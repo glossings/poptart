@@ -136,4 +136,79 @@ function removePinned(text, { kind, id, scope = '' }) {
   return `${src.slice(0, had.start)}${src.slice(had.end)}`;
 }
 
-module.exports = { HEADER, KINDS, parsePinned, upsertPinned, removePinned };
+// ---------------------------------------------------------------------------------------------
+// Snippets. A snippet file is a phrase of code followed by the definitions it names, in exactly the
+// arrangement a pinned file keeps them - which is why the format lives here, where both builds load
+// it: the desktop's snippets.js keeps the files on disk, the browser build's host keeps them in its
+// store, and both write and read them through these two.
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * The body and the sidecar, split apart.
+ *
+ * The sidecar is the TRAILING RUN of definitions - the last one, and every one above it separated
+ * from the next by nothing but blank space, a `;` or a comment. That's exactly the shape defsEdit
+ * writes at the bottom of a buffer, and taking only a trailing run is also what keeps a `_roll(` in
+ * the middle of the body (inside a template literal, say) where it stands rather than hoisting text
+ * out of the code it belongs to.
+ */
+function splitSnippet(code) {
+  const src = String(code ?? '');
+  const defs = parsePinned(src);
+  const run = [];
+  let below = src.length;
+  for (let i = defs.length - 1; i >= 0; i--) {
+    const def = defs[i];
+    // Only blank space, `;` and comments between this definition and what has already joined the
+    // run (or the end of the file, for the last one).
+    if (!isBlankGap(src.slice(def.end, below))) break;
+    run.unshift(def);
+    below = def.start;
+  }
+  return {
+    body: stripMetaHeader(src.slice(0, below)).replace(/\s+$/, ''),
+    carries: run.map(({ kind, id, scope, code: c }) => ({ kind, id, scope, code: c })),
+  };
+}
+
+// The `@title` / `@tags` lines off the top. They are how the snippet is FILED, not part of the
+// phrase - and leaving them on would do real damage on the way back in, because parseMeta scans a
+// whole buffer: an injected `// @tags 303` would quietly become the tags of the pattern it landed
+// in. Only leading lines that are nothing but a metadata tag go; an ordinary comment above the
+// code is somebody's note about it and stays with it.
+const META_LINE = /^[ \t]*\/\/[ \t]*@(?:title|name|by|author|tags|tag)\b[^\n]*\n?/;
+
+function stripMetaHeader(text) {
+  let out = String(text);
+  while (META_LINE.test(out)) out = out.replace(META_LINE, '');
+  return out.replace(/^[ \t]*\n+/, '');
+}
+
+/** Whitespace, stray semicolons and whole-line comments - nothing that is code. */
+function isBlankGap(text) {
+  return String(text)
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .replace(/\/\/[^\n]*/g, ' ')
+    .replace(/[;\s]/g, '') === '';
+}
+
+/**
+ * The file a snippet is saved as: its metadata, the body, then the definitions it carries - one
+ * per line, which is the arrangement parsePinned (and splitSnippet above) can find again.
+ */
+function composeSnippet({ title = '', tags = [], body = '', defs = [] }) {
+  const head = [];
+  if (String(title).trim()) head.push(`// @title ${String(title).trim()}`);
+  const clean = (Array.isArray(tags) ? tags : String(tags).split(/[,\s]+/))
+    .map((t) => String(t).replace(/^#/, '').trim().toLowerCase())
+    .filter(Boolean);
+  if (clean.length) head.push(`// @tags ${[...new Set(clean)].join(' ')}`);
+  const lines = defs.map((d) => String(d?.code ?? '').trim()).filter(Boolean);
+  return [head.join('\n'), String(body).trim(), lines.join('\n')].filter(Boolean).join('\n\n') + '\n';
+}
+
+// Loaded two ways: required by the desktop server, and imported by the browser build's host (see
+// public/web/prebake.mjs), where there is no `module` and the functions are left on globalThis.
+const api = { HEADER, KINDS, parsePinned, upsertPinned, removePinned, splitSnippet, composeSnippet };
+if (typeof module !== 'undefined' && module.exports) module.exports = api;
+else globalThis.poptartPinnedDefs = api;

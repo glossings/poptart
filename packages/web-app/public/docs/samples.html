@@ -1,0 +1,253 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Samples · poptart guide</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <script src="/theme-boot.js"></script>
+    <link rel="stylesheet" href="/themes.css" />
+    <link rel="stylesheet" href="/vendor/codemirror/lib/codemirror.css" />
+    <link rel="stylesheet" href="/docs/docs.css" />
+  </head>
+  <body data-page="samples">
+    <div class="wrap">
+      <nav class="chapters"></nav>
+      <main>
+        <header class="chapter-head">
+          <p class="kicker">Chapter 6</p>
+          <h1>Samples</h1>
+          <p class="lede">Play packs of audio files, chop them, stretch them, bounce your own.</p>
+        </header>
+
+        <h2 id="packs">Packs</h2>
+        <p>
+          <code>s("pack")</code> plays a pack of files, numbered from 0: <code>"pack:3"</code> is the fourth
+          file (the same as <code>.i(3)</code>). A sampler takes <code>.fx()</code> like any instrument.
+        </p>
+        <pre data-run data-build="web"><code>drums: s("pt_kit:0*4, ~ pt_kit:3 ~ pt_kit:3, pt_kit:4*8").vel("1 .6").postgain(0.35)
+bass: s("pt_keys:2").note("c2 ~ c2 eb2 ~ c2 g1 bb1").postgain(0.35)
+bell: s("pt_keys:1").note("&lt;g3 bb3 c4 eb4&gt;").vel(0.5)
+  .fx("Delay").param("Sync", "1/8.").postgain(0.35)</code></pre>
+        <p data-build="desktop">
+          A pack is a folder in your sample library (<code>~/.poptart/samples</code> unless settings says
+          otherwise); its files are numbered in name order. The sounds tab lists every pack: hold a file to
+          hear it.
+        </p>
+        <div data-build="web">
+          <table>
+            <tr><th>Pack</th><th>Has</th></tr>
+            <tr><td><code>pt_kit</code></td><td>a drum kit: 0 kick, 1 snare, 2 rim, 3 clap, 4 hat, 5 open hat, 6 low tom, 7 high tom</td></tr>
+            <tr><td><code>pt_keys</code></td><td>one-shots at middle C: 0 pluck, 1 bell, 2 bass, 3 pad, 4 stab</td></tr>
+            <tr><td><code>pt_drumbox</code> and <code>pt_drumbox_kick</code>, <code>_snare</code>, …</td><td>a drum machine, and sweeps of each of its voices</td></tr>
+            <tr><td><code>pt_mallets</code> · <code>pt_piano</code> · <code>pt_perc</code> · <code>pt_synth</code></td><td>melodic and percussion packs</td></tr>
+          </table>
+          <p>
+            The first two are part of the page. The others download the first time a pattern names them and
+            are kept after that. The sounds tab lists every pack: hold a file to hear it.
+          </p>
+          <p>
+            <strong>Your own files:</strong> drop audio on the window and it is kept in this browser as the
+            <code>files</code> pack: <code>s("files:loop.wav")</code>. Dropped on the code, the
+            <code>s()</code> that plays it is written where it lands.
+          </p>
+          <p>
+            <strong>A folder on this computer:</strong> <strong>settings → sample library → choose
+            folder…</strong> makes a pack of each folder of audio in it. Nothing is copied; a file is read
+            when a pattern first plays its pack. On a later visit the browser asks before the page may read
+            the folder again (<strong>allow again</strong>). A browser that can't keep a folder has it for the
+            visit and offers <strong>keep a copy</strong>, which copies the files into its own storage.
+          </p>
+          <p>
+            <strong>From GitHub:</strong> <code>samples("user/repo")</code> reads a public repository and
+            makes a pack of each folder of audio in it, named after the folder. A share link carries the
+            line, so whoever opens it hears the same files. A file is downloaded the first time it plays
+            and kept by this browser; <strong>settings → downloaded packs</strong> says how much that is,
+            and forgets it.
+          </p>
+        </div>
+        <pre data-build="web"><code>samples("user/drum-kits")       // every folder of audio is a pack
+samples("user/drum-kits@v2")    // a branch, tag or commit
+samples("user/drum-kits/808")   // only that folder
+
+beat: s("kicks:0*4, ~ snares:2")</code></pre>
+
+        <h2 id="controls">Sampler controls</h2>
+        <pre data-build="web"><code>s("pt_kit:4*8")
+  .begin(0).end(1)          // the region to play, 0..1
+  .speed("1 -1")            // rate; negative plays backwards
+  .note("c3 _ g3 c4")       // repitch: c3 plays as recorded
+  .vel("1 .5 ~ 1")          // per-hit level
+  .clip(2)                  // ring for two steps
+  .adsr(0.01, 0.1, 0.8, 0.2) // envelope, in seconds; double-click adsr to draw it
+  .loop()                   // keep looping for the hit's length
+  .flip("&lt;0 1&gt;")            // play backwards into the next beat
+  .stretch(2)               // twice as long, same pitch</code></pre>
+        <pre data-build="desktop"><code>s("hh*8")
+  .begin(0).end(1)          // the region to play, 0..1
+  .speed("1 -1")            // rate; negative plays backwards
+  .note("c3 _ g3 c4")       // repitch: c3 plays as recorded
+  .vel("1 .5 ~ 1")          // per-hit level
+  .clip(2)                  // ring for two steps
+  .adsr(0.01, 0.1, 0.8, 0.2) // envelope, in seconds; double-click adsr to draw it
+  .loop()                   // keep looping for the hit's length
+  .flip("&lt;0 1&gt;")            // play backwards into the next beat
+  .stretch(2)               // twice as long, same pitch</code></pre>
+        <p>
+          A hit sounds for its step (times <code>.clip()</code>), then stops. To let one ring, give it a
+          longer step (<code>"a@2"</code>, <code>"a _"</code>) or a bigger clip. A patterned control makes
+          its own hits: <code>s("x").note("c3 ~ e3")</code> plays twice, with a gap.
+        </p>
+        <p>
+          Every control is also a builder, which reaches into one control from inside a transform:
+          <code>.mul(speed(-1))</code> flips whatever speed is set.
+        </p>
+        <pre data-run data-build="web"><code>kick: s("pt_kit:0*4").postgain(0.25)
+hats: s("pt_kit:5*8").vel("1 .5")
+  // about 3 bars in 10 backwards
+  .when(rand().gte(0.7), (x) =&gt; x.mul(speed(-1))).postgain(0.25)</code></pre>
+
+        <h2 id="loops">Loops and chops</h2>
+        <table>
+          <tr><th>Write</th><th>Does</th></tr>
+          <tr><td><code>.fit(2)</code> · <code>.fit()</code></td><td>repitch so the file lasts two cycles · the nearest power of two</td></tr>
+          <tr><td><code>.slice("0 1 2 3")</code></td><td>play the nth chop (transients, found automatically)</td></tr>
+          <tr><td><code>.splice("&lt;0 1 2&gt;*8")</code></td><td>each chop fitted to its hit; <code>.splicemode("stretch")</code> keeps the pitch</td></tr>
+          <tr><td><code>.slices("break")</code></td><td>use the chops you drew (below)</td></tr>
+        </table>
+        <pre data-build="desktop"><code>// eight random starts a bar
+tops: s("breaks:19").fit().begin(irand(8).seg(8).div(8))</code></pre>
+        <pre data-build="web"><code>// a loop you dropped: eight random starts a bar
+tops: s("files:loop.wav").fit().begin(irand(8).seg(8).div(8))</code></pre>
+        <p>
+          If a fitted loop drops out, the region ran out before the step ended: <code>.loop()</code> it,
+          or use shorter steps. <code>.log()</code> prints the numbers for every hit.
+        </p>
+
+        <details>
+          <summary>The slice editor</summary>
+          <p>
+            Double-click <code>slice</code> on a sampler chain to open the file with its chops drawn on it.
+            Drag a numbered tab to move a chop; double-click to add one, right-click a marker to remove it;
+            <kbd>←</kbd>/<kbd>→</kbd> walk through them. Markers snap to transients unless you hold
+            <kbd>alt</kbd>; hold {mod} for fine moves. The wheel pans, {mod}-wheel zooms, {mod+0} fits.
+          </p>
+          <p>
+            <strong>fit</strong> sets how many cycles this file lasts, <strong>sens</strong> re-detects the
+            chops (left keeps only strong hits, right finds ghost notes), <strong>grid</strong> chops evenly
+            into 8ths, 16ths or triplets, and <strong>auto-slice</strong> goes back to detected chops.
+          </p>
+          <p>
+            What you draw is written into the code as a named set, used with <code>.slices("break")</code>.
+            A set keeps markers per file, so one name covers a whole folder of breaks; <kbd>[</kbd> /
+            <kbd>]</kbd> step to the other files the chain plays. Sets pattern:
+            <code>.slices("&lt;tight loose&gt;")</code>.
+          </p>
+        </details>
+
+        <h2 id="grains">Grains</h2>
+        <p>
+          <code>.grain()</code> plays the sample as a cloud of short overlapping grains cut from around
+          <code>.begin()</code>. It's still one voice per hit: <code>.adsr()</code> shapes the cloud and
+          <code>.note()</code> pitches it.
+        </p>
+        <pre data-run data-build="web"><code>cloud: s("pt_keys:3").note("&lt;[c3,eb3,g3] [bb2,d3,f3]&gt;")
+  .grain()                           // or .grain("&lt;0 1&gt;"), alternating
+  .grainsize(0.08)                   // seconds per grain
+  .grainrate(40)                     // grains per second
+  .grainshape("pluck")               // each grain's window (double-click)
+  .begin(saw(0.25).range(0.2, 0.6)   // a slow scan through the file…
+    .add(rand().mul(0.02)))          // …each grain scattered around it
+  .grainpan(rand().range(-0.6, 0.6))
+  .adsr(0.4, 0.2, 0.8, 1.5)
+  .fx("Reverb")</code></pre>
+        <pre data-build="desktop"><code>cloud: s("pad").note("c3 eb3 g3")
+  .grain()                           // or .grain("&lt;0 1&gt;"), alternating
+  .grainsize(0.08)                   // seconds per grain
+  .grainrate(40)                     // grains per second
+  .grainshape("pluck")               // each grain's window (double-click)
+  .begin(saw(0.25).range(0.2, 0.6)   // a slow scan through the file…
+    .add(rand().mul(0.02)))          // …each grain scattered around it
+  .grainpan(rand().range(-0.6, 0.6))
+  .adsr(0.4, 0.2, 0.8, 1.5)</code></pre>
+        <p>
+          Size, rate, pan and a <code>.begin()</code> with no rhythm of its own are read by every grain, so
+          <code>rand()</code> scatters grains rather than notes and an LFO moves inside a held note.
+          <code>.bend()</code> repitches grains the same way.
+        </p>
+
+        <h2 id="kits">Your own kit: <code>sp()</code></h2>
+        <figure class="shot">
+          <img src="/docs/img/pack-panel.png" width="1064" height="664" alt="The pack panel: the kit's files on the left, and a browser of every pack on the right." />
+          <figcaption>Double-click <code>sp</code> to build a kit from any pack.</figcaption>
+        </figure>
+        <p>
+          <code>sp("kit")</code> is a pack you put together file by file: eight hits from four folders.
+          Evaluate a name nothing defines yet, or double-click <code>sp</code>, and the pack panel opens:
+          click files to add them, hold ▶ to hear one, reorder with the arrows. Play it like any pack:
+          <code>sp("kit:0 kit:2")</code>.
+        </p>
+        <p data-build="web">
+          The panel lists every pack as a folder: the built-in ones, what <code>samples()</code> read, your
+          sample folder and the files you dropped. A kit can mix them. The search box looks through every
+          file of every pack (<code>break 170</code>: all the words have to match), and ← on a selected pack
+          adds all of it.
+        </p>
+        <p data-build="desktop">
+          The search box looks through everything under the folder you're in, not just what's listed:
+          <code>break 170</code> finds every file with both words in its path. ← on a folder adds every audio
+          file under it.
+        </p>
+
+        <h2 id="map">The sample map</h2>
+        <figure class="shot">
+          <img src="/docs/img/sample-map.png" width="1064" height="664" alt="The sample map: thousands of sounds as colored points, similar sounds close together." />
+          <figcaption>Every sound, placed near the ones it sounds like.</figcaption>
+        </figure>
+        <p>
+          The pack panel's <strong>map</strong> view (or <strong>map</strong> in the sounds tab) places each
+          sound near the ones that sound like it, colored by what kind of sound its name and its neighbors'
+          names say it is. Click a point to hear it, ← to add it to the kit.
+        </p>
+        <table>
+          <tr><td><strong>← unique</strong></td><td>add the sound least like anything already in the kit</td></tr>
+          <tr><td><strong>⇄</strong> · <kbd>]</kbd> · <kbd>[</kbd></td><td>swap the selected entries for the next (or previous) sound like each</td></tr>
+          <tr><td><strong>reshuffle</strong></td><td>swap every entry at once</td></tr>
+        </table>
+        <p data-build="desktop">The folders on the map are chosen in <strong>settings → sample map</strong>; the first build analyzes every file under them.</p>
+        <p data-build="web">
+          Every pack is on it unless <strong>settings → sample map</strong> narrows it. It's built the first
+          time it opens, which reads every file of every pack once, so the first build is a download.
+        </p>
+        <p data-build="desktop">
+          <code>se("'hits/stab 01.wav'")</code> plays one exact file under the samples folder (single
+          quotes inside, because a path has characters mini-notation would read).
+        </p>
+
+        <h2 id="bounce">Bounce a track</h2>
+        <p>
+          With the cursor in a block, <strong>{app+b}</strong> records that track from the next phrase for
+          the cycles you choose. The source is muted and the bounce is written under the same name:
+        </p>
+        <pre data-build="web"><code>_bass: note("c2 eb2 g2 _").synth("Wavetable").record({ cycles: 8 })
+bass: sr("bass").slow(8)</code></pre>
+        <pre data-build="desktop"><code>_bass: note("c2 eb2 g2 _").synth("Serum 2").record({ cycles: 8 })
+bass: sr("bass").slow(8)</code></pre>
+        <p>
+          The mix doesn't move, and unmuting one line brings the synth back. Bounces are kept
+          <span data-build="desktop">in <code>~/.poptart/recordings/</code></span><span data-build="web">in this browser</span>
+          and played with <code>sr("name")</code>.
+        </p>
+      </main>
+    </div>
+    <!-- The chapter list, the pager, chords written for this platform, colored and playable code,
+         and the timelines all come from docs.js. -->
+    <script src="/chords.js"></script>
+    <script src="/vendor/codemirror/lib/codemirror.js"></script>
+    <script src="/vendor/codemirror/mode/javascript/javascript.js"></script>
+    <script src="/vendor/codemirror/addon/runmode/runmode.js"></script>
+    <script src="/poptart-mode.js"></script>
+    <script src="/pattern-meta.js"></script>
+    <script src="/docs/docs.js"></script>
+  </body>
+</html>

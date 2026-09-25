@@ -1678,15 +1678,24 @@ class OscEngine {
   // between Node and sclang required. A negative latency (deadline already passed - e.g. a
   // slow tick) is clamped to 0 (fire immediately) rather than sent negative, since
   // Server:sendBundle treats negative latency as "now" inconsistently across versions.
+  // The scheduler hands over fractional notes as they were written; everything here is MIDI -
+  // a plugin, a device route, a MIDI output - so the note is rounded to a key on the way in.
   noteOn(trackId, note, velocity, targetTime) {
-    this._send('/poptart/noteOn', [trackId, note, velocity, this._latency(targetTime)]);
-    this._fanoutMidi(trackId, note, velocity, targetTime, true);
+    const key = Math.round(note);
+    this._send('/poptart/noteOn', [trackId, key, velocity, this._latency(targetTime)]);
+    this._fanoutMidi(trackId, key, velocity, targetTime, true);
   }
   noteOff(trackId, note, targetTime) {
-    this._send('/poptart/noteOff', [trackId, note, this._latency(targetTime)]);
-    this._fanoutMidi(trackId, note, 0, targetTime, false);
+    const key = Math.round(note);
+    this._send('/poptart/noteOff', [trackId, key, this._latency(targetTime)]);
+    this._fanoutMidi(trackId, key, 0, targetTime, false);
   }
   setParam(trackId, slotIndex, paramName, value, targetTime) {
+    // A plugin parameter is a number. A word - an enum label the browser build's devices take -
+    // means nothing to a VST and is dropped rather than sent to sclang as the wrong type. NaN is
+    // dropped with it: it is typeof number, and it is what a unit conversion returns when it is
+    // handed something that was never a quantity.
+    if (typeof value !== 'number' || !Number.isFinite(value)) return;
     this._send('/poptart/setParam', [trackId, slotIndex, paramName, value, this._latency(targetTime)]);
   }
   // ir: { shape: 'sine'|'saw'|'isaw'|'tri'|'square'|'rand', rateHz, phaseCycles, min, max } for

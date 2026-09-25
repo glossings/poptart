@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Mini-notation · poptart guide</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <script src="/theme-boot.js"></script>
+    <link rel="stylesheet" href="/themes.css" />
+    <link rel="stylesheet" href="/vendor/codemirror/lib/codemirror.css" />
+    <link rel="stylesheet" href="/docs/docs.css" />
+  </head>
+  <body data-page="mini">
+    <div class="wrap">
+      <nav class="chapters"></nav>
+      <main>
+        <header class="chapter-head">
+          <p class="kicker">Chapter 2</p>
+          <h1>Mini-notation</h1>
+          <p class="lede">The little language inside the quotes. One string, one cycle.</p>
+        </header>
+
+        <p>
+          Items separated by spaces share the cycle equally, and <code>~</code> is a rest. Each figure
+          below is drawn from the events the pattern actually makes.
+        </p>
+        <figure class="timeline">
+          <div class="row">note("c3 e3 g3 b3")</div>
+          <div class="row">note("c3 ~ g3 ~")</div>
+        </figure>
+
+        <h2 id="syntax">The syntax</h2>
+        <table>
+          <tr><th>Write</th><th>Means</th></tr>
+          <tr><td><code>[a b]</code></td><td>a group: the pair shares one step</td></tr>
+          <tr><td><code>a b, c d</code></td><td>a stack: layers that play at once</td></tr>
+          <tr><td><code>&lt;a b c&gt;</code></td><td>one per cycle, in turn</td></tr>
+          <tr><td><code>a*4</code> · <code>a/2</code></td><td>four in the step · one stretched over two cycles</td></tr>
+          <tr><td><code>a!3</code></td><td>three steps of <code>a</code></td></tr>
+          <tr><td><code>a@3 b</code></td><td><code>a</code> takes three times the room of <code>b</code></td></tr>
+          <tr><td><code>a _ _</code></td><td>a tie: <code>_</code> holds the note before it</td></tr>
+          <tr><td><code>a.e(3,8)</code></td><td>Euclidean: three hits spread over eight steps</td></tr>
+          <tr><td><code>a?</code> · <code>a?0.3</code></td><td>sometimes dropped (half the time · 30%)</td></tr>
+          <tr><td><code>a|b|c</code></td><td>one of them, picked each cycle</td></tr>
+          <tr><td><code>r</code> · <code>i(0,7)</code> · <code>p</code></td><td>random 0..1 · random whole number · slow random drift</td></tr>
+          <tr><td><code>(c2 + 12)</code></td><td>arithmetic; a note name is its MIDI number</td></tr>
+        </table>
+
+        <figure class="timeline" data-cycles="2">
+          <div class="row">note("c3 [e3 g3] ~ b3")</div>
+          <div class="row">note("c3 &lt;e3 g3&gt;")</div>
+          <div class="row">note("c3*3 e3")</div>
+          <div class="row">note("c3@3 e3")</div>
+          <div class="row">note("c3 _ _ e3")</div>
+          <div class="row">note("c3.e(3,8)")</div>
+          <div class="row">note("c3 e3, g2*3")</div>
+        </figure>
+
+        <p>
+          They nest: <code>"&lt;[0 2] [3 5]&gt;*2"</code> does what it looks like. Any number in them can
+          be a pattern too, like <code>a*&lt;2 3&gt;</code> or <code>a.e(&lt;3 5&gt;,8)</code>.
+        </p>
+        <pre data-run data-build="web"><code>kick: s("pt_kit:0 [~ pt_kit:0] ~ pt_kit:0").postgain(0.2)
+snare: s("~ pt_kit:1 ~ &lt;pt_kit:1 [pt_kit:1 pt_kit:3]&gt;").postgain(0.2)
+hat: s("pt_kit:4*8?0.2, ~ pt_kit:5").postgain(0.2)
+rim: s("pt_kit:2.e(3,8)").vel(0.6).postgain(0.2)</code></pre>
+
+        <div class="callout">
+          <span class="tag">random, but repeatable</span>
+          <code>?</code>, <code>|</code>, <code>r</code>, <code>i</code> and <code>p</code> give the same
+          answer every time a given cycle comes round, so the playback highlight always agrees with what you
+          hear.
+        </div>
+
+        <details>
+          <summary>Small print</summary>
+          <p>
+            Inside <code>( … )</code>, <code>*</code> glued to a value is still <em>fast</em>
+            (<code>2*4</code>), but with spaces it multiplies (<code>2 * 4</code>). Put a space before a
+            minus sign. Polymeter, <code>{a b, c d}</code>, is not supported.
+          </p>
+          <p>
+            Mini-notation is what a string in <strong>double quotes</strong> or backticks means where a
+            pattern goes. A single-quoted string is plain text. See
+            <a href="/docs/extending.html#strings">Making it yours</a>.
+          </p>
+        </details>
+      </main>
+    </div>
+    <!-- The chapter list, the pager, chords written for this platform, colored and playable code,
+         and the timelines all come from docs.js. -->
+    <script src="/chords.js"></script>
+    <script src="/vendor/codemirror/lib/codemirror.js"></script>
+    <script src="/vendor/codemirror/mode/javascript/javascript.js"></script>
+    <script src="/vendor/codemirror/addon/runmode/runmode.js"></script>
+    <script src="/poptart-mode.js"></script>
+    <script src="/pattern-meta.js"></script>
+    <script src="/docs/docs.js"></script>
+  </body>
+</html>

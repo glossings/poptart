@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Cheat sheet · poptart guide</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <script src="/theme-boot.js"></script>
+    <link rel="stylesheet" href="/themes.css" />
+    <link rel="stylesheet" href="/vendor/codemirror/lib/codemirror.css" />
+    <link rel="stylesheet" href="/docs/docs.css" />
+  </head>
+  <body data-page="reference">
+    <div class="wrap">
+      <nav class="chapters"></nav>
+      <main>
+        <header class="chapter-head">
+          <p class="kicker">Chapter 13</p>
+          <h1>Cheat sheet</h1>
+          <p class="lede">Everything, one line each. Autocomplete has the full detail.</p>
+        </header>
+
+        <h2 id="session">Session</h2>
+        <table>
+          <tr><td><code>name: …</code> · <code>_name:</code> · <code>Sname:</code> · <code>$:</code></td><td>a track · muted · soloed · unnamed</td></tr>
+          <tr><td><code>setbpm(120)</code> · <code>setscale("F minor")</code></td><td>tempo (4 beats a cycle) · the song's key</td></tr>
+          <tr><td>{mod+enter} · {mod+.}</td><td>evaluate · stop</td></tr>
+          <tr><td>{app+a} · {app+l}</td><td>arrangement ↔ code · let go of the loop region</td></tr>
+          <tr><td>{app+g} · {app+b} · {mod+g}</td><td>mixer · bounce the track · group the selected tracks</td></tr>
+          <tr><td>right-click · {app+j}</td><td>save the selection as a snippet · insert one</td></tr>
+          <tr data-build="desktop"><td>{app+d}</td><td>DJ mode</td></tr>
+          <tr><td><code>.log()</code></td><td>print a track's events to the console</td></tr>
+        </table>
+
+        <h2 id="sources">Sources</h2>
+        <table>
+          <tr><td><code>note("c4 e4")</code> · <code>n("0 2").scale("F minor")</code> · <code>.sc(3)</code></td><td>notes (c3 = 60) · degrees in a scale · in the <code>setscale</code> key</td></tr>
+          <tr><td><code>pianoroll("name")</code> · <code>clips()</code></td><td>drawn notes · notes drawn in the arrangement's clips</td></tr>
+          <tr data-build="web"><td><code>s("pt_kit:0")</code> · <code>s("files:a.wav")</code> · <code>sr("take")</code> · <code>sp("kit")</code> · <code>samples("user/repo")</code></td><td>a pack · a file you dropped · a bounce · your own kit · packs from GitHub</td></tr>
+          <tr data-build="desktop"><td><code>s("bd")</code> · <code>se('a/b.wav')</code> · <code>sr("take")</code> · <code>sp("kit")</code></td><td>a pack · one file · a bounce · your own kit</td></tr>
+          <tr><td><code>synth("…")</code></td><td>an instrument on its own (plays C3)</td></tr>
+          <tr><td><code>midikeys("…")(ch)</code> · <code>midi("…")</code> · <code>audio("…")</code> · <code>input(1)</code></td><td>a MIDI keyboard · MIDI from a device or track · a track or bus · a hardware input</td></tr>
+          <tr><td><code>group({ … })</code> · <code>copy("t")</code> · <code>pcopy("t")</code></td><td>a mixdown of tracks · a whole track again · its notes only</td></tr>
+        </table>
+
+        <h2 id="chain">Chain</h2>
+        <table>
+          <tr><td><code>.synth("…")</code> · <code>.fx("…")</code> · <code>.param("name", v)</code> · <code>.wet(v)</code> · <code>.preset("name")</code></td><td>instrument · effect · control · effect blend · saved state</td></tr>
+          <tr><td><code>.midi("t")</code> · <code>.audio("t")</code> after an fx</td><td>replay notes into it · feed its sidechain</td></tr>
+          <tr><td><code>.gain</code> · <code>.postgain</code> · <code>.pan</code> · <code>.width</code> · <code>.bassmono</code> · <code>.o</code></td><td>the channel strip</td></tr>
+          <tr><td><code>.bus("name", amt)</code> · <code>.dry(v)</code> · <code>.bsend()</code></td><td>sends</td></tr>
+          <tr><td><code>.vel</code> · <code>.clip</code> · <code>.nudge</code> · <code>.swing</code></td><td>velocity, length, timing, groove</td></tr>
+        </table>
+
+        <h2 id="sampler">Sampler</h2>
+        <table>
+          <tr><td><code>.i</code> · <code>.begin</code> · <code>.end</code> · <code>.speed</code> · <code>.note</code></td><td>which file · region · rate · repitch</td></tr>
+          <tr><td><code>.fit</code> · <code>.loop</code> · <code>.flip</code> · <code>.stretch</code></td><td>length in cycles · loop · reverse into the beat · timestretch</td></tr>
+          <tr><td><code>.slice</code> · <code>.splice</code> · <code>.slices("name")</code></td><td>chops · chops fitted to hits · a drawn chop map</td></tr>
+          <tr><td><code>.adsr</code> · <code>.envscale</code> · <code>.grain</code> + <code>.grainsize/rate/pan/shape</code></td><td>envelope (seconds) · scale it · granular playback</td></tr>
+        </table>
+
+        <h2 id="modulators">Modulators</h2>
+        <table>
+          <tr><td><code>sine saw isaw tri square rand perlin</code></td><td>LFOs, 0..1; rate in cycles or <code>"0.5hz"</code></td></tr>
+          <tr><td><code>lfo("shape", { rate, mode })</code> · <code>env({ attack, decay, sustain, release })</code></td><td>drawn shape · envelope per note (seconds)</td></tr>
+          <tr><td><code>macro1…8</code> · <code>midicc("…")(cc)</code> · <code>auto("lane")</code><span data-build="desktop"> · <code>osc("/addr")</code></span></td><td>knobs · automation</td></tr>
+          <tr><td><code>.range(lo, hi)</code> · <code>dur()</code></td><td>rescale · the note's length in seconds</td></tr>
+        </table>
+
+        <h2 id="transforms">Transforms</h2>
+        <table>
+          <tr><td><code>.add .sub .mul .div .mod .set</code> + <code>.in .out .squeeze</code></td><td>arithmetic, and whose events it plays on</td></tr>
+          <tr><td><code>.fast .slow .rib .hold .seg</code></td><td>time</td></tr>
+          <tr><td><code>.struct .mask .ply .echo .arp .bite .degrade</code></td><td>structure</td></tr>
+          <tr><td><code>.when .sometimes</code> · <code>choose irand cat seq</code></td><td>conditions · chance and sequence</td></tr>
+          <tr><td><code>.fmap(fn)</code> · <code>.events(fn)</code></td><td>edit values · edit whole events</td></tr>
+        </table>
+
+        <h2 id="mini">Mini-notation</h2>
+        <table>
+          <tr><td><code>a b</code> · <code>~</code> · <code>[a b]</code> · <code>a, b</code> · <code>&lt;a b&gt;</code></td><td>steps · rest · group · stack · one per cycle</td></tr>
+          <tr><td><code>a*2</code> · <code>a/2</code> · <code>a!2</code> · <code>a@2</code> · <code>a _</code></td><td>faster · slower · repeat · weight · tie</td></tr>
+          <tr><td><code>a.e(3,8)</code> · <code>a?</code> · <code>a|b</code> · <code>r i(0,7) p</code></td><td>Euclidean · maybe · either · random</td></tr>
+          <tr><td><code>"…"</code> · <code>'…'</code> · <code>// mini-off</code></td><td>a pattern · plain text · plain text until <code>// mini-on</code></td></tr>
+        </table>
+      </main>
+    </div>
+    <!-- The chapter list, the pager, chords written for this platform, colored and playable code,
+         and the timelines all come from docs.js. -->
+    <script src="/chords.js"></script>
+    <script src="/vendor/codemirror/lib/codemirror.js"></script>
+    <script src="/vendor/codemirror/mode/javascript/javascript.js"></script>
+    <script src="/vendor/codemirror/addon/runmode/runmode.js"></script>
+    <script src="/poptart-mode.js"></script>
+    <script src="/pattern-meta.js"></script>
+    <script src="/docs/docs.js"></script>
+  </body>
+</html>

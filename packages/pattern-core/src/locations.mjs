@@ -19,6 +19,12 @@
 // untouched. Kept dependency-free: pattern-core takes no parser dependency, and the scan mirrors
 // labels.mjs's string/comment/template-aware style.
 //
+// Two escape hatches keep a literal plain, as in Strudel: a SINGLE-quoted string is never wrapped
+// (`.join(',')`, `.split(' ')` in a helper), and neither is anything between a `// mini-off` and a
+// `// mini-on` comment (or `/* mini-off */` … `/* mini-on */`; an unclosed mini-off runs to the end
+// of the buffer). A builder still reads a plain string as mini notation when it is handed one -
+// `note('c e g')` plays - it just isn't highlighted.
+//
 // Caveat: a bare-numeric sample name - s("3") - becomes mini("3", …) whose numeric coercion yields
 // the number 3 rather than the string "3". Sample packs aren't bare numbers in practice, so this is
 // noted rather than special-cased.
@@ -32,11 +38,16 @@ import { looksLikeShapeData } from './shape.mjs';
 // that fall inside the block's own range (filtering out locations that leaked in from prebake or
 // dynamic strings). Positions are computed from the ORIGINAL code (captured before any rewriting),
 // so inserting the wrappers can't disturb the offsets we hand to mini().
-export function injectLocations(code, base = 0) {
+//
+// `miniOff` is the buffer's mini-off ranges (see miniOffRanges), in the same coordinates as `base`:
+// the caller computes them once over the whole buffer, since a range opened in one block runs on
+// through the blocks below it.
+export function injectLocations(code, base = 0, { miniOff = [] } = {}) {
   const { lits, masked } = scanLiterals(code);
   let out = '';
   let prev = 0;
   for (const lit of lits) {
+    if (lit.quote === "'" || inRanges(miniOff, base + lit.fullStart)) continue;
     // Position is judged on the MASKED code: what is inside other literals and comments is not
     // syntax, and a path like "Kick & Bass (Amin).wav" in the previous argument would otherwise
     // hand the paren scan a `)` to stop on, leaving this literal looking like a pattern.
@@ -49,6 +60,27 @@ export function injectLocations(code, base = 0) {
   }
   out += code.slice(prev);
   return out;
+}
+
+// The stretches of `source` where mini notation is switched off: from each `mini-off` comment to
+// the end of its matching `mini-on` comment, as [start, end) offsets. The comment's text only has
+// to START with the word, so `// mini-off: helpers` works. Pairs nest like brackets; a mini-off
+// left open runs to the end of the source. Comments are found the way the literal scan finds them,
+// so `"// mini-off"` inside a string switches nothing.
+export function miniOffRanges(source) {
+  const ranges = [];
+  const open = [];
+  for (const c of scanLiterals(String(source)).comments) {
+    const text = c.text.trim();
+    if (text.startsWith('mini-off')) open.push(c.start);
+    else if (text.startsWith('mini-on') && open.length) ranges.push([open.pop(), c.end]);
+  }
+  while (open.length) ranges.push([open.pop(), source.length]);
+  return ranges;
+}
+
+function inRanges(ranges, at) {
+  return ranges.some(([from, to]) => at >= from && at < to);
 }
 
 // Calls whose string arguments NAME something outside the pattern language - a plugin, a MIDI or
@@ -84,12 +116,14 @@ const NAME_ARG_CALLS = new Set([
   // listed - its argument wants highlighting exactly as pianoroll("<a b>") does.
   '_slices',
   'param', // only the NAME (first argument); .param("Filter Freq", "0.2 0.8") patterns the value
+  // A place to read sample packs from - "user/repo", a URL - which a "/" would make a division.
+  'samples',
 ]);
 // Of those, the ones whose LATER arguments are also never patterns - a captured plugin-state blob
 // (.synth("Serum 2", "<state>")), an lfo() options object, pianoroll()'s grid, roll()'s drawn
 // notes, input()'s channel numbers (a hardware channel is wiring, not something that can vary per
 // step). param() is excluded: its second argument is the value pattern.
-const NAME_ONLY_CALLS = new Set(['synth', 'fx', 'lfo', 'pianoroll', '_arrange', '_roll', 'roll', '_shape', 'shape', '_auto', 'auto', '_preset', '_pack', '_slices', 'midicc', 'midikeys', 'osc', 'input', 'copy', 'pcopy']);
+const NAME_ONLY_CALLS = new Set(['samples', 'synth', 'fx', 'lfo', 'pianoroll', '_arrange', '_roll', 'roll', '_shape', 'shape', '_auto', 'auto', '_preset', '_pack', '_slices', 'midicc', 'midikeys', 'osc', 'input', 'copy', 'pcopy']);
 
 // Callee names whose METHOD form takes a literal name while the same-named builder takes mini:
 // .se("hits/stab.wav") is a plain path (a "/" would be a mini operator) and .sr("stab") a plain
@@ -187,11 +221,14 @@ export function isPatternPosition(before, after, text = '') {
 //   contentStart index of the first content char (fullStart + 1) - the offset handed to mini()
 //   fullEnd      index just past the closing quote
 //   hasInterp    a template literal containing ${…} (its content isn't a static string - skip it)
+//   quote        the opening quote character
+// `comments`, every comment as { start, end, text } (text without its // or /* */ markers),
 // and `masked`, the same code with every literal's CONTENT and every comment's body blanked to
 // spaces (newlines kept, so every offset still lines up) - the code as syntax alone, for the
 // position tests, which must not read a paren or an operator that sits inside a string.
 function scanLiterals(code) {
   const out = [];
+  const comments = [];
   const mask = code.split('');
   const blank = (from, to) => {
     for (let k = from; k < to; k++) if (mask[k] !== '\n') mask[k] = ' ';
@@ -205,6 +242,7 @@ function scanLiterals(code) {
       const from = i;
       i += 2;
       while (i < n && code[i] !== '\n') i++;
+      comments.push({ start: from, end: i, text: code.slice(from + 2, i) });
       blank(from, i);
       continue;
     }
@@ -212,6 +250,7 @@ function scanLiterals(code) {
       const from = i;
       i += 2;
       while (i < n && !(code[i] === '*' && code[i + 1] === '/')) i++;
+      comments.push({ start: from, end: Math.min(i + 2, n), text: code.slice(from + 2, i) });
       i += 2;
       blank(from, Math.min(i, n));
       continue;
@@ -225,7 +264,7 @@ function scanLiterals(code) {
       }
       // Only a properly closed quote is a literal; an unterminated one (newline/EOF) is left alone.
       if (code[i] === c) {
-        out.push({ fullStart, contentStart: fullStart + 1, fullEnd: i + 1, hasInterp: false });
+        out.push({ fullStart, contentStart: fullStart + 1, fullEnd: i + 1, hasInterp: false, quote: c });
         blank(fullStart + 1, i);
         i++;
       }
@@ -241,7 +280,7 @@ function scanLiterals(code) {
         i++;
       }
       if (code[i] === '`') {
-        out.push({ fullStart, contentStart: fullStart + 1, fullEnd: i + 1, hasInterp });
+        out.push({ fullStart, contentStart: fullStart + 1, fullEnd: i + 1, hasInterp, quote: '`' });
         blank(fullStart + 1, i);
         i++;
       }
@@ -249,5 +288,5 @@ function scanLiterals(code) {
     }
     i++;
   }
-  return { lits: out, masked: mask.join('') };
+  return { lits: out, comments, masked: mask.join('') };
 }

@@ -4,31 +4,19 @@
     <meta charset="utf-8" />
     <title>poptart</title>
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <!-- The saved theme, applied before the stylesheets paint (shared with the guide). -->
+    <script src="/theme-boot.js"></script>
     <script>
-      // Apply the saved theme before the stylesheet paints, so there's no flash of the default.
-      // Custom themes (the unsaved "custom" draft and any named saved theme) are a preset base
-      // plus per-variable inline overrides (see client.js).
       (function () {
         var root = document.documentElement;
-        var t = localStorage.getItem('poptart-theme') || 'poptart';
-        var base = t, vars = null;
-        try {
-          if (t === 'custom') {
-            base = localStorage.getItem('poptart-custom-base') || 'poptart';
-            vars = JSON.parse(localStorage.getItem('poptart-custom-theme')) || {};
-          } else {
-            var saved = JSON.parse(localStorage.getItem('poptart-saved-themes') || '{}');
-            if (saved[t]) { base = saved[t].base || 'poptart'; vars = saved[t].vars || {}; }
-          }
-        } catch (e) {}
-        root.dataset.theme = base;
-        if (vars) for (var k in vars) root.style.setProperty(k, vars[k]);
         // Marks the window between first paint and the editor being ready - CodeMirror up AND the
         // buffer this URL asks for in it. Until then the pane stays blank rather than flashing the
         // raw textarea as unhighlighted text and then the default snippet in place of the real
         // file (see #editor in style.css; client.js clears the flag). Set from script, so with
         // scripting off there is no attribute and the textarea shows normally.
         root.dataset.booting = '1';
+        // A playable example in the guide: the editor alone (see client.js's embed section).
+        if (/[?&]embed\b/.test(location.search)) root.dataset.embed = '1';
         // Which panels are minimized, decided BEFORE the first paint. client.js is a long way from
         // running at this point, so applying it there meant every reload painted both panels open
         // and then snapped them shut. Same storage keys initCollapsible writes.
@@ -38,6 +26,7 @@
     </script>
     <link rel="stylesheet" href="/vendor/codemirror/lib/codemirror.css" />
     <link rel="stylesheet" href="/vendor/codemirror/addon/hint/show-hint.css" />
+    <link rel="stylesheet" href="/themes.css" />
     <link rel="stylesheet" href="style.css" />
   </head>
   <body>
@@ -78,7 +67,7 @@
         </div>
         <select id="themeSelect" title="color theme"></select>
         <button id="themeEditBtn" title="edit theme colors"><span class="ico">🎨</span></button>
-        <a id="docsLink" class="hbtn" href="/docs.html" target="_blank" rel="noopener" title="open the poptart guide in a new tab">docs <span class="ico">↗</span></a>
+        <a id="docsLink" class="hbtn" href="/docs/" target="_blank" rel="noopener" title="open the poptart guide in a new tab">docs <span class="ico">↗</span></a>
         <button id="playBtn" class="primary" data-chord-title="{mod+enter}"><span class="ico">▶</span> play</button>
         <button id="updateBtn" title="evaluate without changing play state"><span class="ico">↻</span> update</button>
       </header>
@@ -117,7 +106,7 @@
   .scale("F minor")
   .synth("Serum 2")
   .param("Filter 1 On", 1)
-  .param("Filter 1 Freq", lfo("0,0 0.5,1,-3 1,0", { rate: 0.3 }).range(200, 5000))</textarea>
+  .param("Filter 1 Freq", lfo("swell", { rate: 0.3 }).range(200, 5000))</textarea>
           <!-- Pulsed green on save, red when something goes wrong with the console collapsed. An
                overlay rather than a style on the pane itself, because CodeMirror's own background
                paints over anything drawn underneath it. -->
@@ -282,6 +271,8 @@
                 <button id="fileSaveBtn" data-chord-title="name this pattern and save it ({mod+s})">save</button>
                 <button id="fileSaveAsBtn" class="small" data-chord-title="save the buffer under a new name ({mod+shift+s})">save as…</button>
                 <span class="spacer"></span>
+                <button id="fileShareBtn" class="small hidden"
+                  title="Copies a link that opens this pattern. Files added to this browser are named in it but not carried.">share</button>
                 <button id="fileExportBtn" class="small" title="download the buffer as a file">export</button>
               </div>
               <input id="fileSearchInput" type="search" spellcheck="false" placeholder="🔍 search everything below…"
@@ -289,6 +280,25 @@
               <div id="fileList" class="panel list">loading…</div>
               <h2 id="wipHeading">work in progress</h2>
               <div id="wipList" class="panel list"></div>
+            </section>
+            <!-- The browser build keeps everything in this browser's storage, and a public site
+                 with no accounts has no other way to hand somebody their work: export writes it
+                 all to one file, import puts a file back. Shown only in the browser build. -->
+            <section id="storeSection" class="hidden">
+              <h2>backup</h2>
+              <label class="settings-check store-audio"
+                title="Puts the audio files you added, your wavetables and your recordings into the same file, as text. Much bigger: audio is most of what this browser keeps.">
+                <input id="storeExportAudio" type="checkbox" />
+                include audio files
+              </label>
+              <div class="settings-actions">
+                <button id="storeExport" class="small"
+                  title="Downloads one file holding everything this browser keeps: patterns, sessions, snippets, the library, the prebake and the captured device states - and, with audio files ticked, the samples you added, your wavetables and your recordings.">export everything…</button>
+                <button id="storeImport" class="small"
+                  title="Puts an exported file back. Anything already here with the same name is kept, not overwritten.">import…</button>
+              </div>
+              <input id="storeImportInput" type="file" accept=".json,application/json" hidden />
+              <div id="storeNote" class="files-note"></div>
             </section>
           </div>
 
@@ -379,6 +389,43 @@
               </div>
               <div id="samplesDirNote" class="files-note"></div>
             </section>
+            <!-- The sample library in the browser build, in place of the section above: a folder on
+                 this computer read where it lives. The client shows this one and hides that one. -->
+            <section id="sampleFolderSection" class="hidden">
+              <h2>sample library</h2>
+              <div class="settings-actions">
+                <button id="sampleFolderPick" class="small"
+                  title="A folder whose subfolders become sample packs, named by folder. Its files are read from where they are when a pattern plays them - nothing is copied into this browser, and nothing is sent anywhere.">choose folder…</button>
+                <button id="sampleFolderReconnect" class="small" disabled
+                  title="the browser asks again, on each visit, before a page may read a folder it was given before">allow again</button>
+                <button id="sampleFolderForget" class="small" disabled title="stop reading the folder; its files are left as they are">forget</button>
+              </div>
+              <input id="sampleFolderInput" type="file" webkitdirectory multiple hidden />
+              <div id="sampleFolderNote" class="files-note"></div>
+            </section>
+            <!-- What samples("user/repo") has downloaded and kept in this browser. Browser build only. -->
+            <section id="downloadsSection" class="hidden">
+              <h2>downloaded packs</h2>
+              <div class="settings-actions">
+                <button id="downloadsForget" class="small" disabled
+                  title="delete the files samples() downloaded from repositories. A pattern that plays them downloads them again; the sample map keeps its place for them">forget</button>
+              </div>
+              <div id="downloadsNote" class="files-note"></div>
+            </section>
+            <!-- The wavetable folder. Only the browser build has one: there the files are kept in
+                 the browser rather than read off a disk it cannot see, so the row is a folder to
+                 read once rather than a path to remember. The client hides this section on the
+                 desktop, where a wavetable is named by its path like any other file. -->
+            <section id="wavetableSection" class="hidden">
+              <h2>wavetables</h2>
+              <div class="settings-actions">
+                <button id="wavetableFolderPick" class="small"
+                  title="Copies a folder of wavetables into this browser's own storage, replacing whatever was there before. Subfolders are kept, so a file is named wt:&lt;folder&gt;/&lt;file&gt;. Nothing is sent anywhere: this page has no server to send it to.">choose folder…</button>
+                <button id="wavetableFolderClear" class="small" title="delete the copies this browser is keeping">forget</button>
+              </div>
+              <input id="wavetableFolderInput" type="file" webkitdirectory multiple hidden />
+              <div id="wavetableFolderNote" class="files-note"></div>
+            </section>
             <!-- The sample map's sources: the folders whose sounds get analyzed and placed. A
                  choice, not the library by default - the map is only as useful as what is on it,
                  and a folder of impulse responses or full songs is not what a kit is built from. -->
@@ -418,6 +465,12 @@
               <h2>startup</h2>
               <div class="settings-actions">
                 <button id="prebakeEditBtn" class="small">edit prebake…</button>
+              </div>
+            </section>
+            <section>
+              <div class="settings-actions">
+                <button id="aboutOpen" class="small">about poptart…</button>
+                <button id="discordOpen" class="small" title="the poptart community server, in a new tab">join the discord ↗</button>
               </div>
             </section>
           </div>
@@ -507,6 +560,59 @@
         <div id="presetSize" class="preset-size"></div>
       </div>
       <div id="presetStatus" class="preset-status"></div>
+    </div>
+
+    <!-- The generated device window. Empty here because every row of it comes from the device's
+         own descriptor: a build whose devices are plugins opens the plugin's window instead and
+         never shows this one. -->
+    <div id="devicePanel" class="preset-panel device-panel hidden">
+      <div class="preset-panel-head">
+        <span id="deviceTitle">device</span>
+        <span id="deviceTarget" class="preset-target"></span>
+        <span class="spacer"></span>
+        <span id="deviceCredit" class="device-credit"></span>
+        <button id="deviceClose" class="small">✕</button>
+      </div>
+      <div id="deviceSections" class="device-sections"></div>
+    </div>
+
+    <!-- The wavetable browser. A table control can be pointed at any file in the wavetable
+         folder, and a folder is a couple of thousand files in subfolders - which is a thing to
+         look through, not a dropdown. Folders down the left, files beside them, and the table
+         the selected file would become drawn on the right before anything is loaded. -->
+    <!-- The credits: the license this is under and where its source is, which a page served
+         over a network has to offer (AGPL section 13), and whose code each device is, read from
+         the catalog. The device rows only where there are compiled devices to credit. -->
+    <div id="aboutPanel" class="preset-panel about-panel hidden">
+      <div class="preset-panel-head">
+        <span>about poptart</span>
+        <span class="spacer"></span>
+        <button id="aboutClose" class="small">✕</button>
+      </div>
+      <div class="about-body">
+        <p id="aboutLicense"></p>
+        <p id="aboutDevices"></p>
+      </div>
+    </div>
+
+    <div id="filePickPanel" class="preset-panel file-pick-panel hidden">
+      <div class="preset-panel-head">
+        <span id="filePickKind">files</span>
+        <span id="filePickTarget" class="preset-target"></span>
+        <span class="spacer"></span>
+        <button id="filePickClose" class="small">✕</button>
+      </div>
+      <div class="file-pick-body">
+        <div class="file-pick-col">
+          <input id="filePickSearch" type="text" placeholder="filter" spellcheck="false" />
+          <div id="filePickFolders" class="file-pick-list"></div>
+        </div>
+        <div id="filePickFiles" class="file-pick-list file-pick-files"></div>
+        <div class="file-pick-preview">
+          <canvas id="filePickCanvas"></canvas>
+          <div id="filePickNote" class="files-note"></div>
+        </div>
+      </div>
     </div>
 
     <div id="lfoPanel" class="lfo-panel hidden">
@@ -651,6 +757,11 @@
         <input id="themeNameInput" type="text" placeholder="name this theme…" spellcheck="false" />
         <button id="themeSaveBtn" class="small" title="save the current colors as a named theme">save</button>
       </div>
+      <div class="theme-save-row theme-file-row">
+        <button id="themeImport" class="small" title="add a theme from a .json file">import</button>
+        <button id="themeExport" class="small" title="download the theme in use as a .json file">export</button>
+      </div>
+      <input id="themeImportInput" type="file" accept=".json,application/json" hidden />
     </div>
 
     <div id="dirPickerBackdrop" class="dir-picker-backdrop hidden">
@@ -821,7 +932,7 @@
             <div class="pack-col-head">pick from
               <span id="packPickMode" class="pack-pick-mode" role="tablist">
                 <button id="packModeBrowse" class="small on" role="tab" title="the disk, as folders">folders</button>
-                <button id="packModeMap" class="small" role="tab" title="the sample map: every sound in your chosen folders, placed by what it sounds like">map</button>
+                <button id="packModeMap" class="small" role="tab" title="the sample map: every sound on it (settings → sample map), placed by what it sounds like">map</button>
               </span>
               <span id="packBrowseHead" class="pack-col-sub"></span><span class="spacer"></span>
               <button id="packUnique" class="small hidden" title="add the sound least like anything in the pack yet - press it eight times for a kit">← unique</button>
@@ -1005,10 +1116,11 @@
     <script src="/vendor/codemirror/addon/search/searchcursor.js"></script>
     <script src="/vendor/codemirror/keymap/sublime.js"></script>
     <!-- The keyboard model (the two modifier families, and how every chord is spelled on this
-         platform) - before client.js, which is written in its terms, and shared with docs.html. -->
+         platform) - before client.js, which is written in its terms, and shared with the guide (docs/). -->
     <script src="chords.js"></script>
     <script src="api-docs.js"></script>
     <script src="pattern-meta.js"></script>
+    <script src="theme-file.js"></script>
     <script src="snippet-code.js"></script>
     <script src="client.js"></script>
   </body>

@@ -37,13 +37,7 @@ function defaultCacheFile() {
   return path.join(poptartHome(), 'cache', 'sample-map.json');
 }
 
-const b64 = {
-  encode: (f32) => Buffer.from(f32.buffer, f32.byteOffset, f32.byteLength).toString('base64'),
-  decode: (s) => {
-    const buf = Buffer.from(s, 'base64');
-    return new Float32Array(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength));
-  },
-};
+const b64 = { encode: sm.f32ToBase64, decode: sm.base64ToF32 };
 
 class SampleIndex {
   /**
@@ -93,7 +87,7 @@ class SampleIndex {
       if (features && features.length !== sm.FEATURE_LENGTH) continue; // a different layout; re-analyze
       this.entries.set(e.path, { ...e, features });
     }
-    this.map = raw.map ? decodeMap(raw.map) : null;
+    this.map = raw.map ? sm.decodeMap(raw.map) : null;
     if (this.map && !this._mapMatches()) this.map = null;
     this.status.count = this.map?.paths.length ?? 0;
     return true;
@@ -105,7 +99,7 @@ class SampleIndex {
       featureVersion: sm.FEATURE_VERSION,
       sources: this.sources,
       entries: [...this.entries.values()].map((e) => ({ ...e, features: e.features ? b64.encode(e.features) : null })),
-      map: this.map ? encodeMap(this.map) : null,
+      map: this.map ? sm.encodeMap(this.map) : null,
     };
     fs.mkdirSync(path.dirname(this.cacheFile), { recursive: true });
     const part = `${this.cacheFile}.part`;
@@ -293,21 +287,7 @@ class SampleIndex {
 
   /** What the client draws: every point with its position, type, group and source. */
   snapshot() {
-    const m = this.map;
-    if (!m) return { sources: this.sources, clusterLabels: [], points: [] };
-    return {
-      sources: this.sources,
-      clusterLabels: m.clusterLabels,
-      points: m.paths.map((p, i) => ({
-        path: p,
-        x: round3(m.xy[i * 2]),
-        y: round3(m.xy[i * 2 + 1]),
-        label: m.labels[i],
-        cluster: m.clusters[i],
-        seconds: round3(m.seconds[i]),
-        source: this.sources.indexOf(m.sources[i]),
-      })),
-    };
+    return sm.mapSnapshot(this.map, this.sources);
   }
 
   /** One point's record, or null if the file isn't on the map. */
@@ -323,15 +303,7 @@ class SampleIndex {
    * Empty for a file that isn't indexed - the caller says so rather than guessing.
    */
   neighbors(file, k = NEIGHBORS) {
-    const i = this._indexOf(file);
-    if (i < 0 || !this.map.neighbors[i]) return [];
-    const { index, dist } = this.map.neighbors[i];
-    const out = [];
-    for (let t = 0; t < Math.min(k, index.length); t++) {
-      if (index[t] < 0) break;
-      out.push({ path: this.map.paths[index[t]], dist: round3(dist[t]), label: this.map.labels[index[t]] });
-    }
-    return out;
+    return sm.mapNeighbors(this.map, this._indexOf(file), k);
   }
 
   /**
@@ -347,94 +319,20 @@ class SampleIndex {
    * @returns {string | null}
    */
   unique(kitPaths, { types = null, sources = null, exclude = [], typical = true } = {}) {
-    const m = this.map;
-    if (!m || !m.points.length) return null;
     const chosen = kitPaths.map((p) => this._indexOf(p)).filter((i) => i >= 0);
-    const skip = new Set([...exclude.map((p) => this._indexOf(p)), ...chosen]);
-    const support = typical ? this._support() : null;
-    const candidates = [];
-    for (let i = 0; i < m.paths.length; i++) {
-      if (types && !types.includes(m.labels[i])) continue;
-      if (sources && !sources.includes(this.sources.indexOf(m.sources[i]))) continue;
-      if (support && support.radius[i] > support.median) continue;
-      candidates.push(i);
-    }
-    const best = sm.farthestFrom(m.points, chosen, { candidates, exclude: skip });
-    return best >= 0 ? m.paths[best] : null;
-  }
-
-  /** Each point's neighborhood radius (distance to its farthest kept neighbor) and the median. */
-  _support() {
-    const m = this.map;
-    if (!m._support) {
-      const radius = Float32Array.from(m.neighbors, ({ dist }) => (dist.length ? dist[dist.length - 1] : 0));
-      const sorted = Float32Array.from(radius).sort();
-      m._support = { radius, median: sorted.length ? sorted[sorted.length >> 1] : 0 };
-    }
-    return m._support;
+    const skip = new Set(exclude.map((p) => this._indexOf(p)));
+    const best = sm.mapUnique(this.map, this.sources, chosen, { types, sourceIndices: sources, skip, typical });
+    return best >= 0 ? this.map.paths[best] : null;
   }
 
   /**
-   * Every kit slot hopped to one of its own near neighbors - same roles, different flavour.
+   * Every kit slot hopped to one of its own near neighbors - same roles, different flavor.
    * A slot whose file isn't indexed, or whose neighbors are all already in the kit, keeps its
    * file. `rng` is injectable so a test can pin the outcome.
    * @returns {string[]}
    */
   reshuffle(kitPaths, { k = 8, rng = Math.random } = {}) {
-    const taken = new Set(kitPaths.map((p) => path.resolve(String(p))));
-    return kitPaths.map((p) => {
-      const options = this.neighbors(p, k).map((n) => n.path).filter((q) => !taken.has(q));
-      if (!options.length) return p;
-      const pick = options[Math.floor(rng() * options.length)];
-      taken.add(pick);
-      return pick;
-    });
-  }
-}
-
-function round3(v) {
-  return Math.round(v * 1000) / 1000;
-}
-
-function encodeMap(m) {
-  return {
-    paths: m.paths,
-    sources: m.sources,
-    seconds: m.seconds,
-    points: m.points.map((p) => b64.encode(p)),
-    xy: b64.encode(m.xy),
-    neighbors: m.neighbors.map((n) => ({ index: Array.from(n.index), dist: Array.from(n.dist).map(round3) })),
-    clusters: Array.from(m.clusters),
-    labels: m.labels,
-    clusterLabels: m.clusterLabels,
-    prepared: m.prepared && {
-      mean: b64.encode(m.prepared.mean),
-      scale: b64.encode(m.prepared.scale),
-      basis: m.prepared.basis.map((b) => b64.encode(b)),
-    },
-  };
-}
-
-function decodeMap(raw) {
-  try {
-    return {
-      paths: raw.paths,
-      sources: raw.sources,
-      seconds: raw.seconds,
-      points: raw.points.map((p) => b64.decode(p)),
-      xy: b64.decode(raw.xy),
-      neighbors: raw.neighbors.map((n) => ({ index: Int32Array.from(n.index), dist: Float32Array.from(n.dist) })),
-      clusters: Int32Array.from(raw.clusters),
-      labels: raw.labels,
-      clusterLabels: raw.clusterLabels,
-      prepared: raw.prepared && {
-        mean: b64.decode(raw.prepared.mean),
-        scale: b64.decode(raw.prepared.scale),
-        basis: raw.prepared.basis.map((b) => b64.decode(b)),
-      },
-    };
-  } catch {
-    return null;
+    return sm.mapReshuffle(kitPaths.map((p) => path.resolve(String(p))), (p) => this.neighbors(p, k), { rng });
   }
 }
 

@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Arranging · poptart guide</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <script src="/theme-boot.js"></script>
+    <link rel="stylesheet" href="/themes.css" />
+    <link rel="stylesheet" href="/vendor/codemirror/lib/codemirror.css" />
+    <link rel="stylesheet" href="/docs/docs.css" />
+  </head>
+  <body data-page="arrange">
+    <div class="wrap">
+      <nav class="chapters"></nav>
+      <main>
+        <header class="chapter-head">
+          <p class="kicker">Chapter 8</p>
+          <h1>Arranging</h1>
+          <p class="lede">Turn loops into a song by painting when each track plays.</p>
+        </header>
+
+        <figure class="shot framed">
+          <img src="/docs/img/arrange.png" width="1120" height="363" alt="The arrangement: four rows, kick, hats, bass and keys, with clips starting at different bars, and a loop region named song over bars 1 to 16." />
+          <figcaption>Keys open the song, hats come in at bar 3, the kick at 5, and the bass drops at 9.</figcaption>
+        </figure>
+
+        <h2 id="clips">Painting clips</h2>
+        <p>
+          Press <strong>{app+a}</strong>. The arrangement replaces the editor: one row per track, bars
+          along the top. Press it again to go back to the code.
+        </p>
+        <ul>
+          <li>The first time, every track is filled from start to end, so nothing changes until you carve.</li>
+          <li>Drag on a row to paint a <strong>clip</strong>. A track plays only inside its clips, and an empty row is silent.</li>
+          <li>A track you add later arrives filled, so arranging never quietly drops a part.</li>
+          <li>The song ends at the end of its last clip (the dashed line), and playback stops there.</li>
+        </ul>
+        <table>
+          <tr><th>To</th><th>Do</th></tr>
+          <tr><td>move · duplicate</td><td>drag a clip's title · {alt}-drag it (onto another row to give it to that track)</td></tr>
+          <tr><td>select several</td><td>{mod}-click, shift-click, or shift-drag a box</td></tr>
+          <tr><td>mark a stretch of song</td><td>drag in a clip's body; it moves and copies like a selection</td></tr>
+          <tr><td>resize</td><td>drag a clip's edge</td></tr>
+          <tr><td>split · join</td><td>{mod+e} at the marker · {mod+j} on what's selected</td></tr>
+          <tr><td>duplicate after · copy · cut · paste</td><td>{mod+d} · {mod+c} · {mod+x} · {mod+v}</td></tr>
+          <tr><td>mute clips</td><td><kbd>0</kbd> (again to unmute)</td></tr>
+          <tr><td>undo</td><td>{mod+z}</td></tr>
+          <tr><td>zoom</td><td><strong>+</strong> / <strong>−</strong>, or ctrl+wheel</td></tr>
+          <tr><td>play from here</td><td>click to place the marker, then {mod+enter}</td></tr>
+        </table>
+        <p>
+          Inside a clip, the pattern starts where the clip starts: a <code>&lt;a b&gt;</code> begins on
+          <code>a</code> in every clip. Splitting or trimming a clip changes nothing you hear; a clip that
+          enters its pattern partway shows <strong>▸</strong><em>bar</em> after its title, and right-click →
+          <strong>enter at bar 1</strong> resets it.
+        </p>
+        <p>
+          Double-click a clip to jump to its block in the code. Right-click for <strong>rename…</strong>
+          ({mod+r}), which renames the track everywhere, and <strong>color…</strong>.
+        </p>
+
+        <h2 id="clip-notes">Notes inside clips</h2>
+        <p>
+          A track written with <code>clips()</code> takes its notes from the clips themselves: each clip
+          holds its own, and double-clicking one draws in it. Copies share their notes until you choose
+          <strong>make unique</strong> in the clip's menu.
+        </p>
+        <pre data-build="web"><code>lead: clips().synth("Wavetable")</code></pre>
+        <pre data-build="desktop"><code>lead: clips().synth("Serum 2")</code></pre>
+
+        <h2 id="loops">Loop regions</h2>
+        <p>
+          Drag across the <strong>loops</strong> strip above the bars to mark a region and name it. Playback
+          loops there every time it gets there. <strong>{app+l}</strong> (from the code, too) lets go of the
+          loop you are in, and playback runs on to the next region or to the end. Stopping arms them all
+          again. A new arrangement starts with one region over the whole song, so it loops until you remove
+          it (right-click a region to rename or remove it).
+        </p>
+
+        <h2 id="automation">Automation</h2>
+        <p>
+          <code>auto("sweep")</code> is a lane drawn against the song's bars, readable anywhere a signal
+          goes. Double-click <code>auto</code> to draw it under the clips.
+        </p>
+        <pre data-run data-build="web"><code>pad: note("&lt;[c3,eb3,g3] [ab2,c3,eb3]&gt;").synth("Wavetable")
+  .fx("Filter").param("Cutoff", auto("sweep").range(0.2, 0.8)).postgain(0.7)</code></pre>
+        <p>
+          The <strong>lane</strong> box names the lane you are drawing on: type to rename, <strong>▾</strong>
+          to search or create. Pin several to read them against each other; a span copied from one lane
+          ({mod+c}) pastes into another. Which lanes are pinned is saved with the song.
+        </p>
+
+        <h2 id="groups">Groups</h2>
+        <p>
+          Select some tracks and press <strong>{mod+g}</strong>. They are wrapped in a group, which mixes
+          them into one channel:
+        </p>
+        <pre data-run data-build="web"><code>drums: group({
+  kick: s("pt_kit:0*4")
+  snare: s("~ pt_kit:1 ~ pt_kit:1")
+  hats: s("pt_kit:4*8").vel("1 .5")
+}).fx("Reverb").param("Mix", 0.15).postgain(0.4)</code></pre>
+        <pre data-build="desktop"><code>drums: group({
+  kick: s("bd*4")
+  snare: s("~ sd ~ sd")
+  hats: s("hh*8").vel("1 .5")
+}).postgain(0.8)</code></pre>
+        <ul>
+          <li>The braces <em>are</em> the membership: where a track is written is where it belongs.</li>
+          <li>An <code>.fx()</code>, <code>.postgain()</code> or <code>.bus()</code> on the group applies to all of it, and the mixer shows it as one strip that unfolds.</li>
+          <li>Groups nest. A bare <code>main: group()</code> receives every ungrouped track: that's where a mastering chain goes.</li>
+          <li><code>_drums:</code> mutes the lot, <code>Sdrums:</code> solos it. A marker on one member reaches only that member.</li>
+          <li>The caret beside the group's line folds it away, in the code and in the arrangement (where its members' clips then draw on its row).</li>
+          <li>A group's own row can be painted too: its clips bring the whole group in and out.</li>
+          <li>Right-click a group to <strong>ungroup</strong> it, or a member to take it out.</li>
+        </ul>
+        <p>
+          Within a loop, <code>&lt;a b&gt;</code>, <code>.when()</code> and <code>.preset("&lt;a b&gt;")</code>
+          vary a part. A second track in a group is for a <em>section</em>: a fill, an outro.
+          <code>copy("kick")</code> duplicates a whole track (<code>kick2: copy("kick").fast(2)</code>);
+          <code>pcopy("kick")</code> takes only its notes.
+        </p>
+      </main>
+    </div>
+    <!-- The chapter list, the pager, chords written for this platform, colored and playable code,
+         and the timelines all come from docs.js. -->
+    <script src="/chords.js"></script>
+    <script src="/vendor/codemirror/lib/codemirror.js"></script>
+    <script src="/vendor/codemirror/mode/javascript/javascript.js"></script>
+    <script src="/vendor/codemirror/addon/runmode/runmode.js"></script>
+    <script src="/poptart-mode.js"></script>
+    <script src="/pattern-meta.js"></script>
+    <script src="/docs/docs.js"></script>
+  </body>
+</html>

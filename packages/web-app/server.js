@@ -36,6 +36,8 @@ const MIME_TYPES = {
   '.mjs': 'text/javascript; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
   '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+  '.webp': 'image/webp',
 };
 
 // CodeMirror (v5: plain script files, no build step) is served under /vendor/codemirror/
@@ -2271,6 +2273,11 @@ let scanPhase = null;
 // first audio-device change. Any new engine callback goes here and nowhere else.
 function wireEngine() {
   mappedEngine = new MappedEngine(engine);
+  // The wrapper's own warnings (a word given to a plugin parameter) go where pattern warnings go.
+  mappedEngine.warn = (line) => {
+    eventLogQueue.push(line);
+    if (eventLogQueue.length > EVENT_LOG_MAX) eventLogQueue.splice(0, eventLogQueue.length - EVENT_LOG_MAX);
+  };
   // audio("kick")/.midi("kick") reference other tracks by label inside engine-call arguments;
   // the wrapper turns those into engine track ids on the way down (see MappedEngine._trackRef).
   // A reference from inside a deck resolves within that deck first - deck b's audio("kick")
@@ -2477,7 +2484,20 @@ function extendStringPrototype(core) {
     'gte', 'gt', 'lte', 'lt', 'eq', 'neq', 'when', 'hold', 'seg', 'segment', 'scale', 'range', 'synth', 'fx', 'param',
     'gain', 'postgain', 'pan', 'o', 'vel', 'clip', 'as', 'sc',
   ];
+  // The binops are getters on Sig (so `.add.in(x)` reads as it does on a pattern) and are
+  // mirrored as getters here too.
+  const MODAL = new Set(['add', 'sub', 'mul', 'div', 'mod', 'gte', 'gt', 'lte', 'lt', 'eq', 'neq']);
   for (const m of METHODS) {
+    if (MODAL.has(m)) {
+      Object.defineProperty(String.prototype, m, {
+        configurable: true,
+        enumerable: false,
+        get() {
+          return core.mini(String(this))[m];
+        },
+      });
+      continue;
+    }
     Object.defineProperty(String.prototype, m, {
       configurable: true,
       writable: true,
@@ -2567,10 +2587,18 @@ function setscale(name) {
   return SCALE_BLOCK;
 }
 
+// samples("user/repo") reads sample packs in from a repository, and that is the browser build's
+// (public/web/remote-packs.mjs): the desktop's packs are folders in the samples folder. Bound here
+// all the same, so a pattern written in the browser opens and plays on the desktop with one line
+// in the console instead of an error.
+function samples(source) {
+  eventLogQueue.push(`[samples] samples(${JSON.stringify(String(source ?? ''))}) reads packs in the browser build only - on the desktop a pack is a folder in the samples folder`);
+}
+
 // The builders the HOST provides (as opposed to pattern-core's), bound alongside BUILDER_NAMES in
 // every evaluated block. Read out of this source by api-docs.test.js, so adding one here is what
 // makes the editor's reference cover it.
-const HOST_BUILDERS = { setbpm, setscale };
+const HOST_BUILDERS = { setbpm, setscale, samples };
 
 
 // Each deck's song clock (pattern-core's ArrangeClock): transport cycle -> arrangement position,
@@ -2740,7 +2768,7 @@ const PREBAKE_BROWSER_SHIMS = {
   },
 };
 
-function makeBlockEvaluator(defs = new Map(), hostBuilders = { ...HOST_BUILDERS }) {
+function makeBlockEvaluator(defs = new Map(), hostBuilders = { ...HOST_BUILDERS }, { miniOff = [] } = {}) {
   // defs: name -> value, accumulated down the buffer. Seeded from the prebake file so its
   // top-level bindings are in scope for every user block too (see runPrebake).
   const evalBlock = function evalBlock(code, locBase) {
@@ -2751,8 +2779,9 @@ function makeBlockEvaluator(defs = new Map(), hostBuilders = { ...HOST_BUILDERS 
     // wrap pattern-position string literals in mini("…", ABS_OFFSET) so the emitted steps carry
     // document-absolute atom spans (see pattern-core/locations.mjs). Prebake/def blocks pass no
     // base and stay untagged. The wrapping only touches string literals inside expressions, so the
-    // decl-name harvest above and the const/let->var rewrite below are unaffected.
-    const located = typeof locBase === 'number' ? patternCore.injectLocations(code, locBase) : code;
+    // decl-name harvest above and the const/let->var rewrite below are unaffected. `miniOff` is the
+    // buffer's `// mini-off` … `// mini-on` stretches (patternCore.miniOffRanges).
+    const located = typeof locBase === 'number' ? patternCore.injectLocations(code, locBase, { miniOff }) : code;
     const body = located.replace(/^([ \t]*)(?:const|let)(\s+)/gm, '$1var$2');
     const macroNames = macroSigNames();
     const baseNames = [...BUILDER_NAMES, ...INTERNAL_BUILDERS, ...macroNames, ...Object.keys(hostBuilders)].filter((n) => !defs.has(n)); // defs may shadow builders
@@ -4650,7 +4679,7 @@ const routes = {
         return deck === 'a' && !clockHeldByDesk() ? declareTempo(value, v) : TEMPO_BLOCK;
       },
     };
-    const evalBlock = makeBlockEvaluator(new Map(prebakeDefs), hostBuilders);
+    const evalBlock = makeBlockEvaluator(new Map(prebakeDefs), hostBuilders, { miniOff: patternCore.miniOffRanges(body.code ?? '') });
 
     // Which row a `clips()` written in this block plays (see pattern-core's clips()). Restores
     // whatever was in force rather than clearing, because these nest: a copy() resolves inside the
@@ -6734,7 +6763,9 @@ function resolveStaticPath(urlPath) {
 }
 
 function serveStatic(req, res) {
-  const urlPath = req.url === '/' ? '/index.html' : req.url;
+  // A folder is its index.html - the guide lives at /docs/.
+  const bare = req.url.split('?')[0];
+  const urlPath = bare.endsWith('/') ? `${bare}index.html` : bare;
   const filePath = resolveStaticPath(urlPath);
 
   if (!filePath) {

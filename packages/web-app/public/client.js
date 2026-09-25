@@ -10,6 +10,12 @@
 // splitter are imported as ESM from /pattern-core/ (both served by server.js), so the browser
 // computes exactly the same steps the server plays.
 
+// Embedded (`?embed`, see index.html): the app as a playable example in the guide - the editor
+// alone, isolated from this browser's patterns and prebake (boot.mjs), with the guide page around
+// it asking for play and stop and sizing the frame to what it reports. See the embed section at the
+// end of this file and docs/docs.js.
+const EMBEDDED = document.documentElement.dataset.embed === '1';
+
 const playBtn = document.getElementById('playBtn');
 const updateBtn = document.getElementById('updateBtn');
 const scanBtn = document.getElementById('scanBtn');
@@ -294,6 +300,14 @@ const DEF_REGISTRIES = [rollDefs, shapeDefs, presetDefs, packDefs, sliceDefs, au
 let pinnedDefs = [];
 
 async function api(method, path, body) {
+  // The browser build has no server: the same route table runs in this page, and the editor
+  // reaches it by calling rather than by asking (see public/web/boot.mjs). Awaiting the boot
+  // promise rather than checking for a finished host is what stops a request made during
+  // startup - and the editor makes several - from racing it.
+  if (window.__poptartHostReady) {
+    const host = await window.__poptartHostReady;
+    return host.call(method, path, body ?? null);
+  }
   const res = await fetch(path, {
     method,
     headers: body ? { 'Content-Type': 'application/json' } : undefined,
@@ -316,6 +330,8 @@ async function api(method, path, body) {
  */
 function logLine(text, level = false) {
   const kind = level === 'warn' ? 'warn' : level ? 'error' : '';
+  // Embedded there is no console on screen, so what would be red in it goes to the guide's example.
+  if (EMBEDDED && kind === 'error') embedPost({ type: 'poptart-embed-error', text });
   const line = document.createElement('div');
   if (kind) line.className = kind;
   line.textContent = `${new Date().toLocaleTimeString()}  ${text}`;
@@ -633,6 +649,8 @@ const RESTORE_KEY = 'poptart.restoreBuffer';
 const DOC_NAME_KEY = 'poptart.docName';
 
 function saveRestoreBuffer(code) {
+  // An embedded example shares the guide tab's sessionStorage with every other example on the page.
+  if (EMBEDDED) return;
   try {
     sessionStorage.setItem(RESTORE_KEY, code);
   } catch {
@@ -676,6 +694,8 @@ function syncBufferState() {
 // point of the id-in-URL design is that the recovery net never sits in front of the sound. The
 // title is set synchronously, though, since that's what the history entry is named after.
 function checkpointUrl() {
+  // A frame's pushState lands in the guide tab's history: Back would walk the example, not the page.
+  if (EMBEDDED) return;
   const code = cm.getValue();
   if (!code.trim() || code === lastCheckpointCode) return;
   lastCheckpointCode = code;
@@ -693,10 +713,10 @@ function checkpointUrl() {
     .catch((e) => logLine(`could not add this state to browser history (${e.message ?? e})`, true));
 }
 
-// A hash is either `s=<id>` (a snapshot on this machine) or, for a shared link and for history
-// entries made before snapshots existed, the whole buffer base64'd. The two ways this can come
-// back empty are told apart by the caller, because they mean opposite things to the user: a
-// pruned snapshot is expected housekeeping, a link that won't decode is a damaged link.
+// A hash is `s=<id>` (a snapshot on this machine), `z=…` (a share link, see web/share-link.mjs),
+// or, for history entries made before snapshots existed, the whole buffer base64'd. The two ways
+// this can come back empty are told apart by the caller, because they mean opposite things to the
+// user: a pruned snapshot is expected housekeeping, a link that won't decode is a damaged link.
 const HASH_EMPTY = { reason: 'empty' };
 const HASH_PRUNED = { reason: 'pruned' };
 const hashDamaged = (len) => ({ reason: 'damaged', len });
@@ -708,10 +728,80 @@ async function loadCodeFromHash() {
     const { code } = await api('GET', `/api/snapshot?id=${encodeURIComponent(hash.slice(2))}`);
     return code === null ? HASH_PRUNED : code;
   }
+  if (hash.startsWith('z=')) {
+    const { decodeShareHash } = await import('/web/share-link.mjs');
+    try {
+      return await decodeShareHash(hash);
+    } catch {
+      return hashDamaged(hash.length);
+    }
+  }
   try {
     return decodeCodeHash(hash);
   } catch {
     return hashDamaged(hash.length);
+  }
+}
+
+function logDamagedLink(len) {
+  logLine(
+    `this share link is incomplete (${(len / 1024).toFixed(1)}kb of code in it, which did not decode) - ` +
+      'a link this long is usually cut short by the address bar it was pasted into. Ask for the ' +
+      'patch as an exported file instead.',
+    true,
+  );
+}
+
+// A share link just opened: trade it for a snapshot id in place (no new history entry - this IS
+// that entry), so the address bar stops holding the whole pattern and the rest of the session
+// behaves like any other. The link that was shared still works; it just isn't what this tab keeps
+// navigating with. And say what the link named but could not carry, since those sounds are silent
+// here unless this browser has files by the same names.
+async function settleSharedLink(code) {
+  if (location.hash.startsWith('#s=')) return;
+  const shared = location.hash.startsWith('#z=');
+  api('POST', '/api/snapshot', { code })
+    .then(({ id }) => history.replaceState(null, '', `#s=${id}`))
+    .catch(() => {}); // the long hash keeps working - nothing to tell the user
+  if (!shared) return;
+  const left = (await import('/web/share-link.mjs')).localOnly(code);
+  if (left?.files.length) {
+    logLine(`this pattern plays files from the browser it was shared from, which the link does not carry: ${left.files.join(', ')}`, true);
+  }
+  if (left?.handles) {
+    logLine(`this pattern names ${left.handles} captured desktop plugin state(s), which the link does not carry`, true);
+  }
+}
+
+// Copies a link that opens the buffer (web/share-link.mjs). The browser build only: the desktop
+// serves the page from this machine, and a link to it opens nothing anywhere else.
+async function shareLink() {
+  await settlePluginState(); // the link has to carry the sound as it is right now
+  const code = cm.getValue();
+  if (!code.trim()) {
+    logLine('nothing to share - the buffer is empty', true);
+    return;
+  }
+  const { encodeShareHash, localOnly, MAX_URL } = await import('/web/share-link.mjs');
+  const url = `${location.origin}${location.pathname}#${await encodeShareHash(code)}`;
+  if (url.length > MAX_URL) {
+    logLine(`this pattern is ${(url.length / 1024 / 1024).toFixed(1)}MB as a link, past what a browser will open - export it as a file instead`, true);
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(url);
+  } catch (e) {
+    logLine(`could not copy the share link (${e.message ?? e})`, true);
+    return;
+  }
+  logLine(`copied a share link (${(url.length / 1024).toFixed(1)}kb)`);
+  pulse(document.getElementById('saveFlash'), 'saved-flash');
+  const left = localOnly(code);
+  if (left?.files.length) {
+    logLine(`the link names files added to this browser but does not carry them - they are silent for whoever opens it: ${left.files.join(', ')}`, true);
+  }
+  if (left?.handles) {
+    logLine(`the link names ${left.handles} captured desktop plugin state(s) but does not carry them`, true);
   }
 }
 
@@ -833,31 +923,20 @@ async function openingBuffer() {
     return;
   }
   if (code.reason === 'damaged') {
-    logLine(
-      `this share link is incomplete (${(code.len / 1024).toFixed(1)}kb of code in it, which did not decode) - ` +
-        'a link this long is usually cut short by the address bar it was pasted into. Ask for the ' +
-        'patch as an exported file instead.',
-      true,
-    );
+    logDamagedLink(code.len);
     return;
   }
   setBufferQuietly(code);
   saveRestoreBuffer(code);
-  // An incoming share link carries the whole buffer. Trade it for a snapshot id in place (no new
-  // history entry - this IS that entry), so the address bar stops being a megabyte long and the
-  // rest of the session behaves like any other. The link that was shared still works; it just
-  // isn't what this tab keeps navigating with.
-  if (!location.hash.startsWith('#s=')) {
-    api('POST', '/api/snapshot', { code })
-      .then(({ id }) => history.replaceState(null, '', `#s=${id}`))
-      .catch(() => {}); // the long hash keeps working - nothing to tell the user
-  }
+  settleSharedLink(code).catch(() => {});
 }
 
 // Back/Forward: put that state back in the editor. No confirm needed - the buffer being replaced
 // keeps its own work-in-progress file on the way out (rollWipSession), so navigating away from
-// something you never named still can't lose it.
+// something you never named still can't lose it. A share link pasted into the address bar of an
+// open tab lands here too: only the fragment changed, so the page does not reload.
 window.addEventListener('popstate', async () => {
+  const shared = location.hash.startsWith('#z=');
   let code = null;
   try {
     code = await loadCodeFromHash();
@@ -866,6 +945,10 @@ window.addEventListener('popstate', async () => {
     return;
   }
   if (code === HASH_EMPTY) return;
+  if (shared && code.reason === 'damaged') {
+    logDamagedLink(code.len);
+    return;
+  }
   if (code === HASH_PRUNED || code.reason === 'damaged') {
     logLine('that state has been pruned from the snapshot store - nothing to restore', true);
     return;
@@ -875,6 +958,12 @@ window.addEventListener('popstate', async () => {
   setBufferQuietly(code);
   saveRestoreBuffer(code);
   checkpointSeq++; // an in-flight checkpoint must not push its URL over where we just landed
+  if (shared) {
+    setCurrentSavedName(null); // a pattern from somebody else is not the file that was open
+    settleSharedLink(code).catch(() => {});
+    logLine(`opened a shared pattern - ${chordLabel('mod+enter')} to play it`);
+    return;
+  }
   logLine(`restored code from browser history - ${chordLabel('mod+enter')} to play it`);
 });
 
@@ -887,6 +976,9 @@ window.addEventListener('popstate', async () => {
 // ---------------------------------------------------------------------------------------------
 
 (() => {
+  // There is no server to be restarted in the browser build, and an EventSource pointed at a
+  // path nothing serves retries for as long as the page is open.
+  if (window.__poptartHostReady) return;
   const es = new EventSource('/api/devReload');
   let bootId = null;
   // An edit to a file the server ALSO loads (public/pattern-meta.js) both broadcasts a reload and
@@ -1453,6 +1545,53 @@ function slotOfPluginNow(code, trackLabel, slot, plugin) {
   return found.length === 1 ? found[0] : slot;
 }
 
+/**
+ * The `.param()` calls a capture has just made redundant, as buffer edits.
+ *
+ * A device we wrote is captured WHOLE - every control it has is in the preset - so a `.param()`
+ * that sets one of them is a second copy of a number the preset already carries, and the louder
+ * of the two: a polled control is re-sent every tick, so the call would quietly win over the
+ * preset it sits beside. Dropping them is also what makes the window usable at all, since
+ * otherwise a synth with thirty knobs writes thirty calls across the track.
+ *
+ * Only calls whose argument is a plain setting. A `.param("Cutoff", lfo(2))`, an `audio("x")` or
+ * a pattern like `"<a b>"` is not a setting a preset can hold - it is modulation, and it stays.
+ */
+function settingParamEdits(code, trackLabel, slot) {
+  if (!labelsMod) return [];
+  const block = blockForTrack(code, trackLabel);
+  if (!block) return [];
+  const isCode = blockOwnCode(code, block);
+  const re = /\.param\s*\(/g;
+  re.lastIndex = block.start;
+  const edits = [];
+  let m;
+  while ((m = re.exec(code)) && m.index < block.end) {
+    if (!isCode(m.index)) continue; // a commented-out call is not setting anything
+    const open = m.index + m[0].length - 1;
+    const close = matchParen(code, open);
+    if (close < 0 || close > block.end) continue;
+    const lit = firstStringLiteral(code, open + 1, close);
+    if (!lit) continue;
+    let i = lit.end;
+    while (i < close && code[i] !== ',') i++;
+    if (code[i] !== ',') continue;
+    if (!isPlainSetting(code.slice(i + 1, close).trim())) continue;
+    if (presetTargetAt(code, m.index)?.slot !== slot) continue;
+    edits.push([m.index, close + 1, '']);
+  }
+  return edits;
+}
+
+/** Whether a `.param()` argument is a value and not a signal or a pattern of them. */
+function isPlainSetting(arg) {
+  if (/^-?(\d+\.?\d*|\.\d+)(e[-+]?\d+)?$/i.test(arg)) return true;
+  const str = /^"([^"\\]*)"$/.exec(arg) ?? /^'([^'\\]*)'$/.exec(arg);
+  // A quoted argument is either the name of one of an enum's choices or a pattern of them; the
+  // characters mini-notation is written with are what tells the two apart.
+  return !!str && !/[\s<>\[\]{}~*!?|,@]/.test(str[1]);
+}
+
 function writePluginState(trackLabel, slot, state, plugin, preset) {
   if (!labelsMod) return null;
   const code = cm.getValue();
@@ -1763,6 +1902,13 @@ async function pollPluginEdits({ flush = false } = {}) {
   // rather than leaving a slot frozen until it times out.
   commitQueue = commitQueue.filter((c) => !committed.includes(c));
   for (const e of edits ?? []) {
+    // A capture that carries every one of a device's settings replaces the `.param()` calls that
+    // set them (see settingParamEdits). Written first and with the same origin, so the whole
+    // capture is one undo step.
+    if (e.replacesParams) {
+      const drop = settingParamEdits(cm.getValue(), e.trackId, e.slot);
+      if (drop.length) applyBufferEdits(drop, '+autopin');
+    }
     const filed = writePluginState(e.trackId, e.slot, e.state, e.plugin, e.preset);
     const commit = { trackId: e.trackId, slot: e.slot, seq: e.seq };
     if (filed === 'already') commitQueue.push(commit);
@@ -1836,7 +1982,7 @@ async function pollConf(labelOverride) {
   const trackLabel = labelOverride ?? confSession?.trackLabel;
   if (!trackLabel) return;
   const { active, params } = await api('POST', '/api/confPending', { trackId: trackLabel });
-  for (const p of params ?? []) upsertParam(trackLabel, p.slot, p.name, p.value);
+  for (const p of params ?? []) upsertParam(trackLabel, p.slot, paramSpellingInCode(trackLabel, p), p.value);
   // active:false on a session we think is live means the server restarted out from under it -
   // stop and say so instead of silently polling a dead session with the button still lit.
   // (Not on the final-drain call from stopConf, which passes labelOverride and expects this.)
@@ -1991,10 +2137,21 @@ async function rollWipSession(id = null) {
 }
 
 // Closing the tab inside the debounce window would otherwise lose the last seconds of typing.
-// sendBeacon survives teardown, which fetch() does not.
+//
+// The page going out of sight is the first sign, and the page is still whole when it fires, so
+// the ordinary save runs then - that is the one the browser build has, since its store is this
+// page's own IndexedDB and there is no server to beacon to (a beacon there is a request for a
+// route a static site does not have, and the words were lost). A tab closed while in view gets
+// no such warning, so the desktop also beacons on the way out: sendBeacon survives teardown,
+// which fetch() does not. The browser build's last try then is the save itself, which an
+// IndexedDB write started during pagehide usually outlives.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') saveWip();
+});
 window.addEventListener('pagehide', () => {
   const code = cm.getValue();
   if (code === wipLastSent) return;
+  if (window.__poptartHostReady) { saveWip(); return; }
   const body = new Blob([JSON.stringify({ id: wipSessionId, code })], { type: 'application/json' });
   navigator.sendBeacon('/api/patterns/wip/save', body);
 });
@@ -2143,7 +2300,9 @@ async function fetchMidiDevices() {
   try {
     midiDevices = await api('GET', '/api/midiDevices');
     if (firstFetch && midiDevices.length === 0) {
-      logLine('midikeys/midicc: engine reports no MIDI sources - they are scanned once at engine start, so restart poptart after plugging a device in', true);
+      logLine(window.__poptartHostReady
+        ? 'midikeys/midicc: no MIDI devices are connected - plug one in and it is picked up as it arrives'
+        : 'midikeys/midicc: engine reports no MIDI sources - they are scanned once at engine start, so restart poptart after plugging a device in', true);
     }
   } catch (err) {
     if (firstFetch) logLine(`midikeys/midicc: device list unavailable (${err.message})`, true);
@@ -2903,6 +3062,10 @@ function findChainHandleAt(code, idx) {
  */
 function showPluginEditor(trackId, slot) {
   queueHandOp(() => api('POST', '/api/showEditor', { trackId, slot })
+    // A device with no window of its own is answered with the panel to draw instead of an
+    // opened window. That is the only thing distinguishing the two here: not which build this
+    // is, but whether what answered had a window to open.
+    .then((res) => { if (res?.panel) showDevicePanel(trackId, slot, res.panel); })
     .catch((e) => logLine(e.message, true))
     // Ops are serialized, so by the time this one is answered any release before it has landed:
     // the server's view of what is held by hand is current again, and the mark can come back.
@@ -2913,6 +3076,2454 @@ function showPluginEditor(trackId, slot) {
     logLine(`${trackId} slot ${slot}: holding its preset while you work in the plugin - click in the code to hand it back`);
   }
 }
+
+// ---------------------------------------------------------------------------------------------
+// The generated device window.
+//
+// A device that is not a plugin has no window of its own, so the host builds one from the
+// device's descriptor and this draws it. Nothing here knows what any particular device is: the
+// sections, the widgets, the units and the curves all arrive as data, which is what keeps a new
+// device from needing a line of UI written for it.
+//
+// TURNING A KNOB DOES TWO THINGS, and the split is the same one the mixer's held controls make.
+// While the gesture is running the value goes straight to the engine, because a drag that
+// re-evaluated the buffer per frame would be unusable. When it is let go the value is written
+// into the code as a `.param()` call, because the code is the single source of truth and a
+// setting that lives only in a knob is a setting that is lost on the next evaluation. The host
+// hands back the exact text to write, so a value heard and a value written cannot disagree.
+// ---------------------------------------------------------------------------------------------
+
+const devicePanelEl = document.getElementById('devicePanel');
+const deviceTitleEl = document.getElementById('deviceTitle');
+const deviceTargetEl = document.getElementById('deviceTarget');
+const deviceSectionsEl = document.getElementById('deviceSections');
+const deviceCreditEl = document.getElementById('deviceCredit');
+
+// Which track and slot the open panel is pointed at, so an evaluation can redraw it against
+// whatever the buffer now says, and a knob knows where to send what it is doing.
+let devicePanelAt = null;
+
+/** Controls whose value changes what the open window has on it, rather than only what it reads. */
+let devicePanelRelayout = new Set();
+
+function hideDevicePanel() {
+  devicePanelEl.classList.add('hidden');
+  if (devicePanelAt) {
+    const { trackLabel, slot } = devicePanelAt;
+    api('POST', '/api/deviceWatch', { trackId: trackLabel, slot, on: false }).catch(() => {});
+  }
+  devicePanelAt = null;
+  stopDeviceLive();
+  deviceFigureEls.clear();
+  deviceLiveEls.clear();
+  deviceWidgetEls.clear();
+}
+
+document.getElementById('deviceClose').onclick = hideDevicePanel;
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && devicePanelAt) hideDevicePanel();
+});
+// A figure is a canvas the stylesheet gives its width, so its backing store is only right for as
+// long as the window is the size it was drawn at.
+window.addEventListener('resize', () => {
+  for (const entry of deviceFigureEls.values()) entry.paint();
+});
+
+/**
+ * One knob, in the desk's shape and on the desk's metrics: the same class, the same sweep, the
+ * same fine-drag modifier. It works in 0..1 positions throughout - the parameter's real units
+ * and its curve live in the descriptor, on the other side of the call.
+ */
+function deviceKnob(widget, { onDrag, onCommit, register }) {
+  const knob = document.createElement('div');
+  knob.className = 'mix-knob';
+  let pos = widget.position;
+  let dragging = false;
+  const paint = () => knob.style.setProperty('--ang', `${-135 + pos * 270}deg`);
+  paint();
+  // How something else moves this knob: a drag on the picture the same parameter is drawn in, or
+  // the poll that follows a control a modulator owns. The position is kept here, so a later drag
+  // starts from where the knob actually is rather than from where the panel was built - but never
+  // while a gesture is running: a control under a hand belongs to that hand until it lets go.
+  register?.((position) => {
+    if (dragging) return;
+    pos = Math.min(1, Math.max(0, Number(position) || 0));
+    paint();
+  });
+  if (widget.modulatedBy) return knob; // driven from elsewhere - drawn, not turned
+
+  const moveTo = (next) => {
+    pos = Math.min(1, Math.max(0, next));
+    paint();
+    onDrag(pos);
+  };
+  knob.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    knob.setPointerCapture(e.pointerId);
+    knob.classList.add('dragging');
+    dragging = true;
+    const y0 = e.clientY;
+    const p0 = pos;
+    // The desk's sweep, and the macro bank's fine-drag modifier: a filter cutoff wants both the
+    // whole range in one gesture and a way to land on a number.
+    const move = (ev) => moveTo(p0 + (y0 - ev.clientY) / (ev.shiftKey ? 1200 : 150));
+    // The gesture ends on ANY of these. A lost capture is the one that was missing: the window
+    // rebuilding under the hand, or the pointer taken by something else, ends the capture with
+    // no pointerup ever arriving, and a knob that never heard the end stayed lit as dragging and
+    // kept its listeners - so the next drag on any knob moved this one too.
+    const up = () => {
+      dragging = false;
+      knob.classList.remove('dragging');
+      knob.removeEventListener('pointermove', move);
+      knob.removeEventListener('pointerup', up);
+      knob.removeEventListener('pointercancel', up);
+      knob.removeEventListener('lostpointercapture', up);
+      onCommit(pos);
+    };
+    knob.addEventListener('pointermove', move);
+    knob.addEventListener('pointerup', up);
+    knob.addEventListener('pointercancel', up);
+    knob.addEventListener('lostpointercapture', up);
+  });
+  knob.addEventListener('dblclick', () => {
+    moveTo(widget.defaultPosition);
+    onCommit(pos);
+  });
+  knob.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    moveTo(pos + (e.deltaY < 0 ? 1 : -1) * (e.shiftKey ? 0.002 : 0.02));
+    onCommit(pos);
+  }, { passive: false });
+  return knob;
+}
+
+/**
+ * A number box: the value itself, dragged up and down or typed. The honest widget for a count or
+ * a transposition, where a knob's sweep says nothing the number does not say better. It sends
+ * REAL values - what is typed is in the parameter's own units - and the host clamps and steps.
+ */
+function deviceNumber(widget, { onDrag, onCommit, register }) {
+  const box = document.createElement('div');
+  box.className = 'device-number';
+  let value = widget.value;
+  let dragging = false;
+  const step = widget.step ?? (widget.max - widget.min) / 200;
+  // The box IS the readout - there is no second line under it - so it prints the value it is
+  // on. While a drag runs it prints what it has locally, because the pointer must not wait for
+  // a round trip; the host's own text lands over that as each answer comes back.
+  // Fixed digits, the descriptor's own count (see decimalsFor): a number that changes width as
+  // it is dragged makes the whole panel shift sideways on every frame of the gesture.
+  const digits = widget.decimals ?? 3;
+  const paint = (text) => {
+    if (box.querySelector('input')) return;
+    box.textContent = text ?? `${value.toFixed(digits)}${widget.unit ? ` ${widget.unit}` : ''}`;
+  };
+  paint(widget.text);
+  // Never while a gesture is running - see the knob, and for the same reason.
+  register?.((v, text) => { if (dragging) return; value = v; paint(text); });
+  if (widget.modulatedBy) return box;
+
+  const clamp = (v) => Math.min(widget.max, Math.max(widget.min, Math.round(v / step) * step));
+  box.addEventListener('pointerdown', (e) => {
+    if (box.querySelector('input')) return;
+    e.preventDefault();
+    box.setPointerCapture(e.pointerId);
+    box.classList.add('dragging');
+    dragging = true;
+    const y0 = e.clientY;
+    const v0 = value;
+    let moved = false;
+    // Six pixels a step, a quarter of that with shift held, the same way the knobs go fine.
+    const move = (ev) => {
+      const px = ev.shiftKey ? 24 : 6;
+      const next = clamp(v0 + Math.round((y0 - ev.clientY) / px) * step);
+      if (next === value) return;
+      moved = true;
+      value = next;
+      onDrag(value, paint);
+    };
+    const up = () => {
+      dragging = false;
+      box.classList.remove('dragging');
+      box.removeEventListener('pointermove', move);
+      box.removeEventListener('pointerup', up);
+      box.removeEventListener('pointercancel', up);
+      if (moved) onCommit(value, paint);
+    };
+    box.addEventListener('pointermove', move);
+    box.addEventListener('pointerup', up);
+    box.addEventListener('pointercancel', up);
+  });
+  // A double-click opens the number for typing; enter or leaving it commits, escape cancels.
+  box.addEventListener('dblclick', () => {
+    if (box.querySelector('input')) return;
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.value = value.toFixed(digits);
+    box.textContent = '';
+    box.appendChild(input);
+    input.focus();
+    input.select();
+    let done = false;
+    const finish = (commit) => {
+      if (done) return;
+      done = true;
+      const typed = Number(input.value);
+      input.remove();
+      if (commit && Number.isFinite(typed)) {
+        value = clamp(typed);
+        onCommit(value, paint);
+      } else {
+        paint();
+      }
+    };
+    input.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter') finish(true);
+      else if (ev.key === 'Escape') finish(false);
+      ev.stopPropagation();
+    });
+    input.addEventListener('blur', () => finish(true));
+  });
+  box.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    value = clamp(value + (e.deltaY < 0 ? 1 : -1) * step);
+    onCommit(value, paint);
+  }, { passive: false });
+  return box;
+}
+
+// ---------------------------------------------------------------------------------------------
+// The figures in that window.
+//
+// A knob is the honest widget for a parameter whose whole meaning is its number. It is the wrong
+// one for a wavetable's position, a filter's mode or an envelope's four times - and those are most
+// of what a synth we wrote is made of - so a descriptor may declare FIGURES, and this draws them.
+//
+// Nothing here knows what device it is drawing. A figure arrives as data computed in web-engine's
+// figures.mjs - a waveform's points, a response curve's decibels, an envelope's handles - and is
+// matched to a renderer by its `kind`; a kind with no renderer is skipped, so a device can ship a
+// picture the editor has never been taught about and lose nothing but the picture.
+//
+// A figure DRAGS on the same terms a knob does, and for the same reason: straight to the engine
+// while the gesture runs, written into the code as a `.param()` call when it is let go. Which shape
+// the drag takes depends on what was grabbed. A FIELD - the response curve, the spread, the table -
+// is grabbed anywhere, so it moves by how far the pointer went and taking hold of it never jumps
+// the value. A HANDLE on an envelope was grabbed because it was under the pointer, so it follows
+// the pointer. A parameter something else is driving does not move at all, the same way its knob
+// does not turn.
+// ---------------------------------------------------------------------------------------------
+
+/** Each drawn figure by id, so a parameter's answer repaints the pictures it appears in. */
+const deviceFigureEls = new Map();
+
+/**
+ * Each drawn control by PARAMETER id, so an answer about that parameter moves it - whatever moved
+ * it. A parameter can be on screen twice, as a knob and as a picture (a wavetable's position is
+ * both), and a drag on either has to leave the other saying the same thing.
+ */
+const deviceWidgetEls = new Map();
+
+/**
+ * The controls something else is driving, by parameter id, each with a way to move its readout:
+ * while the window is open they are polled from the processor's own reports, so a knob under an
+ * LFO turns and a picture under an envelope moves.
+ */
+const deviceLiveEls = new Map();
+let deviceLiveTimer = null;
+
+/** How often a window with driven controls asks where they are. About the rate the eye needs. */
+
+function stopDeviceLive() {
+  if (deviceLiveTimer) cancelAnimationFrame(deviceLiveTimer);
+  deviceLiveTimer = null;
+}
+
+/** Starts the poll, if anything in the open window is driven. */
+function startDeviceLive(trackLabel, slot, panel) {
+  stopDeviceLive();
+  const figures = [...panel.sections.flatMap((s) => s.figures), ...panel.figures];
+  // Polled while something is being driven - and while a picture is of what the device is DOING,
+  // which moves with nothing on a knob at all (a granulator's grains).
+  const follows = panel.sections.some((s) => s.widgets.some((w) => w.modulatedBy))
+    || figures.some((f) => Object.keys(f.driven ?? {}).length || LIVE_FIGURE_KINDS.has(f.kind));
+  if (!follows) return;
+  // On the frame clock rather than a timer, and one request at a time so it can never run ahead
+  // of itself. A grain lives about a tenth of a second: polled four times a second it is a dot
+  // that blinks on somewhere new, and polled every frame it is a dot that travels, which is the
+  // whole thing the picture is for.
+  let inFlight = false;
+  const tick = () => {
+    if (!devicePanelAt || devicePanelAt.trackLabel !== trackLabel || devicePanelAt.slot !== slot) return;
+    deviceLiveTimer = requestAnimationFrame(tick);
+    if (inFlight) return;
+    inFlight = true;
+    api('POST', '/api/deviceLive', { trackId: trackLabel, slot })
+      .then((res) => {
+        if (!res?.values) return;
+        for (const [id, live] of Object.entries(res.values)) deviceLiveEls.get(id)?.(live);
+        applyDeviceFigures(res.figures);
+      })
+      .catch(() => {})
+      .finally(() => { inFlight = false; });
+  };
+  deviceLiveTimer = requestAnimationFrame(tick);
+}
+
+/** Figures that draw what a device is doing rather than how it is set, and so always follow. An
+ * equalizer's curve is drawn over the signal an analyser reads while its window is open. */
+const LIVE_FIGURE_KINDS = new Set(['sample', 'meter', 'transfer', 'eq', 'shaper', 'sweep', 'duck']);
+
+/** How tall each kind of figure is drawn, in CSS pixels. */
+const FIGURE_HEIGHT = { wavetable: 176, unison: 64, response: 108, adsr: 108, eq: 128, band: 52, matrix: 176, sample: 96, grain: 64, meter: 22, transfer: 120, shaper: 108, echoes: 84, repeats: 72, decay: 72, sweep: 96, duck: 112 };
+
+/** How near a press counts as being on an envelope handle - the sampler's panel allows the same. */
+const FIGURE_HIT_PX = 9;
+
+/** An envelope handle's radius, and the room above and below that keeps the extremes grabbable. */
+const FIGURE_POINT_R = 4;
+const FIGURE_PAD_Y = 10;
+
+/** The gap between a transfer figure's curve and the lane that scrolls beside it, in pixels. */
+const FIGURE_LANE_GAP = 8;
+
+/** The height of the wavetable figure's position scrubber, under the waveform. */
+const FIGURE_SCRUB_H = 15;
+
+/**
+ * How far a drag on a two-axis figure has to go before it decides which of the two it means, as
+ * a share of the figure's own size. Small enough that the control starts moving at once, big
+ * enough that the first frame of a gesture does not decide it (see fieldGrab).
+ */
+const AXIS_LATCH = 0.02;
+
+/**
+ * The breakpoints a drawn control is currently on, read off the figure that draws it - the one
+ * place the panel is told what a drawn curve actually is.
+ */
+function figureShapeData(paramId) {
+  for (const entry of deviceFigureEls.values()) {
+    const f = entry.figure();
+    if (f.data && f.widgets?.some((w) => w.id === paramId)) return f.data;
+  }
+  return null;
+}
+
+/** Repaints whichever open figures the host says a parameter changed. */
+function applyDeviceFigures(figures) {
+  for (const f of figures ?? []) deviceFigureEls.get(f.id)?.update(f);
+}
+
+/** The panel's colors, read per paint so a theme change is picked up without rebuilding the DOM. */
+function figureColors() {
+  const css = getComputedStyle(document.documentElement);
+  const col = (v, fallback) => css.getPropertyValue(v).trim() || fallback;
+  return {
+    accent: col('--accent', '#6cf'),
+    text: col('--text', '#ccc'),
+    dim: col('--text-dim', '#888'),
+    grid: col('--border', '#333'),
+    warn: col('--warn', '#d29922'),
+  };
+}
+
+/**
+ * Every readout in a device window is padded to a width it never leaves.
+ *
+ * Nothing in a panel may move because a value changed. These numbers are read WHILE they are
+ * being dragged, and a readout that grows a digit shoves everything beside it sideways on that
+ * frame - which is not a cosmetic complaint, it is a number you cannot read because it will not
+ * hold still. So the digits are fixed (see decimalsFor), every optional clause is printed
+ * whether or not it has anything to say, and what is left is padded with a figure space, which
+ * is exactly as wide as a digit.
+ */
+function figurePad(text, width) {
+  return String(text).padStart(width, '\u2007');
+}
+
+/** A time in the unit it reads best in - the envelope readout spans microseconds to seconds. */
+function figureSeconds(s) {
+  if (s < 0.0005) return figurePad('0.0 ms', 8);
+  if (s < 1) return figurePad(`${(s * 1000).toFixed(1)} ms`, 8);
+  return figurePad(`${s.toFixed(2)} s`, 8);
+}
+
+/** A frequency the way the rest of the app prints one. */
+function figureHz(hz) {
+  return figurePad(hz >= 1000 ? `${(hz / 1000).toFixed(2)} kHz` : `${Math.round(hz)} Hz`, 9);
+}
+
+/**
+ * One figure: a heading with its readout, and the canvas under it.
+ *
+ * The element carries an `update(figure)` that takes a freshly computed figure and repaints - which
+ * is what a drag calls per frame, and what an evaluation calls once.
+ */
+function deviceFigure(trackLabel, slot, figure) {
+  const cell = document.createElement('div');
+  cell.className = 'device-figure';
+
+  const head = document.createElement('div');
+  head.className = 'device-figure-head';
+  const title = document.createElement('span');
+  title.className = 'device-figure-title';
+  // A figure with no title has none: the multiband's three curves sit under headings that have
+  // already named them, and "transfer" over each one said nothing three times.
+  title.textContent = figure.title ?? '';
+  const readout = document.createElement('span');
+  readout.className = 'device-figure-read';
+  head.append(title);
+  // Controls this figure took over (see the panel's `widgets`): a table control belongs on the
+  // picture of the table, where its name is, rather than under it as a second copy of the name.
+  for (const widget of figure.widgets ?? []) head.appendChild(deviceWidget(trackLabel, slot, widget, { bare: true }));
+  head.appendChild(readout);
+  cell.appendChild(head);
+
+  const canvas = document.createElement('canvas');
+  canvas.className = 'device-figure-canvas';
+  canvas.style.height = `${FIGURE_HEIGHT[figure.kind] ?? 96}px`;
+  cell.appendChild(canvas);
+
+  // What the picture is, then how to work it: the same ctrl+hover a knob answers to, and the only
+  // place a drag on a picture is discoverable at all.
+  const driving = Object.entries(figure.driven ?? {}).map(([id, by]) => `${id} is driven by ${by}.`);
+  cell.title = [figure.description, ...driving].filter(Boolean).join(' ');
+  if (driving.length) cell.classList.add('driven');
+
+  let current = figure;
+  const paint = () => {
+    songSizeCanvas(canvas);
+    const ctx = canvas.getContext('2d');
+    const dpr = window.devicePixelRatio || 1;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const w = canvas.clientWidth;
+    const h = canvas.clientHeight;
+    ctx.clearRect(0, 0, w, h);
+    const drawer = FIGURE_DRAWERS[current.kind];
+    if (!drawer) { readout.textContent = ''; return; }
+    const shown = { ...current, focus: entry.focus };
+    if (current.kind === 'transfer' || current.kind === 'meter') {
+      const raw = Number(current.kind === 'meter' ? current.db : current.grDb) || 0;
+      // Toward a deeper reading at once, back to rest slowly.
+      entry.meter += (raw - entry.meter) * (Math.abs(raw) > Math.abs(entry.meter) ? 0.6 : 0.08);
+      if (current.kind === 'meter') shown.db = entry.meter;
+      else shown.grDb = entry.meter;
+      if (current.kind === 'transfer' && current.inDb !== null) {
+        const level = Number(current.inDb);
+        entry.level += (level - entry.level) * (level > entry.level ? 0.6 : 0.12);
+        shown.inDb = entry.level;
+      }
+    }
+    readout.textContent = drawer(ctx, w, h, shown, figureColors()) ?? '';
+  };
+
+  const entry = {
+    figure: () => current,
+    update: (next) => { current = next; paint(); },
+    paint,
+    // Where a meter on this figure has got to. A device reports the deepest gain reduction of
+    // each block, thirty times a second, and a meter that followed that exactly would be a
+    // blur - so it falls fast and comes back slowly, which is what makes one readable.
+    meter: 0,
+    // And where the signal's level has got to, smoothed the same way: a dot on a curve that
+    // followed every block's peak exactly would be a scribble.
+    level: -120,
+    // Which part of a many-part figure the last gesture was on. Set by the gesture, read by the
+    // drawer, and carried across repaints - a figure is rebuilt from the host on every frame of
+    // a drag, so it cannot live on the figure data.
+    focus: 1,
+  };
+  deviceFigureEls.set(figure.id, entry);
+  wireFigureDrag(canvas, trackLabel, slot, entry);
+  // A canvas has no size until it is laid out, so the first paint waits a frame rather than
+  // drawing into a one-pixel box.
+  requestAnimationFrame(paint);
+  return cell;
+}
+
+/**
+ * Sends a figure's parameter the way a knob's gesture does: straight through while the drag runs,
+ * and into the code when it ends. One request at a time with the latest winning, the rule every
+ * streamed control in here follows - a drag fires far faster than a round trip, and what matters is
+ * that the gesture's last value is the one that lands.
+ */
+function figureSender(trackLabel, slot) {
+  let inFlight = false;
+  let queued = null;
+  const send = (body, commit) => {
+    if (inFlight) { queued = [body, commit]; return; }
+    inFlight = true;
+    api('POST', '/api/deviceParam', { trackId: trackLabel, slot, commit, ...body })
+      .then((res) => {
+        applyDeviceFigures(res.figures);
+        // The same parameter's knob, if it is on screen: dragging the waveform moves the
+        // position knob under it, and dragging the response curve moves the cutoff. A gesture
+        // that moved two controls answers for both.
+        for (const one of res.batch ?? [res]) deviceWidgetEls.get(one.id)?.(one);
+      })
+      .catch((e) => logLine(e.message ?? String(e), true))
+      .finally(() => {
+        inFlight = false;
+        if (queued) { const [b, c] = queued; queued = null; send(b, c); }
+      });
+  };
+  return send;
+}
+
+/** Where a level sits on a figure's vertical axis. */
+function figureLevelY(level, h) {
+  return FIGURE_PAD_Y + (1 - level) * Math.max(1, h - 2 * FIGURE_PAD_Y);
+}
+
+/** And the way back, from a pointer to the level it is pointing at. */
+function figureLevelAt(y, h) {
+  return Math.min(1, Math.max(0, 1 - (y - FIGURE_PAD_Y) / Math.max(1, h - 2 * FIGURE_PAD_Y)));
+}
+
+/**
+ * The gestures on a figure.
+ *
+ * An `adsr` has named handles and is dragged by them; everything else is a field whose `drag` map
+ * says which parameter each axis moves.
+ */
+function wireFigureDrag(canvas, trackLabel, slot, entry) {
+  const figure = entry.figure();
+  const handled = new Set(['adsr', 'eq', 'band', 'matrix']);
+  if (!handled.has(figure.kind) && !figure.drag) return;
+  const send = figureSender(trackLabel, slot);
+
+  canvas.addEventListener('pointerdown', (e) => {
+    const f = entry.figure();
+    const rect = canvas.getBoundingClientRect();
+    const px = e.clientX - rect.left;
+    const py = e.clientY - rect.top;
+    const grab = f.kind === 'adsr' ? adsrGrab(f, px, py, rect.width, rect.height)
+      : f.kind === 'eq' ? eqGrab(f, px, py, rect.width, rect.height)
+        : f.kind === 'band' ? bandGrab(f, px, rect.width)
+          : f.kind === 'matrix' ? matrixGrab(f, px, py, rect.width, rect.height)
+            : fieldGrab(f);
+    if (!grab) return;
+    e.preventDefault();
+    canvas.setPointerCapture(e.pointerId);
+    const x0 = e.clientX;
+    const y0 = e.clientY;
+
+    const bodyFor = (ev) => {
+      // Shift is the fine drag, the same modifier the desk's knobs take.
+      const fine = ev.shiftKey ? 0.125 : 1;
+      return grab.at(
+        ((ev.clientX - x0) / Math.max(1, rect.width)) * fine,
+        ((ev.clientY - y0) / Math.max(1, rect.height)) * fine,
+        ev.clientY - rect.top,
+        rect.height,
+        ev.clientX - rect.left,
+        rect.width,
+      );
+    };
+    // Which band the gesture is on, so the heading names the one under your hand rather than
+    // reciting all four - see the equalizer's drawer.
+    if (grab.band !== undefined) entry.focus = grab.band;
+    if (grab.role !== undefined) entry.focus = grab.role;
+    const move = (ev) => { const b = bodyFor(ev); if (b) send(b, false); };
+    const up = (ev) => {
+      canvas.removeEventListener('pointermove', move);
+      canvas.removeEventListener('pointerup', up);
+      canvas.removeEventListener('pointercancel', up);
+      const b = bodyFor(ev);
+      if (b) send(b, true);
+    };
+    canvas.addEventListener('pointermove', move);
+    canvas.addEventListener('pointerup', up);
+    canvas.addEventListener('pointercancel', up);
+  });
+
+  // The wheel sets what a drag has nowhere to put: a band's Q, and a stage's curvature. Both
+  // are shapes rather than places - there is no point on the picture that means "more curved" -
+  // so they go on the wheel over the thing they bend. Shift makes it fine, as everywhere else.
+  if (figure.kind !== 'eq' && figure.kind !== 'adsr') return;
+  canvas.addEventListener('wheel', (e) => {
+    const f = entry.figure();
+    const rect = canvas.getBoundingClientRect();
+    const px = e.clientX - rect.left;
+    let target = null;
+    if (f.kind === 'eq') {
+      const grab = eqGrab(f, px, e.clientY - rect.top, rect.width, rect.height);
+      const band = grab && f.bands.find((b) => b.band === grab.band);
+      if (band?.movesQ) {
+        target = { id: band.movesQ, position: band.qPosition, focus: band.band };
+      }
+    } else {
+      // Whichever stage the pointer is over. The sustain has no curve: it is a level, not a ramp.
+      const at = px / Math.max(1, rect.width);
+      const stage = f.stages?.find((x) => at >= x.x0 && at <= x.x1);
+      if (stage) target = { id: stage.moves, position: stage.position, focus: stage.role };
+    }
+    if (!target || f.driven?.[target.id]) return;
+    e.preventDefault();
+    entry.focus = target.focus;
+    const step = (e.shiftKey ? 0.01 : 0.05) * (e.deltaY < 0 ? 1 : -1);
+    send({ id: target.id, position: Math.min(1, Math.max(0, target.position + step)) }, true);
+  }, { passive: false });
+}
+
+/**
+ * A field grab: each axis moves by how far the pointer went, in 0..1 POSITIONS, so the parameter
+ * arrives at the host on its own curve. That is what makes the response curve's horizontal drag
+ * land where the eye expects it - the cutoff's curve is exponential and the axis is logarithmic,
+ * so the two are the same axis - and it is why a field sends positions where an envelope sends
+ * seconds.
+ */
+function fieldGrab(f) {
+  const axes = [];
+  for (const [axis, paramId] of Object.entries(f.drag ?? {})) {
+    if (f.driven?.[paramId]) continue; // something else is moving it
+    axes.push({ axis, paramId, from: figurePosition(f, axis) });
+  }
+  if (!axes.length) return null;
+  // A two-axis figure is an x-y control: both parameters follow the hand at once, in one request
+  // (the route takes a batch, and answers for each). It used to pick ONE axis per gesture, which
+  // was a fix for an earlier version that re-decided the axis every frame and stuck - but a pad
+  // that only moves one way at a time is not a pad, and the thing somebody wants from a filter's
+  // picture is to sweep the cutoff and the resonance together.
+  return {
+    at: (dx, dy) => ({
+      params: axes.map((a) => ({
+        id: a.paramId,
+        position: Math.min(1, Math.max(0, a.from + (a.axis === 'y' ? -dy : dx))),
+      })),
+    }),
+  };
+}
+
+/** Where a field figure's axis currently sits, 0..1, so a relative drag has somewhere to start. */
+function figurePosition(f, axis) {
+  if (f.kind === 'wavetable') return f.position;
+  if (f.kind === 'sample') return axis === 'y' ? f.spray : f.position;
+  if (f.kind === 'unison') return axis === 'y' ? f.spread : f.detune / 100;
+  if (f.kind === 'response') {
+    if (axis === 'y') return f.resonance;
+    const { lowHz, highHz } = f.range;
+    return Math.log(f.cutoff / lowHz) / Math.log(highHz / lowHz);
+  }
+  // Every figure since those carries the positions of what it drags, by parameter id.
+  if (f.positions && f.drag?.[axis] != null) return f.positions[f.drag[axis]] ?? 0;
+  return 0;
+}
+
+/** Where a frequency sits on a figure's log axis, 0..1 - the same place its exp knob puts it. */
+function figureLogX(hz, range) {
+  return Math.min(1, Math.max(0, Math.log(hz / range.lowHz) / Math.log(range.highHz / range.lowHz)));
+}
+
+/**
+ * An equalizer band's handle: pressed on, it follows the pointer - across for its frequency on
+ * the log axis (which is the exp knob's own curve, so a position is a position), up for its
+ * gain in the decibel window. A band with no gain to move only moves sideways.
+ */
+function eqGrab(f, x, y, w, h) {
+  const { topDb, bottomDb } = f.range;
+  const yOf = (db) => FIGURE_PAD_Y + ((topDb - db) / (topDb - bottomDb)) * Math.max(1, h - 2 * FIGURE_PAD_Y);
+  let best = null;
+  let bestD = FIGURE_HIT_PX * 1.5;
+  for (const band of f.bands) {
+    const d = Math.hypot(figureLogX(band.hz, f.range) * w - x, yOf(band.gainDb) - y);
+    if (d <= bestD) { best = band; bestD = d; }
+  }
+  if (!best) return null;
+  const movesX = best.movesX && !f.driven?.[best.movesX] ? best.movesX : null;
+  const movesY = best.movesY && !f.driven?.[best.movesY] ? best.movesY : null;
+  if (!movesX && !movesY) return null;
+  // BOTH axes at once, unlike every other figure here. A band is a point on a curve, and a
+  // point follows the pointer - picking whichever axis the hand favored would mean dragging a
+  // vertex somewhere it was never put. The route takes the pair in one call so the two can
+  // never land a frame apart.
+  return {
+    band: best.band,
+    at: (dx, dy, pointerY, height, pointerX, width) => {
+      const params = [];
+      if (movesX) params.push({ id: movesX, position: Math.min(1, Math.max(0, pointerX / Math.max(1, width))) });
+      if (movesY) {
+        const db = topDb - ((pointerY - FIGURE_PAD_Y) / Math.max(1, height - 2 * FIGURE_PAD_Y)) * (topDb - bottomDb);
+        params.push({ id: movesY, position: Math.min(1, Math.max(0, (db - bottomDb) / (topDb - bottomDb))) });
+      }
+      return params.length === 1 ? params[0] : { params };
+    },
+  };
+}
+
+/** A region's edge: whichever corner the press was nearer follows the pointer along the log axis. */
+function bandGrab(f, x, w) {
+  const lowX = figureLogX(f.low, f.range) * w;
+  const highX = figureLogX(f.high, f.range) * w;
+  const id = Math.abs(x - lowX) <= Math.abs(x - highX) ? f.movesLow : f.movesHigh;
+  if (!id || f.driven?.[id]) return null;
+  return { at: (dx, dy, pointerY, height, pointerX, width) => ({ id, position: Math.min(1, Math.max(0, pointerX / Math.max(1, width))) }) };
+}
+
+/** Where a matrix cell sits: the operator rows and columns, plus the level column on the right. */
+/**
+ * Where the matrix's grid sits inside its canvas.
+ *
+ * ONE definition, read by both the drawing and the hit test. They used to compute it separately
+ * from the same formula, which is a pair that can drift: a gutter added to one of them would put
+ * every cell a row away from the cell it draws.
+ */
+function matrixGeometry(f, w, h) {
+  const gx = 15;            // the column of operator numbers down the left
+  const gy = 11;            // the row of them across the top
+  const cols = f.ops + 1;   // every operator, then the output column
+  return { gx, gy, cols, cw: (w - gx) / cols, rh: (h - gy) / f.ops };
+}
+
+function matrixCell(f, x, y, w, h) {
+  const { gx, gy, cols, cw, rh } = matrixGeometry(f, w, h);
+  const col = Math.floor((x - gx) / cw);
+  const row = Math.floor((y - gy) / rh);
+  if (row < 0 || row >= f.ops || col < 0 || col >= cols) return null;
+  return { row, col, cell: col < f.ops ? f.cells[row][col] : null, level: col === f.ops ? f.levels[row] : null };
+}
+
+/** A matrix cell: pressed, dragged up and down for its amount, from where it was. */
+function matrixGrab(f, x, y, w, h) {
+  const at = matrixCell(f, x, y, w, h);
+  if (!at) return null;
+  const id = at.cell ? at.cell.param : at.level.param;
+  const from = at.cell ? at.cell.amount : at.level.level;
+  if (!id || f.driven?.[id]) return null;
+  // Which cell the hand is on, so the heading can name the connection it is changing and the
+  // grid can light the two operators it runs between.
+  return { role: `${at.row}:${at.col}`, at: (dx, dy) => ({ id, position: Math.min(1, Math.max(0, from - dy * 2)) }) };
+}
+
+/**
+ * An envelope handle grab.
+ *
+ * Times move by how far the pointer went, measured against the span the figure had when it was
+ * grabbed: the span is computed FROM the times, so measuring against a live one would have the
+ * handle sliding out from under the pointer as it moved. Levels are absolute, because the level
+ * axis does not rescale and a grabbed point should sit under the finger.
+ *
+ * What goes back is UNSCALED seconds - `.param("Amp Attack", …)` is the time before envscale, and
+ * the figure is drawn in scaled ones - so a patch with an envscale keeps its handle under the
+ * pointer instead of moving by the scale twice.
+ */
+function adsrGrab(f, x, y, w, h) {
+  let best = null;
+  let bestD = FIGURE_HIT_PX;
+  for (const hd of f.handles) {
+    const d = Math.hypot(hd.x * w - x, figureLevelY(hd.y, h) - y);
+    if (d <= bestD) { best = hd; bestD = d; }
+  }
+  // The plateau is a line rather than a point, and is only reachable where no point was nearer.
+  if (!best && f.plateau) {
+    const pl = f.plateau;
+    if (x >= pl.x0 * w - 3 && x <= pl.x1 * w + 3 && Math.abs(figureLevelY(pl.y, h) - y) <= 5) best = pl;
+  }
+  // No handle under the pointer: the press is on a SEGMENT, and a vertical drag there bends it,
+  // exactly as it does in the shape editor and the piano roll's bend lane. No modifier - that is
+  // the gesture those two already use, and a curve has no handle to give it because a curve is
+  // not a place on the picture.
+  if (!best) {
+    const at = x / Math.max(1, w);
+    const stage = f.stages?.find((st) => at >= st.x0 && at <= st.x1 && !f.driven?.[st.moves]);
+    if (!stage) return null;
+    return {
+      role: stage.role,
+      at: (dx, dy) => ({ id: stage.moves, position: Math.min(1, Math.max(0, stage.position - dy)) }),
+    };
+  }
+
+  const movesX = best.movesX && !f.driven?.[best.movesX] ? best.movesX : null;
+  const movesY = best.movesY && !f.driven?.[best.movesY] ? best.movesY : null;
+  if (!movesX && !movesY) return null;
+
+  const scale = f.scale || 1;
+  const startSec = { attack: f.attack, decay: f.decay, release: f.release }[best.role] ?? 0;
+  // The decay point is two controls at once, exactly as it is in the sampler's panel: its x is
+  // the decay and its y the sustain. Which one the gesture means is decided once and held - see
+  // fieldGrab, and the same wobble that stuck a detune stuck a decay.
+  let axis = movesX && movesY ? null : (movesX ? 'x' : 'y');
+  return {
+    at: (dx, dy, pointerY, height) => {
+      if (!axis) {
+        if (Math.max(Math.abs(dx), Math.abs(dy)) < AXIS_LATCH) return null;
+        axis = Math.abs(dy) > Math.abs(dx) ? 'y' : 'x';
+      }
+      if (axis === 'y') return { id: movesY, value: figureLevelAt(pointerY, height) };
+      return { id: movesX, value: Math.max(0, (startSec + dx * f.span) / scale) };
+    },
+  };
+}
+
+// --- the drawers ------------------------------------------------------------------------------
+
+/** A polyline through points already in canvas coordinates. */
+function figureStroke(ctx, pts, color, width = 1.5) {
+  if (pts.length < 2) return;
+  ctx.beginPath();
+  ctx.moveTo(pts[0][0], pts[0][1]);
+  for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
+  ctx.strokeStyle = color;
+  ctx.lineWidth = width;
+  ctx.stroke();
+}
+
+/** The same polyline, closed down to a baseline and filled faintly under itself. */
+function figureFill(ctx, pts, color, baseline) {
+  if (pts.length < 2) return;
+  ctx.beginPath();
+  ctx.moveTo(pts[0][0], baseline);
+  for (const [px, py] of pts) ctx.lineTo(px, py);
+  ctx.lineTo(pts[pts.length - 1][0], baseline);
+  ctx.closePath();
+  ctx.globalAlpha = 0.16;
+  ctx.fillStyle = color;
+  ctx.fill();
+  ctx.globalAlpha = 1;
+}
+
+/** A curve through points, rounded at each one - for a spectrum, which is a reading, not a shape. */
+function figureSmoothPath(ctx, pts) {
+  ctx.moveTo(pts[0][0], pts[0][1]);
+  for (let i = 1; i < pts.length - 1; i++) {
+    const mx = (pts[i][0] + pts[i + 1][0]) / 2;
+    const my = (pts[i][1] + pts[i + 1][1]) / 2;
+    ctx.quadraticCurveTo(pts[i][0], pts[i][1], mx, my);
+  }
+  ctx.lineTo(pts[pts.length - 1][0], pts[pts.length - 1][1]);
+}
+
+function figureSmoothStroke(ctx, pts, color, width = 1) {
+  if (pts.length < 3) return figureStroke(ctx, pts, color, width);
+  ctx.beginPath();
+  figureSmoothPath(ctx, pts);
+  ctx.strokeStyle = color;
+  ctx.lineWidth = width;
+  ctx.stroke();
+}
+
+function figureSmoothFill(ctx, pts, color, baseline, alpha = 0.16) {
+  if (pts.length < 3) return figureFill(ctx, pts, color, baseline);
+  ctx.beginPath();
+  ctx.moveTo(pts[0][0], baseline);
+  ctx.lineTo(pts[0][0], pts[0][1]);
+  figureSmoothPath(ctx, pts);
+  ctx.lineTo(pts[pts.length - 1][0], baseline);
+  ctx.closePath();
+  ctx.globalAlpha = alpha;
+  ctx.fillStyle = color;
+  ctx.fill();
+  ctx.globalAlpha = 1;
+}
+
+/** A dashed line, for a threshold or a marker. */
+function figureDashed(ctx, x0, y0, x1, y1, color) {
+  ctx.save();
+  ctx.setLineDash([2, 3]);
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(x0, y0);
+  ctx.lineTo(x1, y1);
+  ctx.stroke();
+  ctx.restore();
+}
+
+/** A small label in a figure's corner, in the dim monospace every figure annotates itself in. */
+function figureLabel(ctx, text, x, y, color, align = 'start') {
+  ctx.font = '8px ui-monospace, monospace';
+  ctx.textBaseline = 'top';
+  ctx.textAlign = align;
+  ctx.fillStyle = color;
+  ctx.fillText(text, x, y);
+  ctx.textAlign = 'start';
+}
+
+/**
+ * Where each frame of a table goes when the table is drawn as a stack leaning away from you:
+ * frame 1 in front at the bottom left, the last at the back, up and to the right - the order the
+ * position knob walks it. The device window and the file picker both draw with this, so a table
+ * reads the same way round in either, and both keep clear of the edges of their box.
+ *
+ * Returns `(frame, values) => points`, `values` being one cycle in -1..1.
+ */
+function tableStackLayout(w, h, count, { padX = 12, padY = 10, leanX = 0.16, leanY = 0.34 } = {}) {
+  const innerW = Math.max(1, w - 2 * padX);
+  const innerH = Math.max(1, h - 2 * padY);
+  const lean = { x: innerW * leanX, y: innerH * leanY };
+  // Half a row either side of each frame's centerline: the front row's bottom and the back row's
+  // top sit exactly on the padding.
+  const rowH = (innerH - lean.y) / 2;
+  const base = padY + lean.y + rowH;
+  const width = innerW - lean.x;
+  return (frame, values) => {
+    const t = count <= 1 ? 0 : frame / (count - 1);
+    const x0 = padX + lean.x * t;
+    const y0 = base - lean.y * t;
+    const last = Math.max(1, values.length - 1);
+    return values.map((v, j) => [x0 + (j / last) * width, y0 - v * rowH]);
+  };
+}
+
+/**
+ * A table as a stack with one cycle drawn boldly in it: every frame faintly, back to front so a
+ * nearer one covers the one behind, the two frames the bold cycle lies between a little
+ * brighter, then the bold cycle on top at its fractional place in the stack. The device window
+ * and the file picker both draw a table with this, so the two look and move alike.
+ */
+function drawTableStackWith(ctx, place, stack, between, frame, wave, c) {
+  for (let i = stack.length - 1; i >= 0; i--) {
+    const near = Math.min(Math.abs(i - between[0]), Math.abs(i - between[1]));
+    ctx.globalAlpha = near === 0 ? 0.34 : 0.13;
+    figureStroke(ctx, place(i, stack[i]), c.dim, 1);
+  }
+  ctx.globalAlpha = 1;
+  figureStroke(ctx, place(frame, wave), c.accent, 1.75);
+}
+
+const FIGURE_DRAWERS = {
+  /**
+   * The waveform this oscillator is reading, over the stack it is reading from, with a scrubber
+   * for the position under it.
+   *
+   * Every frame in the table is drawn faintly in the same axes and the live one boldly on top, so
+   * the position sweep reads as a shape moving through a family of shapes rather than as a number.
+   * The warp is already in the bold curve - it is the phase the oscillator really reads.
+   */
+  wavetable(ctx, w, h, f, c) {
+    const waveH = Math.max(8, h - FIGURE_SCRUB_H - 4);
+    if (!f.wave.length) return figurePad(f.loading ? 'loading' : 'no table', 24);
+
+    // The table as a stack leaning away from you, the same drawing the file picker makes, with
+    // the cycle the oscillator is actually reading - blended and warped - in front of it. One
+    // cycle over another says "a waveform"; this says "a table", which is what the position
+    // knob is moving through.
+    drawTableStackWith(ctx, tableStackLayout(w, waveH, f.stack.length), f.stack, f.between, f.frame, f.wave, c);
+
+    // The scrubber: a tick per frame and a handle where the position is, which is what makes a
+    // drag on this figure something somebody would think to try.
+    const sy = h - FIGURE_SCRUB_H / 2;
+    ctx.strokeStyle = c.grid;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(1, sy);
+    ctx.lineTo(w - 1, sy);
+    ctx.stroke();
+    ctx.fillStyle = c.grid;
+    for (let i = 0; i < f.frameCount; i++) {
+      const tx = 1 + (i / Math.max(1, f.frameCount - 1)) * (w - 2);
+      ctx.fillRect(tx - 0.5, sy - 3, 1, 6);
+    }
+    const hx = 1 + f.position * (w - 2);
+    ctx.fillStyle = c.accent;
+    ctx.beginPath();
+    ctx.arc(hx, sy, 4, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Which frame the position is on, in the corner of the picture it belongs to rather than in
+    // a heading above it - the frame is a fact about the drawing, and the heading carries the
+    // name of the table already.
+    const [lo, hi] = f.between;
+    ctx.font = '9px ui-monospace, monospace';
+    ctx.textAlign = 'end';
+    ctx.textBaseline = 'bottom';
+    ctx.fillStyle = c.dim;
+    ctx.fillText(`${lo + 1} / ${f.frameCount}`, w - 4, waveH - 2);
+    ctx.textAlign = 'start';
+
+    // The heading says what the position is between, where the table names its frames, and what
+    // the warp is doing - both printed whether or not they have anything to say.
+    const names = f.frameNames;
+    const between = figurePad(!names ? '' : lo === hi ? names[lo] : `${names[lo]} \u2192 ${names[hi]}`, 16);
+    const warp = `${figurePad(f.warpModeName ?? 'warp', 9)} ${figurePad(`${Math.round(f.warp * 100)}%`, 4)}`;
+    return `${between} \u00b7 ${warp}${f.cross ? ' (not drawn)' : figurePad('', 12)}`;
+  },
+
+  /**
+   * Where the unison copies sit: detune across, pan up and down.
+   *
+   * Two spreads on two axes, which is what they are - the copies fan out sideways as the detune
+   * widens and vertically as the spread does - so one picture answers both knobs at once.
+   */
+  unison(ctx, w, h, f, c) {
+    const mx = w / 2;
+    const my = h / 2;
+    // The axis is fixed at the detune control's full reach, so the copies spread as the knob
+    // turns rather than always sitting at the edges of the box.
+    const xOf = (copy) => mx + copy.x * (w / 2 - 8);
+    const yOf = (pan) => my + pan * (h / 2 - 8);
+
+    ctx.strokeStyle = c.grid;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(mx, 4);
+    ctx.lineTo(mx, h - 4);
+    ctx.moveTo(8, my);
+    ctx.lineTo(w - 8, my);
+    ctx.stroke();
+
+    for (const copy of f.copies) {
+      const px = xOf(copy);
+      const py = yOf(copy.pan);
+      // A stalk to the center line, so a copy's pan is readable as a distance and not only as a
+      // position - a single dot in the middle of a box says very little.
+      ctx.strokeStyle = c.grid;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(px, my);
+      ctx.lineTo(px, py);
+      ctx.stroke();
+      ctx.fillStyle = c.accent;
+      ctx.beginPath();
+      ctx.arc(px, py, 3, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    ctx.fillStyle = c.dim;
+    ctx.font = '9px ui-monospace, monospace';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('L', 2, 8);
+    ctx.fillText('R', 2, h - 8);
+
+    // Nothing: the count, the detune and the spread are three knobs under this picture and
+    // they each print their own value.
+    return '';
+  },
+
+  /**
+   * The filter's magnitude response, on a log frequency axis and a decibel one.
+   *
+   * The corner is marked where the filter actually put it rather than where the knob was set, which
+   * are the same number until the cutoff is asked for something past what the sample rate allows.
+   */
+  response(ctx, w, h, f, c) {
+    const { lowHz, topDb, bottomDb } = f.range;
+    const highHz = f.points[f.points.length - 1].hz;
+    const xOf = (hz) => (Math.log(hz / lowHz) / Math.log(highHz / lowHz)) * w;
+    const yOf = (db) => FIGURE_PAD_Y + ((topDb - db) / (topDb - bottomDb)) * Math.max(1, h - 2 * FIGURE_PAD_Y);
+
+    ctx.strokeStyle = c.grid;
+    ctx.lineWidth = 1;
+    ctx.font = '8px ui-monospace, monospace';
+    ctx.textBaseline = 'top';
+    for (const hz of [100, 1000, 10000]) {
+      if (hz > highHz) continue;
+      const gx = xOf(hz);
+      ctx.beginPath();
+      ctx.moveTo(gx, 0);
+      ctx.lineTo(gx, h);
+      ctx.stroke();
+      ctx.fillStyle = c.grid;
+      ctx.fillText(hz >= 1000 ? `${hz / 1000}k` : String(hz), gx + 2, h - 10);
+    }
+    // Unity, so how far the resonance is lifting the corner above the passband is visible.
+    ctx.beginPath();
+    ctx.moveTo(0, yOf(0));
+    ctx.lineTo(w, yOf(0));
+    ctx.stroke();
+
+    // CLIPPED, NOT CLAMPED. A steep mode falls past the bottom of the window within an octave or
+    // two of its corner, and a curve held at the bottom edge draws as a flat line from there to
+    // the right - which reads as a filter that stops filtering. Off the picture is the honest
+    // place for it, the same as a resonant peak runs off the top.
+    const pts = f.points.map((p) => [xOf(p.hz), yOf(p.db)]);
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(0, 0, w, h - FIGURE_PAD_Y);
+    ctx.clip();
+    figureFill(ctx, pts, c.accent, h);
+    figureStroke(ctx, pts, c.accent, 1.75);
+    ctx.restore();
+
+    const cx = xOf(Math.min(highHz, Math.max(lowHz, f.corner)));
+    ctx.save();
+    ctx.setLineDash([2, 3]);
+    ctx.strokeStyle = c.warn;
+    ctx.beginPath();
+    ctx.moveTo(cx, 0);
+    ctx.lineTo(cx, h);
+    ctx.stroke();
+    ctx.restore();
+
+    // The corner the filter actually landed on, which is NOT where the cutoff knob is set:
+    // resonance and the ladder's own droop move it. Everything else here is on a knob.
+    return figureHz(f.corner);
+  },
+
+  /**
+   * An equalizer's summed response, with a handle per band. The same axes as the filter's
+   * response, and the bands' own numbers beside their handles.
+   */
+  eq(ctx, w, h, f, c) {
+    const { topDb, bottomDb } = f.range;
+    const xOf = (hz) => figureLogX(hz, f.range) * w;
+    const yOf = (db) => FIGURE_PAD_Y + ((topDb - db) / (topDb - bottomDb)) * Math.max(1, h - 2 * FIGURE_PAD_Y);
+    ctx.strokeStyle = c.grid;
+    ctx.lineWidth = 1;
+    ctx.font = '8px ui-monospace, monospace';
+    ctx.textBaseline = 'top';
+    for (const hz of [100, 1000, 10000]) {
+      const gx = xOf(hz);
+      ctx.beginPath(); ctx.moveTo(gx, 0); ctx.lineTo(gx, h); ctx.stroke();
+      ctx.fillStyle = c.grid;
+      ctx.fillText(hz >= 1000 ? `${hz / 1000}k` : String(hz), gx + 2, h - 10);
+    }
+    for (const db of [-12, 0, 12]) {
+      ctx.beginPath(); ctx.moveTo(0, yOf(db)); ctx.lineTo(w, yOf(db)); ctx.stroke();
+    }
+    // THE SIGNAL, behind the curve: what is actually there to be shaped, from an analyser on the
+    // device's output while this window is open. On its own scale down the same axis - a
+    // spectrum is decibels below full scale and the curve is decibels of gain, and the two share
+    // a frequency axis and nothing else - and faint, so the curve stays the subject.
+    if (Array.isArray(f.spectrum) && f.spectrum.length) {
+      const floorDb = -96;
+      const ySpec = (db) => FIGURE_PAD_Y + ((0 - Math.max(floorDb, Math.min(0, db))) / (0 - floorDb)) * Math.max(1, h - 2 * FIGURE_PAD_Y);
+      const spec = f.spectrum.map((p) => [xOf(p.hz), ySpec(p.db)]);
+      figureSmoothFill(ctx, spec, c.dim, h, 0.28);
+      figureSmoothStroke(ctx, spec, c.dim, 1);
+    }
+    const pts = f.points.map((p) => [xOf(p.hz), yOf(p.db)]);
+    figureFill(ctx, pts, c.accent, yOf(0));
+    figureStroke(ctx, pts, c.accent, 1.75);
+    ctx.font = '9px ui-monospace, monospace';
+    ctx.textBaseline = 'middle';
+    for (const band of f.bands) {
+      const px = xOf(band.hz);
+      const py = yOf(band.gainDb);
+      ctx.fillStyle = f.driven?.[band.movesX] || f.driven?.[band.movesY] ? c.dim : c.accent;
+      ctx.beginPath(); ctx.arc(px, py, FIGURE_POINT_R, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = c.text;
+      ctx.fillText(String(band.band), px + FIGURE_POINT_R + 3, py - 7);
+    }
+    // One band, the one last touched: four of them recited across the heading was a line that
+    // rewrote itself whenever any of them moved, and said nothing about the one under your hand.
+    const band = f.bands.find((b) => b.band === f.focus) ?? f.bands[0];
+    if (!band) return '';
+    const gain = band.hasGain ? `${band.gainDb >= 0 ? '+' : '\u2212'}${figurePad(Math.abs(band.gainDb).toFixed(1), 4)} dB` : figurePad('', 9);
+    return `${figurePad(band.band, 1)} ${figurePad(band.typeName, 9)} ${figureHz(band.hz)} ${gain} Q ${figurePad(band.q.toFixed(2), 5)}`;
+  },
+
+  /** A region of the spectrum between two edges, on the log axis, each edge a handle. */
+  band(ctx, w, h, f, c) {
+    const xOf = (hz) => figureLogX(hz, f.range) * w;
+    ctx.strokeStyle = c.grid;
+    ctx.lineWidth = 1;
+    ctx.font = '8px ui-monospace, monospace';
+    ctx.textBaseline = 'top';
+    for (const hz of [100, 1000, 10000]) {
+      const gx = xOf(hz);
+      ctx.beginPath(); ctx.moveTo(gx, 0); ctx.lineTo(gx, h); ctx.stroke();
+      ctx.fillStyle = c.grid;
+      ctx.fillText(hz >= 1000 ? `${hz / 1000}k` : String(hz), gx + 2, h - 10);
+    }
+    const lo = xOf(f.low);
+    const hi = xOf(f.high);
+    ctx.globalAlpha = 0.22;
+    ctx.fillStyle = c.accent;
+    ctx.fillRect(lo, 4, Math.max(1, hi - lo), h - 8);
+    ctx.globalAlpha = 1;
+    ctx.strokeStyle = c.accent;
+    ctx.lineWidth = 2;
+    for (const x of [lo, hi]) { ctx.beginPath(); ctx.moveTo(x, 2); ctx.lineTo(x, h - 2); ctx.stroke(); }
+    return ''; // both corners are knobs under it
+  },
+
+  /**
+   * A modulation matrix: rows modulate columns, the cell's fill is the amount, and the last
+   * column is each operator's level to the output.
+   */
+  matrix(ctx, w, h, f, c) {
+    // WHICH CELL IS WHICH. The grid used to be eight rows of unlabeled squares with the operator
+    // number buried in the diagonal, so "2 modulating 1" and "1 modulating 2" were two squares
+    // either side of a line with nothing to tell you which was which. The numbers now run down
+    // the left (the operator doing the modulating) and across the top (the one being modulated),
+    // every cell names its own connection with an arrow pointing the way the signal goes, the
+    // cell under your hand lights both of its operators, and the heading spells that one out
+    // with its amount.
+    const { gx, gy, cols, cw, rh } = matrixGeometry(f, w, h);
+    const [fr, fc] = String(f.focus ?? '').split(':').map(Number);
+    const hasFocus = Number.isInteger(fr) && Number.isInteger(fc);
+
+    ctx.font = '8px ui-monospace, monospace';
+    ctx.textBaseline = 'middle';
+    ctx.textAlign = 'center';
+
+    // The axes. The one the hand is on is drawn bright, the rest dim.
+    for (let col = 0; col < f.ops; col++) {
+      ctx.fillStyle = hasFocus && col === fc ? c.accent : c.dim;
+      ctx.fillText(String(col + 1), gx + col * cw + cw / 2, gy / 2);
+    }
+    ctx.fillStyle = hasFocus && fc === f.ops ? c.warn : c.dim;
+    ctx.fillText('out', gx + f.ops * cw + cw / 2, gy / 2);
+    ctx.textAlign = 'end';
+    for (let r = 0; r < f.ops; r++) {
+      ctx.fillStyle = hasFocus && r === fr ? c.accent : c.dim;
+      ctx.fillText(String(r + 1), gx - 3, gy + r * rh + rh / 2);
+    }
+
+    ctx.textAlign = 'center';
+    for (let r = 0; r < f.ops; r++) {
+      for (let col = 0; col < cols; col++) {
+        const cell = col < f.ops ? f.cells[r][col] : null;
+        const amount = cell ? cell.amount : f.levels[r].level;
+        const x = gx + col * cw;
+        const y = gy + r * rh;
+        ctx.strokeStyle = hasFocus && r === fr && col === fc ? c.accent : c.grid;
+        ctx.lineWidth = 1;
+        ctx.strokeRect(x + 0.5, y + 0.5, cw - 1, rh - 1);
+        if (amount > 0.001) {
+          ctx.globalAlpha = 0.15 + 0.85 * amount;
+          ctx.fillStyle = col < f.ops ? c.accent : c.warn;
+          ctx.fillRect(x + 2, y + 2, cw - 4, rh - 4);
+          ctx.globalAlpha = 1;
+        }
+        // "2→1" is operator 2 modulating operator 1, and its mirror across the diagonal reads the
+        // other way round: a cell that names itself cannot be misread, which a grid of blank
+        // squares could. The diagonal reads "2→2", which is an operator modulating itself.
+        const focused = hasFocus && r === fr && col === fc;
+        ctx.fillStyle = focused || amount > 0.001 ? c.text : c.dim;
+        ctx.globalAlpha = focused || amount > 0.001 ? 1 : 0.5;
+        ctx.fillText(col < f.ops ? `${r + 1}→${col + 1}` : `${r + 1}→out`, x + cw / 2, y + rh / 2);
+        ctx.globalAlpha = 1;
+      }
+    }
+    ctx.textAlign = 'start';
+
+    // The heading: what the hand is on, or what the matrix adds up to when it is on nothing.
+    // Padded either way, so nothing moves when one replaces the other.
+    if (hasFocus) {
+      const amount = fc < f.ops ? f.cells[fr][fc].amount : f.levels[fr].level;
+      const pair = fc < f.ops ? `op ${fr + 1} \u2192 op ${fc + 1}` : `op ${fr + 1} \u2192 out`;
+      return `${figurePad(pair, 13)} ${figurePad(amount.toFixed(2), 5)}`;
+    }
+    const on = f.cells.flat().filter((cell) => cell.amount > 0.001).length;
+    return `${figurePad(on, 2)} connections ${figurePad('', 13)}`;
+  },
+
+  /**
+   * An envelope, with a handle per stage - the sampler's envelope panel, for a synth that has no
+   * sample to lay one over.
+   *
+   * The curve is the voice's own: it is computed through the same shaping function the envelope
+   * generator runs, so the default's fast-then-levelling attack looks the way it sounds rather
+   * than being drawn as the straight line it is not.
+   */
+  adsr(ctx, w, h, f, c) {
+    const yOf = (level) => figureLevelY(level, h);
+
+    ctx.strokeStyle = c.grid;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(0, yOf(0));
+    ctx.lineTo(w, yOf(0));
+    ctx.moveTo(0, yOf(1));
+    ctx.lineTo(w, yOf(1));
+    ctx.stroke();
+
+    const pts = f.points.map((p) => [p.x * w, yOf(p.y)]);
+    figureFill(ctx, pts, c.accent, yOf(0));
+    figureStroke(ctx, pts, c.accent, 1.75);
+
+    // The plateau, drawn heavier than the curve because it is a handle and the rest of that line
+    // is not: it is what the sustain level is grabbed by.
+    if (f.plateau) {
+      ctx.strokeStyle = c.accent;
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(f.plateau.x0 * w, yOf(f.plateau.y));
+      ctx.lineTo(f.plateau.x1 * w, yOf(f.plateau.y));
+      ctx.stroke();
+    }
+
+    ctx.font = '9px ui-monospace, monospace';
+    ctx.textBaseline = 'middle';
+    for (const hd of f.handles) {
+      const px = hd.x * w;
+      const py = yOf(hd.y);
+      ctx.fillStyle = c.accent;
+      ctx.beginPath();
+      ctx.arc(px, py, FIGURE_POINT_R, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = c.dim;
+      ctx.fillText(hd.label, px + FIGURE_POINT_R + 3, hd.role === 'release' ? py - 7 : py + 8);
+    }
+
+    // HOW LONG THE PICTURE IS. The curve is drawn to fit its own width, so every stage keeps its
+    // shape whether the envelope runs for five milliseconds or ten seconds - which is what makes
+    // it readable, and what made the scale look like it did nothing: multiplying every stage by
+    // the same number leaves the shape exactly where it was. The span is the one thing that does
+    // change, so the span is what this says.
+    return `${figureSeconds(f.span)}${f.scale && Math.abs(f.scale - 1) > 1e-6 ? ` ${figurePad(`${f.scale.toFixed(2)}x`, 6)}` : figurePad('', 7)}`;
+  },
+
+  /**
+   * The file a granulator is reading, and the cloud it is reading out of it.
+   *
+   * The waveform is the file; the band is where a grain may start, which is the spray about the
+   * position; and the dots are the grains themselves, each drawn where it has got to and as
+   * bright as its window has it. The dots are the whole point - a still picture of a position
+   * and a spray says what was set, and this says what is being heard.
+   */
+  sample(ctx, w, h, f, c) {
+    const mid = h / 2;
+    const half = h / 2 - 4;
+    ctx.strokeStyle = c.grid;
+    ctx.beginPath();
+    ctx.moveTo(0, mid);
+    ctx.lineTo(w, mid);
+    ctx.stroke();
+
+    if (!f.peaks.length) return f.name ? 'reading…' : 'no sample - pick one above';
+
+    // Where the grains may start: the position, plus or minus the spray, wrapped like the read.
+    if (f.spray > 0) {
+      ctx.fillStyle = c.accent;
+      ctx.globalAlpha = 0.1;
+      for (const [from, to] of wrappedSpans(f.position - f.spray, f.position + f.spray)) {
+        ctx.fillRect(from * w, 0, Math.max(1, (to - from) * w), h);
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    ctx.fillStyle = c.dim;
+    const colW = Math.max(1, w / f.peaks.length);
+    for (let i = 0; i < f.peaks.length; i++) {
+      const [lo, hi] = f.peaks[i];
+      ctx.fillRect((i / f.peaks.length) * w, mid - hi * half, colW, Math.max(1, (hi - lo) * half));
+    }
+
+    // The position itself, then every grain in the air on top of it.
+    ctx.strokeStyle = c.accent;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(f.position * w, 0);
+    ctx.lineTo(f.position * w, h);
+    ctx.stroke();
+    // Each grain as a LENS: as wide as the stretch of the file it plays and shaped like its
+    // window, either side of the line. A line crosses it where the grain has got to, as tall
+    // as the lens is there, so how far along a grain is and how loud it is at this instant are
+    // one mark. Nothing on the picture moves but that line. The grain's pan is reported but not
+    // drawn: lenses leaning up and down by it made the cloud harder to read, not easier.
+    const curve = f.window;
+    if (curve) {
+      const up = Math.min(half - 2, 22) / 2;
+      const down = up;
+      ctx.lineWidth = 1;
+      for (const [from, at, , span = 0] of f.grains ?? []) {
+        if (!span) continue;
+        // The lens's outline, walked along the grain, and cut wherever it runs off an end of the
+        // file and comes back at the other. Each piece is one closed shape.
+        const pieces = [];
+        let piece = null;
+        let lastX = null;
+        for (let i = 0; i < curve.length; i++) {
+          const u = i / (curve.length - 1);
+          const x = (((from + span * u) % 1) + 1) % 1;
+          if (piece === null || Math.abs(x - lastX) > 0.5) { piece = { top: [], bottom: [] }; pieces.push(piece); }
+          piece.top.push([x * w, mid - curve[i] * up]);
+          piece.bottom.push([x * w, mid + curve[i] * down]);
+          lastX = x;
+        }
+        for (const { top, bottom } of pieces) {
+          ctx.beginPath();
+          ctx.moveTo(top[0][0], top[0][1]);
+          for (const [x, y] of top) ctx.lineTo(x, y);
+          for (let i = bottom.length - 1; i >= 0; i--) ctx.lineTo(bottom[i][0], bottom[i][1]);
+          ctx.closePath();
+          ctx.globalAlpha = 0.14;
+          ctx.fillStyle = c.accent;
+          ctx.fill();
+          ctx.globalAlpha = 0.55;
+          ctx.strokeStyle = c.accent;
+          ctx.stroke();
+        }
+        // The head: where the grain is reading now, spanning the lens's height there.
+        const k = Math.min(1, Math.max(0, at)) * (curve.length - 1);
+        const i0 = Math.floor(k);
+        const level = curve[i0] + (curve[Math.min(curve.length - 1, i0 + 1)] - curve[i0]) * (k - i0);
+        const hx = ((((from + span * at) % 1) + 1) % 1) * w;
+        ctx.globalAlpha = 1;
+        ctx.strokeStyle = c.text;
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(hx, mid - level * up);
+        ctx.lineTo(hx, mid + level * down);
+        ctx.stroke();
+        ctx.lineWidth = 1;
+      }
+    }
+    ctx.globalAlpha = 1;
+
+    // The length of the file, and how many grains are in the air - neither of which is on a
+    // knob. The position is, so it is not repeated here; a device with no grains says nothing
+    // about them.
+    const held = f.grains ? ` · ${figurePad(f.grains.length, 2)} grains` : '';
+    return `${figurePad(`${f.seconds.toFixed(2)} s`, 8)}${held}`;
+  },
+
+  /**
+   * What a device is doing to the level: a bar from the middle of the scale, and the number.
+   *
+   * A control that silently changes the volume is, from the outside, the same as a broken one -
+   * so an auto gain that takes twelve decibels off says twelve decibels.
+   */
+  meter(ctx, w, h, f, c) {
+    const [lo, hi] = f.range;
+    const at = (db) => ((Math.min(hi, Math.max(lo, db)) - lo) / (hi - lo)) * w;
+    const zero = at(0);
+    const y = h / 2 - 3;
+    ctx.fillStyle = c.grid;
+    ctx.fillRect(0, y, w, 6);
+    if (f.on) {
+      ctx.fillStyle = c.accent;
+      const x = at(f.db);
+      ctx.fillRect(Math.min(zero, x), y, Math.max(1, Math.abs(x - zero)), 6);
+    }
+    ctx.fillStyle = c.dim;
+    ctx.fillRect(zero - 0.5, y - 2, 1, 10);
+    return f.on ? `${figurePad(f.db.toFixed(1), 5)} dB` : figurePad('off', 8);
+  },
+
+  /**
+   * A compressor's transfer curve: what comes out for what goes in.
+   *
+   * Four controls that only mean something together - a ratio says nothing without a threshold,
+   * and a knee is invisible in both. The diagonal is "unchanged"; the curve is what the device
+   * does to that; the dot is where the signal is on it right now.
+   */
+  transfer(ctx, w, h, f, c) {
+    // TWO PICTURES SIDE BY SIDE. On the left the curve: what the device does to a level, with
+    // the dot where the signal is on it now. On the right the lane: the last second of what it
+    // has done, scrolling - the level coming in as a filled trace, the level going out as a line
+    // over it, and the gain being taken off hanging down from the top in its own color, on the
+    // same decibel scale, with the threshold drawn across so the two can be read against it.
+    // The lane is what shows an attack or a release actually happening, which no curve can.
+    const { lowDb, highDb } = f.range;
+    const plot = Math.min(h, w);
+    const laneX = plot + FIGURE_LANE_GAP;
+    const laneW = w - laneX;
+    const clampDb = (db) => Math.min(highDb, Math.max(lowDb, db));
+    const share = (db) => (clampDb(db) - lowDb) / (highDb - lowDb);
+    const xOf = (db) => share(db) * plot;
+    const yOf = (db) => plot - share(db) * plot;
+
+    // Unity, and the threshold (or the ceiling) the curve departs from.
+    ctx.strokeStyle = c.grid;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(0.5, 0.5, plot - 1, plot - 1);
+    ctx.beginPath();
+    ctx.moveTo(xOf(lowDb), yOf(lowDb));
+    ctx.lineTo(xOf(highDb), yOf(highDb));
+    ctx.stroke();
+    figureDashed(ctx, xOf(f.threshold), 0, xOf(f.threshold), plot, c.grid);
+    figureStroke(ctx, f.points.map((p) => [xOf(p.inDb), yOf(p.outDb)]), c.accent, 1.75);
+
+    const live = f.inDb !== null && f.inDb > lowDb;
+    if (live) {
+      const inX = xOf(f.inDb);
+      const near = f.points.reduce((b, p) => (Math.abs(p.inDb - f.inDb) < Math.abs(b.inDb - f.inDb) ? p : b));
+      ctx.fillStyle = c.accent;
+      ctx.beginPath();
+      ctx.arc(inX, yOf(near.outDb), FIGURE_POINT_R, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // The lane, where there is room for one: a multiband's three curves sit in narrow sections.
+    if (laneW > 24) {
+      ctx.strokeStyle = c.grid;
+      ctx.strokeRect(laneX + 0.5, 0.5, laneW - 1, plot - 1);
+      const hist = f.history;
+      if (hist && hist.inDb.length > 1) {
+        const n = hist.inDb.length;
+        const xs = (i) => laneX + (i / (n - 1)) * laneW;
+        // In, as a filled trace; out, as the line over it - the makeup is in the output and
+        // nowhere else, which is where the picture puts it.
+        figureFill(ctx, hist.inDb.map((db, i) => [xs(i), yOf(db)]), c.dim, plot);
+        figureSmoothStroke(ctx, hist.inDb.map((db, i) => [xs(i), yOf(db)]), c.dim, 1);
+        figureStroke(ctx, hist.inDb.map((db, i) => [xs(i), yOf(db + hist.grDb[i] + (f.makeup ?? 0))]), c.accent, 1.25);
+        // The reduction, down from the top.
+        ctx.beginPath();
+        ctx.moveTo(xs(0), 0);
+        for (let i = 0; i < n; i++) ctx.lineTo(xs(i), (Math.max(0, -hist.grDb[i]) / (highDb - lowDb)) * plot);
+        ctx.lineTo(xs(n - 1), 0);
+        ctx.closePath();
+        ctx.globalAlpha = 0.75;
+        ctx.fillStyle = c.warn;
+        ctx.fill();
+        ctx.globalAlpha = 1;
+      }
+      figureDashed(ctx, laneX, yOf(f.threshold), w, yOf(f.threshold), c.text);
+      figureLabel(ctx, 'in', laneX + 3, plot - 11, c.dim);
+      figureLabel(ctx, 'gr', w - 3, 2, c.warn, 'end');
+    }
+
+    // Both numbers, each named, at widths that never change.
+    const shown = Math.min(0, f.grDb);
+    return `in ${live ? figurePad(f.inDb.toFixed(1), 5) : figurePad('', 5)} dB · gr ${figurePad(shown.toFixed(1), 5)} dB`;
+  },
+
+  /**
+   * A waveshaper's curve: in across, out up, through the device's own function at this drive
+   * and bias, with the auto gain's correction on it. The dashed diagonal is "unchanged"; how
+   * far the curve leaves it is the distortion, and the box is full scale - a curve running out
+   * of the top is what a fold or a hot chebyshev does, and is drawn doing it.
+   */
+  shaper(ctx, w, h, f, c) {
+    const top = FIGURE_PAD_Y / 2;
+    const size = Math.max(1, h - FIGURE_PAD_Y);
+    const xOf = (x) => ((x + 1) / 2) * w;
+    const yOf = (y) => top + ((1 - y) / 2) * size;
+    ctx.strokeStyle = c.grid;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(0.5, top + 0.5, w - 1, size - 1);
+    ctx.beginPath();
+    ctx.moveTo(xOf(0), top);
+    ctx.lineTo(xOf(0), top + size);
+    ctx.moveTo(0, yOf(0));
+    ctx.lineTo(w, yOf(0));
+    ctx.stroke();
+    figureDashed(ctx, xOf(-1), yOf(-1), xOf(1), yOf(1), c.grid);
+    const pts = f.points.map((pt) => [xOf(pt.x), yOf(pt.y)]);
+    figureFill(ctx, pts, c.accent, yOf(0));
+    figureStroke(ctx, pts, c.accent, 1.75);
+    const auto = f.autogain
+      ? `${figurePad(`${f.compDb >= 0 ? '+' : '\u2212'}${Math.abs(f.compDb).toFixed(1)}`, 5)} dB`
+      : figurePad('off', 8);
+    return `${figurePad(f.modeName, 9)} · auto ${auto}`;
+  },
+
+  /**
+   * A delay's repeats: one hit at the left edge, then every repeat it makes, when it lands on
+   * the beat grid and how loud - the left channel's above the line, the right's below, so a
+   * ping-pong reads as the bounce it is.
+   */
+  echoes(ctx, w, h, f, c) {
+    const mid = h / 2;
+    const reach = h / 2 - 8;
+    const xOf = (t) => (t / f.span) * w;
+    ctx.strokeStyle = c.grid;
+    ctx.lineWidth = 1;
+    for (let b = 1; b * f.beatSec < f.span; b++) {
+      const gx = xOf(b * f.beatSec);
+      ctx.beginPath();
+      ctx.moveTo(gx, 0);
+      ctx.lineTo(gx, h);
+      ctx.stroke();
+    }
+    ctx.beginPath();
+    ctx.moveTo(0, mid);
+    ctx.lineTo(w, mid);
+    ctx.stroke();
+    // The hit itself, full height, at time zero.
+    ctx.fillStyle = c.dim;
+    ctx.fillRect(0, mid - reach, 2, reach * 2);
+    for (const tap of f.taps) {
+      const x = xOf(tap.t);
+      const len = Math.max(1, tap.level * reach);
+      ctx.fillStyle = c.accent;
+      ctx.globalAlpha = 0.35 + 0.65 * tap.level;
+      if (tap.side <= 0) ctx.fillRect(x - 1, mid - len, 2.5, len);
+      if (tap.side >= 0) ctx.fillRect(x - 1, mid, 2.5, len);
+    }
+    ctx.globalAlpha = 1;
+    figureLabel(ctx, 'L', 4, 2, c.dim);
+    figureLabel(ctx, 'R', 4, h - 11, c.dim);
+    return `${figureSeconds(f.time)} ${f.synced ? figurePad(f.syncName, 6) : figurePad('', 6)} · fb ${figurePad(Math.round(f.feedback * 100), 3)}%`;
+  },
+
+  /**
+   * A beat repeat's catch: each repeat as a block as long as it plays for and as tall as its
+   * level, so a decay reads as a staircase and a pitch drop as blocks that stretch. The ticks
+   * along the bottom are the interval on which the next catch may start.
+   */
+  repeats(ctx, w, h, f, c) {
+    const floor = h - 6;
+    const reach = floor - 6;
+    const xOf = (t) => (t / f.span) * w;
+    ctx.strokeStyle = c.grid;
+    ctx.lineWidth = 1;
+    for (let k = 1; k * f.interval < f.span; k++) {
+      const gx = xOf(k * f.interval);
+      ctx.beginPath();
+      ctx.moveTo(gx, 0);
+      ctx.lineTo(gx, h);
+      ctx.stroke();
+    }
+    ctx.beginPath();
+    ctx.moveTo(0, floor + 0.5);
+    ctx.lineTo(w, floor + 0.5);
+    ctx.stroke();
+    for (const tap of f.taps) {
+      const x = xOf(tap.t);
+      const wd = Math.max(1, xOf(tap.length) - 1);
+      const ht = Math.max(1, tap.level * reach);
+      ctx.fillStyle = c.accent;
+      ctx.globalAlpha = 0.25 + 0.75 * tap.level;
+      ctx.fillRect(x, floor - ht, wd, ht);
+    }
+    ctx.globalAlpha = 1;
+    return `${figureSeconds(f.grid)} × ${figurePad(f.repeats, 2)} · ${figureSeconds(f.end)}`;
+  },
+
+  /**
+   * A reverb's tail: silence for the predelay, then sixty decibels down over the decay time.
+   * The dashed line is where the tail reaches the floor the decay is measured to.
+   */
+  decay(ctx, w, h, f, c) {
+    const { topDb, bottomDb } = f.range;
+    const top = FIGURE_PAD_Y / 2;
+    const size = Math.max(1, h - FIGURE_PAD_Y);
+    const xOf = (t) => (t / f.span) * w;
+    const yOf = (db) => top + ((topDb - db) / (topDb - bottomDb)) * size;
+    ctx.strokeStyle = c.grid;
+    ctx.lineWidth = 1;
+    for (const db of [-20, -40]) {
+      ctx.beginPath();
+      ctx.moveTo(0, yOf(db));
+      ctx.lineTo(w, yOf(db));
+      ctx.stroke();
+    }
+    const step = f.span > 4 ? 1 : f.span > 1 ? 0.5 : 0.1;
+    for (let t = step; t < f.span; t += step) {
+      const gx = xOf(t);
+      ctx.beginPath();
+      ctx.moveTo(gx, top + size - 4);
+      ctx.lineTo(gx, top + size);
+      ctx.stroke();
+    }
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(0, 0, w, top + size);
+    ctx.clip();
+    const pts = f.points.map((pt) => [xOf(pt.t), yOf(pt.db)]);
+    figureFill(ctx, pts, c.accent, top + size);
+    figureStroke(ctx, pts, c.accent, 1.75);
+    ctx.restore();
+    figureDashed(ctx, xOf(f.predelay + f.decay), 0, xOf(f.predelay + f.decay), h, c.warn);
+    figureLabel(ctx, '-60 dB', xOf(f.predelay + f.decay) + 3, 2, c.dim);
+    return `${figureSeconds(f.decay)} · pre ${figureSeconds(f.predelay)}`;
+  },
+
+  /**
+   * A modulated effect's sweep over one cycle of its LFO: the delay each copy is read at, or
+   * for a phaser the frequency its notches sit on, left and right in their own colors, and
+   * a playhead where the sweep is right now.
+   */
+  sweep(ctx, w, h, f, c) {
+    const { min, max, log } = f.axis;
+    const top = FIGURE_PAD_Y / 2;
+    const size = Math.max(1, h - FIGURE_PAD_Y);
+    const yOf = (v) => {
+      const t = log ? Math.log(Math.max(min, v) / min) / Math.log(max / min) : (v - min) / (max - min);
+      return top + (1 - Math.min(1, Math.max(0, t))) * size;
+    };
+    ctx.strokeStyle = c.grid;
+    ctx.lineWidth = 1;
+    for (const q of [0.25, 0.5, 0.75]) {
+      ctx.beginPath();
+      ctx.moveTo(q * w, 0);
+      ctx.lineTo(q * w, h);
+      ctx.stroke();
+    }
+    if (log) {
+      for (const hz of [100, 1000, 10000]) {
+        ctx.beginPath();
+        ctx.moveTo(0, yOf(hz));
+        ctx.lineTo(w, yOf(hz));
+        ctx.stroke();
+        figureLabel(ctx, hz >= 1000 ? `${hz / 1000}k` : String(hz), w - 3, yOf(hz) + 2, c.grid, 'end');
+      }
+    } else {
+      ctx.beginPath();
+      ctx.moveTo(0, yOf((min + max) / 2));
+      ctx.lineTo(w, yOf((min + max) / 2));
+      ctx.stroke();
+      figureLabel(ctx, `${Math.round(max)} ms`, w - 3, top + 1, c.grid, 'end');
+    }
+    for (const tr of f.traces) {
+      figureStroke(ctx, tr.points.map((pt) => [pt.x * w, yOf(pt.y)]), tr.side < 0 ? c.accent : c.warn, 1.5);
+    }
+    if (f.phase != null) {
+      const px = f.phase * w;
+      ctx.strokeStyle = c.text;
+      ctx.globalAlpha = 0.7;
+      ctx.beginPath();
+      ctx.moveTo(px, 0);
+      ctx.lineTo(px, h);
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+    figureLabel(ctx, 'L', 3, 2, c.accent);
+    figureLabel(ctx, 'R', 11, 2, c.warn);
+    return `${figurePad(f.rateHz.toFixed(2), 5)} Hz ${f.synced ? figurePad(f.syncName, 6) : figurePad('', 6)} · ${figureSeconds(f.periodSec)}`;
+  },
+
+  /**
+   * A ducker's dip. Stopped, it is the shape over one beat, as the controls draw it. Playing,
+   * it is the last second: the signal as it comes out, scaled to its loudest so the pump is
+   * visible at any level; the gain the dip is applying over it, which is the shape happening;
+   * and, when a key is patched in, the key's envelope underneath with the threshold it has to
+   * cross.
+   */
+  duck(ctx, w, h, f, c) {
+    const top = FIGURE_PAD_Y / 2;
+    const size = Math.max(1, h - FIGURE_PAD_Y);
+    const yOf = (g) => top + (1 - Math.min(1, Math.max(0, g))) * size;
+    ctx.strokeStyle = c.grid;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(0.5, top + 0.5, w - 1, size - 1);
+    if (f.history) {
+      const { gain, out, key } = f.history;
+      const n = gain.length;
+      const xOf = (i) => (i / (n - 1)) * w;
+      let loudest = 0.05;
+      for (const v of out) if (v > loudest) loudest = v;
+      // The signal, as it comes out: a bar per block.
+      ctx.fillStyle = c.dim;
+      ctx.globalAlpha = 0.45;
+      const bw = Math.max(1, w / n);
+      for (let i = 0; i < n; i++) {
+        const a = out[i] / loudest;
+        ctx.fillRect(xOf(i), yOf(a), bw, yOf(0) - yOf(a));
+      }
+      ctx.globalAlpha = 1;
+      // The key and its threshold, where there is an audio key; where notes trigger it, a tick
+      // at each note instead - a note has no level to cross anything with.
+      if (key && f.trigger === 'notes') {
+        figureStroke(ctx, key.map((v, i) => [xOf(i), yOf(v)]), c.warn, 1);
+        figureLabel(ctx, 'notes', 3, 2, c.warn);
+      } else if (key) {
+        let loudKey = 0.05;
+        for (const v of key) if (v > loudKey) loudKey = v;
+        const threshold = Math.pow(10, f.threshold / 20);
+        const scale = Math.max(loudKey, threshold * 1.25);
+        figureStroke(ctx, key.map((v, i) => [xOf(i), yOf(v / scale)]), c.warn, 1);
+        figureDashed(ctx, 0, yOf(threshold / scale), w, yOf(threshold / scale), c.warn);
+        figureLabel(ctx, 'key', 3, 2, c.warn);
+      }
+      // The gain, over everything: the dip as it is being applied.
+      figureStroke(ctx, gain.map((g, i) => [xOf(i), yOf(g)]), c.accent, 1.75);
+    } else {
+      // The shape over one beat, as set.
+      figureDashed(ctx, 0, yOf(1 - f.amount), w, yOf(1 - f.amount), c.grid);
+      const pts = f.points.map((pt) => [pt.x * w, yOf(pt.y)]);
+      figureFill(ctx, pts, c.accent, yOf(0));
+      figureStroke(ctx, pts, c.accent, 1.75);
+    }
+    const on = f.trigger === 'notes' ? figurePad('notes', 6) : f.keyed ? figurePad('key', 6) : f.synced ? figurePad(f.syncName, 6) : figurePad('', 6);
+    return `${figurePad(Math.round(f.amount * 100), 3)}% · ${figureSeconds(f.recovery)} ${on}`;
+  },
+
+  /** One grain's amplitude across its own length, the window the synth is applying. */
+  grain(ctx, w, h, f, c) {
+    const pts = f.points.map((pt) => [pt.x * w, figureLevelY(pt.y, h)]);
+    figureFill(ctx, pts, c.accent, figureLevelY(0, h));
+    figureStroke(ctx, pts, c.accent);
+    return ''; // the grain's length is a knob beside it
+  },
+};
+
+/**
+ * A span that may run off either end of a 0..1 axis, as the one or two pieces that are on it -
+ * which is what a read position wrapping round the end of a file looks like drawn.
+ */
+function wrappedSpans(from, to) {
+  if (to - from >= 1) return [[0, 1]];
+  const start = ((from % 1) + 1) % 1;
+  const end = start + (to - from);
+  return end <= 1 ? [[start, end]] : [[start, 1], [0, end - 1]];
+}
+
+/**
+ * Draws one device's panel and wires every control to the track and slot it belongs to.
+ *
+ * `panel` is the model the host built from the descriptor - see web-engine's panel.mjs, which
+ * decides the sections and the widget kinds and is unit-tested without a DOM.
+ */
+function showDevicePanel(trackLabel, slot, panel) {
+  devicePanelAt = { trackLabel, slot, deviceId: panel.id };
+  devicePanelRelayout = new Set(panel.relayoutOn ?? []);
+  deviceTitleEl.textContent = panel.title;
+  deviceTargetEl.textContent = `${trackLabel} · slot ${slot}`;
+  // What the device is, and whose DSP it is, on the heading's ctrl+hover: the credit is part
+  // of what a ported device has to say about itself, and this is where it says it.
+  deviceTitleEl.title = panel.description ?? '';
+  // Whose DSP it is, ON the window and not only on a tooltip. A ported module is somebody's
+  // work and its license asks for the credit; a tooltip is not a credit anybody reads.
+  deviceCreditEl.textContent = panel.credit ? panel.credit.vendor : '';
+  deviceCreditEl.title = panel.credit
+    ? `${panel.title} is ${panel.credit.vendor}'s DSP, ${panel.credit.license}${panel.credit.source ? ` - ${panel.credit.source}` : ''}.`
+    : '';
+  deviceSectionsEl.innerHTML = '';
+  // The figures are rebuilt with the panel, so the register of what is on screen is emptied here
+  // rather than being left holding entries whose canvases have been thrown away.
+  deviceFigureEls.clear();
+  deviceLiveEls.clear();
+  deviceWidgetEls.clear();
+  // As wide as the device asks: two oscillators side by side want more than a rack of knobs.
+  devicePanelEl.style.width = `${panel.width ?? 560}px`;
+
+  const drawFigures = (into, figures) => {
+    for (const figure of figures ?? []) into.appendChild(deviceFigure(trackLabel, slot, figure));
+  };
+  // A figure belonging to no section - a device with one picture and no groups - goes above the lot.
+  drawFigures(deviceSectionsEl, panel.figures);
+
+  // The sections in the rows the device laid out, side by side within a row.
+  for (const row of panel.rows ?? panel.sections.map((_, i) => [i])) {
+    const rowEl = document.createElement('div');
+    rowEl.className = 'device-row';
+    for (const index of row) {
+      const section = panel.sections[index];
+      if (!section || (!section.widgets.length && !section.figures?.length)) continue;
+      const sectionEl = document.createElement('div');
+      sectionEl.className = 'device-section';
+      if (section.title) {
+        const head = document.createElement('div');
+        head.className = 'device-section-head';
+        head.textContent = section.title;
+        sectionEl.appendChild(head);
+      }
+      // The picture first, then whatever knobs it did not replace: an envelope's curve stands in
+      // for its four knobs, while a filter's response curve joins its six.
+      drawFigures(sectionEl, section.figures);
+      if (section.widgets.length) {
+        const widgets = document.createElement('div');
+        widgets.className = 'device-widgets';
+        for (const widget of section.widgets) widgets.appendChild(deviceWidget(trackLabel, slot, widget));
+        sectionEl.appendChild(widgets);
+      }
+      rowEl.appendChild(sectionEl);
+    }
+    if (rowEl.childElementCount) deviceSectionsEl.appendChild(rowEl);
+  }
+
+  devicePanelEl.classList.remove('hidden');
+  bringPanelToFront(devicePanelEl);
+  startDeviceLive(trackLabel, slot, panel);
+}
+
+/**
+ * Which spelling of a parameter to write.
+ *
+ * A device parameter answers to two names - its id and its display name - and `.param()` resolves
+ * either. So a call already in the buffer keeps whatever it was written with: writing "Filter
+ * Cutoff" over a line that says "filter.cutoff" would leave two calls for one control, both live,
+ * with the lower one quietly winning.
+ */
+function paramSpellingInCode(trackLabel, { name, id }) {
+  if (!labelsMod) return name;
+  const code = cm.getValue();
+  const block = blockForTrack(code, trackLabel);
+  if (!block) return name;
+  return [name, id].find((spelling) => findParamCall(code, block, spelling)) ?? name;
+}
+
+/** One control: its name, the widget itself, and what it currently reads. */
+function deviceWidget(trackLabel, slot, widget, { bare = false } = {}) {
+  const cell = document.createElement('div');
+  cell.className = bare ? 'device-widget device-widget-bare' : 'device-widget';
+  if (widget.modulatedBy) cell.classList.add('driven');
+
+  // A control drawn inside a figure's heading has the figure's own title beside it already, so
+  // it carries no label of its own.
+  if (!bare) {
+    const name = document.createElement('div');
+    name.className = 'device-widget-name';
+    name.textContent = widget.name;
+    cell.appendChild(name);
+  }
+  // The whole cell answers to ctrl+hover, and what it says is what the control DOES. It used to
+  // add "takes a signal" to every one of them, which is true of nearly every control here and
+  // so told nobody anything - it crowded out the only sentence worth reading. What is already
+  // driving a control is worth saying, because that one is news.
+  cell.title = [
+    widget.description,
+    widget.modulatedBy ? `Driven by ${widget.modulatedBy}.` : null,
+  ].filter(Boolean).join(' ');
+
+  // Under the control, except on a number box: that prints its own value, and a second copy of
+  // it below was two numbers for one control, one of them stale.
+  const isNumber = widget.widget === 'number' && !widget.modulatedBy;
+  // A control that takes a file prints the file's name on the button that opens the picker, so
+  // like a number box it is its own readout.
+  const isFile = widget.takes === 'sample' && !widget.modulatedBy;
+  // One that takes a drawn curve is a menu of the shapes it ships with, plus a way to draw one.
+  const isShape = widget.takes === 'shape' && !widget.modulatedBy;
+  const readout = document.createElement('div');
+  readout.className = 'device-widget-value';
+  readout.textContent = widget.modulatedBy ?? widget.text;
+  /** Where this control's value is printed, whichever element that is. */
+  let showValue = (text) => { readout.textContent = text; };
+
+  // One request at a time, the latest value winning - the same rule every streamed control in
+  // here follows. A drag fires far faster than a round trip, and what matters is that the last
+  // position of the gesture is the one that lands.
+  //
+  // `commit` is the end of a gesture, and it is the host that decides what a finished gesture
+  // means: a `.param()` call while conf is on for this track, and otherwise a capture of the
+  // whole device into a preset, exactly as touching a plugin's own window does on the desktop.
+  // Nothing is written from here (see the auto-pin section).
+  let inFlight = false;
+  let queued = null;
+  const send = (body, commit) => {
+    if (inFlight) { queued = [body, commit]; return; }
+    inFlight = true;
+    api('POST', '/api/deviceParam', { trackId: trackLabel, slot, id: widget.id, commit, ...body })
+      .then((res) => {
+        showValue(res.text);
+        // A knob and a figure can be two views of one parameter - the filter's cutoff is both -
+        // so turning the knob redraws the picture.
+        applyDeviceFigures(res.figures);
+        // Some controls switch other controls in and out - a sync setting decides whether there
+        // is a rate knob at all. That changes what the window HAS, so it is rebuilt rather than
+        // repainted (see the panel's relayoutOn).
+        if (commit && devicePanelRelayout.has(widget.id)) refreshDevicePanel();
+      })
+      .catch((e) => logLine(e.message ?? String(e), true))
+      .finally(() => {
+        inFlight = false;
+        if (queued) { const [b, c] = queued; queued = null; send(b, c); }
+      });
+  };
+
+  // What moves this control when something else changes it. Filled in per widget kind below.
+  let setPosition = () => {};
+
+  if (widget.modulatedBy) {
+    const knob = deviceKnob(widget, { register: (fn) => { setPosition = fn; } });
+    cell.appendChild(knob);
+    // Followed from the processor's reports while the window is open: the knob turns and the
+    // readout prints where the modulator has it, rather than sitting where it was set.
+    deviceLiveEls.set(widget.id, (live) => {
+      setPosition(live.position);
+      readout.textContent = `${widget.modulatedBy} · ${live.text}`;
+    });
+  } else if (isShape) {
+    // The shapes it ships with, and the editor. Drawing one fills a spare slot on the same list,
+    // so a curve somebody made is picked back off the menu like any other - and is written into
+    // the code as its breakpoints, which is what `.param("Window", "0,0 0.1,1 1,0")` takes.
+    const select = document.createElement('select');
+    select.className = 'small';
+    const fill = (options, current) => {
+      select.innerHTML = '';
+      options.forEach((label, i) => {
+        if (label === undefined) return;
+        const opt = document.createElement('option');
+        opt.value = String(i);
+        // A drawn one is a wall of numbers; on a menu it is "drawn" and the numbers are the hover.
+        opt.textContent = i < (widget.fixed ?? options.length) ? label : `drawn ${i - (widget.fixed ?? 0) + 1}`;
+        opt.title = label;
+        if (i === Math.round(current)) opt.selected = true;
+        select.appendChild(opt);
+      });
+    };
+    fill(widget.options, widget.value);
+    select.onchange = () => send({ value: Number(select.value) }, true);
+    // The menu and the way to draw one, side by side: two ways to set the same thing.
+    const box = document.createElement('div');
+    box.className = 'device-file-box';
+    box.appendChild(select);
+    cell.appendChild(box);
+
+    const draw = document.createElement('button');
+    draw.className = 'small device-draw';
+    draw.textContent = 'draw…';
+    draw.title = `Draw ${widget.name.toLowerCase()} by hand, in the same editor an lfo() shape uses.`;
+    draw.onclick = () => openShapeSink({
+      title: `${trackLabel} · ${widget.name}`,
+      // Opens on what it is playing: the drawn breakpoints where there are some, and otherwise a
+      // plain ramp to start from rather than an empty box.
+      points: figureShapeData(widget.id) ?? '0,0 0.5,1 1,0',
+      onChange: (data) => {
+        api('POST', '/api/deviceParam', { trackId: trackLabel, slot, id: widget.id, sample: data, commit: true })
+          .then((res) => {
+            if (res.options) { widget.options = res.options; fill(res.options, res.value); }
+            widget.value = res.value;
+            showValue(res.text);
+            applyDeviceFigures(res.figures);
+          })
+          .catch((e) => logLine(e.message ?? String(e), true));
+      },
+    });
+    box.appendChild(draw);
+    setPosition = (_position, value) => { if (Number.isFinite(value)) { widget.value = value; select.value = String(Math.round(value)); } };
+  } else if (isFile) {
+    // A control that takes a file shows the file it is on, and opens the picker. No menu beside
+    // it: a wavetable folder is a couple of thousand files in subfolders, which is a browser's
+    // job and not a dropdown's, and two ways to set one control is one too many. The arrows
+    // either side step to the file before or after it, in the picker's own order.
+    const box = document.createElement('div');
+    box.className = 'device-file-box';
+    const button = document.createElement('button');
+    button.className = 'device-file';
+    // A loaded slot is named by the reference it was loaded from - "wt:Basic/saw.wav" - and the
+    // button has room for the file, not the path. The whole of it is on the tooltip.
+    // A table is named by its file alone; a sample by its pack as well, since "4" or "kick.wav"
+    // says nothing without it.
+    const shortName = (ref) => {
+      const cut = ref.indexOf(':');
+      const tail = ref.slice(cut + 1);
+      const file = tail.slice(tail.lastIndexOf('/') + 1);
+      return widget.sampleAs === 'wavetable' || cut < 0 ? file : `${ref.slice(0, cut)} \u00b7 ${file}`;
+    };
+    const named = () => widget.options?.[Math.round(widget.value)] ?? 'none';
+    const paint = (ref) => {
+      button.textContent = shortName(ref);
+      button.title = `${widget.name}: ${ref}. Click to pick another.`;
+    };
+    paint(named());
+    const source = () => ({
+      kind: widget.sampleAs === 'wavetable' ? 'wavetable' : 'audio',
+      pack: widget.pack ?? 'files',
+      // The device's own tables, which are not files and are written by their label. Offered
+      // only where there is more than one: a lone "none" is not a list to browse.
+      builtIn: (widget.fixed ?? 0) > 1 ? widget.options.slice(0, widget.fixed) : [],
+    });
+    const pick = (ref) => api('POST', '/api/deviceParam', { trackId: trackLabel, slot, id: widget.id, sample: ref, commit: true })
+      .then((res) => {
+        if (res.options) widget.options = res.options;
+        widget.value = res.value;
+        paint(res.text);
+        applyDeviceFigures(res.figures);
+      })
+      .catch((e) => logLine(e.message ?? String(e), true));
+    button.onclick = () => openFilePicker({
+      ...source(),
+      target: `${trackLabel} \u00b7 ${widget.name}`,
+      current: named(),
+      onPick: pick,
+    });
+    const step = (by, glyph, words) => {
+      const arrow = document.createElement('button');
+      arrow.className = 'device-file-step';
+      arrow.textContent = glyph;
+      arrow.title = `${words} ${widget.sampleAs === 'wavetable' ? 'table' : 'file'}`;
+      arrow.onclick = () => neighborFileRef({ ...source(), current: named() }, by)
+        .then((ref) => { if (ref) pick(ref); })
+        .catch((e) => logLine(e.message ?? String(e), true));
+      return arrow;
+    };
+    box.append(step(-1, '\u2039', 'previous'), button, step(1, '\u203a', 'next'));
+    showValue = (text) => paint(text);
+    setPosition = (_position, value) => { if (Number.isFinite(value)) widget.value = value; };
+    cell.appendChild(box);
+  } else if (widget.widget === 'enum') {
+    // Wider than a knob: a menu's whole job is its word, and "Str…" in a knob's width said none of it.
+    cell.classList.add('device-widget-enum');
+    const select = document.createElement('select');
+    select.className = 'small';
+    const fill = (options, current) => {
+      select.innerHTML = '';
+      // A long list the device heads in groups (the warp modes) is drawn a group to a column.
+      const groups = widget.optionGroups ?? [];
+      let into = select;
+      options.forEach((label, i) => {
+        if (label === undefined) return;
+        const starts = groups.find((g) => g.from === i);
+        if (starts) {
+          into = document.createElement('optgroup');
+          into.label = starts.label;
+          select.appendChild(into);
+        }
+        const opt = document.createElement('option');
+        opt.value = String(i);
+        opt.textContent = label;
+        if (i === Math.round(current)) opt.selected = true;
+        into.appendChild(opt);
+      });
+    };
+    fill(widget.options, widget.value);
+    select.onchange = () => send({ value: Number(select.value) }, true);
+    setPosition = (_position, value) => { if (Number.isFinite(value)) select.value = String(Math.round(value)); };
+    cell.appendChild(select);
+    // The select shows its choice, so the readout under it is left blank rather than printing
+    // the same word twice. Blank, not removed: the cell keeps the height its neighbors have.
+    showValue = () => { readout.textContent = ''; };
+    readout.textContent = '';
+  } else if (isNumber) {
+    const box = deviceNumber(widget, {
+      onDrag: (value, paint) => { paint(); send({ value }, false); },
+      onCommit: (value, paint) => { paint(); send({ value }, true); },
+      register: (fn) => { setPosition = (_position, value, text) => fn(value, text); },
+    });
+    // The box prints its own value, so the answer lands there rather than on a second line.
+    showValue = (text) => { if (!box.querySelector('input')) box.textContent = text; };
+    cell.appendChild(box);
+  } else if (widget.widget === 'toggle') {
+    const button = document.createElement('button');
+    button.className = 'small device-toggle';
+    let on = widget.value >= 0.5;
+    const paint = () => { button.textContent = on ? 'on' : 'off'; button.classList.toggle('on', on); };
+    paint();
+    button.onclick = () => { on = !on; paint(); send({ value: on ? 1 : 0 }, true); };
+    setPosition = (_position, value) => { if (Number.isFinite(value)) { on = value >= 0.5; paint(); } };
+    cell.appendChild(button);
+    // The button says on or off itself, so the readout under it stays blank, as an enum's does:
+    // printing it again doubled every switch. Blank, not removed, to keep the row's height.
+    showValue = () => { readout.textContent = ''; };
+    readout.textContent = '';
+  } else {
+    cell.appendChild(deviceKnob(widget, {
+      onDrag: (position) => send({ position }, false),
+      onCommit: (position) => send({ position }, true),
+      register: (fn) => { setPosition = fn; },
+    }));
+  }
+
+  deviceWidgetEls.set(widget.id, (res) => {
+    setPosition(res.position, res.value, res.text);
+    showValue(res.text);
+  });
+
+  // A menu of shapes shows its choice, so a readout under it would say it twice.
+  if (!isNumber && !isFile && !isShape) cell.appendChild(readout);
+  return cell;
+}
+
+/**
+ * Redraws the open panel from the engine, after something else may have changed what is in the
+ * slot. An evaluation is the usual something else: it can load a different device there, or set
+ * the very parameter the panel is showing.
+ */
+function refreshDevicePanel() {
+  if (!devicePanelAt) return;
+  const { trackLabel, slot } = devicePanelAt;
+  api('POST', '/api/showEditor', { trackId: trackLabel, slot })
+    .then((res) => { if (res?.panel) showDevicePanel(trackLabel, slot, res.panel); })
+    // The track may have been renamed or deleted by the edit that triggered this - that is not
+    // an error worth a console line, it just means there is nothing to show any more.
+    .catch(() => hideDevicePanel());
+}
+
+// ---------------------------------------------------------------------------------------------
+// The file picker.
+//
+// One window for every control that takes a file: an oscillator's wavetable, a granulator's
+// sample, a convolver's impulse response. It is the ONLY way in - a control that takes a file
+// shows the name of the file it is on and opens this, rather than carrying a menu as well, which
+// for a wavetable folder was two thousand lines of dropdown.
+//
+// Three columns: the folders, the files in the one selected, and a picture of the file the
+// cursor is on. The picture is drawn from the same functions the engine reads the file with (see
+// the host's wavetablePreview and samplePreview), so what is drawn is what would sound - a
+// wavetable as the stack of frames it will be cut into, a sample as its waveform.
+//
+// Nothing is loaded into the device until a file is chosen, and a file is chosen the way a file
+// is chosen anywhere: double-click it, or press enter with it selected.
+// ---------------------------------------------------------------------------------------------
+
+const filePickPanelEl = document.getElementById('filePickPanel');
+const filePickKindEl = document.getElementById('filePickKind');
+const filePickTargetEl = document.getElementById('filePickTarget');
+const filePickFoldersEl = document.getElementById('filePickFolders');
+const filePickFilesEl = document.getElementById('filePickFiles');
+const filePickSearchEl = document.getElementById('filePickSearch');
+const filePickCanvas = document.getElementById('filePickCanvas');
+const filePickNoteEl = document.getElementById('filePickNote');
+
+/** What the open picker is pointed at, and what it has to show. */
+let filePicker = null;
+
+function hideFilePicker() {
+  filePickPanelEl.classList.add('hidden');
+  filePicker = null;
+}
+
+document.getElementById('filePickClose').onclick = hideFilePicker;
+
+/** The name a built-in table is written with in the code - not a file, so it carries no pack. */
+const BUILT_IN_GROUP = 'built in';
+
+/** The pack the browser build keeps the wavetable folder in (see the settings tab's wavetables). */
+const WAVETABLE_PACK = 'wt';
+
+/**
+ * Every file the picker offers, as `{ ref, group, name }`.
+ *
+ * `ref` is the string a `.param()` would name - "wt:Basic/saw.wav" for a file, or a plain label
+ * for one of the device's own tables. `group` is the folder column: a pack's subfolder for a
+ * wavetable library, the pack itself for a sample, since that is the division each one is
+ * organized by.
+ */
+async function filePickEntries({ kind, pack, builtIn }) {
+  const out = (builtIn ?? []).map((name) => ({ ref: name, group: BUILT_IN_GROUP, name }));
+  if (kind === 'wavetable') {
+    const { files } = await api('GET', `/api/files?pack=${encodeURIComponent(pack)}`);
+    for (const file of files) {
+      const cut = file.lastIndexOf('/');
+      out.push({ ref: `${pack}:${file}`, group: cut < 0 ? pack : file.slice(0, cut), name: file.slice(cut + 1) });
+    }
+    return out;
+  }
+  // A sample: every pack this build knows, the sourced library and what was added here alike,
+  // which is the same list `sp()` reads (see the sounds tab).
+  const { packs } = await api('GET', '/api/samples');
+  for (const p of packs ?? []) {
+    // The wavetable folder is a pack too, but a table is not something to granulate or convolve.
+    if (p.name === WAVETABLE_PACK) continue;
+    for (const file of p.files ?? []) {
+      const cut = file.lastIndexOf('/');
+      out.push({ ref: `${p.name}:${file}`, group: cut < 0 ? p.name : `${p.name}/${file.slice(0, cut)}`, name: file.slice(cut + 1) });
+    }
+  }
+  return out;
+}
+
+/**
+ * Opens the picker for one control. `onPick` is handed the reference somebody chose - the same
+ * string a `.param()` would name - and does whatever loading it into that control means.
+ */
+async function openFilePicker({ kind, pack, builtIn, target, current, onPick }) {
+  let entries;
+  try {
+    entries = await filePickEntries({ kind, pack, builtIn });
+  } catch (e) {
+    logLine(e.message ?? String(e), true);
+    return;
+  }
+  const selected = entries.find((e) => e.ref === current) ?? null;
+  filePicker = { kind, entries, onPick, folder: selected?.group ?? null, selected: selected?.ref ?? null, filter: '', preview: null, at: 0 };
+  filePickKindEl.textContent = kind === 'wavetable' ? 'wavetables' : 'samples';
+  filePickTargetEl.textContent = target;
+  filePickSearchEl.value = '';
+  filePickNoteEl.textContent = entries.length
+    ? 'double-click a file, or press enter'
+    : kind === 'wavetable' ? 'nothing read in yet - settings has the folder to choose' : 'no samples here yet';
+  clearFilePickPreview();
+  drawFilePickFolders();
+  filePickPanelEl.classList.remove('hidden');
+  bringPanelToFront(filePickPanelEl);
+  filePickSearchEl.focus();
+  if (filePicker.selected) selectFilePick(filePicker.selected);
+}
+
+/** The entries the filter leaves, which is everything when there is no filter. */
+function filePickMatching() {
+  const { entries, filter } = filePicker;
+  if (!filter) return entries;
+  const want = filter.toLowerCase();
+  return entries.filter((e) => `${e.group}/${e.name}`.toLowerCase().includes(want));
+}
+
+/**
+ * The order the picker lists folders in: the device's own tables first, then the folders in the
+ * order a folder listing would have them - a library is organized by its paths, so sorting them
+ * IS the tree.
+ */
+const filePickFolderOrder = (a, b) => (
+  (a === BUILT_IN_GROUP ? -1 : 0) - (b === BUILT_IN_GROUP ? -1 : 0) || a.localeCompare(b)
+);
+
+/**
+ * The file before or after `current` (`by` -1 or 1) in the picker's own order - folder by folder,
+ * each folder's files as it lists them - wrapping at the ends. What a file control's arrows step
+ * through, so they walk the list the picker shows rather than some other one.
+ */
+async function neighborFileRef({ kind, pack, builtIn, current }, by) {
+  const entries = await filePickEntries({ kind, pack, builtIn });
+  if (!entries.length) return null;
+  const folders = [...new Set(entries.map((e) => e.group))].sort(filePickFolderOrder);
+  const ordered = folders.flatMap((folder) => entries.filter((e) => e.group === folder));
+  const at = ordered.findIndex((e) => e.ref === current);
+  const next = at < 0 ? (by > 0 ? 0 : ordered.length - 1) : (at + by + ordered.length) % ordered.length;
+  return ordered[next].ref;
+}
+
+function drawFilePickFolders() {
+  const matching = filePickMatching();
+  const counts = new Map();
+  for (const e of matching) counts.set(e.group, (counts.get(e.group) ?? 0) + 1);
+  const folders = [...counts.keys()].sort(filePickFolderOrder);
+  // A filter that matches across folders opens on the first one that still has anything in it.
+  if (!folders.includes(filePicker.folder)) filePicker.folder = folders[0] ?? null;
+
+  filePickFoldersEl.innerHTML = '';
+  for (const folder of folders) {
+    const row = document.createElement('div');
+    // Indented by depth, so a library of nested folders reads as the tree it is on disk.
+    const depth = folder === BUILT_IN_GROUP ? 0 : folder.split('/').length - 1;
+    const leaf = folder === BUILT_IN_GROUP ? folder : folder.slice(folder.lastIndexOf('/') + 1);
+    row.textContent = `${'  '.repeat(depth)}${leaf}`;
+    const count = document.createElement('span');
+    count.className = 'file-pick-count';
+    count.textContent = counts.get(folder);
+    row.appendChild(count);
+    row.title = folder;
+    row.dataset.folder = folder;
+    if (folder === filePicker.folder) row.classList.add('on');
+    row.onclick = () => { filePicker.folder = folder; drawFilePickFolders(); };
+    filePickFoldersEl.appendChild(row);
+  }
+  drawFilePickFiles();
+}
+
+function drawFilePickFiles() {
+  const { folder } = filePicker;
+  const here = filePickMatching().filter((e) => e.group === folder);
+  filePickFilesEl.innerHTML = '';
+  for (const entry of here) {
+    const row = document.createElement('div');
+    row.textContent = entry.name;
+    row.title = entry.ref;
+    if (entry.ref === filePicker.selected) row.classList.add('on');
+    row.onclick = () => selectFilePick(entry.ref);
+    row.ondblclick = () => { selectFilePick(entry.ref); takeFilePick(); };
+    filePickFilesEl.appendChild(row);
+  }
+}
+
+/** Moves the selection within the folder on screen - what the arrow keys do. */
+function stepFilePick(by) {
+  const rows = [...filePickFilesEl.children];
+  if (!rows.length) return;
+  const at = rows.findIndex((r) => r.title === filePicker.selected);
+  const next = rows[Math.min(rows.length - 1, Math.max(0, (at < 0 ? -1 : at) + by))];
+  selectFilePick(next.title);
+  next.scrollIntoView({ block: 'nearest' });
+}
+
+/** Shows one file: the table or the waveform it would become, read from its own bytes. */
+function selectFilePick(ref) {
+  filePicker.selected = ref;
+  for (const row of filePickFilesEl.children) row.classList.toggle('on', row.title === ref);
+  const route = filePicker.kind === 'wavetable' ? '/api/wavetablePreview' : '/api/samplePreview';
+  filePickNoteEl.textContent = 'reading…';
+  api('POST', route, { ref })
+    .then((preview) => {
+      // Another file may have been clicked while this one was being read.
+      if (filePicker?.selected !== ref) return;
+      if (preview.stack) {
+        // Kept, so a drag across the picture can walk the table the way the position knob does.
+        filePicker.preview = preview;
+        filePicker.at = 0;
+        drawTableStack(preview.stack, 0);
+        filePickNoteEl.textContent = previewNote();
+      } else {
+        filePicker.preview = null;
+        drawSampleWave(preview.peaks ?? []);
+        filePickNoteEl.textContent = `${preview.seconds.toFixed(2)} s · ${preview.channels} ch`;
+      }
+    })
+    .catch((e) => {
+      if (filePicker?.selected !== ref) return;
+      clearFilePickPreview();
+      filePickNoteEl.textContent = e.message ?? String(e);
+    });
+}
+
+/** What a table preview says under it: which frame is in front, of how many, at what length. */
+function previewNote() {
+  const { preview, at } = filePicker;
+  // The frame the position has reached, as the device window counts it.
+  const frame = Math.min(preview.frameCount, Math.floor(at * (preview.frameCount - 1)) + 1);
+  return `${frame} / ${preview.frameCount} · ${preview.frameLength} long`;
+}
+
+/** The preview canvas, sized to its box and cleared, with the drawing context ready. */
+function filePickCanvasCtx() {
+  songSizeCanvas(filePickCanvas);
+  const ctx = filePickCanvas.getContext('2d');
+  const dpr = window.devicePixelRatio || 1;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const w = filePickCanvas.clientWidth;
+  const h = filePickCanvas.clientHeight;
+  ctx.clearRect(0, 0, w, h);
+  return { ctx, w, h, c: figureColors() };
+}
+
+function clearFilePickPreview() {
+  filePickCanvasCtx();
+}
+
+/**
+ * A table as a stack: every frame drawn in turn, each one a little higher and further right, the
+ * near ones brighter. One cycle overlaid on another says "a waveform"; this says "a table",
+ * which is the question somebody looking through a folder of them is asking.
+ */
+function drawTableStack(stack, at = 0) {
+  const { ctx, w, h, c } = filePickCanvasCtx();
+  if (!stack.length) return;
+  // Which frame is drawn in front. A folder is browsed to find a table with a MOVE in it, and a
+  // table only ever shows that when you walk through it, so the picture takes the same drag the
+  // position knob does.
+  // The cycle at the position, blended between the two frames either side of it the way the
+  // oscillator blends them - so a drag sweeps through the table as the window's does, rather
+  // than jumping from frame to frame.
+  const frame = Math.min(1, Math.max(0, at)) * (stack.length - 1);
+  const lo = Math.floor(frame);
+  const hi = Math.min(stack.length - 1, lo + 1);
+  const mix = frame - lo;
+  const wave = stack[lo].map((v, j) => v + (stack[hi][j] - v) * mix);
+  drawTableStackWith(ctx, tableStackLayout(w, h, stack.length), stack, [lo, hi], frame, wave, c);
+  ctx.globalAlpha = 1;
+}
+
+// A drag across a table preview walks it, frame by frame, exactly as the position knob does.
+filePickCanvas.addEventListener('pointerdown', (e) => {
+  if (!filePicker?.preview) return;
+  e.preventDefault();
+  filePickCanvas.setPointerCapture(e.pointerId);
+  const walk = (ev) => {
+    const rect = filePickCanvas.getBoundingClientRect();
+    filePicker.at = Math.min(1, Math.max(0, (ev.clientX - rect.left) / Math.max(1, rect.width)));
+    drawTableStack(filePicker.preview.stack, filePicker.at);
+    filePickNoteEl.textContent = previewNote();
+  };
+  const up = () => {
+    filePickCanvas.removeEventListener('pointermove', walk);
+    filePickCanvas.removeEventListener('pointerup', up);
+    filePickCanvas.removeEventListener('pointercancel', up);
+  };
+  filePickCanvas.addEventListener('pointermove', walk);
+  filePickCanvas.addEventListener('pointerup', up);
+  filePickCanvas.addEventListener('pointercancel', up);
+  walk(e);
+});
+
+/** A sample as its outline: the loudest sample either way per column, filled between. */
+function drawSampleWave(peaks) {
+  const { ctx, w, h, c } = filePickCanvasCtx();
+  if (!peaks.length) return;
+  const mid = h / 2;
+  const half = h / 2 - 4;
+  ctx.strokeStyle = c.grid;
+  ctx.beginPath();
+  ctx.moveTo(0, mid);
+  ctx.lineTo(w, mid);
+  ctx.stroke();
+  ctx.fillStyle = c.accent;
+  for (let i = 0; i < peaks.length; i++) {
+    const x = (i / peaks.length) * w;
+    const [lo, hi] = peaks[i];
+    ctx.fillRect(x, mid - hi * half, Math.max(1, w / peaks.length), Math.max(1, (hi - lo) * half));
+  }
+}
+
+/** Hands the chosen file back to whatever opened the picker. */
+function takeFilePick() {
+  if (!filePicker?.selected) return;
+  const { selected, onPick } = filePicker;
+  hideFilePicker();
+  onPick(selected);
+}
+
+filePickSearchEl.addEventListener('input', () => {
+  if (!filePicker) return;
+  filePicker.filter = filePickSearchEl.value.trim();
+  drawFilePickFolders();
+});
+filePickSearchEl.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); takeFilePick(); }
+  else if (e.key === 'ArrowDown') { e.preventDefault(); stepFilePick(1); }
+  else if (e.key === 'ArrowUp') { e.preventDefault(); stepFilePick(-1); }
+  e.stopPropagation();
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && filePicker) hideFilePicker();
+});
+window.addEventListener('resize', () => {
+  if (filePicker?.selected) selectFilePick(filePicker.selected);
+});
 
 // ---------------------------------------------------------------------------------------------
 // Interactive LFO shape editor - double-click the `lfo` name in any `lfo(...)` call (just the
@@ -3032,6 +5643,7 @@ function lfoCallParts() {
 
 /** The call the panel writes back to: the one it was opened through, else the inline one it IS. */
 function lfoCallee() {
+  if (lfoState?.sink) return lfoState.callee ?? 'lfo';
   return lfoCallParts()?.callee ?? lfoState?.callee ?? 'lfo';
 }
 
@@ -3148,10 +5760,46 @@ function lfoSetFollowLock(locked) {
   lfoSyncHead();
 }
 
-/** Whichever of the two the current state should write to. */
+/** Whichever of the three the current state should write to. */
 function writeLfoRateMode() {
+  // A SINK is a shape being drawn for something that is not a call in the buffer - a device
+  // control that takes a curve (see openShapeSink). There is nothing to rewrite and nothing to
+  // re-evaluate; the points go straight to whoever asked for them.
+  if (lfoState?.sink) { lfoState.sink(shapeMod.serializeShapePoints(lfoState.points)); return; }
   if (lfoState?.idLiteral) writeLfoOptions();
   else writeLfoCall();
+}
+
+/**
+ * Opens the shape editor on a curve that lives in a DEVICE rather than in the buffer - a
+ * granulator's grain window, and anything else that grows a `takes: 'shape'` control.
+ *
+ * The same editor, because it is the same question: the breakpoints, the curvature between
+ * them, the presets and the dice. What it does not have is a call to rewrite, so `onChange` is
+ * handed the serialized points each time they move and decides what that means.
+ */
+function openShapeSink({ title, points, onChange }) {
+  if (lfoState?.marker) lfoState.marker.clear();
+  if (lfoState?.callSource) lfoState.callSource.clear();
+  lfoState = {
+    marker: null,
+    callSource: null,
+    callStart: -1,
+    shapeId: null,
+    idLiteral: null,
+    callee: 'lfo',
+    sink: onChange,
+    points: shapeMod.parseShapePoints(points),
+    rate: 1,
+    mode: 'free',
+  };
+  lfoTitle.textContent = title;
+  lfoPreset.value = '';
+  lfoSyncHead();
+  if (!lfoRaf) lfoRaf = requestAnimationFrame(lfoPlayheadLoop);
+  lfoPanel.classList.remove('hidden');
+  bringPanelToFront(lfoPanel);
+  drawLfoShape();
 }
 
 function openLfoEditor(call) {
@@ -3299,7 +5947,7 @@ function lfoScheduleEval() {
 // `rate:`/`mode:`/the shape string in the code updates the panel instead of being silently reverted
 // by the next drag.
 function syncLfoFromCode() {
-  if (!lfoState || lfoSuppressCursor || !shapeMod) return;
+  if (!lfoState || lfoState.sink || lfoSuppressCursor || !shapeMod) return;
   const range = lfoState.marker.find();
   // The call the panel is anchored to was deleted (or typed into something that is no longer an
   // lfo call) - there is nothing left to edit, so the panel goes with it. This is the only thing
@@ -3451,7 +6099,7 @@ function canvasToLfo(px, py) {
 // through (or the inline lfo() itself). Null for a definition opened straight from the picker -
 // a _shape(...) on its own belongs to no track, and several calls may be playing it at once.
 function lfoGateRegion() {
-  const range = (lfoState?.callSource ?? lfoState?.marker)?.find();
+  const range = (lfoState?.callSource ?? lfoState?.marker)?.find?.();
   if (!range) return null;
   const from = cm.indexFromPos(range.from);
   const to = cm.indexFromPos(range.to);
@@ -3503,7 +6151,10 @@ function lfoPhaseNow() {
   const pos = currentCyclePos();
   let turns;
   if (lfoState.mode === 'free') {
-    turns = lfoState.rateHz ? (Date.now() / 1000) * lfoState.rate : pos * lfoState.rate;
+    // A free-running rate counts the ENGINE's seconds, which is what its anchor counts (see the
+    // scheduler's _anchorLFOs). On the desktop that is the wall clock; in the browser it is the
+    // audio context's own, and the transport mirror carries the offset between the two.
+    turns = lfoState.rateHz ? (Date.now() / 1000 - (transport.clockOffset ?? 0)) * lfoState.rate : pos * lfoState.rate;
   } else {
     const region = lfoGateRegion();
     const gate = region && playing ? lastGateBefore(region, pos) : null;
@@ -5995,6 +8646,17 @@ const lfoHead = makeNamePicker({
 });
 
 function lfoSyncHead() {
+  // A shape being drawn for a device control has no call behind it: no name, no rate, no mode,
+  // nothing to send anywhere (see openShapeSink). The head is the title and the dice.
+  if (lfoState?.sink) {
+    lfoRateWrap.classList.add('hidden');
+    lfoModeWrap.classList.add('hidden');
+    lfoUseBtn.classList.add('hidden');
+    lfoLockBtn.classList.add('hidden');
+    lfoPickWrap.classList.add('hidden');
+    return;
+  }
+  lfoPickWrap.classList.remove('hidden');
   const named = !!lfoState?.shapeId;
   // rate and mode belong to the lfo() CALL. An inline one is the call; a definition has them only
   // while the panel still knows which call it was opened through.
@@ -9195,6 +11857,188 @@ async function prSliceToNotes(targets) {
  *   after      run once an item has been chosen, for a caller that has focus to give back
  *   onHoverOut run when the pointer leaves the menu itself, for a caller previewing on hover
  */
+// ---------------------------------------------------------------------------------------------
+// The dropdowns.
+//
+// Every <select> in the app stays a <select>: it is the value, the change event every listener
+// waits on, and the trigger every panel's stylesheet already has rules for. What is replaced
+// is the LIST it opens. The platform's popup is the one piece of the page no stylesheet can
+// reach, and it looked like it - a system menu over an instrument. Pressing a select opens
+// this list in the app's own menu skin instead, under the select or above it when there is no
+// room, with the current choice marked; the arrow keys walk it and enter picks; picking sets
+// the select and fires its input and change events, so nothing that listens to a select can
+// tell the difference. Arrow keys on a CLOSED select still step its value, as they natively do.
+// ---------------------------------------------------------------------------------------------
+
+/** Past this many options a list is laid out in columns rather than one long one. */
+const SEL_MENU_ROWS = 14;
+
+const selMenuEl = document.createElement('div');
+selMenuEl.className = 'sel-menu hidden';
+document.body.appendChild(selMenuEl);
+let selMenuFor = null;
+
+function closeSelMenu() {
+  if (!selMenuFor) return;
+  selMenuEl.classList.add('hidden');
+  selMenuEl.innerHTML = '';
+  selMenuFor.classList.remove('sel-open');
+  selMenuFor = null;
+}
+
+/** Picks an option for the select the list is open on, and tells its listeners. */
+function selMenuPick(select, option) {
+  const changed = select.value !== option.value || select.selectedIndex !== option.index;
+  select.selectedIndex = option.index;
+  closeSelMenu();
+  select.focus();
+  if (changed) {
+    select.dispatchEvent(new Event('input', { bubbles: true }));
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+}
+
+function openSelMenu(select) {
+  if (selMenuFor === select) { closeSelMenu(); return; }
+  closeSelMenu();
+  if (!select.options.length) return;
+  selMenuFor = select;
+  select.classList.add('sel-open');
+  // The options in order, under their group heads where the select has groups. Each group is a
+  // block of its own, so a long grouped list lays out a group to a column (see below).
+  let lastGroup = null;
+  let block = selMenuEl;
+  const visible = [...select.options].filter((o) => !o.hidden);
+  for (const option of visible) {
+    const group = option.parentElement instanceof HTMLOptGroupElement ? option.parentElement : null;
+    if (group && group !== lastGroup) {
+      block = document.createElement('div');
+      block.className = 'sel-menu-group';
+      selMenuEl.appendChild(block);
+      const head = document.createElement('div');
+      head.className = 'sel-menu-head';
+      head.textContent = group.label;
+      block.appendChild(head);
+    } else if (!group && lastGroup) {
+      block = selMenuEl;
+    }
+    lastGroup = group;
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = option.textContent;
+    if (option.title) b.title = option.title;
+    b.disabled = option.disabled || !!group?.disabled;
+    if (option.selected) b.classList.add('on', 'hi');
+    b.addEventListener('mouseenter', () => selMenuHighlight(b));
+    b.addEventListener('click', () => selMenuPick(select, option));
+    block.appendChild(b);
+  }
+  // A long list goes into columns rather than down past the window: a group to a column where
+  // the select has groups, otherwise as many columns as it takes to keep each one readable.
+  const groupCount = selMenuEl.querySelectorAll('.sel-menu-group').length;
+  const columns = visible.length <= SEL_MENU_ROWS ? 1
+    : groupCount > 1 ? groupCount
+      : Math.min(4, Math.ceil(visible.length / SEL_MENU_ROWS));
+  selMenuEl.classList.toggle('sel-menu-cols', columns > 1);
+  selMenuEl.style.columnCount = columns > 1 ? String(columns) : '';
+  selMenuEl.style.maxHeight = '';
+  selMenuEl.classList.remove('hidden');
+  // Under the select, at least as wide as it, or above it when it only fits there. When it fits
+  // neither way it takes the roomier side and scrolls inside the room it has: it used to open
+  // below regardless and run off the bottom of the window.
+  const r = select.getBoundingClientRect();
+  selMenuEl.style.minWidth = `${Math.ceil(r.width)}px`;
+  const mw = selMenuEl.offsetWidth;
+  const mh = selMenuEl.offsetHeight;
+  const below = window.innerHeight - r.bottom - 7;
+  const above = r.top - 7;
+  let top;
+  if (mh <= below) top = r.bottom + 3;
+  else if (mh <= above) top = r.top - mh - 3;
+  else if (below >= above) {
+    selMenuEl.style.maxHeight = `${below}px`;
+    top = r.bottom + 3;
+  } else {
+    selMenuEl.style.maxHeight = `${above}px`;
+    top = 4;
+  }
+  selMenuEl.style.left = `${Math.max(4, Math.min(r.left, window.innerWidth - mw - 4))}px`;
+  selMenuEl.style.top = `${Math.max(4, top)}px`;
+  selMenuEl.querySelector('button.on')?.scrollIntoView({ block: 'nearest' });
+}
+
+function selMenuHighlight(button) {
+  for (const b of selMenuEl.querySelectorAll('button.hi')) b.classList.remove('hi');
+  button?.classList.add('hi');
+  button?.scrollIntoView({ block: 'nearest' });
+}
+
+// The press opens the list in place of the platform's popup - preventing the default on
+// mousedown is what keeps that popup shut - and a press anywhere else closes it.
+document.addEventListener('mousedown', (e) => {
+  const select = e.target instanceof HTMLSelectElement ? e.target : null;
+  if (select) {
+    if (select.disabled || select.multiple || select.size > 1) return;
+    e.preventDefault();
+    select.focus();
+    openSelMenu(select);
+    return;
+  }
+  if (selMenuFor && !selMenuEl.contains(e.target)) closeSelMenu();
+}, true);
+
+// A press ON the list belongs to the select it was opened from. The list hangs off the body so it
+// can sit over anything, which puts it outside every panel - and the panels close on a press
+// outside themselves (the piano roll, the lfo and slice pickers, the arrangement's name picker).
+// Without this, picking a grid value in an open roll closed the roll before the pick landed.
+// Stopped at the window, in the capture phase, so no document listener sees it; the pick itself
+// is the button's click, a separate event this does not touch.
+for (const type of ['pointerdown', 'mousedown']) {
+  window.addEventListener(type, (e) => {
+    if (selMenuFor && selMenuEl.contains(e.target)) e.stopPropagation();
+  }, true);
+}
+
+// At the window and in the capture phase, ahead of every panel's own keys: while the list is
+// open the keys it uses are its own. Escape closing the list must not also close the piano roll
+// or the picker the select sits in, the way a native popup's Escape never reaches the page.
+window.addEventListener('keydown', (e) => {
+  const select = e.target instanceof HTMLSelectElement ? e.target : null;
+  if (selMenuFor) {
+    // The list is open: the keys walk it.
+    const buttons = [...selMenuEl.querySelectorAll('button:not(:disabled)')];
+    const at = buttons.findIndex((b) => b.classList.contains('hi'));
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      e.stopPropagation();
+      const step = e.key === 'ArrowDown' ? 1 : -1;
+      selMenuHighlight(buttons[Math.min(buttons.length - 1, Math.max(0, at + step))]);
+    } else if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      e.stopPropagation();
+      buttons[at]?.click();
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      closeSelMenu();
+    } else if (e.key === 'Tab') {
+      closeSelMenu();
+    }
+    return;
+  }
+  if (!select || select.disabled || select.multiple || select.size > 1) return;
+  // Closed: the keys that would open the platform's popup open this one.
+  if (e.key === ' ' || e.key === 'Enter' || (e.altKey && (e.key === 'ArrowDown' || e.key === 'ArrowUp'))) {
+    e.preventDefault();
+    openSelMenu(select);
+  }
+}, true);
+
+// A list that has come away from its select is wrong wherever it is.
+window.addEventListener('resize', closeSelMenu);
+window.addEventListener('blur', closeSelMenu);
+document.addEventListener('scroll', (e) => { if (e.target !== selMenuEl) closeSelMenu(); }, true);
+
 function openCtxMenu(el, clientX, clientY, { head = '', items = [], after = null, onHoverOut = null } = {}) {
   el.innerHTML = '';
   if (head) {
@@ -14063,10 +16907,16 @@ async function evaluate(start, { byHand = false } = {}) {
     if (arDeck === 'a') arSetClock(result.arrange ?? null);
     songEndSetClock('a', result.arrange ?? null);
     renderTracks(result);
+    // An evaluation can put a different device in the slot the panel is showing, or set the very
+    // parameter it is showing, so the open panel is redrawn from what the engine now holds.
+    refreshDevicePanel();
     setupHighlighting(result.tracks, result.gridFrom ?? 0, result.gridCount ?? 32);
     refoldAll();
     // A pack's file list is the buffer's to change (a `_pack()` line), and an eval is when it does.
     prNamesStale();
+    // So is the list of packs, when the buffer reads a repository in: the sounds tab and s("
+    // completion ask for it again.
+    if (/\bsamples\s*\(/.test(code)) loadSamples();
     if (prState && prNamesWanted()) prIndexLabels(); // re-asks now; redraws only if the list changed
     if (start) playing = true; // Update keeps the current play state; Play begins it
     // Only for an eval the player asked for. The panels re-evaluate as you drag - a piano roll
@@ -14617,6 +17467,23 @@ function renderPlugins(plugins) {
   }
 }
 
+// There are no plugins to scan for in the browser build: the devices are the catalog, fixed when
+// the page was built. The section says so in its own words (see renderPlugins) and the button
+// that would rescan them is not drawn at all.
+if (window.__poptartHostReady) document.getElementById('pluginsSection')?.classList.add('no-scan');
+
+// What the browser build does not have at all - the DJ desk, the sample map, and the organizer's
+// view of the disk - is not drawn there (style.css, .web-build). Each one also refuses at its
+// opener with a line in the console, because a keyboard shortcut reaches past a hidden button:
+// opened anyway, they asked a server the page does not have and one kept retrying for the rest
+// of the session.
+if (window.__poptartHostReady) document.body.classList.add('web-build');
+function desktopOnly(what) {
+  if (!window.__poptartHostReady) return false;
+  logLine(`${what} is part of the desktop app - the browser build does not have it`, true);
+  return true;
+}
+
 async function doScan() {
   logLine('scanning for plugins…');
   // The scan's own progress arrives through /api/status, and nothing is polling it until a
@@ -14778,8 +17645,11 @@ function stopPreview() {
   }
 }
 
-function previewSample(pack, i, row) {
-  return previewSampleUrl(`/api/sampleAudio?pack=${encodeURIComponent(pack)}&i=${i}`, row);
+async function previewSample(pack, i, row) {
+  let url = `/api/sampleAudio?pack=${encodeURIComponent(pack)}&i=${i}`;
+  // The browser build has no server to stream from: the host answers with where the file is.
+  if (window.__poptartHostReady) ({ url } = await api('GET', url));
+  return previewSampleUrl(url, row);
 }
 
 async function previewSampleUrl(url, row) {
@@ -14947,7 +17817,7 @@ function activateTab(name) {
   settingsTab.classList.toggle('hidden', name !== 'settings');
   if (name === 'sounds') loadSamples();
   if (name === 'files') refreshPatternFiles();
-  if (name === 'settings') { refreshAudioDevices(); refreshAudioInputs(); refreshSamplesDir().then(refreshMapSources); refreshPreferVst3(); refreshWipRetention(); refreshMidiClock(); refreshLink(); }
+  if (name === 'settings') { refreshAudioDevices(); refreshAudioInputs(); refreshSamplesDir().then(refreshMapSources); refreshPreferVst3(); refreshWipRetention(); refreshMidiClock(); refreshLink(); if (window.__poptartHostReady) refreshDownloads(); }
 }
 
 for (const btn of document.querySelectorAll('.side-tab')) {
@@ -14991,7 +17861,7 @@ async function refreshAudioDevices() {
   try {
     const {
       devices, selected, outputChannels, outputChannelChoices, audibleChannels,
-      cueAvailable, cueSelected, cueActive,
+      cueAvailable, cueSelected, cueActive, canReveal, canChoose, warning,
     } = await api('GET', '/api/audioDevices');
     audioCueSelect.innerHTML = '';
     audioCueSelect.appendChild(new Option('none', ''));
@@ -15012,8 +17882,20 @@ async function refreshAudioDevices() {
     for (const d of devices) {
       const opt = document.createElement('option');
       opt.value = d.name;
-      opt.textContent = `${d.name} · ${d.channels} ch`;
+      // A browser does not say how many channels an output has, so the page leaves it off.
+      opt.textContent = d.channels ? `${d.name} · ${d.channels} ch` : d.name;
       audioDeviceSelect.appendChild(opt);
+    }
+    // The browser build only: a browser hides its outputs' names until the page has been let
+    // use a microphone, so the one way to see the list is to ask - said on the entry itself.
+    if (canReveal) {
+      const reveal = new Option('list every output… (asks for the microphone)', AUDIO_REVEAL);
+      reveal.title = 'the browser names its audio outputs only to a page allowed to use a microphone - poptart asks, closes it at once, and records nothing';
+      audioDeviceSelect.appendChild(reveal);
+    }
+    if (canChoose === false) {
+      audioDeviceSelect.disabled = true;
+      audioDeviceSelect.title = warning ?? 'this browser cannot choose an audio output';
     }
     // A saved device that's since been unplugged falls back to "" - the server already plays
     // on the system default in that case.
@@ -15061,7 +17943,23 @@ audioCueSelect.addEventListener('change', async () => {
   }
 });
 
+/** The browser build's channel count: set in place, nothing restarts. */
+async function chooseWebOutputChannels(channels) {
+  audioChannelSelect.disabled = true;
+  try {
+    const res = await api('POST', '/api/audioOutputChannels', { channels });
+    renderChannelChoices(res.outputChannelChoices, res.outputChannels, res.audibleChannels);
+    logLine(res.outputChannels === 2 ? 'every .o(n) now plays to channels 1/2' : `.o(n) now wraps at ${res.outputChannels / 2} stereo pairs`);
+  } catch (e) {
+    logLine(e.message ?? String(e), true);
+    refreshAudioDevices().catch(() => {});
+  } finally {
+    audioChannelSelect.disabled = false;
+  }
+}
+
 audioChannelSelect.addEventListener('change', async () => {
+  if (window.__poptartHostReady) { chooseWebOutputChannels(Number(audioChannelSelect.value)); return; }
   const channels = Number(audioChannelSelect.value);
   if (!scanSurvivesRestart('the output channel count')) {
     refreshAudioDevices().catch(() => {});
@@ -15092,7 +17990,35 @@ audioChannelSelect.addEventListener('change', async () => {
   }
 });
 
+/** The menu entry that asks the browser to name its outputs (see refreshAudioDevices). */
+const AUDIO_REVEAL = '\u0000reveal';
+
+/**
+ * The browser build's output switch. Nothing restarts - the page moves its audio to the other
+ * device and keeps playing - so none of the desktop's engine-restart handling applies.
+ */
+async function chooseWebAudioOutput(value) {
+  audioDeviceSelect.disabled = true;
+  try {
+    if (value === AUDIO_REVEAL) {
+      await api('POST', '/api/audioDevice', { reveal: true });
+      logLine('the browser has named its audio outputs - pick one from the menu');
+    } else {
+      const device = value || null;
+      await api('POST', '/api/audioDevice', { device });
+      logLine(`audio output is now ${device ?? 'the system default'}`);
+    }
+  } catch (e) {
+    // A refused permission lands here too, and says so in the browser's own words.
+    logLine(e.message ?? String(e), true);
+  } finally {
+    audioDeviceSelect.disabled = false;
+    refreshAudioDevices().catch(() => {});
+  }
+}
+
 audioDeviceSelect.addEventListener('change', async () => {
+  if (window.__poptartHostReady) { chooseWebAudioOutput(audioDeviceSelect.value); return; }
   const device = audioDeviceSelect.value || null;
   const label = device ?? 'the system default';
   if (!scanSurvivesRestart('the output device')) {
@@ -15186,7 +18112,7 @@ function setAudioDeviceWarning(warning) {
 
 async function refreshAudioInputs() {
   try {
-    const { available, devices, selected, names, layout, active, warning } = await api('GET', '/api/audioInputs');
+    const { available, devices, selected, names, layout, active, warning, canReveal } = await api('GET', '/api/audioInputs');
     audioInputNeedsApply = !!warning;
     audioInputSelection = new Set(selected);
     audioInputSaved = [...audioInputSelection].sort().join(',');
@@ -15197,6 +18123,22 @@ async function refreshAudioInputs() {
       // No helper (non-macOS, or a checkout without the built binary): the booted device's own
       // inputs still work with absolute channel numbers, there just can't be more than one device.
       audioInputList.textContent = 'combining several input devices is unavailable on this system';
+      audioInputApply.disabled = true;
+      renderAudioInputLayout(layout, active);
+      return;
+    }
+    if (!devices.length && canReveal) {
+      // The browser build: inputs are unnamed until the page may use a microphone.
+      audioInputList.textContent = '';
+      const ask = document.createElement('button');
+      ask.className = 'small';
+      ask.textContent = 'list inputs… (asks for the microphone)';
+      ask.title = 'the browser names its audio inputs only to a page allowed to use one - this opens the default input, which input() would open anyway';
+      ask.addEventListener('click', async () => {
+        try { await api('POST', '/api/audioInputs', { reveal: true }); } catch (e) { logLine(e.message ?? String(e), true); }
+        refreshAudioInputs().catch(() => {});
+      });
+      audioInputList.appendChild(ask);
       audioInputApply.disabled = true;
       renderAudioInputLayout(layout, active);
       return;
@@ -15238,7 +18180,8 @@ async function refreshAudioInputs() {
       });
     }
 
-    for (const d of devices) addRow(d.uid, `${d.name} · ${d.inChannels} in`);
+    // A browser says how many channels an input has only once it is open.
+    for (const d of devices) addRow(d.uid, d.inChannels ? `${d.name} · ${d.inChannels} in` : d.name);
     renderAudioInputLayout(layout, active);
     syncAudioInputApply();
   } catch (e) {
@@ -15247,8 +18190,30 @@ async function refreshAudioInputs() {
   }
 }
 
+/**
+ * The browser build's input switch: the picked inputs open in place, and nothing restarts or
+ * stops playing, so none of the desktop's restart handling applies.
+ */
+async function applyWebAudioInputs(uids) {
+  audioInputApply.disabled = true;
+  try {
+    const { layout, warning } = await api('POST', '/api/audioInputs', { uids });
+    audioInputSaved = [...uids].sort().join(',');
+    audioInputNeedsApply = false;
+    audioInputs = layout ?? null;
+    renderAudioInputLayout(layout, null);
+    setAudioDeviceWarning(warning);
+    logLine(uids.length ? `audio inputs open: ${(layout ?? []).map((d) => d.name).join(' + ')}` : 'audio inputs: the default input, when a pattern asks for one');
+  } catch (e) {
+    logLine(e.message ?? String(e), true);
+  } finally {
+    syncAudioInputApply();
+  }
+}
+
 audioInputApply.addEventListener('click', async () => {
   const uids = [...audioInputSelection];
+  if (window.__poptartHostReady) { applyWebAudioInputs(uids); return; }
   if (!scanSurvivesRestart('the input devices')) return; // the selection stands; apply again later
   audioInputApply.disabled = true;
   engineStatus.textContent = 'restarting engine…';
@@ -15380,6 +18345,367 @@ const samplesDirInput = document.getElementById('samplesDirInput');
 const samplesDirSave = document.getElementById('samplesDirSave');
 const samplesDirReset = document.getElementById('samplesDirReset');
 const samplesDirNote = document.getElementById('samplesDirNote');
+
+// ---------------------------------------------------------------------------------------------
+// The wavetable folder (browser build).
+//
+// A wavetable is a file, and the Wavetable synth's table control takes one by name - but naming
+// a file one at a time is not how anybody keeps wavetables. So a folder is read in once: its
+// audio files are kept in this browser under the `wt` pack, and from then on they are what the
+// table control lists and what `.param("Osc 1 Table", "wt:mytable.wav")` resolves.
+//
+// Read in rather than pointed at, because a page cannot go back to a folder on its own later.
+// The bytes live in the same store the patterns do, so they survive a reload; "forget" empties it.
+// ---------------------------------------------------------------------------------------------
+
+const wavetableSection = document.getElementById('wavetableSection');
+const wavetableFolderPick = document.getElementById('wavetableFolderPick');
+const wavetableFolderClear = document.getElementById('wavetableFolderClear');
+const wavetableFolderInput = document.getElementById('wavetableFolderInput');
+const wavetableFolderNote = document.getElementById('wavetableFolderNote');
+
+/** What the table control can be pointed at, so a reopened window lists what was read in. */
+let wavetableFiles = [];
+
+/** Files worth reading as wavetables. Anything else in the folder is passed over in silence. */
+const WAVETABLE_EXTS = /\.(wav|aif|aiff)$/i;
+
+/** A byte count somebody can read at a glance. */
+function wavetableSize(bytes) {
+  if (bytes >= 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024 / 1024).toFixed(1)} GB`;
+  if (bytes >= 1024 * 1024) return `${Math.round(bytes / 1024 / 1024)} MB`;
+  return `${Math.max(1, Math.round(bytes / 1024))} kB`;
+}
+
+async function refreshWavetableFolder() {
+  if (!window.__poptartHostReady) return;
+  try {
+    const { files, bytes } = await api('GET', '/api/files?pack=wt');
+    wavetableFiles = files;
+    if (!files.length) {
+      wavetableFolderNote.textContent = '';
+      wavetableFolderClear.disabled = true;
+      return;
+    }
+    // What it costs, and what the browser is willing to give this site - the second half is the
+    // part worth knowing, since a folder of a couple of thousand tables is a real amount of
+    // storage and the browser is the one that decides when there is no more.
+    let quota = '';
+    try {
+      const estimate = await navigator.storage?.estimate?.();
+      if (estimate?.quota) {
+        quota = ` - this site is using ${wavetableSize(estimate.usage ?? 0)} of the ${wavetableSize(estimate.quota)} the browser allows it`;
+      }
+    } catch {
+      // A browser that will not say. The count and the size are the useful half anyway.
+    }
+    wavetableFolderNote.textContent =
+      `${files.length} wavetables, ${wavetableSize(bytes)} copied into this browser${quota}`;
+    wavetableFolderClear.disabled = false;
+  } catch {
+    // A build with no file store: the section is hidden anyway.
+  }
+}
+
+/**
+ * Reads a folder in, through the ordinary folder chooser.
+ *
+ * NOT through `showDirectoryPicker`, which would be the other way to do this. That asks the
+ * browser for standing permission over the folder, and the browser asks in its own words - about
+ * viewing and copying files, which reads like a page helping itself to a disk. The permission
+ * would only be worth that if the folder were kept open and read from later, and it is not: the
+ * files are copied in here and the folder is not touched again. So the milder of the two is the
+ * honest one, and it is also the one every browser has.
+ */
+function pickWavetableFolder() {
+  wavetableFolderInput.click();
+}
+
+/** Keeps each file under the `wt` pack, reporting as it goes: a folder can be a few hundred. */
+async function readWavetables(files) {
+  const wanted = [...files].filter((f) => WAVETABLE_EXTS.test(f.name));
+  if (!wanted.length) {
+    wavetableFolderNote.textContent = 'no .wav or .aiff files in that folder';
+    return;
+  }
+  wavetableFolderPick.disabled = true;
+  // Choosing a folder REPLACES what is kept rather than adding to it: a folder is the library,
+  // not an installment of one. Merging instead would leave the files of an older choice behind
+  // for ever, under names nothing points at any more, taking up the same room as the real ones.
+  await api('POST', '/api/files/clear', { pack: WAVETABLE_PACK }).catch(() => {});
+  let kept = 0;
+  let failed = 0;
+  for (const file of wanted) {
+    // Every tenth, so a folder of a couple of thousand is not two thousand layouts.
+    if ((kept + failed) % 10 === 0) wavetableFolderNote.textContent = `reading ${kept + failed + 1} of ${wanted.length}…`;
+    try {
+      // The path INSIDE the chosen folder is the name - "Basic/saw.wav" - so the folders a
+      // library is organized by survive being read in. The chosen folder's own name is dropped:
+      // it is the same for every file and says nothing.
+      const relative = file.webkitRelativePath || file.name;
+      const name = relative.includes('/') ? relative.slice(relative.indexOf('/') + 1) : relative;
+      // Deferred: the pack's index is written and registered once, after the loop. Per file it is
+      // a rewrite of the whole list, which a folder of a couple of thousand turns into minutes of
+      // writing the same names over and over.
+      await api('POST', '/api/files/add', { name, bytes: await file.arrayBuffer(), pack: WAVETABLE_PACK, defer: true });
+      kept += 1;
+    } catch (e) {
+      failed += 1;
+      logLine(`wavetables: ${file.name} - ${e.message ?? e}`, 'warn');
+    }
+  }
+  await api('POST', '/api/files/flush', { pack: WAVETABLE_PACK }).catch((e) => logLine(`wavetables: ${e.message ?? e}`, 'warn'));
+  wavetableFolderPick.disabled = false;
+  await refreshWavetableFolder();
+  logLine(`wavetables: kept ${kept}${failed ? `, ${failed} could not be read` : ''}`);
+  if (devicePanelAt) refreshDevicePanel();
+}
+
+// The credits, behind the "about poptart" button at the foot of settings: the license, where the
+// source is, and - in the browser build, whose devices are compiled from other projects' code -
+// whose each one is. The source has to be offered to whoever is using a page served over a
+// network (AGPL section 13); the device rows are the catalog's, not a list kept here.
+const aboutPanelEl = document.getElementById('aboutPanel');
+document.getElementById('aboutOpen').onclick = () => {
+  aboutPanelEl.classList.remove('hidden');
+  bringPanelToFront(aboutPanelEl);
+};
+document.getElementById('aboutClose').onclick = () => aboutPanelEl.classList.add('hidden');
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !aboutPanelEl.classList.contains('hidden')) aboutPanelEl.classList.add('hidden');
+});
+// The desktop shell hands a window.open() of a web address to the system browser (main.js).
+document.getElementById('discordOpen').onclick = () => window.open('https://discord.gg/g5F59UdN8b', '_blank', 'noopener');
+
+(async () => {
+  const licenseEl = document.getElementById('aboutLicense');
+  const devicesEl = document.getElementById('aboutDevices');
+  if (!licenseEl) return;
+  const source = 'https://github.com/glossings/poptart';
+  const link = (href, text) => `<a href="${href}" target="_blank" rel="noopener">${text}</a>`;
+  licenseEl.innerHTML = `Poptart, copyright 2026 ${link('https://glossing.dev', 'Glossing')}.<br>Free software under the ${link(`${source}/blob/main/LICENSE`, 'GNU AGPL v3')}, with no warranty.<br>Source: ${link(source, source.replace('https://', ''))}`;
+  if (!window.__poptartHostReady || !devicesEl) return;
+  try {
+    const about = await api('GET', '/api/about');
+    const rows = (about.devices ?? []).filter((d) => d.vendor && d.vendor !== 'poptart');
+    if (!rows.length) return;
+    const lines = rows.map((d) => `${d.id}: ${d.license}, ${d.vendor}${d.source ? ` (${link(d.source.split(' ')[0], 'source')})` : ''}`);
+    devicesEl.innerHTML = `Imported devices (${link(about.notices, 'notices')}):<br>${lines.join('<br>')}`;
+  } catch { /* the desktop has no compiled devices, and no route to ask */ }
+})();
+
+// ---------------------------------------------------------------------------------------------
+// Files tab - backup (the browser build only). Everything this browser keeps, as one file and
+// back: the only way somebody takes their work off a public site with no accounts.
+// ---------------------------------------------------------------------------------------------
+
+const storeSection = document.getElementById('storeSection');
+const storeNote = document.getElementById('storeNote');
+const storeImportInput = document.getElementById('storeImportInput');
+
+async function exportStore() {
+  storeNote.textContent = 'exporting…';
+  try {
+    const withAudio = document.getElementById('storeExportAudio')?.checked;
+    const bundle = await api('GET', withAudio ? '/api/export?audio=1' : '/api/export');
+    // In parts, never one string: with audio in it the export can be longer than the longest
+    // string the browser will make (see web/export-file.mjs).
+    const { exportParts } = await import('/web/export-file.mjs');
+    const blob = new Blob(exportParts(bundle), { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `poptart-${new Date().toISOString().slice(0, 10)}.json`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+    const n = Object.keys(bundle.files ?? {}).length;
+    const audioCount = Object.keys(bundle.audio?.bytes ?? {}).length;
+    storeNote.textContent = `exported ${n} record${n === 1 ? '' : 's'}${bundle.audio ? ` and ${audioCount} audio file${audioCount === 1 ? '' : 's'}` : ''}`;
+  } catch (e) {
+    storeNote.textContent = e.message ?? String(e);
+  }
+}
+
+async function importStore(file) {
+  storeNote.textContent = `reading ${file.name}…`;
+  try {
+    const { readExport } = await import('/web/export-file.mjs');
+    const bundle = await readExport(file);
+    const { written, skipped, audio } = await api('POST', '/api/import', { bundle, overwrite: false });
+    const kept = skipped + (audio?.skipped ?? 0);
+    storeNote.textContent = `imported ${written}${audio ? ` and ${audio.written} audio file${audio.written === 1 ? '' : 's'}` : ''}${kept ? ` · kept ${kept} already here` : ''}`;
+    refreshPatternFiles().catch(() => {});
+  } catch (e) {
+    storeNote.textContent = e instanceof SyntaxError ? `${file.name} is not a poptart export` : (e.message ?? String(e));
+  }
+}
+
+if (window.__poptartHostReady) {
+  // The headphone cue is the DJ desk's, and both are the desktop's alone: a row here that can
+  // only ever be disabled is a promise the page cannot keep.
+  document.getElementById('audioCueSelect')?.closest('label')?.classList.add('hidden');
+  storeSection.classList.remove('hidden');
+  const fileShareBtn = document.getElementById('fileShareBtn');
+  fileShareBtn.classList.remove('hidden');
+  fileShareBtn.addEventListener('click', () => shareLink().catch((e) => logLine(`could not make a share link: ${e.message ?? e}`, true)));
+  document.getElementById('storeExport').addEventListener('click', exportStore);
+  document.getElementById('storeImport').addEventListener('click', () => storeImportInput.click());
+  storeImportInput.addEventListener('change', () => {
+    const file = storeImportInput.files?.[0];
+    storeImportInput.value = '';
+    if (file) importStore(file);
+  });
+}
+
+const sampleFolderSection = document.getElementById('sampleFolderSection');
+const sampleFolderPick = document.getElementById('sampleFolderPick');
+const sampleFolderReconnect = document.getElementById('sampleFolderReconnect');
+const sampleFolderForget = document.getElementById('sampleFolderForget');
+const sampleFolderInput = document.getElementById('sampleFolderInput');
+const sampleFolderNote = document.getElementById('sampleFolderNote');
+const downloadsSection = document.getElementById('downloadsSection');
+const downloadsForget = document.getElementById('downloadsForget');
+const downloadsNote = document.getElementById('downloadsNote');
+
+if (window.__poptartHostReady) {
+  wavetableSection.classList.remove('hidden');
+  wavetableFolderPick.addEventListener('click', pickWavetableFolder);
+  wavetableFolderInput.addEventListener('change', () => {
+    const files = [...(wavetableFolderInput.files ?? [])];
+    wavetableFolderInput.value = '';
+    readWavetables(files).catch((e) => logLine(e.message ?? String(e), true));
+
+  });
+  // Forgetting a couple of thousand files takes a moment, so it says it is doing it and says
+  // when it is done. A button that goes quiet and then changes something else on the page is a
+  // button you press twice.
+  wavetableFolderClear.addEventListener('click', async () => {
+    const kept = wavetableFiles.length;
+    wavetableFolderClear.disabled = true;
+    wavetableFolderNote.textContent = 'forgetting\u2026';
+    try {
+      await api('POST', '/api/files/clear', { pack: WAVETABLE_PACK });
+      await refreshWavetableFolder();
+      wavetableFolderNote.textContent = `forgot ${kept} wavetable${kept === 1 ? '' : 's'}`;
+      if (devicePanelAt) refreshDevicePanel();
+    } catch (e) {
+      wavetableFolderNote.textContent = e.message ?? String(e);
+      wavetableFolderClear.disabled = false;
+    }
+  });
+  refreshWavetableFolder();
+  document.getElementById('librarySection').classList.add('hidden');
+  sampleFolderSection.classList.remove('hidden');
+  sampleFolderPick.addEventListener('click', () => pickSampleFolder().catch((e) => logLine(e.message ?? String(e), true)));
+  sampleFolderInput.addEventListener('change', () => {
+    const files = [...(sampleFolderInput.files ?? [])];
+    sampleFolderInput.value = '';
+    if (files.length) useSampleFolder(files).catch((e) => logLine(e.message ?? String(e), true));
+  });
+  // A browser that cannot keep a folder cannot be asked for one again either, so the same button
+  // is the offer to keep a copy there - labeled for its browser from the start, not swapped later.
+  const canKeepFolder = typeof window.showDirectoryPicker === 'function';
+  if (!canKeepFolder) {
+    sampleFolderReconnect.textContent = 'keep a copy';
+    sampleFolderReconnect.title = 'this browser forgets a folder when the page closes - copy its files into the browser\'s storage to have them next visit';
+  }
+  sampleFolderReconnect.addEventListener('click', async () => {
+    const route = canKeepFolder ? '/api/sampleFolder/reconnect' : '/api/sampleFolder/keep';
+    // A copy of a big folder takes a while: the note counts it along.
+    const ticking = canKeepFolder ? null : setInterval(refreshSampleFolder, 500);
+    sampleFolderReconnect.disabled = true;
+    const res = await api('POST', route).catch((e) => ({ error: e.message ?? String(e) }));
+    clearInterval(ticking);
+    if (res?.error) logLine(res.error, true);
+    await refreshSampleFolder();
+    loadSamples().catch(() => {});
+  });
+  sampleFolderForget.addEventListener('click', async () => {
+    await api('POST', '/api/sampleFolder/forget').catch((e) => logLine(e.message ?? String(e), true));
+    await refreshSampleFolder();
+    loadSamples().catch(() => {});
+  });
+  refreshSampleFolder();
+  downloadsSection.classList.remove('hidden');
+  downloadsForget.addEventListener('click', async () => {
+    downloadsForget.disabled = true;
+    downloadsNote.textContent = 'forgetting\u2026';
+    await api('POST', '/api/downloads/forget').catch((e) => logLine(e.message ?? String(e), true));
+    await refreshDownloads();
+  });
+  refreshDownloads();
+}
+
+/** The downloaded-packs row: how much samples() has kept in this browser. */
+async function refreshDownloads() {
+  try {
+    const { bytes, files } = await api('GET', '/api/downloads');
+    downloadsNote.textContent = files
+      ? `${files} file${files === 1 ? '' : 's'} from samples() repositories, ${wavetableSize(bytes)}`
+      : 'nothing downloaded by samples()';
+    downloadsForget.disabled = !files;
+  } catch {
+    // A host without a store: the section says nothing.
+  }
+}
+
+/**
+ * The browser build's sample library: a folder on this computer, read where it lives.
+ *
+ * Through `showDirectoryPicker` where the browser has it, unlike the wavetable folder above: these
+ * files are NOT copied in - a sample library is gigabytes - so the page has to keep the folder
+ * itself and read from it later, which is what that permission is for. A browser without it gets
+ * the ordinary chooser, whose files last as long as the page does.
+ */
+
+async function pickSampleFolder() {
+  if (typeof window.showDirectoryPicker !== 'function') {
+    sampleFolderInput.click();
+    return;
+  }
+  let handle;
+  try {
+    handle = await window.showDirectoryPicker({ id: 'poptart-samples', mode: 'read' });
+  } catch (e) {
+    if (e?.name === 'AbortError') return; // closed without choosing
+    throw e;
+  }
+  await useSampleFolder(handle);
+}
+
+async function useSampleFolder(source) {
+  sampleFolderPick.disabled = true;
+  sampleFolderNote.textContent = `reading ${source?.name ?? 'the folder'}…`;
+  try {
+    await api('POST', '/api/sampleFolder', { source });
+  } finally {
+    sampleFolderPick.disabled = false;
+    await refreshSampleFolder();
+    loadSamples().catch(() => {});
+  }
+}
+
+async function refreshSampleFolder() {
+  let s;
+  try {
+    s = await api('GET', '/api/sampleFolder');
+  } catch {
+    return;
+  }
+  const counts = `${s.packs} pack${s.packs === 1 ? '' : 's'}, ${s.files} files${s.truncated ? ' (the first of more)' : ''}`;
+  sampleFolderNote.textContent = {
+    none: '',
+    reading: `reading ${s.name}…`,
+    ready: `${s.name}: ${counts}, read from where they are`,
+    prompt: `${s.name}: the browser wants a click before poptart reads it again`,
+    session: `${s.name}: ${counts} - gone when this page closes. Keep a copy (${wavetableSize(s.bytes)}) to have it next time`,
+    copying: `copying ${s.progress?.done ?? 0} of ${s.progress?.total ?? s.files}…`,
+    copied: `${s.name}: ${counts}, copied into this browser`,
+  }[s.state] ?? '';
+  sampleFolderReconnect.disabled = s.state !== (typeof window.showDirectoryPicker === 'function' ? 'prompt' : 'session');
+  sampleFolderForget.disabled = s.state === 'none';
+}
 
 async function refreshSamplesDir() {
   try {
@@ -15736,7 +19062,8 @@ function mapStatusLine(st = mapStatus) {
     return st.phase === 'place' ? 'placing…' : 'scanning folders…';
   }
   if (!st.sources?.length) return 'add a folder to build the map';
-  return `${(st.count ?? 0).toLocaleString()} sounds on the map`;
+  const unread = st.unread ? ` - ${st.unread.toLocaleString()} could not be read, rebuild to try again` : '';
+  return `${(st.count ?? 0).toLocaleString()} sounds on the map${unread}`;
 }
 
 function mapRenderStatus() {
@@ -16776,7 +20103,10 @@ const PACK_BUFFER_CACHE = 48;
 async function packLoadBuffer(abs) {
   if (packBuffers.has(abs)) return packBuffers.get(abs);
   previewCtx ??= new (window.AudioContext || window.webkitAudioContext)();
-  const res = await fetch(`/api/sampleAudio?file=${encodeURIComponent(abs)}`);
+  let url = `/api/sampleAudio?file=${encodeURIComponent(abs)}`;
+  // The browser build has no server to stream from: the host answers with where the file is.
+  if (window.__poptartHostReady) ({ url } = await api('GET', url));
+  const res = await fetch(url);
   if (!res.ok) throw new Error(`can't read ${packBasename(abs)} (${res.status})`);
   const buf = await previewCtx.decodeAudioData(await res.arrayBuffer());
   if (packBuffers.size >= PACK_BUFFER_CACHE) packBuffers.delete(packBuffers.keys().next().value);
@@ -20866,6 +24196,19 @@ document.addEventListener('dragover', (e) => {
 document.addEventListener('drop', (e) => {
   endFileDrag();
   const file = midiFileIn(e.dataTransfer);
+  // The browser build: audio dropped on the window is kept in this browser's own files, since a
+  // page has no disk to find it on - and, dropped on the code, written in as the s() that plays it.
+  const audio = !file && window.__poptartHostReady
+    ? Array.from(e.dataTransfer?.files ?? []).filter((f) => isAudioPath(f.name))
+    : [];
+  if (audio.length) {
+    e.preventDefault();
+    e.stopPropagation();
+    const onCode = cm.getWrapperElement().contains(e.target);
+    const at = onCode ? cm.coordsChar({ left: e.clientX, top: e.clientY }, 'window') : null;
+    keepDroppedAudio(audio, at);
+    return;
+  }
   if (!file) {
     // Not ours: CodeMirror inserts a dropped text file itself, so leave drops on the editor to it.
     // Elsewhere, swallow the drop rather than letting the browser navigate away from the patch.
@@ -20876,6 +24219,22 @@ document.addEventListener('drop', (e) => {
   e.stopPropagation();
   openMidiImport(file);
 }, true);
+
+/** Files dropped on the browser build's window, into "your files" - and into the code at `at`. */
+async function keepDroppedAudio(files, at) {
+  const refs = [];
+  for (const file of files) {
+    try {
+      const res = await api('POST', '/api/files/add', { name: file.name, bytes: await file.arrayBuffer(), pack: 'files' });
+      refs.push(res.ref ?? `files:${file.name}`);
+    } catch (err) {
+      logLine(`${file.name}: ${err.message ?? err}`, true);
+    }
+  }
+  if (!refs.length) return;
+  if (at) cm.replaceRange(refs.map((r) => `s(${JSON.stringify(r)})`).join('\n'), at);
+  logLine(`kept in this browser: ${refs.join(', ')}${at ? '' : ` - play with s(${JSON.stringify(refs[0])})`}`);
+}
 
 const midiErr = (e) => String(e?.message ?? e).replace(/^\[[\w-]+\]\s*/, '');
 
@@ -21343,6 +24702,55 @@ function saveTheme() {
   applyTheme(name);
   logLine(existed ? `updated theme "${name}"` : `saved theme "${name}"`);
 }
+
+// The theme in use, as a file (theme-file.js). Every color is written out, not just the ones that
+// differ from the base, so the file looks the same wherever it is opened.
+function exportTheme() {
+  const cur = themeSelect.value;
+  const name = cur === 'custom' ? (themeNameInput.value.trim() || 'custom') : cur;
+  const computed = getComputedStyle(document.documentElement);
+  const vars = Object.fromEntries(THEME_VARS.map(([v]) => [v, cssColorToHex(computed.getPropertyValue(v))]));
+  const base = document.documentElement.dataset.theme ?? 'poptart';
+  const file = `${name.replace(/[^\w.-]+/g, '-').replace(/^-+|-+$/g, '') || 'theme'}.json`;
+  const url = URL.createObjectURL(new Blob([themeFileText({ name, base, vars })], { type: 'application/json' }));
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = file;
+  a.click();
+  URL.revokeObjectURL(url);
+  logLine(`exported theme "${name}" as ${file}`);
+}
+
+async function importTheme(file) {
+  if (!file) return;
+  let theme;
+  try {
+    theme = parseThemeFile(await file.text(), {
+      presets: PRESET_THEMES,
+      varNames: THEME_VARS.map(([v]) => v),
+      fallbackName: file.name.replace(/\.json$/i, ''),
+    });
+  } catch (e) {
+    logLine(`could not import ${file.name}: ${e.message ?? e}`, true);
+    return;
+  }
+  const map = savedThemes();
+  const name = freeThemeName(theme.name, theme, { taken: map, reserved: [...PRESET_THEMES, 'custom'] });
+  map[name] = { base: theme.base, vars: theme.vars };
+  writeSavedThemes(map);
+  rebuildThemeOptions();
+  applyTheme(name);
+  logLine(`imported theme "${name}"`);
+  if (theme.dropped) logLine(`${theme.dropped} entr${theme.dropped === 1 ? 'y' : 'ies'} in ${file.name} were not a known color and were left out`, true);
+}
+
+const themeImportInput = document.getElementById('themeImportInput');
+document.getElementById('themeExport').addEventListener('click', exportTheme);
+document.getElementById('themeImport').addEventListener('click', () => themeImportInput.click());
+themeImportInput.addEventListener('change', () => {
+  importTheme(themeImportInput.files?.[0]);
+  themeImportInput.value = ''; // the same file picked again is still a change
+});
 
 themeSelect.addEventListener('change', () => applyTheme(themeSelect.value));
 themeEditBtn.addEventListener('click', () => {
@@ -21873,6 +25281,7 @@ function askText(message, { label, value = '', confirm = 'ok', problem = null } 
 let preMix = null;
 
 async function openMixMode() {
+  if (desktopOnly('DJ mode')) return;
   // The current song is about to become deck A of a mix. Keep it first: a named song is saved
   // over silently (saving over the open pattern is what saving is), a nameless one gets one
   // three-way offer - "don't save" just means the pre-mix buffer only lives in this browser
@@ -25298,6 +28707,7 @@ function orgSay(text, isError = false) {
 }
 
 function setOrgPane3(mode) {
+  if (mode === 'disk' && desktopOnly('browsing audio files on disk')) return;
   orgPane3 = mode;
   if (mode === 'disk') {
     if (!orgDisk) orgBrowseTo(orgBrowseDir);
@@ -26814,6 +30224,91 @@ addHotkey(builtinHotkeys, 'app+j', () => {
   if (ed.somethingSelected()) openSnippetSave(ed);
   else openSnippetBrowser(ed);
 }, 'keep the selection as a snippet / open the snippet browser');
+
+// ---------------------------------------------------------------------------------------------
+// Embedded: a playable example in the guide (docs/docs.js). The page around the frame asks for
+// play and stop, and sizes the frame to what this reports - the code's own height, or, while a
+// panel is open (a piano roll, a device, a shape), enough for the panel, since every panel is
+// centered in the window and a short frame would cut it off.
+// ---------------------------------------------------------------------------------------------
+
+function embedPost(message) {
+  if (window.parent !== window) window.parent.postMessage(message, location.origin);
+}
+
+const EMBED_PANELS = '.preset-panel, .lfo-panel, .record-panel, .pianoroll-panel, .theme-panel, .dir-picker-backdrop';
+
+// The code's own height: CodeMirror's content plus the padding around it (style.css .cm-s-poptart).
+function embedCodeHeight() {
+  const cs = getComputedStyle(cm.getWrapperElement());
+  return Math.ceil(cm.getScrollInfo().height + parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom));
+}
+
+// Whether a panel is up. A panel is not measured: most of them size by the window (78vh and the
+// like), so a frame grown to fit one lets it grow again, and the two chase each other up the page in
+// a stairway. The guide gives the frame a real window's height instead, in one step, and the panel
+// lays out once, as it does in the app. (A fixed panel has no offsetParent, so "on screen" is
+// whether it has a box at all.)
+function embedPanelOpen() {
+  for (const el of document.querySelectorAll(EMBED_PANELS)) {
+    if (!el.classList.contains('hidden') && el.getClientRects().length) return true;
+  }
+  return false;
+}
+
+if (EMBEDDED) {
+  // What the guide reads back: the example as edited, for its "open" and for putting the code back
+  // when another example takes over. (cm is a top-level const, so not a property of the window.)
+  window.poptartEmbedCode = () => cm.getValue();
+  // No line numbers: the guide shows the same code without them until the example is used, and a
+  // gutter appearing at that moment would move every character over.
+  cm.setOption('lineNumbers', false);
+  let reported = '';
+  const report = () => {
+    const height = embedCodeHeight();
+    const panel = embedPanelOpen();
+    if (`${height}|${panel}` === reported) return;
+    reported = `${height}|${panel}`;
+    embedPost({ type: 'poptart-embed-height', height, panel });
+  };
+  // Reported the moment it changes - a panel opening or closing (its class), a panel growing as
+  // its contents arrive, the code getting longer - so the frame grows once, in step with the panel,
+  // rather than in a stairway behind a poll. One report per frame at most.
+  let queued = false;
+  const soon = () => {
+    if (queued) return;
+    queued = true;
+    requestAnimationFrame(() => { queued = false; report(); });
+  };
+  new MutationObserver(soon).observe(document.body, { attributes: true, attributeFilter: ['class'], subtree: true });
+  cm.on('change', soon);
+  setInterval(report, 1000); // anything the observers cannot see
+  const reportPlaying = () => embedPost({ type: 'poptart-embed-playing', playing: !!playing });
+  setInterval(reportPlaying, 250);
+  // Ready once the example's code is in the editor (the booting flag comes off - see editorReady)
+  // and pattern-core is in, which the widgets a double-click opens are built on.
+  coreReady.then(() => {
+    const waitReady = setInterval(() => {
+      if (document.documentElement.dataset.booting) return;
+      clearInterval(waitReady);
+      report();
+      embedPost({ type: 'poptart-embed-ready' });
+    }, 50);
+  });
+  window.addEventListener('message', (e) => {
+    if (e.origin !== location.origin || !e.data || typeof e.data !== 'object') return;
+    const { type, at } = e.data;
+    if (type === 'poptart-embed-play') evaluate(true, { byHand: true });
+    else if (type === 'poptart-embed-stop' && playing) doStop();
+    else if (type === 'poptart-embed-cursor' || type === 'poptart-embed-open') {
+      // Where the reader clicked in the guide's copy of the code; a double-click there opens that
+      // word's widget, exactly as a double-click in the editor would.
+      cm.focus();
+      cm.setCursor(cm.posFromIndex(at));
+      if (type === 'poptart-embed-open') openWidgetAt(cm.getValue(), at);
+    }
+  });
+}
 
 // ---------------------------------------------------------------------------------------------
 // The arrangement painter - ctrl+A.

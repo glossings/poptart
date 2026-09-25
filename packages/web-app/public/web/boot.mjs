@@ -1,0 +1,419 @@
+// Starting poptart in a page.
+//
+// Everything the desktop does in a Node process before the editor connects - loading the pattern
+// language, bringing up the engine, opening the store, reading the prebake - happens here
+// instead, and the editor waits for it through one promise. The editor's own `api()` is the only
+// thing that knows this file exists: it awaits `window.__poptartHostReady` and then calls the
+// host directly in place of a request.
+//
+// TWO THINGS THE BROWSER IMPOSES, and both shape what follows.
+//
+// An AudioContext may not make a sound until somebody has interacted with the page. So the
+// context is built suspended, the first real gesture resumes it, and until then the editor is
+// fully usable and simply silent. Starting playback IS a gesture, so in practice nobody meets
+// this; what it prevents is a page that looks broken because it was opened in a background tab.
+//
+// And the audio worklets have to be loaded before any device is built - an AudioWorkletNode for
+// a processor that has not been registered throws, and the error names the processor rather than
+// the file that failed to load, which is a confusing place to start looking.
+
+import { memoryStore, openStore } from './kv.mjs';
+import { createBlobs } from './blobs.mjs';
+import { createStorage } from './storage.mjs';
+import { createEvaluator } from './evaluate.mjs';
+import { createSampleStore, registerPacks, restorePacks } from './samples.mjs';
+import { createHost } from './host.mjs';
+import { createAudioOutputs } from './audio-output.mjs';
+import { createWebMidi } from './midi.mjs';
+import { createAudioInputs } from './audio-input.mjs';
+import { createPrebake } from './prebake.mjs';
+import { createBlockEvaluator } from './block-eval.mjs';
+import { createRemotePacks } from './remote-packs.mjs';
+import { createLocalFolder } from './local-folder.mjs';
+import { createWebSampleMap } from './sample-map.mjs';
+
+/** Where the pieces are served from. One place, so moving a folder is one edit. */
+export const PATHS = Object.freeze({
+  patternCore: '/pattern-core/index.mjs',
+  engine: '/web-engine/src/index.mjs',
+  worklets: '/web-engine/worklets',
+  builtInPacks: '/web-engine/packs',
+  devices: '/web-engine/devices',
+  sampleMapCore: '/osc-engine/sample-map-core.mjs',
+});
+
+/**
+ * Runs the sample map's analysis on a worker, started on the first job. Where a module worker
+ * cannot be made, the jobs run on the page instead (see sample-map.mjs's defaults) - slower to
+ * sit through, but the map is still a map.
+ */
+function sampleMapWorker(core, warn) {
+  let worker = null;
+  let failed = false;
+  let seq = 0;
+  const pending = new Map();
+  const job = (kind, args) => {
+    if (!worker && !failed) {
+      try {
+        worker = new Worker(new URL('./sample-map-worker.mjs', import.meta.url), { type: 'module' });
+        worker.onmessage = ({ data }) => {
+          const p = pending.get(data.id);
+          if (!p) return;
+          pending.delete(data.id);
+          if (data.error) p.reject(new Error(data.error));
+          else p.resolve(data.result);
+        };
+      } catch (err) {
+        failed = true;
+        warn(`[samples] the sample map is working on the page's own thread - ${err.message ?? err}`);
+      }
+    }
+    if (!worker) {
+      return Promise.resolve().then(() => (kind === 'features'
+        ? args.heads.map((h) => (h ? { features: core.extractFeatures(h.samples, h.sampleRate, h.totalSeconds), seconds: h.totalSeconds } : null))
+        : core.deriveMap(args.vectors, args.paths, args.opts)));
+    }
+    const id = ++seq;
+    return new Promise((resolve, reject) => {
+      pending.set(id, { resolve, reject });
+      worker.postMessage({ id, kind, args });
+    });
+  };
+  return {
+    analyze: (heads) => job('features', { heads }),
+    derive: (vectors, paths, opts) => job('derive', { vectors, paths, opts }),
+  };
+}
+
+/** The packs that ship with the page, so a fresh load is playable with no network at all. */
+const BUILT_IN_PACKS = Object.freeze(['pt_kit', 'pt_keys']);
+
+const say = (line) => console.log(`[poptart] ${line}`);          // eslint-disable-line no-console
+const warn = (line) => console.warn(`[poptart] ${line}`);        // eslint-disable-line no-console
+
+/**
+ * Resumes the audio context the first time somebody touches the page.
+ *
+ * Registered on several events because browsers disagree about which ones count, and removed
+ * once it has worked so the page is not carrying listeners for the rest of the session.
+ */
+function resumeOnGesture(context) {
+  if (context.state !== 'suspended') return;
+  const events = ['pointerdown', 'keydown', 'touchstart'];
+  const wake = () => {
+    context.resume().then(() => {
+      for (const e of events) window.removeEventListener(e, wake);
+    }).catch(() => {});
+  };
+  for (const e of events) window.addEventListener(e, wake, { passive: true });
+}
+
+/** The manifests of the packs committed alongside the app. */
+export async function readBuiltInPacks(fetchImpl) {
+  const out = [];
+  for (const id of BUILT_IN_PACKS) {
+    try {
+      const res = await fetchImpl(`${PATHS.builtInPacks}/${id}/manifest.json`);
+      if (res.ok) out.push(await res.json());
+    } catch (err) {
+      warn(`the built-in pack ${id} did not load - ${err.message}`);
+    }
+  }
+  return out;
+}
+
+/** How long boot waits for the library index before starting without it (see boot()). */
+export const LIBRARY_WAIT_MS = 3000;
+
+/**
+ * The sourced packs, from the index published beside them.
+ *
+ * A failure here is not a failure to start: the index lives on a CDN and the app has to work
+ * when that is unreachable, behind a filter, or simply slow. What is lost is the packs somebody
+ * has not downloaded yet, and the built-in ones still play.
+ */
+export async function readLibrary(fetchImpl, base, validateIndex) {
+  if (!base) return { packs: [], problems: [] };
+  try {
+    const res = await fetchImpl(`${base}/index.json`);
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+    const { packs, problems } = validateIndex(await res.json());
+    for (const p of problems) warn(p);
+    return { packs, problems };
+  } catch (err) {
+    warn(`the sample library is not reachable, so only the built-in packs are here - ${err.message}`);
+    return { packs: [], problems: [`the library did not load: ${err.message}`] };
+  }
+}
+
+/**
+ * Brings up everything and returns the host the editor talks to.
+ *
+ * Called once. The promise it returns is what `api()` awaits, so a request made before this has
+ * finished simply waits rather than racing it.
+ */
+export async function boot({
+  AudioContextCtor = globalThis.AudioContext ?? globalThis.webkitAudioContext,
+  fetchImpl = fetch.bind(globalThis),
+  packBase = null,
+  // A page that plays examples rather than somebody's work - the guide. It keeps nothing, opens
+  // no store another tab might be holding, and runs no prebake, so an example plays the same for
+  // everyone whatever their own setup redefines.
+  isolated = false,
+} = {}) {
+  const patternCore = await import(PATHS.patternCore);
+  const webEngine = await import(PATHS.engine);
+
+  const context = new AudioContextCtor({ latencyHint: 'interactive' });
+  resumeOnGesture(context);
+
+  // The worklets have to be registered before any device is built, and the ported devices need
+  // their compiled DSP in hand for the same reason: building one is synchronous, so anything it
+  // needs has to have arrived. Both are fetched at once; neither depends on the other.
+  const [, binaries] = await Promise.all([
+    webEngine.loadWorklets(context, PATHS.worklets),
+    webEngine.loadDeviceBinaries(PATHS.devices, fetchImpl),
+  ]);
+  for (const line of binaries.problems) warn(line);
+
+  // Storage first, so that a store which refuses to open is one line in the console rather than
+  // a page that appears to work and silently keeps nothing.
+  const opened = isolated ? { kind: 'isolated', store: memoryStore() } : await openStore();
+  if (opened.kind === 'ephemeral') {
+    warn(`nothing will be saved in this window - ${opened.reason ?? 'the browser would not open a store'}`);
+  } else if (opened.kind === 'durable' && !opened.persisted) {
+    say('saving locally; the browser may clear this site\'s data if it runs short of room');
+  }
+  const store = opened.store ?? memoryStore();
+  const blobs = createBlobs(store);
+  // pinned-defs.js owns the ★ library's file format and the snippet format (see storage and prebake).
+  await import('./pinned-defs.js');
+  const storage = createStorage(store, { meta: globalThis, blobs, snippetFormat: globalThis.poptartPinnedDefs });
+
+  const samples = createSampleStore({ context, store, warn });
+  // A pack written as a list - _pack("kit", […]), what the pack panel and the sample map write -
+  // is read from the language, buffer first, as the desktop engine is handed it.
+  samples.setPackResolver((id) => patternCore.lookupPack(id)?.files ?? null);
+  const engine = new webEngine.WebAudioEngine(context, {
+    registry: webEngine.catalog,
+    samples,
+    warn,
+    deviceModules: binaries.modules,
+    // How a control that takes a drawn curve reads one: the language's own parser and sampler,
+    // so the shape editor and the synth agree about what a curve is.
+    shapes: {
+      looksLikeShapeData: patternCore.looksLikeShapeData,
+      parseShapePoints: patternCore.parseShapePoints,
+      sampleShape: patternCore.sampleShape,
+    },
+  });
+  const transport = new patternCore.Transport(() => engine.getTime(), { cps: 0.5, paused: true });
+
+  // The prebake is somebody's own setup file, and it runs before any pattern so its bindings are
+  // in scope for every one of them.
+  const prebakeDefs = new Map();
+  // Packs a pattern reads in from a repository with samples(): kept in the same store as the
+  // rest, so a repository's listing and its files come down once per browser.
+  const remotePacks = createRemotePacks({
+    fetchImpl,
+    store,
+    samples,
+    onPacks: (manifests) => registerPacks(patternCore, manifests),
+    warn,
+    say,
+  });
+  const evaluator = createEvaluator({ patternCore, engine, transport, prebakeDefs, log: say, remotePacks });
+
+  const builtIn = await readBuiltInPacks(fetchImpl);
+  const builtInUrl = (id, file) => `${PATHS.builtInPacks}/${id}/${file}`;
+  registerPacks(patternCore, builtIn);
+  for (const manifest of builtIn) {
+    await samples.ensure(manifest, builtInUrl);
+  }
+  // The files added from this browser before - one-offs and a wavetable folder - so a pattern
+  // that names one plays again without being pointed at it a second time.
+  const added = isolated ? [] : await samples.loadFiles();
+  registerPacks(patternCore, added.filter((m) => m.files.length));
+  engine.setTempo(transport.cps * 240, transport.secAt(0));
+
+  // The sourced packs are registered, not loaded: the first pattern to name one starts it.
+  //
+  // Waited for, but only briefly. The index is on a CDN, and a network that drops the connection
+  // rather than refusing it - a filter, a captive portal - leaves the fetch hanging for as long
+  // as the browser's own connect timeout, a minute or more, with the whole editor waiting behind
+  // it. Past LIBRARY_WAIT_MS the page comes up on the built-in packs and the library joins when
+  // it answers; a pack registered late is registered all the same (registerPacks remembers it
+  // across prebake runs).
+  const base = packBase ?? webEngine.DEFAULT_PACK_BASE;
+  // One object the host keeps and reads at every call, filled in whenever the index answers.
+  const library = { packs: [], problems: [], urlFor: (id, file) => webEngine.fileUrl(base, id, file) };
+  const addLibrary = (read) => {
+    library.packs = read.packs;
+    library.problems = read.problems;
+    registerPacks(patternCore, read.packs);
+    samples.register(read.packs, library.urlFor);
+  };
+  const libraryRead = readLibrary(fetchImpl, base, webEngine.validateIndex);
+  const early = await Promise.race([libraryRead, new Promise((r) => setTimeout(() => r(null), LIBRARY_WAIT_MS))]);
+  if (early) addLibrary(early);
+  else {
+    say('the sample library is taking a while to answer - starting on the built-in packs, the rest join when it does');
+    libraryRead.then((late) => {
+      addLibrary(late);
+      if (late.packs.length) say(`sample library: ${late.packs.length} packs`);
+    });
+  }
+
+  // The output device chosen last time, if it is still plugged in. Not awaited past a moment:
+  // a device that takes its time to answer should not hold up the editor.
+  const outputs = createAudioOutputs({ context });
+  const restored = await Promise.race([outputs.restore(), new Promise((r) => setTimeout(() => r(null), 1500))]);
+  if (restored) say(`playing to ${restored}`);
+
+  // The sample library folder chosen on an earlier visit, read again where the browser still
+  // allows it. Walking a big library takes a moment, so the editor does not wait on it past the
+  // same moment it gives the output device; the packs join, and say so, when the walk is done.
+  const localFolder = createLocalFolder({
+    store: isolated ? null : store,
+    samples,
+    onPacks: (manifests) => registerPacks(patternCore, manifests),
+    warn,
+    say,
+  });
+  // The sample map, over every pack above. Built the first time it is opened, not now. A map that
+  // cannot load costs the map and nothing else.
+  const mapCore = await import(PATHS.sampleMapCore).catch((err) => {
+    warn(`[samples] the sample map is not available - ${err.message ?? err}`);
+    return null;
+  });
+  const mapRunner = mapCore && sampleMapWorker(mapCore, warn);
+  const sampleMap = mapCore && createWebSampleMap({
+    core: mapCore,
+    store: isolated ? null : store,
+    // The packs in the order the host lists them (host.mjs, allPacks), and the files added here.
+    packs: () => [
+      ...builtIn,
+      ...library.packs,
+      ...remotePacks.packs().map((p) => p.manifest),
+      ...localFolder.packs().map((p) => p.manifest),
+      ...samples.addedPacks().filter((m) => m.files.length),
+    ],
+    bytesOf: async (pack, index) => {
+      const held = await samples.bytes(pack, index);
+      if (held) return held;
+      // A shipped pack is fetched once at boot and decoded, but its bytes are not always kept.
+      const manifest = builtIn.find((m) => m.id === pack);
+      const file = manifest?.files[index]?.file;
+      if (!file) return null;
+      const res = await fetchImpl(builtInUrl(pack, file));
+      return res.ok ? res.arrayBuffer() : null;
+    },
+    decode: (bytes) => context.decodeAudioData(bytes),
+    analyze: mapRunner.analyze,
+    derive: mapRunner.derive,
+    log: say,
+  });
+
+  if (!isolated) {
+    await Promise.race([localFolder.restore().catch((err) => warn(`[samples] ${err.message ?? err}`)), new Promise((r) => setTimeout(r, 1500))]);
+    if (localFolder.status().state === 'prompt') say(`sample folder: ${localFolder.status().name} needs a click before this page reads it again - settings, "allow again"`);
+  }
+
+  // MIDI from the controllers on this machine. Asked for only when something wants it (see
+  // midi.mjs); every message goes to the engine, which plays the tracks listening to that device,
+  // and a controller also to the language's own store, which a midicc() read in a pattern samples.
+  const midi = createWebMidi({
+    transport,
+    context,
+    warn,
+    onMessage: (device, msg) => {
+      engine.midiIn(device, msg.kind, msg.channel, msg.num, msg.value);
+      if (msg.kind === 'cc') patternCore.feedMidiCC(device, msg.channel, msg.num, msg.value);
+    },
+  });
+  // Clock out chosen on an earlier visit: the permission was given then, so this does not prompt.
+  if (midi.available && midi.clockWanted) midi.enable().catch((err) => warn(err.message));
+
+  // The output channel count chosen on an earlier visit, where the device still has them.
+  try {
+    const saved = Number(globalThis.localStorage?.getItem('poptart.outputChannels'));
+    if (saved > 2) engine.setOutputChannels(saved);
+  } catch { /* storage off */ }
+
+  // Audio in: the inputs picked in settings, or the default one the first time input() is read.
+  // The engine takes its channels off one node; the language is told the channel layout, which
+  // is what input("Scarlett", 1) is resolved against.
+  const inputs = createAudioInputs({
+    context,
+    onChange: (node, channels, layout) => {
+      engine.setHardwareInput(node, channels);
+      patternCore.setAudioInputLayout(layout);
+    },
+  });
+  engine.onAudioInputWanted = () => { inputs.want()?.catch?.(() => {}); };
+  inputs.restore().then((layout) => { if (layout?.length) say(`audio in: ${layout.map((d) => d.name).join(' + ')}`); });
+
+  // The ★ library and the prebake, run before any pattern so every buffer starts from them. The
+  // pinned file's format belongs to the desktop's pinned-defs.js, loaded above.
+  let prebake = null;
+  if (!isolated) {
+    try {
+      prebake = createPrebake({
+        patternCore, storage, prebakeDefs, createBlockEvaluator,
+        pinnedDefs: globalThis.poptartPinnedDefs,
+        dehydrate: (code) => storage.dehydrateOnLoad(code),
+        log: say,
+        afterClear: () => restorePacks(patternCore),
+      });
+      for (const line of await prebake.run()) warn(`prebake ${line}`);
+    } catch (err) {
+      warn(`the prebake did not run - ${err?.message ?? err}`);
+    }
+  }
+
+  const host = createHost({
+    patternCore, engine, transport, evaluator, storage, samples, outputs, midi, inputs,
+    slicing: { detectOnsets: webEngine.detectOnsets, monoOf: webEngine.monoOf },
+    prebake,
+    catalog: webEngine.catalog,
+    // What the generated device window is built and edited through. Handed in rather than
+    // imported so the host stays a plain route table with no idea where a device comes from.
+    panel: {
+      buildPanel: webEngine.buildPanel,
+      valueFromPosition: webEngine.valueFromPosition,
+      paramArgFor: webEngine.paramArgFor,
+      formatValue: webEngine.formatValue,
+      clampParam: webEngine.clampParam,
+      normalize: webEngine.normalize,
+      findParam: webEngine.findParam,
+      // The pictures. `figuresFor` is the one a drag uses: it recomputes only the figures the
+      // parameter that moved appears in, so turning a cutoff does not rebuild a wavetable stack.
+      figuresFor: webEngine.figuresFor,
+    },
+    // Memoized in web-engine, so this hands the same frames the synth is reading rather than a
+    // second copy of them, and builds them on the first device window rather than at boot.
+    tables: webEngine.sharedBuiltInTables,
+    // How a file becomes frames, for the wavetable browser's preview: the same two functions
+    // the engine cuts a loaded table with, so what is drawn is what would be played.
+    wavetables: { decodeWav: webEngine.decodeWav, framesOf: webEngine.framesOf },
+    builtIn,
+    builtInUrl,
+    library,
+    remotePacks,
+    localFolder,
+    sampleMap,
+  });
+
+  say(`ready - ${webEngine.catalog.list().length} devices, ${builtIn.length + library.packs.length} packs`);
+  return {
+    ...host,
+    context,
+    engine,
+    transport,
+    storage,
+    samples,
+    patternCore,
+    webEngine,
+    storeKind: opened.kind,
+  };
+}

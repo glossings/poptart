@@ -1,0 +1,43 @@
+{
+  "id": "pt_keys",
+  "title": "poptart keys",
+  "description": "Melodic one-shots, all at middle C.",
+  "kind": "melodic",
+  "files": [
+    {
+      "file": "pluck.wav",
+      "name": "pluck",
+      "license": "CC0-1.0",
+      "source": "rendered by packages/web-engine/build/render-packs.mjs",
+      "by": null
+    },
+    {
+      "file": "bell.wav",
+      "name": "bell",
+      "license": "CC0-1.0",
+      "source": "rendered by packages/web-engine/build/render-packs.mjs",
+      "by": null
+    },
+    {
+      "file": "bass.wav",
+      "name": "bass",
+      "license": "CC0-1.0",
+      "source": "rendered by packages/web-engine/build/render-packs.mjs",
+      "by": null
+    },
+    {
+      "file": "pad.wav",
+      "name": "pad",
+      "license": "CC0-1.0",
+      "source": "rendered by packages/web-engine/build/render-packs.mjs",
+      "by": null
+    },
+    {
+      "file": "stab.wav",
+      "name": "stab",
+      "license": "CC0-1.0",
+      "source": "rendered by packages/web-engine/build/render-packs.mjs",
+      "by": null
+    }
+  ]
+}

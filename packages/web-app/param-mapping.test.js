@@ -113,3 +113,110 @@ test('MappedEngine hands the resolver the referencing track, so references scope
   mapped.injectAudio('#b1', 2, 'track:kick', 1);
   assert.deepEqual(calls.pop(), ['injectAudio', '#b1', 2, 'track:#b-kick', 1]);
 });
+
+// ---- capabilities the engine underneath may not have -------------------------------------------
+
+// The guards above drive the wrapper with a Proxy that answers every property with a function,
+// which is the right stand-in for "did the forwarder get written" and the wrong one for "does the
+// engine underneath actually have this". The scheduler feature-detects a few calls before making
+// them, and for those the wrapper has to answer for the real engine rather than for itself.
+
+/** Every engine call the scheduler asks about before making it, read from its source. */
+function schedulerOptionalCalls() {
+  const schedulerPath = path.join(path.dirname(require.resolve('@poptart/pattern-core')), 'scheduler.mjs');
+  const src = fs.readFileSync(schedulerPath, 'utf8');
+  const found = [...src.matchAll(/typeof this\.engine\.([A-Za-z0-9_]+) === 'function'/g)].map((m) => m[1]);
+  return [...new Set(found)];
+}
+
+test('every call the scheduler feature-detects is one the desktop engine has, or is hidden', () => {
+  // The point of the list is that it stays in step with the scheduler. A new feature-detected
+  // call that OscEngine does not implement has to join OPTIONAL, or the wrapper will claim it.
+  const oscSource = fs.readFileSync(path.join(__dirname, '..', 'osc-engine', 'index.js'), 'utf8');
+  const unlisted = schedulerOptionalCalls().filter((name) => (
+    !MappedEngine.OPTIONAL.includes(name) && !new RegExp(`^\\s{2}(async )?${name}\\(`, 'm').test(oscSource)
+  ));
+  assert.deepEqual(unlisted, [], 'a capability the desktop engine lacks must be hidden, not forwarded blindly');
+});
+
+test('a capability the engine lacks is not advertised by the wrapper', () => {
+  // The desktop's shape: an engine with everything except the parameter-routing pair. Forwarding
+  // those unconditionally made `typeof engine.connectParam === 'function'` true on the wrapper,
+  // so the scheduler wired the route and the forward landed on undefined - a TypeError that took
+  // the evaluation down, where the scheduler's own answer is to warn once and keep playing.
+  const engine = {};
+  for (const name of schedulerEngineCalls()) {
+    if (!MappedEngine.OPTIONAL.includes(name)) engine[name] = () => {};
+  }
+  const mapped = new MappedEngine(engine);
+
+  for (const name of MappedEngine.OPTIONAL) {
+    assert.equal(typeof mapped[name], 'undefined', `${name} should not look available`);
+  }
+  // Everything else still forwards, so hiding one capability cannot quietly hide another.
+  for (const name of schedulerEngineCalls()) {
+    if (!MappedEngine.OPTIONAL.includes(name)) {
+      assert.equal(typeof mapped[name], 'function', `${name} should still be forwarded`);
+    }
+  }
+});
+
+test('a capability the engine does have is forwarded as before', () => {
+  const calls = [];
+  const engine = {};
+  for (const name of schedulerEngineCalls()) engine[name] = (...a) => { calls.push([name, ...a]); };
+  const mapped = new MappedEngine(engine);
+
+  assert.equal(typeof mapped.connectParam, 'function');
+  mapped.setTrackResolver((label) => (label === 'mod' ? '#3' : label));
+  mapped.connectParam('#1', 0, 'Osc 1 Phase', 'mod', 0.5, 0);
+  assert.deepEqual(calls.pop(), ['connectParam', '#1', 0, 'Osc 1 Phase', '#3', 0.5, 0]);
+  mapped.disconnectParam('#1', 0, 'Osc 1 Phase');
+  assert.deepEqual(calls.pop(), ['disconnectParam', '#1', 0, 'Osc 1 Phase']);
+});
+
+test('a word on a MAPPED parameter is handed on as it stands, not converted into NaN', () => {
+  // The scheduler passes strings through to device parameters now - an enum label, which the
+  // browser build's devices take. A label that lands on a parameter serum2.json maps in Hz went
+  // through the unit conversion and came back NaN, and NaN is typeof number, so it sailed past
+  // the engine's own "a plugin parameter is a number" guard and was sent to sclang every poll.
+  const calls = [];
+  const engine = {};
+  for (const name of schedulerEngineCalls()) engine[name] = (...a) => { calls.push([name, ...a]); };
+  const mapped = new MappedEngine(engine);
+  mapped.mappings = new Map([['Serum 2', { plugin: 'Serum 2', params: { 'Filter 1 Freq': { min: 20, max: 20000, curve: 'log' } } }]]);
+  mapped.setChain('#1', ['Serum 2']);
+
+  mapped.setParam('#1', 0, 'Filter 1 Freq', 'lowpass', 0);
+  const [, , , , value] = calls.pop();
+  assert.equal(value, 'lowpass', 'the word reaches the engine, for the engine to drop and name');
+
+  // A number on the same parameter is still converted, which is the reason the mapping exists.
+  mapped.setParam('#1', 0, 'Filter 1 Freq', 2000, 0);
+  const [, , , , mappedValue] = calls.pop();
+  assert.ok(mappedValue > 0 && mappedValue < 1, `a real value still maps: ${mappedValue}`);
+});
+
+test('a word on a plugin parameter is reported on the console once per evaluation', () => {
+  // The desktop engine drops it (a VST parameter is a number), and dropping it without a word is
+  // a line of the pattern that silently does nothing.
+  const engine = {};
+  for (const name of schedulerEngineCalls()) engine[name] = () => {};
+  const mapped = new MappedEngine(engine);
+  const lines = [];
+  mapped.warn = (line) => lines.push(line);
+  mapped.setChain('#1', ['Serum 2']);
+
+  mapped.setParam('#1', 0, 'Filter Type', 'lowpass', 0);
+  mapped.setParam('#1', 0, 'Filter Type', 'lowpass', 0.1);
+  assert.equal(lines.length, 1, 'the scheduler resends a held value every step; it is said once');
+  assert.match(lines[0], /"Filter Type" on Serum 2/);
+  assert.match(lines[0], /"lowpass"/);
+
+  mapped.setParam('#1', 0, 'Filter Type', 0.25, 0.2);
+  assert.equal(lines.length, 1, 'a number says nothing');
+
+  mapped.setChain('#1', ['Serum 2']); // the next evaluation
+  mapped.setParam('#1', 0, 'Filter Type', 'lowpass', 0.3);
+  assert.equal(lines.length, 2, 'still wrong after a re-evaluation, so said again');
+});

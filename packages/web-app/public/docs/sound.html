@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Instruments &amp; effects · poptart guide</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <script src="/theme-boot.js"></script>
+    <link rel="stylesheet" href="/themes.css" />
+    <link rel="stylesheet" href="/vendor/codemirror/lib/codemirror.css" />
+    <link rel="stylesheet" href="/docs/docs.css" />
+  </head>
+  <body data-page="sound">
+    <div class="wrap">
+      <nav class="chapters"></nav>
+      <main>
+        <header class="chapter-head">
+          <p class="kicker">Chapter 4</p>
+          <h1>Instruments &amp; effects</h1>
+          <p class="lede">Load a sound, chain effects after it, set any control.</p>
+        </header>
+
+        <h2 id="chain">The chain</h2>
+        <p>
+          <code>.synth("…")</code> loads an instrument; each <code>.fx("…")</code> adds an effect after it.
+          A chain holds up to twenty effects.
+        </p>
+        <pre data-run data-build="web"><code>lead: note("c4 e4 g4 b4")
+  .synth("Wavetable")
+  .fx("Chorus")
+  .fx("Delay")</code></pre>
+        <pre data-build="desktop"><code>lead: note("c4 e4 g4 b4")
+  .synth("Serum 2")
+  .fx("ValhallaDelay")
+  .fx("Pro-Q 3")</code></pre>
+        <p data-build="desktop">
+          The names are your plugins' own. This guide uses <code>"Serum 2"</code>, <code>"Diva"</code> and
+          so on as stand-ins: <strong>use plugins you have</strong>. The sounds tab lists them (press
+          <strong>rescan</strong> after installing one; click a name to copy it), and names autocomplete
+          inside the quotes.
+        </p>
+        <p data-build="web">Every device is built into the page. The sounds tab lists them, and names autocomplete inside the quotes.</p>
+        <table data-build="web">
+          <tr><th>Instruments</th><th></th></tr>
+          <tr><td><code>Wavetable</code></td><td>two wavetable oscillators with warping, a sub and noise</td></tr>
+          <tr><td><code>FM</code></td><td>eight operators, each able to modulate every other</td></tr>
+          <tr><td><code>Granular</code></td><td>a sample played as a cloud of grains</td></tr>
+          <tr><td><code>Plaits</code></td><td>a macro oscillator with twenty-four models behind three controls (monophonic)</td></tr>
+          <tr><td><code>Braids</code></td><td>forty-eight oscillator models behind two controls</td></tr>
+          <tr><td><code>Rings</code></td><td>a resonator struck by its own exciter</td></tr>
+          <tr><td><code>Elements</code></td><td>a modal resonator played by a bow, a breath and a mallet (monophonic)</td></tr>
+        </table>
+        <table data-build="web">
+          <tr><th>Effects</th><th></th></tr>
+          <tr><td><code>Filter</code> · <code>EQ</code></td><td>multimode filter · four-band equalizer</td></tr>
+          <tr><td><code>Distort</code> · <code>Overdrive</code> · <code>Crush</code></td><td>waveshaping · band-limited drive · bits and rate</td></tr>
+          <tr><td><code>Compressor</code> · <code>Multiband</code> · <code>Limiter</code> · <code>Ducker</code></td><td>dynamics; the compressor and ducker take a sidechain</td></tr>
+          <tr><td><code>Delay</code> · <code>GrainEcho</code> · <code>Stutter</code></td><td>stereo delay · grain delay · synced repeats</td></tr>
+          <tr><td><code>Chorus</code> · <code>Flanger</code> · <code>Phaser</code></td><td>modulation</td></tr>
+          <tr><td><code>Reverb</code> · <code>Convolver</code> · <code>CloudSeed</code> · <code>Galactic</code></td><td>algorithmic · impulse responses · two very large spaces</td></tr>
+          <tr><td><code>Clouds</code> · <code>Shift</code></td><td>granular processing · pitch and formant shifting</td></tr>
+        </table>
+
+        <h2 id="params">Controls</h2>
+        <p>
+          <code>.param("name", value)</code> sets a control on the <strong>last</strong> device in the chain,
+          by the name its panel shows. The value can be a number, a pattern, or anything that moves
+          (<a href="/docs/modulation.html">next chapter</a>).
+        </p>
+        <pre data-run data-build="web"><code>keys: n("0 2 4 &lt;5 7&gt;").scale("D dorian").synth("Plaits")
+  .param("Engine", "Chord")
+  .param("Timbre", sine(0.2))
+  .fx("Reverb").param("Mix", 0.35).postgain(0.6)</code></pre>
+        <pre data-build="desktop"><code>.param("Filter 1 On", 1)
+.param("Filter 1 Freq", 0.6)</code></pre>
+        <p data-build="web">
+          Every value is a <strong>0..1 position</strong> on the control, and the device maps it to its real
+          range (Cutoff runs 20 Hz to 20 kHz, so 0.5 is about 630 Hz). A list control takes its option's
+          name (<code>"ladder"</code>) or index; a switch takes 0 or 1. So an LFO or a macro drives any
+          control as it is.
+        </p>
+        <p data-build="desktop">
+          Values are 0..1 unless a mapping file in <code>mappings/*.json</code> gives them real units (one
+          ships for Serum 2, so its cutoff takes Hertz). When a plugin reuses a name, <code>"Frequency#95"</code>
+          picks one by index; autocomplete shows that form where names collide.
+        </p>
+        <figure class="shot framed narrow" data-build="web">
+          <img src="/docs/img/sounds-tab.png" width="320" height="711" alt="The sounds tab: the bass track's Wavetable controls listed with their values, then the devices and the sample packs." />
+        </figure>
+        <p>
+          To find names, evaluate once, then open <strong>params</strong> in the sounds tab: every control
+          of every device on the track, searchable, click to copy. They autocomplete inside
+          <code>.param("…")</code> too.
+        </p>
+        <p>
+          <code>.wet(v)</code> after a device blends it with what goes into it: 0 bypasses, 1 (the default) is
+          fully processed. It takes a signal, so an effect can fade in over a song.
+        </p>
+
+        <h2 id="presets">Presets</h2>
+        <figure class="shot" data-build="web">
+          <img src="/docs/img/device-wavetable.png" width="944" height="764" alt="The Wavetable device panel: two oscillators with their wavetables, a sub and noise, and an amplitude envelope." />
+          <figcaption>Double-click <code>synth</code> or <code>fx</code> to open a device's panel.</figcaption>
+        </figure>
+        <p>
+          Double-click the <code>synth</code> or <code>fx</code> name to open the
+          <span data-build="desktop">plugin's own window</span><span data-build="web">device's panel</span>.
+          Change anything there and the whole state is captured into the code as a named preset: the call
+          gains <code>.preset("lead")</code>, and the preset is kept in a folded block at the foot of the
+          buffer. There is nothing to press, and the song sounds the same when it is next opened.
+        </p>
+        <pre data-build="web"><code>// a different preset each cycle
+lead: note("c4 e4 g4").synth("Wavetable").preset("&lt;lead growl&gt;")</code></pre>
+        <pre data-build="desktop"><code>// a different preset each cycle
+lead: note("c4 e4 g4").synth("Serum 2").preset("&lt;lead growl&gt;")</code></pre>
+        <p>
+          Preset names pattern like anything else. Double-click <code>preset</code> to pick, make, copy
+          and tweak them.
+          <span data-build="desktop"><strong>export</strong> hands someone one file that plays exactly what you hear; <strong>link</strong> copies the patch without its presets.</span>
+          <span data-build="web">A share link carries the presets with the code.</span>
+        </p>
+      </main>
+    </div>
+    <!-- The chapter list, the pager, chords written for this platform, colored and playable code,
+         and the timelines all come from docs.js. -->
+    <script src="/chords.js"></script>
+    <script src="/vendor/codemirror/lib/codemirror.js"></script>
+    <script src="/vendor/codemirror/mode/javascript/javascript.js"></script>
+    <script src="/vendor/codemirror/addon/runmode/runmode.js"></script>
+    <script src="/poptart-mode.js"></script>
+    <script src="/pattern-meta.js"></script>
+    <script src="/docs/docs.js"></script>
+  </body>
+</html>

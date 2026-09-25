@@ -1,0 +1,22 @@
+{
+  "resolved": {
+    "drumbox": {
+      "repo": "tidalcycles/sounds-tr808-fischer",
+      "ref": "main",
+      "commit": "85fbecf1bec32553395625ea659e2a56dfd7c0e1",
+      "resolved": "2026-09-22"
+    },
+    "vcsl:audio": {
+      "repo": "sgossner/VCSL",
+      "ref": "master",
+      "commit": "c1ea7bcc3c7309650ab0da9d15c9cd1fbc4a4c7e",
+      "resolved": "2026-09-22"
+    },
+    "vcsl:sfz": {
+      "repo": "sgossner/VCSL",
+      "ref": "sfz",
+      "commit": "dfcf4a4918771eee884b96ad4493de82ef84daf6",
+      "resolved": "2026-09-22"
+    }
+  }
+}

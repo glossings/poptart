@@ -1,148 +1,3 @@
-/* ------------------------------------------------------------------- themes
-   Every color in the UI (including the CodeMirror syntax colors) derives from
-   the palette variables below. To add a theme: copy one of the
-   :root[data-theme="…"] blocks, rename it, and add the name to THEMES in
-   client.js - that's the whole job. The picker in the header persists the
-   choice in localStorage. */
-
-:root {
-  /* poptart (default) - dark, pink accent */
-  --bg: #0e0f13;
-  --bg-raised: #15171d;
-  --bg-panel: #191c23;
-  --border: #262a34;
-  --text: #d7dbe4;
-  --text-dim: #8189a0;
-  --accent: #ff7a9c;
-  --ok: #7ed896;
-  --solo: #82aaff; /* a soloed stem's gate (cmd+click) */
-  --err: #ff8080;
-  --warn: #ffcb6b;
-  --selection: #2a2f3d;
-  --linenumber: #3a4050;
-  --shadow: rgba(0, 0, 0, 0.5);
-  --syn-string: #a5d98a;
-  --syn-number: #f78c6c;
-  --syn-keyword: #c792ea;
-  --syn-variable: #82aaff;
-  --syn-property: #ffcb6b;
-  --syn-comment: #5a6274;
-}
-
-:root[data-theme='blueberry'] {
-  /* cool indigo/blue, Tokyo Night-ish */
-  --bg: #0b0e17;
-  --bg-raised: #111527;
-  --bg-panel: #151a30;
-  --border: #232a45;
-  --text: #d6dcf0;
-  --text-dim: #7e88ab;
-  --accent: #7aa2ff;
-  --ok: #9ece6a;
-  --solo: #7dcfff; /* a soloed stem's gate (cmd+click) */
-  --err: #f7768e;
-  --warn: #e0af68;
-  --selection: #283457;
-  --linenumber: #3b4261;
-  --shadow: rgba(0, 0, 0, 0.5);
-  --syn-string: #9ece6a;
-  --syn-number: #ff9e64;
-  --syn-keyword: #bb9af7;
-  --syn-variable: #7dcfff;
-  --syn-property: #e0af68;
-  --syn-comment: #565f89;
-}
-
-:root[data-theme='matcha'] {
-  /* earthy greens, Everforest-ish */
-  --bg: #101410;
-  --bg-raised: #161c16;
-  --bg-panel: #1a221a;
-  --border: #2a352a;
-  --text: #d8e2d4;
-  --text-dim: #869686;
-  --accent: #a7c080;
-  --ok: #a7c080;
-  --solo: #7fbbb3; /* a soloed stem's gate (cmd+click) */
-  --err: #e67e80;
-  --warn: #dbbc7f;
-  --selection: #2d3b2d;
-  --linenumber: #465446;
-  --shadow: rgba(0, 0, 0, 0.5);
-  --syn-string: #a7c080;
-  --syn-number: #e69875;
-  --syn-keyword: #d699b6;
-  --syn-variable: #7fbbb3;
-  --syn-property: #dbbc7f;
-  --syn-comment: #59695c;
-}
-
-:root[data-theme='paper'] {
-  /* light */
-  --bg: #faf9f6;
-  --bg-raised: #f1efe9;
-  --bg-panel: #ffffff;
-  --border: #ddd8cc;
-  --text: #33322e;
-  --text-dim: #8a867a;
-  --accent: #c04c6e;
-  --ok: #2f855a;
-  --solo: #2563eb; /* a soloed stem's gate (cmd+click) */
-  --err: #c53030;
-  --warn: #b7791f;
-  --selection: #d8e4f5;
-  --linenumber: #c0bcb0;
-  --shadow: rgba(60, 50, 30, 0.18);
-  --syn-string: #448c27;
-  --syn-number: #c76b29;
-  --syn-keyword: #8b3fb5;
-  --syn-variable: #2563eb;
-  --syn-property: #b7791f;
-  --syn-comment: #9b9689;
-}
-
-:root[data-theme='glossing'] {
-  /* evil red - near-black, faintly blue-tinted background with bright, vibrant
-     villain-console red. Deliberately low syntax variation: code is just bright
-     red + clean white, with only labels (properties) and comments pulled aside
-     enough to read. No pinks - reds stay saturated, whites stay cool. */
-  --bg: #090a0d;
-  --bg-raised: #0d0f14;
-  --bg-panel: #11141b;
-  --border: #242a36;
-  --text: #f2f4f7;
-  --text-dim: #838a97;
-  --accent: #ff3040;
-  --ok: #45b98f;
-  --solo: #4c8dff; /* a soloed stem's gate (cmd+click) */
-  --err: #ff4b56;
-  --warn: #d8a24a;
-  --selection: #1b2540;
-  --linenumber: #3c4452;
-  --shadow: rgba(0, 0, 0, 0.7);
-  --syn-string: #e6e9f0;
-  --syn-number: #ff3040;
-  --syn-keyword: #ff3040;
-  --syn-variable: #ff3040;
-  --syn-property: #c53640;
-  --syn-comment: #5b636f;
-}
-
-/* derived - shared by all themes, computed from the palette */
-:root,
-:root[data-theme] {
-  --accent-soft: color-mix(in srgb, var(--accent) 15%, transparent);
-  --accent-strong: color-mix(in srgb, var(--accent) 28%, transparent);
-  --hover-bg: color-mix(in srgb, var(--text) 7%, var(--bg-panel));
-  --border-strong: color-mix(in srgb, var(--text) 20%, var(--border));
-  --ok-border: color-mix(in srgb, var(--ok) 45%, transparent);
-  --err-border: color-mix(in srgb, var(--err) 45%, transparent);
-  --ok-soft: color-mix(in srgb, var(--ok) 12%, transparent);
-  --err-soft: color-mix(in srgb, var(--err) 12%, transparent);
-  --warn-soft: color-mix(in srgb, var(--warn) 14%, transparent);
-  --mono: 'SF Mono', ui-monospace, Menlo, monospace;
-}
-
 * {
   box-sizing: border-box;
 }
@@ -1550,6 +1405,16 @@ li.CodeMirror-hint-active {
   font-size: 12px;
 }
 
+/* Import / export, under save: the same footer, so no rule between them. */
+.theme-file-row {
+  border-top: none;
+  padding-top: 0;
+}
+
+.theme-file-row button {
+  flex: 1;
+}
+
 /* --------------------------------------------------------------- folder picker */
 
 .dir-picker-backdrop {
@@ -1851,6 +1716,390 @@ li.CodeMirror-hint-active {
 
 .preset-status.bad {
   color: var(--err);
+}
+
+/* The generated device window. It borrows the preset panel's chrome and the desk's knob, so the
+   only thing written here is the grid they sit in: a device with thirty parameters has to stay a
+   window somebody can find a control in, not a wall. */
+.device-panel {
+  width: 560px;
+}
+
+.device-sections {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 0 2px;
+  max-height: 78vh;
+  overflow-y: auto;
+}
+
+.device-section-head {
+  padding: 8px 10px 2px;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+}
+
+/* Captions are read, not selected. A drag that begins on a knob's name must not start a text
+   selection, and a panel whose labels turn blue on a stray click reads as a web page rather
+   than an instrument. The inputs inside a number box keep their own selection: this is on the
+   text elements, not on the container. */
+.device-section-head,
+.device-widget-name,
+.device-widget-value,
+.device-figure-head,
+.device-figure-canvas {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.device-widgets {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 8px 10px;
+  padding: 4px 10px 8px;
+}
+
+/* The sections a device lays out side by side: each row a flex line, each section a column
+   that shares the width with its neighbors. Two oscillators are twins and read as twins. */
+.device-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
+  padding: 0 4px;
+}
+
+.device-section {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.device-row + .device-row {
+  border-top: 1px solid var(--border);
+  margin-top: 4px;
+  padding-top: 2px;
+}
+
+/* One control: the knob (or select, toggle or number) with its name over it and its value under it. */
+.device-widget {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  width: 64px;
+}
+
+/* A number box: the value itself, dragged up and down or typed. The knob's height, so a row of
+   knobs and boxes lines up. */
+.device-number {
+  /* Digits of one width, so a number dragged past a power of ten does not shuffle sideways. */
+  font-variant-numeric: tabular-nums;
+  width: 100%;
+  height: 28px;
+  box-sizing: border-box;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-raised);
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: ns-resize;
+  touch-action: none;
+  user-select: none;
+}
+
+.device-number.dragging {
+  border-color: var(--accent);
+}
+
+.device-number input {
+  width: 100%;
+  height: 100%;
+  box-sizing: border-box;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: center;
+  outline: none;
+}
+
+/* The name of the file a control is pointed at, in place of a menu of two thousand: a field in
+   the device selects' own box, carrying their chevron - it is a choice, and a bare name beside a
+   figure's title did not look like something to click (the Convolver's impulse went unfound).
+   An arrow either side steps to the file before or after it. */
+.device-file-box {
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
+  width: 100%;
+  min-width: 0;
+}
+
+.device-widget .device-file {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  text-align: left;
+  padding: 4px 22px 4px 9px;
+  border-radius: 5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%23888e99' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 8px center;
+  background-size: 8px 5px;
+}
+
+.device-widget .device-file-step {
+  flex: none;
+  width: 24px;
+  padding: 0;
+  font-size: 14px;
+  line-height: 1;
+  border-radius: 5px;
+  color: var(--text-dim);
+}
+
+.device-widget .device-file-step:hover {
+  color: var(--text);
+}
+
+.device-widget-name {
+  font-size: 9px;
+  color: var(--text-dim);
+  line-height: 1.1;
+  text-align: center;
+}
+
+.device-widget-value {
+  font-variant-numeric: tabular-nums;
+  font-size: 9px;
+  font-family: var(--mono);
+  color: var(--text);
+  line-height: 1;
+}
+
+/* A control something else is already moving. Turning it would be overwritten on the next block,
+   so it does not turn, and what is moving it is named where its value would be. */
+.device-widget.driven .mix-knob {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.device-widget.driven .device-widget-value {
+  color: var(--accent);
+}
+
+.device-widget select,
+.device-widget .device-toggle {
+  width: 100%;
+  font-size: 10px;
+}
+
+/* A menu is its word: wider than a knob, and its chevron pulled in so the word has the room. */
+.device-widget-enum {
+  width: 96px;
+}
+
+.device-widget select {
+  padding: 5px 20px 5px 8px;
+  background-position: right 7px center;
+  background-size: 8px 5px;
+  border-radius: 5px;
+  text-overflow: ellipsis;
+}
+
+.device-widget .small.on {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+/* A figure: a picture of what some of the knobs above it add up to. Same gutter as a widget row,
+   so a curve lines up with the controls it belongs to. */
+.device-figure {
+  padding: 2px 10px 6px;
+}
+
+/* Whose DSP a ported device is, said on its window rather than only on a tooltip. */
+.device-credit {
+  font-size: 9px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 45%;
+}
+
+.device-credit a {
+  color: inherit;
+}
+
+.device-figure-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding-bottom: 2px;
+}
+
+/* The readout sits at the right-hand end whatever else is on the heading. */
+.device-figure-head .device-figure-read {
+  margin-left: auto;
+}
+
+/* A control a figure took over, drawn on its heading: the control alone, taking the room the
+   readout leaves it. */
+.device-widget-bare {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  max-width: 60%;
+}
+
+.device-figure-head:has(.device-widget-bare) {
+  align-items: center;
+  padding-bottom: 6px;
+}
+
+.device-figure-title {
+  font-size: 9px;
+  color: var(--text-dim);
+}
+
+/* What the picture currently reads, in the same mono the knobs print their values in. */
+.device-figure-read {
+  font-variant-numeric: tabular-nums;
+  font-size: 9px;
+  font-family: var(--mono);
+  color: var(--text);
+  text-align: right;
+}
+
+.device-figure-canvas {
+  display: block;
+  width: 100%;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  /* Every figure poptart draws is draggable, and most of them on both axes at once, so it is the
+     crosshair rather than the knobs' ns-resize. */
+  cursor: crosshair;
+  touch-action: none;
+}
+
+/* Something else is moving a parameter this picture is drawn from, so the picture still moves but
+   the gesture does nothing - the same bargain a driven knob makes. */
+.device-figure.driven .device-figure-canvas {
+  cursor: not-allowed;
+}
+
+.device-figure.driven .device-figure-read {
+  color: var(--accent);
+}
+
+/* The browser build has no plugins to scan for - its devices are the catalog, fixed when the page
+   was built - so the button that would rescan them is not drawn. */
+.no-scan #scanBtn {
+  display: none;
+}
+
+/* Nor a DJ desk, a sample map, or a disk to browse: the browser build does not draw their
+   buttons (client.js, desktopOnly). */
+.web-build #viewDjBtn,
+.web-build #sampleMapBtn,
+.web-build #orgTabDisk {
+  display: none;
+}
+
+/* The wavetable browser: folders, files and a picture of the table, in one row. Wider than the
+   preset panel it borrows its chrome from, because three columns is what it is. */
+/* The file picker: folders, files, and a picture of the one selected. The three columns are
+   given one height rather than three of their own, so their boxes line up. */
+.file-pick-panel {
+  width: 720px;
+}
+
+.file-pick-body {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+  padding: 8px 14px;
+  height: 268px;
+  box-sizing: content-box;
+}
+
+.file-pick-col {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 190px;
+}
+
+.file-pick-col input {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.file-pick-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  font-size: 11px;
+}
+
+.file-pick-files {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.file-pick-list div {
+  padding: 3px 8px;
+  cursor: default;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.file-pick-list div:hover {
+  background: var(--bg-raised);
+}
+
+.file-pick-list div.on {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  color: var(--text);
+}
+
+.file-pick-count {
+  color: var(--text-dim);
+  margin-left: 6px;
+}
+
+.file-pick-preview {
+  width: 220px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.file-pick-preview canvas {
+  display: block;
+  width: 100%;
+  flex: 1 1 auto;
+  min-height: 0;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 3px;
 }
 
 .lfo-panel {
@@ -2601,6 +2850,83 @@ li.CodeMirror-hint-active {
 #pianorollKeys {
   font-size: 17px;
   padding: 0 7px;
+}
+
+/* The list a <select> opens in place of the platform's popup (see openSelMenu in client.js): the
+   context menu's skin, over everything, scrolling when a list is long. The select itself stays
+   the trigger, lit while its list is open. */
+.sel-menu {
+  position: fixed;
+  z-index: 300;
+  max-height: 60vh;
+  overflow-y: auto;
+  padding: 4px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  box-shadow: 0 10px 28px var(--shadow);
+  font-size: 12px;
+}
+
+.sel-menu.hidden {
+  display: none;
+}
+
+/* A long list, in columns (openSelMenu sets how many). A group never splits across two. */
+.sel-menu.sel-menu-cols {
+  column-gap: 4px;
+  max-height: none;
+}
+
+.sel-menu-group {
+  break-inside: avoid;
+}
+
+.sel-menu-head {
+  padding: 5px 9px 3px;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+}
+
+.sel-menu button {
+  display: block;
+  width: 100%;
+  position: relative;
+  text-align: left;
+  background: none;
+  border: 0;
+  border-radius: 5px;
+  padding: 4px 12px 4px 22px;
+  font: inherit;
+  color: var(--text);
+  white-space: nowrap;
+  transition: none;
+}
+
+.sel-menu button.hi {
+  background: var(--hover-bg);
+}
+
+.sel-menu button.on {
+  color: var(--accent);
+}
+
+.sel-menu button.on::before {
+  content: '\2713';
+  position: absolute;
+  left: 8px;
+}
+
+.sel-menu button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+select.sel-open {
+  border-color: var(--accent);
 }
 
 /* The app's context menus - the piano roll's value lane (prOpenLaneMenu) and the editor's own
@@ -5882,4 +6208,77 @@ body.mix-on #deckAHead .deck-song {
   font-size: 10.5px;
   color: var(--text-dim);
   font-family: var(--mono);
+}
+
+/* The backup's audio switch sits above the buttons it changes, with room between them. */
+.store-audio {
+  margin-bottom: 8px;
+}
+
+.about-body {
+  padding: 12px 16px 14px;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text-dim);
+}
+
+.about-body p {
+  margin: 0 0 10px;
+}
+
+.about-body p:last-child {
+  margin-bottom: 0;
+}
+
+.about-body a {
+  color: var(--accent);
+}
+
+/* A menu a figure took over (the grain window's), sized like the file field beside the others,
+   with its draw button in the same row. */
+.device-widget-bare select {
+  flex: 1;
+  min-width: 0;
+  width: auto;
+  font-size: 12px;
+  padding: 4px 22px 4px 9px;
+  background-position: right 8px center;
+}
+
+.device-widget-bare .device-draw {
+  flex: none;
+  margin: 0;
+  font-size: 11px;
+  padding: 0 10px;
+  border-radius: 5px;
+}
+
+/* ------------------------------------------------------------------ embedded
+   `?embed` (index.html): a playable example in the guide - the editor and nothing around it. The
+   floating panels stay what they are; the guide grows the frame while one is open. */
+html[data-embed] .layout > header,
+html[data-embed] aside,
+html[data-embed] #console,
+html[data-embed] #mixStrip,
+html[data-embed] #djStripRail,
+html[data-embed] #djStripResize,
+html[data-embed] #deckAHead {
+  display: none !important;
+}
+html[data-embed] .layout {
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: 1fr;
+}
+html[data-embed] main {
+  grid-row: 1;
+}
+html[data-embed],
+html[data-embed] body {
+  background: var(--bg-raised);
+}
+html[data-embed] .cm-s-poptart.CodeMirror {
+  background: var(--bg-raised);
+}
+html[data-embed] .cm-s-poptart .CodeMirror-gutters {
+  background: var(--bg-raised);
 }

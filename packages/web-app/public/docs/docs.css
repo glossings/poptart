@@ -1,0 +1,333 @@
+/* The guide's pages. One stylesheet for every chapter; docs.js builds the chapter list and the
+   previous/next links, so a page is only its own content. */
+
+/* The colors are the app's: themes.css holds every theme's palette and theme-boot.js applies the
+   one picked in the app, so the guide and the editor always match. Only what the app has no name
+   for is set here. */
+:root {
+  --link: var(--syn-variable);
+  --code: var(--syn-property);
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 16px;
+  line-height: 1.65;
+  -webkit-font-smoothing: antialiased;
+}
+
+a { color: var(--link); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+.wrap {
+  display: grid;
+  grid-template-columns: 230px minmax(0, 1fr);
+  gap: 48px;
+  max-width: 1160px;
+  margin: 0 auto;
+  padding: 0 32px;
+}
+
+/* --- the chapter list --- */
+nav.chapters {
+  position: sticky;
+  top: 0;
+  align-self: start;
+  height: 100vh;
+  overflow-y: auto;
+  padding: 32px 8px 48px 0;
+  border-right: 1px solid var(--border);
+}
+nav.chapters .brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-weight: 700;
+  font-size: 18px;
+  letter-spacing: 0.03em;
+  color: var(--text);
+  margin-bottom: 4px;
+}
+nav.chapters .brand:hover { text-decoration: none; }
+nav.chapters .brand .dot {
+  width: 14px; height: 14px; border-radius: 4px;
+  background: linear-gradient(135deg, var(--accent), var(--warn));
+  box-shadow: 0 0 12px var(--accent-strong);
+}
+nav.chapters .tagline { color: var(--text-dim); font-size: 12.5px; margin: 0 0 20px 24px; }
+nav.chapters a.chapter {
+  display: flex;
+  gap: 8px;
+  color: var(--text-dim);
+  font-size: 14px;
+  padding: 4px 10px;
+  border-radius: 6px;
+}
+nav.chapters a.chapter:hover { color: var(--text); background: var(--bg-raised); text-decoration: none; }
+nav.chapters a.chapter.here { color: var(--text); background: var(--accent-soft); }
+nav.chapters a.chapter .num { color: var(--accent); font-variant-numeric: tabular-nums; min-width: 1.4em; text-align: right; }
+nav.chapters .back { display: block; margin-top: 24px; font-size: 12.5px; }
+
+/* On-page headings, listed under the chapter you are on. */
+nav.chapters .toc { margin: 2px 0 8px 34px; padding: 0; list-style: none; border-left: 1px solid var(--border); }
+nav.chapters .toc li { margin: 0; }
+nav.chapters .toc a { display: block; color: var(--text-dim); font-size: 12.5px; padding: 2px 10px; }
+nav.chapters .toc a:hover { color: var(--text); text-decoration: none; }
+
+/* --- a chapter --- */
+main { padding: 40px 0 96px; max-width: 740px; }
+
+header.chapter-head { margin-bottom: 28px; }
+header.chapter-head .kicker {
+  font-size: 12.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: var(--accent);
+  margin: 0 0 4px;
+}
+header.chapter-head h1 { font-size: 34px; margin: 0 0 8px; letter-spacing: -0.01em; line-height: 1.2; }
+header.chapter-head .lede { font-size: 18px; color: var(--text-dim); margin: 0; }
+
+h2 { font-size: 23px; margin: 48px 0 12px; letter-spacing: -0.01em; scroll-margin-top: 24px; }
+h3 { font-size: 17px; margin: 30px 0 8px; scroll-margin-top: 24px; }
+
+p { margin: 12px 0; }
+strong { color: var(--text); font-weight: 600; }
+em { color: var(--text); }
+
+ul, ol { padding-left: 22px; }
+li { margin: 6px 0; }
+
+code {
+  font-family: var(--mono);
+  font-size: 0.87em;
+  background: var(--bg-panel);
+  color: var(--code);
+  padding: 1.5px 5px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+}
+kbd {
+  font-family: var(--mono);
+  font-size: 0.85em;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-strong);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  padding: 0 5px;
+}
+
+pre {
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px 18px;
+  overflow-x: auto;
+  margin: 16px 0;
+  line-height: 1.55;
+}
+pre code {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--text);
+  font-size: 13.5px;
+}
+/* The code's colors, token for token the editor's (style.css, .cm-s-poptart): docs.js highlights
+   every example with the editor's own mode, and marks a label inside a group's braces as the
+   label it is (JavaScript alone calls it a property). */
+.cm-s-docs .cm-string { color: var(--syn-string); }
+.cm-s-docs .cm-number { color: var(--syn-number); }
+.cm-s-docs .cm-keyword, .cm-s-docs .cm-operator { color: var(--syn-keyword); }
+.cm-s-docs .cm-variable { color: var(--syn-variable); }
+.cm-s-docs .cm-property { color: var(--syn-property); }
+.cm-s-docs span.cm-member-label { color: var(--syn-variable) !important; }
+.cm-s-docs .cm-comment { color: var(--syn-comment); font-style: italic; }
+
+/* Built for one build only: build-web.mjs marks the browser build's pages with class "web". */
+html:not(.web) [data-build="web"],
+html.web [data-build="desktop"] { display: none !important; }
+
+/* An example that plays (browser build): its code, then the app in its place, and its buttons. */
+.example {
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  margin: 16px 0;
+  overflow: hidden;
+}
+.example.playing { border-color: var(--accent); }
+.example { position: relative; }
+/* Laid out exactly as the embedded editor lays out the same code (style.css's .cm-s-poptart:
+   14px at 1.6, the fold gutter and CodeMirror's own padding), so the swap moves nothing. */
+.example > pre {
+  margin: 0;
+  border: none;
+  border-radius: 0;
+  cursor: text;
+  padding: 14px 22px;
+  font-size: 14px;
+  line-height: 1.6;
+}
+.example > pre code { font-size: 14px; line-height: 1.6; }
+.example > pre[hidden] { display: none; }
+/* The app itself, embedded, once the example is used (docs.js, and ?embed in client.js). While it
+   loads it waits out of sight behind the code. */
+.example-frame { display: block; width: 100%; border: 0; background: var(--bg-raised); }
+.example-frame.loading { position: absolute; top: 0; left: 0; visibility: hidden; }
+.example-bar { display: flex; align-items: center; gap: 8px; padding: 6px 12px 10px; }
+.example-bar button {
+  font: 600 12px var(--sans);
+  color: var(--text);
+  background: var(--bg-panel);
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  padding: 4px 10px;
+  cursor: pointer;
+}
+.example-bar button:first-child { min-width: 64px; }
+.example-bar button:hover { border-color: var(--accent); }
+.example-bar button:disabled { opacity: 0.5; cursor: default; }
+.example-status {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--warn);
+  font: 12px var(--mono);
+}
+
+.callout {
+  border: 1px solid var(--border-strong);
+  border-left: 3px solid var(--accent);
+  background: var(--accent-soft);
+  border-radius: 8px;
+  padding: 10px 16px;
+  margin: 20px 0;
+  font-size: 15px;
+}
+.callout pre { margin: 10px 0 4px; padding: 10px 12px; }
+.callout .tag {
+  display: inline-block;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  font-weight: 700;
+  color: var(--accent);
+  margin-right: 8px;
+}
+
+/* The deep end of a topic, closed until wanted. */
+details {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin: 16px 0;
+  background: var(--bg-raised);
+}
+details > summary {
+  cursor: pointer;
+  padding: 9px 14px;
+  font-weight: 600;
+  font-size: 15px;
+  list-style: none;
+}
+details > summary::-webkit-details-marker { display: none; }
+details > summary::before { content: "▸"; color: var(--accent); display: inline-block; width: 1.2em; transition: transform 0.15s; }
+details[open] > summary::before { transform: rotate(90deg); }
+details > :not(summary) { margin-left: 14px; margin-right: 14px; }
+details > :last-child { margin-bottom: 14px; }
+
+table { border-collapse: collapse; width: 100%; margin: 16px 0; font-size: 14px; }
+th, td { text-align: left; padding: 7px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+th { color: var(--text-dim); font-weight: 600; font-size: 12.5px; text-transform: uppercase; letter-spacing: 0.06em; }
+td code { white-space: nowrap; }
+
+/* Screenshots of the app. */
+figure.shot { margin: 22px 0; }
+figure.shot img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+}
+/* A capture of the whole window has no edge of its own; a panel's capture brings its own rounded
+   corners and shadow on transparent pixels (see the isolation step in the screenshot driver). */
+figure.shot.framed img {
+  border-radius: 10px;
+  border: 1px solid var(--border-strong);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
+}
+figure.shot.narrow { max-width: 320px; float: right; margin: 4px 0 16px 24px; }
+figure.shot figcaption, figure.timeline figcaption { color: var(--text-dim); font-size: 13.5px; margin-top: 8px; }
+
+/* A pattern drawn from its real events (docs.js computes them with pattern-core). */
+figure.timeline {
+  margin: 18px 0;
+  padding: 12px 16px 10px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+figure.timeline .row + .row { margin-top: 10px; }
+figure.timeline .row > code { display: block; background: none; border: none; padding: 0; font-size: 13px; color: var(--text); white-space: pre; overflow-x: auto; }
+figure.timeline svg { display: block; width: 100%; height: auto; margin-top: 4px; overflow: visible; }
+figure.timeline .cycle-line { stroke: var(--border-strong); stroke-width: 1; }
+figure.timeline .beat-line { stroke: var(--border); stroke-width: 1; }
+figure.timeline .ev { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1; }
+figure.timeline .ev.tie { stroke-dasharray: 3 2; }
+figure.timeline .ev-label { fill: var(--text); font: 11px var(--mono); dominant-baseline: middle; }
+figure.timeline .cycle-num { fill: var(--text-dim); font: 10px var(--mono); }
+figure.timeline .error { color: var(--warn); font: 12px var(--mono); }
+
+/* Previous / next chapter. */
+h2, nav.pager { clear: both; }
+nav.pager {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 64px;
+  padding-top: 24px;
+  border-top: 1px solid var(--border);
+}
+nav.pager a {
+  display: flex;
+  flex-direction: column;
+  padding: 10px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  min-width: 0;
+  max-width: 48%;
+}
+nav.pager a:hover { border-color: var(--accent); text-decoration: none; }
+nav.pager a .dir { color: var(--text-dim); font-size: 12px; }
+nav.pager a.next { margin-left: auto; text-align: right; }
+
+/* The chapter cards on the guide's first page. */
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 12px; margin: 20px 0; }
+.cards a {
+  display: block;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-raised);
+  color: var(--text);
+}
+.cards a:hover { border-color: var(--accent); text-decoration: none; }
+.cards a .num { color: var(--accent); font: 600 12px var(--mono); }
+.cards a .title { display: block; font-weight: 600; margin: 2px 0; }
+.cards a .blurb { display: block; color: var(--text-dim); font-size: 13.5px; line-height: 1.45; }
+
+@media (max-width: 880px) {
+  .wrap { grid-template-columns: 1fr; gap: 0; padding: 0 16px; }
+  nav.chapters { position: static; height: auto; border-right: none; border-bottom: 1px solid var(--border); padding: 20px 0; }
+  nav.chapters .toc { display: none; }
+  main { padding-top: 24px; }
+  header.chapter-head h1 { font-size: 28px; }
+  figure.shot.narrow { float: none; max-width: 100%; margin: 22px 0; }
+}

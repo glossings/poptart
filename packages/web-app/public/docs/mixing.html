@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Mixing &amp; routing · poptart guide</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <script src="/theme-boot.js"></script>
+    <link rel="stylesheet" href="/themes.css" />
+    <link rel="stylesheet" href="/vendor/codemirror/lib/codemirror.css" />
+    <link rel="stylesheet" href="/docs/docs.css" />
+  </head>
+  <body data-page="mixing">
+    <div class="wrap">
+      <nav class="chapters"></nav>
+      <main>
+        <header class="chapter-head">
+          <p class="kicker">Chapter 9</p>
+          <h1>Mixing &amp; routing</h1>
+          <p class="lede">Levels and panning in the code, buses between tracks, sidechains, and the mixer.</p>
+        </header>
+
+        <h2 id="strip">The channel strip</h2>
+        <p>These take numbers, patterns or signals, like everything else.</p>
+        <table>
+          <tr><th>Write</th><th>Does</th></tr>
+          <tr><td><code>.gain(v)</code></td><td>level going <em>into</em> the chain; lower drives the effects less. 1 is unity</td></tr>
+          <tr><td><code>.postgain(v)</code></td><td>level after the chain: the fader. 1 is unity</td></tr>
+          <tr><td><code>.pan(v)</code></td><td>−1 left to 1 right</td></tr>
+          <tr><td><code>.width(v)</code></td><td>stereo width: 0 mono, 1 unchanged, up to 4</td></tr>
+          <tr><td><code>.bassmono(hz)</code></td><td>mono below <code>hz</code>, stereo above</td></tr>
+          <tr><td><code>.o(n)</code></td><td>output pair: <code>.o(2)</code> is channels 3/4 (raise <em>output channels</em> in settings)</td></tr>
+        </table>
+        <p>Several <code>.gain()</code> or <code>.postgain()</code> calls multiply, so <code>.gain(0.5).gain(env())</code> is a level times an envelope.</p>
+
+        <h2 id="buses">Buses</h2>
+        <p>
+          <code>.bus("name", amount)</code> sends a track to a named bus, and <code>audio("name")</code>
+          plays that bus on another track. <code>.dry(0)</code> silences the track's own output;
+          <code>.bsend()</code> does both at once. Both arguments pattern, so
+          <code>.bus("&lt;verb delay&gt;")</code> re-routes as it goes.
+        </p>
+        <pre data-run data-build="web"><code>pad: note("c3 e3 g3").synth("Wavetable")
+  .width(0.6)
+  .pan("&lt;-0.5 0.5&gt;")
+  .bus("space", 0.3)
+
+verb: audio("space").fx("Reverb").param("Mix", 1)</code></pre>
+        <pre data-build="desktop"><code>pad: note("c3 e3 g3").synth("Diva")
+  .pan(sine(0.2).range(-1, 1))
+  .bus("space", 0.3)
+
+verb: audio("space").fx("ValhallaRoom")</code></pre>
+
+        <h2 id="routing">Sources and sidechains</h2>
+        <p>
+          <code>midi()</code> and <code>audio()</code> do two things, depending on where they are written.
+          <strong>At the head</strong> of a track they are its source:
+        </p>
+        <pre data-build="web"><code>midi("KeyStep").synth("Wavetable")   // play from a MIDI device
+audio("drums").fx("Reverb")         // another track through a reverb
+input(1).fx("Overdrive")            // a microphone or interface input</code></pre>
+        <pre data-build="desktop"><code>midi("KeyStep 32").synth("Serum 2")  // play from a MIDI device
+audio("drums").fx("ValhallaRoom")   // another track through a reverb
+input(3).fx("Amp Room")             // a hardware input (two channels = stereo)</code></pre>
+        <p>
+          <strong>After an <code>.fx()</code></strong> they feed that effect: <code>.midi("kick")</code>
+          replays kick's notes into it, and <code>.audio("kick")</code> feeds kick's audio into its sidechain.
+        </p>
+        <pre data-run data-build="web"><code>kick: s("pt_kit:0*4").postgain(0.3)
+// the ducker dips on each of kick's notes
+bass: note("c2*8").synth("Wavetable").fx("Ducker").midi("kick").postgain(0.3)
+// the compressor listens to kick's audio
+pad: note("[c3,eb3,g3]").synth("Wavetable").fx("Compressor").audio("kick").postgain(0.3)</code></pre>
+        <pre data-build="desktop"><code>kick: s("bd*4")
+// duck to kick's notes
+bass: note("c2*8").synth("Serum 2").fx("Kickstart").midi("kick")
+// sidechain from kick's audio
+pad: note("c3").synth("Diva").fx("Pro-C 2").audio("kick")</code></pre>
+        <p>
+          A name means a track first, then any device whose name contains it. Force one with
+          <code>"track:kick"</code> or <code>"dev:KeyStep"</code>. For a trigger with no track of its own,
+          make a muted one (<code>_trig: note("c5 ~ c5 ~")</code>) and point at it.
+        </p>
+        <p data-build="web">
+          The browser asks for permission the first time a pattern uses <code>input()</code> or a MIDI
+          device. Web MIDI is in Chrome, Edge and Firefox, not Safari. Inputs picked in settings are
+          numbered across in the order you picked them; <code>input("USB", 1)</code> names whose channel
+          you mean.
+        </p>
+        <p data-build="desktop">
+          Audio input needs a device with inputs, picked in settings. To use several interfaces, tick them
+          under <strong>extra inputs</strong>; <code>input("Scarlett", 1)</code> then names whose channel
+          you mean.
+        </p>
+
+        <h2 id="mixer">The mixer</h2>
+        <figure class="shot">
+          <img src="/docs/img/mixer.png" width="1004" height="597" alt="The mixer: a strip per track with meters, faders and pan, beside a spectrum and a stereo image." />
+        </figure>
+        <p>
+          <strong>{app+g}</strong> opens a strip per track (meter, fader, pan, width, mute, solo, and
+          <strong>▽ mono</strong> for bass mono) beside a spectrum and a stereo image. Anything in the outer
+          <code>ø</code> wedges is lost in mono.
+        </p>
+        <p>
+          The mixer <strong>writes code</strong>. A fader rewrites the track's <code>.postgain()</code>,
+          mute and solo write <code>_</code> and <code>S</code>, and clicking a strip's name renames the
+          track everywhere. The mix lives in the song.
+        </p>
+        <p>
+          Groups show as one strip that unfolds. The plots analyze up to eight strips, then only the master;
+          folding groups keeps a big song under that.
+        </p>
+      </main>
+    </div>
+    <!-- The chapter list, the pager, chords written for this platform, colored and playable code,
+         and the timelines all come from docs.js. -->
+    <script src="/chords.js"></script>
+    <script src="/vendor/codemirror/lib/codemirror.js"></script>
+    <script src="/vendor/codemirror/mode/javascript/javascript.js"></script>
+    <script src="/vendor/codemirror/addon/runmode/runmode.js"></script>
+    <script src="/poptart-mode.js"></script>
+    <script src="/pattern-meta.js"></script>
+    <script src="/docs/docs.js"></script>
+  </body>
+</html>
