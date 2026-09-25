@@ -701,10 +701,10 @@ function checkpointUrl() {
     .catch((e) => logLine(`could not add this state to browser history (${e.message ?? e})`, true));
 }
 
-// A hash is either `s=<id>` (a snapshot on this machine) or, for a shared link and for history
-// entries made before snapshots existed, the whole buffer base64'd. The two ways this can come
-// back empty are told apart by the caller, because they mean opposite things to the user: a
-// pruned snapshot is expected housekeeping, a link that won't decode is a damaged link.
+// A hash is `s=<id>` (a snapshot on this machine), `z=…` (a share link, see web/share-link.mjs),
+// or, for history entries made before snapshots existed, the whole buffer base64'd. The two ways
+// this can come back empty are told apart by the caller, because they mean opposite things to the
+// user: a pruned snapshot is expected housekeeping, a link that won't decode is a damaged link.
 const HASH_EMPTY = { reason: 'empty' };
 const HASH_PRUNED = { reason: 'pruned' };
 const hashDamaged = (len) => ({ reason: 'damaged', len });
@@ -716,10 +716,80 @@ async function loadCodeFromHash() {
     const { code } = await api('GET', `/api/snapshot?id=${encodeURIComponent(hash.slice(2))}`);
     return code === null ? HASH_PRUNED : code;
   }
+  if (hash.startsWith('z=')) {
+    const { decodeShareHash } = await import('/web/share-link.mjs');
+    try {
+      return await decodeShareHash(hash);
+    } catch {
+      return hashDamaged(hash.length);
+    }
+  }
   try {
     return decodeCodeHash(hash);
   } catch {
     return hashDamaged(hash.length);
+  }
+}
+
+function logDamagedLink(len) {
+  logLine(
+    `this share link is incomplete (${(len / 1024).toFixed(1)}kb of code in it, which did not decode) - ` +
+      'a link this long is usually cut short by the address bar it was pasted into. Ask for the ' +
+      'patch as an exported file instead.',
+    true,
+  );
+}
+
+// A share link just opened: trade it for a snapshot id in place (no new history entry - this IS
+// that entry), so the address bar stops holding the whole pattern and the rest of the session
+// behaves like any other. The link that was shared still works; it just isn't what this tab keeps
+// navigating with. And say what the link named but could not carry, since those sounds are silent
+// here unless this browser has files by the same names.
+async function settleSharedLink(code) {
+  if (location.hash.startsWith('#s=')) return;
+  const shared = location.hash.startsWith('#z=');
+  api('POST', '/api/snapshot', { code })
+    .then(({ id }) => history.replaceState(null, '', `#s=${id}`))
+    .catch(() => {}); // the long hash keeps working - nothing to tell the user
+  if (!shared) return;
+  const left = (await import('/web/share-link.mjs')).localOnly(code);
+  if (left?.files.length) {
+    logLine(`this pattern plays files from the browser it was shared from, which the link does not carry: ${left.files.join(', ')}`, true);
+  }
+  if (left?.handles) {
+    logLine(`this pattern names ${left.handles} captured desktop plugin state(s), which the link does not carry`, true);
+  }
+}
+
+// Copies a link that opens the buffer (web/share-link.mjs). The browser build only: the desktop
+// serves the page from this machine, and a link to it opens nothing anywhere else.
+async function shareLink() {
+  await settlePluginState(); // the link has to carry the sound as it is right now
+  const code = cm.getValue();
+  if (!code.trim()) {
+    logLine('nothing to share - the buffer is empty', true);
+    return;
+  }
+  const { encodeShareHash, localOnly, MAX_URL } = await import('/web/share-link.mjs');
+  const url = `${location.origin}${location.pathname}#${await encodeShareHash(code)}`;
+  if (url.length > MAX_URL) {
+    logLine(`this pattern is ${(url.length / 1024 / 1024).toFixed(1)}MB as a link, past what a browser will open - export it as a file instead`, true);
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(url);
+  } catch (e) {
+    logLine(`could not copy the share link (${e.message ?? e})`, true);
+    return;
+  }
+  logLine(`copied a share link (${(url.length / 1024).toFixed(1)}kb)`);
+  pulse(document.getElementById('saveFlash'), 'saved-flash');
+  const left = localOnly(code);
+  if (left?.files.length) {
+    logLine(`the link names files added to this browser but does not carry them - they are silent for whoever opens it: ${left.files.join(', ')}`, true);
+  }
+  if (left?.handles) {
+    logLine(`the link names ${left.handles} captured desktop plugin state(s) but does not carry them`, true);
   }
 }
 
@@ -841,31 +911,20 @@ async function openingBuffer() {
     return;
   }
   if (code.reason === 'damaged') {
-    logLine(
-      `this share link is incomplete (${(code.len / 1024).toFixed(1)}kb of code in it, which did not decode) - ` +
-        'a link this long is usually cut short by the address bar it was pasted into. Ask for the ' +
-        'patch as an exported file instead.',
-      true,
-    );
+    logDamagedLink(code.len);
     return;
   }
   setBufferQuietly(code);
   saveRestoreBuffer(code);
-  // An incoming share link carries the whole buffer. Trade it for a snapshot id in place (no new
-  // history entry - this IS that entry), so the address bar stops being a megabyte long and the
-  // rest of the session behaves like any other. The link that was shared still works; it just
-  // isn't what this tab keeps navigating with.
-  if (!location.hash.startsWith('#s=')) {
-    api('POST', '/api/snapshot', { code })
-      .then(({ id }) => history.replaceState(null, '', `#s=${id}`))
-      .catch(() => {}); // the long hash keeps working - nothing to tell the user
-  }
+  settleSharedLink(code).catch(() => {});
 }
 
 // Back/Forward: put that state back in the editor. No confirm needed - the buffer being replaced
 // keeps its own work-in-progress file on the way out (rollWipSession), so navigating away from
-// something you never named still can't lose it.
+// something you never named still can't lose it. A share link pasted into the address bar of an
+// open tab lands here too: only the fragment changed, so the page does not reload.
 window.addEventListener('popstate', async () => {
+  const shared = location.hash.startsWith('#z=');
   let code = null;
   try {
     code = await loadCodeFromHash();
@@ -874,6 +933,10 @@ window.addEventListener('popstate', async () => {
     return;
   }
   if (code === HASH_EMPTY) return;
+  if (shared && code.reason === 'damaged') {
+    logDamagedLink(code.len);
+    return;
+  }
   if (code === HASH_PRUNED || code.reason === 'damaged') {
     logLine('that state has been pruned from the snapshot store - nothing to restore', true);
     return;
@@ -883,6 +946,12 @@ window.addEventListener('popstate', async () => {
   setBufferQuietly(code);
   saveRestoreBuffer(code);
   checkpointSeq++; // an in-flight checkpoint must not push its URL over where we just landed
+  if (shared) {
+    setCurrentSavedName(null); // a pattern from somebody else is not the file that was open
+    settleSharedLink(code).catch(() => {});
+    logLine(`opened a shared pattern - ${chordLabel('mod+enter')} to play it`);
+    return;
+  }
   logLine(`restored code from browser history - ${chordLabel('mod+enter')} to play it`);
 });
 
@@ -18457,6 +18526,9 @@ if (window.__poptartHostReady) {
   // only ever be disabled is a promise the page cannot keep.
   document.getElementById('audioCueSelect')?.closest('label')?.classList.add('hidden');
   storeSection.classList.remove('hidden');
+  const fileShareBtn = document.getElementById('fileShareBtn');
+  fileShareBtn.classList.remove('hidden');
+  fileShareBtn.addEventListener('click', () => shareLink().catch((e) => logLine(`could not make a share link: ${e.message ?? e}`, true)));
   document.getElementById('storeExport').addEventListener('click', exportStore);
   document.getElementById('storeImport').addEventListener('click', () => storeImportInput.click());
   storeImportInput.addEventListener('change', () => {
