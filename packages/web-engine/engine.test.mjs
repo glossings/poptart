@@ -113,8 +113,8 @@ test('a track reaches the master, through its strip, from the moment it exists',
 test('birth values are applied, so a track can be born silent', () => {
   const { engine } = makeEngine();
   const track = engine.createTrack('t1', { gain: 0, pan: -1 });
-  assert.ok(track.chainIn.gain.rampedTo(0));
-  assert.ok(track.panCtl.offset.rampedTo(-1));
+  assert.ok(track.chainIn.gain.landedOn(0));
+  assert.ok(track.panCtl.offset.landedOn(-1));
   const [left, right] = track.panLaw.map((s) => s.curve);
   assert.ok(Math.abs(left[0] - Math.SQRT2) < 1e-6 && Math.abs(right[0]) < 1e-6, 'hard left: the left side +3 dB, the right silent');
   const mid = (left.length - 1) / 2;
@@ -277,15 +277,15 @@ test('the channel strip controls this build has work; the ones it lacks warn onc
   engine.setParam('t1', -1, 'gain', 0.5, 0);
   engine.setParam('t1', -1, 'pan', 0.25, 0);
   engine.setParam('t1', -1, 'dry', 0, 0);
-  assert.ok(track.chainIn.gain.rampedTo(0.5));
-  assert.ok(track.panCtl.offset.rampedTo(0.25));
-  assert.ok(track.dryGain.gain.rampedTo(0));
+  assert.ok(track.chainIn.gain.landedOn(0.5));
+  assert.ok(track.panCtl.offset.landedOn(0.25));
+  assert.ok(track.dryGain.gain.landedOn(0));
 
   // Width and bass mono: the side scaled, and high-passed at the cutoff in place of the dry side.
   engine.setParam('t1', -1, 'width', 2, 0);
-  assert.ok(track.width.gain.rampedTo(2));
+  assert.ok(track.width.gain.landedOn(2));
   engine.setParam('t1', -1, 'bassmono', 150, 0);
-  assert.ok(track.bassHp.frequency.rampedTo(150) && track.sideHigh.gain.rampedTo(1) && track.sideDry.gain.rampedTo(0));
+  assert.ok(track.bassHp.frequency.landedOn(150) && track.sideHigh.gain.landedOn(1) && track.sideDry.gain.landedOn(0));
   assert.deepEqual(warnings, []);
 
   // A DJ desk control is not a thing a track in the browser has.
@@ -304,12 +304,12 @@ test('a per-slot wet level crossfades that slot, and one for an empty slot is no
   const track = engine.tracks.get('t1');
   const slot = track.slots.get(1);
   const ctl = track.wetControl(1);
-  assert.ok(ctl.offset.rampedTo(0.25));
+  assert.ok(ctl.offset.landedOn(0.25));
   assert.ok(slot.wetGain.gain.connectedFrom.includes(ctl) && slot.wetGain.gain.value === 0, 'wet is the control');
   assert.ok(slot.dryGain.gain.connectedFrom.includes(slot.wetInvert) && slot.wetInvert.gain.value === -1 && slot.dryGain.gain.value === 1, 'dry is one minus it');
   engine.setParam('t1', -1, 'wet7', 0.5, 0);
   assert.equal(warnings.filter((w) => w.includes('wet7')).length, 0);
-  assert.ok(track.wetControl(7).offset.rampedTo(0.5), 'kept for the device that comes to slot 7');
+  assert.ok(track.wetControl(7).offset.landedOn(0.5), 'kept for the device that comes to slot 7');
 });
 
 test('a wet level belongs to the slot position and carries across a device swap', () => {
@@ -1015,7 +1015,7 @@ test('.bend() is one constant in semitones: the instrument reads it as a signal,
   const synth = track.source.node;
   assert.ok(track.bendNode.outputs.includes(synth.parameters.get(TRACK_BEND_PARAM)), 'wired into the instrument\'s bend input');
   engine.setParam('t1', -1, 'bend', 2, 1.5);
-  assert.ok(track.bendNode.offset.rampedTo(2), 'in semitones');
+  assert.ok(track.bendNode.offset.landedOn(2), 'in semitones');
   assert.deepEqual(synth.messages.filter((m) => m.kind === 'bend'), [], 'a signal, not a message');
   engine.playSample('t1', 'pt_kit', { vel: 1 }, 2, 2.5);
   const voice = engine.ctx.created.filter((n) => n.kind === 'bufferSource').at(-1);
@@ -1037,9 +1037,9 @@ test('an lfo() on bend drives the track\'s bend constant, and owns it until it i
   engine.setParam('t1', -1, 'bend', 5, 0);
   assert.equal(offset.calls.length, before, 'a polled bend must not fight the modulator that owns it');
   engine.clearParamLFO('t1', -1, 'bend');
-  assert.ok(offset.rampedTo(0), 'cleared, the bend comes back to rest rather than where the sweep stopped');
+  assert.ok(offset.landedOn(0), 'cleared, the bend comes back to rest rather than where the sweep stopped');
   engine.setParam('t1', -1, 'bend', 1, 0);
-  assert.ok(offset.rampedTo(1), 'and is the pattern\'s again');
+  assert.ok(offset.landedOn(1), 'and is the pattern\'s again');
   assert.deepEqual(warnings, []);
 });
 
@@ -1125,4 +1125,15 @@ test('.grain() plays a cloud: a grain every 1/rate seconds, read where the track
   // An event's own seed values win for its first grains.
   engine.playSample('t1', 'pt_kit', { vel: 1, grain: 1, grainRate: 10, grainSize: 0.2 }, 0, 1);
   assert.equal(engine.tracks.get('t1').grain.rate, 10);
+});
+
+test('a strip control\'s first value is where the track starts; later ones glide', () => {
+  // Glided to from the node's default, a new track's first hit played louder than its postgain -
+  // by 1.7x at postgain 0.25, measured in the browser.
+  const { engine } = makeEngine();
+  const track = engine.createTrack('t1');
+  engine.setParam('t1', -1, 'postgain', 0.25, 0);
+  assert.deepEqual(track.postGain.gain.calls.map((c) => c.kind).filter((k) => k !== 'hold'), ['set'], 'stepped, not ramped from 1');
+  engine.setParam('t1', -1, 'postgain', 0.5, 0);
+  assert.ok(track.postGain.gain.rampedTo(0.5), 'a change after that glides, so a fader move does not click');
 });

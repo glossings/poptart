@@ -5,11 +5,14 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Playing live · poptart guide</title>
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <script src="/theme-boot.js"></script>
+    <link rel="stylesheet" href="/themes.css" />
     <link rel="stylesheet" href="/vendor/codemirror/lib/codemirror.css" />
     <link rel="stylesheet" href="/docs/docs.css" />
   </head>
   <body data-page="live">
     <div class="wrap">
+      <nav class="chapters"></nav>
       <main>
         <header class="chapter-head">
           <p class="kicker">Chapter 10</p>
@@ -23,8 +26,10 @@
           <tr><td><code>midikeys("KeyStep")(1)</code></td><td>a MIDI keyboard on channel 1 (any part of the device's name): notes, velocity, bend, aftertouch<span data-build="desktop">, played by the audio engine directly, with no scheduling delay</span><span data-build="web">, through Web MIDI (Chrome, Edge, Firefox)</span></td></tr>
           <tr><td>the piano roll's <strong>⌨</strong></td><td>your typing keyboard: the home row is the white keys, the row above the black; <kbd>z</kbd>/<kbd>x</kbd> octave, <kbd>c</kbd>/<kbd>v</kbd> velocity</td></tr>
         </table>
-        <pre data-build="web"><code>keys: pianoroll().synth("Wavetable").scale("F minor")   // double-click pianoroll, press ⌨, play</code></pre>
-        <pre data-build="desktop"><code>keys: pianoroll().synth("Serum 2").scale("F minor")   // double-click pianoroll, press ⌨, play</code></pre>
+        <pre data-build="web"><code>// double-click pianoroll, press ⌨, play
+keys: pianoroll().synth("Wavetable").scale("F minor")</code></pre>
+        <pre data-build="desktop"><code>// double-click pianoroll, press ⌨, play
+keys: pianoroll().synth("Serum 2").scale("F minor")</code></pre>
         <p>
           Live notes start <code>env()</code> envelopes and note-synced LFOs like written ones, and
           <code>.scale()</code> snaps them into the key. Pitch changes such as <code>.add(12)</code> apply to

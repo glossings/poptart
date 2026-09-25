@@ -10,6 +10,12 @@
 // splitter are imported as ESM from /pattern-core/ (both served by server.js), so the browser
 // computes exactly the same steps the server plays.
 
+// Embedded (`?embed`, see index.html): the app as a playable example in the guide - the editor
+// alone, isolated from this browser's patterns and prebake (boot.mjs), with the guide page around
+// it asking for play and stop and sizing the frame to what it reports. See the embed section at the
+// end of this file and docs/docs.js.
+const EMBEDDED = document.documentElement.dataset.embed === '1';
+
 const playBtn = document.getElementById('playBtn');
 const updateBtn = document.getElementById('updateBtn');
 const scanBtn = document.getElementById('scanBtn');
@@ -324,6 +330,8 @@ async function api(method, path, body) {
  */
 function logLine(text, level = false) {
   const kind = level === 'warn' ? 'warn' : level ? 'error' : '';
+  // Embedded there is no console on screen, so what would be red in it goes to the guide's example.
+  if (EMBEDDED && kind === 'error') embedPost({ type: 'poptart-embed-error', text });
   const line = document.createElement('div');
   if (kind) line.className = kind;
   line.textContent = `${new Date().toLocaleTimeString()}  ${text}`;
@@ -641,6 +649,8 @@ const RESTORE_KEY = 'poptart.restoreBuffer';
 const DOC_NAME_KEY = 'poptart.docName';
 
 function saveRestoreBuffer(code) {
+  // An embedded example shares the guide tab's sessionStorage with every other example on the page.
+  if (EMBEDDED) return;
   try {
     sessionStorage.setItem(RESTORE_KEY, code);
   } catch {
@@ -684,6 +694,8 @@ function syncBufferState() {
 // point of the id-in-URL design is that the recovery net never sits in front of the sound. The
 // title is set synchronously, though, since that's what the history entry is named after.
 function checkpointUrl() {
+  // A frame's pushState lands in the guide tab's history: Back would walk the example, not the page.
+  if (EMBEDDED) return;
   const code = cm.getValue();
   if (!code.trim() || code === lastCheckpointCode) return;
   lastCheckpointCode = code;
@@ -30199,6 +30211,91 @@ addHotkey(builtinHotkeys, 'app+j', () => {
   if (ed.somethingSelected()) openSnippetSave(ed);
   else openSnippetBrowser(ed);
 }, 'keep the selection as a snippet / open the snippet browser');
+
+// ---------------------------------------------------------------------------------------------
+// Embedded: a playable example in the guide (docs/docs.js). The page around the frame asks for
+// play and stop, and sizes the frame to what this reports - the code's own height, or, while a
+// panel is open (a piano roll, a device, a shape), enough for the panel, since every panel is
+// centered in the window and a short frame would cut it off.
+// ---------------------------------------------------------------------------------------------
+
+function embedPost(message) {
+  if (window.parent !== window) window.parent.postMessage(message, location.origin);
+}
+
+const EMBED_PANELS = '.preset-panel, .lfo-panel, .record-panel, .pianoroll-panel, .theme-panel, .dir-picker-backdrop';
+
+// The code's own height: CodeMirror's content plus the padding around it (style.css .cm-s-poptart).
+function embedCodeHeight() {
+  const cs = getComputedStyle(cm.getWrapperElement());
+  return Math.ceil(cm.getScrollInfo().height + parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom));
+}
+
+// Whether a panel is up. A panel is not measured: most of them size by the window (78vh and the
+// like), so a frame grown to fit one lets it grow again, and the two chase each other up the page in
+// a stairway. The guide gives the frame a real window's height instead, in one step, and the panel
+// lays out once, as it does in the app. (A fixed panel has no offsetParent, so "on screen" is
+// whether it has a box at all.)
+function embedPanelOpen() {
+  for (const el of document.querySelectorAll(EMBED_PANELS)) {
+    if (!el.classList.contains('hidden') && el.getClientRects().length) return true;
+  }
+  return false;
+}
+
+if (EMBEDDED) {
+  // What the guide reads back: the example as edited, for its "open" and for putting the code back
+  // when another example takes over. (cm is a top-level const, so not a property of the window.)
+  window.poptartEmbedCode = () => cm.getValue();
+  // No line numbers: the guide shows the same code without them until the example is used, and a
+  // gutter appearing at that moment would move every character over.
+  cm.setOption('lineNumbers', false);
+  let reported = '';
+  const report = () => {
+    const height = embedCodeHeight();
+    const panel = embedPanelOpen();
+    if (`${height}|${panel}` === reported) return;
+    reported = `${height}|${panel}`;
+    embedPost({ type: 'poptart-embed-height', height, panel });
+  };
+  // Reported the moment it changes - a panel opening or closing (its class), a panel growing as
+  // its contents arrive, the code getting longer - so the frame grows once, in step with the panel,
+  // rather than in a stairway behind a poll. One report per frame at most.
+  let queued = false;
+  const soon = () => {
+    if (queued) return;
+    queued = true;
+    requestAnimationFrame(() => { queued = false; report(); });
+  };
+  new MutationObserver(soon).observe(document.body, { attributes: true, attributeFilter: ['class'], subtree: true });
+  cm.on('change', soon);
+  setInterval(report, 1000); // anything the observers cannot see
+  const reportPlaying = () => embedPost({ type: 'poptart-embed-playing', playing: !!playing });
+  setInterval(reportPlaying, 250);
+  // Ready once the example's code is in the editor (the booting flag comes off - see editorReady)
+  // and pattern-core is in, which the widgets a double-click opens are built on.
+  coreReady.then(() => {
+    const waitReady = setInterval(() => {
+      if (document.documentElement.dataset.booting) return;
+      clearInterval(waitReady);
+      report();
+      embedPost({ type: 'poptart-embed-ready' });
+    }, 50);
+  });
+  window.addEventListener('message', (e) => {
+    if (e.origin !== location.origin || !e.data || typeof e.data !== 'object') return;
+    const { type, at } = e.data;
+    if (type === 'poptart-embed-play') evaluate(true, { byHand: true });
+    else if (type === 'poptart-embed-stop' && playing) doStop();
+    else if (type === 'poptart-embed-cursor' || type === 'poptart-embed-open') {
+      // Where the reader clicked in the guide's copy of the code; a double-click there opens that
+      // word's widget, exactly as a double-click in the editor would.
+      cm.focus();
+      cm.setCursor(cm.posFromIndex(at));
+      if (type === 'poptart-embed-open') openWidgetAt(cm.getValue(), at);
+    }
+  });
+}
 
 // ---------------------------------------------------------------------------------------------
 // The arrangement painter - ctrl+A.

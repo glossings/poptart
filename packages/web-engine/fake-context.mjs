@@ -31,6 +31,10 @@ export class FakeParam {
   rampedTo(v, epsilon = 1e-9) {
     return this.calls.some((c) => c.kind === 'ramp' && Math.abs(c.value - v) <= epsilon);
   }
+  /** Stepped or ramped to `v`: a strip control's first value steps (see Track#setChannel). */
+  landedOn(v, epsilon = 1e-9) {
+    return this.calls.some((c) => (c.kind === 'ramp' || c.kind === 'set') && Math.abs(c.value - v) <= epsilon);
+  }
 }
 
 let nodeSerial = 0;

@@ -4,31 +4,19 @@
     <meta charset="utf-8" />
     <title>poptart</title>
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <!-- The saved theme, applied before the stylesheets paint (shared with the guide). -->
+    <script src="/theme-boot.js"></script>
     <script>
-      // Apply the saved theme before the stylesheet paints, so there's no flash of the default.
-      // Custom themes (the unsaved "custom" draft and any named saved theme) are a preset base
-      // plus per-variable inline overrides (see client.js).
       (function () {
         var root = document.documentElement;
-        var t = localStorage.getItem('poptart-theme') || 'poptart';
-        var base = t, vars = null;
-        try {
-          if (t === 'custom') {
-            base = localStorage.getItem('poptart-custom-base') || 'poptart';
-            vars = JSON.parse(localStorage.getItem('poptart-custom-theme')) || {};
-          } else {
-            var saved = JSON.parse(localStorage.getItem('poptart-saved-themes') || '{}');
-            if (saved[t]) { base = saved[t].base || 'poptart'; vars = saved[t].vars || {}; }
-          }
-        } catch (e) {}
-        root.dataset.theme = base;
-        if (vars) for (var k in vars) root.style.setProperty(k, vars[k]);
         // Marks the window between first paint and the editor being ready - CodeMirror up AND the
         // buffer this URL asks for in it. Until then the pane stays blank rather than flashing the
         // raw textarea as unhighlighted text and then the default snippet in place of the real
         // file (see #editor in style.css; client.js clears the flag). Set from script, so with
         // scripting off there is no attribute and the textarea shows normally.
         root.dataset.booting = '1';
+        // A playable example in the guide: the editor alone (see client.js's embed section).
+        if (/[?&]embed\b/.test(location.search)) root.dataset.embed = '1';
         // Which panels are minimized, decided BEFORE the first paint. client.js is a long way from
         // running at this point, so applying it there meant every reload painted both panels open
         // and then snapped them shut. Same storage keys initCollapsible writes.
@@ -38,6 +26,7 @@
     </script>
     <link rel="stylesheet" href="/vendor/codemirror/lib/codemirror.css" />
     <link rel="stylesheet" href="/vendor/codemirror/addon/hint/show-hint.css" />
+    <link rel="stylesheet" href="/themes.css" />
     <link rel="stylesheet" href="style.css" />
   </head>
   <body>
@@ -117,7 +106,7 @@
   .scale("F minor")
   .synth("Serum 2")
   .param("Filter 1 On", 1)
-  .param("Filter 1 Freq", lfo("0,0 0.5,1,-3 1,0", { rate: 0.3 }).range(200, 5000))</textarea>
+  .param("Filter 1 Freq", lfo("swell", { rate: 0.3 }).range(200, 5000))</textarea>
           <!-- Pulsed green on save, red when something goes wrong with the console collapsed. An
                overlay rather than a style on the pane itself, because CodeMirror's own background
                paints over anything drawn underneath it. -->

@@ -5,11 +5,14 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Start here · poptart guide</title>
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <script src="/theme-boot.js"></script>
+    <link rel="stylesheet" href="/themes.css" />
     <link rel="stylesheet" href="/vendor/codemirror/lib/codemirror.css" />
     <link rel="stylesheet" href="/docs/docs.css" />
   </head>
   <body data-page="start">
     <div class="wrap">
+      <nav class="chapters"></nav>
       <main>
         <header class="chapter-head">
           <p class="kicker">Chapter 1</p>
@@ -23,8 +26,8 @@
           track; lines that continue it (a <code>.fx(…)</code> on the next line) belong to it.
         </p>
         <pre data-run data-build="web"><code>bass: note("c2 c2 g1 a1").synth("Wavetable")
-  .fx("Filter").param("Cutoff", 0.45)
-drums: s("pt_kit:0*4, ~ pt_kit:4 ~ pt_kit:4")</code></pre>
+  .fx("Filter").param("Cutoff", 0.45).postgain(0.45)
+drums: s("pt_kit:0*4, ~ pt_kit:4 ~ pt_kit:4").postgain(0.45)</code></pre>
         <pre data-build="desktop"><code>bass: note("c2 c2 g1 a1").synth("Serum 2")
 drums: s("bd*4, ~ hh ~ hh")</code></pre>
         <table>

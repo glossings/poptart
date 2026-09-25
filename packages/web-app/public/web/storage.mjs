@@ -94,7 +94,7 @@ function fromBase64(text) {
   return out.buffer;
 }
 
-export function createStorage(store, { meta = globalThis, now = () => Date.now(), blobs = null, maxSnapshots = MAX_SNAPSHOTS } = {}) {
+export function createStorage(store, { meta = globalThis, now = () => Date.now(), blobs = null, maxSnapshots = MAX_SNAPSHOTS, snippetFormat = null } = {}) {
   const { parseMeta, displayLabel, patternNameProblem, matchesQuery } = meta;
   if (typeof patternNameProblem !== 'function') {
     throw new Error('[storage] the pattern metadata helpers are missing - pattern-meta.js has to load first');
@@ -239,7 +239,19 @@ export function createStorage(store, { meta = globalThis, now = () => Date.now()
       out.push(await entryFor(key, { kind: 'snippet', name, id: name, displayName: name }));
     }
     const filtered = query && typeof matchesQuery === 'function' ? out.filter((e) => matchesQuery(e, query)) : out;
-    return filtered.sort((a, b) => b.mtime - a.mtime).map(({ code, ...rest }) => rest);
+    // Each row carries its body and the definitions riding with it, split apart as the desktop's
+    // snippets.js does - the preview shows the one and the chips are the other. The whole file
+    // stays behind: it is for searching, not for shipping to a list.
+    return filtered.sort((a, b) => b.mtime - a.mtime).map(({ code, ...rest }) => ({
+      ...rest,
+      ...(snippetFormat ? snippetFormat.splitSnippet(code) : { body: code, carries: [] }),
+    }));
+  }
+
+  /** A snippet as the editor sends it - `{ name, title, tags, body, defs }` - filed as one file. */
+  async function saveSnippet({ name, title = '', tags = [], body = '', defs = [] }) {
+    if (!snippetFormat) throw new Error('snippets need the snippet format (pinned-defs.js) loaded');
+    await write(`${SNIPPETS}${String(name).trim()}.js`, snippetFormat.composeSnippet({ title, tags, body, defs: Array.isArray(defs) ? defs : [] }));
   }
 
   /** Moves one record to another key, refusing to write over something already there. */
@@ -375,6 +387,7 @@ export function createStorage(store, { meta = globalThis, now = () => Date.now()
 
     // snippets
     listSnippets,
+    saveSnippet,
     readSnippet: (name) => read(`${SNIPPETS}${String(name).trim()}.js`),
     writeSnippet: (name, code) => write(`${SNIPPETS}${String(name).trim()}.js`, code),
     deleteSnippet: (name) => store.delete(`${SNIPPETS}${String(name).trim()}.js`),

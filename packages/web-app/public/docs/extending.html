@@ -5,11 +5,14 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Making it yours · poptart guide</title>
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <script src="/theme-boot.js"></script>
+    <link rel="stylesheet" href="/themes.css" />
     <link rel="stylesheet" href="/vendor/codemirror/lib/codemirror.css" />
     <link rel="stylesheet" href="/docs/docs.css" />
   </head>
   <body data-page="extending">
     <div class="wrap">
+      <nav class="chapters"></nav>
       <main>
         <header class="chapter-head">
           <p class="kicker">Chapter 12</p>
@@ -23,7 +26,8 @@
           them have it. Arguments stay patterns when you pass them on:
         </p>
         <pre data-run data-build="web"><code>Signal.prototype.dub = function (feedback = 0.5) {
-  return this.fx("Delay").param("Sync", "1/8.").param("Feedback", feedback).fx("Reverb");
+  return this.fx("Delay").param("Sync", "1/8.").param("Feedback", feedback)
+    .fx("Reverb");
 };
 
 chords: note("&lt;[c3,eb3,g3] [bb2,d3,f3]&gt;").synth("Wavetable").dub("&lt;0.3 0.7&gt;")</code></pre>
@@ -53,11 +57,18 @@ lead: n(degrees.join(' ')).scale("C minor").synth("FM")</code></pre>
           <code>chord('c3')</code> hands it the text.
         </p>
         <p>For a whole block of helper code, switch mini-notation off and on again:</p>
-        <pre><code>// mini-off
-const chord = (root, ...steps) =&gt; note(steps.map((s) =&gt; noteToMidi(root) + s).join(","));
+        <pre data-run data-build="web"><code>// mini-off
+const chord = (root, ...steps) =&gt; note(
+  steps.map((s) =&gt; noteToMidi(root) + s).join(","));
 // mini-on
 
-pad: chord('c3', 0, 4, 7, 11).synth("FM")</code></pre>
+pad: chord('c3', 0, 4, 7, 11).synth("FM").postgain(0.7)</code></pre>
+        <pre data-build="desktop"><code>// mini-off
+const chord = (root, ...steps) =&gt; note(
+  steps.map((s) =&gt; noteToMidi(root) + s).join(","));
+// mini-on
+
+pad: chord('c3', 0, 4, 7, 11).synth("Serum 2")</code></pre>
         <p>A <code>mini-off</code> with no <code>mini-on</code> runs to the end of the buffer.</p>
 
         <h2 id="fmap">Values: <code>fmap</code></h2>
@@ -67,7 +78,8 @@ pad: chord('c3', 0, 4, 7, 11).synth("FM")</code></pre>
         </p>
         <pre data-run data-build="web"><code>// keep a wandering line inside one octave
 Signal.prototype.fold = function (lo = 60, hi = 72) {
-  return this.fmap((m) =&gt; lo + ((((m - lo) % (hi - lo)) + (hi - lo)) % (hi - lo)));
+  const span = hi - lo;
+  return this.fmap((m) =&gt; lo + ((((m - lo) % span) + span) % span));
 };
 
 lead: n(irand(24).seg(8)).scale("C minor").fold(60, 72).synth("Wavetable")</code></pre>
@@ -113,9 +125,10 @@ Signal.prototype.strum = function (gap = 0.015) {
   });
 };
 
-chords: note("&lt;[c3,eb3,g3,bb3] [ab2,c3,eb3,g3]&gt; ~ ~ [bb2,d3,f3]").strum().synth("Wavetable")
-bass: note("c2 ~ eb2 ~ ~ g1 ~ bb1").legato().synth("FM")
-hats: s("pt_kit:4*16").humanize()</code></pre>
+chords: note("&lt;[c3,eb3,g3,bb3] [ab2,c3,eb3,g3]&gt; ~ ~ [bb2,d3,f3]")
+  .strum().synth("Wavetable").postgain(0.4)
+bass: note("c2 ~ eb2 ~ ~ g1 ~ bb1").legato().synth("FM").postgain(0.4)
+hats: s("pt_kit:4*16").humanize().postgain(0.4)</code></pre>
         <p>
           An event can move up to one cycle either way. Each cycle is worked out once and remembered, so
           <code>Math.random()</code> gives one answer per cycle rather than a new one every time the cycle
@@ -123,6 +136,9 @@ hats: s("pt_kit:4*16").humanize()</code></pre>
         </p>
 
         <h2 id="prebake">Prebake</h2>
+        <figure class="shot">
+          <img src="/docs/img/prebake.png" width="784" height="584" alt="The prebake editor holding a helper method and a setscale line, with save and run." />
+        </figure>
         <p>
           Setup you'd paste into every session (helpers, methods, your own scales) goes in the
           <strong>prebake</strong>, run once at startup. Edit it from <strong>settings → edit prebake…</strong>;
@@ -133,6 +149,9 @@ hats: s("pt_kit:4*16").humanize()</code></pre>
         </p>
 
         <h2 id="library">★ The library</h2>
+        <figure class="shot">
+          <img src="/docs/img/library.png" width="189" height="152" alt="A picker of piano roll names, each with a star; the filled star is in the library." />
+        </figure>
         <p>
           A drawn roll, an LFO shape, a preset or a pack belongs to the buffer it was made in. Click the
           <strong>★</strong> beside its name in any picker and it's copied into your library, and from then on
@@ -142,6 +161,9 @@ hats: s("pt_kit:4*16").humanize()</code></pre>
         </p>
 
         <h2 id="snippets">Snippets</h2>
+        <figure class="shot">
+          <img src="/docs/img/snippets.png" width="884" height="584" alt="The snippet browser: saved snippets listed on the left, one previewed on the right with the definitions it carries." />
+        </figure>
         <p>
           A snippet keeps a <em>phrase</em>, such as four lines of acid bass or a sidechain chain, with
           everything it needs. Select code and <strong>right-click → save as snippet…</strong>; the rolls,

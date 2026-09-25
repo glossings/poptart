@@ -167,6 +167,7 @@ export class Track {
     // what is in a slot never means rebuilding the path around it.
     this.input = ctx.createGain();          // where a source (synth, sampler, bus read) arrives
     this.chainIn = ctx.createGain();        // the `gain` control: level INTO the chain
+    this.stripSeen = new Set(); // the strip controls set so far (see setChannel)
     this.postGain = ctx.createGain();       // the `postgain` control: level out of it
     this.dryGain = ctx.createGain();        // the `dry` control: level to the master
 
@@ -443,12 +444,18 @@ export class Track {
 
   /** Sets a channel-strip control. Returns false for one this engine does not implement yet. */
   setChannel(name, value, atTime, now) {
+    // A control's first value is where the track STARTS, so it is stepped to at once rather than
+    // glided to from the node's own default (1, for the gains): gliding, a new track's first hit
+    // played louder than its .postgain() said - by 1.7x at postgain 0.25.
+    const g = this.stripSeen.has(name) ? undefined : 0;
+    if (g === 0) atTime = now;
+    this.stripSeen.add(name);
     switch (name) {
-      case 'gain': rampParam(this.chainIn.gain, value, atTime, now); return true;
-      case 'postgain': rampParam(this.postGain.gain, value, atTime, now); return true;
+      case 'gain': rampParam(this.chainIn.gain, value, atTime, now, g); return true;
+      case 'postgain': rampParam(this.postGain.gain, value, atTime, now, g); return true;
       case 'pan': {
         this.panValue = Math.min(1, Math.max(-1, value));
-        rampParam(this.panCtl.offset, this.panValue, atTime, now);
+        rampParam(this.panCtl.offset, this.panValue, atTime, now, g);
         return true;
       }
       // Pitch bend, in semitones, on one constant per track that everything playing reads
@@ -459,7 +466,7 @@ export class Track {
       case 'bend': {
         const semis = Math.min(48, Math.max(-48, Number(value) || 0));
         this.bendSemis = semis;
-        rampParam(this.bendSource().offset, semis, atTime, now);
+        rampParam(this.bendSource().offset, semis, atTime, now, g);
         return true;
       }
       // How far a plugin's pitch-bend message reaches: a MIDI matter, and the browser's
@@ -473,23 +480,23 @@ export class Track {
       case 'grainsize': case 'grainrate': case 'grainpan': case 'grainpos':
         this.grain[GRAIN_CHANNEL_FIELDS[name]] = Number(value);
         return true;
-      case 'width': rampParam(this.width.gain, Math.min(4, Math.max(0, value)), atTime, now); return true;
+      case 'width': rampParam(this.width.gain, Math.min(4, Math.max(0, value)), atTime, now, g); return true;
       case 'bassmono': {
         // 0 is off; anything else is the cutoff in Hz, held to the desktop's 20 Hz - 2 kHz.
         const on = value > 0;
         this.bassmonoHz = on ? Math.min(2000, Math.max(20, value)) : 0;
-        if (on) rampParam(this.bassHp.frequency, this.bassmonoHz, atTime, now);
-        rampParam(this.sideDry.gain, on ? 0 : 1, atTime, now);
-        rampParam(this.sideHigh.gain, on ? 1 : 0, atTime, now);
+        if (on) rampParam(this.bassHp.frequency, this.bassmonoHz, atTime, now, g);
+        rampParam(this.sideDry.gain, on ? 0 : 1, atTime, now, g);
+        rampParam(this.sideHigh.gain, on ? 1 : 0, atTime, now, g);
         return true;
       }
-      case 'dry': rampParam(this.dryGain.gain, value, atTime, now); return true;
+      case 'dry': rampParam(this.dryGain.gain, value, atTime, now, g); return true;
       default:
         if (name.startsWith('wet')) {
           // Kept for an empty slot too: the level waits for whatever device is put there.
           const index = Number(name.slice(3));
           if (!(index > 0)) return false;
-          rampParam(this.wetControl(index).offset, Math.min(1, Math.max(0, value)), atTime, now);
+          rampParam(this.wetControl(index).offset, Math.min(1, Math.max(0, value)), atTime, now, g);
           return true;
         }
         return false;

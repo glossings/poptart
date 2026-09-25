@@ -1299,9 +1299,16 @@ export function createHost({
     'GET /api/snapshot': async (_body, query) => ({ code: (await storage.getSnapshot(query.get('id'))) ?? null }),
 
     'GET /api/snippets': async (_body, query) => ({ snippets: await storage.listSnippets(query.get('q') ?? '') }),
+    // Body: { name, title?, tags?, body, defs } - what the editor posts, as the desktop takes it.
     'POST /api/snippets/save': async (body) => {
-      await storage.writeSnippet(body.name, body.code ?? '');
-      return { ok: true };
+      await storage.saveSnippet({
+        name: body?.name,
+        title: String(body?.title ?? ''),
+        tags: body?.tags ?? [],
+        body: String(body?.body ?? ''),
+        defs: body?.defs,
+      });
+      return { name: String(body?.name ?? '').trim() };
     },
     'POST /api/snippets/delete': async (body) => {
       await storage.deleteSnippet(body.name);

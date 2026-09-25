@@ -5,11 +5,14 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Samples · poptart guide</title>
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <script src="/theme-boot.js"></script>
+    <link rel="stylesheet" href="/themes.css" />
     <link rel="stylesheet" href="/vendor/codemirror/lib/codemirror.css" />
     <link rel="stylesheet" href="/docs/docs.css" />
   </head>
   <body data-page="samples">
     <div class="wrap">
+      <nav class="chapters"></nav>
       <main>
         <header class="chapter-head">
           <p class="kicker">Chapter 6</p>
@@ -22,10 +25,10 @@
           <code>s("pack")</code> plays a pack of files, numbered from 0: <code>"pack:3"</code> is the fourth
           file (the same as <code>.i(3)</code>). A sampler takes <code>.fx()</code> like any instrument.
         </p>
-        <pre data-run data-build="web"><code>drums: s("pt_kit:0*4, ~ pt_kit:3 ~ pt_kit:3, pt_kit:4*8").vel("1 .6")
-bass: s("pt_keys:2").note("c2 ~ c2 eb2 ~ c2 g1 bb1")
+        <pre data-run data-build="web"><code>drums: s("pt_kit:0*4, ~ pt_kit:3 ~ pt_kit:3, pt_kit:4*8").vel("1 .6").postgain(0.35)
+bass: s("pt_keys:2").note("c2 ~ c2 eb2 ~ c2 g1 bb1").postgain(0.35)
 bell: s("pt_keys:1").note("&lt;g3 bb3 c4 eb4&gt;").vel(0.5)
-  .fx("Delay").param("Sync", "1/8.")</code></pre>
+  .fx("Delay").param("Sync", "1/8.").postgain(0.35)</code></pre>
         <p data-build="desktop">
           A pack is a folder in your sample library (<code>~/.poptart/samples</code> unless settings says
           otherwise); its files are numbered in name order. The sounds tab lists every pack: hold a file to
@@ -49,9 +52,18 @@ bell: s("pt_keys:1").note("&lt;g3 bb3 c4 eb4&gt;").vel(0.5)
             <code>s()</code> that plays it is written where it lands.
           </p>
           <p>
+            <strong>A folder on this computer:</strong> <strong>settings → sample library → choose
+            folder…</strong> makes a pack of each folder of audio in it. Nothing is copied; a file is read
+            when a pattern first plays its pack. On a later visit the browser asks before the page may read
+            the folder again (<strong>allow again</strong>). A browser that can't keep a folder has it for the
+            visit and offers <strong>keep a copy</strong>, which copies the files into its own storage.
+          </p>
+          <p>
             <strong>From GitHub:</strong> <code>samples("user/repo")</code> reads a public repository and
             makes a pack of each folder of audio in it, named after the folder. A share link carries the
-            line, so whoever opens it hears the same files.
+            line, so whoever opens it hears the same files. A file is downloaded the first time it plays
+            and kept by this browser; <strong>settings → downloaded packs</strong> says how much that is,
+            and forgets it.
           </p>
         </div>
         <pre data-build="web"><code>samples("user/drum-kits")       // every folder of audio is a pack
@@ -90,9 +102,10 @@ beat: s("kicks:0*4, ~ snares:2")</code></pre>
           Every control is also a builder, which reaches into one control from inside a transform:
           <code>.mul(speed(-1))</code> flips whatever speed is set.
         </p>
-        <pre data-run data-build="web"><code>kick: s("pt_kit:0*4")
+        <pre data-run data-build="web"><code>kick: s("pt_kit:0*4").postgain(0.25)
 hats: s("pt_kit:5*8").vel("1 .5")
-  .when(rand().gte(0.7), (x) =&gt; x.mul(speed(-1)))   // about 3 bars in 10 backwards</code></pre>
+  // about 3 bars in 10 backwards
+  .when(rand().gte(0.7), (x) =&gt; x.mul(speed(-1))).postgain(0.25)</code></pre>
 
         <h2 id="loops">Loops and chops</h2>
         <table>
@@ -102,8 +115,10 @@ hats: s("pt_kit:5*8").vel("1 .5")
           <tr><td><code>.splice("&lt;0 1 2&gt;*8")</code></td><td>each chop fitted to its hit; <code>.splicemode("stretch")</code> keeps the pitch</td></tr>
           <tr><td><code>.slices("break")</code></td><td>use the chops you drew (below)</td></tr>
         </table>
-        <pre data-build="desktop"><code>tops: s("breaks:19").fit().begin(irand(8).seg(8).div(8))   // eight random starts a bar</code></pre>
-        <pre data-build="web"><code>tops: s("files:loop.wav").fit().begin(irand(8).seg(8).div(8))   // a loop you dropped: eight random starts a bar</code></pre>
+        <pre data-build="desktop"><code>// eight random starts a bar
+tops: s("breaks:19").fit().begin(irand(8).seg(8).div(8))</code></pre>
+        <pre data-build="web"><code>// a loop you dropped: eight random starts a bar
+tops: s("files:loop.wav").fit().begin(irand(8).seg(8).div(8))</code></pre>
         <p>
           If a fitted loop drops out, the region ran out before the step ended: <code>.loop()</code> it,
           or use shorter steps. <code>.log()</code> prints the numbers for every hit.
@@ -137,42 +152,72 @@ hats: s("pt_kit:5*8").vel("1 .5")
           <code>.note()</code> pitches it.
         </p>
         <pre data-run data-build="web"><code>cloud: s("pt_keys:3").note("&lt;[c3,eb3,g3] [bb2,d3,f3]&gt;")
-  .grain()                 // .grain("&lt;0 1&gt;") alternates plain and granular
-  .grainsize(0.08)         // seconds per grain
-  .grainrate(40)           // grains per second
-  .grainshape("pluck")     // each grain's window: double-click to draw it
-  .begin(0.3)
+  .grain()                           // or .grain("&lt;0 1&gt;"), alternating
+  .grainsize(0.08)                   // seconds per grain
+  .grainrate(40)                     // grains per second
+  .grainshape("pluck")               // each grain's window (double-click)
+  .begin(saw(0.25).range(0.2, 0.6)   // a slow scan through the file…
+    .add(rand().mul(0.02)))          // …each grain scattered around it
+  .grainpan(rand().range(-0.6, 0.6))
   .adsr(0.4, 0.2, 0.8, 1.5)
   .fx("Reverb")</code></pre>
         <pre data-build="desktop"><code>cloud: s("pad").note("c3 eb3 g3")
-  .grain()
-  .grainsize(0.08)                     // seconds per grain
-  .grainrate(40)                       // grains per second
-  .grainshape("pluck")                 // each grain's window: double-click to draw it
-  .begin(saw(0.25).range(0.2, 0.6).add(rand().mul(0.02)))   // a slow scan, each grain scattered
+  .grain()                           // or .grain("&lt;0 1&gt;"), alternating
+  .grainsize(0.08)                   // seconds per grain
+  .grainrate(40)                     // grains per second
+  .grainshape("pluck")               // each grain's window (double-click)
+  .begin(saw(0.25).range(0.2, 0.6)   // a slow scan through the file…
+    .add(rand().mul(0.02)))          // …each grain scattered around it
   .grainpan(rand().range(-0.6, 0.6))
   .adsr(0.4, 0.2, 0.8, 1.5)</code></pre>
-        <p data-build="desktop">
+        <p>
           Size, rate, pan and a <code>.begin()</code> with no rhythm of its own are read by every grain, so
-          <code>rand()</code> scatters grains and an LFO moves inside a held note.
+          <code>rand()</code> scatters grains rather than notes and an LFO moves inside a held note.
+          <code>.bend()</code> repitches grains the same way.
         </p>
-        <p data-build="web">
-          Here the grain controls take numbers and patterns, set per hit. For a cloud that moves inside a
-          held note, use the <code>Granular</code> instrument, whose <code>Position</code>,
-          <code>Spray</code>, <code>Size</code> and <code>Density</code> take signals:
-        </p>
-        <pre data-run data-build="web"><code>cloud: note("&lt;[c3,eb3,g3] [bb2,d3,f3]&gt;").synth("Granular")
-  .param("Sample", "pt_keys:3")
-  .param("Position", saw(0.25).range(0.2, 0.6))
-  .param("Spray", 0.3)
-  .fx("Reverb")</code></pre>
 
         <h2 id="kits">Your own kit: <code>sp()</code></h2>
+        <figure class="shot">
+          <img src="/docs/img/pack-panel.png" width="1064" height="664" alt="The pack panel: the kit's files on the left, and a browser of every pack on the right." />
+          <figcaption>Double-click <code>sp</code> to build a kit from any pack.</figcaption>
+        </figure>
         <p>
           <code>sp("kit")</code> is a pack you put together file by file: eight hits from four folders.
           Evaluate a name nothing defines yet, or double-click <code>sp</code>, and the pack panel opens:
           click files to add them, hold ▶ to hear one, reorder with the arrows. Play it like any pack:
           <code>sp("kit:0 kit:2")</code>.
+        </p>
+        <p data-build="web">
+          The panel lists every pack as a folder: the built-in ones, what <code>samples()</code> read, your
+          sample folder and the files you dropped. A kit can mix them. The search box looks through every
+          file of every pack (<code>break 170</code>: all the words have to match), and ← on a selected pack
+          adds all of it.
+        </p>
+        <p data-build="desktop">
+          The search box looks through everything under the folder you're in, not just what's listed:
+          <code>break 170</code> finds every file with both words in its path. ← on a folder adds every audio
+          file under it.
+        </p>
+
+        <h2 id="map">The sample map</h2>
+        <figure class="shot">
+          <img src="/docs/img/sample-map.png" width="1064" height="664" alt="The sample map: thousands of sounds as colored points, similar sounds close together." />
+          <figcaption>Every sound, placed near the ones it sounds like.</figcaption>
+        </figure>
+        <p>
+          The pack panel's <strong>map</strong> view (or <strong>map</strong> in the sounds tab) places each
+          sound near the ones that sound like it, colored by what kind of sound its name and its neighbors'
+          names say it is. Click a point to hear it, ← to add it to the kit.
+        </p>
+        <table>
+          <tr><td><strong>← unique</strong></td><td>add the sound least like anything already in the kit</td></tr>
+          <tr><td><strong>⇄</strong> · <kbd>]</kbd> · <kbd>[</kbd></td><td>swap the selected entries for the next (or previous) sound like each</td></tr>
+          <tr><td><strong>reshuffle</strong></td><td>swap every entry at once</td></tr>
+        </table>
+        <p data-build="desktop">The folders on the map are chosen in <strong>settings → sample map</strong>; the first build analyzes every file under them.</p>
+        <p data-build="web">
+          Every pack is on it unless <strong>settings → sample map</strong> narrows it. It's built the first
+          time it opens, which reads every file of every pack once, so the first build is a download.
         </p>
         <p data-build="desktop">
           <code>se("'hits/stab 01.wav'")</code> plays one exact file under the samples folder (single

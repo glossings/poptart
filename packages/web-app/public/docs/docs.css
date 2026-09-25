@@ -1,22 +1,12 @@
 /* The guide's pages. One stylesheet for every chapter; docs.js builds the chapter list and the
    previous/next links, so a page is only its own content. */
 
+/* The colors are the app's: themes.css holds every theme's palette and theme-boot.js applies the
+   one picked in the app, so the guide and the editor always match. Only what the app has no name
+   for is set here. */
 :root {
-  --bg: #16181d;
-  --bg-raised: #1c1f26;
-  --bg-panel: #21252e;
-  --border: #2c313c;
-  --border-strong: #3a4150;
-  --text: #d7dbe3;
-  --text-dim: #8f97a6;
-  --accent: #e0916f;
-  --accent-soft: rgba(224, 145, 111, 0.14);
-  --accent-strong: rgba(224, 145, 111, 0.32);
-  --ok: #8fbf7f;
-  --warn: #e6c07a;
-  --code: #e8c9a0;
-  --link: #7fb0d8;
-  --mono: "SF Mono", "JetBrains Mono", "Fira Code", ui-monospace, Menlo, Consolas, monospace;
+  --link: var(--syn-variable);
+  --code: var(--syn-property);
   --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
 }
 
@@ -108,7 +98,7 @@ h2 { font-size: 23px; margin: 48px 0 12px; letter-spacing: -0.01em; scroll-margi
 h3 { font-size: 17px; margin: 30px 0 8px; scroll-margin-top: 24px; }
 
 p { margin: 12px 0; }
-strong { color: #eef1f6; font-weight: 600; }
+strong { color: var(--text); font-weight: 600; }
 em { color: var(--text); }
 
 ul, ol { padding-left: 22px; }
@@ -149,20 +139,22 @@ pre code {
   color: var(--text);
   font-size: 13.5px;
 }
-/* The code's colors: docs.js highlights every example with the editor's own mode. */
-.cm-s-docs .cm-string, .cm-s-docs .cm-string-2 { color: var(--ok); }
-.cm-s-docs .cm-number, .cm-s-docs .cm-atom { color: var(--warn); }
-.cm-s-docs .cm-keyword { color: #c58fd8; }
-.cm-s-docs .cm-variable, .cm-s-docs .cm-def { color: var(--accent); }
-.cm-s-docs .cm-property { color: var(--code); }
-.cm-s-docs .cm-comment { color: var(--text-dim); font-style: italic; }
-.cm-s-docs .cm-operator { color: var(--text-dim); }
+/* The code's colors, token for token the editor's (style.css, .cm-s-poptart): docs.js highlights
+   every example with the editor's own mode, and marks a label inside a group's braces as the
+   label it is (JavaScript alone calls it a property). */
+.cm-s-docs .cm-string { color: var(--syn-string); }
+.cm-s-docs .cm-number { color: var(--syn-number); }
+.cm-s-docs .cm-keyword, .cm-s-docs .cm-operator { color: var(--syn-keyword); }
+.cm-s-docs .cm-variable { color: var(--syn-variable); }
+.cm-s-docs .cm-property { color: var(--syn-property); }
+.cm-s-docs span.cm-member-label { color: var(--syn-variable) !important; }
+.cm-s-docs .cm-comment { color: var(--syn-comment); font-style: italic; }
 
 /* Built for one build only: build-web.mjs marks the browser build's pages with class "web". */
 html:not(.web) [data-build="web"],
 html.web [data-build="desktop"] { display: none !important; }
 
-/* An example that plays (browser build): the editor where the <pre> was, and its buttons. */
+/* An example that plays (browser build): its code, then the app in its place, and its buttons. */
 .example {
   background: var(--bg-raised);
   border: 1px solid var(--border);
@@ -171,17 +163,24 @@ html.web [data-build="desktop"] { display: none !important; }
   overflow: hidden;
 }
 .example.playing { border-color: var(--accent); }
-.example .CodeMirror {
-  height: auto;
-  padding: 12px 8px 4px;
-  background: transparent;
-  color: var(--text);
-  font-family: var(--mono);
-  font-size: 13.5px;
-  line-height: 1.55;
+.example { position: relative; }
+/* Laid out exactly as the embedded editor lays out the same code (style.css's .cm-s-poptart:
+   14px at 1.6, the fold gutter and CodeMirror's own padding), so the swap moves nothing. */
+.example > pre {
+  margin: 0;
+  border: none;
+  border-radius: 0;
+  cursor: text;
+  padding: 14px 22px;
+  font-size: 14px;
+  line-height: 1.6;
 }
-.example .CodeMirror-cursor { border-left-color: var(--text); }
-.example .CodeMirror-selected { background: var(--accent-soft) !important; }
+.example > pre code { font-size: 14px; line-height: 1.6; }
+.example > pre[hidden] { display: none; }
+/* The app itself, embedded, once the example is used (docs.js, and ?embed in client.js). While it
+   loads it waits out of sight behind the code. */
+.example-frame { display: block; width: 100%; border: 0; background: var(--bg-raised); }
+.example-frame.loading { position: absolute; top: 0; left: 0; visibility: hidden; }
 .example-bar { display: flex; align-items: center; gap: 8px; padding: 6px 12px 10px; }
 .example-bar button {
   font: 600 12px var(--sans);
@@ -254,8 +253,12 @@ td code { white-space: nowrap; }
 figure.shot { margin: 22px 0; }
 figure.shot img {
   display: block;
-  width: 100%;
+  max-width: 100%;
   height: auto;
+}
+/* A capture of the whole window has no edge of its own; a panel's capture brings its own rounded
+   corners and shadow on transparent pixels (see the isolation step in the screenshot driver). */
+figure.shot.framed img {
   border-radius: 10px;
   border: 1px solid var(--border-strong);
   box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);

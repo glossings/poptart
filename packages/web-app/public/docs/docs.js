@@ -8,9 +8,8 @@
 // turns the playable examples into small editors with a play button.
 //
 // In the browser build every page's <html> carries class "web" (see build-web.mjs), which shows
-// the `data-build="web"` passages and hides the desktop's. An example is played by the same engine
-// the app runs, booted isolated (boot.mjs) - no store, no prebake - so it sounds the same for
-// everyone; one example plays at a time, and "open" hands it to the app as a share link.
+// the `data-build="web"` passages and hides the desktop's, and a playable example becomes the app
+// itself when it is used (see setUpExamples); "open" hands it to the app in a tab as a share link.
 //
 // Markup, for whoever writes a chapter:
 //   <pre><code>…</code></pre>              highlighted, in both builds
@@ -61,8 +60,14 @@ if (typeof document !== 'undefined') (function () {
   paintChordLabels();
 
   // ---- the chapter list and the pager ----------------------------------------------------------
-  const nav = document.createElement('nav');
-  nav.className = 'chapters';
+  // The page carries an empty <nav class="chapters"> so its column is there from the first paint;
+  // filled here, nothing moves.
+  let nav = document.querySelector('nav.chapters');
+  if (!nav) {
+    nav = document.createElement('nav');
+    nav.className = 'chapters';
+    document.querySelector('.wrap')?.prepend(nav);
+  }
   nav.innerHTML = '<a class="brand" href="/docs/"><span class="dot"></span> poptart</a><p class="tagline">the guide</p>';
   CHAPTERS.forEach((c, i) => {
     const a = document.createElement('a');
@@ -91,7 +96,6 @@ if (typeof document !== 'undefined') (function () {
   back.href = '/';
   back.textContent = '← back to poptart';
   nav.append(back);
-  document.querySelector('.wrap')?.prepend(nav);
 
   const main = document.querySelector('main');
   if (main && at >= 0) {
@@ -123,14 +127,39 @@ if (typeof document !== 'undefined') (function () {
   }
 
   // ---- code ------------------------------------------------------------------------------------
+  // A track label inside a group's braces - an indented `name:` followed by code rather than by a
+  // value, so `kick: s("bd")` counts and an option like `grid: 16` does not. JavaScript calls it a
+  // property; the editor paints it as the label it is (client.js's markMemberLabels), and so does
+  // this.
+  const MEMBER_LABEL_RE = /^([ \t]+)([A-Za-z_$][\w$]*)(?=\s*:\s*[A-Za-z_$])/;
+
   function highlight(el, text) {
     el.textContent = '';
-    CodeMirror.runMode(text, 'poptart', el);
+    const labels = text.split('\n').map((line) => {
+      const m = MEMBER_LABEL_RE.exec(line);
+      return m ? [m[1].length, m[1].length + m[2].length] : null;
+    });
+    CodeMirror.runMode(text, 'poptart', (tok, style, line, start) => {
+      if (tok === '\n') {
+        el.append('\n');
+        return;
+      }
+      const label = labels[line];
+      const cls = label && start >= label[0] && start < label[1] ? 'cm-variable cm-member-label' : style && `cm-${style.replace(/ +/g, ' cm-')}`;
+      if (!cls) {
+        el.append(tok);
+        return;
+      }
+      const span = document.createElement('span');
+      span.className = cls;
+      span.textContent = tok;
+      el.append(span);
+    });
     el.classList.add('cm-s-docs');
   }
 
   for (const pre of document.querySelectorAll('pre')) {
-    if (pre.hasAttribute('data-run') && isWeb) continue;
+    if (pre.hasAttribute('data-run') && isWeb) continue; // setUpExamples highlights these
     const code = pre.querySelector('code') ?? pre;
     highlight(code, code.textContent.replace(/\n$/, ''));
   }
@@ -255,72 +284,117 @@ if (typeof document !== 'undefined') (function () {
   // ---- playing (browser build) -----------------------------------------------------------------
 
   function setUpExamples() {
-    let hostPromise = null;
-    let playing = null; // the example on now: { el, button }
+    // A playable example is its highlighted code with a ▶ play and an open ↗ under it, until it is
+    // used: then the code gives way to the app itself, embedded (`/?embed`, see client.js's embed
+    // section) and loaded with it - the editor's own highlighting, playback boxes, completion,
+    // ctrl-hover, and the widgets a double-click opens (a piano roll, a device, a shape). The frame
+    // boots isolated, so an example never touches the reader's own patterns or prebake. One example
+    // is live at a time: using another hands the page back to code where the last one was.
     const examples = [];
+    let live = null; // the example whose frame is up
 
-    function host() {
-      if (!hostPromise) {
-        hostPromise = import('/web/boot.mjs')
-          .then((m) => m.boot({ isolated: true }))
-          .catch((err) => {
-            hostPromise = null; // a failed start can be tried again from the next click
-            throw err;
-          });
-      }
-      return hostPromise;
+    // The frame loads out of sight behind the code, at the code's size, and takes its place only
+    // once the editor in it is ready - so the page never shows a blank or half-built frame, and
+    // with the two laid out alike nothing moves when they swap.
+    function frameFor(example) {
+      return new Promise((resolve) => {
+        const frame = document.createElement('iframe');
+        frame.className = 'example-frame loading';
+        frame.title = 'playable example';
+        frame.allow = 'autoplay; midi; microphone';
+        frame.style.height = `${example.pre.offsetHeight}px`;
+        example.status.textContent = 'starting…';
+        example.onReady = () => {
+          example.pre.hidden = true;
+          frame.classList.remove('loading');
+          if (example.status.textContent === 'starting…') example.status.textContent = '';
+          resolve(frame);
+        };
+        import('/web/share-link.mjs')
+          .then(({ encodeShareHash }) => encodeShareHash(example.code))
+          .then((hash) => { frame.src = `/?embed#${hash}`; });
+        example.pre.after(frame);
+        example.frame = frame;
+      });
     }
 
-    function setPlaying(example) {
-      if (playing && playing !== example) playing.el.classList.remove('playing');
-      playing = example;
-      for (const ex of examples) ex.button.textContent = ex === playing ? '■ stop' : '▶ play';
-      if (playing) playing.el.classList.add('playing');
+    function retire(example) {
+      if (!example?.frame) return;
+      const code = currentCode(example);
+      example.post({ type: 'poptart-embed-stop' });
+      example.code = code;
+      highlight(example.codeEl, code);
+      example.frame.remove();
+      example.pre.hidden = false;
+      example.frame = null;
+      example.ready = null;
+      setPlaying(example, false);
     }
 
-    async function stop() {
-      if (!playing) return;
-      const was = playing;
-      setPlaying(null);
-      was.el.classList.remove('playing');
-      const h = await host();
-      await h.call('POST', '/api/stop', {});
-    }
-
-    async function play(example) {
-      example.status.textContent = '';
-      example.button.disabled = true;
+    function currentCode(example) {
       try {
-        const h = await host();
-        // Created inside the boot, a moment after the click that asked for it; resumed here so it
-        // starts on the first press rather than the second.
-        await h.context?.resume?.();
-        if (playing) await h.call('POST', '/api/stop', {});
-        await h.call('POST', '/api/evaluate', { code: example.editor.getValue() });
-        setPlaying(example);
-      } catch (err) {
-        example.status.textContent = String(err?.message ?? err);
-        setPlaying(null);
-      } finally {
-        example.button.disabled = false;
+        return example.frame?.contentWindow?.poptartEmbedCode?.() ?? example.code;
+      } catch {
+        return example.code;
       }
     }
 
-    async function openInApp(example) {
-      const { encodeShareHash } = await import('/web/share-link.mjs');
-      window.open(`/#${await encodeShareHash(example.editor.getValue())}`, '_blank', 'noopener');
+    // Brings the example's frame up (once), then sends it `message`.
+    async function use(example, message) {
+      if (live && live !== example) retire(live);
+      live = example;
+      example.ready ??= frameFor(example);
+      await example.ready;
+      if (message) example.post(message);
+    }
+
+    function setPlaying(example, on) {
+      example.playing = on;
+      example.button.textContent = on ? '■ stop' : '▶ play';
+      example.el.classList.toggle('playing', on);
+    }
+
+    // Everything a frame says comes here; each is matched to its example by its window.
+    window.addEventListener('message', (e) => {
+      if (e.origin !== location.origin || !e.data || typeof e.data !== 'object') return;
+      const example = examples.find((ex) => ex.frame && ex.frame.contentWindow === e.source);
+      if (!example) return;
+      const { type } = e.data;
+      if (type === 'poptart-embed-ready') example.onReady?.();
+      else if (type === 'poptart-embed-height') {
+        // With a panel open the frame is a window's worth tall, so the panel lays out as it would
+        // in the app; closed, it is exactly the code's height (see client.js's embed section).
+        const tall = e.data.panel ? Math.round(window.innerHeight * 0.9) : 0;
+        example.frame.style.height = `${Math.max(48, e.data.height, tall)}px`;
+        if (e.data.panel) example.frame.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+      }
+      else if (type === 'poptart-embed-playing') setPlaying(example, !!e.data.playing);
+      else if (type === 'poptart-embed-error') example.status.textContent = e.data.text;
+    });
+
+    // Where in the code text a click on the highlighted copy landed.
+    function offsetAt(example, e) {
+      const range = document.caretRangeFromPoint?.(e.clientX, e.clientY);
+      if (!range || !example.codeEl.contains(range.startContainer)) return 0;
+      const before = document.createRange();
+      before.setStart(example.codeEl, 0);
+      before.setEnd(range.startContainer, range.startOffset);
+      return before.toString().length;
     }
 
     for (const pre of document.querySelectorAll('pre[data-run]')) {
-      const text = (pre.querySelector('code') ?? pre).textContent.replace(/\n$/, '');
+      const codeEl = pre.querySelector('code') ?? pre;
+      const code = codeEl.textContent.replace(/\n$/, '');
+      highlight(codeEl, code);
       const el = document.createElement('div');
       el.className = 'example';
+      pre.replaceWith(el);
       const bar = document.createElement('div');
       bar.className = 'example-bar';
       const button = document.createElement('button');
       button.type = 'button';
       button.textContent = '▶ play';
-      button.title = `${chordLabel('mod+enter')} to play, ${chordLabel('mod+.')} to stop`;
+      button.title = `${chordLabel('mod+enter')} in the code plays it, ${chordLabel('mod+.')} stops`;
       const open = document.createElement('button');
       open.type = 'button';
       open.textContent = 'open ↗';
@@ -328,24 +402,37 @@ if (typeof document !== 'undefined') (function () {
       const status = document.createElement('span');
       status.className = 'example-status';
       bar.append(button, open, status);
-      pre.replaceWith(el);
-      const example = { el, button, status, editor: null };
-      example.editor = CodeMirror(el, {
-        value: text,
-        mode: 'poptart',
-        theme: 'docs',
-        viewportMargin: Infinity,
-        extraKeys: {
-          'Cmd-Enter': () => play(example),
-          'Ctrl-Enter': () => play(example),
-          'Cmd-.': () => stop(),
-          'Ctrl-.': () => stop(),
-        },
-      });
-      el.append(bar);
-      button.addEventListener('click', () => (playing === example ? stop() : play(example)));
-      open.addEventListener('click', () => openInApp(example).catch((err) => { status.textContent = String(err?.message ?? err); }));
+      el.append(pre, bar);
+      pre.title = 'click to edit, double-click a name to open its editor';
+
+      const example = {
+        el, pre, codeEl, code, button, status, frame: null, ready: null, playing: false, onReady: null,
+        post: (message) => example.frame?.contentWindow?.postMessage(message, location.origin),
+      };
       examples.push(example);
+
+      button.addEventListener('click', () => {
+        example.status.textContent = '';
+        if (example.playing) example.post({ type: 'poptart-embed-stop' });
+        else use(example, { type: 'poptart-embed-play' });
+      });
+      // A click waits a moment before it swaps the code for the editor: taken at once, the second
+      // click of a double-click would land on the frame, and the word would never open.
+      let pending = null;
+      pre.addEventListener('click', (e) => {
+        if (e.detail > 1) return; // the double-click below has it
+        const at = offsetAt(example, e);
+        clearTimeout(pending);
+        pending = setTimeout(() => use(example, { type: 'poptart-embed-cursor', at }), 280);
+      });
+      pre.addEventListener('dblclick', (e) => {
+        clearTimeout(pending);
+        use(example, { type: 'poptart-embed-open', at: offsetAt(example, e) });
+      });
+      open.addEventListener('click', async () => {
+        const { encodeShareHash } = await import('/web/share-link.mjs');
+        window.open(`/#${await encodeShareHash(currentCode(example))}`, '_blank', 'noopener');
+      });
     }
   }
 })();

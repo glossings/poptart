@@ -186,7 +186,9 @@ export async function boot({
   }
   const store = opened.store ?? memoryStore();
   const blobs = createBlobs(store);
-  const storage = createStorage(store, { meta: globalThis, blobs });
+  // pinned-defs.js owns the ★ library's file format and the snippet format (see storage and prebake).
+  await import('./pinned-defs.js');
+  const storage = createStorage(store, { meta: globalThis, blobs, snippetFormat: globalThis.poptartPinnedDefs });
 
   const samples = createSampleStore({ context, store, warn });
   // A pack written as a list - _pack("kit", […]), what the pack panel and the sample map write -
@@ -352,11 +354,10 @@ export async function boot({
   inputs.restore().then((layout) => { if (layout?.length) say(`audio in: ${layout.map((d) => d.name).join(' + ')}`); });
 
   // The ★ library and the prebake, run before any pattern so every buffer starts from them. The
-  // pinned file's format belongs to the desktop's pinned-defs.js, loaded here as it is there.
+  // pinned file's format belongs to the desktop's pinned-defs.js, loaded above.
   let prebake = null;
   if (!isolated) {
     try {
-      await import('./pinned-defs.js');
       prebake = createPrebake({
         patternCore, storage, prebakeDefs, createBlockEvaluator,
         pinnedDefs: globalThis.poptartPinnedDefs,

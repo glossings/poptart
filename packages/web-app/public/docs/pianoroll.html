@@ -5,11 +5,14 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>The piano roll · poptart guide</title>
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <script src="/theme-boot.js"></script>
+    <link rel="stylesheet" href="/themes.css" />
     <link rel="stylesheet" href="/vendor/codemirror/lib/codemirror.css" />
     <link rel="stylesheet" href="/docs/docs.css" />
   </head>
   <body data-page="pianoroll">
     <div class="wrap">
+      <nav class="chapters"></nav>
       <main>
         <header class="chapter-head">
           <p class="kicker">Chapter 7</p>
@@ -18,7 +21,7 @@
         </header>
 
         <figure class="shot">
-          <img src="/docs/img/pianoroll.png" width="778" height="543" alt="The piano roll: a keyboard down the left, a melody of eight notes on a sixteenth-note grid, and a value lane along the bottom." />
+          <img src="/docs/img/pianoroll.png" width="802" height="567" alt="The piano roll: a keyboard down the left, a melody of eight notes on a sixteenth-note grid, and a value lane along the bottom." />
           <figcaption>Every stroke is written back into the code and played straight away.</figcaption>
         </figure>
         <pre data-build="web"><code>lead: pianoroll().synth("Wavetable")   // double-click the word pianoroll</code></pre>

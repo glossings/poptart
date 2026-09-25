@@ -5,11 +5,14 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Mixing &amp; routing · poptart guide</title>
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <script src="/theme-boot.js"></script>
+    <link rel="stylesheet" href="/themes.css" />
     <link rel="stylesheet" href="/vendor/codemirror/lib/codemirror.css" />
     <link rel="stylesheet" href="/docs/docs.css" />
   </head>
   <body data-page="mixing">
     <div class="wrap">
+      <nav class="chapters"></nav>
       <main>
         <header class="chapter-head">
           <p class="kicker">Chapter 9</p>
@@ -56,7 +59,7 @@ verb: audio("space").fx("ValhallaRoom")</code></pre>
         </p>
         <pre data-build="web"><code>midi("KeyStep").synth("Wavetable")   // play from a MIDI device
 audio("drums").fx("Reverb")         // another track through a reverb
-input(1).fx("Overdrive")            // a microphone or interface input (two channels = stereo)</code></pre>
+input(1).fx("Overdrive")            // a microphone or interface input</code></pre>
         <pre data-build="desktop"><code>midi("KeyStep 32").synth("Serum 2")  // play from a MIDI device
 audio("drums").fx("ValhallaRoom")   // another track through a reverb
 input(3).fx("Amp Room")             // a hardware input (two channels = stereo)</code></pre>
@@ -64,12 +67,16 @@ input(3).fx("Amp Room")             // a hardware input (two channels = stereo)<
           <strong>After an <code>.fx()</code></strong> they feed that effect: <code>.midi("kick")</code>
           replays kick's notes into it, and <code>.audio("kick")</code> feeds kick's audio into its sidechain.
         </p>
-        <pre data-run data-build="web"><code>kick: s("pt_kit:0*4")
-bass: note("c2*8").synth("Wavetable").fx("Ducker").midi("kick")             // dips on each kick
-pad: note("[c3,eb3,g3]").synth("Wavetable").fx("Compressor").audio("kick")  // compressed by the kick</code></pre>
+        <pre data-run data-build="web"><code>kick: s("pt_kit:0*4").postgain(0.3)
+// the ducker dips on each of kick's notes
+bass: note("c2*8").synth("Wavetable").fx("Ducker").midi("kick").postgain(0.3)
+// the compressor listens to kick's audio
+pad: note("[c3,eb3,g3]").synth("Wavetable").fx("Compressor").audio("kick").postgain(0.3)</code></pre>
         <pre data-build="desktop"><code>kick: s("bd*4")
-bass: note("c2*8").synth("Serum 2").fx("Kickstart").midi("kick")   // duck to kick's notes
-pad: note("c3").synth("Diva").fx("Pro-C 2").audio("kick")          // sidechain from kick's audio</code></pre>
+// duck to kick's notes
+bass: note("c2*8").synth("Serum 2").fx("Kickstart").midi("kick")
+// sidechain from kick's audio
+pad: note("c3").synth("Diva").fx("Pro-C 2").audio("kick")</code></pre>
         <p>
           A name means a track first, then any device whose name contains it. Force one with
           <code>"track:kick"</code> or <code>"dev:KeyStep"</code>. For a trigger with no track of its own,
@@ -89,7 +96,7 @@ pad: note("c3").synth("Diva").fx("Pro-C 2").audio("kick")          // sidechain 
 
         <h2 id="mixer">The mixer</h2>
         <figure class="shot">
-          <img src="/docs/img/mixer.png" width="980" height="573" alt="The mixer: a strip per track with meters, faders and pan, beside a spectrum and a stereo image." />
+          <img src="/docs/img/mixer.png" width="1004" height="597" alt="The mixer: a strip per track with meters, faders and pan, beside a spectrum and a stereo image." />
         </figure>
         <p>
           <strong>{app+g}</strong> opens a strip per track (meter, fader, pan, width, mute, solo, and

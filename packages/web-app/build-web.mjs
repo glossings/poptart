@@ -88,7 +88,8 @@ export function injectBoot(html) {
     '    <!-- The browser build: the host runs in this page in place of a server. -->',
     '    <script>',
     '      window.__poptartHostReady = import("./web/boot.mjs")',
-    '        .then((m) => m.boot())',
+    // Embedded in the guide (?embed), the app keeps nothing and reads none of this browser's own.
+    '        .then((m) => m.boot({ isolated: document.documentElement.dataset.embed === "1" }))',
     '        .catch((err) => {',
     '          document.documentElement.removeAttribute("data-booting");',
     '          console.error("[poptart] could not start", err);',
@@ -168,7 +169,7 @@ export const WEB_SKETCH = [
   'keys: n("0 2 3 <5 7>")',
   '  .scale("F minor")',
   '  .synth("Wavetable")',
-  '  .param("Osc 1 Position", lfo("0,0 0.5,1,-3 1,0", { rate: 0.3 }))',
+  '  .param("Osc 1 Position", lfo("swell", { rate: 0.3 }))',
   '  .fx("Filter").param("Cutoff", sine(0.25).range(0.3, 0.8))',
   '  .fx("Reverb")',
 ].join('\n');

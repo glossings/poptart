@@ -5,11 +5,14 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Transforms · poptart guide</title>
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <script src="/theme-boot.js"></script>
+    <link rel="stylesheet" href="/themes.css" />
     <link rel="stylesheet" href="/vendor/codemirror/lib/codemirror.css" />
     <link rel="stylesheet" href="/docs/docs.css" />
   </head>
   <body data-page="transforms">
     <div class="wrap">
+      <nav class="chapters"></nav>
       <main>
         <header class="chapter-head">
           <p class="kicker">Chapter 11</p>
@@ -88,9 +91,9 @@ pianoroll("lead").sc().add(n("&lt;0 2 -1&gt;"))   // move by scale steps</code><
         <pre data-run data-build="web"><code>arp: note("&lt;[c3,eb3,g3] [ab2,c3,eb3] [bb2,d3,f3] [g2,bb2,d3]&gt;")
   .arp("0 1 2 3 2 1 0 1")
   .when("&lt;0 0 0 1&gt;", (x) =&gt; x.add(12))   // every fourth bar up an octave
-  .echo(2, 3/16, (x) =&gt; x.vel(0.4))       // two quieter repeats, a dotted eighth apart
-  .synth("Wavetable")
-hats: s("pt_kit:4*8").swing(1/3).degrade(0.2)</code></pre>
+  .echo(2, 3/16, (x) =&gt; x.vel(0.4))       // two quieter repeats, 3/16 apart
+  .synth("Wavetable").postgain(0.45)
+hats: s("pt_kit:4*8").swing(1/3).degrade(0.2).postgain(0.45)</code></pre>
 
         <h2 id="chance">Conditions and chance</h2>
         <table>

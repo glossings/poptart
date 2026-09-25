@@ -5,11 +5,14 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Arranging · poptart guide</title>
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <script src="/theme-boot.js"></script>
+    <link rel="stylesheet" href="/themes.css" />
     <link rel="stylesheet" href="/vendor/codemirror/lib/codemirror.css" />
     <link rel="stylesheet" href="/docs/docs.css" />
   </head>
   <body data-page="arrange">
     <div class="wrap">
+      <nav class="chapters"></nav>
       <main>
         <header class="chapter-head">
           <p class="kicker">Chapter 8</p>
@@ -17,7 +20,7 @@
           <p class="lede">Turn loops into a song by painting when each track plays.</p>
         </header>
 
-        <figure class="shot">
+        <figure class="shot framed">
           <img src="/docs/img/arrange.png" width="1120" height="363" alt="The arrangement: four rows, kick, hats, bass and keys, with clips starting at different bars, and a loop region named song over bars 1 to 16." />
           <figcaption>Keys open the song, hats come in at bar 3, the kick at 5, and the bass drops at 9.</figcaption>
         </figure>
@@ -81,7 +84,7 @@
           goes. Double-click <code>auto</code> to draw it under the clips.
         </p>
         <pre data-run data-build="web"><code>pad: note("&lt;[c3,eb3,g3] [ab2,c3,eb3]&gt;").synth("Wavetable")
-  .fx("Filter").param("Cutoff", auto("sweep").range(0.2, 0.8))</code></pre>
+  .fx("Filter").param("Cutoff", auto("sweep").range(0.2, 0.8)).postgain(0.7)</code></pre>
         <p>
           The <strong>lane</strong> box names the lane you are drawing on: type to rename, <strong>▾</strong>
           to search or create. Pin several to read them against each other; a span copied from one lane
@@ -97,7 +100,7 @@
   kick: s("pt_kit:0*4")
   snare: s("~ pt_kit:1 ~ pt_kit:1")
   hats: s("pt_kit:4*8").vel("1 .5")
-}).fx("Reverb").param("Mix", 0.15).postgain(0.8)</code></pre>
+}).fx("Reverb").param("Mix", 0.15).postgain(0.4)</code></pre>
         <pre data-build="desktop"><code>drums: group({
   kick: s("bd*4")
   snare: s("~ sd ~ sd")

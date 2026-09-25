@@ -5,11 +5,14 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Modulation · poptart guide</title>
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <script src="/theme-boot.js"></script>
+    <link rel="stylesheet" href="/themes.css" />
     <link rel="stylesheet" href="/vendor/codemirror/lib/codemirror.css" />
     <link rel="stylesheet" href="/docs/docs.css" />
   </head>
   <body data-page="modulation">
     <div class="wrap">
+      <nav class="chapters"></nav>
       <main>
         <header class="chapter-head">
           <p class="kicker">Chapter 5</p>
@@ -45,7 +48,7 @@
 
         <h2 id="drawn">Drawn shapes</h2>
         <figure class="shot">
-          <img src="/docs/img/lfo-editor.png" width="664" height="380" alt="The shape editor: a curve rising and bending back down, with points to drag." />
+          <img src="/docs/img/lfo-editor.png" width="688" height="404" alt="The shape editor: a curve rising and bending back down, with points to drag." />
           <figcaption>Double-click <code>lfo</code> to draw the shape.</figcaption>
         </figure>
         <p>
@@ -62,9 +65,17 @@
         </table>
         <pre data-run data-build="web"><code>pad: note("&lt;[c3,eb3,g3] [ab2,c3,eb3]&gt;").synth("Wavetable")
   .param("Osc 1 Table", "Vocal")
-  .param("Osc 1 Position", lfo("0,0 0.5,1,-3 1,0", { rate: 0.5 }))
-  .fx("Reverb")</code></pre>
-        <p>Shapes are named, so they pattern: <code>lfo("&lt;pluck swell&gt;")</code>.</p>
+  .param("Osc 1 Position", lfo("wobble", { rate: 0.5 }))
+  .fx("Reverb")
+
+_shape("wobble", "0,0 0.5,1,-3 1,0")</code></pre>
+        <p>
+          A drawn shape is kept by name: the <code>_shape(…)</code> line at the foot of the buffer is what the
+          editor writes (it folds away), and <code>lfo("wobble")</code> plays it. A few come built in,
+          <code>sine</code>, <code>triangle</code>, <code>saw</code>, <code>isaw</code>, <code>square</code>,
+          <code>pluck</code>, <code>swell</code> and <code>stairs</code>, and names pattern:
+          <code>lfo("&lt;pluck swell&gt;")</code>.
+        </p>
 
         <h2 id="envelopes">Envelopes</h2>
         <p>
@@ -73,9 +84,11 @@
         </p>
         <pre data-run data-build="web"><code>bass: note("c2 c2 c3 c2 eb2 c2 g2 bb1").synth("Wavetable")
   .fx("Filter").param("Mode", "ladder")
-  .param("Cutoff", env({ attack: 0.01, decay: 0.2, sustain: 0.1 }).range(0.25, 0.7))
-kick: s("pt_kit:0*4")</code></pre>
-        <pre data-build="desktop"><code>.param("Filter 1 Freq", env({ attack: 0.01, decay: 0.3, sustain: 0.2 }).range(300, 6000))</code></pre>
+  .param("Cutoff", env({ attack: 0.01, decay: 0.2, sustain: 0.1 })
+    .range(0.25, 0.7)).postgain(0.45)
+kick: s("pt_kit:0*4").postgain(0.45)</code></pre>
+        <pre data-build="desktop"><code>.param("Filter 1 Freq", env({ attack: 0.01, decay: 0.3, sustain: 0.2 })
+  .range(300, 6000))</code></pre>
         <p><code>dur()</code> is the current note's length in seconds, for anything that should scale with it.</p>
 
         <h2 id="knobs">Knobs</h2>

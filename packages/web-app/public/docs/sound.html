@@ -5,11 +5,14 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Instruments &amp; effects · poptart guide</title>
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <script src="/theme-boot.js"></script>
+    <link rel="stylesheet" href="/themes.css" />
     <link rel="stylesheet" href="/vendor/codemirror/lib/codemirror.css" />
     <link rel="stylesheet" href="/docs/docs.css" />
   </head>
   <body data-page="sound">
     <div class="wrap">
+      <nav class="chapters"></nav>
       <main>
         <header class="chapter-head">
           <p class="kicker">Chapter 4</p>
@@ -67,7 +70,7 @@
         <pre data-run data-build="web"><code>keys: n("0 2 4 &lt;5 7&gt;").scale("D dorian").synth("Plaits")
   .param("Engine", "Chord")
   .param("Timbre", sine(0.2))
-  .fx("Reverb").param("Mix", 0.35)</code></pre>
+  .fx("Reverb").param("Mix", 0.35).postgain(0.6)</code></pre>
         <pre data-build="desktop"><code>.param("Filter 1 On", 1)
 .param("Filter 1 Freq", 0.6)</code></pre>
         <p data-build="web">
@@ -81,7 +84,7 @@
           ships for Serum 2, so its cutoff takes Hertz). When a plugin reuses a name, <code>"Frequency#95"</code>
           picks one by index; autocomplete shows that form where names collide.
         </p>
-        <figure class="shot narrow" data-build="web">
+        <figure class="shot framed narrow" data-build="web">
           <img src="/docs/img/sounds-tab.png" width="320" height="711" alt="The sounds tab: the bass track's Wavetable controls listed with their values, then the devices and the sample packs." />
         </figure>
         <p>
@@ -96,7 +99,7 @@
 
         <h2 id="presets">Presets</h2>
         <figure class="shot" data-build="web">
-          <img src="/docs/img/device-wavetable.png" width="920" height="740" alt="The Wavetable device panel: two oscillators with their wavetables, a sub and noise, and an amplitude envelope." />
+          <img src="/docs/img/device-wavetable.png" width="944" height="764" alt="The Wavetable device panel: two oscillators with their wavetables, a sub and noise, and an amplitude envelope." />
           <figcaption>Double-click <code>synth</code> or <code>fx</code> to open a device's panel.</figcaption>
         </figure>
         <p>
@@ -106,8 +109,10 @@
           gains <code>.preset("lead")</code>, and the preset is kept in a folded block at the foot of the
           buffer. There is nothing to press, and the song sounds the same when it is next opened.
         </p>
-        <pre data-build="web"><code>lead: note("c4 e4 g4").synth("Wavetable").preset("&lt;lead growl&gt;")   // a different preset each cycle</code></pre>
-        <pre data-build="desktop"><code>lead: note("c4 e4 g4").synth("Serum 2").preset("&lt;lead growl&gt;")   // a different preset each cycle</code></pre>
+        <pre data-build="web"><code>// a different preset each cycle
+lead: note("c4 e4 g4").synth("Wavetable").preset("&lt;lead growl&gt;")</code></pre>
+        <pre data-build="desktop"><code>// a different preset each cycle
+lead: note("c4 e4 g4").synth("Serum 2").preset("&lt;lead growl&gt;")</code></pre>
         <p>
           Preset names pattern like anything else. Double-click <code>preset</code> to pick, make, copy
           and tweak them.

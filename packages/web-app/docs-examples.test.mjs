@@ -119,3 +119,23 @@ test('every timeline in the guide builds, and makes events', async () => {
     }
   }
 });
+
+// ---- the examples as the app itself (?embed) -------------------------------------------------------
+
+test('an example used in the guide is the app, embedded: isolated, and out of the guide\'s history', async () => {
+  const { injectBoot } = await import('./build-web.mjs');
+  const index = fs.readFileSync(path.join(here, 'public', 'index.html'), 'utf8');
+  const client = fs.readFileSync(path.join(here, 'public', 'client.js'), 'utf8');
+  assert.match(index, /if \(\/\[\?&\]embed\\b\/\.test\(location\.search\)\) root\.dataset\.embed = '1';/);
+  assert.match(injectBoot(index), /m\.boot\(\{ isolated: document\.documentElement\.dataset\.embed === "1" \}\)/,
+    'an example never reads or writes the reader\'s own patterns and prebake');
+  const body = (name) => client.slice(client.indexOf(`function ${name}(`), client.indexOf('\n}\n', client.indexOf(`function ${name}(`)));
+  assert.match(body('checkpointUrl'), /if \(EMBEDDED\) return;/, 'a frame\'s pushState would land in the guide tab\'s history');
+  assert.match(body('saveRestoreBuffer'), /if \(EMBEDDED\) return;/, 'every example shares the guide tab\'s sessionStorage');
+  assert.match(client, /window\.poptartEmbedCode = \(\) => cm\.getValue\(\);/, 'the guide reads the edited code back');
+  // A fixed panel has no offsetParent, so that is not how the frame asks whether one is open.
+  assert.match(body('embedPanelOpen'), /getClientRects\(\)\.length/);
+  assert.ok(!/offsetParent\)/.test(body('embedPanelOpen')));
+  // ...and it is not measured: sized by the window, a panel would chase a frame grown to fit it.
+  assert.ok(!/offsetHeight|scrollHeight/.test(body('embedPanelOpen')));
+});

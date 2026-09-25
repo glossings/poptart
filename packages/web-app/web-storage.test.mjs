@@ -284,3 +284,27 @@ test('an export with audio carries the added packs\' files, and an import puts t
   // Again: everything is already here, so nothing is written over.
   assert.deepEqual((await to.importAll(bundle)).audio, { written: 0, skipped: 2 });
 });
+
+// ---- snippets ---------------------------------------------------------------------------------
+
+test('a snippet is saved as the editor posts it, and listed with its body and what it carries', async () => {
+  const snippetFormat = require('./pinned-defs.js');
+  const storage = createStorage(memoryStore(), { meta, snippetFormat });
+  const posted = {
+    name: 'acid',
+    title: 'acid bass',
+    tags: ['bass', '#303'],
+    body: 'bass: pianoroll("acid").synth("Wavetable")',
+    defs: [{ code: '_roll("acid", "36,0,2 48,2,2", { grid: 16 })' }],
+  };
+  await storage.saveSnippet(posted);
+  const [row] = await storage.listSnippets();
+  assert.equal(row.name, 'acid');
+  assert.equal(row.title, 'acid bass');
+  assert.deepEqual(row.tags, ['bass', '303']);
+  assert.equal(row.body, 'bass: pianoroll("acid").synth("Wavetable")');
+  assert.deepEqual(row.carries.map((c) => [c.kind, c.id]), [['roll', 'acid']]);
+  assert.equal(row.code, undefined, 'the whole file is for searching, not for the list');
+  // The file is the one the desktop's snippets.js writes for the same post.
+  assert.equal(await storage.readSnippet('acid'), require('./snippets.js').composeSnippet(posted));
+});

@@ -5,11 +5,14 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>The poptart guide</title>
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <script src="/theme-boot.js"></script>
+    <link rel="stylesheet" href="/themes.css" />
     <link rel="stylesheet" href="/vendor/codemirror/lib/codemirror.css" />
     <link rel="stylesheet" href="/docs/docs.css" />
   </head>
   <body data-page="index">
     <div class="wrap">
+      <nav class="chapters"></nav>
       <main>
         <header class="chapter-head">
           <p class="kicker">The guide</p>
@@ -18,7 +21,7 @@
           <p class="lede" data-build="web">Write short patterns; poptart plays them on synths, samplers and effects built into this page. Nothing to install.</p>
         </header>
 
-        <figure class="shot">
+        <figure class="shot framed">
           <img src="/docs/img/app.png" width="1440" height="900" alt="The poptart window: code on the left with the playing notes boxed, the tracks and macro knobs on the right." />
           <figcaption>A song playing. The boxes in the code are the notes sounding right now.</figcaption>
         </figure>
@@ -27,12 +30,12 @@
         <p>
           A line that starts with a name and a colon is a <strong>track</strong>. Evaluate the buffer with
           <strong>{mod+enter}</strong> and every track plays; <strong>{mod+.}</strong> stops.
-          <span data-build="web">The examples in this guide have their own <strong>▶ play</strong>: edit one and press it again.</span>
+          <span data-build="web">Every example in this guide is the real editor: press <strong>▶ play</strong>, click into the code to change it, and double-click a name like <code>pianoroll</code>, <code>lfo</code> or <code>synth</code> to open its editor.</span>
         </p>
-        <pre data-run data-build="web"><code>kick: s("pt_kit:0*4")
-hats: s("pt_kit:4*8").vel("1 .5")
+        <pre data-run data-build="web"><code>kick: s("pt_kit:0*4").postgain(0.3)
+hats: s("pt_kit:4*8").vel("1 .5").postgain(0.3)
 bass: note("c2 c2 eb2 g1").synth("Wavetable")
-  .fx("Filter").param("Cutoff", sine(0.25).range(0.3, 0.7))</code></pre>
+  .fx("Filter").param("Cutoff", sine(0.25).range(0.3, 0.7)).postgain(0.3)</code></pre>
         <pre data-build="desktop"><code>kick: s("bd*4")
 hats: s("hh*8").vel("1 .5")
 bass: note("c2 c2 eb2 g1").synth("Serum 2")
