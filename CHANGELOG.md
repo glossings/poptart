@@ -2,6 +2,39 @@
 
 What changed in each release, newest first.
 
+## 0.2.0 - 2026-09-25
+
+### Added
+
+- poptart-web!
+  - Stock sample packs
+  - Importing samples with `samples`
+  - Non-integer notes (expanding functionality of Desktop)
+  - Share links
+  - Web-only docs which are interactive
+- Add ways to escape mini notation
+- Theme export and import
+- Add audio files to exports
+- About section and Discord link
+- Extensibility in userland
+  - Fmap, events, 'how' modifiers (in/out/squeeze/mix)
+
+### Fixed
+
+- Fixes and upgrades to the field guide docs for web
+- Don't highlight keywords in labels
+- Fix a bug where the first played note would ignore postgain
+
+### Changed
+
+- Major improvements to Docs (chapters, screenshots, diagrams)
+- WASM ports: mutable instruments, airwindows, cloudseed, signalsmith stretch
+- CI Improvements: supercollider integration test (on mac and windows)
+- Make docs match theme
+- Make default code use the new lfo syntax
+- Remember sample provenance
+- UI feedback when copying a link
+
 ## 0.1.2 - 2026-09-22
 
 ### Fixed
