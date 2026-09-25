@@ -69,12 +69,14 @@ export function createSampleStore({
    * files and decoding them in parallel competes with the audio thread for exactly as long as it
    * takes, which is audible as a stutter in whatever is already playing.
    */
-  async function loadPack(manifest, { urlFor }) {
+  async function loadPack(manifest, { urlFor, read = null }) {
     let index = 0;
     const misses = [];
     for (const file of manifest.files) {
       try {
-        const bytes = await bytesFor(manifest, file.file, urlFor(manifest.id, file.file));
+        // A pack with a reader of its own - a folder on this computer - is read where it lives,
+        // never fetched and never kept (local-folder.mjs).
+        const bytes = read ? await read(manifest, file.file) : await bytesFor(manifest, file.file, urlFor(manifest.id, file.file));
         // decodeAudioData detaches the buffer it is given, and the same bytes may be decoded
         // again after a context change, so it gets a copy.
         const audio = await context.decodeAudioData(bytes.slice(0));
@@ -115,10 +117,10 @@ export function createSampleStore({
    * Makes sure a pack is in memory. Safe to call from anywhere and as often as you like: a pack
    * already loading returns the same promise rather than starting a second download of it.
    */
-  function ensure(manifest, urlFor) {
+  function ensure(manifest, urlFor, read = null) {
     if (manifests.has(manifest.id)) return Promise.resolve(true);
     if (loading.has(manifest.id)) return loading.get(manifest.id);
-    const work = loadPack(manifest, { urlFor })
+    const work = loadPack(manifest, { urlFor, read })
       .then(() => { failed.delete(manifest.id); return true; })
       .catch((err) => {
         failed.set(manifest.id, { why: err.message, at: Date.now() });
@@ -204,6 +206,7 @@ export function createSampleStore({
         if (meta.decode && added.get(pack)?.files.length) decodeStored(pack);
       }
     }
+    stamp += 1;
     return [...added.values()];
   }
 
@@ -295,6 +298,7 @@ export function createSampleStore({
       }
     }
     manifests.set(pack, added.get(pack));
+    stamp += 1;
     return { ref: `${pack}:${file}`, index, name: file };
   }
 
@@ -321,7 +325,47 @@ export function createSampleStore({
     manifest.files.forEach((_, i) => decoded.delete(keyOf(pack, i)));
     added.set(pack, { ...manifest, files: [] });
     manifests.set(pack, added.get(pack));
+    stamp += 1;
     return true;
+  }
+
+  // ---- packs written as a list: _pack("kit", ["pt_kit/bd.wav", "808_kicks", …]) ----------------
+  //
+  // A named pack the store has no manifest of is a DEFINITION: a list of entries, each one file
+  // of a pack ("pack/file") or a whole pack ("pack"), which is what the pack panel and the sample
+  // map write. The language holds the list (`resolvePack`, set by the page); the store turns an
+  // index into it into the file it names, the desktop's order - entries in order, a whole pack
+  // spread out in its own order - with the index wrapping, as it does there.
+  let resolvePack = null;
+  let expanded = new Map();     // pack id -> { entries, stamp, files: [{ pack, index }] }
+  let stamp = 0;                // bumped whenever what a definition can resolve to may have changed
+
+  function viaDefinition(pack, index) {
+    if (!resolvePack || manifestOf(pack)) return null;
+    const entries = resolvePack(pack);
+    if (!Array.isArray(entries) || !entries.length) return null;
+    let held = expanded.get(pack);
+    if (!held || held.entries !== entries || held.stamp !== stamp) {
+      const files = [];
+      for (const entry of entries) {
+        // "/packs/pack/file" is the pack panel's spelling of the same entry (host.mjs, browseDir).
+        const text = String(entry).replace(/^\/packs\//, '');
+        const cut = text.indexOf('/');
+        const from = cut < 0 ? text : text.slice(0, cut);
+        const manifest = from === pack ? null : manifestOf(from);
+        if (!manifest) continue;
+        if (cut < 0) manifest.files.forEach((_, i) => files.push({ pack: from, index: i }));
+        else {
+          const i = indexOf(from, text.slice(cut + 1));
+          if (i != null) files.push({ pack: from, index: i });
+        }
+      }
+      held = { entries, stamp, files };
+      expanded.set(pack, held);
+    }
+    if (!held.files.length) return null;
+    const n = held.files.length;
+    return held.files[((Math.trunc(Number(index) || 0) % n) + n) % n];
   }
 
   /** The manifest a file of a pack sits in, from the added packs, what has loaded or what is known. */
@@ -349,11 +393,14 @@ export function createSampleStore({
     const manifest = manifestOf(pack);
     const entry = manifest?.files[index];
     if (!entry) return null;
+    const lazy = known.get(pack);
+    if (lazy?.read) {
+      try { return await lazy.read(manifest, entry.file); } catch { return null; }
+    }
     if (store) {
       const held = await store.get(cacheKeyOf(manifest, entry.file)).catch(() => null);
       if (held?.bytes) return held.bytes;
     }
-    const lazy = known.get(pack);
     if (lazy?.urlFor && fetchImpl) {
       try { return await bytesFor(manifest, entry.file, lazy.urlFor(pack, entry.file)); } catch { return null; }
     }
@@ -366,8 +413,9 @@ export function createSampleStore({
    * never finish starting; instead the first ask for any of a pack's files starts that pack
    * loading, and the notes until it lands are the "source not ready" the engine already reports.
    */
-  function register(list, urlFor) {
-    for (const manifest of list) known.set(manifest.id, { manifest, urlFor });
+  function register(list, urlFor, { read = null } = {}) {
+    for (const manifest of list) known.set(manifest.id, { manifest, urlFor, read });
+    stamp += 1;
   }
 
   /**
@@ -381,6 +429,7 @@ export function createSampleStore({
     manifests.delete(pack);
     known.delete(pack);
     failed.delete(pack);
+    stamp += 1;
   }
 
   return {
@@ -421,6 +470,8 @@ export function createSampleStore({
      * its path under the samples folder, which for a pack is the same two parts.
      */
     fileKey(pack, index) {
+      const via = viaDefinition(pack, index);
+      if (via) return this.fileKey(via.pack, via.index);
       const manifest = manifests.get(pack) ?? added.get(pack);
       const file = manifest?.files?.[index]?.file;
       return file ? `${pack}/${file}` : null;
@@ -432,8 +483,10 @@ export function createSampleStore({
     get(pack, index) {
       const held = decoded.get(keyOf(pack, index));
       if (held) return held;
+      const via = viaDefinition(pack, index);
+      if (via) return this.get(via.pack, via.index);
       const lazy = known.get(pack);
-      if (lazy && !manifests.has(pack) && !recentlyFailed(pack)) ensure(lazy.manifest, lazy.urlFor);
+      if (lazy && !manifests.has(pack) && !recentlyFailed(pack)) ensure(lazy.manifest, lazy.urlFor, lazy.read);
       return null;
     },
     ensure,
@@ -446,10 +499,17 @@ export function createSampleStore({
       if (manifests.has(pack)) return true;
       const lazy = known.get(pack);
       if (!lazy) return added.has(pack);
-      return ensure(lazy.manifest, lazy.urlFor);
+      return ensure(lazy.manifest, lazy.urlFor, lazy.read);
     },
     register,
     forget,
+    /** How a named pack that is a written list is read: id -> its entries, or null. */
+    setPackResolver(fn) {
+      resolvePack = typeof fn === 'function' ? fn : null;
+      stamp += 1;
+    },
+    /** The file a definition's index lands on, as { pack, index }, or null. */
+    resolveEntry: (pack, index) => viaDefinition(pack, index),
     put,
     loaded: () => [...manifests.keys()],
     problems: () => Object.fromEntries([...failed].map(([id, f]) => [id, f.why])),

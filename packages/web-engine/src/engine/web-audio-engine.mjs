@@ -26,7 +26,7 @@ import { MIX_BAND_FREQS, MIX_TRACK_MAX, MixAnalysis, SpectrumTap } from './analy
 import { MidiRoutes } from './midi-routes.mjs';
 import { detectOnsets, monoOf, planSample, sliceEntryFor } from './sample-plan.mjs';
 import { EnvConnection, FeedConnection, LfoConnection } from './modulators.mjs';
-import { SUPPORTED_CHANNELS, Track, rampParam, teardownParamConnection } from './track.mjs';
+import { GRAIN_CHANNEL_FIELDS, SUPPORTED_CHANNELS, Track, rampParam, teardownParamConnection } from './track.mjs';
 
 const keyOf = (slot, name) => `${slot}:${name}`;
 
@@ -166,7 +166,11 @@ export class WebAudioEngine {
     // window played by a synth have to be the same curve, which is only true if there is one
     // piece of code that says what the curve is.
     shapes = null,
+    // How long a route naming a track or bus that does not exist yet waits before it is said to
+    // name nothing (see _route). Long enough for one evaluation to build every track in it.
+    routeWaitMs = 2000,
   } = {}) {
+    this.routeWaitMs = routeWaitMs;
     this.ctx = ctx;
     this.registry = registry;
     this.samples = samples;
@@ -194,6 +198,7 @@ export class WebAudioEngine {
     this._taps = new Map();         // track id ('*' for the master) -> recorder tap
     this._transients = new WeakMap(); // AudioBuffer -> slice starts (undefined while working, null for none)
     this._hwRoutes = new Map();     // "head|track" / "side|track|slot" -> { chans, wire, dispose }
+    this._waiting = new Map();      // "head|track" / "side|track|slot" / "param|track|slot:name" -> { name, wire }
     this.warned = new Set();
     this.workletsReady = false;
     // Label to track id. A pattern names another track the way somebody wrote it - audio("kick")
@@ -294,6 +299,7 @@ export class WebAudioEngine {
       this.tracks.set(trackId, track);
       this.modulators.set(trackId, new Map());
       this.envelopes.set(trackId, new Map());
+      this._wakeRoutes();
     }
     if (initial) {
       const now = this.getTime();
@@ -313,6 +319,7 @@ export class WebAudioEngine {
     if (!track) return;
     const now = this.getTime();
     this._clearAllModulators(trackId);
+    for (const key of [...this._waiting.keys()]) if (key.split('|')[1] === trackId) this._waiting.delete(key);
     // What reads into it: the head input (a bus, another track, a hardware input) and the
     // hardware routes into its sidechains.
     this.clearInputSource(trackId);
@@ -342,6 +349,8 @@ export class WebAudioEngine {
     this.held.delete(trackId);
     this.sounding.delete(trackId);
     this.voices.delete(trackId);
+    // Last, once the name no longer answers: what it fed goes back to waiting for it.
+    this._orphanRoutesFrom(trackId, track.panner);
   }
 
   // -- devices -----------------------------------------------------------------------------
@@ -653,16 +662,25 @@ export class WebAudioEngine {
     const voice = this._voice(track, { amp, start, release, onRelease: () => { cut = true; } });
 
     const mono = buffer.numberOfChannels === 1;
+    // A grain control an lfo() or env() drives is read off the modulator at the grain's own start,
+    // as the desktop's grains read the control's bus - not at the moment the batch is laid.
+    const mods = this.modulators.get(track.id);
+    const read = (name, at) => {
+      const conn = mods?.get(keyOf(-1, name));
+      if (!conn) return g[GRAIN_CHANNEL_FIELDS[name]];
+      const v = typeof conn.valueAt === 'function' ? conn.valueAt(at) : conn.value();
+      return Number.isFinite(v) ? v : g[GRAIN_CHANNEL_FIELDS[name]];
+    };
     let next = start;
     let count = 0;
     const lay = () => {
       const horizon = cut ? next : Math.min(end, this.getTime() + 0.1);
       while (next < horizon) {
-        const size = Math.min(4, Math.max(0.002, g.size));
-        const density = Math.min(1000, Math.max(0.1, g.rate));
-        const pos = Math.min(1, Math.max(0, posLive ? g.pos : from / Math.max(1e-9, fileSec)));
+        const size = Math.min(4, Math.max(0.002, read('grainsize', next)));
+        const density = Math.min(1000, Math.max(0.1, read('grainrate', next)));
+        const pos = Math.min(1, Math.max(0, posLive ? read('grainpos', next) : from / Math.max(1e-9, fileSec)));
         const level = 1 / Math.sqrt(Math.max(1, size * density * 0.5));
-        this._grain(buffer, amp, next, size, pos * fileSec, rate, g.pan, level * (mono ? Math.SQRT2 : 1), window, track);
+        this._grain(buffer, amp, next, size, pos * fileSec, rate, read('grainpan', next), level * (mono ? Math.SQRT2 : 1), window, track);
         next += 1 / density;
         count += 1;
       }
@@ -1107,14 +1125,16 @@ export class WebAudioEngine {
   _targetParam(trackId, slot, name) {
     const track = this.tracks.get(trackId);
     if (slot === -1) {
-      // The bend's constant is in semitones, the modulator's own units, and every voice on the
-      // track reads it - the instrument through its bend input, the sample voices as detune.
-      if (name === 'bend' && track) return track.bendSource().offset;
-      this._warnOnce(
-        `channel-mod:${name}`,
-        `[web-engine] the "${name}" channel control cannot be driven by an lfo(), env(), midicc() or osc() in the browser build yet, so nothing is connected to it. bend can.`,
-      );
-      return null;
+      // A channel control is driven in its own units, as a set value is: gain as a level, pan
+      // from -1 to 1, bend in semitones, bass mono in Hz (see Track#driveChannel).
+      const param = track?.driveChannel(name, this.getTime()) ?? null;
+      if (!param && track) {
+        this._warnOnce(
+          `channel-mod:${name}`,
+          `[web-engine] the "${name}" channel control cannot be driven by an lfo(), env(), midicc() or osc(), so nothing is connected to it.`,
+        );
+      }
+      return param;
     }
     const filled = track?.slots.get(slot);
     if (!filled) return null;
@@ -1215,16 +1235,24 @@ export class WebAudioEngine {
     const held = this.modulators.get(trackId);
     const conn = held?.get(key);
     if (!conn) return;
-    this._recordLeft(trackId, slot, name, conn.stop());
+    const left = conn.stop();
+    this._recordLeft(trackId, slot, name, left);
     held.delete(key);
-    // A bend is left where it rests, not where the modulator stopped: a pattern that dropped its
-    // lfo() on bend should not stay out of tune by wherever the sweep happened to be. Anything
-    // the pattern bends by now arrives on the next poll.
     const track = this.tracks.get(trackId);
-    if (slot === -1 && name === 'bend' && track) {
-      track.bendSemis = 0;
+    if (slot === -1 && track) {
       const now = this.getTime();
-      rampParam(track.bendSource().offset, 0, now, now);
+      // A bend is left where it rests, not where the modulator stopped: a pattern that dropped its
+      // lfo() on bend should not stay out of tune by wherever the sweep happened to be. Anything
+      // the pattern bends by now arrives on the next poll.
+      if (name === 'bend') {
+        track.bendSemis = 0;
+        rampParam(track.bendSource().offset, 0, now, now);
+      } else if (Number.isFinite(left)) {
+        // Every other channel control stays where the modulator had it, and is SET there, so the
+        // track's own record of it agrees - the grains read it, bass mono decides off it whether
+        // it is on at all.
+        track.setChannel(name, left, now, now);
+      }
     }
     this.envelopes.get(trackId)?.delete(key);
     if (conn._feedKey) this.feeds.get(conn._feedKey)?.delete(conn);
@@ -1323,11 +1351,15 @@ export class WebAudioEngine {
     this.disconnectParam(trackId, slot, name);
     const target = this._targetParam(trackId, slot, name);
     if (!target) return;
-    const from = this._sourceNode(source);
-    if (!from) {
-      this._warnOnce(`source:${source}`, `[web-engine] there is nothing called "${source}" to patch into "${name}".`);
-      return;
-    }
+    // The parameter is looked up again when the source arrives: the device in the slot may have
+    // been swapped while the route waited.
+    this._route(`param|${trackId}|${key}`, source, (from) => {
+      const param = this._targetParam(trackId, slot, name);
+      if (param) this._patchParam(track, key, param, from, source, gain, offset);
+    }, `source:${source}`, `[web-engine] there is nothing called "${source}" to patch into "${name}".`);
+  }
+
+  _patchParam(track, key, target, from, source, gain, offset) {
     const scale = this.ctx.createGain();
     scale.gain.value = gain;
     from.connect(scale);
@@ -1352,6 +1384,7 @@ export class WebAudioEngine {
    * it rather than being left at the bottom of its range.
    */
   disconnectParam(trackId, slot, name) {
+    this._waiting.delete(`param|${trackId}|${keyOf(slot, name)}`);
     const track = this.tracks.get(trackId);
     const conn = track?.paramConnections.get(keyOf(slot, name));
     if (!conn) return;
@@ -1388,6 +1421,7 @@ export class WebAudioEngine {
     if (!bus) {
       bus = this.ctx.createGain();
       this.buses.set(name, bus);
+      this._wakeRoutes();
     }
     return bus;
   }
@@ -1419,6 +1453,75 @@ export class WebAudioEngine {
     const track = this.tracks.get(id) ?? this.tracks.get(bare);
     if (track) return track.panner;
     return explicit ? null : this.buses.get(bare) ?? null;
+  }
+
+  /**
+   * Wires a route from the node `name` resolves to - now if it is there, or as soon as it is.
+   *
+   * The scheduler builds a buffer's tracks in the order they are written, so a track reading one
+   * written BELOW it - `.fx("Ducker").audio("kick")` above `kick:` - names a track that does not
+   * exist yet. It will a moment later, in the same evaluation, and the scheduler does not send a
+   * route twice, so failing here would lose it for good. The route waits instead, and is only
+   * said to name nothing if nothing has answered to the name once the evaluation has had time to
+   * finish.
+   */
+  _route(key, name, wire, warnKey, warning) {
+    this._waiting.delete(key);
+    const from = this._sourceNode(name);
+    if (from) {
+      wire(from);
+      return;
+    }
+    const waiting = { name, wire };
+    this._waiting.set(key, waiting);
+    const timer = setTimeout(() => {
+      if (this._waiting.get(key) === waiting) this._warnOnce(warnKey, warning);
+    }, this.routeWaitMs);
+    timer?.unref?.();
+  }
+
+  /** Wires every waiting route whose source has arrived. */
+  _wakeRoutes() {
+    for (const [key, waiting] of [...this._waiting]) {
+      const from = this._sourceNode(waiting.name);
+      if (!from) continue;
+      this._waiting.delete(key);
+      waiting.wire(from);
+    }
+  }
+
+  /**
+   * Puts every route fed by a track that is going away back to waiting for its name, so the same
+   * label written again - the line deleted and undone, the track renamed and named back - feeds
+   * them again. Left as they were, they would hang off a node that no longer carries anything.
+   */
+  _orphanRoutesFrom(sourceId, panner) {
+    for (const [id, track] of this.tracks) {
+      if (id === sourceId) continue;
+      for (const [slot, held] of [...track.sidechains]) {
+        if (held.from !== panner) continue;
+        const { source, gain } = held;
+        track.clearSidechain(slot);
+        this._route(`side|${id}|${slot}`, source, (from) => track.setSidechain(slot, from, source, gain),
+          `source:${source}`, `[web-engine] there is nothing called "${source}" to feed into slot ${slot}.`);
+      }
+      if (track._headSource === panner && track._headName) {
+        const name = track._headName;
+        try { panner.disconnect(track.input); } catch { /* already detached */ }
+        track._headSource = null;
+        this._route(`head|${id}`, name, (from) => {
+          from.connect(track.input);
+          track._headSource = from;
+          track._headName = name;
+        }, `head:${name}`, `[web-engine] there is nothing called "${name}" for this track to read.`);
+      }
+      for (const [key, conn] of [...track.paramConnections]) {
+        if (conn.from !== panner) continue;
+        const cut = key.indexOf(':');
+        this.disconnectParam(id, Number(key.slice(0, cut)), key.slice(cut + 1));
+        this.connectParam(id, Number(key.slice(0, cut)), key.slice(cut + 1), conn.source, conn.gain, conn.offset);
+      }
+    }
   }
 
   setBusSends(trackId, sends) {
@@ -1488,23 +1591,23 @@ export class WebAudioEngine {
       this._wireHardware(`head|${trackId}`);
       return;
     }
-    const from = this._sourceNode(name);
-    if (!from) {
-      this._warnOnce(`head:${name}`, `[web-engine] there is nothing called "${name}" for this track to read.`);
-      return;
-    }
     this.clearInputSource(trackId);
-    from.connect(track.input);
-    track._headSource = from;
+    this._route(`head|${trackId}`, name, (from) => {
+      from.connect(track.input);
+      track._headSource = from;
+      track._headName = name;
+    }, `head:${name}`, `[web-engine] there is nothing called "${name}" for this track to read.`);
   }
 
   clearInputSource(trackId) {
+    this._waiting.delete(`head|${trackId}`);
     this.midiRoutes.remove(trackId, 0, this.getTime());
     this._dropHardware(`head|${trackId}`);
     const track = this.tracks.get(trackId);
     if (!track?._headSource) return;
     try { track._headSource.disconnect(track.input); } catch { /* already detached */ }
     track._headSource = null;
+    track._headName = null;
   }
 
   // -- the recorder -----------------------------------------------------------------------------
@@ -1691,15 +1794,12 @@ export class WebAudioEngine {
       this._wireHardware(`side|${trackId}|${slot}`);
       return;
     }
-    const from = this._sourceNode(name);
-    if (!from) {
-      this._warnOnce(`source:${name}`, `[web-engine] there is nothing called "${name}" to feed into "${filled.descriptor.id}".`);
-      return;
-    }
-    track.setSidechain(slot, from, name, gain);
+    this._route(`side|${trackId}|${slot}`, name, (from) => track.setSidechain(slot, from, name, gain),
+      `source:${name}`, `[web-engine] there is nothing called "${name}" to feed into "${filled.descriptor.id}".`);
   }
 
   clearAudioInject(trackId, slot) {
+    this._waiting.delete(`side|${trackId}|${slot}`);
     this._dropHardware(`side|${trackId}|${slot}`);
     this.tracks.get(trackId)?.clearSidechain(slot);
   }

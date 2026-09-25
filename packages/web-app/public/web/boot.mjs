@@ -29,6 +29,8 @@ import { createAudioInputs } from './audio-input.mjs';
 import { createPrebake } from './prebake.mjs';
 import { createBlockEvaluator } from './block-eval.mjs';
 import { createRemotePacks } from './remote-packs.mjs';
+import { createLocalFolder } from './local-folder.mjs';
+import { createWebSampleMap } from './sample-map.mjs';
 
 /** Where the pieces are served from. One place, so moving a folder is one edit. */
 export const PATHS = Object.freeze({
@@ -37,7 +39,51 @@ export const PATHS = Object.freeze({
   worklets: '/web-engine/worklets',
   builtInPacks: '/web-engine/packs',
   devices: '/web-engine/devices',
+  sampleMapCore: '/osc-engine/sample-map-core.mjs',
 });
+
+/**
+ * Runs the sample map's analysis on a worker, started on the first job. Where a module worker
+ * cannot be made, the jobs run on the page instead (see sample-map.mjs's defaults) - slower to
+ * sit through, but the map is still a map.
+ */
+function sampleMapWorker(core, warn) {
+  let worker = null;
+  let failed = false;
+  let seq = 0;
+  const pending = new Map();
+  const job = (kind, args) => {
+    if (!worker && !failed) {
+      try {
+        worker = new Worker(new URL('./sample-map-worker.mjs', import.meta.url), { type: 'module' });
+        worker.onmessage = ({ data }) => {
+          const p = pending.get(data.id);
+          if (!p) return;
+          pending.delete(data.id);
+          if (data.error) p.reject(new Error(data.error));
+          else p.resolve(data.result);
+        };
+      } catch (err) {
+        failed = true;
+        warn(`[samples] the sample map is working on the page's own thread - ${err.message ?? err}`);
+      }
+    }
+    if (!worker) {
+      return Promise.resolve().then(() => (kind === 'features'
+        ? args.heads.map((h) => (h ? { features: core.extractFeatures(h.samples, h.sampleRate, h.totalSeconds), seconds: h.totalSeconds } : null))
+        : core.deriveMap(args.vectors, args.paths, args.opts)));
+    }
+    const id = ++seq;
+    return new Promise((resolve, reject) => {
+      pending.set(id, { resolve, reject });
+      worker.postMessage({ id, kind, args });
+    });
+  };
+  return {
+    analyze: (heads) => job('features', { heads }),
+    derive: (vectors, paths, opts) => job('derive', { vectors, paths, opts }),
+  };
+}
 
 /** The packs that ship with the page, so a fresh load is playable with no network at all. */
 const BUILT_IN_PACKS = Object.freeze(['pt_kit', 'pt_keys']);
@@ -143,6 +189,9 @@ export async function boot({
   const storage = createStorage(store, { meta: globalThis, blobs });
 
   const samples = createSampleStore({ context, store, warn });
+  // A pack written as a list - _pack("kit", […]), what the pack panel and the sample map write -
+  // is read from the language, buffer first, as the desktop engine is handed it.
+  samples.setPackResolver((id) => patternCore.lookupPack(id)?.files ?? null);
   const engine = new webEngine.WebAudioEngine(context, {
     registry: webEngine.catalog,
     samples,
@@ -218,6 +267,55 @@ export async function boot({
   const outputs = createAudioOutputs({ context });
   const restored = await Promise.race([outputs.restore(), new Promise((r) => setTimeout(() => r(null), 1500))]);
   if (restored) say(`playing to ${restored}`);
+
+  // The sample library folder chosen on an earlier visit, read again where the browser still
+  // allows it. Walking a big library takes a moment, so the editor does not wait on it past the
+  // same moment it gives the output device; the packs join, and say so, when the walk is done.
+  const localFolder = createLocalFolder({
+    store: isolated ? null : store,
+    samples,
+    onPacks: (manifests) => registerPacks(patternCore, manifests),
+    warn,
+    say,
+  });
+  // The sample map, over every pack above. Built the first time it is opened, not now. A map that
+  // cannot load costs the map and nothing else.
+  const mapCore = await import(PATHS.sampleMapCore).catch((err) => {
+    warn(`[samples] the sample map is not available - ${err.message ?? err}`);
+    return null;
+  });
+  const mapRunner = mapCore && sampleMapWorker(mapCore, warn);
+  const sampleMap = mapCore && createWebSampleMap({
+    core: mapCore,
+    store: isolated ? null : store,
+    // The packs in the order the host lists them (host.mjs, allPacks), and the files added here.
+    packs: () => [
+      ...builtIn,
+      ...library.packs,
+      ...remotePacks.packs().map((p) => p.manifest),
+      ...localFolder.packs().map((p) => p.manifest),
+      ...samples.addedPacks().filter((m) => m.files.length),
+    ],
+    bytesOf: async (pack, index) => {
+      const held = await samples.bytes(pack, index);
+      if (held) return held;
+      // A shipped pack is fetched once at boot and decoded, but its bytes are not always kept.
+      const manifest = builtIn.find((m) => m.id === pack);
+      const file = manifest?.files[index]?.file;
+      if (!file) return null;
+      const res = await fetchImpl(builtInUrl(pack, file));
+      return res.ok ? res.arrayBuffer() : null;
+    },
+    decode: (bytes) => context.decodeAudioData(bytes),
+    analyze: mapRunner.analyze,
+    derive: mapRunner.derive,
+    log: say,
+  });
+
+  if (!isolated) {
+    await Promise.race([localFolder.restore().catch((err) => warn(`[samples] ${err.message ?? err}`)), new Promise((r) => setTimeout(r, 1500))]);
+    if (localFolder.status().state === 'prompt') say(`sample folder: ${localFolder.status().name} needs a click before this page reads it again - settings, "allow again"`);
+  }
 
   // MIDI from the controllers on this machine. Asked for only when something wants it (see
   // midi.mjs); every message goes to the engine, which plays the tracks listening to that device,
@@ -301,6 +399,8 @@ export async function boot({
     builtInUrl,
     library,
     remotePacks,
+    localFolder,
+    sampleMap,
   });
 
   say(`ready - ${webEngine.catalog.list().length} devices, ${builtIn.length + library.packs.length} packs`);

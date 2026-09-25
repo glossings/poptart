@@ -107,6 +107,7 @@ export class FakeAudioContext {
   createGain() { return this._make(new FakeNode('gain', { gain: new FakeParam(1, 'gain') })); }
   createStereoPanner() { return this._make(new FakeNode('panner', { pan: new FakeParam(0, 'pan') })); }
   createConstantSource() { return this._make(new FakeNode('constant', { offset: new FakeParam(0, 'offset') })); }
+  createWaveShaper() { return this._make(new FakeNode('shaper', { curve: null, oversample: 'none' })); }
   createBufferSource() {
     return this._make(new FakeNode('bufferSource', {
       buffer: null, loop: false, loopStart: 0, loopEnd: 0,

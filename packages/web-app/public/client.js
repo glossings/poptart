@@ -18459,6 +18459,8 @@ document.getElementById('aboutOpen').onclick = () => {
   bringPanelToFront(aboutPanelEl);
 };
 document.getElementById('aboutClose').onclick = () => aboutPanelEl.classList.add('hidden');
+// The desktop shell hands a window.open() of a web address to the system browser (main.js).
+document.getElementById('discordOpen').onclick = () => window.open('https://discord.gg/g5F59UdN8b', '_blank', 'noopener');
 
 (async () => {
   const licenseEl = document.getElementById('aboutLicense');
@@ -18541,6 +18543,13 @@ if (window.__poptartHostReady) {
   });
 }
 
+const sampleFolderSection = document.getElementById('sampleFolderSection');
+const sampleFolderPick = document.getElementById('sampleFolderPick');
+const sampleFolderReconnect = document.getElementById('sampleFolderReconnect');
+const sampleFolderForget = document.getElementById('sampleFolderForget');
+const sampleFolderInput = document.getElementById('sampleFolderInput');
+const sampleFolderNote = document.getElementById('sampleFolderNote');
+
 if (window.__poptartHostReady) {
   wavetableSection.classList.remove('hidden');
   wavetableFolderPick.addEventListener('click', pickWavetableFolder);
@@ -18568,6 +18577,95 @@ if (window.__poptartHostReady) {
     }
   });
   refreshWavetableFolder();
+  document.getElementById('librarySection').classList.add('hidden');
+  sampleFolderSection.classList.remove('hidden');
+  sampleFolderPick.addEventListener('click', () => pickSampleFolder().catch((e) => logLine(e.message ?? String(e), true)));
+  sampleFolderInput.addEventListener('change', () => {
+    const files = [...(sampleFolderInput.files ?? [])];
+    sampleFolderInput.value = '';
+    if (files.length) useSampleFolder(files).catch((e) => logLine(e.message ?? String(e), true));
+  });
+  // A browser that cannot keep a folder cannot be asked for one again either, so the same button
+  // is the offer to keep a copy there - labeled for its browser from the start, not swapped later.
+  const canKeepFolder = typeof window.showDirectoryPicker === 'function';
+  if (!canKeepFolder) {
+    sampleFolderReconnect.textContent = 'keep a copy';
+    sampleFolderReconnect.title = 'this browser forgets a folder when the page closes - copy its files into the browser\'s storage to have them next visit';
+  }
+  sampleFolderReconnect.addEventListener('click', async () => {
+    const route = canKeepFolder ? '/api/sampleFolder/reconnect' : '/api/sampleFolder/keep';
+    // A copy of a big folder takes a while: the note counts it along.
+    const ticking = canKeepFolder ? null : setInterval(refreshSampleFolder, 500);
+    sampleFolderReconnect.disabled = true;
+    const res = await api('POST', route).catch((e) => ({ error: e.message ?? String(e) }));
+    clearInterval(ticking);
+    if (res?.error) logLine(res.error, true);
+    await refreshSampleFolder();
+    loadSamples().catch(() => {});
+  });
+  sampleFolderForget.addEventListener('click', async () => {
+    await api('POST', '/api/sampleFolder/forget').catch((e) => logLine(e.message ?? String(e), true));
+    await refreshSampleFolder();
+    loadSamples().catch(() => {});
+  });
+  refreshSampleFolder();
+}
+
+/**
+ * The browser build's sample library: a folder on this computer, read where it lives.
+ *
+ * Through `showDirectoryPicker` where the browser has it, unlike the wavetable folder above: these
+ * files are NOT copied in - a sample library is gigabytes - so the page has to keep the folder
+ * itself and read from it later, which is what that permission is for. A browser without it gets
+ * the ordinary chooser, whose files last as long as the page does.
+ */
+
+async function pickSampleFolder() {
+  if (typeof window.showDirectoryPicker !== 'function') {
+    sampleFolderInput.click();
+    return;
+  }
+  let handle;
+  try {
+    handle = await window.showDirectoryPicker({ id: 'poptart-samples', mode: 'read' });
+  } catch (e) {
+    if (e?.name === 'AbortError') return; // closed without choosing
+    throw e;
+  }
+  await useSampleFolder(handle);
+}
+
+async function useSampleFolder(source) {
+  sampleFolderPick.disabled = true;
+  sampleFolderNote.textContent = `reading ${source?.name ?? 'the folder'}…`;
+  try {
+    await api('POST', '/api/sampleFolder', { source });
+  } finally {
+    sampleFolderPick.disabled = false;
+    await refreshSampleFolder();
+    loadSamples().catch(() => {});
+  }
+}
+
+async function refreshSampleFolder() {
+  let s;
+  try {
+    s = await api('GET', '/api/sampleFolder');
+  } catch {
+    return;
+  }
+  const counts = `${s.packs} pack${s.packs === 1 ? '' : 's'}, ${s.files} files${s.truncated ? ' (the first of more)' : ''}`;
+  sampleFolderNote.textContent = {
+    none: '',
+    reading: `reading ${s.name}…`,
+    ready: `${s.name}: ${counts}, read from where they are`,
+    prompt: `${s.name}: the browser wants a click before poptart reads it again`,
+    session: `${s.name}: ${counts} - gone when this page closes. Keep a copy (${wavetableSize(s.bytes)}) to have it next time`,
+    copying: `copying ${s.progress?.done ?? 0} of ${s.progress?.total ?? s.files}…`,
+    copied: `${s.name}: ${counts}, copied into this browser`,
+  }[s.state] ?? '';
+  sampleFolderReconnect.disabled = s.state !== (typeof window.showDirectoryPicker === 'function' ? 'prompt' : 'session');
+  sampleFolderForget.disabled = s.state === 'none';
 }
 
 async function refreshSamplesDir() {
@@ -20772,7 +20870,6 @@ async function packReshuffle() {
 // The sounds tab's "map" button: the pack panel, on its map, on a pack - the first one defined
 // here, or a new one called kit if there is none.
 function openSampleMap() {
-  if (desktopOnly('the sample map')) return;
   if (!packState) {
     const first = packDefs.defsInBuffer()[0]?.id ?? prPrebakePacks[0]?.id;
     if (first != null) openPackById(first);

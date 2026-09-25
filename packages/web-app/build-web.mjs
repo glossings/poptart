@@ -46,6 +46,8 @@ function sources() {
     { from: path.join(webEngine, 'public', 'worklets'), to: 'web-engine/worklets' },
     { from: path.join(webEngine, 'public', 'packs'), to: 'web-engine/packs' },
     { from: path.join(webEngine, 'public', 'devices'), to: 'web-engine/devices' },
+    // The sample map's maths, the one module both builds share (see its header).
+    { from: path.join(repoRoot, 'packages', 'osc-engine'), to: 'osc-engine', only: ['sample-map-core.mjs'] },
   ];
 }
 

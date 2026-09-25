@@ -34,6 +34,22 @@ export function panGains(pan) {
   return [Math.cos(angle) * Math.SQRT2, Math.sin(angle) * Math.SQRT2];
 }
 
+/** How finely the pan law is tabled for the shapers that read it. Odd, so pan 0 is a point of its own. */
+const PAN_CURVE_POINTS = 1025;
+
+/**
+ * One side of the pan law as a waveshaper curve: the input, -1..1, is the pan, and the output is
+ * that side's gain. A shaper clamps what is past its ends, which is the clamp a set pan gets.
+ */
+export function panCurve(side) {
+  const curve = new Float32Array(PAN_CURVE_POINTS);
+  for (let i = 0; i < PAN_CURVE_POINTS; i++) curve[i] = panGains(-1 + (2 * i) / (PAN_CURVE_POINTS - 1))[side];
+  return curve;
+}
+
+/** The grain controls, which each grain reads as it starts rather than a node reading them. */
+export const GRAIN_CHANNEL_FIELDS = Object.freeze({ grainsize: 'size', grainrate: 'rate', grainpan: 'pan', grainpos: 'pos' });
+
 /**
  * How long a set-by-value takes to reach its target. Long enough not to click, short enough to
  * feel instant.
@@ -175,8 +191,22 @@ export class Track {
     this.bassHp.frequency.value = 120;
     this.sideOut = gain(1);
     this.sideInv = gain(-1);
-    this.panL = gain(1);
-    this.panR = gain(1);
+    // The pan is ONE control - a constant from -1 to 1 - and each side's gain is read off it
+    // through the pan law, so an lfo() on pan moves both sides together at audio rate, which two
+    // gains set one at a time could not. The gains themselves rest at zero: the law is all of them.
+    this.panL = gain(0);
+    this.panR = gain(0);
+    this.panCtl = ctx.createConstantSource();
+    this.panCtl.offset.value = 0;
+    const law = (side, into) => {
+      const shaper = ctx.createWaveShaper();
+      shaper.curve = panCurve(side);
+      this.panCtl.connect(shaper);
+      shaper.connect(into.gain);
+      return shaper;
+    };
+    this.panLaw = [law(0, this.panL), law(1, this.panR)];
+    this.panCtl.start();
     this.merge = ctx.createChannelMerger(2);
     this.panner = gain(1);
     this.panValue = 0;
@@ -212,6 +242,53 @@ export class Track {
     this.source = null;                     // the instrument node, when there is one
     this.paramConnections = new Map();      // "slot:name" -> { scale, bias, from, source, gain, offset }
     this.sidechains = new Map();            // slot index -> { from, source } feeding the slot's second input
+    this.wetControls = new Map();           // slot index -> the constant its wet level is (see wetControl)
+    this.grainSink = null;                  // where a modulator on a grain control plugs in (see driveChannel)
+  }
+
+  /**
+   * The wet level of the slot at `index`, as one constant from 0 to 1: the slot's wet gain is it
+   * and its dry gain is one minus it. It belongs to the POSITION, not the device, as the desktop's
+   * wetN is a control of the track synth - a level or an lfo() set on it carries across whatever
+   * device is put in that slot next.
+   */
+  wetControl(index) {
+    let ctl = this.wetControls.get(index);
+    if (!ctl) {
+      ctl = this.ctx.createConstantSource();
+      ctl.offset.value = 1;
+      ctl.start();
+      this.wetControls.set(index, ctl);
+    }
+    return ctl;
+  }
+
+  /**
+   * The AudioParam an lfo(), env(), midicc() or osc() on a channel control drives, or null for a
+   * control that has no single value to drive (out, bendrange). Driving bass mono turns it on: the
+   * modulator is its cutoff in Hz, as a set value is. The grain controls are read by each grain as
+   * it starts, off the modulator itself (see the engine's _playGrains), so theirs is a parameter
+   * nothing listens to - somewhere for the connection to plug in.
+   */
+  driveChannel(name, now) {
+    switch (name) {
+      case 'gain': return this.chainIn.gain;
+      case 'postgain': return this.postGain.gain;
+      case 'dry': return this.dryGain.gain;
+      case 'width': return this.width.gain;
+      case 'pan': return this.panCtl.offset;
+      case 'bend': return this.bendSource().offset;
+      case 'bassmono':
+        this.bassmonoHz = this.bassmonoHz || 120;
+        rampParam(this.sideDry.gain, 0, now, now);
+        rampParam(this.sideHigh.gain, 1, now, now);
+        return this.bassHp.frequency;
+      default: {
+        if (name in GRAIN_CHANNEL_FIELDS) return (this.grainSink ??= this.ctx.createGain()).gain;
+        const index = Number(/^wet(\d+)$/.exec(name)?.[1]);
+        return index > 0 ? this.wetControl(index).offset : null;
+      }
+    }
   }
 
   /**
@@ -275,9 +352,18 @@ export class Track {
     this.clearSlot(index, { rewire: false });
     const wetGain = this.ctx.createGain();
     const dryGain = this.ctx.createGain();
-    wetGain.gain.value = 1;
-    dryGain.gain.value = 0;
     const slot = new Slot(descriptor, built, wetGain, dryGain);
+    if (index > 0) {
+      // The mix is the position's wet control: wet = control, dry = 1 - control.
+      wetGain.gain.value = 0;
+      dryGain.gain.value = 1;
+      const ctl = this.wetControl(index);
+      slot.wetInvert = this.ctx.createGain();
+      slot.wetInvert.gain.value = -1;
+      ctl.connect(wetGain.gain);
+      ctl.connect(slot.wetInvert);
+      slot.wetInvert.connect(dryGain.gain);
+    }
     this.slots.set(index, slot);
     if (index === 0) {
       // The instrument is the source, not a link in the chain: it feeds the track's input.
@@ -311,6 +397,12 @@ export class Track {
       slot.wetGain.disconnect();
       slot.dryGain.disconnect();
     } catch { /* a node already detached; nothing to undo */ }
+    if (slot.wetInvert) {
+      const ctl = this.wetControls.get(index);
+      try { ctl?.disconnect(slot.wetGain.gain); } catch { /* already detached */ }
+      try { ctl?.disconnect(slot.wetInvert); } catch { /* already detached */ }
+      try { slot.wetInvert.disconnect(); } catch { /* already detached */ }
+    }
     this.slots.delete(index);
     if (index === 0) this.source = null;
     else if (rewire) this.rewire();
@@ -356,9 +448,7 @@ export class Track {
       case 'postgain': rampParam(this.postGain.gain, value, atTime, now); return true;
       case 'pan': {
         this.panValue = Math.min(1, Math.max(-1, value));
-        const [l, r] = panGains(this.panValue);
-        rampParam(this.panL.gain, l, atTime, now);
-        rampParam(this.panR.gain, r, atTime, now);
+        rampParam(this.panCtl.offset, this.panValue, atTime, now);
         return true;
       }
       // Pitch bend, in semitones, on one constant per track that everything playing reads
@@ -380,10 +470,9 @@ export class Track {
       case 'out': this.outValue = Number(value) || 1; return true;
       // The granular voice's live controls, read by each grain as it starts (see the engine's
       // _playGrains). Held here because a grain belongs to a voice, and the voice to the track.
-      case 'grainsize': this.grain.size = Number(value); return true;
-      case 'grainrate': this.grain.rate = Number(value); return true;
-      case 'grainpan': this.grain.pan = Number(value); return true;
-      case 'grainpos': this.grain.pos = Number(value); return true;
+      case 'grainsize': case 'grainrate': case 'grainpan': case 'grainpos':
+        this.grain[GRAIN_CHANNEL_FIELDS[name]] = Number(value);
+        return true;
       case 'width': rampParam(this.width.gain, Math.min(4, Math.max(0, value)), atTime, now); return true;
       case 'bassmono': {
         // 0 is off; anything else is the cutoff in Hz, held to the desktop's 20 Hz - 2 kHz.
@@ -397,12 +486,10 @@ export class Track {
       case 'dry': rampParam(this.dryGain.gain, value, atTime, now); return true;
       default:
         if (name.startsWith('wet')) {
+          // Kept for an empty slot too: the level waits for whatever device is put there.
           const index = Number(name.slice(3));
-          const slot = this.slots.get(index);
-          if (!slot) return true;   // a wet level for a slot with nothing in it is not an error
-          const m = Math.min(1, Math.max(0, value));
-          rampParam(slot.wetGain.gain, m, atTime, now);
-          rampParam(slot.dryGain.gain, 1 - m, atTime, now);
+          if (!(index > 0)) return false;
+          rampParam(this.wetControl(index).offset, Math.min(1, Math.max(0, value)), atTime, now);
           return true;
         }
         return false;
@@ -483,6 +570,12 @@ export class Track {
       this.bendNode = null;
       this.bendCents = null;
     }
+    // So are the pan and the wet controls.
+    for (const ctl of [this.panCtl, ...this.wetControls.values()]) {
+      try { ctl.stop(); } catch { /* already stopped */ }
+      try { ctl.disconnect(); } catch { /* already detached */ }
+    }
+    this.wetControls.clear();
     try {
       this.input.disconnect();
       this.chainIn.disconnect();

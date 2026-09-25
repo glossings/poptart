@@ -16,7 +16,6 @@ import { FakeAudioContext, fakeWorkletFor } from './fake-context.mjs';
 import { catalog } from './src/catalog.mjs';
 import { TRACK_BEND_PARAM } from './src/descriptor.mjs';
 import { WebAudioEngine } from './src/engine/web-audio-engine.mjs';
-import { panGains } from './src/engine/track.mjs';
 import { renderRange, renderShape } from './src/engine/modulators.mjs';
 import { SPECTRUM_BAND_FREQS, SpectrumTap } from './src/engine/analysis.mjs';
 
@@ -60,6 +59,7 @@ function makeEngine({ samples = null } = {}) {
   const engine = new WebAudioEngine(ctx, {
     registry: catalog,
     samples,
+    routeWaitMs: 1,
     warn: (line) => warnings.push(line),
     AudioWorkletNode: fakeWorkletFor(catalog),
   });
@@ -114,7 +114,12 @@ test('birth values are applied, so a track can be born silent', () => {
   const { engine } = makeEngine();
   const track = engine.createTrack('t1', { gain: 0, pan: -1 });
   assert.ok(track.chainIn.gain.rampedTo(0));
-  assert.ok(track.panL.gain.rampedTo(Math.SQRT2) && track.panR.gain.rampedTo(0), 'hard left: the left side +3 dB, the right silent');
+  assert.ok(track.panCtl.offset.rampedTo(-1));
+  const [left, right] = track.panLaw.map((s) => s.curve);
+  assert.ok(Math.abs(left[0] - Math.SQRT2) < 1e-6 && Math.abs(right[0]) < 1e-6, 'hard left: the left side +3 dB, the right silent');
+  const mid = (left.length - 1) / 2;
+  assert.ok(Math.abs(left[mid] - 1) < 1e-6 && Math.abs(right[mid] - 1) < 1e-6, 'center: both sides at unity');
+  assert.ok(track.panLaw[0].outputs.includes(track.panL.gain) && track.panL.gain.value === 0, 'the law is the whole of each side\'s gain');
 });
 
 test('an instrument becomes the track source and reaches the master', () => {
@@ -273,8 +278,7 @@ test('the channel strip controls this build has work; the ones it lacks warn onc
   engine.setParam('t1', -1, 'pan', 0.25, 0);
   engine.setParam('t1', -1, 'dry', 0, 0);
   assert.ok(track.chainIn.gain.rampedTo(0.5));
-  const [l, r] = panGains(0.25);
-  assert.ok(track.panL.gain.rampedTo(l) && track.panR.gain.rampedTo(r));
+  assert.ok(track.panCtl.offset.rampedTo(0.25));
   assert.ok(track.dryGain.gain.rampedTo(0));
 
   // Width and bass mono: the side scaled, and high-passed at the cutoff in place of the dry side.
@@ -297,11 +301,29 @@ test('a per-slot wet level crossfades that slot, and one for an empty slot is no
   engine.createTrack('t1');
   engine.loadEffect('t1', 'Reverb', 1);
   engine.setParam('t1', -1, 'wet1', 0.25, 0);
-  const slot = engine.tracks.get('t1').slots.get(1);
-  assert.ok(slot.wetGain.gain.rampedTo(0.25));
-  assert.ok(slot.dryGain.gain.rampedTo(0.75));
+  const track = engine.tracks.get('t1');
+  const slot = track.slots.get(1);
+  const ctl = track.wetControl(1);
+  assert.ok(ctl.offset.rampedTo(0.25));
+  assert.ok(slot.wetGain.gain.connectedFrom.includes(ctl) && slot.wetGain.gain.value === 0, 'wet is the control');
+  assert.ok(slot.dryGain.gain.connectedFrom.includes(slot.wetInvert) && slot.wetInvert.gain.value === -1 && slot.dryGain.gain.value === 1, 'dry is one minus it');
   engine.setParam('t1', -1, 'wet7', 0.5, 0);
   assert.equal(warnings.filter((w) => w.includes('wet7')).length, 0);
+  assert.ok(track.wetControl(7).offset.rampedTo(0.5), 'kept for the device that comes to slot 7');
+});
+
+test('a wet level belongs to the slot position and carries across a device swap', () => {
+  const { engine } = makeEngine();
+  engine.createTrack('t1');
+  engine.loadEffect('t1', 'Reverb', 1);
+  engine.setParam('t1', -1, 'wet1', 0.25, 0);
+  const track = engine.tracks.get('t1');
+  const old = track.slots.get(1);
+  engine.loadEffect('t1', 'Delay', 1);
+  const now = track.slots.get(1);
+  assert.notEqual(now, old);
+  assert.ok(now.wetGain.gain.connectedFrom.includes(track.wetControl(1)), 'the new device is mixed by the same control');
+  assert.equal(old.wetGain.gain.connectedFrom.length, 0, 'and the old one is let go');
 });
 
 test('a bus send is built once and its level moved after that', () => {
@@ -488,11 +510,12 @@ test('patching into something that cannot take a signal warns instead of failing
   assert.equal(engine.tracks.get('lead').paramConnections.size, 0);
 });
 
-test('patching from something that does not exist warns and names it', () => {
+test('patching from something that does not exist warns and names it', async () => {
   const { engine, warnings } = makeEngine();
   engine.createTrack('lead');
   engine.loadInstrument('lead', 'Wavetable');
   engine.connectParam('lead', 0, 'Osc 1 Phase', 'nonesuch', 1, 0);
+  await new Promise((r) => setTimeout(r, 10));
   assert.ok(warnings.some((w) => w.includes('nonesuch')));
 });
 
@@ -693,7 +716,7 @@ test('a seeded random shape renders the same every time, so a song is reproducib
   assert.notDeepEqual([...renderShape({ shape: 'rand', seed: 42 })], [...renderShape({ shape: 'rand', seed: 43 })]);
 });
 
-test('a routing name is the label somebody typed, resolved to the track the host made for it', () => {
+test('a routing name is the label somebody typed, resolved to the track the host made for it', async () => {
   // The bug this pins: the scheduler passes `audio("kick")` through as the LABEL, the engine
   // keys its tracks by the id the host handed it, and with nothing in between every cross-track
   // route found nothing and warned about a name that was plainly in the buffer.
@@ -717,9 +740,57 @@ test('a routing name is the label somebody typed, resolved to the track the host
   engine.setInputSource('#2', 'audio', 'kick');
   assert.ok(engine.tracks.get('#2')._headSource, 'a bare label is a track before it is a bus');
 
-  // A name nothing answers to still warns, by the name that was written.
+  // A name nothing answers to still warns, by the name that was written, once the evaluation
+  // has had time to build whatever it names.
   engine.injectAudio('#2', 1, 'nonesuch');
+  assert.equal(warnings.some((w) => w.includes('nonesuch')), false);
+  await new Promise((r) => setTimeout(r, 10));
   assert.ok(warnings.some((w) => w.includes('nothing called "nonesuch"')));
+});
+
+test('a route naming a track written further down waits for it, and says nothing', async () => {
+  const { engine, warnings } = makeEngine();
+  engine.createTrack('bass');
+  engine.loadEffect('bass', 'Ducker', 1);
+  engine.loadInstrument('bass', 'Wavetable');
+  engine.createTrack('pad');
+  // bass: ….fx("Ducker").audio("kick"), a phase patch and a head, all above `kick:`.
+  engine.injectAudio('bass', 1, 'kick', 0.5);
+  engine.connectParam('bass', 0, 'Osc 1 Phase', 'kick');
+  engine.setInputSource('pad', 'audio', 'kick');
+  assert.equal(engine.tracks.get('bass').sidechains.size, 0);
+
+  engine.createTrack('kick');
+  const kick = engine.tracks.get('kick').panner;
+  assert.ok(kick.outputs.includes(engine.tracks.get('bass').sidechains.get(1).level), 'the sidechain is wired when kick arrives');
+  assert.ok(engine.tracks.get('bass').paramConnections.get('0:Osc 1 Phase')?.from === kick, 'and the parameter patch');
+  assert.equal(engine.tracks.get('pad')._headSource, kick, 'and the head');
+  await new Promise((r) => setTimeout(r, 10));
+  assert.deepEqual(warnings.filter((w) => w.includes('kick')), []);
+});
+
+test('a route whose source goes away waits for the name to come back', () => {
+  const { engine } = makeEngine();
+  engine.createTrack('kick');
+  engine.createTrack('bass');
+  engine.loadEffect('bass', 'Ducker', 1);
+  engine.injectAudio('bass', 1, 'kick', 0.5);
+  engine.destroyTrack('kick');
+  assert.equal(engine.tracks.get('bass').sidechains.size, 0, 'nothing hangs off a track that is gone');
+  engine.createTrack('kick');
+  const held = engine.tracks.get('bass').sidechains.get(1);
+  assert.ok(engine.tracks.get('kick').panner.outputs.includes(held.level), 'the same label written again feeds it');
+  assert.equal(held.level.gain.value, 0.5, 'at the level it was given');
+});
+
+test('a waiting route that is cleared stays cleared', () => {
+  const { engine } = makeEngine();
+  engine.createTrack('bass');
+  engine.loadEffect('bass', 'Ducker', 1);
+  engine.injectAudio('bass', 1, 'kick');
+  engine.clearAudioInject('bass', 1);
+  engine.createTrack('kick');
+  assert.equal(engine.tracks.get('bass').sidechains.size, 0);
 });
 
 test('a sidechain goes in through a level of its own, so .audio() can carry a gain', () => {
@@ -975,9 +1046,49 @@ test('an lfo() on bend drives the track\'s bend constant, and owns it until it i
 test('a modulator on a channel control that cannot take one warns rather than doing nothing silently', () => {
   const { engine, warnings } = makeEngine();
   engine.createTrack('t1');
-  engine.setParamLFO('t1', -1, 'gain', { shape: 'sine', rateHz: 1, min: 0, max: 1 });
+  engine.setParamLFO('t1', -1, 'out', { shape: 'sine', rateHz: 1, min: 1, max: 2 });
   assert.equal(warnings.length, 1);
-  assert.match(warnings[0], /"gain" channel control cannot be driven/);
+  assert.match(warnings[0], /"out" channel control cannot be driven/);
+});
+
+test('an lfo() drives a channel control in its own units, and is let go where it had it', () => {
+  const { ctx, engine, warnings } = makeEngine();
+  engine.createTrack('t1');
+  engine.loadEffect('t1', 'Reverb', 1);
+  const track = engine.tracks.get('t1');
+  const lfo = (min, max) => ({ shape: 'sine', rateHz: 1, min, max });
+  const targets = {
+    gain: track.chainIn.gain, postgain: track.postGain.gain, dry: track.dryGain.gain, width: track.width.gain,
+    pan: track.panCtl.offset, wet1: track.wetControl(1).offset, bassmono: track.bassHp.frequency,
+  };
+  for (const [name, param] of Object.entries(targets)) {
+    engine.setParamLFO('t1', -1, name, name === 'bassmono' ? lfo(80, 300) : lfo(-1, 1));
+    assert.equal(param.connectedFrom.length, 1, `${name}: the lfo is plugged into it`);
+  }
+  assert.deepEqual(warnings, []);
+  assert.ok(track.sideHigh.gain.rampedTo(1) && track.sideDry.gain.rampedTo(0), 'bass mono driven is bass mono on');
+
+  // A set value does not fight the modulator that owns the control.
+  engine.setParam('t1', -1, 'pan', 0.5, 0);
+  assert.equal(track.panCtl.offset.rampedTo(0.5), false);
+
+  ctx.advance(0.25);  // a quarter of a sine from its midpoint: the top
+  engine.clearParamLFO('t1', -1, 'pan');
+  assert.equal(track.panCtl.offset.connectedFrom.length, 0);
+  assert.ok(Math.abs(track.panValue - 1) < 1e-3, `left where the lfo had it (${track.panValue})`);
+});
+
+test('a grain control an lfo() drives is read at each grain\'s own start', () => {
+  const { ctx, engine } = makeEngine({ samples: { get: () => ({ buffer: fakeBuffer(48000), rootNote: 60 }) } });
+  engine.createTrack('t1');
+  engine.setParam('t1', -1, 'grainrate', 40, 0);
+  // A saw over 100 ms from a 10 ms grain to a 90 ms one.
+  engine.setParamLFO('t1', -1, 'grainsize', { shape: 'saw', rateHz: 10, min: 0.01, max: 0.09 });
+  const before = ctx.created.filter((n) => n.kind === 'bufferSource').length;
+  engine.playSample('t1', 'pt_kit', { vel: 1, grain: 1 }, 0, 1);
+  const grains = ctx.created.filter((n) => n.kind === 'bufferSource').slice(before);
+  const sizes = grains.map((g) => Math.round((g.stopped.when - g.started.when - 0.005) * 1000));
+  assert.deepEqual(sizes, [10, 30, 50, 70], 'each grain is as long as the saw was when it started');
 });
 
 test('.o() puts a track on the pair it names, wrapped at the pairs the output has', () => {

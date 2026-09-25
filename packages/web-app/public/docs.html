@@ -1058,6 +1058,15 @@ verb: audio("space").fx("Reverb").param("Mix", 1)</code></pre>
             pattern has been evaluated. Because the line is code, a share link carries it, and whoever
             opens the link hears the same files.
           </p>
+          <p data-build="web">
+            <strong>A folder on this computer:</strong> <strong>settings → sample library → choose
+            folder…</strong> makes a pack of each folder of audio files in it, named the same way.
+            Nothing is copied: a file is read from the folder when a pattern first plays its pack.
+            The browser asks again on a later visit before the page may read the folder
+            (<strong>allow again</strong>). A browser that cannot keep a folder has it for the visit,
+            and offers <strong>keep a copy</strong>, which copies its files into the browser's own
+            storage so they are there next time.
+          </p>
           <pre data-build="web"><code>samples("user/drum-kits")               // every folder of audio files is a pack
 samples("user/drum-kits@v2")            // a branch, tag or commit
 samples("user/drum-kits/808")           // only what is under that folder
@@ -1152,30 +1161,21 @@ bell: s("pt_keys:1").note("&lt;g3 bb3 c4 eb4&gt;").vel(0.5)
     .add(rand().mul(0.02)))           // …with every grain scattered around it
   .grainpan(rand().range(-0.6, 0.6))  // and placed somewhere of its own
   .adsr(0.4, 0.2, 0.8, 1.5)</code></pre>
-            <span data-build="desktop">Size, rate, pan and a <code>.begin()</code> with no rhythm of its own are read by each
+            <pre data-run data-build="web"><code>cloud: s("pt_keys:3").note("&lt;[c3,eb3,g3] [bb2,d3,f3]&gt;")
+  .grain()                            // .grain("&lt;0 1&gt;") alternates plain and granular hits
+  .grainsize(0.08)                    // seconds per grain
+  .grainrate(40)                      // grains per second — size x rate is how many overlap
+  .grainshape("pluck")                // each grain's window — double-click `grainshape` to draw it
+  .begin(saw(0.25).range(0.2, 0.6)    // position: a slow scan through the file…
+    .add(rand().mul(0.02)))           // …with every grain scattered around it
+  .grainpan(rand().range(-0.6, 0.6))  // and placed somewhere of its own
+  .adsr(0.4, 0.2, 0.8, 1.5)
+  .fx("Reverb")</code></pre>
+            <span>Size, rate, pan and a <code>.begin()</code> with no rhythm of its own are read by each
             grain as it starts, not once per hit — which is why <code>rand()</code> scatters grains
             rather than notes, and why an LFO on any of them is heard moving inside a held note. A
             <code>.begin("0 0.5")</code> still makes hits, and each hit stays where it was put.
             <code>.bend()</code> repitches grains the same way.</span>
-            <pre data-run data-build="web"><code>cloud: s("pt_keys:3").note("&lt;[c3,eb3,g3] [bb2,d3,f3]&gt;")
-  .grain()                    // .grain("&lt;0 1&gt;") alternates plain and granular hits
-  .grainsize(0.08)            // seconds per grain
-  .grainrate(40)              // grains per second — size x rate is how many overlap
-  .grainshape("pluck")        // each grain's window — double-click `grainshape` to draw it
-  .begin(0.3)                 // where in the file the grains are cut from
-  .grainpan(0.3)              // and where they sit in the stereo field
-  .adsr(0.4, 0.2, 0.8, 1.5)
-  .fx("Reverb")</code></pre>
-            <span data-build="web">In the browser build the grain controls and <code>.begin()</code>
-            take numbers and mini-notation, set per hit; an LFO or <code>rand()</code> on them is not
-            connected. For a cloud that moves inside a held note, the <code>Granular</code>
-            instrument takes a signal on its <code>Position</code>, <code>Spray</code>,
-            <code>Size</code> and <code>Density</code>:</span>
-            <pre data-run data-build="web"><code>cloud: note("&lt;[c3,eb3,g3] [bb2,d3,f3]&gt;").synth("Granular")
-  .param("Sample", "pt_keys:3")
-  .param("Position", saw(0.25).range(0.2, 0.6))
-  .param("Spray", 0.3)
-  .fx("Reverb")</code></pre>
             The window takes what
             <code>lfo()</code> takes — drawn points, a shape's name, or
             <code>"&lt;pluck swell&gt;"</code> — and opens in the same editor.
@@ -1225,6 +1225,28 @@ loop: sr("bass").slow(8)                 // an 8-cycle bounce, played whole</cod
             and the <strong>pack panel</strong> opens: click files to add, hold ▶ to hear one first,
             reorder with the arrows. Index it like any pack: <code>sp("kit:0 kit:2 kit:1 kit:2")</code>,
             or draw it in a piano roll's index rows.
+          </p>
+          <p data-build="web">
+            The panel's browser lists every pack as a folder: the ones that ship, the sourced
+            library, what <code>samples()</code> read, your sample folder and the files dropped on the
+            window. A kit can mix them, and its list is written as <code>"pack/file"</code> entries.
+            The <strong>search box</strong> looks through every file of every pack
+            (<code>break 170</code>: all the words have to match), and selecting a pack and pressing
+            ← adds all of it.
+          </p>
+          <p>
+            <strong>The sample map</strong> (the panel's <strong>map</strong> view, or
+            <strong>map</strong> in the sounds tab) places each sound near the ones that sound like
+            it, colored by the kind of sound its name and its neighbors' names say it is. Click a
+            point to hear it, ← to add it. <strong>← unique</strong> adds the sound least like
+            anything in the kit yet; ⇄ swaps the selected entries for the next sound like each
+            (<code>]</code>, or <code>[</code> for the one before), and <strong>reshuffle</strong>
+            does that to every entry at once.
+            <span data-build="desktop">The folders on the map are chosen in <strong>settings → sample
+            map</strong>; the first build analyzes every file under them.</span>
+            <span data-build="web">Every pack is on it unless <strong>settings → sample map</strong>
+            narrows it. It is built the first time it is opened, which reads every file of every
+            pack once — the sourced library included, so the first build is a download.</span>
           </p>
           <p data-build="desktop">
             The browser's <strong>search box</strong> looks through everything under the folder

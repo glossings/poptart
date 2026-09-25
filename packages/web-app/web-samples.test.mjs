@@ -237,3 +237,41 @@ test('a pack filled in before sizes were recorded is measured once and remembers
   await again.samples.loadFiles();
   assert.equal((await again.samples.packSize('wt')).bytes, 10);
 });
+
+test('a pack with a reader of its own is read through it: nothing fetched, nothing kept', async () => {
+  const asked = [];
+  const kept = [];
+  const read = [];
+  const context = { decodeAudioData: async (bytes) => ({ length: bytes.byteLength }) };
+  const store = { get: async () => null, put: async (k) => { kept.push(k); } };
+  const samples = createSampleStore({ context, store, fetchImpl: async (url) => { asked.push(url); return { ok: false }; } });
+  const local = { id: 'kicks', files: [{ file: 'Kicks/a.wav' }, { file: 'Kicks/b.wav' }] };
+  samples.register([local], null, { read: async (manifest, file) => { read.push(file); return new ArrayBuffer(8); } });
+  assert.equal(samples.get('kicks', 0), null);
+  assert.ok(await until(() => samples.has('kicks')));
+  assert.deepEqual(read, ['Kicks/a.wav', 'Kicks/b.wav']);
+  assert.equal(samples.get('kicks', 1).buffer.length, 8);
+  assert.equal((await samples.bytes('kicks', 0)).byteLength, 8, 'a device reading the file whole reads it there too');
+  assert.deepEqual(asked, []);
+  assert.deepEqual(kept, []);
+});
+
+test('a pack written as a list plays the files it names, whole packs spread out, the index wrapping', async () => {
+  const context = { decodeAudioData: async (bytes) => ({ length: bytes.byteLength }) };
+  const sizes = { 'a.wav': 1, 'b.wav': 2, 'c.wav': 3, 'k.wav': 4 };
+  const fetchImpl = async (url) => ({ ok: true, arrayBuffer: async () => new ArrayBuffer(sizes[url.split('/').pop()]) });
+  const samples = createSampleStore({ context, fetchImpl });
+  samples.register([{ id: 'drums', files: [{ file: 'a.wav' }, { file: 'b.wav' }, { file: 'c.wav' }] }], urlFor);
+  samples.register([{ id: 'kicks', files: [{ file: 'Deep/k.wav' }] }], (id, file) => `https://cdn.invalid/${id}/${file.split('/').pop()}`);
+  const defs = { kit: ['kicks/Deep/k.wav', 'drums', 'nowhere/x.wav', 'drums/B'] };
+  samples.setPackResolver((id) => defs[id] ?? null);
+  assert.deepEqual([0, 1, 2, 3, 4, 5, -1].map((i) => samples.resolveEntry('kit', i)), [
+    { pack: 'kicks', index: 0 }, { pack: 'drums', index: 0 }, { pack: 'drums', index: 1 }, { pack: 'drums', index: 2 },
+    { pack: 'drums', index: 1 }, { pack: 'kicks', index: 0 }, { pack: 'drums', index: 1 },
+  ]);
+  assert.equal(samples.get('kit', 0), null, 'the first ask starts the pack it lands in');
+  assert.ok(await until(() => samples.get('kit', 0)));
+  assert.equal(samples.get('kit', 0).buffer.length, 4);
+  assert.equal(samples.fileKey('kit', 0), 'kicks/Deep/k.wav', 'slices are looked up by the file it lands on');
+  assert.equal(samples.resolveEntry('drums', 0), null, 'a real pack is itself, never a definition');
+});

@@ -400,6 +400,20 @@
               </div>
               <div id="samplesDirNote" class="files-note"></div>
             </section>
+            <!-- The sample library in the browser build, in place of the section above: a folder on
+                 this computer read where it lives. The client shows this one and hides that one. -->
+            <section id="sampleFolderSection" class="hidden">
+              <h2>sample library</h2>
+              <div class="settings-actions">
+                <button id="sampleFolderPick" class="small"
+                  title="A folder whose subfolders become sample packs, named by folder. Its files are read from where they are when a pattern plays them - nothing is copied into this browser, and nothing is sent anywhere.">choose folder…</button>
+                <button id="sampleFolderReconnect" class="small" disabled
+                  title="the browser asks again, on each visit, before a page may read a folder it was given before">allow again</button>
+                <button id="sampleFolderForget" class="small" disabled title="stop reading the folder; its files are left as they are">forget</button>
+              </div>
+              <input id="sampleFolderInput" type="file" webkitdirectory multiple hidden />
+              <div id="sampleFolderNote" class="files-note"></div>
+            </section>
             <!-- The wavetable folder. Only the browser build has one: there the files are kept in
                  the browser rather than read off a disk it cannot see, so the row is a folder to
                  read once rather than a path to remember. The client hides this section on the
@@ -458,6 +472,7 @@
             <section>
               <div class="settings-actions">
                 <button id="aboutOpen" class="small">about poptart…</button>
+                <button id="discordOpen" class="small" title="the poptart community server, in a new tab">join the discord ↗</button>
               </div>
             </section>
           </div>
@@ -919,7 +934,7 @@
             <div class="pack-col-head">pick from
               <span id="packPickMode" class="pack-pick-mode" role="tablist">
                 <button id="packModeBrowse" class="small on" role="tab" title="the disk, as folders">folders</button>
-                <button id="packModeMap" class="small" role="tab" title="the sample map: every sound in your chosen folders, placed by what it sounds like">map</button>
+                <button id="packModeMap" class="small" role="tab" title="the sample map: every sound on it (settings → sample map), placed by what it sounds like">map</button>
               </span>
               <span id="packBrowseHead" class="pack-col-sub"></span><span class="spacer"></span>
               <button id="packUnique" class="small hidden" title="add the sound least like anything in the pack yet - press it eight times for a kit">← unique</button>

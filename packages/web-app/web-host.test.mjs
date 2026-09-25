@@ -121,8 +121,8 @@ test('an empty answer is a fresh object, so one caller cannot edit what the next
 test('something the browser cannot do is refused by name, with the reason', async () => {
   const rig = makeHost();
   await assert.rejects(
-    () => rig.host.call('GET', '/api/browseDir', {}),
-    (err) => err.unsupported && /browsing the file system/.test(err.message) && /cannot see your disk/.test(err.message),
+    () => rig.host.call('POST', '/api/locateSample', {}),
+    (err) => err.unsupported && /finding a dropped file on disk/.test(err.message) && /cannot see your disk/.test(err.message),
   );
 });
 
@@ -471,10 +471,6 @@ test('every path the editor asks for is one the host has an answer for', () => {
     'POST /api/songfiles/stat',
     // the headphone cue device row, drawn disabled from cueAvailable: false
     'POST /api/audioCueDevice',
-    // the sample map window: its button is not drawn, and openSampleMap refuses
-    'GET /api/sampleMap',
-    'GET /api/sampleMap/neighbors', 'GET /api/sampleMap/point', 'POST /api/sampleMap/unique',
-    'POST /api/sampleMap/reshuffle',
   ]);
 
   // An entry that has since been given a handler is a stale promise: take it off the list.
@@ -892,4 +888,28 @@ test('auditioning a chop needs an evaluated track, and stopping one hushes it', 
   assert.deepEqual(await rig.host.call('POST', '/api/previewSlice', { trackId: 'drums', stop: true }), { ok: true });
   assert.deepEqual(await rig.host.call('POST', '/api/previewSlice', { trackId: 'drums', ref: 'files' }), { ok: false, why: 'bad request' });
   shutdown(rig);
+});
+
+test('the pack panel browses the packs as folders, and a pick is the "pack/file" a _pack() list plays', async () => {
+  const rig = makeHost({
+    builtIn: [{ id: 'pt_kit', files: [{ file: 'bd.wav' }, { file: 'sd.wav' }] }],
+    library: { packs: [{ id: 'breaks', files: [{ file: 'Amen/amen.wav' }] }], problems: [], urlFor: cdn },
+  });
+  const root = await rig.host.call('GET', '/api/browseDir?path=');
+  assert.deepEqual(root, { path: '/packs', parent: null, dirs: ['breaks', 'pt_kit'], files: [], samplesRoot: '/packs' });
+  const pack = await rig.host.call('GET', '/api/browseDir?path=/packs/breaks/');
+  assert.deepEqual(pack.files, ['Amen/amen.wav']);
+  assert.equal(pack.parent, '/packs');
+  // Anything else - a desktop path in a setting, a pack that is gone - opens at the root.
+  assert.equal((await rig.host.call('GET', '/api/browseDir?path=/Users/someone')).path, '/packs');
+
+  const all = await rig.host.call('GET', '/api/findSamples?path=/packs&q=');
+  assert.deepEqual(all.files, ['pt_kit/bd.wav', 'pt_kit/sd.wav', 'breaks/Amen/amen.wav']);
+  const found = await rig.host.call('GET', '/api/findSamples?path=/packs&q=amen%20BREAKS');
+  assert.deepEqual(found.files, ['breaks/Amen/amen.wav'], 'every word, any case');
+  const inPack = await rig.host.call('GET', '/api/findSamples?path=/packs/pt_kit&q=sd');
+  assert.deepEqual(inPack.files, ['sd.wav'], 'relative to the folder asked about');
+
+  const { url } = await rig.host.call('GET', '/api/sampleAudio?file=/packs/pt_kit/sd.wav');
+  assert.equal(url, '/web-engine/packs/pt_kit/sd.wav', 'the panel\'s spelling plays the same file');
 });

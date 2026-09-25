@@ -68,26 +68,25 @@ const EMPTY_ANSWERS = {
   // tab reads every one of these names, and a missing one is a row that throws while drawing.
   'GET /api/link': { enabled: false, peers: 0, playing: false, bpm: null, available: false },
   'GET /api/songfiles': { entries: [] },
-  'GET /api/sampleMap/status': { state: 'off', building: false },
-  'GET /api/sampleMap/sources': { sources: [], suggested: '' },
   // The settings tab draws these two rows as the page loads, so they answer rather than refuse.
-  // The folder is empty because a page has no disk to hold one, and neither plugin format is
-  // preferred because neither is here. Saving either is refused below, where the reason belongs.
-  'GET /api/samplesDir': { dir: '', envOverride: false },
+  // The library is every pack the page knows, under the pack panel's root (see sample-map.mjs),
+  // and neither plugin format is preferred because neither is here. Saving either is refused
+  // below, where the reason belongs.
+  'GET /api/samplesDir': { dir: '/packs', envOverride: false },
   'GET /api/preferVst3': { enabled: false },
 
   'POST /api/captureEditors': { ok: true },
 };
 
+/** The pack panel's root here: every pack the page knows, as folders (see 'GET /api/browseDir'). */
+const PACK_ROOT = '/packs';
+const PACK_ROOT_PREFIX = /^\/packs\//;
+
 /** Routes that are refused by name, with the reason the editor's console will show. */
 const REFUSALS = {
   'POST /api/song/load': ['the DJ decks', 'they stay on the desktop'],
-  'GET /api/browseDir': ['browsing the file system', 'a page cannot see your disk'],
-  'GET /api/findSamples': ['searching your sample folders', 'a page cannot see your disk'],
   'POST /api/locateSample': ['finding a dropped file on disk', 'a page cannot see your disk'],
   'GET /api/pasteboardFiles': ['reading the clipboard for files', 'a page cannot see your disk'],
-  'POST /api/sampleMap/rebuild': ['the sample map', 'it stays on the desktop'],
-  'POST /api/sampleMap/sources': ['the sample map', 'it stays on the desktop'],
   'POST /api/samplesDir': ['choosing a sample folder', 'a page cannot see your disk'],
   'POST /api/preferVst3': ['choosing between plugin formats', 'there are no plugins to host'],
   'POST /api/patterns/wip/retention': ['expiring old sessions', 'nothing here is deleted on its own'],
@@ -125,6 +124,10 @@ export function createHost({
   builtInUrl = null,
   library = { packs: [], problems: [] },
   remotePacks = null,
+  // The sample library: a folder on this computer, read where it lives (see local-folder.mjs).
+  localFolder = null,
+  // The sample map over every pack (see sample-map.mjs). Absent, the map routes say so.
+  sampleMap = null,
   version = '0.1.1-web',
   // Which device the page plays to (see audio-output.mjs). Absent in a host built without a
   // page around it, which then answers as a machine with only the system default.
@@ -157,7 +160,14 @@ export function createHost({
     for (const m of builtIn) out.push({ manifest: m, urlFor: builtInUrl });
     for (const m of library.packs) out.push({ manifest: m, urlFor: library.urlFor ?? null });
     for (const p of remotePacks?.packs() ?? []) out.push(p);
+    for (const p of localFolder?.packs() ?? []) out.push(p);
     return out;
+  }
+
+  /** What the pack panel browses and the sample map covers: every pack, and the files added here. */
+  function browsablePacks() {
+    const added = (samples.addedPacks?.() ?? []).filter((m) => m.files.length && m.id !== 'wt' && m.id !== 'rec');
+    return [...allPacks().map((p) => p.manifest), ...added];
   }
 
   /** Where one file of a pack is served from, or null when the pack is not known here. */
@@ -175,7 +185,8 @@ export function createHost({
 
   /** The pack and index a slice-set key names, or null. */
   function fileOfKey(key) {
-    const k = String(key ?? '');
+    // The pack panel's own spelling, "/packs/pack/file", is the same file as "pack/file".
+    const k = String(key ?? '').replace(PACK_ROOT_PREFIX, '');
     if (k.startsWith('rec:')) {
       const name = k.slice(4).replace(/\.wav$/i, '');
       const names = samples.names?.('rec') ?? [];
@@ -940,6 +951,100 @@ export function createHost({
       if (!defer && patternCore?._pack && samples.addedPack) registerPacks(patternCore, [samples.addedPack(pack)]);
       return { ref: added.ref, index: added.index, name: added.name };
     },
+    // The sample library folder: what the settings row says, and the four things it can do. A
+    // folder arrives as the handle the page's own picker returned, or as the files of an ordinary
+    // folder chooser - both are objects of this page, handed across without being copied.
+    'GET /api/sampleFolder': async () => localFolder?.status() ?? { state: 'none', name: '', packs: 0, files: 0, truncated: false },
+    'POST /api/sampleFolder': async (body) => {
+      if (!localFolder) throw new Unsupported('choosing a sample folder', 'this host has no way to read one');
+      await localFolder.choose(body?.source);
+      return localFolder.status();
+    },
+    'POST /api/sampleFolder/reconnect': async () => {
+      if (!(await localFolder?.reconnect())) throw new Error('the browser did not allow reading the folder');
+      return localFolder.status();
+    },
+    'POST /api/sampleFolder/keep': async () => {
+      if (!(await localFolder?.keepCopy())) throw new Error('there is no folder from this visit to keep a copy of');
+      return localFolder.status();
+    },
+    'POST /api/sampleFolder/forget': async () => {
+      await localFolder?.forget();
+      return localFolder?.status() ?? null;
+    },
+    // ---- the pack panel's browser, over packs -----------------------------------------------------
+    //
+    // The desktop's panel browses folders on the disk. Here the "folders" are the packs the page
+    // knows, under one root: `/packs` lists them and `/packs/<pack>` lists its files, so a pick is
+    // written into a `_pack()` list as "pack/file" - which the sample store plays - exactly as a
+    // pick under the desktop's library is written relative to it.
+    'GET /api/browseDir': async (_body, query) => {
+      const at = String(query.get('path') ?? '').replace(/\/+$/, '');
+      const pack = at.startsWith(`${PACK_ROOT}/`) ? browsablePacks().find((m) => m.id === at.slice(PACK_ROOT.length + 1)) : null;
+      if (pack) return { path: `${PACK_ROOT}/${pack.id}`, parent: PACK_ROOT, dirs: [], files: pack.files.map((f) => f.file), samplesRoot: PACK_ROOT };
+      return { path: PACK_ROOT, parent: null, dirs: browsablePacks().map((m) => m.id).sort(), files: [], samplesRoot: PACK_ROOT };
+    },
+    // Every file under a "folder" - the root or one pack - relative to it, filtered by the words
+    // in `q`, all of which must appear in the path.
+    'GET /api/findSamples': async (_body, query) => {
+      const at = String(query.get('path') ?? PACK_ROOT).replace(/\/+$/, '') || PACK_ROOT;
+      const limit = Math.max(1, Math.min(20000, Number(query.get('limit')) || 500));
+      const only = at.startsWith(`${PACK_ROOT}/`) ? at.slice(PACK_ROOT.length + 1) : null;
+      const all = [];
+      for (const m of browsablePacks()) {
+        if (only && m.id !== only) continue;
+        for (const f of m.files) all.push(only ? f.file : `${m.id}/${f.file}`);
+      }
+      const terms = String(query.get('q') ?? '').toLowerCase().split(/\s+/).filter(Boolean);
+      const hits = terms.length ? all.filter((p) => terms.every((t) => p.toLowerCase().includes(t))) : all;
+      return { path: only ? `${PACK_ROOT}/${only}` : PACK_ROOT, files: hits.slice(0, limit), matched: hits.length, total: all.length, truncated: false };
+    },
+
+    // ---- the sample map ---------------------------------------------------------------------------
+
+    // Opening the map is what builds it, when it is behind the packs (see sample-map.mjs).
+    'GET /api/sampleMap': async () => {
+      if (!sampleMap) throw new Unsupported('the sample map', 'this host has none');
+      const status = await sampleMap.ensure();
+      return { ...sampleMap.snapshot(), status };
+    },
+    'GET /api/sampleMap/status': async () => sampleMap?.status() ?? { building: false, phase: 'idle', count: 0, sources: [] },
+    'GET /api/sampleMap/sources': async () => {
+      await sampleMap?.load();
+      return { sources: sampleMap?.sources() ?? [], suggested: PACK_ROOT };
+    },
+    'POST /api/sampleMap/sources': async (body) => {
+      if (!sampleMap) throw new Unsupported('the sample map', 'this host has none');
+      return sampleMap.setSources(Array.isArray(body?.sources) ? body.sources : []);
+    },
+    'POST /api/sampleMap/rebuild': async (body) => {
+      if (!sampleMap) throw new Unsupported('the sample map', 'this host has none');
+      sampleMap.refresh({ force: !!body?.force });
+      return sampleMap.status();
+    },
+    'GET /api/sampleMap/neighbors': async (_body, query) => {
+      const file = String(query.get('path') ?? '');
+      const k = Math.max(1, Math.min(50, Number(query.get('k')) || 15));
+      const point = sampleMap?.pointOf(file) ?? null;
+      return { indexed: !!point, point, neighbors: point ? sampleMap.neighbors(file, k) : [] };
+    },
+    'GET /api/sampleMap/point': async (_body, query) => ({ point: sampleMap?.pointOf(String(query.get('path') ?? '')) ?? null }),
+    'POST /api/sampleMap/unique': async (body) => {
+      const kit = Array.isArray(body?.kit) ? body.kit.map(String) : [];
+      const opts = {};
+      if (Array.isArray(body?.types)) opts.types = body.types;
+      if (Array.isArray(body?.sources)) opts.sources = body.sources.map(Number);
+      if (Array.isArray(body?.exclude)) opts.exclude = body.exclude.map(String);
+      if (body?.typical === false) opts.typical = false;
+      const file = sampleMap?.unique(kit, opts) ?? null;
+      return { path: file, point: file ? sampleMap.pointOf(file) : null };
+    },
+    'POST /api/sampleMap/reshuffle': async (body) => {
+      const kit = Array.isArray(body?.kit) ? body.kit.map(String) : [];
+      const out = sampleMap?.reshuffle(kit) ?? kit;
+      return { kit: out, points: out.map((p) => sampleMap?.pointOf(p) ?? null) };
+    },
+
     // The end of such a batch: the manifest written once and the pack registered once.
     'POST /api/files/flush': async (body) => {
       const pack = String(body?.pack ?? 'files');

@@ -28,9 +28,12 @@
 export const LISTING_TTL_MS = 30 * 60 * 1000;
 export const MAX_FILES = 5000;
 
-const AUDIO = /\.(wav|wave|aif|aiff|flac|mp3|ogg|oga|opus|m4a)$/i;
+/** The file types a pack is made of. */
+export const AUDIO = /\.(wav|wave|aif|aiff|flac|mp3|ogg|oga|opus|m4a)$/i;
 const SHA = /^[0-9a-f]{40}$/i;
-const RESERVED = new Set(['files', 'wt', 'rec']);
+/** Pack names poptart's own packs have, which a folder read in from somewhere else may not take. */
+export const RESERVED = new Set(['files', 'wt', 'rec']);
+export const isReservedPack = (id) => RESERVED.has(id) || id.startsWith('pt_');
 
 /**
  * What a samples() argument points at, or null when it is not something this can read:
@@ -343,7 +346,7 @@ export function createRemotePacks({ fetchImpl, store = null, samples, onPacks = 
         // poptart's own packs keep their names: a folder that has one goes by the repository's
         // name in front of it.
         for (const m of manifests) {
-          if (!RESERVED.has(m.id) && !m.id.startsWith('pt_')) continue;
+          if (!isReservedPack(m.id)) continue;
           const renamed = packName(`${src.kind === 'github' ? src.repo : 'samples'}_${m.id}`);
           say(`samples: ${title}'s "${m.id}" is the name of one of poptart's own packs - it is "${renamed}" here`);
           m.id = renamed;
