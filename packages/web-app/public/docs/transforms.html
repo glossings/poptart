@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Transforms · poptart guide</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/vendor/codemirror/lib/codemirror.css" />
+    <link rel="stylesheet" href="/docs/docs.css" />
+  </head>
+  <body data-page="transforms">
+    <div class="wrap">
+      <main>
+        <header class="chapter-head">
+          <p class="kicker">Chapter 11</p>
+          <h1>Transforms</h1>
+          <p class="lede">Reshape patterns with methods: arithmetic, time, structure, chance.</p>
+        </header>
+
+        <h2 id="arithmetic">Arithmetic</h2>
+        <pre><code>note("c3 e3 g3").add(12)                   // up an octave
+n("0 2 4").add("&lt;0 7&gt;").scale("C major")   // transpose every other cycle
+pianoroll("lead").sc().add(n("&lt;0 2 -1&gt;"))   // move by scale steps</code></pre>
+        <p>
+          A number moves notes in semitones; an <code>n()</code> moves them in <strong>scale steps</strong>, in
+          the key they were last mapped through (else the <code>setscale</code> key). A note outside the key
+          keeps its distance from the nearest one, so a passing tone stays a passing tone.
+        </p>
+        <p>
+          The set: <code>add</code> <code>sub</code> <code>mul</code> <code>div</code> <code>mod</code>
+          <code>set</code>, then <code>round</code> <code>abs</code> <code>floor</code> <code>ceil</code>
+          <code>clamp</code>, and the comparisons <code>gte</code> <code>gt</code> <code>lte</code>
+          <code>lt</code> <code>eq</code> <code>neq</code> (1 or 0, handy as conditions).
+        </p>
+
+        <h2 id="modes">Whose events?</h2>
+        <p>
+          When both sides have a rhythm, the result has <em>both</em>: each note is cut wherever the right
+          side changes. That's the default, <code>mix</code>. Three modifiers pick differently:
+        </p>
+        <table>
+          <tr><th>Write</th><th>Plays</th></tr>
+          <tr><td><code>.add(x)</code> · <code>.add.mix(x)</code></td><td>both rhythms together</td></tr>
+          <tr><td><code>.add.in(x)</code></td><td>this pattern's events, with <code>x</code> read at each onset</td></tr>
+          <tr><td><code>.add.out(x)</code></td><td><code>x</code>'s events, with this pattern read at each onset</td></tr>
+          <tr><td><code>.add.squeeze(x)</code></td><td>a whole cycle of <code>x</code> fitted into each event</td></tr>
+        </table>
+        <figure class="timeline">
+          <div class="row">note("c3 e3").add("0 7 12")</div>
+          <div class="row">note("c3 e3").add.in("0 7 12")</div>
+          <div class="row">note("c3 e3").add.out("0 7 12")</div>
+          <div class="row">note("c3 e3").add.squeeze("0 7 12")</div>
+        </figure>
+        <p>
+          Every binop has them (<code>.mul.in(vel("1 .5"))</code>, <code>.set.out(…)</code>,
+          <code>.gte.in(…)</code>), and they work the same on notes, samplers and controls.
+          <code>.when()</code> is always <code>in</code>: its condition is read at the pattern's own events and
+          never adds any.
+        </p>
+
+        <h2 id="time">Time</h2>
+        <table>
+          <tr><th>Write</th><th>Does</th></tr>
+          <tr><td><code>.fast(f)</code> · <code>.slow(f)</code></td><td>speed up · slow down; negative also reverses</td></tr>
+          <tr><td><code>.swing(amt, grid)</code></td><td>delay every second slot: <code>1/3</code> is the triplet shuffle</td></tr>
+          <tr><td><code>.nudge(v)</code></td><td>push each event late (or early) by part of its step</td></tr>
+          <tr><td><code>.rib(cycle, len)</code></td><td>loop a stretch of the pattern forever</td></tr>
+          <tr><td><code>.hold(trig)</code> · <code>.seg(n)</code></td><td>sample and hold at another pattern's onsets · <code>n</code> times a cycle</td></tr>
+        </table>
+
+        <h2 id="structure">Structure</h2>
+        <table>
+          <tr><th>Write</th><th>Does</th></tr>
+          <tr><td><code>.struct("1 ~ 1 1")</code></td><td>take the rhythm from another pattern</td></tr>
+          <tr><td><code>.mask("1 0 1 1")</code></td><td>silence where the other pattern is off</td></tr>
+          <tr><td><code>.ply(n, fn?)</code></td><td>repeat each event <code>n</code> times in its step; <code>(x, i) =&gt; …</code> changes each repeat</td></tr>
+          <tr><td><code>.echo(n, dt, fn?)</code></td><td><code>n</code> copies, <code>dt</code> cycles apart</td></tr>
+          <tr><td><code>.arp("0 1 2 1")</code></td><td>play chords one note at a time</td></tr>
+          <tr><td><code>.bite(indices)</code></td><td>cut four cycles into eighths and play them in a new order</td></tr>
+          <tr><td><code>.degrade(p)</code></td><td>drop events at random</td></tr>
+          <tr><td><code>.vel(v)</code> · <code>.clip(v)</code></td><td>velocity · note length as a multiple of its step</td></tr>
+        </table>
+        <figure class="timeline">
+          <div class="row">note("c3 e3 g3 b3").struct("1 ~ 1 1 ~ 1 1 ~")</div>
+          <div class="row">note("[c3,e3,g3]").arp("0 1 2 1")</div>
+          <div class="row">note("c3 e3").ply(3)</div>
+        </figure>
+        <pre data-run data-build="web"><code>arp: note("&lt;[c3,eb3,g3] [ab2,c3,eb3] [bb2,d3,f3] [g2,bb2,d3]&gt;")
+  .arp("0 1 2 3 2 1 0 1")
+  .when("&lt;0 0 0 1&gt;", (x) =&gt; x.add(12))   // every fourth bar up an octave
+  .echo(2, 3/16, (x) =&gt; x.vel(0.4))       // two quieter repeats, a dotted eighth apart
+  .synth("Wavetable")
+hats: s("pt_kit:4*8").swing(1/3).degrade(0.2)</code></pre>
+
+        <h2 id="chance">Conditions and chance</h2>
+        <table>
+          <tr><th>Write</th><th>Does</th></tr>
+          <tr><td><code>.when(cond, fn)</code></td><td>apply <code>fn</code> where <code>cond</code> is on: <code>.when("1 0", (x) =&gt; x.add(12))</code></td></tr>
+          <tr><td><code>.sometimes(0.3, fn)</code></td><td>apply <code>fn</code> to about 3 events in 10</td></tr>
+          <tr><td><code>choose("0", "3", "7")</code></td><td>one option each cycle; <code>["7", 3]</code> weights one</td></tr>
+          <tr><td><code>irand(8)</code> · <code>rand()</code> · <code>perlin()</code></td><td>whole number 0–7 · 0..1 per read · smooth drift</td></tr>
+          <tr><td><code>cat(a, b)</code> · <code>seq(a, b)</code></td><td>one pattern per cycle, in turn · each plays for its share of every cycle</td></tr>
+        </table>
+        <p>
+          Every random source is its own stream, seeded by where it sits in the buffer: two
+          <code>.when(rand().gte(0.7), …)</code> pick different bars, and a song replays identically every
+          time. Pass <code>{ seed: 1 }</code> to make two move together.
+        </p>
+        <p>
+          Every argument above takes a pattern, not just a number: <code>.ply("&lt;2 4&gt;")</code>,
+          <code>.fast(macro1.range(1, 4))</code>. If one doesn't, that's a bug.
+        </p>
+      </main>
+    </div>
+    <!-- The chapter list, the pager, chords written for this platform, colored and playable code,
+         and the timelines all come from docs.js. -->
+    <script src="/chords.js"></script>
+    <script src="/vendor/codemirror/lib/codemirror.js"></script>
+    <script src="/vendor/codemirror/mode/javascript/javascript.js"></script>
+    <script src="/vendor/codemirror/addon/runmode/runmode.js"></script>
+    <script src="/poptart-mode.js"></script>
+    <script src="/pattern-meta.js"></script>
+    <script src="/docs/docs.js"></script>
+  </body>
+</html>

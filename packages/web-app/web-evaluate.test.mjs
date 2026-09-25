@@ -97,6 +97,23 @@ test('evaluating a named block builds a track, a scheduler and an engine chain',
   shutdown(rig);
 });
 
+test('a helper that joins with a comma plays, single-quoted or inside mini-off', () => {
+  const chord = (quote) => `const chord = (root, ...ivs) => note(ivs.map((iv) => noteToMidi(root) + iv).join(${quote}))`;
+  for (const buffer of [
+    `${chord("','")}\npad: chord('c3', 0, 4, 7).synth("Wavetable")`,
+    `// mini-off\n${chord('","')}\n// mini-on\npad: chord('c3', 0, 4, 7).synth("Wavetable")`,
+  ]) {
+    const rig = makeRig();
+    try {
+      rig.evaluator.evaluate(buffer);
+      const notes = rig.evaluator.schedulers.get('pad').pattern.stepsForCycle(0).map((s) => s.value).sort();
+      assert.deepEqual(notes, [60, 64, 67], buffer);
+    } finally {
+      shutdown(rig);
+    }
+  }
+});
+
 test('a scheduler survives re-evaluation, so editing one track does not cut its sound', () => {
   const rig = makeRig();
   rig.evaluator.evaluate('kick: s("bd*4")');

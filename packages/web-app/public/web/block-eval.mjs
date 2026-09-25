@@ -111,6 +111,7 @@ export function createBlockEvaluator(patternCore, {
   hostBuilders = {},
   utils = PREBAKE_UTILS,
   builtins = null,
+  miniOff = [],
 } = {}) {
   const known = builtins ?? builtinSigMethods(patternCore);
   const macroNames = Array.from({ length: patternCore.MACRO_COUNT }, (_, i) => `macro${i + 1}`);
@@ -122,7 +123,8 @@ export function createBlockEvaluator(patternCore, {
     // Playback-highlight source locations: a real editor block carries its document offset, so
     // pattern-position string literals are wrapped in mini("…", OFFSET) and the steps they emit
     // can be traced back to the characters that made them. A prebake block passes none.
-    const located = typeof locBase === 'number' ? patternCore.injectLocations(code, locBase) : code;
+    // `miniOff` is the buffer's `// mini-off` … `// mini-on` stretches (patternCore.miniOffRanges).
+    const located = typeof locBase === 'number' ? patternCore.injectLocations(code, locBase, { miniOff }) : code;
     const body = located.replace(/^([ \t]*)(?:const|let)(\s+)/gm, '$1var$2');
 
     const baseNames = [...BUILDER_NAMES, ...INTERNAL_BUILDERS, ...macroNames, ...Object.keys(hostBuilders)]

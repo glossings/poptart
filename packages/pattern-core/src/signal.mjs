@@ -153,6 +153,10 @@ export class Sig {
     // control they must be read per onset rather than imposing that grid. Everything else is read
     // off the step covering the position, where value and spans already travel together.
     this.eventAt = opts.eventAt ?? null;
+    // How this signal meets a pattern it is an OPERAND of: null (mix - its own triggers cut the
+    // events), 'in' or 'squeeze'. Set only on the copy a binop modifier makes of its argument -
+    // `.add.in(x)` - see binopModes and operandSteps.
+    this.how = opts.how ?? null;
 
     // Track-building metadata, threaded through by .synth()/.fx()/.param() etc. Every control
     // method returns a NEW Sig (same sample/stepsForCycle) with this metadata carried forward -
@@ -278,6 +282,7 @@ export class Sig {
   /** Track-building metadata carried onto every derived Sig (chain, params, channel, sampler). */
   _meta() {
     return {
+      how: this.how,
       instrument: this.instrument,
       fxChain: this.fxChain,
       paramSignals: this.paramSignals,
@@ -301,6 +306,82 @@ export class Sig {
       clipsHead: this.clipsHead,
       pending: this.pending,
     };
+  }
+
+  /**
+   * `.fmap(fn)` - every value through `fn`, timing untouched: `n("0 2 4").fmap((v) => v * 2)`.
+   * A rest stays a rest. The value is what the pattern holds - a note or a degree, a pack name, a
+   * number - and a whole event (its time, velocity, sampler controls) is `.events()`.
+   */
+  fmap(fn) {
+    if (typeof fn !== 'function') throw new Error('[signal] .fmap() takes a function of the value: .fmap((v) => v * 2)');
+    return this.mapValue(fn);
+  }
+
+  /**
+   * `.events(fn)` - the pattern's events one cycle at a time, as plain objects to move, stretch,
+   * drop, copy or make from nothing. `fn(events, cycle)` gets one cycle's events and returns the
+   * events to play (or edits them in place and returns nothing). Each is
+   *
+   *   { start, end, value, vel, clip, nudge, controls }
+   *
+   * `start`/`end` are in cycles from the top of the song (cycle 3's downbeat is 3), `value` is the
+   * note, degree or pack name, and `controls` holds the sampler controls this event carries, by
+   * the name you'd call them with (`{ speed: 2, begin: 0.25 }`). Copy one with a spread,
+   * `{ ...e, start: e.start + 0.5 }`, and the copy keeps everything the original had - the atom it
+   * highlights included; an object made from scratch needs only `start`, `end` and `value`.
+   *
+   *   Signal.prototype.humanize = function (amt = 0.01) {
+   *     return this.events((es) => es.map((e) => ({ ...e, start: e.start + (Math.random() - 0.5) * amt, vel: e.vel * (0.9 + Math.random() * 0.1) })));
+   *   };
+   *
+   * An event may move up to a cycle either way and still play; further than that it is lost.
+   * Each cycle is worked out once and remembered, so `Math.random()` in `fn` gives one answer per
+   * cycle rather than a different one every time the cycle is read.
+   */
+  events(fn) {
+    if (typeof fn !== 'function') throw new Error('[signal] .events() takes a function of one cycle\'s events: .events((es) => es.filter((e) => e.vel > 0.5))');
+    if (!this.stepsForCycle) {
+      warnUser('[signal] .events() needs a pattern with events - this one has none of its own (an LFO, a live input), so it is left as it was');
+      return this;
+    }
+    const base = this.stepsForCycle;
+    const channels = this.noteChannels;
+    const sampler = this.sampler;
+    const done = new Map(); // cycle -> the steps fn gave back, phases relative to that cycle
+    const worked = (cycle) => {
+      if (done.has(cycle)) return done.get(cycle);
+      const shown = base(cycle).filter((s) => s.value != null).map((s) => eventOf(s, cycle, channels, sampler));
+      let got;
+      try {
+        got = fn(shown, cycle);
+      } catch (err) {
+        throw new Error(`[signal] .events(): your function threw at cycle ${cycle}: ${err?.message ?? err}`);
+      }
+      const list = got === undefined ? shown : got;
+      if (!Array.isArray(list)) throw new Error(`[signal] .events(): your function has to return a list of events (or nothing, having edited them in place) - it returned ${typeof list}`);
+      const steps = [];
+      for (const e of list) {
+        const step = stepOfEvent(e, cycle);
+        if (step) steps.push(step);
+      }
+      if (done.size >= EVENTS_CACHE_CYCLES) done.delete(done.keys().next().value);
+      done.set(cycle, steps);
+      return steps;
+    };
+    // A cycle's events are its own that stayed, plus its neighbors' that moved in.
+    const stepsForCycle = (cycle) => {
+      const out = [];
+      for (const from of [cycle - 1, cycle, cycle + 1]) {
+        for (const s of worked(from)) {
+          const start = s.start + from - cycle;
+          if (start < -MIX_EPS || start >= 1 - MIX_EPS) continue;
+          out.push(from === cycle ? s : { ...s, start, end: s.end + from - cycle });
+        }
+      }
+      return out.sort((a, b) => a.start - b.start);
+    };
+    return new Sig((t, cps, pos) => sampleViaSteps(stepsForCycle, t, cps, pos), { stepsForCycle, ...this._meta() });
   }
 
   /** Maps this signal's values through `fn`; rests (null) pass through untouched. */
@@ -1222,13 +1303,14 @@ export class Sig {
     // real time, so param-signal math is always exact.
     const stepsForCycle = this.stepsForCycle
       ? (cycle) => {
-          const otherSteps = mixableSteps(otherSig, cycle);
+          const cycleSteps = mixableSteps(otherSig, cycle);
           const out = [];
           for (const s of this.stepsForCycle(cycle)) {
             if (s.value == null) {
               out.push(s);
               continue;
             }
+            const otherSteps = operandSteps(otherSig, cycle, s, cycleSteps);
             // The right operand MIXES its triggers in: it keeps its own timeline and cuts each left
             // event where it changes, so `n("0").add("1 2")` is two events (1, then 2) rather than one
             // event reading whichever half it happened to look at. An operand with no grid of its own
@@ -1259,7 +1341,11 @@ export class Sig {
                 }
                 continue;
               }
-              const b = otherSig.sample(cycle + at, 1);
+              // A modified operand (.add.in/.squeeze) is read off the steps it was fitted to; one
+              // with no grid, under .in, is read at the event's onset.
+              const b = !otherSig.how ? otherSig.sample(cycle + at, 1)
+                : otherSteps ? layers[0]?.value ?? null
+                : readEvent(otherSig, cycle + (otherSig.how === 'in' ? s.start : at)).value;
               if (b == null) {
                 // A rest on the right silences the segment it covers, rather than dropping the event
                 // outright - the grid keeps its shape for the highlighter.
@@ -1550,11 +1636,14 @@ export class Sig {
     return this;
   }
 
-  add(...xs) { return this._arith('add', xs, ARITHMETIC.add, true); }
-  sub(...xs) { return this._arith('sub', xs, ARITHMETIC.sub, true); }
-  mul(...xs) { return this._arith('mul', xs, ARITHMETIC.mul, true); }
-  div(...xs) { return this._arith('div', xs, ARITHMETIC.div, true); }
-  mod(...xs) { return this._arith('mod', xs, ARITHMETIC.mod, false); }
+  // The binops come with modifiers that say whose events the result plays on (see binopModes):
+  // `.add(x)` mixes x's triggers in, `.add.in(x)` keeps this pattern's events, `.add.out(x)` plays
+  // on x's events, and `.add.squeeze(x)` fits a cycle of x into each event.
+  get add() { return binopModes(this, (sig, xs) => sig._arith('add', xs, ARITHMETIC.add, true)); }
+  get sub() { return binopModes(this, (sig, xs) => sig._arith('sub', xs, ARITHMETIC.sub, true)); }
+  get mul() { return binopModes(this, (sig, xs) => sig._arith('mul', xs, ARITHMETIC.mul, true)); }
+  get div() { return binopModes(this, (sig, xs) => sig._arith('div', xs, ARITHMETIC.div, true)); }
+  get mod() { return binopModes(this, (sig, xs) => sig._arith('mod', xs, ARITHMETIC.mod, false)); }
   /**
    * The binop that REPLACES: `.set(x)` puts x's values where this pattern's were, keeping this
    * pattern's rhythm (cut where x changes, as every operand cuts), and `.set(vel(0.5))` puts 0.5 on
@@ -1562,7 +1651,7 @@ export class Sig {
    * _layers - where it is the verb that pins a channel: `.add(note(12).set(vel(0.7)))` is the
    * octave AT 0.7, where `.add(note(12).vel(0.7))` is the octave 0.7 louder.
    */
-  set(...xs) { return this._arith('set', xs, ARITHMETIC.set, false); }
+  get set() { return binopModes(this, (sig, xs) => sig._arith('set', xs, ARITHMETIC.set, false)); }
 
   /**
    * The pitch-returning arithmetic (add/sub/mul/div/mod) on top of _binop. A DEGREE operand -
@@ -1600,12 +1689,12 @@ export class Sig {
     return this._binop('clamp', lo, (a, b) => Math.max(a, b), false)._binop('clamp', hi, (a, b) => Math.min(a, b), false);
   }
 
-  gte(x) { return this._binop('gte', x, (a, b) => (a >= b ? 1 : 0), false); }
-  gt(x) { return this._binop('gt', x, (a, b) => (a > b ? 1 : 0), false); }
-  lte(x) { return this._binop('lte', x, (a, b) => (a <= b ? 1 : 0), false); }
-  lt(x) { return this._binop('lt', x, (a, b) => (a < b ? 1 : 0), false); }
-  eq(x) { return this._binop('eq', x, (a, b) => (a === b ? 1 : 0), false); }
-  neq(x) { return this._binop('neq', x, (a, b) => (a !== b ? 1 : 0), false); }
+  get gte() { return binopModes(this, (sig, [x]) => sig._binop('gte', x, (a, b) => (a >= b ? 1 : 0), false)); }
+  get gt() { return binopModes(this, (sig, [x]) => sig._binop('gt', x, (a, b) => (a > b ? 1 : 0), false)); }
+  get lte() { return binopModes(this, (sig, [x]) => sig._binop('lte', x, (a, b) => (a <= b ? 1 : 0), false)); }
+  get lt() { return binopModes(this, (sig, [x]) => sig._binop('lt', x, (a, b) => (a < b ? 1 : 0), false)); }
+  get eq() { return binopModes(this, (sig, [x]) => sig._binop('eq', x, (a, b) => (a === b ? 1 : 0), false)); }
+  get neq() { return binopModes(this, (sig, [x]) => sig._binop('neq', x, (a, b) => (a !== b ? 1 : 0), false)); }
 
   /**
    * `n("0 1 2 3").when("1 0", x => x.add(12))` - applies `fn` to this pattern wherever `cond` is
@@ -3278,6 +3367,110 @@ function mixEdges(step, otherSteps) {
   return edges;
 }
 
+// ------------------------------------------------------------------------------------------------
+// Events as userland sees them (Sig#events)
+// ------------------------------------------------------------------------------------------------
+
+// How many cycles of a .events() result are remembered. The readers ask for the same few cycles
+// over and over (the scheduler's window, the highlighter, a neighbor's spill-over), and a
+// remembered cycle is what keeps a Math.random() in the user's function to one answer per cycle.
+const EVENTS_CACHE_CYCLES = 64;
+
+// Where an event keeps the step it was made from, and what it was shown as. A symbol, so a spread
+// copy of the event carries it along (the copy keeps the original's highlight and sampler config)
+// while nothing a person types can collide with it.
+const EVENT_SOURCE = Symbol('poptart.event');
+
+// Sampler config key -> the control's own name, for an event's `controls` (index -> i, ...).
+let CONTROL_NAMES = null;
+function controlNames() {
+  CONTROL_NAMES ??= new Map(Object.entries(SAMPLER_CONTROLS).filter(([name]) => name !== 'note').map(([name, spec]) => [spec.key, name]));
+  return CONTROL_NAMES;
+}
+
+// The fields of an event that are note channels (see NOTE_CONTROLS), in the order they're shown.
+const EVENT_CHANNELS = ['vel', 'clip', 'nudge'];
+
+// A step of cycle `cycle` as the event userland is handed. The channels show what is IN FORCE -
+// the event's own value, else the pattern's channel read at the onset, else the resting default -
+// so `e.vel * 0.5` means half as loud whatever set the velocity. `controls` shows each sampler
+// control that is set, the same way (a control nobody set isn't there).
+function eventOf(step, cycle, channels, sampler) {
+  const at = cycle + step.start;
+  const shown = {};
+  for (const name of EVENT_CHANNELS) shown[name] = channelAt(name, step, channels, at, 1, at) ?? NOTE_CONTROLS[name].unset;
+  const controls = {};
+  for (const [key, name] of controlNames()) {
+    const own = step.cfg?.[key];
+    const ch = sampler?.[key];
+    const v = typeof own === 'number' ? own : ch instanceof Sig ? Number(ch.sample(at, 1, at)) : NaN;
+    if (Number.isFinite(v)) controls[name] = v;
+  }
+  return {
+    start: at,
+    end: cycle + step.end,
+    value: step.value,
+    ...shown,
+    controls,
+    [EVENT_SOURCE]: { step, at, shown, controls: { ...controls } },
+  };
+}
+
+// An event handed back by userland as a step of cycle `cycle`, or null (with a warning) for one
+// that can't play. A field left as it was shown stays as the step had it - a channel read off an
+// LFO at the onset is not frozen onto the event just because it was shown - and only what changed
+// is written.
+function stepOfEvent(e, cycle) {
+  if (!e || typeof e !== 'object') {
+    warnUser(`[signal] .events(): ${JSON.stringify(e)} is not an event - it needs start, end and value`);
+    return null;
+  }
+  const start = Number(e.start);
+  const end = Number(e.end);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || !(end > start)) {
+    warnUser(`[signal] .events(): an event needs a start before its end, in cycles - got start ${e.start}, end ${e.end}`);
+    return null;
+  }
+  const src = e[EVENT_SOURCE];
+  const step = src ? { ...src.step } : {};
+  step.start = start - cycle;
+  step.end = end - cycle;
+  step.value = e.value ?? null;
+  // A tie stays a tie only where it still starts where it did.
+  if (!src || Math.abs(start - src.at) > MIX_EPS) delete step.cont;
+  for (const name of EVENT_CHANNELS) {
+    if (src && e[name] === src.shown[name]) continue;
+    if (!src && e[name] === undefined) continue;
+    const v = Number(e[name]);
+    if (e[name] == null || Number.isNaN(v)) delete step[name];
+    else step[name] = v;
+    if (step.pend?.[name]) step.pend = withoutKey(step.pend, name);
+  }
+  const controls = e.controls && typeof e.controls === 'object' ? e.controls : {};
+  // A control taken out of `controls` is taken off the event.
+  for (const name of Object.keys(src?.controls ?? {})) if (!(name in controls)) controls[name] = null;
+  for (const [name, v] of Object.entries(controls)) {
+    if (src && src.controls[name] === v) continue;
+    const spec = SAMPLER_CONTROLS[name];
+    if (!spec || name === 'note') {
+      warnUser(`[signal] .events(): there is no sampler control called ${JSON.stringify(name)} - leaving it out`);
+      continue;
+    }
+    const n = Number(v);
+    const cfg = { ...step.cfg };
+    if (v == null || Number.isNaN(n)) delete cfg[spec.key];
+    else cfg[spec.key] = n;
+    step.cfg = cfg;
+    if (step.cfgPend?.[spec.key]) step.cfgPend = withoutKey(step.cfgPend, spec.key);
+  }
+  return step;
+}
+
+function withoutKey(bag, key) {
+  const { [key]: _gone, ...kept } = bag;
+  return Object.keys(kept).length ? kept : undefined;
+}
+
 // A merged event continues only where BOTH sides continue: a fresh step on either side is an attack.
 // Same rule crossMerge applies to controls.
 function mixedCont(step, other, start) {
@@ -3289,6 +3482,107 @@ function mixedCont(step, other, start) {
 // phase-0 draw, hence `eventAt`) has no triggers of its own - it is read per event instead.
 function mixableSteps(sig, cycle) {
   return sig.stepsForCycle && !sig.eventAt ? seamedSteps(sig.stepsForCycle, cycle) : null;
+}
+
+// An operand's steps as they meet ONE event of the pattern it's applied to - `base`, a step of
+// cycle `cycle`. This is where the binop modifiers (see binopModes) take effect, and it is the
+// only place: every reader of an operand's grid (the value arithmetic, crossMerge's controls, the
+// layers) cuts and reads `base` against what this returns, so each modifier means the same thing
+// on every path.
+//   mix (no modifier)  the operand's own grid: it cuts the event wherever it changes
+//   in                 the operand's layers sounding at the event's onset, stretched over the whole
+//                      event - nothing cuts it, and a `,`-stack still fans it out
+//   squeeze            a whole cycle of the operand fitted into the event
+// `cycleSteps` is mixableSteps(sig, cycle), when the caller already has it. An operand with no
+// grid (a number, an LFO, irand()) returns null as it always has - it's read per event anyway.
+function operandSteps(sig, cycle, base, cycleSteps) {
+  const steps = cycleSteps === undefined ? mixableSteps(sig, cycle) : cycleSteps;
+  if (!steps || !base || !sig.how) return steps;
+  if (sig.how === 'in') {
+    // `cont`: the operand never makes the event an attack - whether it is one is the event's say.
+    return coveringSteps(steps, base.start).map((o) => ({ ...o, start: base.start, end: base.end, cont: true }));
+  }
+  const span = base.end - base.start;
+  return sig.stepsForCycle(cycle)
+    .filter((o) => o.value != null && o.end > MIX_EPS && o.start < 1 - MIX_EPS)
+    .map((o) => {
+      const from = Math.max(0, o.start);
+      return { ...o, start: base.start + from * span, end: base.start + Math.min(1, o.end) * span, cont: from <= MIX_EPS ? true : o.cont };
+    });
+}
+
+// A binop getter's value: the operation itself, which mixes (`.add(x)`), carrying its modifiers -
+// `.add.mix(x)` (the same thing, spelled out), `.add.in(x)`, `.add.out(x)` and `.add.squeeze(x)`.
+// `run(sig, xs)` performs the operation on `sig` with operands `xs`.
+//   in       the events are this pattern's; x is read at each onset and cuts nothing
+//   out      the events are x's; this pattern is read at each of x's onsets (every layer of it)
+//   squeeze  a whole cycle of x is fitted into each of this pattern's events
+// in and squeeze mark the operand (see operandSteps); out moves this pattern onto x's events
+// first, after which the plain operation has nothing left to cut.
+function binopModes(sig, run) {
+  const plain = (...xs) => run(sig, xs);
+  plain.mix = plain;
+  plain.in = (...xs) => run(sig, xs.map((x) => withHow(x, 'in')));
+  plain.squeeze = (...xs) => run(sig, xs.map((x) => withHow(x, 'squeeze')));
+  plain.out = (...xs) => {
+    const trig = onsetsOf(xs);
+    return run(trig ? onEventsOf(sig, trig) : sig, xs);
+  };
+  return plain;
+}
+
+// A copy of operand `x` that meets its target `how`. A plain number has no events to modify, so it
+// stays as it is. Copied field for field rather than through _clone, which would drop what makes
+// the operand what it is (the control tag of `speed("1 2")`, the verb a layer carries).
+function withHow(x, how) {
+  if (!(x instanceof Sig) && typeof x !== 'string') return x;
+  const sig = toSignal(x);
+  if (sig.constVal !== undefined && !sig.stepsForCycle) return x;
+  return Object.assign(Object.create(Sig.prototype), sig, { how });
+}
+
+// The events of the operands `xs`, merged into one grid of distinct spans (a `,`-stack is one
+// event there, so it fans out once, in the operation, rather than once per layer here too).
+// Null when no operand has a grid - `.add.out(12)` is then just `.add(12)`.
+function onsetsOf(xs) {
+  const grids = xs
+    .map((x) => (x instanceof Sig || typeof x === 'string' ? toSignal(x) : null))
+    .filter((g) => g?.stepsForCycle && !g.eventAt);
+  if (!grids.length) return null;
+  return new Sig(() => 1, {
+    stepsForCycle: (cycle) => {
+      const spans = new Map();
+      for (const g of grids) {
+        for (const o of g.stepsForCycle(cycle)) {
+          if (o.value == null) continue;
+          const key = `${o.start}|${o.end}`;
+          if (!spans.has(key)) spans.set(key, { start: o.start, end: o.end, value: 1 });
+        }
+      }
+      return [...spans.values()].sort((a, b) => a.start - b.start);
+    },
+  });
+}
+
+// `sig` re-struck on `trig`'s events: each takes every layer of `sig` sounding at its onset, whole
+// (value, channels, sampler config), for its own span. .struct() keeps one layer - the right call
+// for a rhythm - but `.add.out()` over a chord has to keep the chord.
+function onEventsOf(sig, trig) {
+  const base = sig.stepsForCycle;
+  const stepsForCycle = (cycle) => {
+    const src = base ? base(cycle) : null;
+    const out = [];
+    for (const t of trig.stepsForCycle(cycle)) {
+      if (src) {
+        for (const l of coveringSteps(src, t.start)) out.push({ ...l, start: t.start, end: t.end, cont: undefined });
+        continue;
+      }
+      const ev = readEvent(sig, cycle + t.start);
+      if (ev.value != null) out.push({ start: t.start, end: t.end, value: ev.value, ...(ev.locs.length ? { locs: ev.locs } : {}) });
+    }
+    return out;
+  };
+  return new Sig((t, cps, pos) => sampleViaSteps(stepsForCycle, t, cps, pos), { stepsForCycle, ...sig._meta() });
 }
 
 // A grid is cut into cycles, but a pattern that merely HOLDS - `note(-36)`, `"0.8"`, a bar of
@@ -3758,8 +4052,8 @@ function layerPlan(target, layer, op, fn) {
 // Every reading of `sig` at cycle-phase `at`: one per covering step for a gridded pattern (several
 // for a `,`-stack, a single null over a rest), one bare read for anything else. `step` is the
 // covering step itself, for the merged event's continuation test and for the values it carries.
-function readingsAt(sig, cycle, at) {
-  const steps = mixableSteps(sig, cycle);
+function readingsAt(sig, cycle, at, base = null) {
+  const steps = operandSteps(sig, cycle, base);
   if (steps) {
     const covering = coveringSteps(steps, at);
     return covering.length ? covering.map((b) => ({ value: b.value, locs: stepLocs(b), step: b })) : [{ value: null, locs: [] }];
@@ -3781,8 +4075,8 @@ function pendingFn(target, p, entry) {
 // piece with no verb (a sound) yields its own reading; one with a verb folds each operation over
 // the value in force, reading the recorded operand (or, with none recorded, the piece's own
 // values). `from` is the piece's own covering step, whose stamped values applyStamps reads.
-function pieceOutcomes(target, p, inForce, cycle, at) {
-  const own = readingsAt(p.sig, cycle, at);
+function pieceOutcomes(target, p, inForce, cycle, at, base = null) {
+  const own = readingsAt(p.sig, cycle, at, base);
   const asOutcome = (r) => (r.value == null ? null : { value: r.value, locs: r.locs, edges: r.step ? [r.step] : [], from: r.step ?? null, chain: null });
   if (!p.pending) return own.map(asOutcome);
   // A channel whose every operation recorded its operand has nothing to read off its own values -
@@ -3797,7 +4091,7 @@ function pieceOutcomes(target, p, inForce, cycle, at) {
     let accs = [{ value: inForce, locs: r.locs, edges: r.step ? [r.step] : [], from: r.step ?? null, chain: [] }];
     for (const e of p.pending) {
       const fn = pendingFn(target, p, e);
-      const readings = e.raw ? readingsAt(e.raw, cycle, at) : [r];
+      const readings = e.raw ? readingsAt(e.raw, cycle, at, base) : [r];
       const next = [];
       for (const acc of accs) {
         if (acc == null) {
@@ -3918,7 +4212,7 @@ function applyLayer(target, plan, s, cycle, out) {
   const grids = [];
   for (const p of plan.pieces) {
     for (const sig of [p.sig, ...(p.pending ?? []).map((e) => e.raw).filter(Boolean)]) {
-      const steps = mixableSteps(sig, cycle);
+      const steps = operandSteps(sig, cycle, s);
       if (steps) grids.push(...steps);
     }
   }
@@ -3932,7 +4226,7 @@ function applyLayer(target, plan, s, cycle, out) {
       const next = [];
       for (const c of combos) {
         const inForce = inForceOf(target, p, c.step, cycle, at);
-        for (const o of pieceOutcomes(target, p, inForce, cycle, at)) {
+        for (const o of pieceOutcomes(target, p, inForce, cycle, at, s)) {
           if (o == null) continue;
           let step = applyPiece(target, p, c.step, o.value, o.chain);
           if ((p.kind === 'pitch' || p.kind === 'pack') && o.from) step = applyStamps(target, plan, step, o.from, cycle, at);
@@ -4066,7 +4360,7 @@ function crossMerge(baseStepsForCycle, ctlSig, stamp = null) {
       // rather than "two events". The cleared copy is what the new value lands on.
       const baseKey = stepKey(s);
       const cleared = clear(s);
-      for (const c of ctlSteps) {
+      for (const c of operandSteps(ctlSig, cycle, s, ctlSteps)) {
         const start = Math.max(s.start, c.start);
         const end = Math.min(s.end, c.end);
         if (start >= end) continue;
@@ -4702,6 +4996,7 @@ function bareSig(sig) {
     envIR: sig.envIR,
     ccIR: sig.ccIR,
     pitchKind: sig.pitchKind,
+    how: sig.how,
   });
   if (sig.constVal !== undefined) out.constVal = sig.constVal;
   return out;

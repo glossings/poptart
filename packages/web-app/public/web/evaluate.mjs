@@ -241,7 +241,7 @@ export function createEvaluator({ patternCore, engine, transport, prebakeDefs = 
         remotePacks.use(source);
       },
     };
-    const evalBlock = createBlockEvaluator(patternCore, { defs: new Map(prebakeDefs), hostBuilders });
+    const evalBlock = createBlockEvaluator(patternCore, { defs: new Map(prebakeDefs), hostBuilders, miniOff: patternCore.miniOffRanges(code ?? '') });
 
     const byLabel = new Map(blocks.map((b) => [b.label, b]));
     patternCore.setCopyResolver((label, seen = new Set()) => {

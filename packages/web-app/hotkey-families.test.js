@@ -185,12 +185,18 @@ test('the editor binds its app chords through CM_APP, so a keymap cannot keep th
   assert.ok(!/'Ctrl-[ADF]':/.test(CLIENT), 'a literal Ctrl- binding is back in extraKeys');
 });
 
+// The guide's chapters, as [name, html].
+function guidePages() {
+  const dir = path.join(__dirname, 'public', 'docs');
+  return fs.readdirSync(dir).filter((f) => f.endsWith('.html')).map((f) => [`docs/${f}`, fs.readFileSync(path.join(dir, f), 'utf8')]);
+}
+
 test('the unlock-loop chord is the app\'s, because mod+L is the editor\'s selectLine', () => {
   // It was taken with either of cmd/ctrl, and the sublime keymap binds both to selectLine (cmd on
   // macOS, ctrl elsewhere) - so from inside the editor, where the guide says to press it, only
   // macOS's ctrl+L ever arrived. As an app chord it is a key CodeMirror leaves alone everywhere.
   assert.match(CLIENT, /app && e\.key\.toLowerCase\(\) === 'l' && !e\.shiftKey\) \{/);
-  const docs = fs.readFileSync(path.join(__dirname, 'public', 'docs.html'), 'utf8');
+  const docs = guidePages().map(([, html]) => html).join('\n');
   assert.ok(docs.includes('{app+l}') && !docs.includes('{mod+l}'), 'the guide names the chord that is bound');
 });
 
@@ -213,8 +219,7 @@ test('no string a person reads spells a chord by hand, in any of the spellings',
 
 test('the pages carry chords as combos, not as one platform\'s keycaps', () => {
   const index = fs.readFileSync(path.join(__dirname, 'public', 'index.html'), 'utf8');
-  const docs = fs.readFileSync(path.join(__dirname, 'public', 'docs.html'), 'utf8');
-  for (const [name, html] of [['index.html', index], ['docs.html', docs]]) {
+  for (const [name, html] of [['index.html', index], ...guidePages()]) {
     assert.ok(html.includes('chords.js'), `${name} does not load the keyboard model`);
     // Nothing a person reads may be spelled in cmd glyphs: those are Mac-only, and this is the
     // half a Windows user cannot act on.

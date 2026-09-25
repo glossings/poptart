@@ -6,7 +6,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { injectLocations, isPatternPosition } from './src/locations.mjs';
+import { injectLocations, isPatternPosition, miniOffRanges } from './src/locations.mjs';
 import { parseMini, getStepsForCycle, stepLocs } from './src/mini.mjs';
 import { n, note, mini } from './src/signal.mjs';
 
@@ -50,6 +50,39 @@ test('injectLocations leaves method-form .se()/.sr() names plain but wraps the b
 test('injectLocations wraps a second-position .param() value but not its name', () => {
   const out = injectLocations('x.param("Filter Freq", "0.2 0.8")');
   assert.ok(out.includes('.param("Filter Freq", mini("0.2 0.8"'), out);
+});
+
+test('a single-quoted string is plain JavaScript, never mini notation', () => {
+  const helper = 'const chord = (root, ...ivs) => note(ivs.map((iv) => noteToMidi(root) + iv).join(\',\'));';
+  assert.equal(injectLocations(helper), helper);
+  assert.equal(injectLocations("note('c e g')"), "note('c e g')");
+  // Double quotes and backticks still are.
+  assert.equal(injectLocations('x.join(",")'), 'x.join(mini(",", 8))');
+  assert.equal(injectLocations('n(`0 1`)'), 'n(mini(`0 1`, 3))');
+});
+
+test('mini-off … mini-on switches the wrapping off across blocks, and an open one runs to the end', () => {
+  const buffer = [
+    'kick: s("bd*4")',
+    '// mini-off',
+    'const chord = (r) => note(r).add([0, 4, 7].join(","))',
+    'pad: chord("c3")',
+    '// mini-on',
+    'hat: s("hh*8")',
+  ].join('\n');
+  const ranges = miniOffRanges(buffer);
+  assert.equal(ranges.length, 1);
+  const lines = buffer.split('\n');
+  const at = (i) => lines.slice(0, i).join('\n').length + (i ? 1 : 0);
+  const block = (i) => injectLocations(lines[i], at(i), { miniOff: ranges });
+  assert.match(block(0), /mini\("bd\*4"/);
+  assert.equal(block(2), lines[2]);
+  assert.equal(block(3), lines[3]);
+  assert.match(block(5), /mini\("hh\*8"/);
+
+  assert.deepEqual(miniOffRanges('a\n/* mini-off */ b("x")'), [[2, 23]]);
+  assert.deepEqual(miniOffRanges('"// mini-off" + x'), [], 'inside a string it is not a comment');
+  assert.deepEqual(miniOffRanges('// mini-on'), [], 'a stray mini-on switches nothing');
 });
 
 test('injectLocations wraps a string that immediately chains a method', () => {

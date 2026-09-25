@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Modulation · poptart guide</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/vendor/codemirror/lib/codemirror.css" />
+    <link rel="stylesheet" href="/docs/docs.css" />
+  </head>
+  <body data-page="modulation">
+    <div class="wrap">
+      <main>
+        <header class="chapter-head">
+          <p class="kicker">Chapter 5</p>
+          <h1>Modulation</h1>
+          <p class="lede">Any control can move: LFOs, drawn shapes, envelopes, knobs.</p>
+        </header>
+
+        <p>
+          Wherever a value goes, a moving signal can go instead. Modulation runs inside the audio engine,
+          sample-accurate, not as a stream of messages.
+        </p>
+
+        <h2 id="lfos">LFOs</h2>
+        <p>
+          <code>sine</code> · <code>saw</code> (rises) · <code>isaw</code> (falls) · <code>tri</code> ·
+          <code>square</code> · <code>rand</code> · <code>perlin</code> (smooth drift). Each runs 0..1, and
+          <code>.range(lo, hi)</code> rescales it.
+        </p>
+        <p>
+          The rate is in cycles: <code>sine(0.25)</code> is one pass every four cycles, aligned to the bar
+          grid, so a slow sweep is in the same place every time round. Write a unit for a fixed speed:
+          <code>sine("0.5hz")</code>.
+        </p>
+        <pre data-run data-build="web"><code>bass: note("c2 c2 c3 c2 eb2 c2 g2 bb1").synth("Wavetable")
+  .fx("Filter").param("Mode", "ladder")
+  .param("Cutoff", sine(0.25).range(0.3, 0.7))
+  .param("Resonance", tri(0.5).range(0.2, 0.7))</code></pre>
+        <pre data-build="desktop"><code>.param("Filter 1 Freq", sine(0.3).range(200, 5000))</code></pre>
+        <p>
+          <code>.range()</code>'s bounds can move too: <code data-build="web">sine().range("0.2 0.3", 0.8)</code><code data-build="desktop">sine().range("200 300", 4000)</code>
+          sweeps from a stepped floor.
+        </p>
+
+        <h2 id="drawn">Drawn shapes</h2>
+        <figure class="shot">
+          <img src="/docs/img/lfo-editor.png" width="664" height="380" alt="The shape editor: a curve rising and bending back down, with points to drag." />
+          <figcaption>Double-click <code>lfo</code> to draw the shape.</figcaption>
+        </figure>
+        <p>
+          <code>lfo("…", { rate, mode })</code> is a shape you draw. Double-click the word
+          <code>lfo</code>, drag points and bend segments, and the code is written as you go. The two ends
+          move together while they sit at the same level, which keeps a loop from clicking;
+          <kbd>alt</kbd> moves one alone.
+        </p>
+        <table>
+          <tr><th>mode</th><th></th></tr>
+          <tr><td><code>free</code></td><td>loops on its own clock (the default)</td></tr>
+          <tr><td><code>retrigger</code></td><td>restarts on every note</td></tr>
+          <tr><td><code>envelope</code></td><td>plays once per note, then holds</td></tr>
+        </table>
+        <pre data-run data-build="web"><code>pad: note("&lt;[c3,eb3,g3] [ab2,c3,eb3]&gt;").synth("Wavetable")
+  .param("Osc 1 Table", "Vocal")
+  .param("Osc 1 Position", lfo("0,0 0.5,1,-3 1,0", { rate: 0.5 }))
+  .fx("Reverb")</code></pre>
+        <p>Shapes are named, so they pattern: <code>lfo("&lt;pluck swell&gt;")</code>.</p>
+
+        <h2 id="envelopes">Envelopes</h2>
+        <p>
+          <code>env({ attack, decay, sustain, release, curve })</code> is an ADSR started by each of the
+          track's notes. Times are in seconds, sustain is a level.
+        </p>
+        <pre data-run data-build="web"><code>bass: note("c2 c2 c3 c2 eb2 c2 g2 bb1").synth("Wavetable")
+  .fx("Filter").param("Mode", "ladder")
+  .param("Cutoff", env({ attack: 0.01, decay: 0.2, sustain: 0.1 }).range(0.25, 0.7))
+kick: s("pt_kit:0*4")</code></pre>
+        <pre data-build="desktop"><code>.param("Filter 1 Freq", env({ attack: 0.01, decay: 0.3, sustain: 0.2 }).range(300, 6000))</code></pre>
+        <p><code>dur()</code> is the current note's length in seconds, for anything that should scale with it.</p>
+
+        <h2 id="knobs">Knobs</h2>
+        <table>
+          <tr><th>Write</th><th>Is</th></tr>
+          <tr><td><code>macro1</code> … <code>macro8</code></td><td>the knobs in the session tab</td></tr>
+          <tr><td><code>midicc("Twister")(12)</code></td><td>controller 12 on a MIDI device (any part of its name)<span data-build="web">, through the browser's Web MIDI (not in Safari)</span></td></tr>
+          <tr data-build="desktop"><td><code>osc("/1/fader3")</code></td><td>a value sent over OSC to port 57160</td></tr>
+          <tr><td><code>auto("sweep")</code></td><td>an automation lane drawn in the arrangement (<a href="/docs/arrange.html#automation">Arranging</a>)</td></tr>
+        </table>
+        <pre data-build="web"><code>.fx("Filter").param("Cutoff", macro1.range(0.2, 0.7))</code></pre>
+        <pre data-build="desktop"><code>.param("Filter 1 Freq", macro1.range(200, 4000))</code></pre>
+      </main>
+    </div>
+    <!-- The chapter list, the pager, chords written for this platform, colored and playable code,
+         and the timelines all come from docs.js. -->
+    <script src="/chords.js"></script>
+    <script src="/vendor/codemirror/lib/codemirror.js"></script>
+    <script src="/vendor/codemirror/mode/javascript/javascript.js"></script>
+    <script src="/vendor/codemirror/addon/runmode/runmode.js"></script>
+    <script src="/poptart-mode.js"></script>
+    <script src="/pattern-meta.js"></script>
+    <script src="/docs/docs.js"></script>
+  </body>
+</html>

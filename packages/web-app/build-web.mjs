@@ -151,9 +151,9 @@ export function injectAnalytics(html) {
  * a range.
  */
 /**
- * The guide as the browser build serves it: the same page, marked as this build's, which is
- * what shows its `data-build="web"` passages, hides the desktop's, and turns its `data-run`
- * examples into ones that play (public/docs.js).
+ * A page of the guide as the browser build serves it: the same page, marked as this build's,
+ * which is what shows its `data-build="web"` passages, hides the desktop's, and turns its
+ * `data-run` examples into ones that play (public/docs/docs.js).
  */
 export function markDocsWeb(html) {
   if (/<html[^>]*\bclass="web"/.test(html)) return html;
@@ -215,12 +215,11 @@ export function build({ out = DIST, quiet = false } = {}) {
   const indexPath = path.join(out, 'index.html');
   fs.writeFileSync(indexPath, replaceSketch(injectAnalytics(injectBoot(fs.readFileSync(indexPath, 'utf8')))));
 
-  const docsPath = path.join(out, 'docs.html');
-  fs.writeFileSync(docsPath, injectAnalytics(markDocsWeb(fs.readFileSync(docsPath, 'utf8'))));
-
-  // The desktop server's own file, which the browser build has no use for and should not ship.
-  for (const gone of ['docs.html.map']) {
-    fs.rmSync(path.join(out, gone), { force: true });
+  // Every chapter of the guide, marked as this build's.
+  const docsDir = path.join(out, 'docs');
+  for (const name of fs.readdirSync(docsDir).filter((f) => f.endsWith('.html'))) {
+    const page = path.join(docsDir, name);
+    fs.writeFileSync(page, injectAnalytics(markDocsWeb(fs.readFileSync(page, 'utf8'))));
   }
 
   log(`\nbuilt ${out} (${(total / 1e6).toFixed(1)} MB)`);

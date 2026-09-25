@@ -19,7 +19,7 @@ export { parseMidiFile, midiFileToLanes, midiLanesToPianoroll, pickGrid, detectK
 export { parseMini, getStepsForCycle, stepLocs } from './mini.mjs';
 export { splitLabeledBlocks, isBareCallBlock, isBusBlock, isBodylessGroup, isRowlessBlock } from './labels.mjs';
 export { isGroupSig, routeGroups, treeOfBlocks, normalizeGroupTree, parentsOf, ancestorsOf, descendantsOf, markerResolver, groupOrder, GROUP_ROOT } from './groups.mjs';
-export { injectLocations, isPatternPosition } from './locations.mjs';
+export { injectLocations, isPatternPosition, miniOffRanges } from './locations.mjs';
 export { looksLikeShapeData, parseShapePoints, serializeShapePoints, sampleShape, curveInterp, SHAPE_PRESETS, parseAutoPoints, serializeAutoPoints, sampleAutoPoints, parseBendPoints, serializeBendPoints, sampleBendPoints, bendIsFlat } from './shape.mjs';
 export { parsePianoRoll, serializePianoRoll, normalizePianoRollSteps, normalizePianoRollMode, pianoRollEventAt, noteIndex, noteSlice, noteNudge, noteNudgeChannel, pianoRollNotePos, placePianoRollNote, looksLikeNoteString, sliceNotesFor, PIANOROLL_DEFAULT_STEPS, PIANOROLL_MODES, PIANOROLL_DEFAULT_NOTE, PIANOROLL_DEFAULT_INDEX, PIANOROLL_DEFAULT_SLICE, PIANOROLL_MAX_NUDGE, PIANOROLL_MIN_LEN, pianoRollSwingCells, commitPianoRollSwing, pianoRollNoteGrid } from './pianoroll.mjs';
 export { clearRolls, restoreRolls, setRollLayer, setDefOwner, adoptDefs, lookupRoll, rollIds, lookupShape, shapeIds, lookupPreset, presetIds, lookupPack, packIds, lookupSlices, sliceSetIds, lookupAuto, autoIds } from './rolls.mjs';

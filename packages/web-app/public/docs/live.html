@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Playing live · poptart guide</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/vendor/codemirror/lib/codemirror.css" />
+    <link rel="stylesheet" href="/docs/docs.css" />
+  </head>
+  <body data-page="live">
+    <div class="wrap">
+      <main>
+        <header class="chapter-head">
+          <p class="kicker">Chapter 10</p>
+          <h1>Playing live</h1>
+          <p class="lede">Keyboards into tracks, and takes into piano rolls.</p>
+        </header>
+
+        <h2 id="keyboards">Keyboards</h2>
+        <table>
+          <tr><th>Source</th><th></th></tr>
+          <tr><td><code>midikeys("KeyStep")(1)</code></td><td>a MIDI keyboard on channel 1 (any part of the device's name): notes, velocity, bend, aftertouch<span data-build="desktop">, played by the audio engine directly, with no scheduling delay</span><span data-build="web">, through Web MIDI (Chrome, Edge, Firefox)</span></td></tr>
+          <tr><td>the piano roll's <strong>⌨</strong></td><td>your typing keyboard: the home row is the white keys, the row above the black; <kbd>z</kbd>/<kbd>x</kbd> octave, <kbd>c</kbd>/<kbd>v</kbd> velocity</td></tr>
+        </table>
+        <pre data-build="web"><code>keys: pianoroll().synth("Wavetable").scale("F minor")   // double-click pianoroll, press ⌨, play</code></pre>
+        <pre data-build="desktop"><code>keys: pianoroll().synth("Serum 2").scale("F minor")   // double-click pianoroll, press ⌨, play</code></pre>
+        <p>
+          Live notes start <code>env()</code> envelopes and note-synced LFOs like written ones, and
+          <code>.scale()</code> snaps them into the key. Pitch changes such as <code>.add(12)</code> apply to
+          them; timing changes don't.
+        </p>
+
+        <h2 id="layering">Playing over a part</h2>
+        <p>
+          Written <em>after</em> something, <code>.pianoroll()</code> adds a roll under it instead of
+          replacing it, so you can draw while you hear what's already there:
+        </p>
+        <pre data-build="web"><code>const kb = midikeys("KeyStep")
+keys: kb(1).pianoroll().synth("Wavetable")   // play live over a drawn part
+riff: n("&lt;0 1 2&gt;").sc(3).pianoroll()       // draw a counter-line under a pattern</code></pre>
+        <pre data-build="desktop"><code>const kb = midikeys("KeyStep")
+keys: kb(1).pianoroll().synth("Serum 2")     // play live over a drawn part
+riff: n("&lt;0 1 2&gt;").sc(3).pianoroll()       // draw a counter-line under a pattern</code></pre>
+
+        <h2 id="recording">Recording a take</h2>
+        <p>
+          <strong>● rec</strong> in the header records into the piano roll. It counts in to the next phrase,
+          records for the cycles you pick and quantizes to the grid you pick (what's left over is kept as
+          each note's nudge). A roll shorter than the take overdubs; notes played during the count-in land
+          before the start, dimmed, if you want them.
+        </p>
+        <p>
+          Played something good without recording? The roll's <strong>capture</strong> grabs the last stretch
+          you played, as if rec had been on.
+        </p>
+        <p>
+          <strong>Drop a <code>.mid</code> file</strong> on the window: each lane becomes a
+          <code>pianoroll</code> track, with the key it guessed offered as a <code>setscale</code> line.
+        </p>
+        <p data-build="desktop">
+          <strong>DJ mode</strong> ({app+d}, or the header button) puts a second deck beside the first, each
+          with its own song, and mixes between them.
+        </p>
+      </main>
+    </div>
+    <!-- The chapter list, the pager, chords written for this platform, colored and playable code,
+         and the timelines all come from docs.js. -->
+    <script src="/chords.js"></script>
+    <script src="/vendor/codemirror/lib/codemirror.js"></script>
+    <script src="/vendor/codemirror/mode/javascript/javascript.js"></script>
+    <script src="/vendor/codemirror/addon/runmode/runmode.js"></script>
+    <script src="/poptart-mode.js"></script>
+    <script src="/pattern-meta.js"></script>
+    <script src="/docs/docs.js"></script>
+  </body>
+</html>
