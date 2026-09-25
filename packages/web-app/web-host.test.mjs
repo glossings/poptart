@@ -896,7 +896,7 @@ test('the pack panel browses the packs as folders, and a pick is the "pack/file"
     library: { packs: [{ id: 'breaks', files: [{ file: 'Amen/amen.wav' }] }], problems: [], urlFor: cdn },
   });
   const root = await rig.host.call('GET', '/api/browseDir?path=');
-  assert.deepEqual(root, { path: '/packs', parent: null, dirs: ['breaks', 'pt_kit'], files: [], samplesRoot: '/packs' });
+  assert.deepEqual(root, { path: '/packs', parent: null, dirs: ['breaks', 'pt_kit'], files: [], samplesRoot: '/packs', origins: {} });
   const pack = await rig.host.call('GET', '/api/browseDir?path=/packs/breaks/');
   assert.deepEqual(pack.files, ['Amen/amen.wav']);
   assert.equal(pack.parent, '/packs');

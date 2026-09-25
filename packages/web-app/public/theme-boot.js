@@ -7,6 +7,27 @@
 // (see client.js). The palettes themselves are in themes.css.
 (function () {
   var root = document.documentElement;
+  // A theme handed over in the address (?theme={"base":…,"vars":{…}}) - the desktop's docs link,
+  // opening the guide in a browser that has never seen the app's theme. Kept, so the guide's own
+  // links go on showing it, and taken back out of the address.
+  try {
+    var params = new URLSearchParams(location.search);
+    var given = params.get('theme');
+    if (given) {
+      var t0 = JSON.parse(given);
+      var hasVars = t0 && t0.vars && Object.keys(t0.vars).length;
+      if (hasVars) {
+        localStorage.setItem('poptart-custom-base', t0.base || 'poptart');
+        localStorage.setItem('poptart-custom-theme', JSON.stringify(t0.vars));
+        localStorage.setItem('poptart-theme', 'custom');
+      } else if (t0 && t0.base) {
+        localStorage.setItem('poptart-theme', t0.base);
+      }
+      params.delete('theme');
+      var rest = params.toString();
+      history.replaceState(null, '', location.pathname + (rest ? '?' + rest : '') + location.hash);
+    }
+  } catch (e) {}
   var t = 'poptart';
   var base = t;
   var vars = null;

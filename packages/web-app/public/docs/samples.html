@@ -60,17 +60,37 @@ bell: s("pt_keys:1").note("&lt;g3 bb3 c4 eb4&gt;").vel(0.5)
           </p>
           <p>
             <strong>From GitHub:</strong> <code>samples("user/repo")</code> reads a public repository and
-            makes a pack of each folder of audio in it, named after the folder. A share link carries the
-            line, so whoever opens it hears the same files. A file is downloaded the first time it plays
-            and kept by this browser; <strong>settings → downloaded packs</strong> says how much that is,
-            and forgets it.
+            makes a pack of each folder of audio in it, named after the folder. The line is code, so a
+            shared link carries it and whoever opens it hears the same files.
           </p>
         </div>
-        <pre data-build="web"><code>samples("user/drum-kits")       // every folder of audio is a pack
-samples("user/drum-kits@v2")    // a branch, tag or commit
-samples("user/drum-kits/808")   // only that folder
+        <pre data-build="web"><code>samples("user/drum-kits")                   // every folder of audio is a pack
+samples("user/drum-kits@v2")                // a branch, tag or commit
+samples("user/drum-kits/808")               // only that folder
+samples("tidalcycles/dirt-samples", "dirt") // prefixed: dirt_bd, dirt_sn, …
 
-beat: s("kicks:0*4, ~ snares:2")</code></pre>
+beat: s("dirt_bd*4, ~ dirt_sn")</code></pre>
+        <ul data-build="web">
+          <li>
+            The names last for the session: they come from the <code>samples()</code> lines evaluated, and
+            the later line wins a name two repositories share. The console says when that happens and
+            offers <strong>prefix them</strong>.
+          </li>
+          <li>
+            A repository you always want goes in the <a href="/docs/extending.html#prebake">prebake</a>,
+            and is there in every session.
+          </li>
+          <li>
+            A file is downloaded the first time it plays, then kept by this browser. <strong>settings →
+            downloaded packs</strong> lists each repository with its size: <strong>+</strong> puts its
+            <code>samples()</code> line back in the buffer, <strong>✕</strong> deletes its files.
+          </li>
+          <li>
+            A kit (<code>sp()</code>, below) remembers where each of its files came from, so it plays in a
+            buffer without the <code>samples()</code> line, and downloads what it needs if the files were
+            deleted.
+          </li>
+        </ul>
 
         <h2 id="controls">Sampler controls</h2>
         <pre data-build="web"><code>s("pt_kit:4*8")

@@ -248,7 +248,8 @@
             </section>
 
             <section id="pluginsSection">
-              <h2>plugins <button id="scanBtn" class="small">rescan</button><span id="pluginScan" class="dim"></span></h2>
+              <h2>plugins <span id="pluginsCount" class="count"></span> <button id="scanBtn" class="small">rescan</button><span id="pluginScan" class="dim"></span></h2>
+              <input id="pluginSearch" type="search" placeholder="filter plugins… (click to copy)" />
               <div id="pluginList" class="panel list">not scanned yet</div>
             </section>
 
@@ -272,7 +273,7 @@
                 <button id="fileSaveAsBtn" class="small" data-chord-title="save the buffer under a new name ({mod+shift+s})">save as…</button>
                 <span class="spacer"></span>
                 <button id="fileShareBtn" class="small hidden"
-                  title="Copies a link that opens this pattern. Files added to this browser are named in it but not carried.">share</button>
+                  title="Copies a link that opens this pattern. Files added to this browser are named in it but not carried.">copy link</button>
                 <button id="fileExportBtn" class="small" title="download the buffer as a file">export</button>
               </div>
               <input id="fileSearchInput" type="search" spellcheck="false" placeholder="🔍 search everything below…"
@@ -408,9 +409,10 @@
               <h2>downloaded packs</h2>
               <div class="settings-actions">
                 <button id="downloadsForget" class="small" disabled
-                  title="delete the files samples() downloaded from repositories. A pattern that plays them downloads them again; the sample map keeps its place for them">forget</button>
+                  title="delete every file samples() downloaded from repositories. A pattern that plays them downloads them again; the sample map keeps its place for them">forget all</button>
               </div>
               <div id="downloadsNote" class="files-note"></div>
+              <div id="downloadsList" class="check-list map-source-list hidden"></div>
             </section>
             <!-- The wavetable folder. Only the browser build has one: there the files are kept in
                  the browser rather than read off a disk it cannot see, so the row is a folder to
@@ -437,8 +439,8 @@
               </div>
               <div class="settings-actions">
                 <button id="mapSourceAdd" class="small">add folder…</button>
-                <button id="mapSourceLibrary" class="small" title="add the sample library folder">add library</button>
-                <button id="mapRebuild" class="small" title="analyze every file again">rebuild</button>
+                <button id="mapSourceLibrary" class="small">add library</button>
+                <button id="mapRebuild" class="small" title="analyze every sound on the map again from the start. New sounds are added by themselves when the map is opened">rebuild</button>
               </div>
               <div id="mapSourceNote" class="settings-note map-source-note"></div>
             </section>

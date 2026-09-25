@@ -117,3 +117,18 @@ test('a build stops asking a server that has stopped answering, and builds from 
   assert.equal(map.snapshot().points.length, 6, 'the kicks that did read are on the map');
   assert.equal(map.status().unread, 40, 'and the rest are counted for the next build');
 });
+
+test('a repository\'s pack is placed by where its files live, so a same-named pack stays apart', async () => {
+  const sha = 'b'.repeat(40);
+  const base = `https://raw.githubusercontent.com/someone/kit/${sha}/`;
+  const local = { id: 'kicks', description: 'my folder', files: Array.from({ length: 3 }, (_, i) => ({ file: `kick${i}.wav` })) };
+  const remote = { id: 'kicks', description: 'someone/kit', cachePrefix: `remote/${base}`, base, files: Array.from({ length: 3 }, (_, i) => ({ file: `kick${i}.wav` })) };
+  const { map } = rig({ packs: [local, remote] });
+  await map.refresh();
+  const paths = map.snapshot().points.map((p) => p.path).sort();
+  assert.equal(paths.length, 6, 'two packs called kicks are six sounds, not three');
+  assert.ok(paths.includes(`${ROOT}/kicks/kick0.wav`));
+  assert.ok(paths.includes(`${ROOT}/github:someone/kit@${sha}/kick0.wav`), paths.join('\n'));
+  // ...and a point added to a kit is found again by the same name.
+  assert.ok(map.pointOf(`github:someone/kit@${sha}/kick1.wav`));
+});

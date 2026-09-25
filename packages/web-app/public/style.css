@@ -576,6 +576,7 @@ aside h2 {
 }
 
 #paramSearch,
+#pluginSearch,
 #sampleSearch,
 #fileSearchInput {
   width: 100%;
@@ -591,6 +592,7 @@ aside h2 {
 }
 
 #paramSearch:focus,
+#pluginSearch:focus,
 #sampleSearch:focus,
 #fileSearchInput:focus {
   border-color: var(--accent);
@@ -1051,6 +1053,13 @@ footer#console {
 }
 
 /* Something worked, differently than you'd expect - not the red that means it did not happen. */
+/* A fix offered on a console line (see client.js, attachLogFix). */
+#log .log-fix {
+  margin-left: 6px;
+  padding: 0 6px;
+  font-size: 11px;
+}
+
 #log .warn {
   color: var(--warn);
 }

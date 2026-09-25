@@ -2591,7 +2591,7 @@ function setscale(name) {
 // (public/web/remote-packs.mjs): the desktop's packs are folders in the samples folder. Bound here
 // all the same, so a pattern written in the browser opens and plays on the desktop with one line
 // in the console instead of an error.
-function samples(source) {
+function samples(source, _prefix) {
   eventLogQueue.push(`[samples] samples(${JSON.stringify(String(source ?? ''))}) reads packs in the browser build only - on the desktop a pack is a folder in the samples folder`);
 }
 

@@ -20,6 +20,8 @@
 // is several times larger, it is tied to the sample rate of the context that decoded it, and
 // decoding again on the next visit costs milliseconds.
 
+import { parseOrigin } from './remote-packs.mjs';
+
 /** Where a pack's audio is held once it has been decoded, keyed "<pack>/<index>". */
 const keyOf = (pack, index) => `${pack}/${index}`;
 
@@ -72,9 +74,33 @@ export function createSampleStore({
 
   /** How much the downloads under a cache-key prefix weigh, and how many files that is. */
   async function downloaded(prefix) {
+    const held = await ledgerNow();
+    // The ledger against what is really kept: files cached before there was a ledger (or whose
+    // entry was lost to a write that never landed) are sized and added, once, and entries whose
+    // file has gone are dropped. Otherwise the row says "nothing" over files that are there, and
+    // its forget button - which deletes what is stored, not what is listed - is never offered.
+    if (store?.keys) {
+      const keys = await store.keys(prefix).catch(() => null);
+      if (keys) {
+        const there = new Set(keys);
+        let changed = false;
+        for (const key of keys) {
+          if (held.has(key)) continue;
+          const value = await store.get(key).catch(() => null);
+          const size = value?.bytes?.byteLength;
+          if (!size) continue; // not a file: a repository's list of files, say
+          held.set(key, size);
+          changed = true;
+        }
+        for (const key of [...held.keys()]) {
+          if (key.startsWith(prefix) && !there.has(key)) { held.delete(key); changed = true; }
+        }
+        if (changed) saveLedger();
+      }
+    }
     let bytes = 0;
     let files = 0;
-    for (const [key, size] of await ledgerNow()) {
+    for (const [key, size] of held) {
       if (!key.startsWith(prefix)) continue;
       bytes += size;
       files += 1;
@@ -408,6 +434,13 @@ export function createSampleStore({
       for (const entry of entries) {
         // "/packs/pack/file" is the pack panel's spelling of the same entry (host.mjs, browseDir).
         const text = String(entry).replace(/^\/packs\//, '');
+        // A file named by where it lives (remote-packs.mjs, originOf) plays whatever this page's
+        // samples() lines have made the pack names mean - or whether there are any.
+        const origin = originFile(text);
+        if (origin) {
+          files.push(origin);
+          continue;
+        }
         const cut = text.indexOf('/');
         const from = cut < 0 ? text : text.slice(0, cut);
         const manifest = from === pack ? null : manifestOf(from);
@@ -424,6 +457,30 @@ export function createSampleStore({
     if (!held.files.length) return null;
     const n = held.files.length;
     return held.files[((Math.trunc(Number(index) || 0) % n) + n) % n];
+  }
+
+  /**
+   * The file an origin names ("github:owner/repo@<commit>/path.wav"), as { pack, index }: a one-file
+   * pack under the origin's own name, made the first time it is asked for, cached under the key
+   * samples() keeps the same file under - so a kit and the samples() line share one download, and
+   * "forget" in settings lets both go. Null for anything that is not an origin.
+   */
+  function originFile(text) {
+    const at = parseOrigin(text);
+    if (!at) return null;
+    if (!manifestOf(text)) {
+      const manifest = {
+        id: text,
+        title: at.file.split('/').pop(),
+        description: text,
+        kind: 'drums',
+        cachePrefix: `remote/${at.base}`,
+        base: at.base,
+        files: [{ file: at.file, name: at.file.split('/').pop().replace(/\.[^.]+$/, ''), rootNote: null, loop: null }],
+      };
+      register([manifest], (_id, file) => (at.base ? `${at.base}${file.split('/').map(encodeURIComponent).join('/')}` : file));
+    }
+    return { pack: text, index: 0 };
   }
 
   /** The manifest a file of a pack sits in, from the added packs, what has loaded or what is known. */
@@ -570,6 +627,7 @@ export function createSampleStore({
     },
     /** The file a definition's index lands on, as { pack, index }, or null. */
     resolveEntry: (pack, index) => viaDefinition(pack, index),
+    originFile,
     put,
     loaded: () => [...manifests.keys()],
     problems: () => Object.fromEntries([...failed].map(([id, f]) => [id, f.why])),

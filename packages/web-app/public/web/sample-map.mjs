@@ -18,6 +18,8 @@
 // The work that is seconds of CPU (the features, the layout) is the caller's to put somewhere -
 // boot hands in a worker - so this file is the bookkeeping, and runs as happily in a test.
 
+import { originOf } from './remote-packs.mjs';
+
 export const ROOT = '/packs';
 const CACHE_KEY = 'samplemap/cache';
 const SETTINGS_KEY = 'settings/sample-map';
@@ -124,8 +126,13 @@ export function createWebSampleMap({ core, store = null, packs, bytesOf, decode,
       if (NOT_ON_MAP.has(manifest.id)) continue;
       const source = sources.find((s) => under(s, manifest.id));
       if (!source) continue;
+      // A samples() pack's files are placed by where they live (remote-packs.mjs, originOf), not by
+      // the pack's name: two repositories' "bd" are two sets of sounds on the map, and a point added
+      // to a kit is a file the kit can play without the samples() line.
+      const remote = String(manifest.cachePrefix ?? '').startsWith('remote/');
       manifest.files.forEach((f, index) => {
-        const path = pointPath(manifest.id, f.file);
+        const origin = remote ? originOf(manifest.base, f.file) : null;
+        const path = origin ? `${ROOT}/${origin}` : pointPath(manifest.id, f.file);
         if (!found.has(path)) found.set(path, { path, source, sig: sigOf(manifest, f.file), pack: manifest.id, index });
       });
     }

@@ -109,7 +109,7 @@ test('samples() calls are found in code, not in comments or strings', () => {
     'mysamples("not/this")',
     'samples(`tpl/repo`)',
   ].join('\n');
-  assert.deepEqual(sourcesIn(code), ['someone/kit', 'other/kit@v1', 'tpl/repo']);
+  assert.deepEqual(sourcesIn(code), [{ source: 'someone/kit', prefix: null }, { source: 'other/kit@v1', prefix: null }, { source: 'tpl/repo', prefix: null }]);
 });
 
 test('a repository without a strudel.json is read by folder, pinned to its commit', async () => {
@@ -200,4 +200,75 @@ test('what is not a repository, or has no audio, is one line and no packs', asyn
   assert.deepEqual(r.packs(), []);
   assert.ok(lines.some((l) => /"nope" is not a repository/.test(l)));
   assert.ok(lines.some((l) => /no audio files/.test(l)));
+});
+
+test('a prefix goes in front of every pack name, so two repositories can both have a "bd"', async () => {
+  const { sourcesIn: find } = await import('./public/web/remote-packs.mjs');
+  assert.deepEqual(find('samples("someone/kit", "dirt")'), [{ source: 'someone/kit', prefix: 'dirt' }]);
+  const { r, registered } = remote({ files: { 'bd/1.wav': '', 'sn/1.wav': '' } });
+  await r.prepare('samples("someone/kit", "dirt")');
+  assert.deepEqual(registered, ['dirt_bd', 'dirt_sn']);
+});
+
+test('a collision is said once per source, with the prefix that keeps both as its fix', async () => {
+  const notes = [];
+  const gh = fakeGitHub({ 'bd/1.wav': '' });
+  const r = createRemotePacks({ fetchImpl: gh.fetchImpl, store: memoryStore(), samples: { register() {}, forget() {} }, note: (m) => notes.push(m) });
+  // the same repository read twice under different spellings of one source would not collide, so
+  // two sources: the plain one and one with a folder that holds the same pack name
+  await r.prepare('samples("someone/kit")');
+  await r.prepare('samples("someone/kit@v2")');
+  const clash = notes.find((m) => m.fix);
+  assert.ok(clash, JSON.stringify(notes));
+  assert.match(clash.text, /bd from someone\/kit replaces the one from someone\/kit/);
+  assert.deepEqual(clash.fix, { kind: 'samples-prefix', label: 'prefix them', source: 'someone/kit@v2', prefix: 'kit' });
+  assert.equal(clash.level, 'warn');
+});
+
+test('a file named by where it lives comes back as the base samples() caches it under', async () => {
+  const { originOf, parseOrigin, suggestPrefix } = await import('./public/web/remote-packs.mjs');
+  const base = `https://raw.githubusercontent.com/tidalcycles/dirt-samples/${SHA}/`;
+  const origin = originOf(base, 'bd/BT0A0A7.wav');
+  assert.equal(origin, `github:tidalcycles/dirt-samples@${SHA}/bd/BT0A0A7.wav`);
+  assert.deepEqual(parseOrigin(origin), { base, file: 'bd/BT0A0A7.wav' });
+  assert.equal(parseOrigin('bd/BT0A0A7.wav'), null, 'a pack/file entry is not an origin');
+  assert.equal(suggestPrefix('tidalcycles/dirt-samples'), 'dirt');
+});
+
+test('each repository kept here is listed with the call that reads it and where its files are', async () => {
+  const { r, store } = remote({ files: { 'bd/1.wav': '' } });
+  await r.prepare('samples("someone/kit@main")');
+  const kept = await r.kept();
+  assert.equal(kept.length, 1);
+  assert.equal(kept[0].source, 'someone/kit@main', 'as it was written');
+  assert.deepEqual(kept[0].bases, [`https://raw.githubusercontent.com/someone/kit/${SHA}/`]);
+  await r.forgetListing(kept[0].key);
+  assert.deepEqual(await r.kept(), []);
+  assert.deepEqual(await store.keys('remote/listing/'), []);
+});
+
+test('a shared name belongs to the later line, however the downloads finish, and re-evaluating is quiet', async () => {
+  const slow = fakeGitHub({ 'bd/1.wav': '' }, { owner: 'someone', repo: 'kit' });
+  const fast = fakeGitHub({ 'bd/2.wav': '' }, { owner: 'other', repo: 'kit' });
+  const fetchImpl = async (url) => {
+    if (url.includes('/other/')) return fast.fetchImpl(url);
+    await new Promise((r) => setTimeout(r, 30)); // the first line's source answers last
+    return slow.fetchImpl(url);
+  };
+  const notes = [];
+  const registered = [];
+  const r = createRemotePacks({
+    fetchImpl,
+    store: memoryStore(),
+    samples: { register: (list) => registered.push(...list.map((m) => `${m.id}<${m.description}`)), forget() {} },
+    note: (m) => notes.push(m),
+  });
+  const code = 'samples("someone/kit")\nsamples("other/kit")';
+  await r.prepare(code);
+  assert.equal(r.packs().find((p) => p.manifest.id === 'bd').manifest.description, 'other/kit', 'the later line');
+  const said = notes.filter((m) => m.fix).length;
+  const before = registered.length;
+  await r.prepare(code);
+  assert.equal(registered.length, before, 'nothing is registered again');
+  assert.equal(notes.filter((m) => m.fix).length, said, 'and the collision is not said again');
 });

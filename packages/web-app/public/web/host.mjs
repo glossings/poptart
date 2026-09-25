@@ -26,6 +26,7 @@
 // handed in, so this file works the same in a test with a stand-in graph as it does in a page,
 // and the static build does not have to reproduce a relative path between two packages.
 
+import { originOf } from './remote-packs.mjs';
 import { registerPacks } from './samples.mjs';
 import { createLiveNotes } from './live-notes.mjs';
 import { createTrackRecorder } from './track-record.mjs';
@@ -127,6 +128,10 @@ export function createHost({
   builtInUrl = null,
   library = { packs: [], problems: [] },
   remotePacks = null,
+  // Lines for the editor's console that arrive between requests (samples() finishing a download,
+  // a collision): drained by the same poll that carries plugin edits. Each is a string or
+  // { text, level, fix } - see client.js's logLine.
+  drainNotes = () => [],
   // The sample library: a folder on this computer, read where it lives (see local-folder.mjs).
   localFolder = null,
   // The sample map over every pack (see sample-map.mjs). Absent, the map routes say so.
@@ -168,6 +173,20 @@ export function createHost({
   }
 
   /** What the pack panel browses and the sample map covers: every pack, and the files added here. */
+  /**
+   * For each samples() pack, the root a kit entry of one of its files starts with - the file's
+   * origin less the file (remote-packs.mjs, originOf) - so the pack panel writes the entry as where
+   * the file lives rather than as a name only this session's samples() lines give it.
+   */
+  function packOrigins() {
+    const out = {};
+    for (const { manifest: m } of remotePacks?.packs() ?? []) {
+      const probe = originOf(m.base, '\u0000');
+      if (probe) out[m.id] = probe.slice(0, probe.indexOf('\u0000')).replace(/\/$/, '');
+    }
+    return out;
+  }
+
   function browsablePacks() {
     const added = (samples.addedPacks?.() ?? []).filter((m) => m.files.length && m.id !== 'wt' && m.id !== 'rec');
     return [...allPacks().map((p) => p.manifest), ...added];
@@ -186,10 +205,44 @@ export function createHost({
     return (manifest?.files ?? []).map((f) => ({ key: `${id}/${f.file}`, name: String(f.file).split('/').pop() }));
   }
 
+  /**
+   * What samples() has kept here: the total, and a row per repository (at its commit) - the files
+   * live under the repository whichever way a samples() line named it (the whole of it, one
+   * folder, a prefix), so those spellings are one row, shown as the plainest of them. A kit's
+   * files from a repository are the same files under the same keys, so they count toward it too.
+   */
+  async function downloadsNow() {
+    const total = (await samples.downloaded?.(REMOTE_PREFIX)) ?? { bytes: 0, files: 0 };
+    const groups = new Map(); // the repository's bases -> { keys, sources, bases }
+    for (const r of (await remotePacks?.kept?.()) ?? []) {
+      const id = [...r.bases].sort().join(' ');
+      const g = groups.get(id) ?? { keys: [], sources: [], bases: r.bases };
+      g.keys.push(r.key);
+      g.sources.push(r.source);
+      groups.set(id, g);
+    }
+    const repos = [];
+    for (const g of groups.values()) {
+      let bytes = 0;
+      let files = 0;
+      for (const base of g.bases) {
+        const d = (await samples.downloaded?.(`${REMOTE_PREFIX}${base}`)) ?? { bytes: 0, files: 0 };
+        bytes += d.bytes;
+        files += d.files;
+      }
+      const source = [...g.sources].sort((a, b) => a.length - b.length || a.localeCompare(b))[0];
+      repos.push({ keys: g.keys, source, bytes, files });
+    }
+    repos.sort((a, b) => b.bytes - a.bytes || a.source.localeCompare(b.source));
+    return { ...total, repos };
+  }
+
   /** The pack and index a slice-set key names, or null. */
   function fileOfKey(key) {
     // The pack panel's own spelling, "/packs/pack/file", is the same file as "pack/file".
     const k = String(key ?? '').replace(PACK_ROOT_PREFIX, '');
+    const origin = samples.originFile?.(k);
+    if (origin) return { ...origin, name: k.split('/').pop() };
     if (k.startsWith('rec:')) {
       const name = k.slice(4).replace(/\.wav$/i, '');
       const names = samples.names?.('rec') ?? [];
@@ -837,7 +890,7 @@ export function createHost({
       });
       // Never anything pending: an edit is taken the moment its window closes, which is now, so
       // there is no held gesture for the editor to warn about the way there is on the desktop.
-      return { edits, logs: [], pending: 0, holds };
+      return { edits, logs: drainNotes(), pending: 0, holds };
     },
 
     // A click in the buffer: every open window's slot goes back to its pattern (see holdSlot).
@@ -975,10 +1028,20 @@ export function createHost({
     // letting it go. Everything under `remote/` in the store (remote-packs.mjs); the sample map's
     // analysis of those files is kept apart and stays, so a repository used again is on the map
     // without being read again.
-    'GET /api/downloads': async () => (await samples.downloaded?.(REMOTE_PREFIX)) ?? { bytes: 0, files: 0 },
-    'POST /api/downloads/forget': async () => {
-      await samples.forgetDownloads?.(REMOTE_PREFIX);
-      return (await samples.downloaded?.(REMOTE_PREFIX)) ?? { bytes: 0, files: 0 };
+    'GET /api/downloads': async () => downloadsNow(),
+    // Body: { keys } lets one repository go - its files, and every list of them the ways it was
+    // named (a row's `keys`); no keys, everything samples() downloaded.
+    'POST /api/downloads/forget': async (body) => {
+      const keys = Array.isArray(body?.keys) ? body.keys.map(String) : null;
+      if (!keys?.length) {
+        await samples.forgetDownloads?.(REMOTE_PREFIX);
+        return downloadsNow();
+      }
+      const kept = (await remotePacks?.kept?.()) ?? [];
+      const bases = new Set(kept.filter((r) => keys.includes(r.key)).flatMap((r) => r.bases));
+      for (const base of bases) await samples.forgetDownloads?.(`${REMOTE_PREFIX}${base}`);
+      for (const key of keys) await remotePacks?.forgetListing?.(key);
+      return downloadsNow();
     },
     'POST /api/sampleFolder/forget': async () => {
       await localFolder?.forget();
@@ -993,8 +1056,8 @@ export function createHost({
     'GET /api/browseDir': async (_body, query) => {
       const at = String(query.get('path') ?? '').replace(/\/+$/, '');
       const pack = at.startsWith(`${PACK_ROOT}/`) ? browsablePacks().find((m) => m.id === at.slice(PACK_ROOT.length + 1)) : null;
-      if (pack) return { path: `${PACK_ROOT}/${pack.id}`, parent: PACK_ROOT, dirs: [], files: pack.files.map((f) => f.file), samplesRoot: PACK_ROOT };
-      return { path: PACK_ROOT, parent: null, dirs: browsablePacks().map((m) => m.id).sort(), files: [], samplesRoot: PACK_ROOT };
+      if (pack) return { path: `${PACK_ROOT}/${pack.id}`, parent: PACK_ROOT, dirs: [], files: pack.files.map((f) => f.file), samplesRoot: PACK_ROOT, origins: packOrigins() };
+      return { path: PACK_ROOT, parent: null, dirs: browsablePacks().map((m) => m.id).sort(), files: [], samplesRoot: PACK_ROOT, origins: packOrigins() };
     },
     // Every file under a "folder" - the root or one pack - relative to it, filtered by the words
     // in `q`, all of which must appear in the path.
@@ -1009,7 +1072,7 @@ export function createHost({
       }
       const terms = String(query.get('q') ?? '').toLowerCase().split(/\s+/).filter(Boolean);
       const hits = terms.length ? all.filter((p) => terms.every((t) => p.toLowerCase().includes(t))) : all;
-      return { path: only ? `${PACK_ROOT}/${only}` : PACK_ROOT, files: hits.slice(0, limit), matched: hits.length, total: all.length, truncated: false };
+      return { path: only ? `${PACK_ROOT}/${only}` : PACK_ROOT, files: hits.slice(0, limit), matched: hits.length, total: all.length, truncated: false, origins: packOrigins() };
     },
 
     // ---- the sample map ---------------------------------------------------------------------------

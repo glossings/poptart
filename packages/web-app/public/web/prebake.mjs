@@ -16,7 +16,7 @@
 // The pinned file's format - one definition per line, found and replaced by name - belongs to the
 // desktop's pinned-defs.js, which is handed in rather than copied.
 
-export function createPrebake({ patternCore, storage, prebakeDefs, createBlockEvaluator, pinnedDefs, log = () => {}, dehydrate = async (code) => ({ code }), afterClear = () => {} }) {
+export function createPrebake({ patternCore, storage, prebakeDefs, createBlockEvaluator, pinnedDefs, remotePacks = null, log = () => {}, dehydrate = async (code) => ({ code }), afterClear = () => {} }) {
   /** Runs everything again. Answers the per-block errors, empty on success. */
   async function run() {
     const sources = [];
@@ -26,7 +26,10 @@ export function createPrebake({ patternCore, storage, prebakeDefs, createBlockEv
     if (own.trim()) sources.push({ name: 'prebake.js', code: own });
 
     const errors = [];
-    const evalBlock = createBlockEvaluator(patternCore, { defs: new Map() });
+    // samples() works here as in a buffer: a repository named in the prebake is there in every
+    // session. Not waited for - the page starts, and the packs join as they arrive.
+    const hostBuilders = remotePacks ? { samples: (source, prefix) => { remotePacks.use(source, prefix); } } : {};
+    const evalBlock = createBlockEvaluator(patternCore, { defs: new Map(), hostBuilders });
     patternCore.setRollLayer('prebake');
     patternCore.clearRolls('prebake');
     // What the host keeps in this layer and is not the prebake's to drop: the sample packs.

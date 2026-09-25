@@ -235,9 +235,9 @@ const API_DOCS = {
   },
   samples: {
     kind: 'builder',
-    sig: 'samples(repo)',
-    desc: 'Reads sample packs from a public GitHub repository: one pack per folder of audio files, named after the folder, files in name order. "user/repo@branch" picks a branch, tag or commit, and a path after the repository keeps only that folder. A repository with a strudel.json at its top is read from that file instead. Browser build only.',
-    eg: 'samples("user/drum-kits")',
+    sig: 'samples(repo, prefix?)',
+    desc: 'Reads sample packs from a public GitHub repository: one pack per folder of audio files, named after the folder, files in name order. "user/repo@branch" picks a branch, tag or commit, and a path after the repository keeps only that folder. A repository with a strudel.json at its top is read from that file instead. The optional prefix goes in front of every pack name, so samples("tidalcycles/dirt-samples", "dirt") gives dirt_bd, dirt_sn and so on. Works in the prebake too. Browser build only.',
+    eg: 'samples("tidalcycles/dirt-samples", "dirt")',
   },
   setscale: {
     kind: 'builder',

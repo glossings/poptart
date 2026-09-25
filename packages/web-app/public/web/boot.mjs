@@ -214,13 +214,22 @@ export async function boot({
   const prebakeDefs = new Map();
   // Packs a pattern reads in from a repository with samples(): kept in the same store as the
   // rest, so a repository's listing and its files come down once per browser.
+  // The editor's console hears samples() through the host's poll (see host.mjs, drainNotes): a
+  // download finishing or a collision happens between evaluations, not inside one.
+  const notes = [];
+  const note = (m) => {
+    notes.push(m);
+    (m.level === 'warn' ? warn : say)(m.text);
+    if (notes.length > 200) notes.splice(0, notes.length - 200);
+  };
   const remotePacks = createRemotePacks({
     fetchImpl,
     store,
     samples,
     onPacks: (manifests) => registerPacks(patternCore, manifests),
-    warn,
-    say,
+    warn: (text) => note({ level: 'warn', text }),
+    say: (text) => note({ level: 'info', text }),
+    note,
   });
   const evaluator = createEvaluator({ patternCore, engine, transport, prebakeDefs, log: say, remotePacks });
 
@@ -359,7 +368,7 @@ export async function boot({
   if (!isolated) {
     try {
       prebake = createPrebake({
-        patternCore, storage, prebakeDefs, createBlockEvaluator,
+        patternCore, storage, prebakeDefs, createBlockEvaluator, remotePacks,
         pinnedDefs: globalThis.poptartPinnedDefs,
         dehydrate: (code) => storage.dehydrateOnLoad(code),
         log: say,
@@ -373,6 +382,7 @@ export async function boot({
 
   const host = createHost({
     patternCore, engine, transport, evaluator, storage, samples, outputs, midi, inputs,
+    drainNotes: () => notes.splice(0).map((m) => (m.fix || m.level === 'warn' ? m : m.text)),
     slicing: { detectOnsets: webEngine.detectOnsets, monoOf: webEngine.monoOf },
     prebake,
     catalog: webEngine.catalog,

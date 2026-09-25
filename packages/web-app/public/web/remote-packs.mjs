@@ -79,6 +79,14 @@ export function sourceKey(src) {
   return `github:${src.owner}/${src.repo}@${src.ref ?? ''}/${src.path}`.toLowerCase();
 }
 
+/** A listing key back as something samples() takes, for a listing kept before it kept its source. */
+function sourceText(key) {
+  if (key.startsWith('json:')) return key.slice(5);
+  const m = /^github:([^/]+)\/([^@]+)@([^/]*)\/(.*)$/.exec(key);
+  if (!m) return key;
+  return `${m[1]}/${m[2]}${m[4] ? `/${m[4]}` : ''}${m[3] ? `@${m[3]}` : ''}`;
+}
+
 /** A folder or key as a pack name: lower case, and only what mini-notation reads as one word. */
 export function packName(text) {
   return String(text).toLowerCase().replace(/[^a-z0-9_-]+/g, '_').replace(/^_+|_+$/g, '') || 'samples';
@@ -261,6 +269,41 @@ export function manifestsOf(listing, { title }) {
   return manifests;
 }
 
+// ---- a file by where it lives ------------------------------------------------------------------
+//
+// A kit entry or a point on the sample map names a file of a samples() pack by its ORIGIN rather
+// than by its pack's name: `github:owner/repo@<commit>/path/in/repo.wav`, or the file's own URL for a
+// source that is not a GitHub repository. A pack name is only what one session's samples() lines
+// made it - two repositories both have a "bd", and a buffer without the line has none - while an
+// origin is the same file wherever it is read, pinned to its commit. The bytes are cached under the
+// same key samples() uses for the file (see parseOrigin), so the two share one download.
+
+const RAW = /^https:\/\/raw\.githubusercontent\.com\/([^/]+)\/([^/]+)\/([0-9a-f]{40})\/(.*)$/i;
+const ORIGIN = /^github:([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)@([0-9a-f]{40})\/(.+)$/i;
+
+/** The origin of `file` in a pack read from `base` (a manifest's base URL), or null. */
+export function originOf(base, file) {
+  const m = RAW.exec(String(base ?? ''));
+  if (m) return `github:${m[1]}/${m[2]}@${m[3]}/${m[4]}${file}`;
+  return /^https:\/\//i.test(String(base ?? '')) ? `${base}${encodePath(String(file))}` : null;
+}
+
+/** An origin back as { base, file } - the base a samples() pack of that repository has - or null. */
+export function parseOrigin(text) {
+  const t = String(text ?? '');
+  const m = ORIGIN.exec(t);
+  if (m) return { base: `https://raw.githubusercontent.com/${m[1]}/${m[2]}/${m[3]}/`, file: m[4] };
+  return /^https:\/\/[^\s]+\.(wav|wave|aif|aiff|flac|mp3|ogg|oga|opus|m4a)$/i.test(t) ? { base: '', file: t } : null;
+}
+
+/** A short prefix for a source's packs: the first word of the repository's name ("dirt"). */
+export function suggestPrefix(text) {
+  const src = parseSource(text);
+  const name = src?.kind === 'github' ? src.repo : 'samples';
+  const word = name.toLowerCase().split(/[^a-z0-9]+/).find((w) => w.length >= 2) ?? 'lib';
+  return packName(word);
+}
+
 const urlFor = (manifests) => {
   const byId = new Map(manifests.map((m) => [m.id, m]));
   // Paths are kept as the repository names them and made into a URL only here, so a file called
@@ -270,7 +313,10 @@ const urlFor = (manifests) => {
 
 // ---- finding samples() in code ------------------------------------------------------------------
 
-/** The string arguments of every samples("…") call in `code` that is not commented out. */
+/**
+ * Every samples("…") call in `code` that is not commented out, as { source, prefix } - the prefix
+ * being the optional second string: samples("tidalcycles/dirt-samples", "dirt").
+ */
 export function sourcesIn(code) {
   const text = String(code ?? '');
   const out = [];
@@ -286,9 +332,9 @@ export function sourcesIn(code) {
       i = j + 1;
       continue;
     }
-    const call = /^samples\s*\(\s*(["'`])((?:\\.|(?!\1)[^\\\n])*)\1/.exec(text.slice(i, i + 600));
+    const call = /^samples\s*\(\s*(["'`])((?:\\.|(?!\1)[^\\\n])*)\1(?:\s*,\s*(["'`])((?:\\.|(?!\3)[^\\\n])*)\3)?/.exec(text.slice(i, i + 600));
     if (call && !/[\w$.]/.test(text[i - 1] ?? '')) {
-      out.push(call[2]);
+      out.push({ source: call[2], prefix: call[4] ?? null });
       i += call[0].length;
       continue;
     }
@@ -304,7 +350,10 @@ export function sourcesIn(code) {
  * packs with the sample store (so a note can load one) and with the language (so sp() and the
  * roll list know the names).
  */
-export function createRemotePacks({ fetchImpl, store = null, samples, onPacks = () => {}, warn = () => {}, say = () => {}, now = () => Date.now() }) {
+export function createRemotePacks({ fetchImpl, store = null, samples, onPacks = () => {}, warn = () => {}, say = () => {}, note = null, now = () => Date.now() }) {
+  // A line that can carry a fix the editor offers beside it (see client.js's logLine); a host that
+  // takes only text gets the text.
+  const tell = note ?? ((m) => (m.level === 'warn' ? warn : say)(m.text));
   const resolved = new Map();   // source key -> Promise<manifests | null>
   const active = new Map();     // pack id -> { manifest, urlFor, source }
 
@@ -313,14 +362,15 @@ export function createRemotePacks({ fetchImpl, store = null, samples, onPacks = 
     return store.get(`remote/listing/${key}`).catch(() => null);
   }
 
-  async function listing(src) {
+  async function listing(src, text) {
     const key = sourceKey(src);
     const kept = await keptListing(key);
     const pinned = src.kind === 'github' && SHA.test(src.ref ?? '');
     if (kept?.listing && (pinned || now() - kept.at < LISTING_TTL_MS)) return kept.listing;
     try {
       const fresh = await readSource(src, { fetchImpl });
-      if (store) await store.put(`remote/listing/${key}`, { at: now(), listing: fresh }).catch(() => {});
+      // `source` is the call's own spelling, so the settings row can write the line back.
+      if (store) await store.put(`remote/listing/${key}`, { at: now(), listing: fresh, source: kept?.source ?? text }).catch(() => {});
       return fresh;
     } catch (err) {
       if (kept?.listing) {
@@ -331,18 +381,27 @@ export function createRemotePacks({ fetchImpl, store = null, samples, onPacks = 
     }
   }
 
-  function add(text) {
+  const warned = new Set();      // "loser|winner" source keys already said, so a re-evaluate is quiet
+
+  /**
+   * A source's packs, read but not yet handed out: { key, title, text, pre, manifests, find,
+   * truncated }, or null (said why). Cached per source and prefix, so re-evaluating reads nothing.
+   */
+  function load(text, prefix = null) {
     const src = parseSource(text);
     if (!src) {
       warn(`[samples] "${text}" is not a repository - write samples("user/repo"), optionally with @branch and a folder`);
       return Promise.resolve(null);
     }
-    const key = sourceKey(src);
+    const pre = prefix == null || String(prefix).trim() === '' ? null : packName(prefix);
+    // The same repository under two prefixes is two sets of names over one listing.
+    const key = `${sourceKey(src)}|${pre ?? ''}`;
     if (resolved.has(key)) return resolved.get(key);
     const title = src.kind === 'json' ? src.url : `${src.owner}/${src.repo}${src.path ? `/${src.path}` : ''}`;
-    const work = listing(src)
+    const work = listing(src, text)
       .then((l) => {
         const manifests = manifestsOf(l, { title });
+        if (pre) for (const m of manifests) m.id = packName(`${pre}_${m.id}`);
         // poptart's own packs keep their names: a folder that has one goes by the repository's
         // name in front of it.
         for (const m of manifests) {
@@ -351,21 +410,7 @@ export function createRemotePacks({ fetchImpl, store = null, samples, onPacks = 
           say(`samples: ${title}'s "${m.id}" is the name of one of poptart's own packs - it is "${renamed}" here`);
           m.id = renamed;
         }
-        const find = urlFor(manifests);
-        for (const m of manifests) {
-          const held = active.get(m.id);
-          if (held && held.source !== key) {
-            warn(`[samples] "${m.id}" from ${title} replaces the "${m.id}" from ${held.manifest.description}`);
-            samples.forget?.(m.id);
-          }
-          active.set(m.id, { manifest: m, urlFor: find, source: key });
-        }
-        samples.register(manifests, find);
-        onPacks(manifests);
-        const files = manifests.reduce((n, m) => n + m.files.length, 0);
-        say(`samples: ${title} - ${manifests.length} pack${manifests.length === 1 ? '' : 's'}, ${files} files (${manifests.slice(0, 8).map((m) => m.id).join(', ')}${manifests.length > 8 ? ', …' : ''})`);
-        if (l.truncated) warn(`[samples] ${title} is larger than one listing holds - only the first ${files} files are in its packs`);
-        return manifests;
+        return { key, title, text, pre, manifests, find: urlFor(manifests), truncated: l.truncated };
       })
       .catch((err) => {
         resolved.delete(key); // a failure can be tried again on the next evaluate
@@ -377,22 +422,110 @@ export function createRemotePacks({ fetchImpl, store = null, samples, onPacks = 
   }
 
   /**
+   * Hands out a loaded source's names. `wins(id)` says whether this source is the one a name
+   * belongs to (the last line naming it, in prepare); a name it already holds is left alone, so
+   * re-evaluating the same buffer reloads nothing.
+   */
+  function activate(e, wins = () => true) {
+    const changed = [];
+    const taken = new Map(); // the source whose names these take -> the names
+    for (const m of e.manifests) {
+      if (!wins(m.id)) continue;
+      const held = active.get(m.id);
+      if (held?.source === e.key) continue;
+      if (held) {
+        const from = held.manifest.description;
+        taken.set(from, [...(taken.get(from) ?? []), m.id]);
+        samples.forget?.(m.id);
+      }
+      active.set(m.id, { manifest: m, urlFor: e.find, source: e.key });
+      changed.push(m);
+    }
+    if (!changed.length) return;
+    samples.register(changed, e.find);
+    onPacks(changed);
+    const files = changed.reduce((n, m) => n + m.files.length, 0);
+    say(`samples: ${e.title} - ${changed.length} pack${changed.length === 1 ? '' : 's'}, ${files} files (${changed.slice(0, 8).map((m) => m.id).join(', ')}${changed.length > 8 ? ', …' : ''})`);
+    if (e.truncated) warn(`[samples] ${e.title} is larger than one listing holds - only the first ${files} files are in its packs`);
+    for (const [from, names] of taken) sayTaken(e, from, names);
+  }
+
+  // Said once per pair of sources, with the fix beside it: the later line wins, as it plays, and a
+  // prefix keeps both.
+  function sayTaken(e, from, names) {
+    if (warned.has(`${from}|${e.key}`)) return;
+    warned.add(`${from}|${e.key}`);
+    const list = `${names.slice(0, 6).join(', ')}${names.length > 6 ? `, and ${names.length - 6} more` : ''}`;
+    tell({
+      level: 'warn',
+      text: `[samples] ${list} from ${e.title} replace${names.length === 1 ? 's' : ''} the one${names.length === 1 ? '' : 's'} from ${from}`,
+      fix: e.pre ? null : { kind: 'samples-prefix', label: 'prefix them', source: e.text, prefix: suggestPrefix(e.text) },
+    });
+  }
+
+  /**
    * Resolves every samples() source in `code` before it is evaluated, so the first evaluate of a
-   * pattern already knows its packs' names. Waits at most `waitMs`: a slow network lets the
-   * pattern start, and the packs join when they arrive - a note on a pack that is not in yet is
-   * the ordinary "source not ready".
+   * pattern already knows its packs' names. The lists are read side by side, but names are handed
+   * out in the order the lines are written - a name two sources share belongs to the later line,
+   * however the downloads happen to finish. Waits at most `waitMs`: a slow network lets the pattern
+   * start, and the packs join when they arrive - a note on a pack that is not in yet is the
+   * ordinary "source not ready".
    */
   async function prepare(code, { waitMs = 6000 } = {}) {
-    const pending = sourcesIn(code).map(add);
-    if (!pending.length) return;
-    await Promise.race([Promise.all(pending), new Promise((r) => setTimeout(r, waitMs))]);
+    const calls = sourcesIn(code);
+    if (!calls.length) return;
+    const loads = calls.map(({ source, prefix }) => load(source, prefix));
+    const settle = (async () => {
+      const entries = (await Promise.all(loads)).filter(Boolean);
+      const owner = new Map(); // pack name -> the last line naming it
+      const shared = new Map(); // winner -> (loser's title -> names): the lines' own collisions
+      for (const e of entries) {
+        for (const m of e.manifests) {
+          const before = owner.get(m.id);
+          if (before && before.key !== e.key) {
+            const byLoser = shared.get(e) ?? new Map();
+            byLoser.set(before.title, [...(byLoser.get(before.title) ?? []), m.id]);
+            shared.set(e, byLoser);
+          }
+          owner.set(m.id, e);
+        }
+      }
+      for (const e of entries) activate(e, (id) => owner.get(id) === e);
+      for (const [e, byLoser] of shared) for (const [from, names] of byLoser) sayTaken(e, from, names);
+    })();
+    await Promise.race([settle, new Promise((r) => setTimeout(r, waitMs))]);
   }
 
   return {
     prepare,
     /** What the language's samples() calls: starts a source that prepare() did not see. */
-    use(text) {
-      add(String(text ?? ''));
+    // Only names nobody holds: prepare() has already handed out the buffer's names in line order,
+    // and this runs again for every call as the buffer evaluates - taking names here would undo it.
+    use(text, prefix = null) {
+      return load(String(text ?? ''), prefix).then((e) => {
+        if (e) activate(e, (id) => !active.has(id));
+        return e?.manifests ?? null;
+      });
+    },
+    /**
+     * Every repository this browser has kept a list of files for: { key, source, bases } - the
+     * call's own spelling, and the base URLs its files are cached under (see manifestsOf).
+     */
+    async kept() {
+      if (!store?.keys) return [];
+      const out = [];
+      for (const k of await store.keys('remote/listing/')) {
+        const held = await store.get(k).catch(() => null);
+        const l = held?.listing;
+        if (!l) continue;
+        const key = k.slice('remote/listing/'.length);
+        out.push({ key, source: held.source ?? sourceText(key), bases: [...new Set((l.packs ?? []).map((p) => p.base))] });
+      }
+      return out;
+    },
+    /** Lets one repository's list of files go (its downloaded files are the sample store's). */
+    async forgetListing(key) {
+      await store?.delete?.(`remote/listing/${key}`).catch(() => {});
     },
     /** Every pack a samples() call has added, as the host lists packs. */
     packs: () => [...active.values()].map(({ manifest, urlFor: u }) => ({ manifest, urlFor: u })),

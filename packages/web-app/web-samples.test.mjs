@@ -295,3 +295,37 @@ test('what was downloaded is measured by prefix without reading it back, and can
   assert.deepEqual(await store.keys('remote/'), [], 'the files and the lists of them');
   assert.equal((await store.keys('samples/pt_piano/')).length, 2, 'the library\'s downloads are another prefix, and stay');
 });
+
+test('files kept before there was a record of downloads are counted, so they can be let go', async () => {
+  const { memoryStore } = await import('./public/web/kv.mjs');
+  const store = memoryStore();
+  // As an older page left them: the files, and no ledger naming them.
+  await store.put('remote/https://raw.invalid/kit/sha/bd/1.wav', { bytes: new ArrayBuffer(300), mtime: 0 });
+  await store.put('remote/https://raw.invalid/kit/sha/bd/2.wav', { bytes: new ArrayBuffer(200), mtime: 0 });
+  await store.put('remote/listing/github:kit', { at: 0, listing: {} });
+  const samples = createSampleStore({ context: { decodeAudioData: async () => ({}) }, store, fetchImpl: null });
+  assert.deepEqual(await samples.downloaded('remote/'), { bytes: 500, files: 2 }, 'the files, not the list of them');
+  await samples.forgetDownloads('remote/');
+  assert.deepEqual(await samples.downloaded('remote/'), { bytes: 0, files: 0 });
+});
+
+test('a kit entry naming a file by where it lives plays with no samples() line, from the same download', async () => {
+  const { memoryStore } = await import('./public/web/kv.mjs');
+  const store = memoryStore();
+  const fetched = [];
+  const fetchImpl = async (url) => { fetched.push(url); return { ok: true, arrayBuffer: async () => new ArrayBuffer(8) }; };
+  const context = { decodeAudioData: async (bytes) => ({ length: bytes.byteLength }) };
+  const samples = createSampleStore({ context, store, fetchImpl });
+  const sha = 'c'.repeat(40);
+  const entry = `github:tidalcycles/dirt-samples@${sha}/bd/BT0A0A7.wav`;
+  samples.setPackResolver((id) => (id === 'kit' ? [entry, `/packs/${entry}`] : null));
+  const at = samples.resolveEntry('kit', 0);
+  assert.deepEqual(at, { pack: entry, index: 0 });
+  samples.get(at.pack, at.index);
+  assert.ok(await until(() => samples.get(at.pack, at.index)));
+  assert.deepEqual(fetched, [`https://raw.githubusercontent.com/tidalcycles/dirt-samples/${sha}/bd/BT0A0A7.wav`]);
+  // Kept under the key samples() keeps the same file under (remote-packs.mjs: cachePrefix remote/<base>).
+  assert.deepEqual(await store.keys('remote/'), [`remote/https://raw.githubusercontent.com/tidalcycles/dirt-samples/${sha}//bd/BT0A0A7.wav`]);
+  assert.deepEqual((await samples.downloaded('remote/')).files, 1, 'and counted, so forget lets it go');
+  assert.deepEqual(samples.resolveEntry('kit', 1), { pack: entry, index: 0 }, 'the pack panel\'s spelling of the same entry');
+});

@@ -236,9 +236,9 @@ export function createEvaluator({ patternCore, engine, transport, prebakeDefs = 
       // buffer before evaluating, so by here a literal one has usually been read already; this
       // starts one that was not, such as a name built at run time. A setup line, so it plays
       // nothing and returns nothing.
-      samples: (source) => {
+      samples: (source, prefix) => {
         if (!remotePacks) throw new Error('samples() needs the browser build\'s sample loader');
-        remotePacks.use(source);
+        remotePacks.use(source, prefix);
       },
     };
     const evalBlock = createBlockEvaluator(patternCore, { defs: new Map(prebakeDefs), hostBuilders, miniOff: patternCore.miniOffRanges(code ?? '') });

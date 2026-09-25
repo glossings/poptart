@@ -329,6 +329,13 @@ async function api(method, path, body) {
  * the calls in this file predate the third level.
  */
 function logLine(text, level = false) {
+  // A host's line can be { text, level, fix }: said like any other, with the fix as a button on it.
+  if (text && typeof text === 'object') {
+    const m = text;
+    logLine(m.text, m.level === 'warn' ? 'warn' : m.level === 'error');
+    if (m.fix) attachLogFix(log.firstElementChild, m.fix);
+    return;
+  }
   const kind = level === 'warn' ? 'warn' : level ? 'error' : '';
   // Embedded there is no console on screen, so what would be red in it goes to the guide's example.
   if (EMBEDDED && kind === 'error') embedPost({ type: 'poptart-embed-error', text });
@@ -351,6 +358,42 @@ function logLine(text, level = false) {
   if (kind === 'error' && document.documentElement.hasAttribute('data-console-collapsed')) {
     pulse(document.getElementById('saveFlash'), 'error-flash');
   }
+}
+
+/** A fix offered on a console line; pressed once, it does its edit and goes. */
+function attachLogFix(line, fix) {
+  if (!line) return;
+  const btn = document.createElement('button');
+  btn.className = 'small log-fix';
+  btn.textContent = fix.label ?? 'fix';
+  btn.addEventListener('click', () => {
+    if (runLogFix(fix)) btn.remove();
+  });
+  line.append(' ', btn);
+}
+
+function runLogFix(fix) {
+  if (fix.kind === 'samples-prefix') return prefixSamplesCall(fix.source, fix.prefix);
+  return false;
+}
+
+// samples("tidalcycles/dirt-samples") -> samples("tidalcycles/dirt-samples", "dirt"), then an update
+// so the new names are in. The call is found by its source, written with any quote.
+function prefixSamplesCall(source, prefix) {
+  const code = cm.getValue();
+  const esc = source.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const re = new RegExp(`\\bsamples\\(\\s*(["'\`])${esc}\\1\\s*\\)`);
+  const m = re.exec(code);
+  if (!m) {
+    logLine(`there is no samples("${source}") without a prefix in the buffer to add one to`, 'warn');
+    return false;
+  }
+  const q = m[1];
+  const at = m.index;
+  cm.replaceRange(`samples(${q}${source}${q}, ${q}${prefix}${q})`, cm.posFromIndex(at), cm.posFromIndex(at + m[0].length), '+samples');
+  logLine(`${source}'s packs are ${prefix}_… now`);
+  evaluate(false, { byHand: true });
+  return true;
 }
 
 /**
@@ -795,7 +838,6 @@ async function shareLink() {
     return;
   }
   logLine(`copied a share link (${(url.length / 1024).toFixed(1)}kb)`);
-  pulse(document.getElementById('saveFlash'), 'saved-flash');
   const left = localOnly(code);
   if (left?.files.length) {
     logLine(`the link names files added to this browser but does not carry them - they are silent for whoever opens it: ${left.files.join(', ')}`, true);
@@ -803,6 +845,7 @@ async function shareLink() {
   if (left?.handles) {
     logLine(`the link names ${left.handles} captured desktop plugin state(s) but does not carry them`, true);
   }
+  return true;
 }
 
 // How a patch is shared: as a file. Captured plugin states are filled back in on the way out (the
@@ -16916,7 +16959,11 @@ async function evaluate(start, { byHand = false } = {}) {
     prNamesStale();
     // So is the list of packs, when the buffer reads a repository in: the sounds tab and s("
     // completion ask for it again.
-    if (/\bsamples\s*\(/.test(code)) loadSamples();
+    if (/\bsamples\s*\(/.test(code)) {
+      loadSamples();
+      // An open map re-checks, which builds the new packs in (opening it is what does that).
+      if (packMode === 'map' && packState && mapState.loaded) mapLoad();
+    }
     if (prState && prNamesWanted()) prIndexLabels(); // re-asks now; redraws only if the list changed
     if (start) playing = true; // Update keeps the current play state; Play begins it
     // Only for an eval the player asked for. The panels re-evaluate as you drag - a piano roll
@@ -17444,14 +17491,34 @@ paramSearch.addEventListener('input', renderParams);
 // Plugin browser (also feeds autocomplete via `knownPlugins`)
 // ---------------------------------------------------------------------------------------------
 
-function renderPlugins(plugins) {
-  knownPlugins = plugins;
+const pluginSearch = document.getElementById('pluginSearch');
+const pluginsCount = document.getElementById('pluginsCount');
+
+// By name, as a person looks for one - the scan hands them over in whatever order it found them.
+const byPluginName = (a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base', numeric: true });
+
+function renderPlugins(plugins = knownPlugins) {
+  knownPlugins = [...plugins].sort(byPluginName);
   pluginList.innerHTML = '';
-  if (!plugins.length) {
+  pluginsCount.textContent = knownPlugins.length ? `${knownPlugins.length}` : '';
+  if (!knownPlugins.length) {
     pluginList.textContent = lastScan?.scanning ? 'scanning…' : 'no plugins found';
     return;
   }
-  for (const p of plugins) {
+  // Every word typed has to appear somewhere in the name or the format, so "fab q" finds FabFilter
+  // Pro-Q and "vst3 comp" the VST3 compressors.
+  const words = pluginSearch.value.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  const shown = words.length
+    ? knownPlugins.filter((p) => {
+      const hay = `${p.name} ${p.format}${p.isInstrument ? ' inst instrument' : ''}`.toLowerCase();
+      return words.every((w) => hay.includes(w));
+    })
+    : knownPlugins;
+  if (!shown.length) {
+    pluginList.textContent = 'no plugin matches';
+    return;
+  }
+  for (const p of shown) {
     const row = document.createElement('div');
     row.className = 'plugin-row';
     row.title = 'click to copy';
@@ -17466,6 +17533,8 @@ function renderPlugins(plugins) {
     pluginList.appendChild(row);
   }
 }
+
+pluginSearch.addEventListener('input', () => renderPlugins());
 
 // There are no plugins to scan for in the browser build: the devices are the catalog, fixed when
 // the page was built. The section says so in its own words (see renderPlugins) and the button
@@ -18548,7 +18617,21 @@ if (window.__poptartHostReady) {
   storeSection.classList.remove('hidden');
   const fileShareBtn = document.getElementById('fileShareBtn');
   fileShareBtn.classList.remove('hidden');
-  fileShareBtn.addEventListener('click', () => shareLink().catch((e) => logLine(`could not make a share link: ${e.message ?? e}`, true)));
+  // The button says it worked, in place: most people never see the console. Wide enough for both
+  // words from the start, so neither the button nor its neighbors move when it says so.
+  const shareLabel = fileShareBtn.textContent;
+  fileShareBtn.textContent = 'copied ✓';
+  fileShareBtn.style.minWidth = `${fileShareBtn.offsetWidth}px`;
+  fileShareBtn.textContent = shareLabel;
+  let shareTimer = null;
+  fileShareBtn.addEventListener('click', () => shareLink()
+    .then((copied) => {
+      if (!copied) return;
+      fileShareBtn.textContent = 'copied ✓';
+      clearTimeout(shareTimer);
+      shareTimer = setTimeout(() => { fileShareBtn.textContent = shareLabel; }, 1600);
+    })
+    .catch((e) => logLine(`could not make a share link: ${e.message ?? e}`, true)));
   document.getElementById('storeExport').addEventListener('click', exportStore);
   document.getElementById('storeImport').addEventListener('click', () => storeImportInput.click());
   storeImportInput.addEventListener('change', () => {
@@ -18567,6 +18650,7 @@ const sampleFolderNote = document.getElementById('sampleFolderNote');
 const downloadsSection = document.getElementById('downloadsSection');
 const downloadsForget = document.getElementById('downloadsForget');
 const downloadsNote = document.getElementById('downloadsNote');
+const downloadsList = document.getElementById('downloadsList');
 
 if (window.__poptartHostReady) {
   wavetableSection.classList.remove('hidden');
@@ -18640,14 +18724,64 @@ if (window.__poptartHostReady) {
 /** The downloaded-packs row: how much samples() has kept in this browser. */
 async function refreshDownloads() {
   try {
-    const { bytes, files } = await api('GET', '/api/downloads');
+    const { bytes, files, repos = [] } = await api('GET', '/api/downloads');
     downloadsNote.textContent = files
       ? `${files} file${files === 1 ? '' : 's'} from samples() repositories, ${wavetableSize(bytes)}`
       : 'nothing downloaded by samples()';
     downloadsForget.disabled = !files;
+    renderDownloads(repos);
   } catch {
     // A host without a store: the section says nothing.
   }
+}
+
+// One row per repository this browser keeps: its samples() call, what its files weigh, and two
+// buttons - put the call in the buffer (the packs are back with no download), or let the files go.
+function renderDownloads(repos) {
+  downloadsList.innerHTML = '';
+  downloadsList.classList.toggle('hidden', !repos.length);
+  for (const r of repos) {
+    const row = document.createElement('div');
+    row.className = 'map-source-row';
+    const name = document.createElement('span');
+    name.className = 'path';
+    name.textContent = r.source;
+    name.title = `samples("${r.source}")`;
+    const size = document.createElement('span');
+    size.className = 'dim';
+    size.textContent = r.files ? wavetableSize(r.bytes) : 'list only';
+    const add = document.createElement('span');
+    add.className = 'pack-entry-btn';
+    add.textContent = '+';
+    add.title = `put samples("${r.source}") at the top of the buffer and update, so its packs play`;
+    add.addEventListener('click', () => insertSamplesCall(r.source));
+    const drop = document.createElement('span');
+    drop.className = 'pack-entry-btn pack-entry-del';
+    drop.textContent = '✕';
+    drop.title = 'delete this repository\'s downloaded files. A pattern that plays them downloads them again';
+    drop.addEventListener('click', async () => {
+      await api('POST', '/api/downloads/forget', { keys: r.keys }).catch((e) => logLine(e.message ?? String(e), true));
+      await refreshDownloads();
+    });
+    row.append(name, size, add, drop);
+    downloadsList.append(row);
+  }
+}
+
+// samples("…") at the top of the buffer - below a title/tags header - unless it is there already.
+function insertSamplesCall(source) {
+  const code = cm.getValue();
+  const esc = source.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  if (new RegExp(`\\bsamples\\(\\s*(["'\`])${esc}\\1`).test(code)) {
+    logLine(`samples("${source}") is in the buffer already`);
+    return;
+  }
+  const lines = code.split('\n');
+  let at = 0;
+  while (at < lines.length && /^\s*\/\/\s*@/.test(lines[at])) at += 1;
+  cm.replaceRange(`samples("${source}")\n`, { line: at, ch: 0 }, { line: at, ch: 0 }, '+samples');
+  logLine(`added samples("${source}")`);
+  evaluate(false, { byHand: true });
 }
 
 /**
@@ -19050,7 +19184,7 @@ function renderMapSources() {
     row.appendChild(x);
     mapSourceList.appendChild(row);
   });
-  mapSourceLibrary.disabled = mapSources.includes(samplesDirInput.value.trim());
+  mapSourceLibrary.disabled = !mapLibrarySource() || mapSources.includes(mapLibrarySource());
   mapRebuild.disabled = !mapSources.length;
 }
 
@@ -19137,10 +19271,27 @@ mapSourceAdd.addEventListener('click', () => {
     if (dir && !mapSources.includes(dir)) saveMapSources([...mapSources, dir]);
   });
 });
+// The one source that covers "everything": the samples folder on the desktop, every pack in the
+// browser build (the host names it - `suggested` in /api/sampleMap/sources).
+function mapLibrarySource() {
+  return mapSuggested || samplesDirInput.value.trim();
+}
+
 mapSourceLibrary.addEventListener('click', () => {
-  const dir = samplesDirInput.value.trim();
+  const dir = mapLibrarySource();
   if (dir && !mapSources.includes(dir)) saveMapSources([...mapSources, dir]);
 });
+
+// The browser build has packs, not folders: "a folder" is one pack and "the library" all of them.
+if (window.__poptartHostReady) {
+  mapSourceAdd.textContent = 'add pack…';
+  mapSourceAdd.title = 'put one pack on the map';
+  mapSourceLibrary.textContent = 'add all packs';
+  mapSourceLibrary.title = 'put every pack on the map: the built-in ones, the sourced library, what samples() read, your sample folder and the files dropped on the window';
+} else {
+  mapSourceAdd.title = 'put one folder on the map, with the folders inside it';
+  mapSourceLibrary.title = 'put the whole samples folder (settings → samples folder) on the map';
+}
 mapRebuild.addEventListener('click', async () => {
   try {
     mapStatus = await api('POST', '/api/sampleMap/rebuild', { force: true });
@@ -19370,9 +19521,18 @@ const stripExt = (name) => String(name ?? '').replace(/\.[^.]+$/, '');
 // root (so the pack travels with the library, and reads short); anywhere else, as it is.
 function packEntryFor(abs) {
   const root = packBrowse.samplesRoot;
-  if (root && (abs === root || abs.startsWith(`${root}/`) || abs.startsWith(`${root}\\`))) return abs.slice(root.length + 1);
+  if (root && (abs === root || abs.startsWith(`${root}/`) || abs.startsWith(`${root}\\`))) {
+    const rel = abs.slice(root.length + 1);
+    // A samples() pack's file is written where it lives (the host's `origins`), so the kit plays
+    // it without the samples() line, and two repositories' "bd" stay two different files.
+    const cut = rel.indexOf('/');
+    const origin = cut > 0 ? packOrigins[rel.slice(0, cut)] : null;
+    return origin ? `${origin}/${rel.slice(cut + 1)}` : rel;
+  }
   return abs;
 }
+// Pack -> the root its files' origins start with, from the browse and find answers (browser build).
+let packOrigins = {};
 const packAbsOf = (entry) => (isAbsPath(entry) ? entry : `${packBrowse.samplesRoot}/${entry}`);
 const packBasename = pathBasename;
 const isAudioPath = (p) => /\.(wav|aif|aiff|flac|mp3)$/i.test(p);
@@ -19550,7 +19710,8 @@ function packScrollTo(list, key) {
 // No query means the whole tree, which is what adding a folder takes.
 
 const packFindFetch = (dir, q, limit) =>
-  api('GET', `/api/findSamples?path=${encodeURIComponent(dir)}&q=${encodeURIComponent(q)}&limit=${limit}`);
+  api('GET', `/api/findSamples?path=${encodeURIComponent(dir)}&q=${encodeURIComponent(q)}&limit=${limit}`)
+    .then((r) => { if (r?.origins) packOrigins = { ...packOrigins, ...r.origins }; return r; });
 
 const packFindActive = () => packFind.query !== '';
 
@@ -20002,8 +20163,9 @@ async function packDropFiles({ files = [], paths = [] }) {
 async function packBrowseTo(target) {
   packSay('');
   try {
-    const { path, parent, dirs, files, samplesRoot } = await api('GET', `/api/browseDir?path=${encodeURIComponent(target ?? '')}`);
+    const { path, parent, dirs, files, samplesRoot, origins } = await api('GET', `/api/browseDir?path=${encodeURIComponent(target ?? '')}`);
     packBrowse = { path, parent, dirs, files: files ?? [], samplesRoot: samplesRoot ?? '' };
+    if (origins) packOrigins = { ...packOrigins, ...origins };
     packBrowsePath.value = path;
     packSel.browse.clear(); // a selection is of rows in THIS folder
     packSel.browseAnchor = null;
@@ -20448,7 +20610,9 @@ function packSetMode(mode) {
   packMapEl.classList.toggle('hidden', !onMap);
   packUniqueBtn.classList.toggle('hidden', !onMap);
   if (onMap) {
-    if (!mapState.loaded) mapLoad();
+    // A map on hand that no longer matches what was built (a build nobody was watching) is fetched again.
+    const behind = mapStatus && !mapStatus.building && mapStatus.count !== mapState.points.length;
+    if (!mapState.loaded || behind) mapLoad();
     else { mapResize(); mapRenderHead(); mapRenderEmpty(); }
     packMapCanvas.focus({ preventScroll: true });
   } else {
@@ -20495,6 +20659,10 @@ mapStatusListeners.add((st, info) => {
   if (packMode === 'map' && packState) {
     mapRenderEmpty(); // "no folders" becomes "building…" with the bar, then the map
     if (info?.finished) mapLoad();
+  } else if (info?.finished) {
+    // Built with the panel shut (settings' rebuild, say): the map on hand is the old one, and
+    // opening the panel must fetch the new one rather than draw it.
+    mapState.loaded = false;
   }
 });
 
@@ -24798,6 +24966,16 @@ rebuildThemeOptions();
 }
 
 // ---------------------------------------------------------------------------------------------
+
+// The desktop opens the guide in the user's own browser, which has never seen this window's theme:
+// the link carries it (theme-boot.js reads it there and keeps it).
+document.getElementById('docsLink')?.addEventListener('click', (e) => {
+  const root = document.documentElement;
+  const vars = {};
+  for (const name of root.style) if (name.startsWith('--')) vars[name] = root.style.getPropertyValue(name).trim();
+  const theme = JSON.stringify({ base: root.dataset.theme ?? 'poptart', vars });
+  e.currentTarget.href = `/docs/?theme=${encodeURIComponent(theme)}`;
+});
 
 playBtn.addEventListener('click', togglePlay);
 updateBtn.addEventListener('click', () => evaluate(false, { byHand: true }));
@@ -30236,7 +30414,7 @@ function embedPost(message) {
   if (window.parent !== window) window.parent.postMessage(message, location.origin);
 }
 
-const EMBED_PANELS = '.preset-panel, .lfo-panel, .record-panel, .pianoroll-panel, .theme-panel, .dir-picker-backdrop';
+const EMBED_PANELS = '.preset-panel, .lfo-panel, .record-panel, .pianoroll-panel, .theme-panel, .dir-picker-backdrop, .mixer-backdrop';
 
 // The code's own height: CodeMirror's content plus the padding around it (style.css .cm-s-poptart).
 function embedCodeHeight() {
