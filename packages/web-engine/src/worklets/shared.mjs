@@ -12,7 +12,7 @@
 // curve, per sample where a signal is moving the control and once where nothing is. That
 // conversion is here, once, so a synth and an effect and a ported module all do it the same way.
 
-import { denormalize } from '../descriptor.mjs';
+import { TRACK_BEND_PARAM, denormalize } from '../descriptor.mjs';
 
 /**
  * The processor's parameter descriptors, straight from the device's own.
@@ -21,15 +21,36 @@ import { denormalize } from '../descriptor.mjs';
  * too rather than passing them over the message port means there is exactly one way a parameter
  * reaches the audio thread - and a mode that arrives a block later than the value it belongs
  * with is a bug nobody will find by reading.
+ *
+ * An instrument declares one more, the track's bend in semitones (TRACK_BEND_PARAM). It is not
+ * a position and has no range.
  */
 export function parameterDescriptorsFor(descriptor) {
-  return descriptor.params.map((p) => ({
+  const params = descriptor.params.map((p) => ({
     name: p.id,
     defaultValue: positionOfDefault(p),
     minValue: 0,
     maxValue: 1,
     automationRate: p.rate === 'a' ? 'a-rate' : 'k-rate',
   }));
+  if (descriptor.kind === 'synth') params.push({ name: TRACK_BEND_PARAM, defaultValue: 0, automationRate: 'a-rate' });
+  return params;
+}
+
+/**
+ * The track's bend for this block, in semitones: a number while it is still, the block's own
+ * array while something is moving it. The array is the AudioParam's, valid for this block only.
+ *
+ * The track's bend constant is always connected, and a connected AudioParam arrives a full block
+ * long even when it is not moving - so a flat block is caught here and handed on as the number
+ * it is, and a synth follows the pitch per sample only while a bend is actually moving.
+ */
+export function bendOf(parameters) {
+  const values = parameters[TRACK_BEND_PARAM];
+  if (!values || values.length === 0) return 0;
+  const first = values[0];
+  for (let i = 1; i < values.length; i++) if (values[i] !== first) return values;
+  return first;
 }
 
 /** Where a parameter's default sits, as the position its AudioParam starts at. */

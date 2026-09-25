@@ -10,6 +10,8 @@
 // Every node records what it is connected to. Every AudioParam records the calls made on it, so
 // a test can tell a ramp from a step, and a scheduled value from an immediate one.
 
+import { parameterDescriptorsFor } from './src/worklets/shared.mjs';
+
 export class FakeParam {
   constructor(value = 0, name = '') {
     this.value = value;
@@ -187,7 +189,7 @@ export function fakeWorkletFor(registry) {
       // Every parameter, k-rate ones included, because that is what the real processors declare
       // (see parameterDescriptorsFor). A rig that left the k-rate ones out would send them by
       // message here and by AudioParam in a browser, which is the wrong half to be testing.
-      const paramIds = descriptor ? descriptor.params.map((p) => p.id) : [];
+      const paramIds = descriptor ? parameterDescriptorsFor(descriptor).map((p) => p.name) : [];
       super(ctx, name, { ...options, paramIds });
       ctx.created.push(this);
     }

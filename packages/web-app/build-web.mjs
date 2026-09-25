@@ -100,8 +100,7 @@ export function injectBoot(html) {
 
 /**
  * Puts the visit counter into the page's head: Vercel's Web Analytics, which counts page views
- * and visitors without cookies or anything that identifies a person. The settings tab's about
- * section says so (client.js, the credits).
+ * and visitors without cookies or anything that identifies a person.
  *
  * What it would report is cut down before it leaves: the URL goes without its query and its `#`,
  * because a shared link carries the whole pattern after the `#`, and only a load's FIRST page

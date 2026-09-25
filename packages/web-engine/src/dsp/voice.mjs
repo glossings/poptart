@@ -90,6 +90,12 @@ export class VoiceParams {
     /** Per-sample arrays for the fields a signal is moving this block, or null. Same names. */
     this.a = {};
     for (const key of Object.keys(this)) if (key !== 'a') this.a[key] = null;
+
+    // While a bend is moving, each oscillator's cents with the bend added, per sample: worked out
+    // once a block for every voice to read (see WavetableSynth#_bendBlock). Unread while it is still.
+    this.bendCents1 = new Float32Array(128);
+    this.bendCents2 = new Float32Array(128);
+    this.bendCentsSub = new Float32Array(128);
   }
 }
 
@@ -229,7 +235,9 @@ export class WavetableVoice {
     } else {
       this.currentHz = this.targetHz;
     }
-    const baseHz = p.bend ? this.currentHz * Math.pow(2, p.bend / 12) : this.currentHz;
+    // A still bend moves the note; a moving one rides each oscillator's cents, per sample.
+    const bendA = a.bend;
+    const baseHz = bendA === null && p.bend ? this.currentHz * Math.pow(2, p.bend / 12) : this.currentHz;
 
     const osc1 = this.osc1;
     const osc2 = this.osc2;
@@ -239,6 +247,12 @@ export class WavetableVoice {
     sub.frequency = baseHz * Math.pow(2, p.subOctave);
     sub.position = p.subShape; sub.positionA = null;
     sub.level = p.subLevel; sub.levelA = a.subLevel;
+    sub.cents = 0; sub.centsA = null;
+    if (bendA !== null) {
+      osc1.centsA = p.bendCents1;
+      osc2.centsA = p.bendCents2;
+      sub.centsA = p.bendCentsSub;
+    }
 
     const cross1 = crossModOf(p.osc1WarpMode);
     const cross2 = crossModOf(p.osc2WarpMode);

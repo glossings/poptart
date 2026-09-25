@@ -290,6 +290,25 @@
               <h2 id="wipHeading">work in progress</h2>
               <div id="wipList" class="panel list"></div>
             </section>
+            <!-- The browser build keeps everything in this browser's storage, and a public site
+                 with no accounts has no other way to hand somebody their work: export writes it
+                 all to one file, import puts a file back. Shown only in the browser build. -->
+            <section id="storeSection" class="hidden">
+              <h2>backup</h2>
+              <label class="settings-check store-audio"
+                title="Puts the audio files you added, your wavetables and your recordings into the same file, as text. Much bigger: audio is most of what this browser keeps.">
+                <input id="storeExportAudio" type="checkbox" />
+                include audio files
+              </label>
+              <div class="settings-actions">
+                <button id="storeExport" class="small"
+                  title="Downloads one file holding everything this browser keeps: patterns, sessions, snippets, the library, the prebake and the captured device states - and, with audio files ticked, the samples you added, your wavetables and your recordings.">export everything…</button>
+                <button id="storeImport" class="small"
+                  title="Puts an exported file back. Anything already here with the same name is kept, not overwritten.">import…</button>
+              </div>
+              <input id="storeImportInput" type="file" accept=".json,application/json" hidden />
+              <div id="storeNote" class="files-note"></div>
+            </section>
           </div>
 
           <div id="settingsTab" class="tab-body hidden">
@@ -393,34 +412,6 @@
               <input id="wavetableFolderInput" type="file" webkitdirectory multiple hidden />
               <div id="wavetableFolderNote" class="files-note"></div>
             </section>
-            <!-- The browser build keeps everything in this browser's storage, and a public site
-                 with no accounts has no other way to hand somebody their work: export writes it
-                 all to one file, import puts a file back. Shown only in the browser build. -->
-            <section id="storeSection" class="hidden">
-              <h2>your work</h2>
-              <div class="settings-actions">
-                <button id="storeExport" class="small"
-                  title="Downloads one file holding everything this browser keeps as text: patterns, sessions, snippets, the library, the prebake and the captured device states - and, with audio ticked, the files you added, your wavetables and your recordings.">export…</button>
-                <button id="storeImport" class="small"
-                  title="Puts an exported file back. Anything already here with the same name is kept, not overwritten.">import…</button>
-              </div>
-              <label class="settings-row settings-check"
-                title="Puts the files you added, your wavetables and your recordings in the export too. Much bigger - audio is most of what this browser keeps.">
-                <input id="storeExportAudio" type="checkbox" />
-                include audio
-              </label>
-              <input id="storeImportInput" type="file" accept=".json,application/json" hidden />
-              <div id="storeNote" class="files-note"></div>
-            </section>
-            <!-- The credits: the license this is under and where its source is, which a page
-                 served over a network has to offer (AGPL section 13), and whose code each device
-                 is, read from the catalog. Shown on the desktop too; the device rows only where
-                 there are compiled devices to credit. -->
-            <section id="aboutSection">
-              <h2>about</h2>
-              <div id="aboutLicense" class="files-note"></div>
-              <div id="aboutDevices" class="files-note"></div>
-            </section>
             <!-- The sample map's sources: the folders whose sounds get analyzed and placed. A
                  choice, not the library by default - the map is only as useful as what is on it,
                  and a folder of impulse responses or full songs is not what a kit is built from. -->
@@ -460,6 +451,11 @@
               <h2>startup</h2>
               <div class="settings-actions">
                 <button id="prebakeEditBtn" class="small">edit prebake…</button>
+              </div>
+            </section>
+            <section>
+              <div class="settings-actions">
+                <button id="aboutOpen" class="small">about poptart…</button>
               </div>
             </section>
           </div>
@@ -569,6 +565,21 @@
          folder, and a folder is a couple of thousand files in subfolders - which is a thing to
          look through, not a dropdown. Folders down the left, files beside them, and the table
          the selected file would become drawn on the right before anything is loaded. -->
+    <!-- The credits: the license this is under and where its source is, which a page served
+         over a network has to offer (AGPL section 13), and whose code each device is, read from
+         the catalog. The device rows only where there are compiled devices to credit. -->
+    <div id="aboutPanel" class="preset-panel about-panel hidden">
+      <div class="preset-panel-head">
+        <span>about poptart</span>
+        <span class="spacer"></span>
+        <button id="aboutClose" class="small">✕</button>
+      </div>
+      <div class="about-body">
+        <p id="aboutLicense"></p>
+        <p id="aboutDevices"></p>
+      </div>
+    </div>
+
     <div id="filePickPanel" class="preset-panel file-pick-panel hidden">
       <div class="preset-panel-head">
         <span id="filePickKind">files</span>

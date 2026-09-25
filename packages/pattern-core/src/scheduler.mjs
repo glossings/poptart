@@ -1375,7 +1375,9 @@ export class Scheduler {
           this._logEvent(logAt[0], logAt[1], formatSampleEvent(pack, cfg, info, stepEndCycle - stepStartCycle));
         }
       } else {
-        const midiNote = Math.round(step.value);
+        // Not rounded: a fractional note is a microtone, and an instrument that can play one
+        // should get it. Whatever speaks MIDI rounds on its own side (see the OSC engine).
+        const midiNote = Number(step.value);
         const vel = velocity ?? 1.0; // unset velocity on a synth note is full
         if (logAt) {
           this._logEvent(logAt[0], logAt[1], formatNoteEvent(midiNote, vel));

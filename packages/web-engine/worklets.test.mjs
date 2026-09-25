@@ -16,9 +16,10 @@ import { fileURLToPath } from 'node:url';
 import { WORKLETS, bundle, collect, readModule, topLevelNames } from './build/bundle-worklets.mjs';
 import { WAVETABLE } from './src/devices/wavetable.mjs';
 import { DEVICES } from './src/catalog.mjs';
+import { PLAITS_ENGINES } from './build/devices/mutable.mjs';
 import { DISTORT } from './src/devices/distort.mjs';
 import { REVERB } from './src/devices/reverb.mjs';
-import { defaultValues, normalize } from './src/descriptor.mjs';
+import { TRACK_BEND_PARAM, defaultValues, normalize } from './src/descriptor.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const SR = 48000;
@@ -599,7 +600,7 @@ test('an effect makes no sound of its own: silence in, silence out, wherever its
 });
 
 test('a bend moves the ported instruments\' notes while they sound', () => {
-  // An octave up, sent after the note has started: the pitch should double, measured as the
+  // An octave up on the track's bend input, arriving after the note has started: the pitch should double, measured as the
   // rate the output crosses zero on the way up once it has settled. Settings are each module's
   // plainest pitched sound, so the crossing count is the fundamental's.
   const settings = {
@@ -615,12 +616,12 @@ test('a bend moves the ported instruments\' notes while they sound', () => {
   const rate = (id, bend) => {
     const { node, descriptor } = portedDevice(id);
     const params = paramsFor(descriptor, settings[id]);
+    const bent = { ...params, [TRACK_BEND_PARAM]: Float32Array.of(bend) };
     const out = [[new Float32Array(BLOCK), new Float32Array(BLOCK)]];
     node.port._send({ kind: 'noteOn', note: 48, velocity: 1, time: 0 });
     const kept = [];
     for (let block = 0; block < 120; block++) {
-      if (block === 8 && bend) node.port._send({ kind: 'bend', semitones: bend, time: 0 });
-      node.process([], out, params);
+      node.process([], out, block >= 8 ? bent : params);
       if (block >= 56) kept.push(...out[0][0]);
     }
     const n = kept.length;
@@ -646,6 +647,54 @@ test('a bend moves the ported instruments\' notes while they sound', () => {
     assert.ok(flat > 0, `${id} should sound`);
     const ratio = up / flat;
     assert.ok(Math.abs(ratio - 2) < 0.1, `${id}: an octave of bend moved the pitch by ${ratio.toFixed(2)}x (${flat.toFixed(1)} -> ${up.toFixed(1)} Hz)`);
+  }
+});
+
+/** Plays one note for `holdSec` on a ported instrument, then renders on; the output after the off. */
+function afterNoteOff(id, settings, { holdSec = 0.25, thenSec = 4, notes = [[48, 0]], offs = [48] } = {}) {
+  const { node, descriptor } = portedDevice(id);
+  const params = paramsFor(descriptor, settings);
+  const out = [[new Float32Array(BLOCK), new Float32Array(BLOCK)]];
+  const blockSec = BLOCK / SR;
+  const holdBlocks = Math.round(holdSec / blockSec);
+  const tail = [];
+  for (let block = 0; block < holdBlocks + Math.round(thenSec / blockSec); block++) {
+    for (const [note, at] of notes) if (block === at) node.port._send({ kind: 'noteOn', note, velocity: 1, time: 0 });
+    if (block === holdBlocks) for (const note of offs) node.port._send({ kind: 'noteOff', note, time: 0 });
+    node.process([], out, params);
+    if (block >= holdBlocks) tail.push(...out[0][0]);
+  }
+  return tail;
+}
+
+test('every ported instrument goes quiet after its note ends - every Plaits engine included', () => {
+  // Chiptune was the one that did not: played from notes it envelopes itself and skips the
+  // low-pass gate, and with Timbre Mod at zero its envelope never decays. The last half second
+  // of twelve after the note-off must be silent, whatever the model: the longest tails here are
+  // a Decay near the top and the 6-op engines' own patch releases, and both end within ten.
+  const cases = [
+    ...PLAITS_ENGINES.map((name, engine) => ['Plaits', { engine }, name]),
+    // The chiptune preset the bug was found with: long decay, arpeggiator, some of the bass.
+    ['Plaits', { engine: 7, harmonics: 0.264, timbre: 0.764, morph: 0.207, blend: 0.233, decay: 0.858, lpgcolor: 0.5 }, 'Chiptune, long decay'],
+    ['Braids', {}, 'default'],
+    ['Rings', {}, 'default'],
+    ['Elements', {}, 'default'],
+  ];
+  const ringing = [];
+  for (const [id, settings, label] of cases) {
+    const tail = afterNoteOff(id, settings, { thenSec: 12 });
+    const end = peak(tail.slice(-Math.round(0.5 * SR)));
+    if (end > 1e-3) ringing.push(`${id} ${label}: ${end.toFixed(4)} twelve seconds after the note ended`);
+  }
+  assert.deepEqual(ringing, []);
+});
+
+test('a monophonic module ignores the off of a note another note already replaced', () => {
+  // Legato: 50 starts while 48 is held, then 48's off arrives. 50 is the note sounding, so it
+  // plays on; the off it belongs to has not come.
+  for (const [id, settings] of [['Plaits', { engine: 8, decay: 1 }], ['Elements', { bowlevel: 1, strikelevel: 0 }]]) {
+    const tail = afterNoteOff(id, settings, { notes: [[48, 0], [50, 40]], offs: [48], thenSec: 1 });
+    assert.ok(peak(tail.slice(-Math.round(0.25 * SR))) > 1e-2, `${id} should still be playing 50`);
   }
 });
 

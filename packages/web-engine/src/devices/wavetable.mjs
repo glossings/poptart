@@ -157,7 +157,7 @@ function oscFigures(n) {
       id: `${p}.wave`,
       kind: 'wavetable',
       group,
-      title: 'table',
+      // No title: the table's own name heads the picture, in the control that picks it.
       description: 'One cycle as this oscillator reads it, over the stack it is read from, with the warp applied. Drag across to sweep the position.',
       params: { table: `${p}.table`, position: `${p}.position`, warp: `${p}.warp`, warpmode: `${p}.warpmode` },
       drag: { x: 'position' },
@@ -318,12 +318,41 @@ export class WavetableSynth {
     this.events.push({ at: Math.max(0, offset | 0), kind: 0, note, velocity: 0 });
   }
 
-  /** Releases everything, the way the host's hush does. */
-  /** The track's .bend(), in semitones: every voice, sounding or to come. */
-  setBend(semitones) {
-    this.params.bend = Number.isFinite(semitones) ? semitones : 0;
+  /**
+   * The track's .bend(), in semitones: every voice, sounding or to come. A number while it is
+   * still, a block of values while something moves it (see bendOf in worklets/shared.mjs).
+   */
+  setBend(bend) {
+    const p = this.params;
+    if (typeof bend === 'number') {
+      p.bend = Number.isFinite(bend) ? bend : 0;
+      p.a.bend = null;
+    } else {
+      p.bend = bend[0];
+      p.a.bend = bend;
+    }
   }
 
+  /** A moving bend added to each oscillator's cents, per sample, once for every voice. */
+  _bendBlock(count) {
+    const p = this.params;
+    const bend = p.a.bend;
+    if (p.bendCents1.length < count) {
+      p.bendCents1 = new Float32Array(count);
+      p.bendCents2 = new Float32Array(count);
+      p.bendCentsSub = new Float32Array(count);
+    }
+    const c1 = p.osc1Cents; const c1A = p.a.osc1Cents;
+    const c2 = p.osc2Cents; const c2A = p.a.osc2Cents;
+    for (let i = 0; i < count; i++) {
+      const cents = bend[i] * 100;
+      p.bendCents1[i] = (c1A === null ? c1 : c1A[i]) + cents;
+      p.bendCents2[i] = (c2A === null ? c2 : c2A[i]) + cents;
+      p.bendCentsSub[i] = cents;
+    }
+  }
+
+  /** Releases everything, the way the host's hush does. */
   allNotesOff() {
     this.events.length = 0;
     for (const v of this.voices) if (v.active) v.noteOff();
@@ -382,6 +411,7 @@ export class WavetableSynth {
   process(outL, outR, count) {
     const events = this.events;
     if (events.length > 1) events.sort((a, b) => a.at - b.at);
+    if (this.params.a.bend !== null) this._bendBlock(count);
 
     // A table swapped under a sounding voice - a file that just landed, a switch of the table
     // control - reaches it at the block, which is soon enough and clicks no more than a switch.

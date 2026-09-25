@@ -75,6 +75,7 @@ test('sessions do not appear among the saved patterns, though they share a prefi
   assert.deepEqual(saved.map((e) => e.name), ['song']);
   const wip = await storage.listWip();
   assert.deepEqual(wip.map((e) => e.name), ['2026-08-02-143205']);
+  assert.deepEqual(wip.map((e) => e.month), ['2026-08'], 'the month the files tab groups sessions under');
 });
 
 // ---- the files tab ------------------------------------------------------------------------------

@@ -31,7 +31,7 @@ import { CLOUDSEED_DEVICES } from '../devices/cloudseed.mjs';
 import { STRETCH_DEVICES } from '../devices/stretch.mjs';
 import { MUTABLE_DEVICES } from '../devices/mutable.mjs';
 import { denormalize } from '../descriptor.mjs';
-import { Reporter, blockValue, isDispose, offsetInBlock, parameterDescriptorsFor } from './shared.mjs';
+import { Reporter, bendOf, blockValue, isDispose, offsetInBlock, parameterDescriptorsFor } from './shared.mjs';
 
 /**
  * Everything a compiled device is allowed to ask of its host, which is very little.
@@ -75,6 +75,9 @@ function importsFor(held) {
   };
 }
 
+/** How many frames a ported instrument renders between bend updates while the bend is moving. */
+const BEND_PIECE = 32;
+
 class WasmDeviceProcessor extends AudioWorkletProcessor {
   constructor(options, descriptor) {
     super(options);
@@ -111,8 +114,7 @@ class WasmDeviceProcessor extends AudioWorkletProcessor {
 
   receive(message) {
     if (!message) return;
-    // A bend is timestamped like a note, so it is applied at its sample in the block.
-    if (message.kind === 'noteOn' || message.kind === 'noteOff' || message.kind === 'bend') {
+    if (message.kind === 'noteOn' || message.kind === 'noteOff') {
       this.pending.push(message);
       return;
     }
@@ -208,19 +210,24 @@ class WasmDeviceProcessor extends AudioWorkletProcessor {
     // on the sample it was scheduled for rather than at the next block boundary. With no notes
     // due - which is every effect, always - there is one piece and this is a straight render.
     const edges = this.edgesIn(frames);
+    // The track's bend, for an instrument: the module takes it once per piece rendered, and its
+    // own pitch smoothing does the rest.
+    const bend = this.descriptor.kind === 'synth' ? bendOf(parameters) : null;
     let at = 0;
     let edge = 0;
     while (at < frames) {
       while (edge < edges.length && edges[edge].offset <= at) {
         const { event } = edges[edge];
         if (event.kind === 'noteOn') this.exports.pd_note_on?.(event.note, event.velocity ?? 1);
-        else if (event.kind === 'bend') this.exports.pd_bend?.(event.semitones ?? 0);
         else this.exports.pd_note_off?.(event.note);
         edge += 1;
       }
-      const until = edge < edges.length ? Math.min(edges[edge].offset, frames) : frames;
+      let until = edge < edges.length ? Math.min(edges[edge].offset, frames) : frames;
+      // A moving bend is followed in short pieces, so a vibrato is not a staircase of blocks.
+      if (bend !== null && typeof bend !== 'number') until = Math.min(until, at + BEND_PIECE);
       const span = until - at;
       if (span <= 0) break;
+      if (bend !== null) this.exports.pd_bend?.(typeof bend === 'number' ? bend : bend[at]);
 
       const before = this.floats();
       if (left) {

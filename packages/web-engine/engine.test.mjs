@@ -14,6 +14,7 @@ import { fileURLToPath } from 'node:url';
 
 import { FakeAudioContext, fakeWorkletFor } from './fake-context.mjs';
 import { catalog } from './src/catalog.mjs';
+import { TRACK_BEND_PARAM } from './src/descriptor.mjs';
 import { WebAudioEngine } from './src/engine/web-audio-engine.mjs';
 import { panGains } from './src/engine/track.mjs';
 import { renderRange, renderShape } from './src/engine/modulators.mjs';
@@ -936,19 +937,47 @@ test('a spectrum tap reads the loudest bin of each band, over the audible range'
 
 // --- bend, and which outputs a track plays to ---------------------------------------------------
 
-test('.bend() reaches the instrument timed, and every sample voice through the track\'s detune', () => {
+test('.bend() is one constant in semitones: the instrument reads it as a signal, every sample voice as detune', () => {
   const { engine, warnings } = makeEngine({ samples: { get: () => ({ buffer: fakeBuffer(4800), rootNote: 60 }) } });
   engine.loadInstrument('t1', 'Wavetable');
-  engine.setParam('t1', -1, 'bend', 2, 1.5);
-  const synth = engine.tracks.get('t1').source.node;
-  assert.deepEqual(synth.messages.filter((m) => m.kind === 'bend').map((m) => [m.semitones, m.time]), [[2, 1.5]]);
   const track = engine.tracks.get('t1');
-  assert.ok(track.bendNode.offset.rampedTo(200), 'in cents, for the sample voices');
+  const synth = track.source.node;
+  assert.ok(track.bendNode.outputs.includes(synth.parameters.get(TRACK_BEND_PARAM)), 'wired into the instrument\'s bend input');
+  engine.setParam('t1', -1, 'bend', 2, 1.5);
+  assert.ok(track.bendNode.offset.rampedTo(2), 'in semitones');
+  assert.deepEqual(synth.messages.filter((m) => m.kind === 'bend'), [], 'a signal, not a message');
   engine.playSample('t1', 'pt_kit', { vel: 1 }, 2, 2.5);
   const voice = engine.ctx.created.filter((n) => n.kind === 'bufferSource').at(-1);
-  assert.ok(track.bendNode.outputs.includes(voice.detune), 'a voice follows the bend while it sounds');
+  assert.equal(track.bendCents.gain.value, 100, 'a sample voice\'s detune is in cents');
+  assert.ok(track.bendCents.outputs.includes(voice.detune), 'a voice follows the bend while it sounds');
+  engine.setParam('t1', -1, 'bend', 12, 0);
   engine.setParam('t1', -1, 'bendrange', 12, 0);
   assert.deepEqual(warnings, [], 'the range is a MIDI matter, and quietly accepted');
+});
+
+test('an lfo() on bend drives the track\'s bend constant, and owns it until it is cleared', () => {
+  const { engine, warnings } = makeEngine();
+  engine.loadInstrument('t1', 'Wavetable');
+  const track = engine.tracks.get('t1');
+  engine.setParamLFO('t1', -1, 'bend', { shape: 'sine', rateHz: 6, min: -0.3, max: 0.3 });
+  const offset = track.bendNode.offset;
+  assert.ok(offset.connectedFrom.length > 0, 'the LFO is connected to the bend, in its own semitones');
+  const before = offset.calls.length;
+  engine.setParam('t1', -1, 'bend', 5, 0);
+  assert.equal(offset.calls.length, before, 'a polled bend must not fight the modulator that owns it');
+  engine.clearParamLFO('t1', -1, 'bend');
+  assert.ok(offset.rampedTo(0), 'cleared, the bend comes back to rest rather than where the sweep stopped');
+  engine.setParam('t1', -1, 'bend', 1, 0);
+  assert.ok(offset.rampedTo(1), 'and is the pattern\'s again');
+  assert.deepEqual(warnings, []);
+});
+
+test('a modulator on a channel control that cannot take one warns rather than doing nothing silently', () => {
+  const { engine, warnings } = makeEngine();
+  engine.createTrack('t1');
+  engine.setParamLFO('t1', -1, 'gain', { shape: 'sine', rateHz: 1, min: 0, max: 1 });
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /"gain" channel control cannot be driven/);
 });
 
 test('.o() puts a track on the pair it names, wrapped at the pairs the output has', () => {

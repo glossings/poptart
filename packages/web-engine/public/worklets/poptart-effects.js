@@ -32,6 +32,16 @@
 // A device we wrote can go further and declare `figures` - the pictures its panel draws, bound to
 // its own parameters - which is figures.mjs's business rather than this file's.
 
+/**
+ * The AudioParam every instrument's processor declares for the track's `.bend()`, in semitones.
+ *
+ * Not one of the descriptor's parameters: it is not a control on the device, it is the track's
+ * pitch bend, which the track wires in (see Track#setSlot) so that a bend - a value, a polled
+ * signal, or an lfo() running on the audio thread - reaches every voice as a signal rather than
+ * as a message a block at a time.
+ */
+const TRACK_BEND_PARAM = 'track.bend';
+
 /** Parameter value curves: how a 0..1 position maps onto the parameter's real range. */
 const CURVES = new Set(['lin', 'exp', 'pow']);
 
@@ -4562,15 +4572,36 @@ class RecorderTap {
  * too rather than passing them over the message port means there is exactly one way a parameter
  * reaches the audio thread - and a mode that arrives a block later than the value it belongs
  * with is a bug nobody will find by reading.
+ *
+ * An instrument declares one more, the track's bend in semitones (TRACK_BEND_PARAM). It is not
+ * a position and has no range.
  */
 function parameterDescriptorsFor(descriptor) {
-  return descriptor.params.map((p) => ({
+  const params = descriptor.params.map((p) => ({
     name: p.id,
     defaultValue: positionOfDefault(p),
     minValue: 0,
     maxValue: 1,
     automationRate: p.rate === 'a' ? 'a-rate' : 'k-rate',
   }));
+  if (descriptor.kind === 'synth') params.push({ name: TRACK_BEND_PARAM, defaultValue: 0, automationRate: 'a-rate' });
+  return params;
+}
+
+/**
+ * The track's bend for this block, in semitones: a number while it is still, the block's own
+ * array while something is moving it. The array is the AudioParam's, valid for this block only.
+ *
+ * The track's bend constant is always connected, and a connected AudioParam arrives a full block
+ * long even when it is not moving - so a flat block is caught here and handed on as the number
+ * it is, and a synth follows the pitch per sample only while a bend is actually moving.
+ */
+function bendOf(parameters) {
+  const values = parameters[TRACK_BEND_PARAM];
+  if (!values || values.length === 0) return 0;
+  const first = values[0];
+  for (let i = 1; i < values.length; i++) if (values[i] !== first) return values;
+  return first;
 }
 
 /** Where a parameter's default sits, as the position its AudioParam starts at. */

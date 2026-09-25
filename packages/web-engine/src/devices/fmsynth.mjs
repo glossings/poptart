@@ -199,6 +199,11 @@ class FmParams {
     this.glide = 0;
     this.out = 0.6;
     this.outA = null;
+    // The track's bend in semitones, and while it moves, the frequency ratio it makes per sample
+    // - worked out once a block for every voice (see FmSynth#setBend). Null while it is still.
+    this.bend = 0;
+    this.bendRatio = new Float32Array(128);
+    this.bendRatioA = null;
   }
 
   /** Called once per block, with the whole block's length, before any voice renders. */
@@ -265,12 +270,14 @@ class FmVoice {
     }
     const inc = this.inc;
     for (let o = 0; o < OPS; o++) {
-      // A fixed operator holds its frequency; the rest follow the note, bent.
-      const base = p.fixed[o] ? 100 : this.currentHz * (p.bend ? Math.pow(2, p.bend / 12) : 1);
+      // A fixed operator holds its frequency; the rest follow the note, bent - by the block's
+      // bend while it is still, per sample below while it moves.
+      const base = p.fixed[o] ? 100 : this.currentHz * (p.bendRatioA === null && p.bend ? Math.pow(2, p.bend / 12) : 1);
       inc[o] = (base * p.ratio[o] * Math.pow(2, p.detune[o] / 1200)) / this.sampleRate;
       this.envs[o].setStages(p.attack[o], p.decay[o], p.sustain[o], p.release[o], -4, -4, -4);
     }
     const vel = this.velocity;
+    const bendRatioA = p.bendRatioA;
 
     // A still control is read straight out of the block's values; one that is moving is followed
     // per sample. `moving` is almost always empty - nothing is being dragged, nothing is being
@@ -290,6 +297,7 @@ class FmVoice {
       for (let r = 0; r < mMoving.length; r++) matrix[mMoving[r]] = p.matrix.at(mMoving[r], t);
       for (let r = 0; r < lMoving.length; r++) level[lMoving[r]] = p.level.at(lMoving[r], t);
       const depth = (dMoving ? p.depth.at(0, t) : p.depth.value[0]) * 4;
+      const bent = bendRatioA === null ? 1 : bendRatioA[t];
 
       let sum = 0;
       for (let o = 0; o < OPS; o++) {
@@ -304,7 +312,7 @@ class FmVoice {
         }
         const v = wave(p.wave[o], this.phase[o] + mod) * env;
         this.last[o] = v;
-        this.phase[o] += inc[o];
+        this.phase[o] += p.fixed[o] ? inc[o] : inc[o] * bent;
         if (this.phase[o] >= 1) this.phase[o] -= 1;
         sum += v * level[o];
       }
@@ -356,9 +364,21 @@ export class FmSynth {
   queueNoteOn(note, velocity, offset = 0) { this.events.push({ at: Math.max(0, offset | 0), kind: 1, note, velocity }); }
   queueNoteOff(note, offset = 0) { this.events.push({ at: Math.max(0, offset | 0), kind: 0, note }); }
 
-  /** The track's .bend(), in semitones. */
-  setBend(semitones) {
-    this.params.bend = Number.isFinite(semitones) ? semitones : 0;
+  /**
+   * The track's .bend(), in semitones: a number while it is still, a block of values while
+   * something moves it (see bendOf in worklets/shared.mjs).
+   */
+  setBend(bend) {
+    const p = this.params;
+    if (typeof bend === 'number') {
+      p.bend = Number.isFinite(bend) ? bend : 0;
+      p.bendRatioA = null;
+      return;
+    }
+    if (p.bendRatio.length < bend.length) p.bendRatio = new Float32Array(bend.length);
+    for (let i = 0; i < bend.length; i++) p.bendRatio[i] = Math.pow(2, bend[i] / 12);
+    p.bend = bend[0];
+    p.bendRatioA = p.bendRatio;
   }
 
   allNotesOff() {

@@ -159,15 +159,20 @@ export function createStorage(store, { meta = globalThis, now = () => Date.now()
     for (const key of keys) {
       if (!key.endsWith('.js')) continue;
       const id = key.slice(WIP.length, -3);
-      const session = id.slice(id.indexOf('/') + 1);
-      out.push(await entryFor(key, {
+      const cut = id.indexOf('/');
+      const session = id.slice(cut + 1);
+      const entry = await entryFor(key, {
         kind: 'wip',
         name: session,
         id,
         displayName: null,
         fallbackLabel: wipFallbackLabel(session),
         borrowBlockLabel: true,
-      }));
+      });
+      // The month folder, which the files tab groups sessions under - as the desktop's listing
+      // carries it. Without it the tab could not draw the list at all.
+      entry.month = id.slice(0, cut);
+      out.push(entry);
     }
     return out;
   }

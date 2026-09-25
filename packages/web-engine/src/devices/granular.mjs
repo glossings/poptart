@@ -97,16 +97,17 @@ export const GRANULAR = defineDevice({
       id: 'cloud',
       kind: 'sample',
       group: 'Source',
-      title: 'sample',
-      description: 'The file, with the grains being read out of it. Drag across it to move the position, up and down for the spray.',
-      params: { sample: 'sample', position: 'position', spray: 'spray', size: 'size', scan: 'scan' },
+      description: 'The file, with the grains being read out of it. Each grain is a lens as wide as the stretch it plays and shaped like its window, with a line crossing it for how far along the grain is. Drag across it to move the position, up and down for the spray.',
+      params: { sample: 'sample', position: 'position', spray: 'spray', size: 'size', scan: 'scan', window: 'window' },
       drag: { x: 'position', y: 'spray' },
+      // The sample is what the whole synth is made of, so its name heads the picture of it, in
+      // the control that picks it - as a table heads the Wavetable's.
+      subsumes: ['sample'],
     },
     {
       id: 'shape',
       kind: 'grain',
       group: 'Grains',
-      title: 'grain',
       description: 'One grain\'s amplitude across its own length.',
       params: { shape: 'window', size: 'size' },
       // The window control is drawn ON the picture of the window - the picture is what the
@@ -126,7 +127,7 @@ export const GRANULAR = defineDevice({
 });
 
 class VoiceGrain {
-  constructor() { this.on = false; this.pos = 0; this.len = 1; this.at = 0; this.rate = 1; this.l = 1; this.r = 1; }
+  constructor() { this.on = false; this.pos = 0; this.from = 0; this.pan = 0; this.len = 1; this.at = 0; this.rate = 1; this.l = 1; this.r = 1; }
 }
 
 class GrainVoice {
@@ -188,8 +189,10 @@ class GrainVoice {
           g.rate = ratioBase * Math.pow(2, (p.random * (this.random() * 2 - 1)) / 12);
           if (this.random() < p.reverse) g.rate = -g.rate;
           g.pos = center;
+          g.from = center;
           g.at = 0;
           const pan = (this.random() * 2 - 1) * p.spread;
+          g.pan = pan;
           g.l = Math.cos(((pan + 1) * Math.PI) / 4) * Math.SQRT2;
           g.r = Math.sin(((pan + 1) * Math.PI) / 4) * Math.SQRT2;
           g.on = true;
@@ -285,17 +288,18 @@ export class GranularSynth {
    */
   report() {
     const sample = this.samples[Math.round(this.p.sample)] ?? null;
-    const drawn = this.shapes[Math.round(this.p.window)] ?? null;
     const len = sample?.data?.length ?? 0;
     if (!len) return null;
+    const unit = (x) => (((x % len) + len) % len) / len;
     const grains = [];
     for (const v of this.voices) {
       if (!v.active) continue;
       for (const g of v.grains) {
         if (!g.on) continue;
-        const drawn = this.shapes[Math.round(this.p.window)] ?? null;
-        const t = g.at / g.len;
-        grains.push([(((g.pos % len) + len) % len) / len, drawn ? drawnWindow(drawn, t) : grainWindow(this.p.window, t)]);
+        // Where it started, how far through its life it is, where it is panned, and the stretch
+        // of the file it plays as a fraction of the file - backwards for a reversed grain. A
+        // picture draws the grain as that stretch, so its Size and Spread are visible on it.
+        grains.push([unit(g.from), g.at / g.len, g.pan, (g.len * g.rate) / len]);
         if (grains.length >= REPORTED_GRAINS) return { grains };
       }
     }
@@ -305,8 +309,12 @@ export class GranularSynth {
   queueNoteOn(note, velocity, offset = 0) { this.events.push({ at: Math.max(0, offset | 0), kind: 1, note, velocity }); }
   queueNoteOff(note, offset = 0) { this.events.push({ at: Math.max(0, offset | 0), kind: 0, note }); }
 
-  /** The track's .bend(), in semitones: read as each grain starts. */
-  setBend(semitones) {
+  /**
+   * The track's .bend(), in semitones: read as each grain starts, so a block of values (a bend
+   * something is moving) is read at the block's start.
+   */
+  setBend(bend) {
+    const semitones = typeof bend === 'number' ? bend : bend?.[0];
     this.p.bend = Number.isFinite(semitones) ? semitones : 0;
   }
 

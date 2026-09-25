@@ -15,7 +15,7 @@ import { WAVETABLE, WavetableSynth } from '../devices/wavetable.mjs';
 import { FMSYNTH, FmSynth } from '../devices/fmsynth.mjs';
 import { GRANULAR, GranularSynth } from '../devices/granular.mjs';
 import { sharedBuiltInTables } from '../dsp/tables.mjs';
-import { Reporter, isDispose, offsetInBlock, parameterDescriptorsFor, realParams } from './shared.mjs';
+import { Reporter, bendOf, isDispose, offsetInBlock, parameterDescriptorsFor, realParams } from './shared.mjs';
 
 // The tables are built here, as the script loads, rather than in the first processor's
 // constructor: a hundred milliseconds of harmonic sums is an audible dropout on the rendering
@@ -41,8 +41,7 @@ class SynthProcessor extends AudioWorkletProcessor {
 
   receive(message) {
     if (!message) return;
-    // A bend is timestamped like a note, so it lands with the notes it belongs to.
-    if (message.kind === 'noteOn' || message.kind === 'noteOff' || message.kind === 'bend') {
+    if (message.kind === 'noteOn' || message.kind === 'noteOff') {
       this.pending.push(message);
       return;
     }
@@ -76,7 +75,6 @@ class SynthProcessor extends AudioWorkletProcessor {
       const offset = offsetInBlock(event.time, currentFrame, sampleRate, blockSize);
       if (offset >= blockSize) { keep.push(event); continue; }
       if (event.kind === 'noteOn') this.synth.queueNoteOn(event.note, event.velocity, offset);
-      else if (event.kind === 'bend') this.synth.setBend?.(event.semitones);
       else this.synth.queueNoteOff(event.note, offset);
     }
     this.pending = keep;
@@ -89,6 +87,8 @@ class SynthProcessor extends AudioWorkletProcessor {
     const blockSize = out[0].length;
 
     this.synth.setParams(realParams(this.descriptor, parameters, this.real, this.scratch));
+    // The track's bend, which the track keeps connected: per sample while it moves.
+    this.synth.setBend(bendOf(parameters));
     this.drain(blockSize);
 
     out[0].fill(0);

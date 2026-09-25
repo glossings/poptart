@@ -13,6 +13,7 @@ import assert from 'node:assert/strict';
 
 import { FakeAudioContext, FakeParam, fakeWorkletFor } from './fake-context.mjs';
 import { catalog } from './src/catalog.mjs';
+import { TRACK_BEND_PARAM } from './src/descriptor.mjs';
 import { WebAudioEngine } from './src/engine/web-audio-engine.mjs';
 import { rampParam } from './src/engine/track.mjs';
 import { cyclesFor, renderShape } from './src/engine/modulators.mjs';
@@ -507,10 +508,23 @@ test('a finished sample voice is unplugged from the track bend as well', () => {
   engine.setParam('t1', -1, 'bend', 1, 0);
   engine.playSample('t1', 'kit', { vel: 1 }, 0, 0.5);
   const source = ctx.created.filter((n) => n.kind === 'bufferSource').pop();
-  const bend = engine.tracks.get('t1').bendNode;
+  const bend = engine.tracks.get('t1').bendCents;
   assert.ok(bend.outputs.includes(source.detune));
   source.onended();
   assert.equal(bend.outputs.includes(source.detune), false);
+});
+
+test('the track bend follows the instrument slot: a swapped-out synth is unplugged from it', () => {
+  const ctx = new FakeAudioContext();
+  const engine = new WebAudioEngine(ctx, { registry: catalog, warn: () => {}, AudioWorkletNode: fakeWorkletFor(catalog) });
+  engine.loadInstrument('t1', 'Wavetable');
+  const track = engine.tracks.get('t1');
+  const first = track.source.node.parameters.get(TRACK_BEND_PARAM);
+  assert.ok(track.bendNode.outputs.includes(first), 'the instrument reads the bend from the start');
+  engine.loadInstrument('t1', 'Plaits');
+  const second = track.source.node.parameters.get(TRACK_BEND_PARAM);
+  assert.equal(track.bendNode.outputs.includes(first), false, 'the old synth is let go');
+  assert.ok(track.bendNode.outputs.includes(second), 'the new one reads it');
 });
 
 // ---- hush ----------------------------------------------------------------------------------------

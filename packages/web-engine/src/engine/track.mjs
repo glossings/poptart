@@ -16,7 +16,7 @@
 // `.param()` writes and what every modulator sweeps. `normalize` is the bridge, and it is crossed
 // exactly here, so nothing downstream has to know which form it was handed.
 
-import { argToValue, clampParam, defaultValues, findParam, normalize } from '../descriptor.mjs';
+import { TRACK_BEND_PARAM, argToValue, clampParam, defaultValues, findParam, normalize } from '../descriptor.mjs';
 
 /** Channel-strip controls this engine implements. The rest warn once - see the engine. */
 export const SUPPORTED_CHANNELS = Object.freeze(['gain', 'postgain', 'pan', 'dry', 'width', 'bassmono', 'bend', 'bendrange', 'out', 'grainsize', 'grainrate', 'grainpan', 'grainpos']);
@@ -283,6 +283,12 @@ export class Track {
       // The instrument is the source, not a link in the chain: it feeds the track's input.
       this.source = built;
       built.output.connect(this.input);
+      // And it plays the track's bend, as a signal into its own bend input.
+      const bendIn = built.node?.parameters?.get?.(TRACK_BEND_PARAM);
+      if (bendIn) {
+        this.bendSource().connect(bendIn);
+        this.bendInto = bendIn;
+      }
     } else {
       this.rewire();
     }
@@ -294,6 +300,10 @@ export class Track {
     if (!slot) return;
     this.takeConnections(index);
     this.clearSidechain(index);
+    if (index === 0 && this.bendInto) {
+      try { this.bendNode?.disconnect(this.bendInto); } catch { /* already detached */ }
+      this.bendInto = null;
+    }
     try {
       slot.built.output?.disconnect?.();
       slot.built.input?.disconnect?.();
@@ -351,14 +361,15 @@ export class Track {
         rampParam(this.panR.gain, r, atTime, now);
         return true;
       }
-      // Pitch bend, in semitones. The sample voices read it continuously off one constant per
-      // track, in cents, connected to each voice's detune - so a bend moves the ones already
-      // sounding, as the desktop's voices reading the track's bend bus do. The instrument is told
-      // by the engine, which knows what kind of instrument it is.
+      // Pitch bend, in semitones, on one constant per track that everything playing reads
+      // continuously - the instrument through its bend input, each sample voice through its
+      // detune in cents (see bendCents) - so a bend moves the notes already sounding, as the
+      // desktop's voices reading the track's bend bus do. An lfo() or env() on bend drives the
+      // same constant (see the engine's _targetParam).
       case 'bend': {
         const semis = Math.min(48, Math.max(-48, Number(value) || 0));
         this.bendSemis = semis;
-        rampParam(this.bendSource().offset, semis * 100, atTime, now);
+        rampParam(this.bendSource().offset, semis, atTime, now);
         return true;
       }
       // How far a plugin's pitch-bend message reaches: a MIDI matter, and the browser's
@@ -398,12 +409,18 @@ export class Track {
     }
   }
 
-  /** The track's bend as a signal in cents, started on first use. */
+  /**
+   * The track's bend as a signal in semitones, started on first use - with `bendCents` beside it,
+   * the same signal in cents, which is what a sample voice's detune takes.
+   */
   bendSource() {
     if (!this.bendNode) {
       this.bendNode = this.ctx.createConstantSource();
-      this.bendNode.offset.value = (this.bendSemis ?? 0) * 100;
+      this.bendNode.offset.value = this.bendSemis ?? 0;
       this.bendNode.start();
+      this.bendCents = this.ctx.createGain();
+      this.bendCents.gain.value = 100;
+      this.bendNode.connect(this.bendCents);
     }
     return this.bendNode;
   }
@@ -462,7 +479,9 @@ export class Track {
     if (this.bendNode) {
       try { this.bendNode.stop(); } catch { /* already stopped */ }
       try { this.bendNode.disconnect(); } catch { /* already detached */ }
+      try { this.bendCents.disconnect(); } catch { /* already detached */ }
       this.bendNode = null;
+      this.bendCents = null;
     }
     try {
       this.input.disconnect();

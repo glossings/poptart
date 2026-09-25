@@ -152,11 +152,14 @@ export class MidiRoutes {
   pitch(route, note, sec) {
     if (route.noteMap) {
       const mapped = route.noteMap(note, sec);
-      return mapped == null || !Number.isFinite(mapped) ? null : Math.min(127, Math.max(0, Math.round(mapped)));
+      return mapped == null || !Number.isFinite(mapped) ? null : Math.min(127, Math.max(0, mapped));
     }
-    let out = Math.round(note) + (route.transpose ?? 0);
+    // A fractional note is a microtone and goes through as one - every sink here is an
+    // instrument of the browser's own, which plays it. Snapping to a scale lands on a key.
+    let out = note + (route.transpose ?? 0);
     const pcs = route.pcs;
     if (pcs && pcs.length > 0) {
+      out = Math.round(out);
       // Nearest pitch class, ties downward - the rule the desktop's device routes use too.
       for (let d = 0; d < 12; d++) {
         if (pcs.includes(wrap(out - d, 12))) { out -= d; break; }

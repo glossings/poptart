@@ -683,8 +683,8 @@ export class WebAudioEngine {
     const src = this.ctx.createBufferSource();
     src.buffer = buffer;
     src.playbackRate.value = rate;
-    // The bend constant is held by the one the voice was connected to, which is the one to undo.
-    const bend = track.bendNode ?? null;
+    // The bend, in cents, is held by the one the voice was connected to, which is the one to undo.
+    const bend = track.bendCents ?? null;
     if (bend) { try { bend.connect(src.detune); } catch { /* no detune */ } }
     const shape = this.ctx.createGain();
     shape.gain.value = 0;
@@ -776,13 +776,6 @@ export class WebAudioEngine {
     track._outPair = pair;
   }
 
-  /** Tells a track's instrument where the bend is, at the time the bend is set for. */
-  _bendInstrument(trackId, track, atTime) {
-    const source = track.source;
-    if (!source?.node?.port) return;
-    try { source.node.port.postMessage({ kind: 'bend', semitones: track.bendSemis ?? 0, time: atTime }); } catch { /* gone */ }
-  }
-
   /**
    * Releases everything on a track without cutting what is already sounding - the desktop's
    * hushTrack. The instrument, and any effect played by notes, has every note still to end
@@ -862,17 +855,17 @@ export class WebAudioEngine {
     const track = this.tracks.get(trackId);
     if (!track) return;
     const now = this.getTime();
+    // A parameter a modulator owns is not ours to set: the modulator is the whole value, and a
+    // scalar written over it would fight with the connection until one of them stopped. The same
+    // for a channel control one drives (bend - see _targetParam).
+    if (this.modulators.get(trackId)?.has(keyOf(slot, name))) return;
     if (slot === -1) {
       if (!track.setChannel(name, value, atTime, now)) {
         this._warnOnce(`channel:${name}`, `[web-engine] the "${name}" channel control is not implemented in the browser build yet, so it does nothing here. Implemented: ${SUPPORTED_CHANNELS.join(', ')} and wet1..wet20.`);
       }
-      if (name === 'bend') this._bendInstrument(trackId, track, atTime);
       if (name === 'out') this._routeOut(track);
       return;
     }
-    // A parameter a modulator owns is not ours to set: the modulator is the whole value, and a
-    // scalar written over it would fight with the connection until one of them stopped.
-    if (this.modulators.get(trackId)?.has(keyOf(slot, name))) return;
     const result = track.setParam(slot, name, value, atTime, now, glide);
     if (result === true) return;
     const filled = track.slots.get(slot);
@@ -1113,6 +1106,16 @@ export class WebAudioEngine {
   /** The AudioParam a modulator or a connection should drive, or null with a warning. */
   _targetParam(trackId, slot, name) {
     const track = this.tracks.get(trackId);
+    if (slot === -1) {
+      // The bend's constant is in semitones, the modulator's own units, and every voice on the
+      // track reads it - the instrument through its bend input, the sample voices as detune.
+      if (name === 'bend' && track) return track.bendSource().offset;
+      this._warnOnce(
+        `channel-mod:${name}`,
+        `[web-engine] the "${name}" channel control cannot be driven by an lfo(), env(), midicc() or osc() in the browser build yet, so nothing is connected to it. bend can.`,
+      );
+      return null;
+    }
     const filled = track?.slots.get(slot);
     if (!filled) return null;
     const found = filled.paramFor(name);
@@ -1214,6 +1217,15 @@ export class WebAudioEngine {
     if (!conn) return;
     this._recordLeft(trackId, slot, name, conn.stop());
     held.delete(key);
+    // A bend is left where it rests, not where the modulator stopped: a pattern that dropped its
+    // lfo() on bend should not stay out of tune by wherever the sweep happened to be. Anything
+    // the pattern bends by now arrives on the next poll.
+    const track = this.tracks.get(trackId);
+    if (slot === -1 && name === 'bend' && track) {
+      track.bendSemis = 0;
+      const now = this.getTime();
+      rampParam(track.bendSource().offset, 0, now, now);
+    }
     this.envelopes.get(trackId)?.delete(key);
     if (conn._feedKey) this.feeds.get(conn._feedKey)?.delete(conn);
   }
@@ -2030,7 +2042,7 @@ export class WebAudioEngine {
     // Loops play to the gate; a one-shot to the gate or its own end, whichever comes first.
     const gateEnd = plan.loop || plan.cut || sustained ? Math.max(start, plan.offsetSec) : start + plan.durSec;
     const stopAt = this._envelope(amp, plan, start, gateEnd);
-    const bend = track.bendNode ?? null;
+    const bend = track.bendCents ?? null;
     if (bend) { try { bend.connect(source.detune); } catch { /* no detune */ } }
     if (playFor != null) source.start(start, offset, playFor);
     else source.start(start, offset);

@@ -1966,20 +1966,46 @@ li.CodeMirror-hint-active {
   outline: none;
 }
 
-/* The name of the file a sample control is pointed at, in place of a menu of two thousand. It
-   carries the select's own chevron: it is a choice, and on a figure's heading, a bare name beside
-   the title did not look like something to click - the Convolver's impulse went unfound. */
-.device-widget .device-file {
+/* The name of the file a control is pointed at, in place of a menu of two thousand: a field in
+   the device selects' own box, carrying their chevron - it is a choice, and a bare name beside a
+   figure's title did not look like something to click (the Convolver's impulse went unfound).
+   An arrow either side steps to the file before or after it. */
+.device-file-box {
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
   width: 100%;
-  font-size: 9px;
-  padding: 1px 16px 1px 6px;
+  min-width: 0;
+}
+
+.device-widget .device-file {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  text-align: left;
+  padding: 4px 22px 4px 9px;
+  border-radius: 5px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%23888e99' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
   background-repeat: no-repeat;
-  background-position: right 5px center;
-  background-size: 7px 4px;
+  background-position: right 8px center;
+  background-size: 8px 5px;
+}
+
+.device-widget .device-file-step {
+  flex: none;
+  width: 24px;
+  padding: 0;
+  font-size: 14px;
+  line-height: 1;
+  border-radius: 5px;
+  color: var(--text-dim);
+}
+
+.device-widget .device-file-step:hover {
+  color: var(--text);
 }
 
 .device-widget-name {
@@ -2064,16 +2090,18 @@ li.CodeMirror-hint-active {
   margin-left: auto;
 }
 
-/* A control a figure took over, drawn on its heading: the control alone, sized to its text. */
+/* A control a figure took over, drawn on its heading: the control alone, taking the room the
+   readout leaves it. */
 .device-widget-bare {
   display: flex;
+  flex: 1;
   min-width: 0;
-  max-width: 45%;
+  max-width: 60%;
 }
 
-.device-widget-bare .device-file {
-  width: auto;
-  max-width: 100%;
+.device-figure-head:has(.device-widget-bare) {
+  align-items: center;
+  padding-bottom: 6px;
 }
 
 .device-figure-title {
@@ -6315,4 +6343,47 @@ body.mix-on #deckAHead .deck-song {
   font-size: 10.5px;
   color: var(--text-dim);
   font-family: var(--mono);
+}
+
+/* The backup's audio switch sits above the buttons it changes, with room between them. */
+.store-audio {
+  margin-bottom: 8px;
+}
+
+.about-body {
+  padding: 12px 16px 14px;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text-dim);
+}
+
+.about-body p {
+  margin: 0 0 10px;
+}
+
+.about-body p:last-child {
+  margin-bottom: 0;
+}
+
+.about-body a {
+  color: var(--accent);
+}
+
+/* A menu a figure took over (the grain window's), sized like the file field beside the others,
+   with its draw button in the same row. */
+.device-widget-bare select {
+  flex: 1;
+  min-width: 0;
+  width: auto;
+  font-size: 12px;
+  padding: 4px 22px 4px 9px;
+  background-position: right 8px center;
+}
+
+.device-widget-bare .device-draw {
+  flex: none;
+  margin: 0;
+  font-size: 11px;
+  padding: 0 10px;
+  border-radius: 5px;
 }

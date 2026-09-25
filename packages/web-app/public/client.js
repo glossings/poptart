@@ -3293,7 +3293,7 @@ function startDeviceLive(trackLabel, slot, panel) {
 const LIVE_FIGURE_KINDS = new Set(['sample', 'meter', 'transfer', 'eq', 'shaper', 'sweep', 'duck']);
 
 /** How tall each kind of figure is drawn, in CSS pixels. */
-const FIGURE_HEIGHT = { wavetable: 132, unison: 64, response: 108, adsr: 108, eq: 128, band: 52, matrix: 176, sample: 96, grain: 64, meter: 22, transfer: 120, shaper: 108, echoes: 84, repeats: 72, decay: 72, sweep: 96, duck: 112 };
+const FIGURE_HEIGHT = { wavetable: 176, unison: 64, response: 108, adsr: 108, eq: 128, band: 52, matrix: 176, sample: 96, grain: 64, meter: 22, transfer: 120, shaper: 108, echoes: 84, repeats: 72, decay: 72, sweep: 96, duck: 112 };
 
 /** How near a press counts as being on an envelope handle - the sampler's panel allows the same. */
 const FIGURE_HIT_PX = 9;
@@ -3857,6 +3857,48 @@ function figureLabel(ctx, text, x, y, color, align = 'start') {
   ctx.textAlign = 'start';
 }
 
+/**
+ * Where each frame of a table goes when the table is drawn as a stack leaning away from you:
+ * frame 1 in front at the bottom left, the last at the back, up and to the right - the order the
+ * position knob walks it. The device window and the file picker both draw with this, so a table
+ * reads the same way round in either, and both keep clear of the edges of their box.
+ *
+ * Returns `(frame, values) => points`, `values` being one cycle in -1..1.
+ */
+function tableStackLayout(w, h, count, { padX = 12, padY = 10, leanX = 0.16, leanY = 0.34 } = {}) {
+  const innerW = Math.max(1, w - 2 * padX);
+  const innerH = Math.max(1, h - 2 * padY);
+  const lean = { x: innerW * leanX, y: innerH * leanY };
+  // Half a row either side of each frame's centerline: the front row's bottom and the back row's
+  // top sit exactly on the padding.
+  const rowH = (innerH - lean.y) / 2;
+  const base = padY + lean.y + rowH;
+  const width = innerW - lean.x;
+  return (frame, values) => {
+    const t = count <= 1 ? 0 : frame / (count - 1);
+    const x0 = padX + lean.x * t;
+    const y0 = base - lean.y * t;
+    const last = Math.max(1, values.length - 1);
+    return values.map((v, j) => [x0 + (j / last) * width, y0 - v * rowH]);
+  };
+}
+
+/**
+ * A table as a stack with one cycle drawn boldly in it: every frame faintly, back to front so a
+ * nearer one covers the one behind, the two frames the bold cycle lies between a little
+ * brighter, then the bold cycle on top at its fractional place in the stack. The device window
+ * and the file picker both draw a table with this, so the two look and move alike.
+ */
+function drawTableStackWith(ctx, place, stack, between, frame, wave, c) {
+  for (let i = stack.length - 1; i >= 0; i--) {
+    const near = Math.min(Math.abs(i - between[0]), Math.abs(i - between[1]));
+    ctx.globalAlpha = near === 0 ? 0.34 : 0.13;
+    figureStroke(ctx, place(i, stack[i]), c.dim, 1);
+  }
+  ctx.globalAlpha = 1;
+  figureStroke(ctx, place(frame, wave), c.accent, 1.75);
+}
+
 const FIGURE_DRAWERS = {
   /**
    * The waveform this oscillator is reading, over the stack it is reading from, with a scrubber
@@ -3874,24 +3916,7 @@ const FIGURE_DRAWERS = {
     // the cycle the oscillator is actually reading - blended and warped - in front of it. One
     // cycle over another says "a waveform"; this says "a table", which is what the position
     // knob is moving through.
-    const lean = { x: w * 0.14, y: waveH * 0.3 };
-    const rowH = (waveH - lean.y) * 0.5 - 2;
-    const base = 2 + lean.y + rowH;
-    const width = w - lean.x;
-    const rowAt = (frame, points, color, alpha, weight) => {
-      const t = f.stack.length <= 1 ? 1 : frame / (f.stack.length - 1);
-      const x0 = lean.x * t;
-      const y0 = base - lean.y * t;
-      ctx.globalAlpha = alpha;
-      figureStroke(ctx, points.map((v, j) => [x0 + (j / (points.length - 1)) * width, y0 - v * rowH]), color, weight);
-    };
-    // Back to front, so a nearer frame covers the one behind it.
-    for (let i = f.stack.length - 1; i >= 0; i--) {
-      const near = Math.min(Math.abs(i - f.between[0]), Math.abs(i - f.between[1]));
-      rowAt(i, f.stack[i], c.dim, near === 0 ? 0.34 : 0.13, 1);
-    }
-    rowAt(f.frame, f.wave, c.accent, 1, 1.75);
-    ctx.globalAlpha = 1;
+    drawTableStackWith(ctx, tableStackLayout(w, waveH, f.stack.length), f.stack, f.between, f.frame, f.wave, c);
 
     // The scrubber: a tick per frame and a handle where the position is, which is what makes a
     // drag on this figure something somebody would think to try.
@@ -3921,7 +3946,7 @@ const FIGURE_DRAWERS = {
     ctx.textAlign = 'end';
     ctx.textBaseline = 'bottom';
     ctx.fillStyle = c.dim;
-    ctx.fillText(`${lo + 1} / ${f.frameCount}`, w - 3, waveH);
+    ctx.fillText(`${lo + 1} / ${f.frameCount}`, w - 4, waveH - 2);
     ctx.textAlign = 'start';
 
     // The heading says what the position is between, where the table names its frames, and what
@@ -4292,12 +4317,58 @@ const FIGURE_DRAWERS = {
     ctx.moveTo(f.position * w, 0);
     ctx.lineTo(f.position * w, h);
     ctx.stroke();
-    for (const [at, level] of f.grains ?? []) {
-      ctx.globalAlpha = 0.25 + 0.75 * Math.min(1, Math.max(0, level));
-      ctx.fillStyle = c.accent;
-      ctx.beginPath();
-      ctx.arc(at * w, mid, 2.5, 0, Math.PI * 2);
-      ctx.fill();
+    // Each grain as a LENS: as wide as the stretch of the file it plays and shaped like its
+    // window, either side of the line. A line crosses it where the grain has got to, as tall
+    // as the lens is there, so how far along a grain is and how loud it is at this instant are
+    // one mark. Nothing on the picture moves but that line. The grain's pan is reported but not
+    // drawn: lenses leaning up and down by it made the cloud harder to read, not easier.
+    const curve = f.window;
+    if (curve) {
+      const up = Math.min(half - 2, 22) / 2;
+      const down = up;
+      ctx.lineWidth = 1;
+      for (const [from, at, , span = 0] of f.grains ?? []) {
+        if (!span) continue;
+        // The lens's outline, walked along the grain, and cut wherever it runs off an end of the
+        // file and comes back at the other. Each piece is one closed shape.
+        const pieces = [];
+        let piece = null;
+        let lastX = null;
+        for (let i = 0; i < curve.length; i++) {
+          const u = i / (curve.length - 1);
+          const x = (((from + span * u) % 1) + 1) % 1;
+          if (piece === null || Math.abs(x - lastX) > 0.5) { piece = { top: [], bottom: [] }; pieces.push(piece); }
+          piece.top.push([x * w, mid - curve[i] * up]);
+          piece.bottom.push([x * w, mid + curve[i] * down]);
+          lastX = x;
+        }
+        for (const { top, bottom } of pieces) {
+          ctx.beginPath();
+          ctx.moveTo(top[0][0], top[0][1]);
+          for (const [x, y] of top) ctx.lineTo(x, y);
+          for (let i = bottom.length - 1; i >= 0; i--) ctx.lineTo(bottom[i][0], bottom[i][1]);
+          ctx.closePath();
+          ctx.globalAlpha = 0.14;
+          ctx.fillStyle = c.accent;
+          ctx.fill();
+          ctx.globalAlpha = 0.55;
+          ctx.strokeStyle = c.accent;
+          ctx.stroke();
+        }
+        // The head: where the grain is reading now, spanning the lens's height there.
+        const k = Math.min(1, Math.max(0, at)) * (curve.length - 1);
+        const i0 = Math.floor(k);
+        const level = curve[i0] + (curve[Math.min(curve.length - 1, i0 + 1)] - curve[i0]) * (k - i0);
+        const hx = ((((from + span * at) % 1) + 1) % 1) * w;
+        ctx.globalAlpha = 1;
+        ctx.strokeStyle = c.text;
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(hx, mid - level * up);
+        ctx.lineTo(hx, mid + level * down);
+        ctx.stroke();
+        ctx.lineWidth = 1;
+      }
     }
     ctx.globalAlpha = 1;
 
@@ -4867,7 +4938,11 @@ function deviceWidget(trackLabel, slot, widget, { bare = false } = {}) {
     };
     fill(widget.options, widget.value);
     select.onchange = () => send({ value: Number(select.value) }, true);
-    cell.appendChild(select);
+    // The menu and the way to draw one, side by side: two ways to set the same thing.
+    const box = document.createElement('div');
+    box.className = 'device-file-box';
+    box.appendChild(select);
+    cell.appendChild(box);
 
     const draw = document.createElement('button');
     draw.className = 'small device-draw';
@@ -4889,45 +4964,68 @@ function deviceWidget(trackLabel, slot, widget, { bare = false } = {}) {
           .catch((e) => logLine(e.message ?? String(e), true));
       },
     });
-    cell.appendChild(draw);
+    box.appendChild(draw);
     setPosition = (_position, value) => { if (Number.isFinite(value)) { widget.value = value; select.value = String(Math.round(value)); } };
   } else if (isFile) {
     // A control that takes a file shows the file it is on, and opens the picker. No menu beside
     // it: a wavetable folder is a couple of thousand files in subfolders, which is a browser's
-    // job and not a dropdown's, and two ways to set one control is one too many.
+    // job and not a dropdown's, and two ways to set one control is one too many. The arrows
+    // either side step to the file before or after it, in the picker's own order.
+    const box = document.createElement('div');
+    box.className = 'device-file-box';
     const button = document.createElement('button');
-    button.className = 'small device-file';
+    button.className = 'device-file';
     // A loaded slot is named by the reference it was loaded from - "wt:Basic/saw.wav" - and the
     // button has room for the file, not the path. The whole of it is on the tooltip.
-    const shortName = (ref) => { const tail = ref.slice(ref.indexOf(':') + 1); return tail.slice(tail.lastIndexOf('/') + 1); };
+    // A table is named by its file alone; a sample by its pack as well, since "4" or "kick.wav"
+    // says nothing without it.
+    const shortName = (ref) => {
+      const cut = ref.indexOf(':');
+      const tail = ref.slice(cut + 1);
+      const file = tail.slice(tail.lastIndexOf('/') + 1);
+      return widget.sampleAs === 'wavetable' || cut < 0 ? file : `${ref.slice(0, cut)} \u00b7 ${file}`;
+    };
     const named = () => widget.options?.[Math.round(widget.value)] ?? 'none';
     const paint = (ref) => {
       button.textContent = shortName(ref);
       button.title = `${widget.name}: ${ref}. Click to pick another.`;
     };
     paint(named());
-    button.onclick = () => openFilePicker({
+    const source = () => ({
       kind: widget.sampleAs === 'wavetable' ? 'wavetable' : 'audio',
       pack: widget.pack ?? 'files',
       // The device's own tables, which are not files and are written by their label. Offered
       // only where there is more than one: a lone "none" is not a list to browse.
       builtIn: (widget.fixed ?? 0) > 1 ? widget.options.slice(0, widget.fixed) : [],
+    });
+    const pick = (ref) => api('POST', '/api/deviceParam', { trackId: trackLabel, slot, id: widget.id, sample: ref, commit: true })
+      .then((res) => {
+        if (res.options) widget.options = res.options;
+        widget.value = res.value;
+        paint(res.text);
+        applyDeviceFigures(res.figures);
+      })
+      .catch((e) => logLine(e.message ?? String(e), true));
+    button.onclick = () => openFilePicker({
+      ...source(),
       target: `${trackLabel} \u00b7 ${widget.name}`,
       current: named(),
-      onPick: (ref) => {
-        api('POST', '/api/deviceParam', { trackId: trackLabel, slot, id: widget.id, sample: ref, commit: true })
-          .then((res) => {
-            if (res.options) widget.options = res.options;
-            widget.value = res.value;
-            paint(res.text);
-            applyDeviceFigures(res.figures);
-          })
-          .catch((e) => logLine(e.message ?? String(e), true));
-      },
+      onPick: pick,
     });
+    const step = (by, glyph, words) => {
+      const arrow = document.createElement('button');
+      arrow.className = 'device-file-step';
+      arrow.textContent = glyph;
+      arrow.title = `${words} ${widget.sampleAs === 'wavetable' ? 'table' : 'file'}`;
+      arrow.onclick = () => neighborFileRef({ ...source(), current: named() }, by)
+        .then((ref) => { if (ref) pick(ref); })
+        .catch((e) => logLine(e.message ?? String(e), true));
+      return arrow;
+    };
+    box.append(step(-1, '\u2039', 'previous'), button, step(1, '\u203a', 'next'));
     showValue = (text) => paint(text);
     setPosition = (_position, value) => { if (Number.isFinite(value)) widget.value = value; };
-    cell.appendChild(button);
+    cell.appendChild(box);
   } else if (widget.widget === 'enum') {
     // Wider than a knob: a menu's whole job is its word, and "Str…" in a knob's width said none of it.
     cell.classList.add('device-widget-enum');
@@ -4996,7 +5094,8 @@ function deviceWidget(trackLabel, slot, widget, { bare = false } = {}) {
     showValue(res.text);
   });
 
-  if (!isNumber && !isFile) cell.appendChild(readout);
+  // A menu of shapes shows its choice, so a readout under it would say it twice.
+  if (!isNumber && !isFile && !isShape) cell.appendChild(readout);
   return cell;
 }
 
@@ -5054,6 +5153,9 @@ document.getElementById('filePickClose').onclick = hideFilePicker;
 /** The name a built-in table is written with in the code - not a file, so it carries no pack. */
 const BUILT_IN_GROUP = 'built in';
 
+/** The pack the browser build keeps the wavetable folder in (see the settings tab's wavetables). */
+const WAVETABLE_PACK = 'wt';
+
 /**
  * Every file the picker offers, as `{ ref, group, name }`.
  *
@@ -5076,6 +5178,8 @@ async function filePickEntries({ kind, pack, builtIn }) {
   // which is the same list `sp()` reads (see the sounds tab).
   const { packs } = await api('GET', '/api/samples');
   for (const p of packs ?? []) {
+    // The wavetable folder is a pack too, but a table is not something to granulate or convolve.
+    if (p.name === WAVETABLE_PACK) continue;
     for (const file of p.files ?? []) {
       const cut = file.lastIndexOf('/');
       out.push({ ref: `${p.name}:${file}`, group: cut < 0 ? p.name : `${p.name}/${file.slice(0, cut)}`, name: file.slice(cut + 1) });
@@ -5120,15 +5224,35 @@ function filePickMatching() {
   return entries.filter((e) => `${e.group}/${e.name}`.toLowerCase().includes(want));
 }
 
+/**
+ * The order the picker lists folders in: the device's own tables first, then the folders in the
+ * order a folder listing would have them - a library is organized by its paths, so sorting them
+ * IS the tree.
+ */
+const filePickFolderOrder = (a, b) => (
+  (a === BUILT_IN_GROUP ? -1 : 0) - (b === BUILT_IN_GROUP ? -1 : 0) || a.localeCompare(b)
+);
+
+/**
+ * The file before or after `current` (`by` -1 or 1) in the picker's own order - folder by folder,
+ * each folder's files as it lists them - wrapping at the ends. What a file control's arrows step
+ * through, so they walk the list the picker shows rather than some other one.
+ */
+async function neighborFileRef({ kind, pack, builtIn, current }, by) {
+  const entries = await filePickEntries({ kind, pack, builtIn });
+  if (!entries.length) return null;
+  const folders = [...new Set(entries.map((e) => e.group))].sort(filePickFolderOrder);
+  const ordered = folders.flatMap((folder) => entries.filter((e) => e.group === folder));
+  const at = ordered.findIndex((e) => e.ref === current);
+  const next = at < 0 ? (by > 0 ? 0 : ordered.length - 1) : (at + by + ordered.length) % ordered.length;
+  return ordered[next].ref;
+}
+
 function drawFilePickFolders() {
   const matching = filePickMatching();
   const counts = new Map();
   for (const e of matching) counts.set(e.group, (counts.get(e.group) ?? 0) + 1);
-  // The device's own tables first, then the folders in the order a folder listing would have
-  // them - a library is organized by its paths, so sorting them IS the tree.
-  const folders = [...counts.keys()].sort((a, b) => (
-    (a === BUILT_IN_GROUP ? -1 : 0) - (b === BUILT_IN_GROUP ? -1 : 0) || a.localeCompare(b)
-  ));
+  const folders = [...counts.keys()].sort(filePickFolderOrder);
   // A filter that matches across folders opens on the first one that still has anything in it.
   if (!folders.includes(filePicker.folder)) filePicker.folder = folders[0] ?? null;
 
@@ -5209,7 +5333,8 @@ function selectFilePick(ref) {
 /** What a table preview says under it: which frame is in front, of how many, at what length. */
 function previewNote() {
   const { preview, at } = filePicker;
-  const frame = Math.min(preview.frameCount, Math.round(at * (preview.frameCount - 1)) + 1);
+  // The frame the position has reached, as the device window counts it.
+  const frame = Math.min(preview.frameCount, Math.floor(at * (preview.frameCount - 1)) + 1);
   return `${frame} / ${preview.frameCount} · ${preview.frameLength} long`;
 }
 
@@ -5240,27 +5365,15 @@ function drawTableStack(stack, at = 0) {
   // Which frame is drawn in front. A folder is browsed to find a table with a MOVE in it, and a
   // table only ever shows that when you walk through it, so the picture takes the same drag the
   // position knob does.
-  const front = Math.round(Math.min(1, Math.max(0, at)) * (stack.length - 1));
-
-  // The room the stack leans into: a third of the height and a fifth of the width, so a table of
-  // one frame still uses the box and a table of fifty is still legible at the back.
-  const leanY = h * 0.34;
-  const leanX = w * 0.18;
-  const rowH = (h - leanY) * 0.5 - 4;
-  // Where the FRONT row's centerline goes. Measured rather than pinned to the bottom edge: the
-  // stack is as tall as the lean plus a row either side of it, and anchoring the near row at the
-  // bottom pushed half of the front frame off the canvas.
-  const base = 4 + leanY + rowH;
-  for (let i = stack.length - 1; i >= 0; i--) {
-    const t = stack.length === 1 ? 1 : i / (stack.length - 1);
-    const x0 = leanX * (1 - t);
-    const y0 = base - leanY * (1 - t);
-    const width = w - leanX;
-    const pts = stack[i].map((v, j) => [x0 + (j / (stack[i].length - 1)) * width, y0 - v * rowH]);
-    const chosen = i === front;
-    ctx.globalAlpha = chosen ? 1 : 0.12 + 0.3 * (1 - t);
-    figureStroke(ctx, pts, chosen ? c.accent : c.dim, chosen ? 1.6 : 1);
-  }
+  // The cycle at the position, blended between the two frames either side of it the way the
+  // oscillator blends them - so a drag sweeps through the table as the window's does, rather
+  // than jumping from frame to frame.
+  const frame = Math.min(1, Math.max(0, at)) * (stack.length - 1);
+  const lo = Math.floor(frame);
+  const hi = Math.min(stack.length - 1, lo + 1);
+  const mix = frame - lo;
+  const wave = stack[lo].map((v, j) => v + (stack[hi][j] - v) * mix);
+  drawTableStackWith(ctx, tableStackLayout(w, h, stack.length), stack, [lo, hi], frame, wave, c);
   ctx.globalAlpha = 1;
 }
 
@@ -18235,7 +18348,7 @@ async function readWavetables(files) {
   // Choosing a folder REPLACES what is kept rather than adding to it: a folder is the library,
   // not an installment of one. Merging instead would leave the files of an older choice behind
   // for ever, under names nothing points at any more, taking up the same room as the real ones.
-  await api('POST', '/api/files/clear', { pack: 'wt' }).catch(() => {});
+  await api('POST', '/api/files/clear', { pack: WAVETABLE_PACK }).catch(() => {});
   let kept = 0;
   let failed = 0;
   for (const file of wanted) {
@@ -18250,48 +18363,51 @@ async function readWavetables(files) {
       // Deferred: the pack's index is written and registered once, after the loop. Per file it is
       // a rewrite of the whole list, which a folder of a couple of thousand turns into minutes of
       // writing the same names over and over.
-      await api('POST', '/api/files/add', { name, bytes: await file.arrayBuffer(), pack: 'wt', defer: true });
+      await api('POST', '/api/files/add', { name, bytes: await file.arrayBuffer(), pack: WAVETABLE_PACK, defer: true });
       kept += 1;
     } catch (e) {
       failed += 1;
       logLine(`wavetables: ${file.name} - ${e.message ?? e}`, 'warn');
     }
   }
-  await api('POST', '/api/files/flush', { pack: 'wt' }).catch((e) => logLine(`wavetables: ${e.message ?? e}`, 'warn'));
+  await api('POST', '/api/files/flush', { pack: WAVETABLE_PACK }).catch((e) => logLine(`wavetables: ${e.message ?? e}`, 'warn'));
   wavetableFolderPick.disabled = false;
   await refreshWavetableFolder();
   logLine(`wavetables: kept ${kept}${failed ? `, ${failed} could not be read` : ''}`);
   if (devicePanelAt) refreshDevicePanel();
 }
 
-// The credits, in settings: the license, where the source is, and - in the browser build, whose
-// devices are compiled from other projects' code - whose each one is. The source link is here
-// and not only in the readme because a page served over a network has to offer its source to
-// whoever is using it (AGPL section 13); the device rows are the catalog's, not a list kept here.
+// The credits, behind the "about poptart" button at the foot of settings: the license, where the
+// source is, and - in the browser build, whose devices are compiled from other projects' code -
+// whose each one is. The source has to be offered to whoever is using a page served over a
+// network (AGPL section 13); the device rows are the catalog's, not a list kept here.
+const aboutPanelEl = document.getElementById('aboutPanel');
+document.getElementById('aboutOpen').onclick = () => {
+  aboutPanelEl.classList.remove('hidden');
+  bringPanelToFront(aboutPanelEl);
+};
+document.getElementById('aboutClose').onclick = () => aboutPanelEl.classList.add('hidden');
+
 (async () => {
   const licenseEl = document.getElementById('aboutLicense');
   const devicesEl = document.getElementById('aboutDevices');
   if (!licenseEl) return;
   const source = 'https://github.com/glossings/poptart';
   const link = (href, text) => `<a href="${href}" target="_blank" rel="noopener">${text}</a>`;
-  licenseEl.innerHTML = `Poptart, copyright 2026 Glossing. Free software under the ${link(`${source}/blob/main/LICENSE`, 'GNU AGPL v3')}, with no warranty. Source: ${link(source, source.replace('https://', ''))}`;
-  if (!window.__poptartHostReady) return;
-  // The browser build counts visits (see build-web.mjs, injectAnalytics), and says so where the
-  // rest of what this page is lives. The desktop app counts nothing and prints nothing here.
-  licenseEl.insertAdjacentHTML('beforeend', '<br>This site counts visits anonymously: no cookies, and nothing that identifies you. Your patterns and files stay in this browser.');
-  if (!devicesEl) return;
+  licenseEl.innerHTML = `Poptart, copyright 2026 ${link('https://glossing.dev', 'Glossing')}.<br>Free software under the ${link(`${source}/blob/main/LICENSE`, 'GNU AGPL v3')}, with no warranty.<br>Source: ${link(source, source.replace('https://', ''))}`;
+  if (!window.__poptartHostReady || !devicesEl) return;
   try {
     const about = await api('GET', '/api/about');
     const rows = (about.devices ?? []).filter((d) => d.vendor && d.vendor !== 'poptart');
     if (!rows.length) return;
     const lines = rows.map((d) => `${d.id}: ${d.license}, ${d.vendor}${d.source ? ` (${link(d.source.split(' ')[0], 'source')})` : ''}`);
-    devicesEl.innerHTML = `Devices built from other projects' code, each under its own license (${link(about.notices, 'notices')}):<br>${lines.join('<br>')}`;
+    devicesEl.innerHTML = `Imported devices (${link(about.notices, 'notices')}):<br>${lines.join('<br>')}`;
   } catch { /* the desktop has no compiled devices, and no route to ask */ }
 })();
 
 // ---------------------------------------------------------------------------------------------
-// Settings tab - your work (the browser build only). Everything this browser keeps as text, as
-// one file and back: the only way somebody takes their work off a public site with no accounts.
+// Files tab - backup (the browser build only). Everything this browser keeps, as one file and
+// back: the only way somebody takes their work off a public site with no accounts.
 // ---------------------------------------------------------------------------------------------
 
 const storeSection = document.getElementById('storeSection');
@@ -18337,6 +18453,9 @@ async function importStore(file) {
 }
 
 if (window.__poptartHostReady) {
+  // The headphone cue is the DJ desk's, and both are the desktop's alone: a row here that can
+  // only ever be disabled is a promise the page cannot keep.
+  document.getElementById('audioCueSelect')?.closest('label')?.classList.add('hidden');
   storeSection.classList.remove('hidden');
   document.getElementById('storeExport').addEventListener('click', exportStore);
   document.getElementById('storeImport').addEventListener('click', () => storeImportInput.click());
@@ -18364,7 +18483,7 @@ if (window.__poptartHostReady) {
     wavetableFolderClear.disabled = true;
     wavetableFolderNote.textContent = 'forgetting\u2026';
     try {
-      await api('POST', '/api/files/clear', { pack: 'wt' });
+      await api('POST', '/api/files/clear', { pack: WAVETABLE_PACK });
       await refreshWavetableFolder();
       wavetableFolderNote.textContent = `forgot ${kept} wavetable${kept === 1 ? '' : 's'}`;
       if (devicePanelAt) refreshDevicePanel();

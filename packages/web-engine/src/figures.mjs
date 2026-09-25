@@ -168,7 +168,7 @@ function figureData(descriptor, figure, values, opts) {
     case 'eq': return { ...common, ...eqFigure(figure, read, sampleRate, descriptor, report) };
     case 'band': return { ...common, ...bandFigure(figure, read) };
     case 'matrix': return { ...common, ...matrixFigure(figure, read) };
-    case 'sample': return { ...common, ...sampleFigure(figure, read, { waves, extras, report }) };
+    case 'sample': return { ...common, ...sampleFigure(figure, read, { waves, extras, report, shapes }) };
     case 'grain': return { ...common, ...grainFigure(figure, read, { shapes, extras }) };
     case 'meter': return { ...common, ...meterFigure(figure, read, report) };
     case 'transfer': return { ...common, ...transferFigure(figure, read, report) };
@@ -691,12 +691,13 @@ function adsrFigure(figure, read, descriptor) {
  *
  * The waveform is the outline the engine kept when the file was loaded, so this is a picture of
  * the bytes the synth has rather than of a second decode of the same file. The `grains` are the
- * processor's own report - where each sounding grain has got to and how loud its window has it -
- * because there is nothing to infer them from: a grain's start is a random draw inside the
- * spray, and a drawing of the spray band alone would be a picture of the settings rather than of
- * the cloud they are making.
+ * processor's own report - where each sounding grain starts, how far through its life it is,
+ * its pan and the stretch it plays - because there is nothing to infer them from: a grain's
+ * start is a random draw inside the spray, and a drawing of the spray band alone would be a
+ * picture of the settings rather than of the cloud they are making. The `window` is the shape
+ * each grain is drawn as, so the picture can show how loud a grain is from how far along it is.
  */
-function sampleFigure(figure, read, { waves, extras, report }) {
+function sampleFigure(figure, read, { waves, extras, report, shapes }) {
   const index = Math.round(read('sample') ?? 0);
   const held = waves?.[index] ?? null;
   const position = Math.min(1, Math.max(0, read('position') ?? 0));
@@ -714,7 +715,22 @@ function sampleFigure(figure, read, { waves, extras, report }) {
     // figure and has none to report, and "0 grains" under it was an answer to a question nobody
     // asked. An empty list is a granulator with nothing sounding, which is a different thing.
     grains: figure.params.spray ? (report?.grains ?? []) : null,
+    window: figure.params.window ? windowCurve(Math.round(read('window') ?? 0), shapes, LENS_POINTS) : null,
   };
+}
+
+/** How finely a grain's window is sampled for the lens each grain is drawn as. */
+const LENS_POINTS = 24;
+
+/** A grain window - a shipped one, or the table of a drawn one - as `n` levels across its length. */
+function windowCurve(mode, shapes, n) {
+  const drawn = shapes?.[mode] ?? null;
+  const out = new Array(n);
+  for (let i = 0; i < n; i++) {
+    const t = i / (n - 1);
+    out[i] = drawn ? drawnWindow(drawn.points, t) : grainWindow(mode, t);
+  }
+  return out;
 }
 
 /**
@@ -726,11 +742,7 @@ function sampleFigure(figure, read, { waves, extras, report }) {
 function grainFigure(figure, read, { shapes, extras }) {
   const mode = Math.round(read('shape') ?? 0);
   const drawn = shapes?.[mode] ?? null;
-  const points = new Array(ENV_POINTS);
-  for (let i = 0; i < ENV_POINTS; i++) {
-    const t = i / (ENV_POINTS - 1);
-    points[i] = { x: t, y: drawn ? drawnWindow(drawn.points, t) : grainWindow(mode, t) };
-  }
+  const points = windowCurve(mode, shapes, ENV_POINTS).map((y, i) => ({ x: i / (ENV_POINTS - 1), y }));
   return {
     shape: mode,
     size: read('size') ?? 0,

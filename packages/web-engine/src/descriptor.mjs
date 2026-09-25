@@ -28,6 +28,16 @@
 // A device we wrote can go further and declare `figures` - the pictures its panel draws, bound to
 // its own parameters - which is figures.mjs's business rather than this file's.
 
+/**
+ * The AudioParam every instrument's processor declares for the track's `.bend()`, in semitones.
+ *
+ * Not one of the descriptor's parameters: it is not a control on the device, it is the track's
+ * pitch bend, which the track wires in (see Track#setSlot) so that a bend - a value, a polled
+ * signal, or an lfo() running on the audio thread - reaches every voice as a signal rather than
+ * as a message a block at a time.
+ */
+export const TRACK_BEND_PARAM = 'track.bend';
+
 /** Parameter value curves: how a 0..1 position maps onto the parameter's real range. */
 const CURVES = new Set(['lin', 'exp', 'pow']);
 
