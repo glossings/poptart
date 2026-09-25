@@ -35,7 +35,7 @@ export const INDEX_FORMAT = 'poptart-packs-1';
  * It is one string so that moving the packs - to another CDN, to a folder on the same site, to a
  * local copy while working offline - is one edit and needs no change anywhere else.
  */
-export const DEFAULT_PACK_BASE = 'https://cdn.jsdelivr.net/gh/glossing/poptart-packs@v1';
+export const DEFAULT_PACK_BASE = 'https://cdn.jsdelivr.net/gh/glossings/poptart-packs@v1';
 
 const isText = (v) => typeof v === 'string' && v.trim().length > 0;
 

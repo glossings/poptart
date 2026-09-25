@@ -269,3 +269,14 @@ test('trimming keeps the sound and drops the silence after it', () => {
   const [out] = trim([buf]);
   assert.ok(out.length > 500 && out.length < 1200, `trimmed to ${out.length}`);
 });
+
+test('the packs repository\'s LICENSE names every source\'s own license, and refuses one it cannot state', async () => {
+  const { licenseText } = await import('./build/fetch-packs.mjs');
+  const { SOURCES } = await import('./build/packs/upstream.mjs');
+  const text = licenseText();
+  for (const s of Object.values(SOURCES)) assert.ok(text.includes(`${s.title} (${s.by}): ${s.license}`), `${s.title} is listed with its license`);
+  assert.match(text, /no single license over the repository/);
+  const mixed = licenseText({ a: { title: 'A', by: 'x', license: 'CC0-1.0' }, b: { title: 'B', by: 'y', license: 'CC-BY-4.0' } });
+  assert.doesNotMatch(mixed, /Every source is under/, 'two licenses are not summarized as one');
+  assert.throws(() => licenseText({ a: { title: 'A', by: 'x', license: 'GPL-3.0-only' } }), /LICENSE_TEXTS/);
+});

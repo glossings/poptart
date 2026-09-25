@@ -190,7 +190,7 @@ function writeReadme(dir, manifests) {
     'are redistributed under their own terms rather than under poptart\'s.',
     '',
     'Every file here is either a public domain dedication or an attribution license, and every',
-    'one records where it came from - see `CREDITS.md`, which is generated, and the `source`',
+    'one records where it came from - see `LICENSE` and `CREDITS.md`, which are generated, and the `source`',
     'field on each entry in a pack\'s `manifest.json`, which links to the file it was taken from.',
     '',
     'This folder is generated. Nothing in it should be edited by hand: run',
@@ -215,6 +215,57 @@ function writeCredits(dir, manifests) {
   for (const m of manifests) lines.push(`- ${creditLine(m)}`);
   lines.push('');
   fs.writeFileSync(path.join(dir, 'CREDITS.md'), `${lines.join('\n')}\n`);
+}
+
+/**
+ * The legal text each license a source may carry is found at. A source under any other license
+ * cannot be written into the LICENSE file, and says so rather than going in unexplained: a new
+ * kind of license is a decision (upstream.mjs admits only public domain dedications and
+ * attribution licenses), and this list is where it is recorded.
+ */
+const LICENSE_TEXTS = Object.freeze({
+  'CC0-1.0': { name: 'CC0 1.0 Universal (public domain dedication)', url: 'https://creativecommons.org/publicdomain/zero/1.0/legalcode' },
+  'CC-BY-4.0': { name: 'Creative Commons Attribution 4.0 International', url: 'https://creativecommons.org/licenses/by/4.0/legalcode' },
+});
+
+/**
+ * The packs repository's LICENSE file. There is no one license over the repository: the files
+ * are other projects' recordings, each under its source's own terms, so this names every source
+ * with its license and where the legal text is - and says in one line when they all agree.
+ */
+export function licenseText(sources = SOURCES) {
+  const list = Object.values(sources);
+  for (const s of list) {
+    if (!LICENSE_TEXTS[s.license]) throw new Error(`"${s.title}" is under ${s.license}, which the packs' LICENSE does not know how to state - add it to LICENSE_TEXTS`);
+  }
+  const kinds = [...new Set(list.map((s) => s.license))];
+  const lines = [
+    '# License',
+    '',
+    'The files in this repository are recordings made by other projects, redistributed under',
+    'each project\'s own terms. There is no single license over the repository as a whole.',
+    '',
+  ];
+  if (kinds.length === 1) {
+    const only = LICENSE_TEXTS[kinds[0]];
+    lines.push(`Every source is under ${only.name}, ${kinds[0]}:`, only.url, '');
+  }
+  lines.push('## By source', '');
+  for (const s of list) {
+    const text = LICENSE_TEXTS[s.license];
+    lines.push(`- ${s.title} (${s.by}): ${s.license}, ${text.url}`);
+  }
+  lines.push(
+    '',
+    'Who made each and where it came from is in `CREDITS.md`, and each pack\'s `manifest.json`',
+    'links every file to the original it was taken from.',
+    '',
+  );
+  return lines.join('\n');
+}
+
+function writeLicense(dir) {
+  fs.writeFileSync(path.join(dir, 'LICENSE'), licenseText());
 }
 
 // ---- entry point -------------------------------------------------------------------------------
@@ -283,6 +334,7 @@ async function main(argv) {
     fs.writeFileSync(path.join(opts.out, 'index.json'), `${JSON.stringify(buildIndex(manifests, { sizes }), null, 2)}\n`);
     writeCredits(opts.out, manifests);
     writeReadme(opts.out, manifests);
+    writeLicense(opts.out);
     log(`\nwrote ${manifests.length} packs to ${opts.out}`);
   }
 
