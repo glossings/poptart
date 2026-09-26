@@ -29,7 +29,7 @@ test('the synths and the effects land on the right side of synth() and fx()', ()
     catalog.list('fx').map((d) => d.id).sort(),
     [
       'Chorus', 'CloudSeed', 'Clouds', 'Compressor', 'Convolver', 'Crush', 'Delay', 'Distort',
-      'Ducker', 'EQ', 'Filter', 'Flanger', 'Galactic', 'GrainEcho', 'Limiter', 'Multiband',
+      'Ducker', 'EQ', 'Filter', 'Flanger', 'FreqShift', 'Galactic', 'GrainEcho', 'Limiter', 'Multiband',
       'Overdrive', 'Phaser', 'Reverb', 'Shift', 'Stutter',
     ],
   );

@@ -183,9 +183,10 @@ function defineParam(deviceId, spec, seen) {
   // and only one of them is being read, and a panel that shows both leaves somebody turning the
   // one that does nothing. `active: { param: 'sync', is: 'free' }` says which - the panel draws
   // the control only when the named parameter is on that setting, and swaps them when it moves.
+  // `is` may be a list - a waveshaper's Character knob is live on most of its curves, not one.
   const active = spec.active === undefined ? null : Object.freeze({
     param: String(spec.active.param ?? ''),
-    is: spec.active.is,
+    is: Array.isArray(spec.active.is) ? Object.freeze([...spec.active.is]) : spec.active.is,
   });
 
   // How many digits after the point the readout prints. The span says it well enough for most
@@ -420,7 +421,9 @@ export function defineDevice(spec) {
     if (!p.active) continue;
     const on = params.find((x) => x.id === p.active.param);
     if (!on) fail(id, `param "${p.id}" is active on "${p.active.param}", which this device does not have`);
-    if (argToValue(on, p.active.is) === null) fail(id, `param "${p.id}" is active on "${p.active.param}" being ${JSON.stringify(p.active.is)}, which is not one of its values`);
+    for (const is of [p.active.is].flat()) {
+      if (argToValue(on, is) === null) fail(id, `param "${p.id}" is active on "${p.active.param}" being ${JSON.stringify(is)}, which is not one of its values`);
+    }
   }
 
   // Pictures the panel draws instead of, or as well as, some of those knobs - see figures.mjs,

@@ -187,9 +187,10 @@ function defineParam(deviceId, spec, seen) {
   // and only one of them is being read, and a panel that shows both leaves somebody turning the
   // one that does nothing. `active: { param: 'sync', is: 'free' }` says which - the panel draws
   // the control only when the named parameter is on that setting, and swaps them when it moves.
+  // `is` may be a list - a waveshaper's Character knob is live on most of its curves, not one.
   const active = spec.active === undefined ? null : Object.freeze({
     param: String(spec.active.param ?? ''),
-    is: spec.active.is,
+    is: Array.isArray(spec.active.is) ? Object.freeze([...spec.active.is]) : spec.active.is,
   });
 
   // How many digits after the point the readout prints. The span says it well enough for most
@@ -424,7 +425,9 @@ function defineDevice(spec) {
     if (!p.active) continue;
     const on = params.find((x) => x.id === p.active.param);
     if (!on) fail(id, `param "${p.id}" is active on "${p.active.param}", which this device does not have`);
-    if (argToValue(on, p.active.is) === null) fail(id, `param "${p.id}" is active on "${p.active.param}" being ${JSON.stringify(p.active.is)}, which is not one of its values`);
+    for (const is of [p.active.is].flat()) {
+      if (argToValue(on, is) === null) fail(id, `param "${p.id}" is active on "${p.active.param}" being ${JSON.stringify(is)}, which is not one of its values`);
+    }
   }
 
   // Pictures the panel draws instead of, or as well as, some of those knobs - see figures.mjs,
@@ -715,7 +718,7 @@ const GALACTIC = defineDevice({
       "default": 0.5,
       "rate": "a",
       "group": "Controls",
-      "description": "How much of the reverb tail is replaced by new sound as it decays, rather than being fed back. Low keeps a long tail going; high keeps the tail following what is played into it."
+      "description": "How much of the tail is replaced by new sound as it decays. Low keeps a long tail; high makes the tail follow what is played."
     },
     {
       "id": "brightness",
@@ -735,7 +738,7 @@ const GALACTIC = defineDevice({
       "default": 0.5,
       "rate": "a",
       "group": "Controls",
-      "description": "Pitch drift inside the tail, which is what stops a very long reverb ringing on one note. A little is a chorus on the tail; a lot is the unreal end of this device."
+      "description": "Pitch drift inside the tail. A little is a chorus on the tail; a lot is the unreal end of this device."
     },
     {
       "id": "bigness",
@@ -830,7 +833,7 @@ const CLOUDSEED = defineDevice({
       "max": 1,
       "default": 0.2346999943256378,
       "rate": "a",
-      "description": "How much the two channels are summed before the reverb. Up is a mono feed into the tank, which keeps the tail centered; down keeps the sides apart."
+      "description": "How much the two channels are summed before the reverb. Up is a mono feed, which keeps the tail centered."
     },
     {
       "id": "lowcut",
@@ -1176,7 +1179,7 @@ const CLOUDSEED = defineDevice({
       "max": 1,
       "default": 0.9759999513626099,
       "rate": "a",
-      "description": "Where the lowpass sits. Because it is inside the feedback, every pass round the tank takes more top off - so the tail gets darker as it goes rather than starting dark."
+      "description": "Where the lowpass sits. It is inside the feedback, so the tail darkens as it goes."
     },
     {
       "id": "lowgain",
@@ -1206,7 +1209,7 @@ const CLOUDSEED = defineDevice({
       "max": 1,
       "default": 0,
       "rate": "a",
-      "description": "How different the left and right sides are. Zero is the same space in both ears; up is two related spaces, which is what makes a wide tail."
+      "description": "How different the left and right sides are. Zero is the same space in both ears; up is two related spaces."
     },
     {
       "id": "tapseed",
@@ -1216,7 +1219,7 @@ const CLOUDSEED = defineDevice({
       "max": 1,
       "default": 0.3339999914169312,
       "rate": "a",
-      "description": "Which random arrangement the multitap stage uses. Changing it rearranges the echoes without changing any of the settings above."
+      "description": "Which random arrangement the multitap stage uses. Rearranges the echoes without changing the settings."
     },
     {
       "id": "diffusionseed",
@@ -1309,7 +1312,7 @@ const SHIFT = defineDevice({
       "default": 8000,
       "unit": "Hz",
       "group": "Shift",
-      "description": "Above this, partials keep their own frequency rather than being transposed, which is what keeps sibilance from shifting with the note. Zero transposes everything.",
+      "description": "Above this, partials keep their own frequency rather than being transposed, which keeps sibilance in place. Zero transposes everything.",
       "rate": "k"
     }
   ]
@@ -1387,7 +1390,7 @@ const PLAITS = defineDevice({
       "max": 1,
       "default": 0.5,
       "group": "Model",
-      "description": "The first of the three model controls. Broadly: how much material there is - the number of partials, the spread of a chord, the depth of the FM. It means something different in every engine."
+      "description": "The first model control: broadly, how much material there is. Partials, chord spread, FM depth. Differs by engine."
     },
     {
       "rate": "a",
@@ -1397,7 +1400,7 @@ const PLAITS = defineDevice({
       "max": 1,
       "default": 0.5,
       "group": "Model",
-      "description": "The second model control. Broadly: brightness, or the balance of what Harmonics set up. It means something different in every engine."
+      "description": "The second model control: broadly, brightness. Differs by engine."
     },
     {
       "rate": "a",
@@ -1407,7 +1410,7 @@ const PLAITS = defineDevice({
       "max": 1,
       "default": 0.5,
       "group": "Model",
-      "description": "The third model control. Broadly: the character of the waveform itself, often from soft to hard. It means something different in every engine."
+      "description": "The third model control: broadly, the character of the waveform, soft to hard. Differs by engine."
     },
     {
       "rate": "a",
@@ -1511,7 +1514,7 @@ const RINGS = defineDevice({
       "max": 1,
       "default": 0.35,
       "group": "Resonator",
-      "description": "What the resonator IS: the ratio of its partials, from a string through a bar to a bell. This is the control that decides whether it sounds struck or bowed material."
+      "description": "The ratio of the resonator's partials, from a string through a bar to a bell."
     },
     {
       "rate": "a",
@@ -1541,7 +1544,7 @@ const RINGS = defineDevice({
       "max": 1,
       "default": 0.25,
       "group": "Resonator",
-      "description": "Where along the resonator it is struck. Near the middle is round and fundamental-heavy; near the end is thin and full of odd partials."
+      "description": "Where the resonator is struck. The middle is round; the end is thin and full of odd partials."
     },
     {
       "rate": "k",
@@ -1680,7 +1683,7 @@ const ELEMENTS = defineDevice({
       "max": 1,
       "default": 0,
       "group": "Strike",
-      "description": "Adds the module's own noise and inharmonicity to the exciters, which is what stops it sounding like a clean physical model."
+      "description": "Adds the module's own noise and inharmonicity to the exciters, so it sounds less like a clean model."
     },
     {
       "rate": "a",
@@ -1690,7 +1693,7 @@ const ELEMENTS = defineDevice({
       "max": 1,
       "default": 0.4,
       "group": "Resonator",
-      "description": "What the resonator is made of and shaped like, sweeping through plates, strings, bars and tubes. Everything else is heard through this."
+      "description": "What the resonator is made of and shaped like: plates, strings, bars, tubes."
     },
     {
       "rate": "a",
@@ -1898,7 +1901,7 @@ const CLOUDS = defineDevice({
       "max": 1,
       "default": 0.5,
       "group": "Buffer",
-      "description": "Where in the recorded buffer the grains are read from. Hold it still and the sound freezes there; sweep it and the buffer is scrubbed."
+      "description": "Where in the buffer the grains are read from. Hold it to freeze; sweep it to scrub."
     },
     {
       "rate": "a",
@@ -1980,7 +1983,7 @@ const CLOUDS = defineDevice({
       "max": 1,
       "default": 0,
       "group": "Output",
-      "description": "How much of the output is written back into the buffer, which is how a cloud builds on itself rather than only on what is played in."
+      "description": "How much of the output is written back into the buffer, so the cloud builds on itself."
     },
     {
       "rate": "a",

@@ -64,9 +64,8 @@ export function buildPanel(descriptor, values = {}, modulated = new Map(), opts 
     if (!p.active) return true;
     const on = descriptor.params.find((x) => x.id === p.active.param);
     if (!on) return true;
-    const want = argToValue(on, p.active.is);
     const has = values[on.id] === undefined ? on.default : clampParam(on, values[on.id]);
-    return Math.abs(has - want) < 1e-9;
+    return [p.active.is].flat().some((is) => Math.abs(has - argToValue(on, is)) < 1e-9);
   };
 
   const widgetFor_ = (p) => {

@@ -21,7 +21,7 @@ import { REVERB } from './src/devices/reverb.mjs';
 import { CHORUS } from './src/devices/chorus.mjs';
 import { PHASER } from './src/devices/phaser.mjs';
 import { DUCKER } from './src/devices/ducker.mjs';
-import { shape, autoGainFor } from './src/dsp/shapers.mjs';
+import { SHAPER_MODES, shape, autoGainFor } from './src/dsp/shapers.mjs';
 import { SYNC_OPTIONS } from './src/dsp/sync.mjs';
 
 const tables = sharedBuiltInTables();
@@ -579,7 +579,35 @@ test('the shaper figure is the device\'s own curve with the auto gain on it', ()
   const live = only(DISTORT, 'shaper', { mode: 1, drive: 12, autogain: 1 }, { report: { meters: { autogain: -6 } } });
   assert.ok(Math.abs(live.compDb + 6) < 1e-9);
   assert.equal(only(DISTORT, 'shaper', { autogain: 0 }).comp, 1, 'off, nothing is corrected');
-  assert.equal(subsumedParams(DISTORT).size, 0, 'the curve joins the knobs rather than replacing any');
+  assert.deepEqual([...subsumedParams(DISTORT)], ['mode'], 'the mode control heads the picture of the curve');
+});
+
+test('the shaper figure says where the signal is on the curve, while the device reports', () => {
+  assert.equal(only(DISTORT, 'shaper').level, null, 'stopped, there is no signal to place');
+  const live = only(DISTORT, 'shaper', {}, { report: { meters: { autogain: 0, level: 0.35 } } });
+  assert.equal(live.level, 0.35);
+  assert.equal(only(DISTORT, 'shaper', {}, { report: { meters: { autogain: 0, level: 7 } } }).level, 1, 'clipped to the axis');
+});
+
+test('the shaper figure shows the harmonics, and opens the draw button on the curve it shows', () => {
+  const f = only(DISTORT, 'shaper', { mode: SHAPER_MODES.indexOf('asym'), drive: 6 });
+  assert.equal(f.harmonics.length, 7);
+  assert.ok(f.harmonics[0] > -40, 'asym makes a real second harmonic');
+  assert.equal(f.shapeParam, 'mode');
+  assert.match(f.data, /^0,[\d.]+( [\d.]+,[\d.]+){4}$/, 'the curve as five breakpoints, 0..1 both ways');
+  assert.deepEqual(f.shapeAxes, { x: 'level in', y: 'level out' });
+  assert.deepEqual(Object.keys(f.builtIns), [...SHAPER_MODES], 'every shipped curve, to copy from');
+  assert.equal(f.builtIns.hard, '0,0 0.25,0.25 0.5,0.5 0.75,0.75 1,1', 'hard clipping at no drive is the diagonal: nothing reaches the ceiling');
+});
+
+test('a drawn curve is drawn from the table the device plays', () => {
+  const drawnMode = SHAPER_MODES.length;
+  const points = Array.from({ length: 256 }, (_, i) => 1 - i / 255); // an inverter
+  const f = only(DISTORT, 'shaper', { mode: drawnMode, drive: 0, autogain: 0 }, { shapes: { [drawnMode]: { name: 'grit', points } } });
+  assert.equal(f.modeName, 'grit', 'named after its definition');
+  assert.equal(f.data, 'grit');
+  assert.ok(Math.abs(f.points[0].y - 1) < 1e-6);
+  assert.ok(Math.abs(f.points[f.points.length - 1].y + 1) < 1e-6);
 });
 
 test('the echoes figure walks the delay\'s own feedback path', () => {

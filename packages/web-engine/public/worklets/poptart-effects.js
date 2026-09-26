@@ -187,9 +187,10 @@ function defineParam(deviceId, spec, seen) {
   // and only one of them is being read, and a panel that shows both leaves somebody turning the
   // one that does nothing. `active: { param: 'sync', is: 'free' }` says which - the panel draws
   // the control only when the named parameter is on that setting, and swaps them when it moves.
+  // `is` may be a list - a waveshaper's Character knob is live on most of its curves, not one.
   const active = spec.active === undefined ? null : Object.freeze({
     param: String(spec.active.param ?? ''),
-    is: spec.active.is,
+    is: Array.isArray(spec.active.is) ? Object.freeze([...spec.active.is]) : spec.active.is,
   });
 
   // How many digits after the point the readout prints. The span says it well enough for most
@@ -424,7 +425,9 @@ function defineDevice(spec) {
     if (!p.active) continue;
     const on = params.find((x) => x.id === p.active.param);
     if (!on) fail(id, `param "${p.id}" is active on "${p.active.param}", which this device does not have`);
-    if (argToValue(on, p.active.is) === null) fail(id, `param "${p.id}" is active on "${p.active.param}" being ${JSON.stringify(p.active.is)}, which is not one of its values`);
+    for (const is of [p.active.is].flat()) {
+      if (argToValue(on, is) === null) fail(id, `param "${p.id}" is active on "${p.active.param}" being ${JSON.stringify(is)}, which is not one of its values`);
+    }
   }
 
   // Pictures the panel draws instead of, or as well as, some of those knobs - see figures.mjs,
@@ -1375,34 +1378,16 @@ class Oversampler {
 }
 
 // ---- src/dsp/shapers.mjs -----------------------------------------
-// Waveshapers - the eleven curves behind the one Distort device.
+// Waveshapers - the curves behind the one Distort device.
 //
 // One device with a mode switch rather than eleven devices, because they all want the same
 // things around them: drive into the curve, bias to push it off center, a tone control after
 // it, a dry/wet and an output trim. Splitting them up would be eleven copies of that plumbing
 // and eleven names to remember, and it would make A/B-ing two curves an edit rather than a knob.
 //
-// Every curve here is a PURE function of one sample. That is what lets the device oversample:
-// run the same function at four times the rate and the harmonics it generates above the
-// original Nyquist rate are filtered off rather than folded back down. Two of the modes are not
-// pure in that sense, and they are
-// marked so the device runs them at the real rate, where they mean something.
-
-/** Mode names, in panel order. The index is what the descriptor's enum stores in a song. */
-const SHAPER_MODES = Object.freeze([
-  'soft', 'hard', 'fold', 'sine', 'asym', 'tube', 'diode', 'westcoast', 'cheby',
-]);
-
-const SHAPER_INDEX = Object.freeze(
-  SHAPER_MODES.reduce((acc, name, i) => { acc[name] = i; return acc; }, Object.create(null)),
-);
-
-/**
- * Every mode here is a curve, and so can be oversampled. It was not always: bit crushing and
- * downsampling lived here too and had to be exempted, which is half of why they are their own
- * device now (see devices/crush.mjs). The flag stays because the oversampler asks.
- */
-const IS_CURVE = Object.freeze(SHAPER_MODES.map(() => true));
+// Every curve is a PURE function of one sample, which is what lets the device oversample: the
+// same curve at four times the rate, and the harmonics it makes above the original Nyquist rate
+// are filtered off rather than folded back down.
 
 const clamp1 = (x) => (x < -1 ? -1 : x > 1 ? 1 : x);
 
@@ -1418,126 +1403,294 @@ function foldTriangle(x) {
   return 1 - Math.abs(p * 4 - 2);
 }
 
+// ---------------------------------------------------------------------------------------------
+// The curves.
+//
+// The first nine are the ones Distort shipped with in 0.2.0, in the same order; the rest are
+// appended after them, since an index is what a saved song holds. Most of them take a CHARACTER, 0..1, read from one knob the device
+// shares across all of them: the asymmetry of asym, the number of steps in stairs, which harmonic
+// cheby adds, and so on. One knob rather than one per curve so that whatever drives it - an lfo,
+// an automation lane - goes on driving it when the curve changes. At 0.5 every curve that had a
+// fixed version of it sounds as it did.
+//
+// A curve earns a place by changing the sound of ANY signal put through it - a chord through a
+// reverb as much as a clean mono line. Curves that only showed on particular material (an
+// octave divider, slew limiting, hysteresis, a level-gated fuzz, crossover, a power curve that
+// was soft with a harder knee) were tried and taken out for sounding like soft on most of it.
+//
+// Past the named modes, a mode is a curve somebody DREW (see the descriptor's `takes: 'shape'`):
+// a table the engine sampled from breakpoints, read here from -1 to 1 on both axes.
+// ---------------------------------------------------------------------------------------------
+
+const SHAPER_MODES = Object.freeze([
+  'soft', 'hard', 'fold', 'sine', 'asym', 'tube', 'diode', 'westcoast', 'cheby',
+  'rectify', 'stairs', 'harmonics', 'wrap', 'bitflip', 'chaos',
+]);
+
+const SHAPER_INDEX = Object.freeze(
+  SHAPER_MODES.reduce((acc, name, i) => { acc[name] = i; return acc; }, Object.create(null)),
+);
+
+/** Every mode is played sample by sample in order, so all of them can be oversampled. */
+const IS_CURVE = Object.freeze(SHAPER_MODES.map(() => true));
+
+/** The curves the Character knob does something to; on the rest it is hidden and ignored. */
+const TAKES_CHARACTER = Object.freeze(SHAPER_MODES.filter((name) => !['hard', 'fold', 'sine'].includes(name)));
+
+/**
+ * Which modes put an offset on their output by their own shape. Version 2 blocks DC on every
+ * curve anyway; this says which ones would need it.
+ */
+const ASYMMETRIC = Object.freeze(SHAPER_MODES.map((name) =>
+  ['asym', 'tube', 'diode', 'rectify', 'harmonics', 'bitflip', 'chaos'].includes(name)));
+
+/** Which harmonic cheby adds at a character: the 2nd at 0.5, the 8th at 1. */
+const chebyHarmonic = (c) => 1 + Math.round(7 * Math.pow(Math.min(1, Math.max(0, c)), 2.5));
+
+/**
+ * The whole-number setting a character picks on the curves where it moves in steps - cheby's
+ * harmonic, bitflip's mask - or null where it moves smoothly. A change in it is
+ * a change of curve, and the device crossfades it like one rather than cutting over mid-wave.
+ */
+function characterStep(mode, c) {
+  const k = Math.min(1, Math.max(0, Number.isFinite(c) ? c : 0.5));
+  if (mode === SHAPER_INDEX.cheby) return chebyHarmonic(k);
+  if (mode === SHAPER_INDEX.bitflip) return Math.round(k * 126);
+  return null;
+}
+
+/** Chebyshev polynomial T_n at t, for t in -1..1. */
+function chebyshev(n, t) {
+  let a = 1;
+  let b = t;
+  if (n === 0) return a;
+  for (let k = 2; k <= n; k++) { const c = 2 * t * b - a; a = b; b = c; }
+  return b;
+}
+
+/** A drawn transfer curve at v: the table spans -1..1 in and 0..1 (meaning -1..1) out. */
+function drawnCurve(table, v) {
+  const n = table.length;
+  const p = ((clamp1(v) + 1) / 2) * (n - 1);
+  const i = Math.floor(p);
+  const a = table[i];
+  const b = table[Math.min(n - 1, i + 1)];
+  return clamp1((a + (b - a) * (p - i)) * 2 - 1);
+}
+
+/** A soft clip with a knee as hard as `p`: 2 is close to tanh, 8 nearly a straight cut. */
+const knee = (v, p) => v / Math.pow(1 + Math.pow(Math.abs(v), p), 1 / p);
+
+/** How many stairs a side the staircase has, at full scale. The drive sets how many are crossed. */
+const STAIRS = 4;
+
 /**
  * One sample through one curve.
  *
  * `drive` is a linear gain (the device converts its dB knob before calling), `bias` shifts the
- * input before shaping - which is how the symmetric curves are made to produce even harmonics -
- * and `extra` is the one mode-specific number some curves want.
+ * input before shaping, `character` is the shared 0..1 knob (see the section note), and `table`
+ * is the drawn curve for a mode past the named ones.
  */
-function shape(x, mode, drive, bias, extra) {
+function shape(x, mode, drive, bias, character = 0.5, table = null) {
+  const c = Math.min(1, Math.max(0, Number.isFinite(character) ? character : 0.5));
   const v = x * drive + bias;
   switch (mode) {
-    // The workhorse. Rounds the peaks off rather than cutting them, so it stays musical a long
-    // way past the point where hard clipping has turned to buzz.
-    case 0: return Math.tanh(v);
+    // The workhorse, with a knee as soft or as hard as the character asks: tanh at 0.5, a gentle
+    // rational curve at 0, nearly a straight cut at 1.
+    case SHAPER_INDEX.soft:
+      return c <= 0.5
+        ? v / (1 + Math.abs(v)) + (Math.tanh(v) - v / (1 + Math.abs(v))) * (c * 2)
+        : Math.tanh(v) + (knee(v, 8) - Math.tanh(v)) * ((c - 0.5) * 2);
 
-    // A straight cut. Everything above full scale becomes full scale, which is the harshest
-    // thing here and the most useful on drums.
-    case 1: return clamp1(v);
+    // A straight cut. Everything above full scale becomes full scale: the harshest curve here,
+    // and the most useful on drums.
+    case SHAPER_INDEX.hard: return clamp1(v);
 
-    // Past full scale the signal turns round and comes back. Piling on drive walks the output
-    // up and down through the fold repeatedly, which is where the metallic, inharmonic sound
-    // comes from.
-    case 2: return foldTriangle(v);
+    // Past full scale the signal turns round and comes back; more drive walks it up and down
+    // through the fold again and again, which is where the metallic sound comes from.
+    case SHAPER_INDEX.fold: return foldTriangle(v);
 
-    // A sine as the transfer curve: smooth folding, with a gentler first fold than the triangle
-    // and a warmer result.
-    case 3: return Math.sin(v * Math.PI * 0.5);
+    // A sine as the transfer curve: smooth folding, gentler at the first fold than the triangle.
+    case SHAPER_INDEX.sine: return Math.sin(v * Math.PI * 0.5);
 
-    // Asymmetric soft clipping: the positive half is squashed harder than the negative one, so
-    // the curve produces even harmonics on its own without needing a bias.
-    case 4: return v >= 0 ? Math.tanh(v) : Math.tanh(v * 0.6) * 0.8;
+    // Soft clipping squashed harder one way than the other: symmetric at 0, the negative half
+    // nearly flattened at 1 - which walks from odd harmonics towards a half-wave's even ones.
+    case SHAPER_INDEX.asym:
+      return v >= 0 ? Math.tanh(v) : Math.tanh(v * (1 - 0.8 * c)) * (1 - 0.4 * c);
 
-    // A valve-ish curve: soft in the middle, a long shoulder one way and a harder knee the
-    // other. The asymmetry puts a second harmonic under everything, which is the part people
-    // mean by warmth.
-    case 5: {
-      if (v >= 0) return 1 - Math.exp(-v);
-      return -1 + Math.exp(v * 0.7);
+    // A valve-ish curve: a long shoulder one way and a harder knee the other, more lopsided as
+    // the character rises.
+    case SHAPER_INDEX.tube:
+      return v >= 0 ? 1 - Math.exp(-v) : -1 + Math.exp(v * (1 - 0.6 * c));
+
+    // One silicon diode one way and a stack the other: nearly straight up to the knee and then a
+    // hard bend onto a ceiling. The character sets how much lower the positive ceiling sits.
+    case SHAPER_INDEX.diode: {
+      const ceiling = v >= 0 ? 1 - 0.76 * c : 1;
+      return v / Math.pow(1 + Math.pow(Math.abs(v) / ceiling, 6), 1 / 6);
     }
 
-    // A pair of diodes to ground: almost nothing happens below the forward voltage and the
-    // curve bends sharply above it. The knee is what makes it sound like a pedal.
-    case 6: {
-      const knee = 0.35;
-      const a = Math.abs(v);
-      if (a <= knee) return v;
-      const over = a - knee;
-      return Math.sign(v) * (knee + (1 - knee) * Math.tanh(over / (1 - knee)));
+    // Two folds in series; the character is the gain between them, 1 to 2.
+    case SHAPER_INDEX.westcoast: {
+      const g = 1 + c;
+      return foldTriangle(foldTriangle(v * g) * g + bias * 0.5);
     }
 
-    // Two folds in series, each driven into the next, which is the west-coast arrangement: the
-    // second stage folds what the first already folded, so the series it generates is far denser
-    // than one fold at the same drive.
-    //
-    // The offset between the stages is the BIAS and nothing else. A fixed offset here - which is
-    // the obvious way to write it - makes the mode asymmetric even with the bias at zero, so it
-    // puts a constant on its output and shifts a quiet signal off center whatever the settings
-    // say. Driven by the bias, the curve stays odd until somebody asks for it not to be.
-    //
-    // It has real gain inside it, so it is louder than the other curves at the same drive. That
-    // is the shape doing its job, and the auto-gain control is what evens it out.
-    case 7: {
-      const stage = foldTriangle(v * 1.5);
-      return foldTriangle(stage * 1.5 + bias * 0.5);
+    // One chosen harmonic: the second at 0.5, up to the eighth at 1 (the curve is steep so the
+    // musical low ones get most of the travel). Less its value at silence, which is -1, 0 or +1 by
+    // harmonic: left in, turning the knob across harmonics jumped the output by that much, and a
+    // DC blocker passes a jump straight through - a pop on every step, heard even on silence.
+    case SHAPER_INDEX.cheby: {
+      const n = chebyHarmonic(c);
+      return Math.cos(n * Math.acos(clamp1(v))) - Math.cos(n * Math.PI / 2);
     }
 
-    // A Chebyshev polynomial adds one chosen harmonic rather than a whole series, so it can
-    // pitch the signal up an octave or a fifth without the buzz a clipper would bring. `extra`
-    // picks which harmonic, and the input is clipped first because the polynomials only behave
-    // inside the unit interval.
-    case 8: {
-      const n = Math.max(1, Math.min(8, Math.round(extra)));
-      const t = clamp1(v);
-      return Math.cos(n * Math.acos(clamp1(t)));
+    // Rectification, from none through a half-wave (0.5, every even harmonic) to a full-wave (1,
+    // a sine comes out an octave up).
+    case SHAPER_INDEX.rectify: {
+      const u = Math.tanh(v);
+      if (u >= 0) return u;
+      return c <= 0.5 ? u * (1 - 2 * c) : -u * (2 * c - 1);
+    }
+
+    // A staircase, four stairs a side (the drive sets how many a signal crosses). The character
+    // is the shape of each stair: smooth sine stairs at 0, rounded treads with no jumps at all;
+    // hard stairs at 0.5, flat treads and square edges; diagonal at 1, every stair sloped and a
+    // jump at each edge, so nothing is flat and a quiet signal still passes. (Smooth stairs as the
+    // default rounded off so much that at ordinary drive it came out close to hard clipping.)
+    case SHAPER_INDEX.stairs: {
+      const t = clamp1(v) * STAIRS;
+      const hard = Math.round(t);
+      const diagonal = hard + (t - hard) * 0.5;
+      const smooth = t - Math.sin(2 * Math.PI * t) / (2 * Math.PI);
+      const y = c <= 0.5 ? smooth + (hard - smooth) * (c * 2) : hard + (diagonal - hard) * ((c - 0.5) * 2);
+      return y / STAIRS;
+    }
+
+    // A blend of Chebyshev harmonics that the drive walks through, one more per six decibels, the
+    // second to the eighth. The character tilts them: dark at 0, each 1/k at 0.5, all equal at 1.
+    // Each is taken less its value at silence, so the blend adds overtones and not an offset - an
+    // offset the level correction counted as loudness and the DC blocker then took away, which is
+    // what made this mode sound quiet at every drive.
+    case SHAPER_INDEX.harmonics: {
+      const t = clamp1(x + bias);
+      const reach = Math.log2(Math.max(1, drive));
+      const tilt = 2 - 2 * c;
+      let y = t;
+      let norm = 1;
+      for (let k = 2; k <= 8; k++) {
+        const w = Math.min(1, Math.max(0, reach - (k - 2))) / Math.pow(k, tilt);
+        if (w === 0) break;
+        y += w * (chebyshev(k, t) - chebyshev(k, 0));
+        // An even term less its value at silence swings twice as far - it counts double.
+        norm += k % 2 === 0 ? 2 * w : w;
+      }
+      return y / norm;
+    }
+
+    // Integer overflow: past full scale the signal comes back in from the other side, the way a
+    // digital sum wraps - a tear, not a fold. The character is how hard the tear is: at 1 it is a
+    // sheer drop, the harshest sound here; lower, the drop is a steep slope that starts earlier,
+    // and at 0 it is a slope as long as the rise - a fold, at half scale. Below the tear the signal is
+    // untouched, so the drive decides how often it wraps and the character what the wrap sounds
+    // like - where a shrinking wrap range, as it first was, was only a second drive knob.
+    case SHAPER_INDEX.wrap: {
+      const edge = 0.5 - 0.49 * c; // how much of each side the return takes, 0.5 to 0.01
+      const m = ((((v + 1) % 2) + 2) % 2) - 1; // the plain wrap, into -1..1
+      const top = 1 - edge;
+      if (m >= -top && m <= top) return m;
+      // On the return: from the top of the rise at 1 - edge, down to the bottom of the next one.
+      const along = m > 0 ? m - top : m + 2 - top;
+      return top - along * (top / edge);
+    }
+
+    // The signal's magnitude as seven bits, exclusive-ored with a mask the character sets - but
+    // only below its own top bit, so each level is scrambled within its own octave of loudness:
+    // quiet stays quiet, loud stays loud, and in between the levels are rearranged into a broken,
+    // digital buzz no analog circuit makes. 0 is plain 8-bit. (Flipping the whole word turned
+    // silence, which sits at the middle of it, into full scale.)
+    case SHAPER_INDEX.bitflip: {
+      const m = Math.round(Math.abs(clamp1(v)) * 127);
+      if (m === 0) return 0;
+      const below = (1 << (31 - Math.clz32(m))) - 1;
+      // Over 126, not 127: at 0.5 that is 63, every bit below the top one, where 64 was above all
+      // of them and changed nothing.
+      const mask = Math.round(c * 126) & below;
+      return Math.sign(v) * ((m ^ mask) / 127);
+    }
+
+    // The logistic map, iterated: the saturated signal is the seed and the character the growth
+    // rate, 3 to 4. Low, it doubles and quadruples the waveform's turns; past about 0.57 the map
+    // is chaotic, and every input level lands somewhere unrelated to its neighbor's.
+    case SHAPER_INDEX.chaos: {
+      const r = 3 + c;
+      let u = (Math.tanh(v) + 1) / 2;
+      for (let k = 0; k < 4; k++) u = r * u * (1 - u);
+      return u * 2 - 1;
     }
 
     default:
-      return clamp1(v);
+      return table ? drawnCurve(table, v) : clamp1(v);
   }
 }
 
 /**
- * Which modes put a DC offset on their output by their own shape, and so always need blocking.
- * The rest only need it when a bias has been dialled in - and blocking a mode that does not
- * need it is not free - it is one more filter in the path of a signal that did not ask for one.
+ * How much a curve at this setting changes the level, measured rather than derived: the curve is
+ * probed with a sine and the ratio of what went in to what came out is the correction, clamped
+ * because a fold can land on a zero crossing for a whole probe and ask for hundreds. Measured on the part
+ * you hear: the probe's average is taken off first, since the device blocks it.
  */
-const ASYMMETRIC = Object.freeze(
-  SHAPER_MODES.map((_, i) => i === 4 || i === 5),
-);
-
-/**
- * How much a curve at this setting changes the level, measured rather than derived.
- *
- * The auto-gain knob is there so that turning drive up does not just turn everything up - the
- * point of a distortion is the shape it makes, and comparing two settings is impossible if one
- * is simply louder. Deriving the correction per curve would be eleven bits of algebra that go
- * stale the moment a curve is edited, so this probes the curve with a sine instead and returns
- * the ratio of what came out to what went in.
- *
- * Clamped, because a fold can land almost exactly on a zero crossing for a whole probe and ask
- * for a correction of several hundred.
- */
-function autoGainFor(mode, drive, bias, extra) {
-  const PROBES = 64;
+function autoGainFor(mode, drive, bias, character, table = null) {
+  // 256 points a cycle, not version 1's 64: a curve that throws a few sharp spikes a cycle (chaos,
+  // wrap) is measured by where the probe lands, and too coarse a probe missed most of them.
+  const PROBES = 256;
   const amplitude = 0.5;
-  let sum = 0;
-  for (let i = 0; i < PROBES; i++) {
-    const x = Math.sin((i / PROBES) * Math.PI * 2) * amplitude;
-    const y = shape(x, mode, drive, bias, extra);
-    sum += y * y;
-  }
-  const out = Math.sqrt(sum / PROBES);
+  const ys = [];
+  for (let i = 0; i < PROBES; i++) ys.push(shape(Math.sin((i / PROBES) * Math.PI * 2) * amplitude, mode, drive, bias, character, table));
+  const mean = ys.reduce((a, b) => a + b, 0) / ys.length;
+  const out = Math.sqrt(ys.reduce((a, y) => a + (y - mean) * (y - mean), 0) / ys.length);
   const inRms = amplitude / Math.SQRT2;
   if (!(out > 1e-6)) return 1;
   return Math.min(8, Math.max(0.05, inRms / out));
 }
 
+/**
+ * The harmonics a curve makes of a half-scale sine, in decibels against that sine, second to
+ * eighth. Against the INPUT, not the output's own fundamental: a curve that all but cancels the
+ * fundamental (a full-wave rectifier, a flat drawn curve) would otherwise read every harmonic as
+ * enormous. Transfer curves that look alike can sound quite different, and most of the difference
+ * is here: an even harmonic is a lean in the curve a few pixels wide, and a bar a third of the
+ * picture tall.
+ */
+function harmonicsOf(mode, drive, bias, character, table = null) {
+  const N = 256;
+  const ys = new Float64Array(N);
+  for (let i = 0; i < N; i++) ys[i] = shape(0.5 * Math.sin((2 * Math.PI * i) / N), mode, drive, bias, character, table);
+  const amp = new Float64Array(9);
+  for (let k = 1; k <= 8; k++) {
+    let re = 0;
+    let im = 0;
+    for (let i = 0; i < N; i++) {
+      const ph = (2 * Math.PI * i) / N;
+      re += ys[i] * Math.cos(k * ph);
+      im += ys[i] * Math.sin(k * ph);
+    }
+    amp[k] = Math.hypot(re, im);
+  }
+  const ref = 0.5 * (N / 2); // the input sine's own bin, at the probe's half-scale amplitude
+  return Array.from({ length: 7 }, (_, i) => 20 * Math.log10(Math.max(1e-9, amp[i + 2]) / ref));
+}
+
 // ---- src/devices/distort.mjs -------------------------------------
-// The Distort effect: nine curves behind one set of controls.
+// The Distort effect: a set of curves, and any curve drawn by hand, behind one set of controls.
 //
-// The shape of the device is the argument. Nine separate effects would each need their own
+// This is version 2. Version 1 (0.2.0) had nine curves and a cheby-only Harmonic knob; this one
+// rebuilt the diode, added twelve curves and curves you draw, and shares one Character knob
+// across them. At the default character its first nine curves null against version 1's, the
+// diode and the level correction aside. Version 1 is not kept: nothing in a song can pin a device
+// version yet, so a frozen copy would only have been code nobody could reach.
+//
+// The shape of the device is the argument. Separate effects would each need their own
 // drive, bias, tone, mix and output, and comparing two of them would mean editing the chain
 // instead of turning a knob - so they are one device with a mode, exactly the way the filter
 // modes are one filter. Bit crushing and downsampling used to be modes here and are not: they
@@ -1545,39 +1698,59 @@ function autoGainFor(mode, drive, bias, extra) {
 // no use for. They are their own device now (see crush.mjs).
 
 
+/** How many drawn curves the device holds at once, past the ones it ships with. */
+const SHAPE_SLOTS = 8;
+
+/** How long a change of curve takes to crossfade, in seconds: long enough not to click. */
+const CURVE_FADE_SEC = 0.01;
+
+
+/**
+ * The one extra control, shared by every curve that has something to vary - so whatever drives it
+ * goes on driving it when the curve changes. Hidden on the curves that ignore it.
+ */
+const CHARACTER = { id: 'character', name: 'Character', min: 0, max: 1, default: 0.5, group: 'Shape',
+  active: { param: 'mode', is: [...TAKES_CHARACTER] },
+  description: 'What varies in this curve: a knee, an asymmetry, a harmonic, the shape of a stair, the hardness of a wrap. The middle is the classic setting.' };
+
 const DISTORT = defineDevice({
   id: 'Distort',
   kind: 'fx',
-  version: 1,
+  version: 2,
   license: 'AGPL-3.0-only',
   processor: 'poptart-distort',
-  description: 'Waveshaping with nine curves, oversampled, with a tone control and a dry/wet.',
+  description: 'Waveshaping with fifteen curves or one you draw, oversampled, with a tone control and a dry/wet.',
   channels: { in: 2, out: 2 },
   params: [
-    { id: 'mode', name: 'Mode', default: 0, options: [...SHAPER_MODES], rate: 'k', group: 'Shape' },
+    { id: 'mode', name: 'Mode', default: 0, options: [...SHAPER_MODES], capacity: SHAPER_MODES.length + SHAPE_SLOTS,
+      takes: 'shape', rate: 'k', group: 'Shape',
+      description: 'The curve: one of these, or one you draw. Input across, output up.' },
     { id: 'drive', name: 'Drive', min: 0, max: 48, default: 6, unit: 'dB', curve: 'pow', curveExp: 2, group: 'Shape',
-      description: 'Level into the curve. Everything interesting happens between the curve and this, and most of it in the first twelve decibels, which is where the knob spends half its travel.' },
+      description: 'Level into the curve. Most of the change is in the first twelve decibels, which is half the knob\'s travel.' },
     { id: 'bias', name: 'Bias', min: -1, max: 1, default: 0, group: 'Shape',
-      description: 'Pushes the signal off center before shaping, which is how a symmetric curve is made to produce even harmonics. The offset it leaves behind is removed afterwards.' },
+      description: 'Pushes the signal off center before shaping, so a symmetric curve makes even harmonics. The offset is removed afterwards.' },
+    CHARACTER,
     { id: 'tone', name: 'Tone', min: 200, max: 20000, default: 20000, unit: 'Hz', curve: 'exp', group: 'Out' },
     { id: 'mix', name: 'Mix', min: 0, max: 1, default: 1, group: 'Out' },
     { id: 'output', name: 'Output', min: -24, max: 24, default: 0, unit: 'dB', group: 'Out' },
     { id: 'oversample', name: 'Oversample', default: 1, options: ['1x', '2x', '4x'], rate: 'k', group: 'Out',
-      description: 'Runs the curve at a higher rate so the harmonics it makes above the audible range are filtered off instead of folding back down.' },
+      description: 'Runs the curve at a higher rate, so harmonics above the audible range are filtered off rather than folding back down.' },
     { id: 'autogain', name: 'Auto Gain', min: 0, max: 1, default: 1, ui: 'toggle', rate: 'k', group: 'Out',
       description: 'Holds the level steady as the drive goes up, so turning it up is a change of shape rather than of volume.' },
-    { id: 'harmonic', name: 'Harmonic', min: 1, max: 8, default: 2, step: 1, rate: 'k', group: 'Shape',
-      description: 'Read by the cheby mode: which harmonic it adds. Two is an octave up, three an octave and a fifth.' },
   ],
   figures: [
     {
       id: 'curve',
       kind: 'shaper',
       group: 'Shape',
-      title: 'curve',
-      description: 'What comes out for what goes in, through the curve at this drive and bias, with the auto gain\'s correction applied - so the picture is the level you hear, and the heading says how much the auto gain is taking off. Drag up for the drive.',
-      params: { mode: 'mode', drive: 'drive', bias: 'bias', harmonic: 'harmonic', autogain: 'autogain' },
+      // No title: the curve's own name heads the picture, in the control that picks it.
+      description: 'What comes out for what goes in, at this drive and bias, with the auto gain applied. The lit stretch is where the signal is on it. Beside it, the harmonics the curve makes, second to eighth. Drag up for the drive.',
+      params: { mode: 'mode', drive: 'drive', bias: 'bias', character: 'character', autogain: 'autogain' },
       drag: { y: 'drive' },
+      // The mode control belongs ON the picture of the curve, where there is room for its name and
+      // the draw button - squeezed into a knob cell underneath it was the one control that matters
+      // most on the device and the hardest to read. As the Wavetable's table heads its picture.
+      subsumes: ['mode'],
     },
   ],
   panel: { width: 640, rows: [['Shape', 'Out']] },
@@ -1619,6 +1792,16 @@ class Channel {
 class DistortProcessor {
   constructor(sampleRate, maxBlock = 256) {
     this.sampleRate = sampleRate;
+    // Drawn curves by mode index, as the engine sampled them (see loadShape).
+    this.tables = [];
+    // A change of curve, fading in: the one before (its mode, table and gain) and how far the
+    // fade has to go, in samples.
+    this.fadeLen = Math.max(1, Math.round(CURVE_FADE_SEC * sampleRate));
+    this.fadeFrom = null;
+    this.fadeLeft = 0;
+    this.lastCurve = null;
+    // How much of the DC blocker's output is in the signal, 0..1 (see process).
+    this.dcMix = 0;
     this.channels = [new Channel(sampleRate, maxBlock), new Channel(sampleRate, maxBlock)];
     this.lastTone = -1;
     // The drive in linear gain, per sample, for a block where something is moving it: one
@@ -1629,11 +1812,21 @@ class DistortProcessor {
     // is - which is what a drive knob being dragged sounded like: the drive itself glides, and
     // the correction undoing it jumped at the block rate. Ramped across the block instead.
     this.comp = -1;
+    // The loudest input sample of the last block, for the picture: where on the curve the signal
+    // is. Read before the drive, on the curve's own input axis.
+    this.peak = 0;
   }
 
   reset() {
     for (const c of this.channels) c.reset();
     this.comp = -1;
+  }
+
+  /** Keeps a drawn curve in a mode slot, for the mode control to pick. */
+  loadShape(paramId, index, table) {
+    if (paramId !== 'mode' || !table?.length) return false;
+    this.tables[Math.max(0, Math.round(index))] = table;
+    return true;
   }
 
   /**
@@ -1644,12 +1837,18 @@ class DistortProcessor {
    * patched into one arrives.
    */
   process(inputs, outputs, count, params) {
-    const mode = Math.round(at(params.mode, 0)) | 0;
+    let mode = Math.round(at(params.mode, 0)) | 0;
+    // A drawn slot whose table has not arrived yet keeps the curve before it. The table comes by
+    // message and the control by automation, and the automation can land first: played empty, the
+    // slot was a hard clip for a block - a crack, and every harmonic at once - on every pick.
+    const named = SHAPER_MODES.length;
+    if (mode >= named && !this.tables[mode] && this.lastCurve) mode = this.lastCurve.mode;
     // 1x, 2x, 4x by option index; anything else is the setting that costs nothing.
     const factorIndex = Math.round(at(params.oversample, 0));
     const factor = factorIndex >= 2 ? 4 : factorIndex === 1 ? 2 : 1;
     const autogain = at(params.autogain, 0) >= 0.5;
-    const harmonic = Math.round(at(params.harmonic, 0));
+    // The character, read per sample so an lfo on it moves the curve smoothly.
+    const extraAt = (i) => at(params.character, i);
 
     // The drive in linear gain: once for the block when it is still, once per input sample when
     // it moves. Either way the curve reads a number rather than taking a power per call, which
@@ -1665,19 +1864,38 @@ class DistortProcessor {
     // where the last block left it - so a drive being dragged is corrected along a ramp rather
     // than in block-sized steps.
     const biasAtStart = at(params.bias, 0);
-    const extraAtStart = harmonic;
+    const extraAtStart = extraAt(count - 1);
     const driveEnd = driveMoving ? driveGain[count - 1] : driveStill;
-    const compTo = autogain ? autoGainFor(mode, driveEnd, biasAtStart, extraAtStart) : 1;
+    const table = mode >= named ? (this.tables[mode] ?? null) : null;
+    const compTo = autogain ? autoGainFor(mode, driveEnd, biasAtStart, extraAtStart, table) : 1;
     if (this.comp < 0) this.comp = compTo;
-    const compFrom = this.comp;
-    const compStep = (compTo - compFrom) / Math.max(1, count);
+    // A different curve from last block's - another mode, or a drawn one redrawn into its slot -
+    // fades in rather than cutting over. Its gain is set outright, and the outgoing curve keeps its
+    // own inside the blend, so the level does not jump either.
+    // The same for a character that moves a curve in whole steps (cheby's harmonic, the stair
+    // count): the outgoing curve is played at the character it had.
+    const step = characterStep(mode, extraAtStart);
+    const last = this.lastCurve;
+    if (last && (last.mode !== mode || last.table !== table || last.step !== step)) {
+      this.fadeFrom = { mode: last.mode, table: last.table, comp: this.comp, character: last.character };
+      this.fadeLeft = this.fadeLen;
+      this.comp = compTo;
+    }
+    this.lastCurve = { mode, table, step, character: extraAtStart };
 
-    // Only the curves that actually leave an offset get a DC blocker. Running one over the
-    // crush and downsample modes would turn their flat held steps into slopes. A Chebyshev
-    // polynomial of EVEN order is one of the curves that does: it maps silence to minus one,
-    // so at the default harmonic the mode would otherwise park its output at half scale.
-    const needsDc = (ASYMMETRIC[mode] ?? false) || biasAtStart !== 0
-      || (mode === SHAPER_INDEX.cheby && harmonic % 2 === 0);
+    // Only the curves that actually leave an offset get a DC blocker: it is a 20 Hz high-pass,
+    // and on a curve that needs none it took a decibel off a 41 Hz bass and turned its phase. An
+    // even Chebyshev harmonic needs one - it maps silence to minus one - and so does a drawn curve,
+    // which may not pass through zero.
+    const chebyN = chebyHarmonic(extraAtStart);
+    const needsDc = (ASYMMETRIC[mode] ?? true) || biasAtStart !== 0
+      || (mode === SHAPER_INDEX.cheby && chebyN % 2 === 0);
+    // The blocker runs on every sample, and its OUTPUT fades in and out as the
+    // curve needs it. Switched in cold, it came back from wherever it had last been and stepped by
+    // the offset it was tracking; warm and faded, it lands without a click.
+    const dcFrom = this.dcMix;
+    const dcTo = needsDc ? 1 : 0;
+    const dcStep = dcTo === dcFrom ? 0 : (dcTo - dcFrom) / this.fadeLen;
 
     const toneHz = at(params.tone, 0);
     if (toneHz !== this.lastTone) {
@@ -1686,8 +1904,32 @@ class DistortProcessor {
     }
 
     // One curve for the block, shared by both channels: it reads the controls by sample index.
-    const curve = (v, i) => shape(v, mode, driveAt(i), at(params.bias, i), harmonic);
+    const curve = (() => {
+      const now = (v, i) => shape(v, mode, driveAt(i), at(params.bias, i), extraAt(i), table);
+      // The auto gain is applied INSIDE the curve, per input sample, rather than to what
+      // comes out of the oversampler: that output lags its input by the filter's delay, so at a
+      // change of curve the last few samples the old curve shaped came out under the new curve's
+      // gain - a step, and at 2x a clearly audible one. In here each sample carries the gain of the
+      // curve that shaped it.
+      const from = this.fadeLeft > 0 ? this.fadeFrom : null;
+      const done = this.fadeLen - this.fadeLeft;
+      const fadeLen = this.fadeLen;
+      const gainFrom = this.comp;
+      const gainStep = (compTo - gainFrom) / Math.max(1, count);
+      const gained = (v, i) => now(v, i) * (gainFrom + gainStep * i);
+      return from
+        ? (v, i) => {
+          const t = Math.min(1, (done + i) / fadeLen);
+          // A stepped character fades from the setting it had; otherwise the outgoing curve follows
+          // the knob like the incoming one.
+          const character = characterStep(from.mode, from.character) === null ? extraAt(i) : from.character;
+          const was = shape(v, from.mode, driveAt(i), at(params.bias, i), character, from.table) * from.comp;
+          return was + (gained(v, i) - was) * t;
+        }
+        : gained;
+    })();
 
+    let peak = 0;
     for (let ch = 0; ch < outputs.length; ch++) {
       const out = outputs[ch];
       const input = inputs[Math.min(ch, inputs.length - 1)];
@@ -1695,16 +1937,21 @@ class DistortProcessor {
       c.ensure(count);
 
       if (!input) { out.fill(0, 0, count); continue; }
-      for (let i = 0; i < count; i++) c.dry[i] = input[i];
-
+      for (let i = 0; i < count; i++) {
+        c.dry[i] = input[i];
+        const a = Math.abs(input[i]);
+        if (a > peak) peak = a;
+      }
       c.over.setFactor(factor);
       c.over.process(c.dry, c.scratch, count, curve);
 
       for (let i = 0; i < count; i++) {
-        let wet = c.scratch[i] * (compFrom + compStep * i);
+        let wet = c.scratch[i];
         // A biased curve leaves an offset behind. It is inaudible on its own and costs headroom
         // on everything after it, so it comes off here rather than being somebody else's problem.
-        if (needsDc) wet = c.dc.next(wet);
+        const blocked = c.dc.next(wet);
+        const k = dcStep === 0 ? dcFrom : Math.min(1, Math.max(0, dcFrom + dcStep * (i + 1)));
+        wet += (blocked - wet) * k;
         if (toneHz < 19999) wet = c.tone.next(wet);
         const mix = Math.min(1, Math.max(0, at(params.mix, i)));
         const gain = dbToGain(at(params.output, i));
@@ -1712,16 +1959,20 @@ class DistortProcessor {
       }
       c.settle(out[count - 1]);
     }
-    // After both channels, so the pair are corrected by the same ramp.
+    // After both channels, so the pair are corrected by the same ramp and fade the same way.
     this.comp = compTo;
+    if (this.fadeLeft > 0) this.fadeLeft = Math.max(0, this.fadeLeft - count);
+    if (dcStep !== 0) this.dcMix = Math.min(1, Math.max(0, dcFrom + dcStep * count));
+    this.peak = Number.isFinite(peak) ? Math.min(1, peak) : 0;
   }
 
   /**
-   * What the auto gain is doing, in decibels, for the meter on the panel. A correction that is
-   * invisible is a correction nobody can tell from a quiet distortion.
+   * What the auto gain is doing, in decibels, for the meter on the panel - a correction that is
+   * invisible is a correction nobody can tell from a quiet distortion - and how loud the input
+   * is, so the picture can light the part of the curve the signal is on.
    */
   report() {
-    return { meters: { autogain: this.comp > 0 ? 20 * Math.log10(this.comp) : 0 } };
+    return { meters: { autogain: this.comp > 0 ? 20 * Math.log10(this.comp) : 0, level: this.peak } };
   }
 }
 
@@ -1757,7 +2008,7 @@ const CRUSH = defineDevice({
     { id: 'bits', name: 'Bits', min: 1, max: 16, default: 8, unit: 'bit', group: 'Digital',
       description: 'How many levels the signal is rounded to. Sixteen is transparent; under six is the sound of the rounding.' },
     { id: 'rate', name: 'Rate', min: 100, max: RATE_TOP, default: RATE_TOP, unit: 'Hz', curve: 'exp', group: 'Digital',
-      description: 'The rate the signal is held at. Everything above half of it folds back down as the aliasing this device is for. At the top of the range the signal is not held at all.' },
+      description: 'The rate the signal is held at. Everything above half of it folds back down as aliasing. At the top, nothing is held.' },
     { id: 'jitter', name: 'Jitter', min: 0, max: 1, default: 0, group: 'Digital',
       description: 'Wobbles the hold rate, which smears the aliasing into noise instead of leaving it as tones.' },
     { id: 'tone', name: 'Tone', min: 200, max: 20000, default: 20000, unit: 'Hz', curve: 'exp', group: 'Out',
@@ -2115,7 +2366,7 @@ const REVERB = defineDevice({
   channels: { in: 2, out: 2 },
   params: [
     { id: 'decay', name: 'Decay', min: 0.05, max: 30, default: 2, unit: 's', curve: 'exp', group: 'Room',
-      description: 'How long the tail takes to fall by sixty decibels, measured below the damping frequency. Above it the tail is shorter, as a room\'s is, so a bright hit fades sooner than the number says.' },
+      description: 'How long the tail takes to fall sixty decibels, below the damping frequency. Above it the tail is shorter.' },
     { id: 'size', name: 'Size', min: 0.05, max: 1, default: 0.7, group: 'Room',
       description: 'Scales the delay network, so a small room and a hall differ in more than their decay time.' },
     { id: 'predelay', name: 'Predelay', min: 0, max: 0.25, default: 0.01, unit: 's', group: 'Room' },
@@ -2219,7 +2470,7 @@ const FILTER = defineDevice({
   channels: { in: 2, out: 2 },
   params: [
     { id: 'mode', name: 'Mode', default: FILTER_MODES.indexOf('lowpass'), options: [...FILTER_MODES], rate: 'k',
-      description: 'The numbered modes are slopes in decibels per octave off a state-variable core. The ladder is four poles with a saturated feedback path, so at the same cutoff it sits about six decibels lower at the corner than the plain lowpass does, as a ladder does. Comb tunes a delayed copy of the signal to the cutoff; allpass is a cascade of phase turns summed back, which is a fixed phaser; formant sweeps through five vowels.' },
+      description: 'The numbered modes are slopes in decibels per octave. Ladder is a four-pole with a saturating feedback path. Comb tunes an echo to the cutoff, allpass is a fixed phaser, formant sweeps through five vowels.' },
     { id: 'cutoff', name: 'Cutoff', min: 20, max: 20000, default: 2000, unit: 'Hz', curve: 'exp' },
     { id: 'resonance', name: 'Resonance', min: 0, max: 1, default: 0.2 },
     { id: 'drive', name: 'Drive', min: 1, max: 8, default: 1, unit: 'x',
@@ -2401,7 +2652,7 @@ const DELAY = defineDevice({
       id: 'echoes',
       kind: 'echoes',
       title: 'echoes',
-      description: 'The repeats one hit makes: when each lands, on the beat grid, and how loud. Left above the line, right below; a ping-pong alternates. Drag up for the feedback.',
+      description: 'The repeats one hit makes: when each lands on the beat grid and how loud. Left above the line, right below. Drag up for the feedback.',
       params: { time: 'time', feedback: 'feedback', sync: 'sync', pingpong: 'pingpong', spread: 'spread' },
       drag: { y: 'feedback' },
     },
@@ -2516,6 +2767,9 @@ class History {
     this.keep = keep;
     this.count = 0;
     this.acc = 0;
+    // How many entries have ever been written. A lane uses it to pin each entry to the same pixel
+    // column for as long as it is on screen, so the picture moves in whole pixels as it scrolls.
+    this.written = 0;
   }
 
   push(v) {
@@ -2528,6 +2782,7 @@ class History {
     this.count = 0;
     this.buf[this.at] = this.acc;
     this.at = (this.at + 1) % this.buf.length;
+    this.written += 1;
   }
 
   /**
@@ -2686,7 +2941,7 @@ class CompressorProcessor {
       meters: {
         curve: {
           inDb: this.level, grDb: this.reduction,
-          history: { inDb: this.levels.snapshot(), grDb: this.reductions.snapshot(), blockSec: this.blockSec },
+          history: { inDb: this.levels.snapshot(), grDb: this.reductions.snapshot(), end: this.levels.written, blockSec: this.blockSec },
         },
       },
     };
@@ -2727,7 +2982,7 @@ const LIMITER = defineDevice({
       id: 'curve',
       kind: 'transfer',
       title: '',
-      description: 'What comes out for what goes in: everything above the ceiling is held to it. The dot is where the signal is on it right now, after the gain.',
+      description: 'What comes out for what goes in: everything above the ceiling is held to it. The dot is where the signal is now.',
       params: { threshold: 'ceiling', pregain: 'gain' },
     },
   ],
@@ -2805,7 +3060,7 @@ class LimiterProcessor {
       meters: {
         curve: {
           inDb: this.level, grDb: this.reduction < 1 ? 20 * Math.log10(this.reduction) : 0,
-          history: { inDb: this.levels.snapshot(), grDb: this.reductions.snapshot(), blockSec: this.blockSec },
+          history: { inDb: this.levels.snapshot(), grDb: this.reductions.snapshot(), end: this.levels.written, blockSec: this.blockSec },
         },
       },
     };
@@ -3215,7 +3470,7 @@ const CHORUS = defineDevice({
       id: 'sweep',
       kind: 'sweep',
       title: 'sweep',
-      description: 'The delay each copy is read at over one cycle of the LFO - a voice per copy, left and right apart by the spread - and where the sweep is right now. Drag up for the depth.',
+      description: 'The delay each copy is read at over one cycle of the LFO, a voice per copy, left and right apart by the spread. Drag up for the depth.',
       params: { rate: 'rate', depth: 'depth', delay: 'delay', sync: 'sync', spread: 'spread', shape: 'shape', voices: 'voices' },
       drag: { y: 'depth' },
     },
@@ -3297,7 +3552,7 @@ const FLANGER = defineDevice({
       id: 'sweep',
       kind: 'sweep',
       title: 'sweep',
-      description: 'The delay each copy is read at over one cycle of the LFO - left and right apart by the spread - and where the sweep is right now. Drag up for the depth.',
+      description: 'The delay each copy is read at over one cycle of the LFO, left and right apart by the spread. Drag up for the depth.',
       params: { rate: 'rate', depth: 'depth', delay: 'delay', sync: 'sync', spread: 'spread', shape: 'shape' },
       drag: { y: 'depth' },
     },
@@ -3385,7 +3640,7 @@ const PHASER = defineDevice({
       id: 'sweep',
       kind: 'sweep',
       title: 'sweep',
-      description: 'Where the notches are centered over one cycle of the LFO, in octaves around the center, left and right apart by the spread - and where the sweep is right now. Drag up for the depth.',
+      description: 'Where the notches sit over one cycle of the LFO, left and right apart by the spread, and where the sweep is now. Drag up for the depth.',
       params: { rate: 'rate', depth: 'depth', center: 'center', sync: 'sync', spread: 'spread' },
       drag: { y: 'depth' },
     },
@@ -3467,6 +3722,138 @@ function coefficient(hz, sampleRate) {
   const f = Math.min(sampleRate * 0.45, Math.max(10, hz));
   const t = Math.tan((Math.PI * f) / sampleRate);
   return (1 - t) / (1 + t);
+}
+
+// ---- src/devices/freqshift.mjs -----------------------------------
+// The FreqShift effect: every partial moved by the same number of hertz, rather than by the same
+// ratio the way a pitch shifter moves them.
+//
+// Adding a fixed amount to every frequency breaks the harmonic series apart - a few hertz is a
+// slow phasing wobble, tens of hertz turn a pitched sound metallic and bell-like, hundreds make
+// it clangorous. The signal is split into two copies a quarter-cycle apart at every frequency (a
+// Hilbert pair, built from two chains of allpasses) and those are ring-modulated by a sine and a
+// cosine; summing the products one way keeps only the upper sideband, the other way only the
+// lower. Feedback runs the shifted signal round again, so each pass moves it further: the
+// endlessly rising or falling spiral.
+
+
+const DIRECTIONS = Object.freeze(['up', 'down', 'split']);
+
+const FREQSHIFT = defineDevice({
+  id: 'FreqShift',
+  kind: 'fx',
+  version: 1,
+  license: 'AGPL-3.0-only',
+  processor: 'poptart-freqshift',
+  description: 'A frequency shifter: moves every partial by the same number of hertz, which makes a pitched sound inharmonic.',
+  channels: { in: 2, out: 2 },
+  params: [
+    { id: 'freq', name: 'Freq', min: 0.1, max: 5000, default: 50, unit: 'Hz', curve: 'exp',
+      description: 'How far every partial moves. A few hertz is a slow phasing wobble; tens to hundreds turn a pitched sound metallic.' },
+    { id: 'direction', name: 'Direction', default: 0, options: [...DIRECTIONS], rate: 'k',
+      description: 'Up adds the frequency and down subtracts it; split moves the left channel up and the right down.' },
+    { id: 'feedback', name: 'Feedback', min: 0, max: 0.95, default: 0,
+      description: 'Sends the shifted signal round again, so each repeat moves further: a rising or falling spiral.' },
+    { id: 'mix', name: 'Mix', min: 0, max: 1, default: 1,
+      description: 'The shifted signal against the dry one. In between, the two beat against each other.' },
+  ],
+});
+
+// Two chains of second-order allpasses whose outputs stay 90 degrees apart from about 20 Hz to
+// within a few hundred hertz of Nyquist at 44.1 and 48 kHz. Each stage is
+// y[n] = a^2 (x[n] + y[n-2]) - x[n-2]; the first chain is read one sample late.
+const CHAIN_I = [0.6923878, 0.9360654322959, 0.988229522686, 0.9987488452737].map((a) => a * a);
+const CHAIN_Q = [0.4021921162426, 0.856171088242, 0.9722909545651, 0.9952884791278].map((a) => a * a);
+
+class AllpassChain {
+  constructor(coefficients) {
+    this.k = coefficients;
+    this.x1 = new Float64Array(coefficients.length);
+    this.x2 = new Float64Array(coefficients.length);
+    this.y1 = new Float64Array(coefficients.length);
+    this.y2 = new Float64Array(coefficients.length);
+  }
+
+  reset() { this.x1.fill(0); this.x2.fill(0); this.y1.fill(0); this.y2.fill(0); }
+
+  next(x) {
+    let v = x;
+    for (let s = 0; s < this.k.length; s++) {
+      const y = this.k[s] * (v + this.y2[s]) - this.x2[s];
+      this.x2[s] = this.x1[s]; this.x1[s] = v;
+      this.y2[s] = this.y1[s]; this.y1[s] = y;
+      v = y;
+    }
+    return v;
+  }
+}
+
+/** One channel's Hilbert pair: a sample in, its in-phase and quadrature copies out. */
+class Hilbert {
+  constructor() {
+    this.i = new AllpassChain(CHAIN_I);
+    this.q = new AllpassChain(CHAIN_Q);
+    this.iLate = 0;
+  }
+
+  reset() { this.i.reset(); this.q.reset(); this.iLate = 0; }
+
+  /** Returns [inPhase, quadrature] for `x`, written into `out`. */
+  next(x, out) {
+    out[0] = this.iLate;
+    out[1] = this.q.next(x);
+    this.iLate = this.i.next(x);
+    return out;
+  }
+}
+
+class FreqShiftProcessor {
+  constructor(sampleRate) {
+    this.sampleRate = sampleRate;
+    this.pairs = [new Hilbert(), new Hilbert()];
+    this.fb = [0, 0];
+    this.phase = 0;
+    this.iq = [0, 0];
+  }
+
+  process(inputs, outputs, count, params) {
+    const inL = inputs[0];
+    const inR = inputs[1] ?? inputs[0];
+    const outL = outputs[0];
+    const outR = outputs[1] ?? outputs[0];
+    const direction = Math.round(at(params.direction, 0));
+    // +1 keeps the upper sideband, -1 the lower; split sends the two channels opposite ways.
+    const signL = direction === 1 ? -1 : 1;
+    const signR = direction === 0 ? 1 : -1;
+    const sr = this.sampleRate;
+    for (let i = 0; i < count; i++) {
+      this.phase += at(params.freq, i) / sr;
+      if (this.phase >= 1) this.phase -= Math.floor(this.phase);
+      const w = 2 * Math.PI * this.phase;
+      const c = Math.cos(w);
+      const s = Math.sin(w);
+      const feedback = at(params.feedback, i);
+      const mix = at(params.mix, i);
+      const l = inL ? inL[i] : 0;
+      const r = inR ? inR[i] : 0;
+      const wetL = this.shift(0, l, c, s * signL, feedback);
+      const wetR = this.shift(1, r, c, s * signR, feedback);
+      outL[i] = l + (wetL - l) * mix;
+      if (outR !== outL) outR[i] = r + (wetR - r) * mix;
+    }
+    if (!Number.isFinite(outL[count - 1])) {
+      for (const p of this.pairs) p.reset();
+      this.fb[0] = this.fb[1] = 0;
+    }
+  }
+
+  /** One channel, one sample: the single sideband of `x` (plus the fed-back shift) at the oscillator. */
+  shift(ch, x, c, s, feedback) {
+    const [re, im] = this.pairs[ch].next(x + this.fb[ch] * feedback, this.iq);
+    const y = re * c + im * s;
+    this.fb[ch] = Math.tanh(y);
+    return y;
+  }
 }
 
 // ---- src/dsp/adsr.mjs --------------------------------------------
@@ -3697,7 +4084,7 @@ const DUCKER = defineDevice({
     { id: 'attack', name: 'Attack', min: 0, max: 50, default: 2, unit: 'ms',
       description: 'How long the drop itself takes. A few milliseconds keeps it from clicking.' },
     { id: 'curve', name: 'Curve', min: -8, max: 8, default: 3, step: 0.5, ui: 'number', rate: 'k',
-      description: 'The shape of the recovery: positive starts slow and rises fast at the end, which is the classic pump; negative snaps back at once.' },
+      description: 'The shape of the recovery: positive starts slow and rises fast, the classic pump; negative snaps back.' },
     { id: 'threshold', name: 'Threshold', min: -60, max: 0, default: -24, unit: 'dB',
       description: 'The level a sidechained signal has to reach to trigger the dip. Notes trigger it whatever their level.' },
   ],
@@ -3706,7 +4093,7 @@ const DUCKER = defineDevice({
       id: 'dip',
       kind: 'duck',
       title: 'dip',
-      description: 'The dip over one beat, as the shape controls draw it - and, while the track plays, the last second of the signal with the gain the dip is applying laid over it, and the key that triggers it underneath. Drag up for the amount, across for the length.',
+      description: 'The dip over one beat. While the track plays: the last second of the signal, the gain over it, and the key that triggers it underneath. Drag up for the amount, across for the length.',
       params: { amount: 'amount', length: 'length', attack: 'attack', curve: 'curve', sync: 'sync', threshold: 'threshold' },
       drag: { x: 'length', y: 'amount' },
     },
@@ -3839,7 +4226,7 @@ class DuckerProcessor {
   /** The last second of the dip, the signal under it and the key driving it, for the picture. */
   report() {
     return {
-      history: { gain: this.gains.snapshot(), out: this.peaks.snapshot(), key: this.keyed ? this.keys.snapshot() : null, blockSec: this.blockSec },
+      history: { gain: this.gains.snapshot(), out: this.peaks.snapshot(), key: this.keyed ? this.keys.snapshot() : null, end: this.gains.written, blockSec: this.blockSec },
       keyed: this.keyed,
       // What is triggering it, for the picture's label: 'notes', 'audio' or 'clock'.
       trigger: this.audioKeyed ? 'audio' : this.noteRouted ? 'notes' : 'clock',
@@ -4015,7 +4402,7 @@ const MULTIBAND = defineDevice({
     group: name,
     // No title: the picture sits under the band's own heading, which has named it already.
     title: '',
-    description: 'What comes out of this band for what goes in - down from the threshold, up toward it from below. The dot is where the band is right now.',
+    description: 'What comes out of this band for what goes in. The dot is where the band is right now.',
     params: {
       threshold: `${name.toLowerCase()}.threshold`,
       ratio: `${name.toLowerCase()}.ratio`,
@@ -4141,7 +4528,7 @@ class MultibandProcessor {
     BANDS.forEach((name, b) => {
       meters[`${name.toLowerCase()}.curve`] = {
         inDb: this.levels[b], grDb: this.changes[b],
-        history: { inDb: this.levelHistory[b].snapshot(), grDb: this.changeHistory[b].snapshot(), blockSec: this.blockSec },
+        history: { inDb: this.levelHistory[b].snapshot(), grDb: this.changeHistory[b].snapshot(), end: this.levelHistory[b].written, blockSec: this.blockSec },
       };
     });
     return { meters };
@@ -4202,7 +4589,7 @@ const STUTTER = defineDevice({
       id: 'repeats',
       kind: 'repeats',
       title: 'repeats',
-      description: 'One catch and its repeats: each one as long as it plays for, at the level and the pitch it falls to, against the interval the next catch may start on.',
+      description: 'One catch and its repeats: how long each plays and how far it falls in level and pitch, against the interval the next may start on.',
       params: { grid: 'grid', repeats: 'repeats', decay: 'decay', pitch: 'pitch', interval: 'interval' },
     },
   ],
@@ -4772,6 +5159,11 @@ class EffectProcessor extends AudioWorkletProcessor {
     if (message.kind === 'noteOn') { this.fx.noteOn?.(message.note, message.velocity, message.time); return; }
     if (message.kind === 'noteOff') { this.fx.noteOff?.(message.note, message.time); return; }
     if (message.kind === 'noteRoute') { this.fx.setNoteRoute?.(!!message.on); return; }
+    // A curve somebody drew, already sampled into a table by the engine - see _loadShapeParam.
+    if (message.kind === 'shape' && typeof this.fx.loadShape === 'function') {
+      this.fx.loadShape(message.param, message.index, message.table);
+      return;
+    }
     if (message.kind === 'sample' && typeof this.fx.loadSample === 'function') {
       this.fx.loadSample(message.param, message.index, message);
     }
@@ -4796,7 +5188,7 @@ const EFFECTS = [
   [DELAY, DelayProcessor], [COMPRESSOR, CompressorProcessor], [LIMITER, LimiterProcessor],
   [EQ, EqProcessor], [CHORUS, ChorusProcessor], [FLANGER, FlangerProcessor], [PHASER, PhaserProcessor],
   [DUCKER, DuckerProcessor], [OVERDRIVE, OverdriveProcessor], [MULTIBAND, MultibandProcessor],
-  [STUTTER, StutterProcessor], [GRAINECHO, GrainEchoProcessor],
+  [STUTTER, StutterProcessor], [GRAINECHO, GrainEchoProcessor], [FREQSHIFT, FreqShiftProcessor],
 ];
 
 for (const [descriptor, Impl] of EFFECTS) {

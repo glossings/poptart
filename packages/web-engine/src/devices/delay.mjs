@@ -42,7 +42,7 @@ export const DELAY = defineDevice({
       id: 'echoes',
       kind: 'echoes',
       title: 'echoes',
-      description: 'The repeats one hit makes: when each lands, on the beat grid, and how loud. Left above the line, right below; a ping-pong alternates. Drag up for the feedback.',
+      description: 'The repeats one hit makes: when each lands on the beat grid and how loud. Left above the line, right below. Drag up for the feedback.',
       params: { time: 'time', feedback: 'feedback', sync: 'sync', pingpong: 'pingpong', spread: 'spread' },
       drag: { y: 'feedback' },
     },

@@ -54,7 +54,7 @@ export const SHIFT = defineDevice({
       "default": 8000,
       "unit": "Hz",
       "group": "Shift",
-      "description": "Above this, partials keep their own frequency rather than being transposed, which is what keeps sibilance from shifting with the note. Zero transposes everything.",
+      "description": "Above this, partials keep their own frequency rather than being transposed, which keeps sibilance in place. Zero transposes everything.",
       "rate": "k"
     }
   ]

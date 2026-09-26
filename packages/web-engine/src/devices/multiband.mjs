@@ -65,7 +65,7 @@ export const MULTIBAND = defineDevice({
     group: name,
     // No title: the picture sits under the band's own heading, which has named it already.
     title: '',
-    description: 'What comes out of this band for what goes in - down from the threshold, up toward it from below. The dot is where the band is right now.',
+    description: 'What comes out of this band for what goes in. The dot is where the band is right now.',
     params: {
       threshold: `${name.toLowerCase()}.threshold`,
       ratio: `${name.toLowerCase()}.ratio`,
@@ -191,7 +191,7 @@ export class MultibandProcessor {
     BANDS.forEach((name, b) => {
       meters[`${name.toLowerCase()}.curve`] = {
         inDb: this.levels[b], grDb: this.changes[b],
-        history: { inDb: this.levelHistory[b].snapshot(), grDb: this.changeHistory[b].snapshot(), blockSec: this.blockSec },
+        history: { inDb: this.levelHistory[b].snapshot(), grDb: this.changeHistory[b].snapshot(), end: this.levelHistory[b].written, blockSec: this.blockSec },
       };
     });
     return { meters };

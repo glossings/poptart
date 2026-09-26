@@ -141,6 +141,11 @@ const shapeDefs = makeDefRegistry({
   alsoCalls: ['grainshape'], // a grain's window is a shape too, named the same way (see lfoCallee)
   legacyCall: 'shape',
   emptyBody: '"0,0 0.5,1 1,0"',
+  // A device control that takes a curve names one with .param("Mode", "grit"), which is not a call
+  // this registry reads - so a rename carries those settings too, and a delete sees them.
+  otherRefs: (code, id) => shapeUsesOnControl(code, null, id).length,
+  otherRenameEdits: (code, from, to) => shapeRenameEdits(code, null, from, to),
+  otherRefsNoun: 'device setting',
   isData: (str) => (shapeMod ? shapeMod.looksLikeShapeData(str) : null),
   library: () => [...Object.keys(shapeMod?.SHAPE_PRESETS ?? {}), ...prPrebakeShapes],
   libraryNote: 'preset',
@@ -1447,7 +1452,8 @@ function firstStringLiteral(code, from, to) {
 // Finds an existing `.param("name", <value>)` call for `name` on `block`'s own chain and returns
 // the character range of its value argument (after the separator comma, up to the close paren), so
 // conf can overwrite the value in place instead of appending a duplicate. null if not present.
-function findParamCall(code, block, name) {
+// With a `slot`, only a call aiming at that slot counts - two devices can share a parameter name.
+function findParamCall(code, block, name, slot = null) {
   const { start: from, end: to } = block;
   const re = /\.param\s*\(/g;
   re.lastIndex = from;
@@ -1458,14 +1464,33 @@ function findParamCall(code, block, name) {
     const open = m.index + m[0].length - 1;
     const close = matchParen(code, open);
     if (close < 0 || close > to) continue;
-    const lit = firstStringLiteral(code, open + 1, close);
-    if (!lit || lit.content !== name) continue;
-    let i = lit.end;
-    while (i < close && code[i] !== ',') i++;
-    if (code[i] !== ',') continue;
-    return { valueStart: i + 1, valueEnd: close };
+    const args = paramCallArgs(code, open, close);
+    if (!args || args.name !== name) continue;
+    if (slot != null && paramSlotAt(code, m.index, args.target) !== slot) continue;
+    return { valueStart: args.valueStart, valueEnd: close };
   }
   return null;
+}
+
+/**
+ * A `.param(...)` call's arguments, in either of its forms: `.param(name, value)`, which aims at
+ * the device before it in the chain, and `.param(device, name, value)`, which aims at the one it
+ * names (see Sig#_slotFor). `target` is that device reference, or null for the first form; the
+ * value runs from `valueStart` to the close paren. null for a call whose name isn't a literal.
+ */
+function paramCallArgs(code, open, close) {
+  const inner = code.slice(open + 1, close);
+  const [first, afterFirst] = splitFirstArg(inner);
+  const [second, afterSecond] = splitFirstArg(afterFirst);
+  if (afterSecond !== '') {
+    const target = idLiteralValue(first);
+    const name = idLiteralValue(second);
+    if (target == null || name == null) return null;
+    return { target, name, value: afterSecond.trim(), valueStart: close - afterSecond.length };
+  }
+  const name = idLiteralValue(first);
+  if (name == null || afterFirst === '') return null;
+  return { target: null, name, value: afterFirst.trim(), valueStart: close - afterFirst.length };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1614,13 +1639,9 @@ function settingParamEdits(code, trackLabel, slot) {
     const open = m.index + m[0].length - 1;
     const close = matchParen(code, open);
     if (close < 0 || close > block.end) continue;
-    const lit = firstStringLiteral(code, open + 1, close);
-    if (!lit) continue;
-    let i = lit.end;
-    while (i < close && code[i] !== ',') i++;
-    if (code[i] !== ',') continue;
-    if (!isPlainSetting(code.slice(i + 1, close).trim())) continue;
-    if (presetTargetAt(code, m.index)?.slot !== slot) continue;
+    const args = paramCallArgs(code, open, close);
+    if (!args || !isPlainSetting(args.value)) continue;
+    if (paramSlotAt(code, m.index, args.target) !== slot) continue;
     edits.push([m.index, close + 1, '']);
   }
   return edits;
@@ -2059,7 +2080,7 @@ function upsertParam(trackLabel, slot, name, value) {
   const block = blockForTrack(code, trackLabel);
   if (!block) return;
   // Overwrite an existing .param() for this name, else insert one targeting the touched slot.
-  const existing = findParamCall(code, block, name);
+  const existing = findParamCall(code, block, name, slot);
   if (existing) {
     cm.replaceRange(` ${value}`, cm.posFromIndex(existing.valueStart), cm.posFromIndex(existing.valueEnd));
     return;
@@ -2294,17 +2315,20 @@ function withParamAddrs(params) {
   return params.map((p) => ({ ...p, addr: counts.get(p.name) > 1 ? `${p.name}#${p.index}` : p.name }));
 }
 
-function paramHints(cur, typed, textBefore, editor) {
+function paramHints(cur, typed, textBefore, editor, target = null) {
   // A `.param(` call targets whatever is last in the chain at that point of the method chain:
   // slot 0 (the instrument) before any .fx(), then slot 1, 2, … after each. Count `.fx(`
   // occurrences between the block start and the cursor to mirror that rule - skipping a group's
   // braces, since the chains inside them belong to the tracks nested there and the group's own
-  // slots number around them (the rule findChainCall follows too).
+  // slots number around them (the rule findChainCall follows too). A `.param("Device", "` names
+  // its device, and completes that device's parameters wherever it sits.
   const block = blockAtCursor(editor);
   const sinceBlockStart = block
     ? textBefore.slice(block.start, block.bodyStart) + (block.bodyEnd == null ? '' : textBefore.slice(block.bodyEnd))
     : textBefore;
-  const slot = (sinceBlockStart.match(/\.fx\s*\(/g) ?? []).length;
+  const slot = target != null
+    ? paramSlotAt(editor.getValue(), textBefore.length, target)
+    : (sinceBlockStart.match(/\.fx\s*\(/g) ?? []).length;
   // This track's slot; failing that, whatever is loaded at that slot anywhere.
   const entry =
     (block && chainSlots.find((s) => s.track === block.label && s.slot === slot)) ??
@@ -2320,6 +2344,19 @@ function paramHints(cur, typed, textBefore, editor) {
       (item.param.label ? ` · ${item.param.label}` : '') +
       (item.plugin ? `  (${item.plugin})` : ''),
   }));
+  // The first string can name a device instead (`.param("Filter", "Cutoff", ...)`), so the chain's
+  // devices are offered too - by label where one is given, "Name#k" where a name repeats.
+  if (target == null) {
+    const chain = chainBefore(editor.getValue(), textBefore.length);
+    const refs = chain.map((d) => {
+      if (d.name) return d.name;
+      const same = chain.filter((o) => o.plugin && d.plugin && o.plugin.toLowerCase() === d.plugin.toLowerCase());
+      return same.length > 1 ? `${d.plugin}#${same.indexOf(d) + 1}` : d.plugin;
+    }).filter(Boolean);
+    const devices = rankedMatches(refs.map((r) => ({ key: r })), typed, 20)
+      .map((item) => ({ text: item.key, displayText: `${item.key}  (device)` }));
+    completions.unshift(...devices);
+  }
   return hintResult(cur, typed, completions);
 }
 
@@ -2596,8 +2633,11 @@ function poptartHint(editor) {
   const cur = editor.getCursor();
   const before = editor.getRange(CodeMirror.Pos(0, 0), cur);
 
-  // Inside the name string of .param(" → real VST parameter names.
-  let m = before.match(/\.param\s*\(\s*["']([^"']*)$/);
+  // Inside the name string of .param(" → real VST parameter names; inside the second string of
+  // .param("Device", " → that device's.
+  let m = before.match(/\.param\s*\(\s*(["'])([^"']*)\1\s*,\s*["']([^"']*)$/);
+  if (m) return paramHints(cur, m[3], before, editor, m[2]);
+  m = before.match(/\.param\s*\(\s*["']([^"']*)$/);
   if (m) return paramHints(cur, m[1], before, editor);
 
   // Inside the name string of synth(" or .fx(" → scanned plugin names. \b instead of a literal
@@ -3150,6 +3190,7 @@ let devicePanelAt = null;
 let devicePanelRelayout = new Set();
 
 function hideDevicePanel() {
+  closeDeviceShapeList();
   devicePanelEl.classList.add('hidden');
   if (devicePanelAt) {
     const { trackLabel, slot } = devicePanelAt;
@@ -3444,9 +3485,336 @@ const AXIS_LATCH = 0.02;
  * place the panel is told what a drawn curve actually is.
  */
 function figureShapeData(paramId) {
+  return figureShapeOf(paramId)?.data ?? null;
+}
+
+/**
+ * The `.param()` calls that play shape `id` on a control called `control`, anywhere in `code`:
+ * the value is a string naming it, alone or in a pattern of names ("<grit soft>"). Each comes with
+ * where its value literal sits. These are the uses the shape registry cannot see - it knows lfo()
+ * and .grainshape() - so a device's picker checks them before a delete and carries them on a rename.
+ */
+function shapeUsesOnControl(code, control, id) { // control null: any control
+  const out = [];
+  const isCode = codeOnly(code);
+  const re = /\.param\s*\(/g;
+  let m;
+  while ((m = re.exec(code)) !== null) {
+    if (!isCode(m.index)) continue;
+    const open = m.index + m[0].length - 1;
+    const close = matchParen(code, open);
+    if (close < 0) continue;
+    const args = paramCallArgs(code, open, close);
+    if (!args || (control != null && String(args.name).toLowerCase() !== String(control).toLowerCase())) continue;
+    const lit = /^(["'])((?:\\.|(?!\1).)*)\1$/.exec(args.value);
+    if (!lit || !idsNamedIn(lit[2]).includes(id)) continue;
+    out.push({ from: code.indexOf(args.value, args.valueStart), text: args.value, quote: lit[1], body: lit[2] });
+  }
+  return out;
+}
+
+/** The edits that carry a shape rename into the `.param()` calls that play it on `control`. */
+function shapeRenameEdits(code, control, from, to) {
+  const escaped = from.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const word = new RegExp(`(^|[^\\w$])${escaped}(?![\\w$])`, 'g');
+  return shapeUsesOnControl(code, control, from)
+    .map((u) => [u.from, u.from + u.text.length, `${u.quote}${u.body.replace(word, `$1${to}`)}${u.quote}`]);
+}
+
+// The curve pickers on the open device panel, by the control they set: each re-reads the curve
+// the device is on whenever that curve's picture is redrawn.
+const deviceShapeFollowers = new Map();
+
+// The one device shape list that is open, if any: a click anywhere else closes it, as the lfo
+// panel's does. One listener for all of them, since the panel rebuilds its controls on every eval.
+let deviceShapeOpen = null;
+
+/**
+ * Takes an open device shape list off the page. It lives on the page, not in the panel (see
+ * deviceShapePicker), so nothing else takes it down: closing the panel or rebuilding it (every
+ * evaluation does) left the old picker's list up for good, pointing at a picker that was gone.
+ */
+function closeDeviceShapeList() {
+  const open = deviceShapeOpen;
+  if (!open) return;
+  deviceShapeOpen = null;
+  if (open.head.isOpen()) open.head.closePicker(false);
+  open.box.remove();
+}
+document.addEventListener('mousedown', (e) => {
+  const open = deviceShapeOpen;
+  if (open && !open.wrap.isConnected) { closeDeviceShapeList(); return; }
+  if (open?.head.isOpen() && !open.wrap.contains(e.target) && !open.box.contains(e.target)) closeDeviceShapeList();
+});
+// The list is lifted out of the panel while it is open (see deviceShapePicker), so it does not
+// scroll with it: when the name box it hangs from moves - the panel scrolled under it - it closes
+// rather than being left adrift. Only then: opening it focuses its search box, which can scroll
+// the page by a hair, and that is not a reason to shut it again.
+document.addEventListener('scroll', () => {
+  const open = deviceShapeOpen;
+  if (!open?.head.isOpen() || !open.at) return;
+  const now = open.wrap.getBoundingClientRect();
+  if (!open.wrap.isConnected || Math.abs(now.top - open.at.top) > 2 || Math.abs(now.left - open.at.left) > 2) closeDeviceShapeList();
+}, true);
+
+/**
+ * The picker a device control that takes a curve is drawn as - the waveshaper's mode, a grain's
+ * window. It is the lfo panel's own (makeNamePicker), over a list that starts with the curves the
+ * device ships with and goes on with every shape there is: this buffer's, then the library's. The
+ * lfo's time presets are left out; a swell is no use as a transfer curve.
+ *
+ * A row PLAYS that curve on the device (the lfo panel's rows open one for editing, since that
+ * panel is the editor; here the list is a selector). Typing a name that matches nothing makes a
+ * shape by that name, starting from the curve on now. ⧉ copies one - a built-in too - and plays
+ * the copy. "edit" opens the shape editor on the one playing, copying a built-in first.
+ *
+ * A device names a shape with `.param("Mode", "grit")`, which the shape registry cannot see (it
+ * knows lfo() and .grainshape()), so a rename carries those calls here, and a delete is refused
+ * while one still plays it.
+ */
+function deviceShapePicker(trackLabel, slot, widget, showValue) {
+  const builtIns = widget.options.slice(0, widget.fixed ?? widget.options.length);
+  const isBuiltIn = (id) => builtIns.includes(id);
+  const say = (text, err = false) => logLine(`${trackLabel}: ${text}`, err);
+  const figure = () => figureShapeOf(widget.id);
+  const axesOptions = () => (figure()?.shapeAxes ? { axes: figure().shapeAxes } : {});
+
+  const make = (tag, cls, text) => {
+    const el = document.createElement(tag);
+    if (cls) el.className = cls;
+    if (text != null) el.textContent = text;
+    return el;
+  };
+  const wrap = make('div', 'def-pick-wrap device-shape-pick');
+  const title = make('span', 'hidden');
+  const name = make('input', 'def-name');
+  name.type = 'text';
+  name.spellcheck = false;
+  name.placeholder = 'drawn';
+  const btn = make('button', 'small', '▾');
+  btn.title = 'find, copy or create a curve';
+  const edit = make('button', 'small device-draw', 'edit');
+  const box = make('div', 'def-picker hidden');
+  const search = make('input');
+  search.type = 'text';
+  search.spellcheck = false;
+  search.placeholder = 'curve name';
+  const list = make('div', 'def-pick-list');
+  box.append(search, list);
+  wrap.append(title, name, btn, edit, box);
+
+  /** The name the device is on: a built-in, a shape, or null for raw breakpoints in the code. */
+  const current = () => {
+    // The picture's word first: it is refreshed from the device, where this widget's value is only
+    // what the panel was built with - which after an evaluation can be the curve before a rename.
+    const f = figureShapeOf(widget.id);
+    if (f && 'curveName' in f) return f.curveName;
+    const i = Math.round(widget.value);
+    const label = widget.options[i];
+    if (label === undefined) return null;
+    if (i < builtIns.length) return label;
+    return shapeMod && !shapeMod.looksLikeShapeData(label) ? label : null;
+  };
+
+  const answer = (res) => {
+    // A pick evaluates the buffer, and the evaluation rebuilds the panel - so by the time the
+    // device answers, this picker may have been replaced by one built from the device as it was
+    // BEFORE the switch. Rebuild once more from the device as it is now, rather than updating a
+    // picker nobody can see.
+    if (!wrap.isConnected) { refreshDevicePanel(); return; }
+    if (res.options) widget.options = res.options;
+    widget.value = res.value;
+    showValue(res.text);
+    applyDeviceFigures(res.figures);
+    sync();
+  };
+  /** Puts the device on `id`, now. */
+  const setDevice = (id) => {
+    const body = isBuiltIn(id) ? { value: builtIns.indexOf(id) } : { sample: id };
+    return api('POST', '/api/deviceParam', { trackId: trackLabel, slot, id: widget.id, commit: false, ...body })
+      .then(answer)
+      .catch((e) => logLine(e.message ?? String(e), true));
+  };
+  /**
+   * Picks `id`: a curve is a NAME, and a name belongs in the code - so the pick is written as the
+   * `.param()` call, whatever conf says, and evaluated before the device is set. The other order
+   * lost: a playing pattern still said the old name and put it back on the next tick.
+   */
+  const play = (id) => {
+    upsertParam(trackLabel, slot, widget.name, JSON.stringify(id));
+    return evaluate(false).then(() => setDevice(id));
+  };
+
+  /** The breakpoints a curve is made of, where they can be read here; null for a library one. */
+  const pointsOf = (id) => {
+    if (isBuiltIn(id)) return figure()?.builtIns?.[id] ?? null;
+    const code = cm.getValue();
+    const def = shapeDefs.findDef(code, id);
+    if (!def) return null;
+    const [, rest] = splitFirstArg(code.slice(def.open + 1, def.close));
+    return idLiteralValue(rest.trim());
+  };
+  /** What a new shape starts from: the curve on now, whatever it is. */
+  const pointsNow = () => {
+    const on = current();
+    const shown = figure()?.data;
+    return (on && pointsOf(on))
+      ?? (shown && shapeMod.looksLikeShapeData(shown) ? shown : null)
+      ?? '0,0 0.5,0.5 1,1';
+  };
+
+  /**
+   * Files `points` as the shape `id`, points the device at it, and (by default) opens the editor.
+   * The name only exists once the buffer has been evaluated, so the device is set after that.
+   */
+  const makeShape = (id, points, { open = true } = {}) => {
+    const [start, end, text] = shapeDefs.defsEdit(cm.getValue(), [id], () => JSON.stringify(points));
+    cm.replaceRange(text, cm.posFromIndex(start), cm.posFromIndex(end));
+    upsertParam(trackLabel, slot, widget.name, JSON.stringify(id));
+    refoldAll();
+    evaluate(false).then(() => setDevice(id));
+    if (open) openShapeById(id, { options: axesOptions() });
+  };
+  const nameFor = (stem) => {
+    const rows = shapeDefs.allIds();
+    return freshDefId(stem.replace(/\d+$/, '') || stem, (n) => isBuiltIn(n) || rows.some((r) => r.id === n), 'shape');
+  };
+  /** A copy of `id` under the next free spelling of its name, played at once. */
+  const copy = (id, { open = true } = {}) => {
+    const points = pointsOf(id);
+    if (points == null) return shapeDefs.duplicate(id); // a library shape: its source is fetched first
+    const to = nameFor(id);
+    makeShape(to, points, { open });
+    say(`"${to}" is a copy of ${isBuiltIn(id) ? `the built-in ${id}` : `"${id}"`}`);
+  };
+
+  const deviceUses = (code, id) => shapeUsesOnControl(code, widget.name, id);
+
+  const reg = {
+    label: 'curve',
+    libraryNote: shapeDefs.libraryNote,
+    allIds: () => [
+      ...builtIns.map((id) => ({ id, scope: null, note: 'built-in', own: false })),
+      ...shapeDefs.allIds().filter((r) => !isBuiltIn(r.id) && !(r.note === shapeDefs.libraryNote && shapeMod?.SHAPE_PRESETS?.[r.id] != null)),
+    ],
+    pinState: (id, sc) => (isBuiltIn(id) ? 'none' : shapeDefs.pinState(id, sc)),
+    pin: (id, sc) => shapeDefs.pin(id, sc),
+    unpin: (id, sc) => shapeDefs.unpin(id, sc),
+    duplicate: (id) => copy(id),
+    remove: (id, sc) => {
+      if (deviceUses(cm.getValue(), id).length) return say(`can't delete "${id}": a .param("${widget.name}", …) still plays it`, true);
+      shapeDefs.remove(id, sc);
+    },
+    rename: (from, to) => {
+      if (isBuiltIn(to)) { say(`"${to}" is a built-in curve's name - pick another`, true); return sync(); }
+      // Typing over a built-in's name makes your own copy by that name, and plays it.
+      if (isBuiltIn(from)) {
+        if (DEF_ID_BAD.test(to)) { say(`a curve's name has to be one plain word - "${to}" isn't`, true); return sync(); }
+        if (shapeDefs.allIds().some((r) => r.id === to)) { say(`there is already a shape called "${to}"`, true); return sync(); }
+        const points = pointsOf(from);
+        if (points == null) return sync();
+        makeShape(to, points, { open: false });
+        say(`"${to}" is a copy of the built-in ${from}`);
+        return;
+      }
+      // The registry carries the .param() settings that name it as well (see shapeDefs).
+      shapeDefs.rename(from, to);
+    },
+  };
+
+  const head = makeNamePicker({
+    els: { wrap, title, name, btn, picker: box, search, list },
+    reg,
+    current,
+    alwaysShow: true,
+    open: (id) => play(id),
+    create: (id) => {
+      if (DEF_ID_BAD.test(id)) return say(`a curve's name has to be one plain word - "${id}" isn't`, true);
+      if (isBuiltIn(id) || shapeDefs.allIds().some((r) => r.id === id)) return play(id);
+      makeShape(id, pointsNow());
+      say(`new curve "${id}", from the one that was playing`);
+    },
+    refocus: () => {},
+  });
+
+  name.addEventListener('keydown', (e) => {
+    // ⌘/Ctrl-Enter and ⌘/Ctrl-. are the transport, and reach the page from here as from anywhere.
+    if (packTransportKey(e)) return;
+    if (e.key === 'Enter') { e.preventDefault(); name.blur(); }
+    else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); head.revertName(); name.blur(); return; }
+    e.stopPropagation();
+  });
+  name.addEventListener('blur', () => head.commitName());
+  btn.addEventListener('click', () => {
+    if (head.isOpen()) { closeDeviceShapeList(); return; }
+    // The device panel scrolls and is centered by a transform, and either clips a list hung off
+    // the name box - its bottom rows were only reachable by scrolling the panel. So the list is
+    // moved to the page while open, placed under the name box (or over it, where there is no room
+    // below), and above every panel. One at a time: an earlier picker's list, from a panel since
+    // rebuilt, is taken off the page first.
+    closeDeviceShapeList();
+    deviceShapeOpen = { head, wrap, box };
+    document.body.appendChild(box);
+    head.openPicker();
+    const at = wrap.getBoundingClientRect();
+    deviceShapeOpen.at = at;
+    const height = box.getBoundingClientRect().height;
+    const below = window.innerHeight - at.bottom;
+    box.style.position = 'fixed';
+    box.style.left = `${Math.max(8, Math.min(at.left, window.innerWidth - box.offsetWidth - 8))}px`;
+    box.style.top = `${below >= height + 12 || below >= at.top ? at.bottom + 4 : Math.max(8, at.top - height - 4)}px`;
+    box.style.zIndex = String(panelFrontZ + 1);
+  });
+  search.addEventListener('input', () => head.renderList(true));
+  search.addEventListener('keydown', (e) => {
+    if (packTransportKey(e)) return; // play and stop while browsing, as in the pack panel
+    if (e.key === 'ArrowDown') { e.preventDefault(); head.move(1); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); head.move(-1); }
+    else if (e.key === 'Enter') { e.preventDefault(); head.choose(); }
+    else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); head.closePicker(); return; }
+    e.stopPropagation();
+  });
+  edit.title = 'Edit this curve. A built-in one is copied first, under a name of its own.';
+  edit.addEventListener('click', () => {
+    const on = current();
+    if (on == null) { makeShape(nameFor(trackLabel), pointsNow()); return; }
+    if (isBuiltIn(on)) { copy(on); return; }
+    openShapeById(on, { options: axesOptions() });
+  });
+
+  function sync() {
+    head.syncHead();
+    // Built-ins can't be renamed from the box; the tooltip says what to do instead.
+    const on = current();
+    name.title = on == null ? 'raw breakpoints in the code - edit gives them a name'
+      : isBuiltIn(on) ? `${on} - built in; type a name to make your own copy` : `${on} - type to rename`;
+  }
+  // Only when the name has actually changed, and never while the list is open: the picture is
+  // redrawn many times a second while the device plays, and each resync re-rendered the open list,
+  // which scrolls its current row back into view - so scrolling away from it kept bouncing back.
+  let followed = current();
+  deviceShapeFollowers.set(widget.id, () => {
+    if (!wrap.isConnected || document.activeElement === name || head.isOpen()) return;
+    const now = current();
+    if (now === followed) return;
+    followed = now;
+    sync();
+  });
+  // Nothing is sent from here: a picker is rebuilt on every evaluation, often from a device a
+  // moment behind the code, and one that re-sent what it was built showing put the old curve back.
+  // A redrawn shape reaches the device from the engine (see refreshNamedShapes).
+  sync();
+
+  return { el: wrap, sync };
+}
+
+/** The figure that draws a drawn control's curve, if one is open. */
+function figureShapeOf(paramId) {
   for (const entry of deviceFigureEls.values()) {
     const f = entry.figure();
-    if (f.data && f.widgets?.some((w) => w.id === paramId)) return f.data;
+    // A figure that took the control over, or one that draws the curve the control picks (a
+    // waveshaper's picture is its mode's curve, and says so with `shapeParam`).
+    if ((f.data || f.builtIns) && (f.widgets?.some((w) => w.id === paramId) || f.shapeParam === paramId)) return f;
   }
   return null;
 }
@@ -3556,12 +3924,40 @@ function deviceFigure(trackLabel, slot, figure) {
         shown.inDb = entry.level;
       }
     }
+    if (current.kind === 'shaper' && current.level !== null) {
+      // The lit stretch of the curve follows the signal's peak the way the compressor's dot does:
+      // out at once, back slowly, so it reads as a level and not a flicker.
+      const level = Number(current.level);
+      entry.peak += (level - entry.peak) * (level > entry.peak ? 0.6 : 0.08);
+      shown.level = entry.peak;
+    }
+    if (current.kind === 'duck' && current.history) {
+      // The ducker's lane is scaled to its loudest: up at once, back down slowly, so the trace
+      // does not jump whenever a peak scrolls off the left.
+      const follow = (at, values) => {
+        let raw = 0.05;
+        for (const v of values) if (v > raw) raw = v;
+        return raw > at ? raw : at + (raw - at) * 0.04;
+      };
+      entry.outScale = follow(entry.outScale, current.history.out);
+      shown.outScale = entry.outScale;
+      if (current.history.key) {
+        entry.keyScale = follow(entry.keyScale, current.history.key);
+        shown.keyScale = entry.keyScale;
+      }
+    }
     readout.textContent = drawer(ctx, w, h, shown, figureColors()) ?? '';
   };
 
   const entry = {
     figure: () => current,
-    update: (next) => { current = next; paint(); },
+    update: (next) => {
+      current = next;
+      paint();
+      // A curve picker on the same device follows what the picture says it is on (see
+      // deviceShapePicker): the picture is refreshed from the device, so the name is never stale.
+      if (next.shapeParam) deviceShapeFollowers.get(next.shapeParam)?.();
+    },
     paint,
     // Where a meter on this figure has got to. A device reports the deepest gain reduction of
     // each block, thirty times a second, and a meter that followed that exactly would be a
@@ -3570,6 +3966,11 @@ function deviceFigure(trackLabel, slot, figure) {
     // And where the signal's level has got to, smoothed the same way: a dot on a curve that
     // followed every block's peak exactly would be a scribble.
     level: -120,
+    // The same for a waveshaper's input peak, 0..1 on the curve's input axis.
+    peak: 0,
+    // The ducker lane's vertical scale for the signal and for its key, smoothed the same way.
+    outScale: 0.05,
+    keyScale: 0.05,
     // Which part of a many-part figure the last gesture was on. Set by the gesture, read by the
     // drawer, and carried across repaints - a figure is rebuilt from the host on every frame of
     // a drag, so it cannot live on the figure data.
@@ -3899,6 +4300,30 @@ function adsrGrab(f, x, y, w, h) {
 
 // --- the drawers ------------------------------------------------------------------------------
 
+/**
+ * A waveshaper's harmonics, second to eighth, as bars on a decibel scale against the fundamental:
+ * 0 dB at the top, -72 at the bottom. Even ones in the accent, odd ones dimmer, because which of
+ * the two a curve makes is most of what tells two similar curves apart by ear.
+ */
+function shaperHarmonics(ctx, x0, top, width, size, harmonics, c) {
+  const FLOOR_DB = -72;
+  ctx.strokeStyle = c.grid;
+  ctx.lineWidth = 1;
+  ctx.strokeRect(x0 + 0.5, top + 0.5, width - 1, size - 1);
+  const n = harmonics.length;
+  const slot = (width - 2) / n;
+  const barW = Math.max(1, Math.floor(slot) - 2);
+  harmonics.forEach((db, i) => {
+    const share = Math.min(1, Math.max(0, (db - FLOOR_DB) / -FLOOR_DB));
+    const barH = Math.round(share * (size - 14));
+    if (barH <= 0) return;
+    const x = Math.round(x0 + 1 + i * slot + (slot - barW) / 2);
+    ctx.fillStyle = (i + 2) % 2 === 0 ? c.accent : c.dim;
+    ctx.fillRect(x, Math.round(top + size - 1 - barH), barW, barH);
+  });
+  figureLabel(ctx, 'h2-8', x0 + 3, top + 2, c.dim);
+}
+
 /** A polyline through points already in canvas coordinates. */
 function figureStroke(ctx, pts, color, width = 1.5) {
   if (pts.length < 2) return;
@@ -3922,6 +4347,48 @@ function figureFill(ctx, pts, color, baseline) {
   ctx.fillStyle = color;
   ctx.fill();
   ctx.globalAlpha = 1;
+}
+
+/**
+ * A scrolling history as one value per whole-pixel column, newest at the right.
+ *
+ * A device keeps a fixed number of entries, and drawn at their own spacing they land between
+ * pixels. Every report then moves them by a fraction of one, the anti-aliasing is worked out
+ * afresh each frame, and the lane shimmers. Here each column covers the same entries for as long
+ * as they are on screen, counted from `end` (how many entries the device has ever written), so the
+ * picture only ever moves by whole columns. A column that covers several entries keeps their
+ * largest, or their smallest with `keep` 'min', so a transient is never dropped between two; a
+ * column older than the history is null.
+ */
+function laneColumns(values, end, width, keep = 'max') {
+  const n = values.length;
+  const cols = Math.max(1, Math.floor(width));
+  const out = new Array(cols).fill(null);
+  if (n === 0) return out;
+  const last = Number.isFinite(end) && end >= n ? end : n; // one past the newest entry, absolute
+  const first = last - n;
+  const per = n / cols; // entries a column covers, on average
+  const newest = Math.floor((last - 1) / per); // the absolute column the newest entry is in
+  for (let c = 0; c < cols; c++) {
+    const col = newest - (cols - 1 - c);
+    let lo = Math.ceil(col * per);
+    let hi = Math.ceil((col + 1) * per);
+    if (hi <= lo) { lo = Math.floor(col * per); hi = lo + 1; } // a lane wider than the history
+    let v = null;
+    for (let a = Math.max(lo, first); a < Math.min(hi, last); a++) {
+      const x = values[a - first];
+      v = v === null ? x : keep === 'min' ? Math.min(v, x) : Math.max(v, x);
+    }
+    out[c] = v;
+  }
+  return out;
+}
+
+/** A column's value (from laneColumns) as a point at its center, skipping the columns with none. */
+function lanePoints(cols, x0, yOf) {
+  const pts = [];
+  cols.forEach((v, c) => { if (v !== null) pts.push([x0 + c + 0.5, yOf(v, c)]); });
+  return pts;
 }
 
 /** A curve through points, rounded at each one - for a spectrum, which is a reading, not a shape. */
@@ -4542,7 +5009,7 @@ const FIGURE_DRAWERS = {
     // The lane is what shows an attack or a release actually happening, which no curve can.
     const { lowDb, highDb } = f.range;
     const plot = Math.min(h, w);
-    const laneX = plot + FIGURE_LANE_GAP;
+    const laneX = Math.round(plot + FIGURE_LANE_GAP);
     const laneW = w - laneX;
     const clampDb = (db) => Math.min(highDb, Math.max(lowDb, db));
     const share = (db) => (clampDb(db) - lowDb) / (highDb - lowDb);
@@ -4576,22 +5043,23 @@ const FIGURE_DRAWERS = {
       ctx.strokeRect(laneX + 0.5, 0.5, laneW - 1, plot - 1);
       const hist = f.history;
       if (hist && hist.inDb.length > 1) {
-        const n = hist.inDb.length;
-        const xs = (i) => laneX + (i / (n - 1)) * laneW;
+        // One value per pixel column, pinned to its entries (see laneColumns): the lane moves in
+        // whole pixels rather than re-sampling itself every frame.
+        const inCols = laneColumns(hist.inDb, hist.end, laneW, 'max');
+        const grCols = laneColumns(hist.grDb, hist.end, laneW, 'min');
+        const inPts = lanePoints(inCols, laneX, (db) => yOf(db));
         // In, as a filled trace; out, as the line over it - the makeup is in the output and
         // nowhere else, which is where the picture puts it.
-        figureFill(ctx, hist.inDb.map((db, i) => [xs(i), yOf(db)]), c.dim, plot);
-        figureSmoothStroke(ctx, hist.inDb.map((db, i) => [xs(i), yOf(db)]), c.dim, 1);
-        figureStroke(ctx, hist.inDb.map((db, i) => [xs(i), yOf(db + hist.grDb[i] + (f.makeup ?? 0))]), c.accent, 1.25);
-        // The reduction, down from the top.
-        ctx.beginPath();
-        ctx.moveTo(xs(0), 0);
-        for (let i = 0; i < n; i++) ctx.lineTo(xs(i), (Math.max(0, -hist.grDb[i]) / (highDb - lowDb)) * plot);
-        ctx.lineTo(xs(n - 1), 0);
-        ctx.closePath();
+        figureFill(ctx, inPts, c.dim, plot);
+        figureStroke(ctx, inPts, c.dim, 1);
+        figureStroke(ctx, lanePoints(inCols, laneX, (db, i) => yOf(db + (grCols[i] ?? 0) + (f.makeup ?? 0))), c.accent, 1.25);
+        // The reduction, down from the top: a bar per column, so it has no edges to blur.
         ctx.globalAlpha = 0.75;
         ctx.fillStyle = c.warn;
-        ctx.fill();
+        grCols.forEach((gr, i) => {
+          const depth = Math.round((Math.max(0, -(gr ?? 0)) / (highDb - lowDb)) * plot);
+          if (depth > 0) ctx.fillRect(laneX + i, 0, 1, depth);
+        });
         ctx.globalAlpha = 1;
       }
       figureDashed(ctx, laneX, yOf(f.threshold), w, yOf(f.threshold), c.text);
@@ -4613,6 +5081,14 @@ const FIGURE_DRAWERS = {
   shaper(ctx, w, h, f, c) {
     const top = FIGURE_PAD_Y / 2;
     const size = Math.max(1, h - FIGURE_PAD_Y);
+    // The harmonics the curve makes, as bars beside it where the device reports them and there is
+    // room: the curve keeps the width it always had minus a fixed strip, so nothing moves as the
+    // numbers change.
+    const stripW = f.harmonics && w > size + 90 ? 70 : 0;
+    if (stripW) {
+      w -= stripW + FIGURE_LANE_GAP;
+      shaperHarmonics(ctx, Math.round(w + FIGURE_LANE_GAP), top, stripW, size, f.harmonics, c);
+    }
     const xOf = (x) => ((x + 1) / 2) * w;
     const yOf = (y) => top + ((1 - y) / 2) * size;
     ctx.strokeStyle = c.grid;
@@ -4628,10 +5104,27 @@ const FIGURE_DRAWERS = {
     const pts = f.points.map((pt) => [xOf(pt.x), yOf(pt.y)]);
     figureFill(ctx, pts, c.accent, yOf(0));
     figureStroke(ctx, pts, c.accent, 1.75);
+    // Where the signal is on the curve: the stretch between minus and plus its peak, lit, with
+    // the ends marked - the part of the shape that is being heard, and how far up the knee it
+    // reaches. Only while the device reports, so a stopped track shows the curve alone.
+    if (f.level !== null && f.level > 0.01) {
+      const lit = f.points.filter((pt) => Math.abs(pt.x) <= f.level + 1e-9).map((pt) => [xOf(pt.x), yOf(pt.y)]);
+      if (lit.length >= 2) {
+        figureStroke(ctx, lit, c.text, 2.75);
+        ctx.fillStyle = c.text;
+        for (const [px, py] of [lit[0], lit[lit.length - 1]]) {
+          ctx.beginPath();
+          ctx.arc(px, py, FIGURE_POINT_R - 1, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+    }
     const auto = f.autogain
       ? `${figurePad(`${f.compDb >= 0 ? '+' : '\u2212'}${Math.abs(f.compDb).toFixed(1)}`, 5)} dB`
       : figurePad('off', 8);
-    return `${figurePad(f.modeName, 9)} · auto ${auto}`;
+    // The mode's name is on the menu heading the picture; saying it again here only took the room
+    // the menu needs.
+    return `auto ${auto}`;
   },
 
   /**
@@ -4815,36 +5308,37 @@ const FIGURE_DRAWERS = {
     ctx.lineWidth = 1;
     ctx.strokeRect(0.5, top + 0.5, w - 1, size - 1);
     if (f.history) {
-      const { gain, out, key } = f.history;
-      const n = gain.length;
-      const xOf = (i) => (i / (n - 1)) * w;
-      let loudest = 0.05;
-      for (const v of out) if (v > loudest) loudest = v;
-      // The signal, as it comes out: a bar per block.
+      const { gain, out, key, end } = f.history;
+      // One value per pixel column, pinned to its entries (see laneColumns): the lane moves in
+      // whole pixels rather than re-sampling itself every frame.
+      const gainCols = laneColumns(gain, end, w, 'min');
+      const outCols = laneColumns(out, end, w, 'max');
+      // Scaled to the loudest, as the panel has been smoothing it (see paint): a scale that
+      // followed the lane exactly would jump every time a peak scrolled off the left.
+      const loudest = f.outScale ?? Math.max(0.05, ...out);
       ctx.fillStyle = c.dim;
       ctx.globalAlpha = 0.45;
-      const bw = Math.max(1, w / n);
-      for (let i = 0; i < n; i++) {
-        const a = out[i] / loudest;
-        ctx.fillRect(xOf(i), yOf(a), bw, yOf(0) - yOf(a));
-      }
+      const floor = Math.round(yOf(0));
+      outCols.forEach((v, i) => {
+        if (v === null) return;
+        const y = Math.round(yOf(v / loudest));
+        if (y < floor) ctx.fillRect(i, y, 1, floor - y);
+      });
       ctx.globalAlpha = 1;
       // The key and its threshold, where there is an audio key; where notes trigger it, a tick
       // at each note instead - a note has no level to cross anything with.
       if (key && f.trigger === 'notes') {
-        figureStroke(ctx, key.map((v, i) => [xOf(i), yOf(v)]), c.warn, 1);
+        figureStroke(ctx, lanePoints(laneColumns(key, end, w, 'max'), 0, (v) => yOf(v)), c.warn, 1);
         figureLabel(ctx, 'notes', 3, 2, c.warn);
       } else if (key) {
-        let loudKey = 0.05;
-        for (const v of key) if (v > loudKey) loudKey = v;
         const threshold = Math.pow(10, f.threshold / 20);
-        const scale = Math.max(loudKey, threshold * 1.25);
-        figureStroke(ctx, key.map((v, i) => [xOf(i), yOf(v / scale)]), c.warn, 1);
+        const scale = Math.max(f.keyScale ?? Math.max(0.05, ...key), threshold * 1.25);
+        figureStroke(ctx, lanePoints(laneColumns(key, end, w, 'max'), 0, (v) => yOf(v / scale)), c.warn, 1);
         figureDashed(ctx, 0, yOf(threshold / scale), w, yOf(threshold / scale), c.warn);
         figureLabel(ctx, 'key', 3, 2, c.warn);
       }
       // The gain, over everything: the dip as it is being applied.
-      figureStroke(ctx, gain.map((g, i) => [xOf(i), yOf(g)]), c.accent, 1.75);
+      figureStroke(ctx, lanePoints(gainCols, 0, (g) => yOf(g)), c.accent, 1.75);
     } else {
       // The shape over one beat, as set.
       figureDashed(ctx, 0, yOf(1 - f.amount), w, yOf(1 - f.amount), c.grid);
@@ -4882,7 +5376,8 @@ function wrappedSpans(from, to) {
  * `panel` is the model the host built from the descriptor - see web-engine's panel.mjs, which
  * decides the sections and the widget kinds and is unit-tested without a DOM.
  */
-function showDevicePanel(trackLabel, slot, panel) {
+function showDevicePanel(trackLabel, slot, panel, { raise = true } = {}) {
+  closeDeviceShapeList(); // the list belongs to the controls about to be rebuilt
   devicePanelAt = { trackLabel, slot, deviceId: panel.id };
   devicePanelRelayout = new Set(panel.relayoutOn ?? []);
   deviceTitleEl.textContent = panel.title;
@@ -4941,7 +5436,9 @@ function showDevicePanel(trackLabel, slot, panel) {
   }
 
   devicePanelEl.classList.remove('hidden');
-  bringPanelToFront(devicePanelEl);
+  // Raised when it is OPENED. A refresh (every evaluation redraws an open panel) leaves the
+  // stacking alone: the shape editor over it re-evaluates on every drag, and came out underneath.
+  if (raise) bringPanelToFront(devicePanelEl);
   startDeviceLive(trackLabel, slot, panel);
 }
 
@@ -5042,54 +5539,12 @@ function deviceWidget(trackLabel, slot, widget, { bare = false } = {}) {
       readout.textContent = `${widget.modulatedBy} · ${live.text}`;
     });
   } else if (isShape) {
-    // The shapes it ships with, and the editor. Drawing one fills a spare slot on the same list,
-    // so a curve somebody made is picked back off the menu like any other - and is written into
-    // the code as its breakpoints, which is what `.param("Window", "0,0 0.1,1 1,0")` takes.
-    const select = document.createElement('select');
-    select.className = 'small';
-    const fill = (options, current) => {
-      select.innerHTML = '';
-      options.forEach((label, i) => {
-        if (label === undefined) return;
-        const opt = document.createElement('option');
-        opt.value = String(i);
-        // A drawn one is a wall of numbers; on a menu it is "drawn" and the numbers are the hover.
-        opt.textContent = i < (widget.fixed ?? options.length) ? label : `drawn ${i - (widget.fixed ?? 0) + 1}`;
-        opt.title = label;
-        if (i === Math.round(current)) opt.selected = true;
-        select.appendChild(opt);
-      });
-    };
-    fill(widget.options, widget.value);
-    select.onchange = () => send({ value: Number(select.value) }, true);
-    // The menu and the way to draw one, side by side: two ways to set the same thing.
-    const box = document.createElement('div');
-    box.className = 'device-file-box';
-    box.appendChild(select);
-    cell.appendChild(box);
-
-    const draw = document.createElement('button');
-    draw.className = 'small device-draw';
-    draw.textContent = 'draw…';
-    draw.title = `Draw ${widget.name.toLowerCase()} by hand, in the same editor an lfo() shape uses.`;
-    draw.onclick = () => openShapeSink({
-      title: `${trackLabel} · ${widget.name}`,
-      // Opens on what it is playing: the drawn breakpoints where there are some, and otherwise a
-      // plain ramp to start from rather than an empty box.
-      points: figureShapeData(widget.id) ?? '0,0 0.5,1 1,0',
-      onChange: (data) => {
-        api('POST', '/api/deviceParam', { trackId: trackLabel, slot, id: widget.id, sample: data, commit: true })
-          .then((res) => {
-            if (res.options) { widget.options = res.options; fill(res.options, res.value); }
-            widget.value = res.value;
-            showValue(res.text);
-            applyDeviceFigures(res.figures);
-          })
-          .catch((e) => logLine(e.message ?? String(e), true));
-      },
-    });
-    box.appendChild(draw);
-    setPosition = (_position, value) => { if (Number.isFinite(value)) { widget.value = value; select.value = String(Math.round(value)); } };
+    // The same picker the lfo panel heads itself with (see deviceShapePicker): the device's own
+    // curves, then every named shape, with stars, copies and "create". Its name box is the hero of
+    // the heading, so it takes the width the heading has.
+    const picker = deviceShapePicker(trackLabel, slot, widget, showValue);
+    cell.appendChild(picker.el);
+    setPosition = (_position, value) => { if (Number.isFinite(value)) { widget.value = value; picker.sync(); } };
   } else if (isFile) {
     // A control that takes a file shows the file it is on, and opens the picker. No menu beside
     // it: a wavetable folder is a couple of thousand files in subfolders, which is a browser's
@@ -5232,7 +5687,7 @@ function refreshDevicePanel() {
   if (!devicePanelAt) return;
   const { trackLabel, slot } = devicePanelAt;
   api('POST', '/api/showEditor', { trackId: trackLabel, slot })
-    .then((res) => { if (res?.panel) showDevicePanel(trackLabel, slot, res.panel); })
+    .then((res) => { if (res?.panel) showDevicePanel(trackLabel, slot, res.panel, { raise: false }); })
     // The track may have been renamed or deleted by the edit that triggered this - that is not
     // an error worth a console line, it just means there is nothing to show any more.
     .catch(() => hideDevicePanel());
@@ -5686,7 +6141,6 @@ function lfoCallParts() {
 
 /** The call the panel writes back to: the one it was opened through, else the inline one it IS. */
 function lfoCallee() {
-  if (lfoState?.sink) return lfoState.callee ?? 'lfo';
   return lfoCallParts()?.callee ?? lfoState?.callee ?? 'lfo';
 }
 
@@ -5805,44 +6259,8 @@ function lfoSetFollowLock(locked) {
 
 /** Whichever of the three the current state should write to. */
 function writeLfoRateMode() {
-  // A SINK is a shape being drawn for something that is not a call in the buffer - a device
-  // control that takes a curve (see openShapeSink). There is nothing to rewrite and nothing to
-  // re-evaluate; the points go straight to whoever asked for them.
-  if (lfoState?.sink) { lfoState.sink(shapeMod.serializeShapePoints(lfoState.points)); return; }
   if (lfoState?.idLiteral) writeLfoOptions();
   else writeLfoCall();
-}
-
-/**
- * Opens the shape editor on a curve that lives in a DEVICE rather than in the buffer - a
- * granulator's grain window, and anything else that grows a `takes: 'shape'` control.
- *
- * The same editor, because it is the same question: the breakpoints, the curvature between
- * them, the presets and the dice. What it does not have is a call to rewrite, so `onChange` is
- * handed the serialized points each time they move and decides what that means.
- */
-function openShapeSink({ title, points, onChange }) {
-  if (lfoState?.marker) lfoState.marker.clear();
-  if (lfoState?.callSource) lfoState.callSource.clear();
-  lfoState = {
-    marker: null,
-    callSource: null,
-    callStart: -1,
-    shapeId: null,
-    idLiteral: null,
-    callee: 'lfo',
-    sink: onChange,
-    points: shapeMod.parseShapePoints(points),
-    rate: 1,
-    mode: 'free',
-  };
-  lfoTitle.textContent = title;
-  lfoPreset.value = '';
-  lfoSyncHead();
-  if (!lfoRaf) lfoRaf = requestAnimationFrame(lfoPlayheadLoop);
-  lfoPanel.classList.remove('hidden');
-  bringPanelToFront(lfoPanel);
-  drawLfoShape();
 }
 
 function openLfoEditor(call) {
@@ -5869,6 +6287,9 @@ function openLfoEditor(call) {
     // Which call an INLINE shape is the argument of - lfo(), or .grainshape() (see findLfoCallAt).
     callee: call.callee ?? 'lfo',
     ...parseLfoCall(call.idLiteral ? splitFirstArg(inner)[1] : inner),
+    // What across and up mean when this is a device's curve rather than a shape in time - a
+    // waveshaper's level in and out. Drawn in the corners, with the "unchanged" diagonal.
+    axes: null,
     ...(call.options ?? {}),
   };
   lfoRate.value = lfoState.rate;
@@ -5990,7 +6411,7 @@ function lfoScheduleEval() {
 // `rate:`/`mode:`/the shape string in the code updates the panel instead of being silently reverted
 // by the next drag.
 function syncLfoFromCode() {
-  if (!lfoState || lfoState.sink || lfoSuppressCursor || !shapeMod) return;
+  if (!lfoState || lfoSuppressCursor || !shapeMod) return;
   const range = lfoState.marker.find();
   // The call the panel is anchored to was deleted (or typed into something that is no longer an
   // lfo call) - there is nothing left to edit, so the panel goes with it. This is the only thing
@@ -6038,6 +6459,7 @@ function initLfoEditor() {
   // the ▾ behind it searches every shape there is and offers to make one that matches nothing.
   // Same gestures as the piano roll's, because it is the same widget (see makeNamePicker).
   lfoName.addEventListener('keydown', (e) => {
+    if (packTransportKey(e)) return; // the transport reaches the page from here too
     if (e.key === 'Enter') { e.preventDefault(); lfoName.blur(); }
     else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); lfoHead.revertName(); lfoName.blur(); return; }
     e.stopPropagation();
@@ -6059,6 +6481,7 @@ function initLfoEditor() {
   });
   lfoSearch.addEventListener('input', () => lfoHead.renderList(true));
   lfoSearch.addEventListener('keydown', (e) => {
+    if (packTransportKey(e)) return; // play and stop while browsing shapes
     if (e.key === 'ArrowDown') { e.preventDefault(); lfoHead.move(1); }
     else if (e.key === 'ArrowUp') { e.preventDefault(); lfoHead.move(-1); }
     else if (e.key === 'Enter') { e.preventDefault(); lfoHead.choose(); }
@@ -6251,7 +6674,7 @@ function drawLfoShape() {
 
   // An end in hand, level with the other: the line they share, so a catch is something you see
   // happen and not something you find out from the code.
-  if (lfoDrag?.end && shapeMod.shapeEndsMeet(lfoState.points)) {
+  if (lfoDrag?.end && !lfoState.axes && shapeMod.shapeEndsMeet(lfoState.points)) {
     const { py } = lfoToCanvas(lfoState.points[0]);
     ctx.save();
     ctx.strokeStyle = col('--accent');
@@ -6259,6 +6682,30 @@ function drawLfoShape() {
     ctx.setLineDash([4, 4]);
     ctx.beginPath(); ctx.moveTo(LFO_PAD, py); ctx.lineTo(W - LFO_PAD, py); ctx.stroke();
     ctx.restore();
+  }
+
+  if (lfoState.axes) {
+    // A transfer curve: the diagonal is "out equals in", and the cross is silence in and out.
+    ctx.save();
+    ctx.strokeStyle = col('--text-dim');
+    ctx.globalAlpha = 0.5;
+    ctx.setLineDash([3, 4]);
+    ctx.beginPath(); ctx.moveTo(LFO_PAD, H - LFO_PAD); ctx.lineTo(W - LFO_PAD, LFO_PAD); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.globalAlpha = 0.9;
+    ctx.beginPath(); ctx.moveTo(W / 2, LFO_PAD); ctx.lineTo(W / 2, H - LFO_PAD); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(LFO_PAD, H / 2); ctx.lineTo(W - LFO_PAD, H / 2); ctx.stroke();
+    ctx.restore();
+    // On the ends of the cross, as a graph labels its axes: the corners are where a curve's end
+    // points sit, and labels there were drawn over them.
+    ctx.fillStyle = col('--text-dim');
+    ctx.font = '10px sans-serif';
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'bottom';
+    ctx.fillText(`${lfoState.axes.x} \u2192`, W - LFO_PAD - 4, H / 2 - 4);
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    ctx.fillText(`\u2191 ${lfoState.axes.y}`, W / 2 + 6, LFO_PAD + 4);
   }
 
   ctx.strokeStyle = col('--accent');
@@ -6285,7 +6732,8 @@ function drawLfoShape() {
 
   // Where the shape is right now, as a line down the canvas - on the transport's own grid in free
   // mode, and counted from the last note that gated it in the other two (see lfoPhaseNow).
-  const phase = lfoPhaseNow();
+  // A device's curve is not a shape in time, so it has no playhead to draw.
+  const phase = lfoState.axes ? null : lfoPhaseNow();
   lfoPlayheadOn = phase != null;
   if (phase != null) {
     const x = LFO_PAD + (W - 2 * LFO_PAD) * phase;
@@ -6333,7 +6781,9 @@ function initLfoCanvas() {
     // drag starts, so a pair stays a pair however far it is carried.
     const last = lfoState.points.length - 1;
     lfoDrag.end = pointIdx === 0 || pointIdx === last;
-    lfoDrag.linked = lfoDrag.end && shapeMod.shapeEndsMeet(lfoState.points);
+    // A transfer curve's ends are the loudest negative and positive input: nothing joins them.
+    // Only a shape in time wraps round from its end to its start, and only there do they pair.
+    lfoDrag.linked = lfoDrag.end && !lfoState.axes && shapeMod.shapeEndsMeet(lfoState.points);
   });
 
   lfoCanvas.addEventListener('pointermove', (e) => {
@@ -6345,11 +6795,18 @@ function initLfoCanvas() {
       // pair moves together, a lone end catches on the other's level within a few pixels. alt is
       // the way out of both, as it is for the slice editor's magnets.
       const { y } = canvasToLfo(px, py);
-      const snap = e.altKey ? 0 : LFO_END_SNAP_PX / (lfoCanvas.height - 2 * LFO_PAD);
+      const snap = e.altKey || lfoState.axes ? 0 : LFO_END_SNAP_PX / (lfoCanvas.height - 2 * LFO_PAD);
       lfoState.points = shapeMod.moveShapeEnd(pts, lfoDrag.index, y, { linked: lfoDrag.linked && !e.altKey, snap });
     } else if (lfoDrag.kind === 'point') {
       const i = lfoDrag.index;
-      const { x, y } = canvasToLfo(px, py);
+      let { x, y } = canvasToLfo(px, py);
+      // On a transfer curve the center is silence in and silence out: a point near it catches on
+      // it, so "quiet stays quiet" is the easy thing to draw. alt is the way out, as for the ends.
+      if (lfoState.axes && !e.altKey) {
+        const snapX = LFO_END_SNAP_PX / (lfoCanvas.width - 2 * LFO_PAD);
+        const snapY = LFO_END_SNAP_PX / (lfoCanvas.height - 2 * LFO_PAD);
+        if (Math.abs(x - 0.5) < snapX && Math.abs(y - 0.5) < snapY) { x = 0.5; y = 0.5; }
+      }
       pts[i] = { ...pts[i], x: Math.min(pts[i + 1].x, Math.max(pts[i - 1].x, x)), y };
     } else {
       // vertical drag bends the segment: push the curve toward the pointer
@@ -6362,9 +6819,13 @@ function initLfoCanvas() {
   });
 
   lfoCanvas.addEventListener('pointerup', (e) => {
-    if (lfoDrag && lfoState) writeLfoCall();
-    lfoDrag = null;
-    lfoCanvas.releasePointerCapture(e.pointerId);
+    // The drag ends whatever the write does: a point left in hand cannot be put down.
+    try {
+      if (lfoDrag && lfoState) writeLfoCall();
+    } finally {
+      lfoDrag = null;
+      lfoCanvas.releasePointerCapture(e.pointerId);
+    }
   });
 
   lfoCanvas.addEventListener('dblclick', (e) => {
@@ -6444,25 +6905,55 @@ function labeledBlocksFor(code) {
 // which is exactly the rule Sig#preset uses (the chain as it stood when the method was called).
 // Read from the code rather than remembered, so moving the call between two .fx()es re-aims it.
 function presetTargetAt(code, idx) {
-  if (!labelsMod) return null;
+  return chainBefore(code, idx).at(-1) ?? null;
+}
+
+/**
+ * The devices a chain holds at `idx`: every synth()/.fx() before it in its block, as { label (the
+ * track's), slot, plugin, name (the call's own { label }, or null) }. What a chain method at `idx`
+ * can reach - Sig's chain methods read the chain as it stood when they were called.
+ */
+function chainBefore(code, idx) {
+  if (!labelsMod) return [];
   const block = labeledBlocksFor(code).findLast((b) => idx >= b.start && idx <= b.end);
-  if (!block) return null;
+  if (!block) return [];
   const isCode = blockOwnCode(code, block);
   const re = /\b(synth|fx)\s*\(/g;
   re.lastIndex = block.start;
   let m;
   let fxSeen = 0;
-  let found = null;
+  const found = [];
   while ((m = re.exec(code)) && m.index < block.end) {
     if (!isCode(m.index)) continue; // a commented-out call holds no slot
-    if (m.index > idx) break; // past the .preset(...) - a later .fx() is not what it aims at
+    if (m.index > idx) break; // past the call asking - a later .fx() is not what it aims at
     const slot = m[1] === 'synth' ? 0 : ++fxSeen;
     const open = m.index + m[0].length - 1;
     const close = matchParen(code, open);
-    const [lit] = splitFirstArg(code.slice(open + 1, close < 0 ? code.length : close));
-    found = { label: block.label, slot, plugin: idLiteralValue(lit.trim()) };
+    const [lit, rest] = splitFirstArg(code.slice(open + 1, close < 0 ? code.length : close));
+    const labelLit = /\blabel\s*:\s*(["'])((?:\\.|(?!\1).)*)\1/.exec(rest);
+    // A synth() replaces the instrument, so a second one takes slot 0 over rather than adding one.
+    if (slot === 0) for (let i = found.length - 1; i >= 0; i--) if (found[i].slot === 0) found.splice(i, 1);
+    found.push({ label: block.label, slot, plugin: idLiteralValue(lit.trim()), name: labelLit ? labelLit[2].trim() : null });
   }
-  return found;
+  return found.sort((a, b) => a.slot - b.slot);
+}
+
+/**
+ * The slot a chain method at `idx` aims at: the last device before it, or with a `target` the one
+ * that names - a label, a device's name, or "Name#k" - by the rule Sig#_slotFor follows, so the
+ * editor and the pattern agree on which device a call reaches. null when it names nothing.
+ */
+function paramSlotAt(code, idx, target) {
+  const chain = chainBefore(code, idx);
+  if (target == null) return chain.length ? chain[chain.length - 1].slot : null;
+  const ref = String(target).trim();
+  const labeled = chain.filter((d) => d.name === ref);
+  if (labeled.length) return labeled[labeled.length - 1].slot;
+  const nth = /^(.*?)\s*#\s*(\d+)$/.exec(ref);
+  const name = (nth ? nth[1] : ref).toLowerCase();
+  const same = chain.filter((d) => d.plugin != null && d.plugin.toLowerCase() === name);
+  if (nth) return same[Number(nth[2]) - 1]?.slot ?? null;
+  return same.length ? same[same.length - 1].slot : null;
 }
 
 /** The plugin and the program out of a `_preset(id, plugin, state)` definition, read off the buffer. */
@@ -7898,6 +8389,7 @@ function makeDefRegistry(opts) {
     // has to see them, exactly as it does for the patterns that say the name.
     otherRefs = () => 0,
     otherRenameEdits = () => [],
+    otherRefsNoun = 'clip',
   } = opts;
   const say = (line, isError) => logLine(line, isError);
 
@@ -8231,7 +8723,7 @@ function makeDefRegistry(opts) {
     refoldAll();
     panel.syncHead();
     panel.scheduleEval();
-    const also = elsewhere.length ? ` (${otherRefs(code, from)} clip(s) updated)` : '';
+    const also = elsewhere.length ? ` (${otherRefs(code, from)} ${otherRefsNoun}(s) updated)` : '';
     say(`renamed ${label} "${from}" to "${to}"${refs.length ? ` (${refs.length} pattern(s) updated)` : ''}${also}`);
   }
 
@@ -8689,17 +9181,9 @@ const lfoHead = makeNamePicker({
 });
 
 function lfoSyncHead() {
-  // A shape being drawn for a device control has no call behind it: no name, no rate, no mode,
-  // nothing to send anywhere (see openShapeSink). The head is the title and the dice.
-  if (lfoState?.sink) {
-    lfoRateWrap.classList.add('hidden');
-    lfoModeWrap.classList.add('hidden');
-    lfoUseBtn.classList.add('hidden');
-    lfoLockBtn.classList.add('hidden');
-    lfoPickWrap.classList.add('hidden');
-    return;
-  }
   lfoPickWrap.classList.remove('hidden');
+  // The presets are shapes in time - a swell, a pluck - and mean nothing as a device's curve.
+  lfoPreset.classList.toggle('hidden', !!lfoState?.axes);
   const named = !!lfoState?.shapeId;
   // rate and mode belong to the lfo() CALL. An inline one is the call; a definition has them only
   // while the panel still knows which call it was opened through.

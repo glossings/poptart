@@ -34,7 +34,7 @@ export const DUCKER = defineDevice({
     { id: 'attack', name: 'Attack', min: 0, max: 50, default: 2, unit: 'ms',
       description: 'How long the drop itself takes. A few milliseconds keeps it from clicking.' },
     { id: 'curve', name: 'Curve', min: -8, max: 8, default: 3, step: 0.5, ui: 'number', rate: 'k',
-      description: 'The shape of the recovery: positive starts slow and rises fast at the end, which is the classic pump; negative snaps back at once.' },
+      description: 'The shape of the recovery: positive starts slow and rises fast, the classic pump; negative snaps back.' },
     { id: 'threshold', name: 'Threshold', min: -60, max: 0, default: -24, unit: 'dB',
       description: 'The level a sidechained signal has to reach to trigger the dip. Notes trigger it whatever their level.' },
   ],
@@ -43,7 +43,7 @@ export const DUCKER = defineDevice({
       id: 'dip',
       kind: 'duck',
       title: 'dip',
-      description: 'The dip over one beat, as the shape controls draw it - and, while the track plays, the last second of the signal with the gain the dip is applying laid over it, and the key that triggers it underneath. Drag up for the amount, across for the length.',
+      description: 'The dip over one beat. While the track plays: the last second of the signal, the gain over it, and the key that triggers it underneath. Drag up for the amount, across for the length.',
       params: { amount: 'amount', length: 'length', attack: 'attack', curve: 'curve', sync: 'sync', threshold: 'threshold' },
       drag: { x: 'length', y: 'amount' },
     },
@@ -176,7 +176,7 @@ export class DuckerProcessor {
   /** The last second of the dip, the signal under it and the key driving it, for the picture. */
   report() {
     return {
-      history: { gain: this.gains.snapshot(), out: this.peaks.snapshot(), key: this.keyed ? this.keys.snapshot() : null, blockSec: this.blockSec },
+      history: { gain: this.gains.snapshot(), out: this.peaks.snapshot(), key: this.keyed ? this.keys.snapshot() : null, end: this.gains.written, blockSec: this.blockSec },
       keyed: this.keyed,
       // What is triggering it, for the picture's label: 'notes', 'audio' or 'clock'.
       trigger: this.audioKeyed ? 'audio' : this.noteRouted ? 'notes' : 'clock',

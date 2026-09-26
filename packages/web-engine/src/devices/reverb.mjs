@@ -20,7 +20,7 @@ export const REVERB = defineDevice({
   channels: { in: 2, out: 2 },
   params: [
     { id: 'decay', name: 'Decay', min: 0.05, max: 30, default: 2, unit: 's', curve: 'exp', group: 'Room',
-      description: 'How long the tail takes to fall by sixty decibels, measured below the damping frequency. Above it the tail is shorter, as a room\'s is, so a bright hit fades sooner than the number says.' },
+      description: 'How long the tail takes to fall sixty decibels, below the damping frequency. Above it the tail is shorter.' },
     { id: 'size', name: 'Size', min: 0.05, max: 1, default: 0.7, group: 'Room',
       description: 'Scales the delay network, so a small room and a hall differ in more than their decay time.' },
     { id: 'predelay', name: 'Predelay', min: 0, max: 0.25, default: 0.01, unit: 's', group: 'Room' },

@@ -172,6 +172,16 @@ class MappedEngine {
     this.engine.clearParamLFO(trackId, slot, name);
   }
 
+  // A hold reads the plugin, a release writes back what it read - neither carries a value of
+  // ours to convert, but both have to be real methods here for the same reason anchorParamLFO is.
+  holdParam(trackId, slot, name) {
+    this.engine.holdParam(trackId, slot, name);
+  }
+
+  releaseParam(trackId, slot, name, targetTime) {
+    this.engine.releaseParam(trackId, slot, name, targetTime);
+  }
+
   // Which shape a patterned lfo("<a b>") is on. An index, not a value, so there is nothing to
   // convert - but like anchorParamLFO it has to be a real method here: the Scheduler
   // feature-detects it on whatever engine it is given, and this wrapper is what it is given.

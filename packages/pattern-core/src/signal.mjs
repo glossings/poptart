@@ -216,6 +216,10 @@ export class Sig {
     // the scheduler reads the pattern on its own step grid and pushes each state at the step's
     // onset. Which plugin is in the slot never varies; only what it is set to.
     this.presetPatterns = opts.presetPatterns ?? {};
+    // Names the code gave chain slots (synth/fx's `{ label }`): { [slot]: "label" }. A label is how
+    // .param()/.wet() reach one device from anywhere in the chain whatever order the chain is in -
+    // see Sig#_slotFor.
+    this.slotLabels = opts.slotLabels ?? {};
     // Sampler config, present only for sampler patterns: { index, begin, end, loop, speed,
     // stretch, fit, slice, attack, decay, sustain, release, envScale }, each a Sig (sampled per event
     // onset) or absent for its default.
@@ -299,6 +303,7 @@ export class Sig {
       recordOpts: this.recordOpts,
       slotStates: this.slotStates,
       presetPatterns: this.presetPatterns,
+      slotLabels: this.slotLabels,
       midiNotes: this.midiNotes,
       pitchKind: this.pitchKind,
       scaleName: this.scaleName,
@@ -648,6 +653,7 @@ export class Sig {
     return this._clone({
       instrument: pluginId,
       ...(config?.state ? { slotStates: { ...this.slotStates, 0: config.state } } : {}),
+      slotLabels: this._withLabel(0, config?.label, 'synth'),
     });
   }
 
@@ -666,7 +672,73 @@ export class Sig {
     return this._clone({
       fxChain: [...this.fxChain, pluginId],
       ...(config?.state ? { slotStates: { ...this.slotStates, [slot]: config.state } } : {}),
+      slotLabels: this._withLabel(slot, config?.label, 'fx'),
     });
+  }
+
+  // The slot labels with `label` given to `slot` (or taken off it, for a call with none - a
+  // re-.synth() replaces the instrument, and the old one's name goes with it).
+  _withLabel(slot, label, builder) {
+    const { [slot]: _replaced, ...rest } = this.slotLabels;
+    if (label == null) return rest;
+    const name = typeof label === 'string' ? label.trim() : '';
+    if (!name) {
+      warnUser(`[signal] ${builder}()'s label has to be a word, e.g. ${builder}("Filter", { label: "lo" }) - this one is left unlabeled.`);
+      return rest;
+    }
+    if (Object.values(rest).includes(name)) {
+      warnUser(`[signal] two devices on this track are labeled "${name}" - .param("${name}", ...) reaches the later one.`);
+    }
+    return { ...rest, [slot]: name };
+  }
+
+  /**
+   * The chain slot a device reference names, as .param(target, ...) and .wet(target, ...) read it:
+   *
+   *   "lo"        a label given with synth/fx's { label: "lo" }
+   *   "Filter"    the device of that name, when the chain holds one
+   *   "Filter#2"  the second of that name, counting from the instrument in chain order
+   *
+   * Resolved against the chain as it stands at the call, the same moment every other chain method
+   * reads it, so a reference can only reach a device already added. A plain name that matches
+   * several devices reaches the last, as a bare .param() would, and says so; one that matches
+   * nothing is null, with a console line naming what the chain holds.
+   */
+  /** The shortest reference _slotFor resolves to `slot`: its label, its name, or "Name#k". */
+  _refFor(slot) {
+    if (this.slotLabels[slot] != null) return this.slotLabels[slot];
+    const devices = [this.instrument, ...this.fxChain];
+    const name = devices[slot];
+    if (name == null) return `slot ${slot}`;
+    const same = devices.flatMap((d, i) => (d != null && String(d).toLowerCase() === String(name).toLowerCase() ? [i] : []));
+    return same.length > 1 ? `${name}#${same.indexOf(slot) + 1}` : name;
+  }
+
+  _slotFor(target, method) {
+    const ref = typeof target === 'string' ? target.trim() : '';
+    const devices = [this.instrument, ...this.fxChain]; // index = slot
+    const held = devices.filter((d) => d != null).map((d) => `"${d}"`).join(', ') || 'nothing yet';
+    if (!ref) {
+      warnUser(`[signal] .${method}() names a device with a word - a label, a device's name or "Name#2". Nothing was set.`);
+      return null;
+    }
+    const labeled = Object.entries(this.slotLabels).filter(([, label]) => label === ref).map(([slot]) => Number(slot));
+    if (labeled.length) return Math.max(...labeled); // a label given twice was warned about at the second
+    const nth = /^(.*?)\s*#\s*(\d+)$/.exec(ref);
+    const name = (nth ? nth[1] : ref).toLowerCase();
+    const slots = devices.flatMap((d, slot) => (d != null && String(d).toLowerCase() === name ? [slot] : []));
+    if (nth) {
+      const k = Number(nth[2]);
+      if (k >= 1 && k <= slots.length) return slots[k - 1];
+      warnUser(`[signal] .${method}("${ref}", ...) - this chain holds ${slots.length === 1 ? 'one' : slots.length || 'no'} "${nth[1]}" at that point, so there is no #${k}. Nothing was set.`);
+      return null;
+    }
+    if (slots.length > 1) {
+      warnUser(`[signal] .${method}("${ref}", ...) - this chain holds ${slots.length} of those, so it reaches the last. Say "${ref}#1" for the first, or give it a { label }.`);
+    }
+    if (slots.length) return slots[slots.length - 1];
+    warnUser(`[signal] .${method}("${ref}", ...) names no device on this track at that point - it holds ${held}. Nothing was set.`);
+    return null;
   }
 
   /**
@@ -688,12 +760,29 @@ export class Sig {
    * automates it over the arrangement and `.wet("<1 0>")` alternates by cycle. The crossfade is
    * linear, so 0 and 1 are EXACTLY the two signals rather than a 3dB-loud blend of them.
    *
+   * With a device named first - `.wet("Shift", 0)` - it turns that one down wherever it sits in the
+   * chain, by the same names .param() takes (see _slotFor).
+   *
    * Blending (rather than fully bypassing) an effect that delays its output - a linear-phase EQ, a
    * lookahead limiter - combs against the dry path, since only the plugin side is late. That is
    * true of a wet knob in any host; the fix is to use those at wet 1 and automate something else.
    */
-  wet(value) {
-    const slot = this.fxChain.length; // 0 = instrument, 1..n = effects, in call order
+  wet(...args) {
+    if (args.length >= 2) {
+      // .wet("Reverb", 0.3): the device named, wherever it sits in the chain (see _slotFor).
+      const [target, value] = args;
+      const slot = this._slotFor(target, 'wet');
+      if (slot == null) return this;
+      if (slot === 0) {
+        warnUser(`[signal] .wet("${target}", ...) names the instrument, which has no dry signal to mix back - .wet() turns an effect down.`);
+        return this;
+      }
+      return this._wetAt(slot, value);
+    }
+    return this._wetAt(this.fxChain.length, args[0]);
+  }
+
+  _wetAt(slot, value) {
     if (slot === 0) {
       throw new Error('[signal] .wet() turns an effect down - put it after an .fx(...), e.g. .fx("ValhallaRoom").wet(0.3)');
     }
@@ -1038,10 +1127,27 @@ export class Sig {
 
   /**
    * Sets any named parameter (by its real VST parameter name - see the params panel /
-   * autocomplete in the editor), targeting whatever's last in the chain right now.
+   * autocomplete in the editor), targeting whatever's last in the chain right now:
+   *
+   *   .fx("Filter").param("Cutoff", 0.4)
+   *
+   * or, with a device named first, that device wherever it sits in the chain - by its name, by
+   * "Name#2" for the second of two, or by a label given with synth/fx's `{ label }`:
+   *
+   *   .fx("Filter", { label: "lo" }).fx("Delay")
+   *   .when("<0 1>", x => x.param("lo", "Cutoff", 0.8).param("Delay", "Feedback", 0.6))
    */
-  param(name, value) {
-    const slot = this.fxChain.length; // 0 = instrument, 1..n = effects, in call order
+  param(...args) {
+    if (args.length >= 3) {
+      // .param("Filter", "Cutoff", 0.8): the device named, wherever it sits (see _slotFor).
+      const [target, name, value] = args;
+      const slot = this._slotFor(target, 'param');
+      return slot == null ? this : this._paramAt(slot, name, value);
+    }
+    return this._paramAt(this.fxChain.length, args[0], args[1]); // 0 = instrument, 1..n = effects
+  }
+
+  _paramAt(slot, name, value) {
     const key = `${slot}:${name}`;
     // An audio handle in value position is a CONNECTION: wire that track or bus onto the
     // parameter and let it run at the sample rate. `.param("Osc 1 Phase", audio("mod"))` is
@@ -1818,15 +1924,16 @@ export class Sig {
         }
       : null;
 
-    // Track metadata comes from the transformed side - fn may have added an .fx()/.param(); those
-    // apply unconditionally. What the scheduler reads as a VALUE is the exception: the per-onset
-    // controls (see condSwitchMap) and the channel strip (see condSwitchChannel) both switch with
-    // the condition, because "off" for those is a state we can name - an absent value for a
-    // per-onset control, the strip's neutral default for a streamed one.
+    // Track metadata comes from the transformed side - fn may have added an .fx(); that applies
+    // unconditionally, since a plugin can't come and go per step (turn one in and out with
+    // .wet("Name", ...) instead). What the scheduler reads as a VALUE is the exception: the
+    // per-onset controls (see condSwitchMap), the channel strip (see condSwitchChannel) and the
+    // plugin parameters (see condSwitchParams) all switch with the condition.
     const switched = (before, after, skip) => condSwitchMap(before, after, condAtCycle, truthy, skip);
     return new Sig(sample, {
       stepsForCycle,
       ...transformed._meta(),
+      paramSignals: condSwitchParams(this.paramSignals, transformed.paramSignals, condAtCycle, truthy),
       channel: condSwitchChannel(this.channel, transformed.channel, condAtCycle, truthy),
       noteChannels: switched(this.noteChannels, transformed.noteChannels),
       // Only when the callback's result is still a sampler pattern - a callback that swapped the
@@ -4706,6 +4813,34 @@ function condSwitchChannel(before, after, condAt, truthy) {
   return out;
 }
 
+// Plugin parameters (Sig#paramSignals) across a .when(): the callback's value where the condition
+// holds and the one set outside it where it doesn't. A parameter set ONLY inside the callback
+// answers nothing on its off side, and the scheduler reads that as "hand it back": the engine
+// puts the parameter where it was before the .when() first took it (see Scheduler#_heldParams),
+// so the plugin sounds as if the call were not there. A .param() AFTER the .when() replaces the
+// whole entry, the way a later call always wins.
+function condSwitchParams(before, after, condAt, truthy) {
+  const entries = {};
+  for (const key of new Set([...Object.keys(before ?? {}), ...Object.keys(after ?? {})])) {
+    const off = before?.[key] ?? null;
+    const on = after?.[key] ?? null;
+    if (off === on || (off && on && off.sig === on.sig)) {
+      entries[key] = on ?? off;
+      continue;
+    }
+    const { slot, name } = on ?? off;
+    entries[key] = {
+      slot,
+      name,
+      sig: new Sig((t, cps, pos) => {
+        const branch = truthy(condAt(pos ?? t * cps)) ? on : off;
+        return branch ? branch.sig.sample(t, cps, pos) : null;
+      }),
+    };
+  }
+  return entries;
+}
+
 // Rests/gaps in a condition pattern count as falsy regions, not holes - without this, a cond
 // like "1 ~" would silence the second half of the cycle instead of playing the original.
 function fillCondGaps(steps) {
@@ -5336,6 +5471,7 @@ function buildJoin(builder, options, slotsForCycle) {
     joined.fxChain = chained.fxChain;
     joined.slotStates = chained.slotStates;
     joined.presetPatterns = chained.presetPatterns; // travels with the chain it sets, like slotStates
+    joined.slotLabels = chained.slotLabels;
   }
   return joined;
 }

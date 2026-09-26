@@ -41,7 +41,7 @@ export const PHASER = defineDevice({
       id: 'sweep',
       kind: 'sweep',
       title: 'sweep',
-      description: 'Where the notches are centered over one cycle of the LFO, in octaves around the center, left and right apart by the spread - and where the sweep is right now. Drag up for the depth.',
+      description: 'Where the notches sit over one cycle of the LFO, left and right apart by the spread, and where the sweep is now. Drag up for the depth.',
       params: { rate: 'rate', depth: 'depth', center: 'center', sync: 'sync', spread: 'spread' },
       drag: { y: 'depth' },
     },

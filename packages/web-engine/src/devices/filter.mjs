@@ -20,7 +20,7 @@ export const FILTER = defineDevice({
   channels: { in: 2, out: 2 },
   params: [
     { id: 'mode', name: 'Mode', default: FILTER_MODES.indexOf('lowpass'), options: [...FILTER_MODES], rate: 'k',
-      description: 'The numbered modes are slopes in decibels per octave off a state-variable core. The ladder is four poles with a saturated feedback path, so at the same cutoff it sits about six decibels lower at the corner than the plain lowpass does, as a ladder does. Comb tunes a delayed copy of the signal to the cutoff; allpass is a cascade of phase turns summed back, which is a fixed phaser; formant sweeps through five vowels.' },
+      description: 'The numbered modes are slopes in decibels per octave. Ladder is a four-pole with a saturating feedback path. Comb tunes an echo to the cutoff, allpass is a fixed phaser, formant sweeps through five vowels.' },
     { id: 'cutoff', name: 'Cutoff', min: 20, max: 20000, default: 2000, unit: 'Hz', curve: 'exp' },
     { id: 'resonance', name: 'Resonance', min: 0, max: 1, default: 0.2 },
     { id: 'drive', name: 'Drive', min: 1, max: 8, default: 1, unit: 'x',

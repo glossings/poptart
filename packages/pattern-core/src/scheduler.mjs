@@ -161,6 +161,12 @@ export function grainPosSig(sig) {
   return begin && begin.constVal === undefined && !begin.stepsForCycle ? begin : null;
 }
 
+/** A _heldParams key back into its slot and name - the name may itself contain a colon. */
+const splitHeldKey = (key) => {
+  const at = key.indexOf(':');
+  return [Number(key.slice(0, at)), key.slice(at + 1)];
+};
+
 const MODULATOR_CLEARS = { lfo: 'clearParamLFO', env: 'clearParamEnv', cc: 'clearParamCC', osc: 'clearParamOSC' };
 
 /** Which native modulator a control signal is, or null for a polled one. */
@@ -497,6 +503,13 @@ export class Scheduler {
     // control the new pattern doesn't set - e.g. a track that had .bsend() (dry=0) coming back must
     // return to dry=1. Same reasoning as clearing all trailing fx slots rather than diffing.
     this._prevChannelNames = Object.keys(CHANNEL_DEFAULTS);
+    // Plugin parameters the pattern is driving right now, as "slot:name" - each one held in the
+    // engine (see holdParam) since its first value, so that when the pattern stops saying anything
+    // about it the engine can put it back where it was (releaseParam). A parameter stops being
+    // spoken for when its signal answers null - the off side of a .when() that alone sets it - or
+    // when an eval drops the call, and either way the plugin should sound as if the call were
+    // never there, rather than parked wherever it was last sent.
+    this._heldParams = new Set();
     this._sentAudioInjects = new Map(); // fx slot -> audioRouteKey last wired, for diffing and teardown
     this._sentParamRoutes = new Map();  // "slot:name" -> route key last wired (see .param() connections)
     this._adoptedParamRoutes = false;   // whether the routes the engine already held have been read in
@@ -871,6 +884,20 @@ export class Scheduler {
     }
     this._prevChannelNames = Object.keys(channel);
 
+    // A plugin parameter the new pattern no longer polls - its call deleted, or now driven by a
+    // native modulator instead - goes back to what it was before the pattern took it.
+    const polled = new Set(
+      Object.values(sig.paramSignals)
+        .filter((e) => !(e.sig.lfoIR || e.sig.envIR || e.sig.ccIR))
+        .map((e) => `${e.slot}:${e.name}`),
+    );
+    for (const key of [...this._heldParams]) {
+      if (polled.has(key)) continue;
+      const [slot, name] = splitHeldKey(key);
+      this.engine.releaseParam(this.trackId, slot, name, resetSec);
+      this._heldParams.delete(key);
+    }
+
     // Live head input from the midi()/audio() source builders (Sig#inputSource): play a named
     // MIDI source on this track's instrument, or feed a named audio source into the chain input.
     // The engine resolves the name to a track or a device. Dropped on re-eval when it's gone.
@@ -1191,6 +1218,11 @@ export class Scheduler {
       this.engine[MODULATOR_CLEARS[m.kind]](this.trackId, m.slot, m.name);
     }
     this._activeModulators = new Map();
+    // Held parameters are NOT handed back here. Stopping leaves the sound as it is - a stopped
+    // track's plugins keep the settings the pattern gave them, as they keep their voices ringing
+    // (see the note at the top of stop()). The holds are forgotten, and the engine keeps its first
+    // reading, so the Scheduler that plays next takes over from where this one left things.
+    this._heldParams.clear();
     // Nothing is sounding, so no slot is "on" a preset any more: a capture off one of these
     // plugins now belongs in its `{ state }` argument, not in a definition (see livePreset).
     this._livePresets.clear();
@@ -1829,6 +1861,20 @@ export class Scheduler {
         // conditional rather than `&&` so a plugin param can't come out as `false ?? sample`.
         const held = c.slot === CHANNEL_SLOT ? this._channelHold.get(c.name) : undefined;
         const value = held ?? c.sig.sample(applySec, this.transport.cps, applyCycle);
+        if (c.slot !== CHANNEL_SLOT) {
+          // The first value the pattern sends a plugin parameter takes it over; a null after that
+          // hands it back (see _heldParams). A channel control needs neither: its off side is a
+          // neutral default the pattern itself answers (see condSwitchChannel).
+          const key = `${c.slot}:${c.name}`;
+          const speaks = typeof value === 'number' || typeof value === 'string';
+          if (speaks && !this._heldParams.has(key)) {
+            this.engine.holdParam(this.trackId, c.slot, c.name);
+            this._heldParams.add(key);
+          } else if (!speaks && this._heldParams.has(key)) {
+            this.engine.releaseParam(this.trackId, c.slot, c.name, applySec);
+            this._heldParams.delete(key);
+          }
+        }
         if (typeof value === 'number') {
           if (c.name === 'bend' && c.slot === CHANNEL_SLOT) this._checkBendRange(value, applySec, applyCycle);
           this.engine.setParam(this.trackId, c.slot, c.name, value, applySec);

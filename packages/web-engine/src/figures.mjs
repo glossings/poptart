@@ -26,7 +26,7 @@ import { BIQUAD_TYPES, biquadCoefficients, biquadMagnitude } from './dsp/biquad.
 import { FILTER_MODES, MultiFilter } from './dsp/filters.mjs';
 import { fillUnison } from './dsp/oscillator.mjs';
 import { WARP_MODES, crossModOf, warpPhase } from './dsp/warp.mjs';
-import { SHAPER_MODES, autoGainFor, shape } from './dsp/shapers.mjs';
+import { SHAPER_MODES, autoGainFor, harmonicsOf, shape } from './dsp/shapers.mjs';
 import { dbToGain } from './dsp/control.mjs';
 import { SYNC_OPTIONS, isFree, syncedHz, syncedSeconds } from './dsp/sync.mjs';
 import { lfoValue } from './dsp/moddelay.mjs';
@@ -169,10 +169,10 @@ function figureData(descriptor, figure, values, opts) {
     case 'band': return { ...common, ...bandFigure(figure, read) };
     case 'matrix': return { ...common, ...matrixFigure(figure, read) };
     case 'sample': return { ...common, ...sampleFigure(figure, read, { waves, extras, report, shapes }) };
-    case 'grain': return { ...common, ...grainFigure(figure, read, { shapes, extras }) };
+    case 'grain': return { ...common, ...grainFigure(descriptor, figure, read, { shapes, extras }) };
     case 'meter': return { ...common, ...meterFigure(figure, read, report) };
     case 'transfer': return { ...common, ...transferFigure(figure, read, report) };
-    case 'shaper': return { ...common, ...shaperFigure(read, report) };
+    case 'shaper': return { ...common, ...shaperFigure(descriptor, figure, read, { report, shapes, extras }) };
     case 'echoes': return { ...common, ...echoesFigure(read, bpm) };
     case 'repeats': return { ...common, ...repeatsFigure(read, bpm) };
     case 'decay': return { ...common, ...decayFigure(read) };
@@ -739,17 +739,39 @@ function windowCurve(mode, shapes, n) {
  * A window past the shipped shapes is one somebody DREW, which is not a formula - it is the
  * table the engine sampled and handed to the device, and the picture reads the same table.
  */
-function grainFigure(figure, read, { shapes, extras }) {
+function grainFigure(descriptor, figure, read, { shapes, extras }) {
   const mode = Math.round(read('shape') ?? 0);
   const drawn = shapes?.[mode] ?? null;
   const points = windowCurve(mode, shapes, ENV_POINTS).map((y, i) => ({ x: i / (ENV_POINTS - 1), y }));
+  const names = descriptor.params.find((p) => p.id === figure.params.shape)?.options ?? [];
   return {
     shape: mode,
     size: read('size') ?? 0,
     // The breakpoints, where this is a drawn one - what the editor opens on.
-    data: drawn?.name ?? extras?.[figure.params.shape]?.[mode] ?? null,
+    data: drawn?.data ?? drawn?.name ?? extras?.[figure.params.shape]?.[mode] ?? null,
+    shapeParam: figure.params.shape,
+    curveName: curveNameOf(names, mode, drawn),
+    shapeAxes: { x: 'grain', y: 'level' },
+    // Every shipped window as breakpoints, for a copy of one to start from (see the panel's picker).
+    builtIns: Object.fromEntries(names.map((name, i) => [name, breakpointsOf((t) => grainWindow(i, t))])),
     points,
   };
+}
+
+/** What a curve control's current setting is called: see the shaper figure's `curveName`. */
+function curveNameOf(builtIns, index, drawn) {
+  if (index < builtIns.length) return builtIns[index] ?? null;
+  return drawn && drawn.name !== 'drawn' ? drawn.name : null;
+}
+
+/** A curve on 0..1 as five breakpoints: enough to hold its shape, and room to draw between. */
+function breakpointsOf(curve) {
+  const n = 5;
+  const round = (v) => Math.round(v * 1000) / 1000;
+  return Array.from({ length: n }, (_, i) => {
+    const x = i / (n - 1);
+    return `${round(x)},${round(Math.min(1, Math.max(0, curve(x))))}`;
+  }).join(' ');
 }
 
 // --- what a device is doing to the level -------------------------------------------------------
@@ -827,7 +849,7 @@ function transferFigure(figure, read, report) {
   // beside the curve that shows the attack and the release as they happen. Null when the device
   // is not reporting, and the picture is the curve alone.
   const history = live?.history && Array.isArray(live.history.inDb) && Array.isArray(live.history.grDb)
-    ? { inDb: live.history.inDb, grDb: live.history.grDb, blockSec: Number(live.history.blockSec) || 128 / NOMINAL_RATE }
+    ? { inDb: live.history.inDb, grDb: live.history.grDb, end: historyEnd(live.history), blockSec: Number(live.history.blockSec) || 128 / NOMINAL_RATE }
     : null;
   return {
     threshold, ratio, knee, makeup, upward, pregain, history,
@@ -856,27 +878,56 @@ const SHAPER_POINTS = 129;
  * value the block is actually being multiplied by; a stopped device gets the same number from
  * the same function the processor calls, so the still picture and the live one agree.
  */
-function shaperFigure(read, report) {
+function shaperFigure(descriptor, figure, read, { report, shapes, extras }) {
+  const modes = SHAPER_MODES;
   const mode = Math.round(read('mode') ?? 0);
   const driveDb = read('drive') ?? 0;
   const bias = read('bias') ?? 0;
-  const harmonic = Math.round(read('harmonic') ?? 2);
+  const character = read('character') ?? 0.5;
   const autogain = (read('autogain') ?? 1) >= 0.5;
   const drive = dbToGain(driveDb);
+  // A mode past the named ones is a curve somebody drew: the table the engine sampled, which the
+  // processor reads too, so the picture is the curve being played.
+  const drawn = mode >= modes.length ? (shapes?.[mode] ?? null) : null;
+  const table = drawn?.points ?? null;
   const reported = Number(report?.meters?.autogain);
   const comp = !autogain ? 1 : Number.isFinite(reported) && report?.meters?.autogain != null
     ? dbToGain(reported)
-    : autoGainFor(mode, drive, bias, harmonic);
+    : autoGainFor(mode, drive, bias, character, table);
   const points = new Array(SHAPER_POINTS);
   for (let i = 0; i < SHAPER_POINTS; i++) {
     const x = -1 + (2 * i) / (SHAPER_POINTS - 1);
-    points[i] = { x, y: shape(x, mode, drive, bias, harmonic) * comp };
+    points[i] = { x, y: shape(x, mode, drive, bias, character, table) * comp };
   }
+  // How loud the input is right now, 0..1 on the curve's own axis, or null when the device is not
+  // reporting: the stretch of the curve between minus and plus this is where the signal lives.
+  const level = Number(report?.meters?.level);
   return {
-    mode, modeName: SHAPER_MODES[mode] ?? SHAPER_MODES[0], drive: driveDb, bias, harmonic, autogain,
+    mode, modeName: modes[mode] ?? drawn?.name ?? 'drawn', drive: driveDb, bias, character, autogain,
+    // The name of the curve the device is on - a built-in's, a shape's - or null for breakpoints
+    // written straight into the code. The panel's picker shows this, so it follows the device.
+    curveName: curveNameOf(modes, mode, drawn),
     comp, compDb: 20 * Math.log10(Math.max(1e-6, comp)),
+    level: report?.meters?.level != null && Number.isFinite(level) ? Math.min(1, Math.max(0, level)) : null,
     points,
+    harmonics: harmonicsOf(mode, drive, bias, character, table),
+    // What the draw button opens on (see the panel's figureShapeData): the drawn breakpoints
+    // where there are some, and otherwise the curve as it stands at no drive, so drawing starts
+    // from the sound you have rather than from nothing.
+    shapeParam: figure.params.mode,
+    shapeAxes: { x: 'level in', y: 'level out' },
+    // Every shipped curve as breakpoints, for a copy of one to start from (see the panel's picker).
+    builtIns: Object.fromEntries(modes.map((name, i) => [name, curveBreakpoints(i, character)])),
+    data: drawn?.data ?? drawn?.name ?? extras?.[figure.params.mode]?.[mode] ?? curveBreakpoints(mode, character),
   };
+}
+
+/**
+ * A named curve at no drive and no bias, as breakpoints on 0..1 both ways -
+ * five of them, enough to hold the shape and few enough to leave room to draw between.
+ */
+function curveBreakpoints(mode, harmonic) {
+  return breakpointsOf((x) => (shape(x * 2 - 1, mode, 1, 0, harmonic) + 1) / 2);
 }
 
 // --- a delay's repeats -----------------------------------------------------------------------
@@ -1045,6 +1096,16 @@ function sweepFigure(figure, read, descriptor, bpm, report) {
   };
 }
 
+/**
+ * How many entries a device's history has ever written, or null from one that does not say. The
+ * panel uses it to keep each entry on the same pixel column while it scrolls (see laneColumns in
+ * the client).
+ */
+function historyEnd(h) {
+  const end = Number(h.end);
+  return Number.isFinite(end) ? end : null;
+}
+
 // --- a ducker's dip ------------------------------------------------------------------------
 
 const DUCK_POINTS = 192;
@@ -1092,7 +1153,7 @@ function duckFigure(read, bpm, report) {
   while (next < DUCK_POINTS) points[next++] = { x: 1, y: gain };
   const h = report?.history;
   const history = h && Array.isArray(h.gain) && Array.isArray(h.out)
-    ? { gain: h.gain, out: h.out, key: Array.isArray(h.key) ? h.key : null, blockSec: Number(h.blockSec) || 128 / NOMINAL_RATE }
+    ? { gain: h.gain, out: h.out, key: Array.isArray(h.key) ? h.key : null, end: historyEnd(h), blockSec: Number(h.blockSec) || 128 / NOMINAL_RATE }
     : null;
   return {
     amount, length, attack: attackMs, curve, sync, synced: !isFree(sync), syncName: SYNC_OPTIONS[sync] ?? null,

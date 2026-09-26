@@ -187,9 +187,10 @@ function defineParam(deviceId, spec, seen) {
   // and only one of them is being read, and a panel that shows both leaves somebody turning the
   // one that does nothing. `active: { param: 'sync', is: 'free' }` says which - the panel draws
   // the control only when the named parameter is on that setting, and swaps them when it moves.
+  // `is` may be a list - a waveshaper's Character knob is live on most of its curves, not one.
   const active = spec.active === undefined ? null : Object.freeze({
     param: String(spec.active.param ?? ''),
-    is: spec.active.is,
+    is: Array.isArray(spec.active.is) ? Object.freeze([...spec.active.is]) : spec.active.is,
   });
 
   // How many digits after the point the readout prints. The span says it well enough for most
@@ -424,7 +425,9 @@ function defineDevice(spec) {
     if (!p.active) continue;
     const on = params.find((x) => x.id === p.active.param);
     if (!on) fail(id, `param "${p.id}" is active on "${p.active.param}", which this device does not have`);
-    if (argToValue(on, p.active.is) === null) fail(id, `param "${p.id}" is active on "${p.active.param}" being ${JSON.stringify(p.active.is)}, which is not one of its values`);
+    for (const is of [p.active.is].flat()) {
+      if (argToValue(on, is) === null) fail(id, `param "${p.id}" is active on "${p.active.param}" being ${JSON.stringify(is)}, which is not one of its values`);
+    }
   }
 
   // Pictures the panel draws instead of, or as well as, some of those knobs - see figures.mjs,
@@ -2598,12 +2601,12 @@ function oscParams(n, group, levelDefault) {
   return [
     { id: `${p}.level`, name: `Osc ${n} Level`, min: 0, max: 1, default: levelDefault, group },
     { id: `${p}.table`, name: `Osc ${n} Table`, default: 0, options: [...TABLE_NAMES], capacity: TABLE_SLOTS, takes: 'sample', sampleAs: 'wavetable', rate: 'k', group,
-      description: 'Which stack of waveforms this oscillator reads. Name a sample - "pack:3" or "files:mytable.wav" - to load a file as a table: it is cut into frames of 2048 samples, or whatever length it declares; a file shorter than that is one cycle.' },
+      description: 'Which stack of waveforms this oscillator reads. Name a sample to load a file as a table.' },
     { id: `${p}.position`, name: `Osc ${n} Position`, min: 0, max: 1, default: 0, group,
       description: 'Where in the table stack this oscillator reads. Sweeping it morphs one waveform into the next.' },
     { id: `${p}.warpmode`, name: `Osc ${n} Warp Mode`, default: 0, options: [...WARP_MODES], rate: 'k', group,
       optionGroups: [{ label: 'phase', from: 0 }, { label: 'cross-mod', from: PHASE_WARPS.length }],
-      description: 'How the warp bends this oscillator. The phase warps reshape the cycle; the fm, pm and ring modes bend it with another source in the voice - the other oscillator, the sub, the noise - and the warp amount is their depth.' },
+      description: 'How the warp bends this oscillator. The phase warps reshape the cycle; fm, pm and ring bend it with another source in the voice, by the warp amount.' },
     { id: `${p}.warp`, name: `Osc ${n} Warp`, min: 0, max: 1, default: 0, group,
       description: 'How hard the warp mode bends the phase, or the depth of a cross-modulation. Zero is neutral in every mode.' },
     { id: `${p}.phase`, name: `Osc ${n} Phase`, min: 0, max: 1, default: 0, unit: 'cyc', group,
@@ -3050,7 +3053,7 @@ function opParams(n) {
     { id: `${p}.sustain`, name: `Op ${n} Sustain`, min: 0, max: 1, default: 0.7, group },
     opSeconds(`${p}.release`, `Op ${n} Release`, 0.3, group),
     { id: `${p}.velocity`, name: `Op ${n} Vel > Level`, min: 0, max: 1, default: 0.5, group,
-      description: 'How much the note\'s velocity sets this operator\'s level. At 0 every note plays it at full level; at 1 its level follows velocity all the way, so a soft note barely sounds it. On an operator that modulates others, that makes soft notes darker and hard ones brighter.' },
+      description: 'How much velocity sets this operator\'s level. Zero plays it at full level on every note; one follows velocity all the way.' },
   ];
 }
 
@@ -3512,7 +3515,7 @@ const GRANULAR = defineDevice({
   channels: { in: 0, out: 2 },
   params: [
     { id: 'sample', name: 'Sample', default: 0, options: ['none'], capacity: SAMPLE_SLOTS, takes: 'sample', rate: 'k', group: 'Source',
-      description: 'The sample the grains are read from - "pack:3" or "files:voice.wav". With none named the synth is silent.' },
+      description: 'The sample the grains are read from. With none named the synth is silent.' },
     { id: 'position', name: 'Position', min: 0, max: 1, default: 0.2, group: 'Source',
       description: 'Where in the sample the grains are read from.' },
     { id: 'spray', name: 'Spray', min: 0, max: 1, default: 0.05, group: 'Source',
@@ -3527,7 +3530,7 @@ const GRANULAR = defineDevice({
     { id: 'random', name: 'Random Pitch', min: 0, max: 12, default: 0, unit: 'st', group: 'Grains' },
     { id: 'window', name: 'Window', default: 0, options: [...WINDOWS], capacity: WINDOWS.length + SHAPE_SLOTS,
       takes: 'shape', rate: 'k', group: 'Grains',
-      description: 'The amplitude a grain is played through. One of the shapes here, or one you draw - `.param("Window", "0,0 0.1,1 1,0")` takes the same breakpoints lfo() takes.' },
+      description: 'The amplitude a grain is played through: one of these shapes, or one you draw.' },
     { id: 'spread', name: 'Spread', min: 0, max: 1, default: 0.5, group: 'Grains',
       description: 'How far grains are panned either way.' },
     { id: 'reverse', name: 'Reverse', min: 0, max: 1, default: 0, group: 'Grains',
@@ -3544,7 +3547,7 @@ const GRANULAR = defineDevice({
       id: 'cloud',
       kind: 'sample',
       group: 'Source',
-      description: 'The file, with the grains being read out of it. Each grain is a lens as wide as the stretch it plays and shaped like its window, with a line crossing it for how far along the grain is. Drag across it to move the position, up and down for the spray.',
+      description: 'The file, with the grains being read out of it: each as wide as the stretch it plays, in the shape of its window - drag across for the position, up and down for the spray.',
       params: { sample: 'sample', position: 'position', spray: 'spray', size: 'size', scan: 'scan', window: 'window' },
       drag: { x: 'position', y: 'spray' },
       // The sample is what the whole synth is made of, so its name heads the picture of it, in

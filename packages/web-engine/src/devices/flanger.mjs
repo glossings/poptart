@@ -33,7 +33,7 @@ export const FLANGER = defineDevice({
       id: 'sweep',
       kind: 'sweep',
       title: 'sweep',
-      description: 'The delay each copy is read at over one cycle of the LFO - left and right apart by the spread - and where the sweep is right now. Drag up for the depth.',
+      description: 'The delay each copy is read at over one cycle of the LFO, left and right apart by the spread. Drag up for the depth.',
       params: { rate: 'rate', depth: 'depth', delay: 'delay', sync: 'sync', spread: 'spread', shape: 'shape' },
       drag: { y: 'depth' },
     },

@@ -61,6 +61,9 @@ function makeHost({ builtIn = [], library = { packs: [], problems: [], urlFor: c
       looksLikeShapeData: patternCore.looksLikeShapeData,
       parseShapePoints: patternCore.parseShapePoints,
       sampleShape: patternCore.sampleShape,
+      // A curve named rather than drawn inline: the _shape(...) definitions the last evaluation
+      // registered, so a device control names a shape exactly as lfo() does.
+      lookupShape: patternCore.lookupShape,
     },
   });
   const transport = new patternCore.Transport(() => engine.getTime(), { cps: 0.5, paused: true });
@@ -299,8 +302,10 @@ test('a dragged control glides and a switched one steps, because a device reads 
   mode.calls.length = 0;
   await rig.host.call('POST', '/api/deviceParam', { trackId: 'lead', slot: 1, id: 'mode', value: 2 });
   assert.equal(mode.calls.some((c) => c.kind === 'ramp'), false, 'ramping an enum sweeps the modes in between');
-  // The AudioParam carries a position: the third of nine modes sits a quarter of the way up.
-  assert.ok(Math.abs(mode.calls.find((c) => c.kind === 'set').value - 0.25) < 1e-9);
+  // The AudioParam carries a position: the third entry, counted along the whole list including
+  // the slots kept for drawn curves.
+  const modeParam = findParam(catalog.get('Distort'), 'mode');
+  assert.ok(Math.abs(mode.calls.find((c) => c.kind === 'set').value - normalize(modeParam, 2)) < 1e-9);
   assert.equal(rig.engine.deviceState(rig.evaluator.trackIds.get('lead'), 1).values.mode, 2);
   shutdown(rig);
 });
@@ -856,13 +861,64 @@ test('a curve drawn for a device control is sampled and written into the code as
   shutdown(rig);
 });
 
+test('a waveshaper curve can be drawn too, and reaches the effect as a table', async () => {
+  const rig = makeHost();
+  await rig.host.call('POST', '/api/evaluate', { code: 'lead: n("0").synth("FM").fx("Distort")' });
+  const tid = rig.evaluator.trackIds.get('lead');
+  const mode = catalog.get('Distort').params.find((p) => p.id === 'mode');
+  const res = await rig.host.call('POST', '/api/deviceParam', {
+    trackId: 'lead', slot: 1, id: 'mode', sample: '0,1 1,0', commit: true,
+  });
+  assert.equal(res.value, mode.options.length, 'the first slot past the curves it ships with');
+  const node = rig.engine.tracks.get(tid).slots.get(1).built.node;
+  const sent = node.messages.find((m) => m.kind === 'shape');
+  assert.equal(sent.param, 'mode');
+  assert.equal(sent.index, res.value);
+  // Drawn upside down, and pictured that way: the table the effect plays is the one on screen.
+  const curve = res.figures.find((f) => f.kind === 'shaper');
+  assert.equal(curve.modeName, 'drawn');
+  assert.ok(curve.points[0].y > 0 && curve.points[curve.points.length - 1].y < 0);
+  shutdown(rig);
+});
+
+test('a device curve is a named shape: resolved from the buffer, redrawn in place, patternable', async () => {
+  const rig = makeHost();
+  const warnings = [];
+  rig.engine.warn = (line) => warnings.push(line);
+  const code = (grit) => `lead: n("0").synth("FM").fx("Distort").param("Mode", "grit")\n_shape("grit", ${JSON.stringify(grit)})`;
+  await rig.host.call('POST', '/api/evaluate', { code: code('0,1 1,0') });
+  const tid = rig.evaluator.trackIds.get('lead');
+  const mode = catalog.get('Distort').params.find((p) => p.id === 'mode');
+  const first = await rig.host.call('POST', '/api/deviceParam', { trackId: 'lead', slot: 1, id: 'mode', sample: 'grit', commit: true });
+  assert.equal(first.value, mode.options.length, 'the first slot past the curves it ships with');
+  assert.equal(first.arg, '"grit"', 'the code names the shape, not its points');
+  assert.equal(first.options[first.value], 'grit', 'and so does the menu');
+  const curve = first.figures.find((f) => f.kind === 'shaper');
+  assert.equal(curve.modeName, 'grit');
+  assert.ok(curve.points[0].y > 0 && curve.points.at(-1).y < 0, 'an inverter: the curve falls');
+  // Redrawn: the definition changes, the name keeps its slot, and the table is the new curve.
+  await rig.host.call('POST', '/api/evaluate', { code: code('0,0 1,1') });
+  const again = await rig.host.call('POST', '/api/deviceParam', { trackId: 'lead', slot: 1, id: 'mode', sample: 'grit', commit: true });
+  assert.equal(again.value, first.value, 'the same slot');
+  const redrawn = again.figures.find((f) => f.kind === 'shaper');
+  assert.ok(redrawn.points[0].y < 0 && redrawn.points.at(-1).y > 0, 'now the diagonal: it rises');
+  assert.equal(Object.keys(rig.engine.deviceState(tid, 1).shapes).length, 1, 'one curve, not two');
+  // Set from the pattern's own poll: a name the scheduler sends as a string lands the same way.
+  rig.engine.setParam(tid, 1, 'Mode', 'grit', rig.engine.getTime(), 0);
+  assert.equal(rig.engine.deviceState(tid, 1).values.mode, first.value);
+  // A name nothing defines is refused by name.
+  rig.engine.setParam(tid, 1, 'Mode', 'nonesuch', rig.engine.getTime(), 0);
+  assert.ok(warnings.some((w) => /no shape called "nonesuch"/.test(w)), warnings.join(' / '));
+  shutdown(rig);
+});
+
 test('a drawn curve that is not one is refused by name rather than played as silence', async () => {
   const rig = makeHost();
   const warnings = [];
   rig.engine.warn = (line) => warnings.push(line);
   await rig.host.call('POST', '/api/evaluate', { code: 'pad: n("0").synth("Granular")' });
   await rig.host.call('POST', '/api/deviceParam', { trackId: 'pad', slot: 0, id: 'window', sample: 'not a curve' });
-  assert.ok(warnings.some((w) => /is not a drawn shape/.test(w)), warnings.join(' / '));
+  assert.ok(warnings.some((w) => /no shape called "not a curve"/.test(w)), warnings.join(' / '));
   shutdown(rig);
 });
 
@@ -912,4 +968,35 @@ test('the pack panel browses the packs as folders, and a pick is the "pack/file"
 
   const { url } = await rig.host.call('GET', '/api/sampleAudio?file=/packs/pt_kit/sd.wav');
   assert.equal(url, '/web-engine/packs/pt_kit/sd.wav', 'the panel\'s spelling plays the same file');
+});
+
+test('a shape redefined by an evaluation reaches the device on it, playing or not, and moves nothing', async () => {
+  const rig = makeHost();
+  const code = (keys, mode = 'keys') => `lead: n("0").synth("FM").fx("Distort").param("Mode", "${mode}")\n_shape("keys", "${keys}")\n_shape("other", "0,0 1,1")`;
+  await rig.host.call('POST', '/api/evaluate', { code: code('0,1 1,0') });
+  const tid = rig.evaluator.trackIds.get('lead');
+  await rig.host.call('POST', '/api/deviceParam', { trackId: 'lead', slot: 1, id: 'mode', sample: 'keys', commit: false });
+  const state = () => rig.engine.deviceState(tid, 1);
+  const index = state().values.mode;
+  const node = rig.engine.tracks.get(tid).slots.get(1).built.node;
+  const sent = () => node.messages.filter((m) => m.kind === 'shape');
+  const before = sent().length;
+  assert.ok(state().shapes[index].points[0] > 0.9, 'an inverter: it starts at the top');
+  // Stopped, redrawn: the device is on the same slot, with the new curve in it.
+  await rig.host.call('POST', '/api/evaluate', { code: code('0,0 1,1') });
+  assert.equal(state().values.mode, index, 'the control has not moved');
+  assert.ok(state().shapes[index].points[0] < 0.1, 'and the slot holds the redrawn curve');
+  assert.equal(sent().length, before + 1, 'posted to the device once');
+  // Evaluated again unchanged: nothing is re-sent.
+  await rig.host.call('POST', '/api/evaluate', { code: code('0,0 1,1') });
+  assert.equal(sent().length, before + 1, 'an unchanged shape costs nothing');
+  // A picked shape posts its table before the control moves onto it.
+  const order = [];
+  const origSet = rig.engine.tracks.get(tid).setParamValue.bind(rig.engine.tracks.get(tid));
+  rig.engine.tracks.get(tid).setParamValue = (...a) => { order.push('control'); return origSet(...a); };
+  const origPost = node.port.postMessage;
+  node.port.postMessage = (m, t) => { if (m.kind === 'shape') order.push('table'); return origPost(m, t); };
+  await rig.host.call('POST', '/api/deviceParam', { trackId: 'lead', slot: 1, id: 'mode', sample: 'other', commit: false });
+  assert.deepEqual(order.slice(0, 2), ['table', 'control']);
+  shutdown(rig);
 });

@@ -84,9 +84,9 @@ export function paramDefaults(source, count) {
  * work out by turning the knob and listening.
  */
 const PARAM_NOTES = new Map(Object.entries({
-  'Galactic.replace': 'How much of the reverb tail is replaced by new sound as it decays, rather than being fed back. Low keeps a long tail going; high keeps the tail following what is played into it.',
+  'Galactic.replace': 'How much of the tail is replaced by new sound as it decays. Low keeps a long tail; high makes the tail follow what is played.',
   'Galactic.brightness': 'How much high end survives each pass round the tank. Down is a dark hall; up is a bright metallic one.',
-  'Galactic.detune': 'Pitch drift inside the tail, which is what stops a very long reverb ringing on one note. A little is a chorus on the tail; a lot is the unreal end of this device.',
+  'Galactic.detune': 'Pitch drift inside the tail. A little is a chorus on the tail; a lot is the unreal end of this device.',
   'Galactic.bigness': 'The size of the space - how long the tail runs and how far apart its reflections are.',
   'Galactic.drywet': 'Dry against reverb.',
 }));

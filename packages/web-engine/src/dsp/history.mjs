@@ -29,6 +29,9 @@ export class History {
     this.keep = keep;
     this.count = 0;
     this.acc = 0;
+    // How many entries have ever been written. A lane uses it to pin each entry to the same pixel
+    // column for as long as it is on screen, so the picture moves in whole pixels as it scrolls.
+    this.written = 0;
   }
 
   push(v) {
@@ -41,6 +44,7 @@ export class History {
     this.count = 0;
     this.buf[this.at] = this.acc;
     this.at = (this.at + 1) % this.buf.length;
+    this.written += 1;
   }
 
   /**

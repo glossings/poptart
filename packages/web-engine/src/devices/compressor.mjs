@@ -144,7 +144,7 @@ export class CompressorProcessor {
       meters: {
         curve: {
           inDb: this.level, grDb: this.reduction,
-          history: { inDb: this.levels.snapshot(), grDb: this.reductions.snapshot(), blockSec: this.blockSec },
+          history: { inDb: this.levels.snapshot(), grDb: this.reductions.snapshot(), end: this.levels.written, blockSec: this.blockSec },
         },
       },
     };

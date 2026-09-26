@@ -68,7 +68,7 @@ export const PLAITS = defineDevice({
       "max": 1,
       "default": 0.5,
       "group": "Model",
-      "description": "The first of the three model controls. Broadly: how much material there is - the number of partials, the spread of a chord, the depth of the FM. It means something different in every engine."
+      "description": "The first model control: broadly, how much material there is. Partials, chord spread, FM depth. Differs by engine."
     },
     {
       "rate": "a",
@@ -78,7 +78,7 @@ export const PLAITS = defineDevice({
       "max": 1,
       "default": 0.5,
       "group": "Model",
-      "description": "The second model control. Broadly: brightness, or the balance of what Harmonics set up. It means something different in every engine."
+      "description": "The second model control: broadly, brightness. Differs by engine."
     },
     {
       "rate": "a",
@@ -88,7 +88,7 @@ export const PLAITS = defineDevice({
       "max": 1,
       "default": 0.5,
       "group": "Model",
-      "description": "The third model control. Broadly: the character of the waveform itself, often from soft to hard. It means something different in every engine."
+      "description": "The third model control: broadly, the character of the waveform, soft to hard. Differs by engine."
     },
     {
       "rate": "a",
@@ -192,7 +192,7 @@ export const RINGS = defineDevice({
       "max": 1,
       "default": 0.35,
       "group": "Resonator",
-      "description": "What the resonator IS: the ratio of its partials, from a string through a bar to a bell. This is the control that decides whether it sounds struck or bowed material."
+      "description": "The ratio of the resonator's partials, from a string through a bar to a bell."
     },
     {
       "rate": "a",
@@ -222,7 +222,7 @@ export const RINGS = defineDevice({
       "max": 1,
       "default": 0.25,
       "group": "Resonator",
-      "description": "Where along the resonator it is struck. Near the middle is round and fundamental-heavy; near the end is thin and full of odd partials."
+      "description": "Where the resonator is struck. The middle is round; the end is thin and full of odd partials."
     },
     {
       "rate": "k",
@@ -361,7 +361,7 @@ export const ELEMENTS = defineDevice({
       "max": 1,
       "default": 0,
       "group": "Strike",
-      "description": "Adds the module's own noise and inharmonicity to the exciters, which is what stops it sounding like a clean physical model."
+      "description": "Adds the module's own noise and inharmonicity to the exciters, so it sounds less like a clean model."
     },
     {
       "rate": "a",
@@ -371,7 +371,7 @@ export const ELEMENTS = defineDevice({
       "max": 1,
       "default": 0.4,
       "group": "Resonator",
-      "description": "What the resonator is made of and shaped like, sweeping through plates, strings, bars and tubes. Everything else is heard through this."
+      "description": "What the resonator is made of and shaped like: plates, strings, bars, tubes."
     },
     {
       "rate": "a",
@@ -579,7 +579,7 @@ export const CLOUDS = defineDevice({
       "max": 1,
       "default": 0.5,
       "group": "Buffer",
-      "description": "Where in the recorded buffer the grains are read from. Hold it still and the sound freezes there; sweep it and the buffer is scrubbed."
+      "description": "Where in the buffer the grains are read from. Hold it to freeze; sweep it to scrub."
     },
     {
       "rate": "a",
@@ -661,7 +661,7 @@ export const CLOUDS = defineDevice({
       "max": 1,
       "default": 0,
       "group": "Output",
-      "description": "How much of the output is written back into the buffer, which is how a cloud builds on itself rather than only on what is played in."
+      "description": "How much of the output is written back into the buffer, so the cloud builds on itself."
     },
     {
       "rate": "a",

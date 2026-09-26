@@ -34,7 +34,7 @@ export const LIMITER = defineDevice({
       id: 'curve',
       kind: 'transfer',
       title: '',
-      description: 'What comes out for what goes in: everything above the ceiling is held to it. The dot is where the signal is on it right now, after the gain.',
+      description: 'What comes out for what goes in: everything above the ceiling is held to it. The dot is where the signal is now.',
       params: { threshold: 'ceiling', pregain: 'gain' },
     },
   ],
@@ -112,7 +112,7 @@ export class LimiterProcessor {
       meters: {
         curve: {
           inDb: this.level, grDb: this.reduction < 1 ? 20 * Math.log10(this.reduction) : 0,
-          history: { inDb: this.levels.snapshot(), grDb: this.reductions.snapshot(), blockSec: this.blockSec },
+          history: { inDb: this.levels.snapshot(), grDb: this.reductions.snapshot(), end: this.levels.written, blockSec: this.blockSec },
         },
       },
     };

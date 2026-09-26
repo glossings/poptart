@@ -66,7 +66,7 @@ export const CLOUDSEED = defineDevice({
       "max": 1,
       "default": 0.2346999943256378,
       "rate": "a",
-      "description": "How much the two channels are summed before the reverb. Up is a mono feed into the tank, which keeps the tail centered; down keeps the sides apart."
+      "description": "How much the two channels are summed before the reverb. Up is a mono feed, which keeps the tail centered."
     },
     {
       "id": "lowcut",
@@ -412,7 +412,7 @@ export const CLOUDSEED = defineDevice({
       "max": 1,
       "default": 0.9759999513626099,
       "rate": "a",
-      "description": "Where the lowpass sits. Because it is inside the feedback, every pass round the tank takes more top off - so the tail gets darker as it goes rather than starting dark."
+      "description": "Where the lowpass sits. It is inside the feedback, so the tail darkens as it goes."
     },
     {
       "id": "lowgain",
@@ -442,7 +442,7 @@ export const CLOUDSEED = defineDevice({
       "max": 1,
       "default": 0,
       "rate": "a",
-      "description": "How different the left and right sides are. Zero is the same space in both ears; up is two related spaces, which is what makes a wide tail."
+      "description": "How different the left and right sides are. Zero is the same space in both ears; up is two related spaces."
     },
     {
       "id": "tapseed",
@@ -452,7 +452,7 @@ export const CLOUDSEED = defineDevice({
       "max": 1,
       "default": 0.3339999914169312,
       "rate": "a",
-      "description": "Which random arrangement the multitap stage uses. Changing it rearranges the echoes without changing any of the settings above."
+      "description": "Which random arrangement the multitap stage uses. Rearranges the echoes without changing the settings."
     },
     {
       "id": "diffusionseed",

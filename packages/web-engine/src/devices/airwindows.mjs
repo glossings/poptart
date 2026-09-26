@@ -34,7 +34,7 @@ export const GALACTIC = defineDevice({
       "default": 0.5,
       "rate": "a",
       "group": "Controls",
-      "description": "How much of the reverb tail is replaced by new sound as it decays, rather than being fed back. Low keeps a long tail going; high keeps the tail following what is played into it."
+      "description": "How much of the tail is replaced by new sound as it decays. Low keeps a long tail; high makes the tail follow what is played."
     },
     {
       "id": "brightness",
@@ -54,7 +54,7 @@ export const GALACTIC = defineDevice({
       "default": 0.5,
       "rate": "a",
       "group": "Controls",
-      "description": "Pitch drift inside the tail, which is what stops a very long reverb ringing on one note. A little is a chorus on the tail; a lot is the unreal end of this device."
+      "description": "Pitch drift inside the tail. A little is a chorus on the tail; a lot is the unreal end of this device."
     },
     {
       "id": "bigness",

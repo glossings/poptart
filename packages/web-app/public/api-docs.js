@@ -80,8 +80,8 @@ const API_DOCS = {
   },
   synth: {
     kind: 'both',
-    sig: 'synth(plugin, { state })',
-    desc: 'Sets the track\'s instrument plugin, by name. Double-click the name to open the plugin\'s window. The optional state is a captured plugin state to load.',
+    sig: 'synth(plugin, { label, state })',
+    desc: 'Sets the track\'s instrument plugin, by name. Double-click the name to open the plugin\'s window. The optional label is a name .param() and .wet() can reach this device by. The optional state is a captured plugin state to load.',
     eg: 'note("c2*4").synth("Serum 2")',
   },
   pianoroll: {
@@ -254,14 +254,14 @@ const API_DOCS = {
   // ----------------------------------------------------------------- chain & channel strip
   fx: {
     kind: 'method',
-    sig: 'fx(plugin, { state })',
-    desc: 'Adds an effect plugin to the end of the track\'s chain. Double-click the name to open the plugin\'s window; {app+f} inserts one at the cursor. .param() calls after it set this plugin\'s parameters.',
+    sig: 'fx(plugin, { label, state })',
+    desc: 'Adds an effect plugin to the end of the track\'s chain. Double-click the name to open the plugin\'s window; {app+f} inserts one at the cursor. .param() calls after it set this plugin\'s parameters. The optional label is a name .param() and .wet() can reach this device by from anywhere later in the chain, whatever order the chain is in.',
     eg: '.fx("ValhallaRoom").param("Mix", 0.3)',
   },
   param: {
     kind: 'method',
-    sig: 'param(name, value)',
-    desc: 'Sets a parameter of the last plugin in the chain, by the name the plugin gives it. Names autocomplete inside the quotes. The value is a number, pattern or signal: the parameter\'s position from 0 to 1, or its real units where a mapping file gives the plugin some (a filter frequency in Hz, for example). On the browser build\'s devices a switch also takes its option\'s name, an on/off takes 0 or 1, and a control that loads a sample takes "pack:index" or "pack:file". An audio() handle in place of the value wires that track or bus onto the parameter at the sample rate, with .mul() and .add() on the handle as its gain and offset; the browser build does this, and the desktop engine reports it on the console and plays the rest of the track.',
+    sig: 'param(device?, name, value)',
+    desc: 'Sets a parameter of the last plugin in the chain, by the name the plugin gives it. With a device named first, it sets that device\'s parameter wherever it sits in the chain: by its label, by its plugin name, or by "Name#2" for the second of two with that name, counting in chain order. A plain name two devices share reaches the later one. Inside a .when(), the setting holds while the condition does and then yields: to a .param() outside the .when(), or, with none, to whatever the parameter was before. Names autocomplete inside the quotes. The value is a number, pattern or signal: the parameter\'s position from 0 to 1, or its real units where a mapping file gives the plugin some (a filter frequency in Hz, for example). On the browser build\'s devices a switch also takes its option\'s name, an on/off takes 0 or 1, and a control that loads a sample takes "pack:index" or "pack:file". An audio() handle in place of the value wires that track or bus onto the parameter at the sample rate, with .mul() and .add() on the handle as its gain and offset; the browser build does this, and the desktop engine reports it on the console and plays the rest of the track.',
     eg: '.param("Filter 1 Freq", sine(0.2).range(300, 6000))',
   },
   preset: {
@@ -303,8 +303,8 @@ const API_DOCS = {
   dry: { kind: 'method', sig: 'dry(value)', desc: 'The level of the track\'s own output alongside its bus sends. 1 by default; 0 leaves only the sends.', eg: '.dry(0)' },
   wet: {
     kind: 'method',
-    sig: 'wet(value)',
-    desc: 'Dry/wet mix for the plugin just before it in the chain: 1 (the default) is fully processed, 0 bypasses it. Accepts any signal, so an effect can fade in and out over a song. Plugins that add latency, such as linear-phase EQs, can sound hollow at in-between values.',
+    sig: 'wet(device?, value)',
+    desc: 'Dry/wet mix for the plugin just before it in the chain: 1 (the default) is fully processed, 0 bypasses it. With a device named first, as .param() takes one, it sets that effect\'s mix wherever it sits. Accepts any signal, so an effect can fade in and out over a song. Plugins that add latency, such as linear-phase EQs, can sound hollow at in-between values.',
     eg: '.fx("ValhallaRoom").wet(auto("breakdown"))',
   },
   bsend: { kind: 'method', sig: 'bsend(name, amount)', desc: 'Sends the track\'s output to a named bus and silences its own output. Both arguments can be patterns.', eg: '.bsend("reverb")' },

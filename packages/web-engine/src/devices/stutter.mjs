@@ -54,7 +54,7 @@ export const STUTTER = defineDevice({
       id: 'repeats',
       kind: 'repeats',
       title: 'repeats',
-      description: 'One catch and its repeats: each one as long as it plays for, at the level and the pitch it falls to, against the interval the next catch may start on.',
+      description: 'One catch and its repeats: how long each plays and how far it falls in level and pitch, against the interval the next may start on.',
       params: { grid: 'grid', repeats: 'repeats', decay: 'decay', pitch: 'pitch', interval: 'interval' },
     },
   ],

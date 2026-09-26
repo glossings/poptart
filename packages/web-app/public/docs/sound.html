@@ -53,12 +53,12 @@
         <table data-build="web">
           <tr><th>Effects</th><th></th></tr>
           <tr><td><code>Filter</code> · <code>EQ</code></td><td>multimode filter · four-band equalizer</td></tr>
-          <tr><td><code>Distort</code> · <code>Overdrive</code> · <code>Crush</code></td><td>waveshaping · band-limited drive · bits and rate</td></tr>
+          <tr><td><code>Distort</code> · <code>Overdrive</code> · <code>Crush</code></td><td>waveshaping, with curves you draw as named shapes · band-limited drive · bits and rate</td></tr>
           <tr><td><code>Compressor</code> · <code>Multiband</code> · <code>Limiter</code> · <code>Ducker</code></td><td>dynamics; the compressor and ducker take a sidechain</td></tr>
           <tr><td><code>Delay</code> · <code>GrainEcho</code> · <code>Stutter</code></td><td>stereo delay · grain delay · synced repeats</td></tr>
           <tr><td><code>Chorus</code> · <code>Flanger</code> · <code>Phaser</code></td><td>modulation</td></tr>
           <tr><td><code>Reverb</code> · <code>Convolver</code> · <code>CloudSeed</code> · <code>Galactic</code></td><td>algorithmic · impulse responses · two very large spaces</td></tr>
-          <tr><td><code>Clouds</code> · <code>Shift</code></td><td>granular processing · pitch and formant shifting</td></tr>
+          <tr><td><code>Clouds</code> · <code>Shift</code> · <code>FreqShift</code></td><td>granular processing · pitch and formant shifting · frequency shifting</td></tr>
         </table>
 
         <h2 id="params">Controls</h2>
@@ -92,6 +92,20 @@
           of every device on the track, searchable, click to copy. They autocomplete inside
           <code>.param("…")</code> too.
         </p>
+        <p>
+          Name a device first and <code>.param()</code> reaches it wherever it sits in the chain:
+          <code>.param("Delay", "Feedback", 0.6)</code>. When two devices share a name,
+          <code>"Filter#2"</code> is the second of them in chain order. A label given as
+          <code>.fx("Filter", { label: "lo" })</code> is reached as <code>"lo"</code> however the chain is
+          reordered. <code>.wet()</code> takes a device the same way. Inside a <code>.when()</code>, a control
+          follows the condition, then yields: to a <code>.param()</code> outside the <code>.when()</code>, or,
+          with none, to wherever the control was before. A <code>.param()</code> after the <code>.when()</code>
+          wins over it, as a later call always does.
+        </p>
+        <pre data-run data-build="web"><code>keys: n("0 2 4 &lt;5 7&gt;").scale("D dorian").synth("FM")
+  .fx("Filter", { label: "lo" }).param("Cutoff", 0.35)
+  .fx("Delay").wet(0)
+  .when("&lt;0 1&gt;", x =&gt; x.param("lo", "Cutoff", 0.7).wet("Delay", 0.5))</code></pre>
         <p>
           <code>.wet(v)</code> after a device blends it with what goes into it: 0 bypasses, 1 (the default) is
           fully processed. It takes a signal, so an effect can fade in over a song.

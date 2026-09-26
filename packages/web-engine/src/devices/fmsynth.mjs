@@ -43,7 +43,7 @@ function opParams(n) {
     { id: `${p}.sustain`, name: `Op ${n} Sustain`, min: 0, max: 1, default: 0.7, group },
     opSeconds(`${p}.release`, `Op ${n} Release`, 0.3, group),
     { id: `${p}.velocity`, name: `Op ${n} Vel > Level`, min: 0, max: 1, default: 0.5, group,
-      description: 'How much the note\'s velocity sets this operator\'s level. At 0 every note plays it at full level; at 1 its level follows velocity all the way, so a soft note barely sounds it. On an operator that modulates others, that makes soft notes darker and hard ones brighter.' },
+      description: 'How much velocity sets this operator\'s level. Zero plays it at full level on every note; one follows velocity all the way.' },
   ];
 }
 

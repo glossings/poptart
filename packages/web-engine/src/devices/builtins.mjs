@@ -30,7 +30,7 @@ export const CONVOLVER = defineDevice({
   description: 'A convolution reverb: five synthesized spaces, or any sample as the impulse response.',
   params: [
     { id: 'ir', name: 'Impulse', default: 1, options: [...IR_NAMES], capacity: IR_SLOTS, takes: 'sample', rate: 'k', group: 'Space',
-      description: 'The space. Name a sample - "pack:3" or "files:hall.wav" - to convolve with that file instead.' },
+      description: 'The space. Name a sample to convolve with that file instead.' },
     { id: 'size', name: 'Size', min: 0.3, max: 6, default: 2, unit: 's', curve: 'exp', rate: 'k', group: 'Space',
       description: 'The decay of a synthesized space. A loaded file has its own length and ignores this.' },
     { id: 'predelay', name: 'Predelay', min: 0, max: 0.25, default: 0.01, unit: 's', group: 'Space' },

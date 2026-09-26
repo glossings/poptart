@@ -1968,9 +1968,11 @@ li.CodeMirror-hint-active {
    readout leaves it. */
 .device-widget-bare {
   display: flex;
+  flex-direction: row; /* a knob cell stacks its name over the control; a bare one has no name */
+  align-items: center;
   flex: 1;
+  width: auto;
   min-width: 0;
-  max-width: 60%;
 }
 
 .device-figure-head:has(.device-widget-bare) {
@@ -1985,6 +1987,8 @@ li.CodeMirror-hint-active {
 
 /* What the picture currently reads, in the same mono the knobs print their values in. */
 .device-figure-read {
+  flex: none; /* the readout keeps its width; the control beside it gives way */
+  white-space: nowrap;
   font-variant-numeric: tabular-nums;
   font-size: 9px;
   font-family: var(--mono);
@@ -6243,15 +6247,20 @@ body.mix-on #deckAHead .deck-song {
   color: var(--accent);
 }
 
-/* A menu a figure took over (the grain window's), sized like the file field beside the others,
-   with its draw button in the same row. */
-.device-widget-bare select {
+/* A curve picker a figure took over (a waveshaper's mode, a grain's window): the lfo panel's own
+   name box and list, with the name taking the heading's width - it is the hero of the device. */
+.device-shape-pick {
+  display: flex;
+  align-items: center;
+  gap: 4px;
   flex: 1;
   min-width: 0;
+}
+
+.device-shape-pick .def-name {
+  flex: 1;
   width: auto;
-  font-size: 12px;
-  padding: 4px 22px 4px 9px;
-  background-position: right 8px center;
+  min-width: 0;
 }
 
 .device-widget-bare .device-draw {

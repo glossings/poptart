@@ -1698,6 +1698,15 @@ class OscEngine {
     if (typeof value !== 'number' || !Number.isFinite(value)) return;
     this._send('/poptart/setParam', [trackId, slotIndex, paramName, value, this._latency(targetTime)]);
   }
+  // The pattern is about to drive this parameter by poll: sclang reads what it is now and keeps
+  // it, and releaseParam puts it back - so a `.param()` that stops speaking for a parameter (the
+  // off side of a .when(), a call deleted in an eval) leaves the plugin as if it had never been.
+  holdParam(trackId, slotIndex, paramName) {
+    this._send('/poptart/holdParam', [trackId, slotIndex, paramName]);
+  }
+  releaseParam(trackId, slotIndex, paramName, targetTime) {
+    this._send('/poptart/releaseParam', [trackId, slotIndex, paramName, this._latency(targetTime)]);
+  }
   // ir: { shape: 'sine'|'saw'|'isaw'|'tri'|'square'|'rand', rateHz, phaseCycles, min, max } for
   // the basic shapes, or { shape: 'custom', points, mode, ... } for lfo() drawn shapes - see
   // signal.mjs / shape.mjs.

@@ -141,6 +141,9 @@ export class Slot {
     // What the processor last read of each control, by id, while a panel is watching it. Where
     // a modulator owns a control this is the only place its current value can be found.
     this.live = null;
+    // The value each parameter the pattern is driving had before the pattern took it, by id -
+    // where releaseParam puts it back (see Track#holdParam).
+    this.resting = new Map();
   }
 
   /** The AudioParam a name reaches, if it is one. Worklet params and node params look the same here. */
@@ -536,6 +539,30 @@ export class Track {
     return true;
   }
 
+  /**
+   * The pattern is about to drive this parameter: keeps what it reads now, so that releaseParam
+   * can put it back when the pattern stops. A parameter already held keeps its first reading -
+   * a second hold is a fresh Scheduler on the same track, not a new starting point.
+   */
+  holdParam(slotIndex, name) {
+    const slot = this.slots.get(slotIndex);
+    const found = slot?.paramFor(name);
+    if (!found) return false;
+    if (!slot.resting.has(found.param.id)) slot.resting.set(found.param.id, slot.values[found.param.id]);
+    return true;
+  }
+
+  /** The pattern is done with this parameter: back to what it was when the pattern took it. */
+  releaseParam(slotIndex, name, atTime, now, glide) {
+    const slot = this.slots.get(slotIndex);
+    const found = slot?.paramFor(name);
+    if (!found || !slot.resting.has(found.param.id)) return false;
+    const value = slot.resting.get(found.param.id);
+    slot.resting.delete(found.param.id);
+    this._apply(slot, found, value, atTime, now, glide);
+    return true;
+  }
+
   /** Sets a device parameter to a REAL value - what a preset, a panel or a default hands over. */
   setParamValue(slotIndex, paramId, value, atTime, now, glide) {
     const slot = this.slots.get(slotIndex);
@@ -548,7 +575,12 @@ export class Track {
 
   _apply(slot, { param, audioParam }, value, atTime, now, glide) {
     slot.values[param.id] = value;
-    if (audioParam) rampParam(audioParam, normalize(param, value), atTime, now, glide);
+    // A choice, a stepped control or a switch STEPS, whoever sets it. The pattern's poll and a
+    // named curve being loaded pass no glide, and the default one ramped a mode control from slot
+    // 19 to slot 1 through every setting between - each played for a block, empty drawn slots as a
+    // hard clip, which was the crack heard on every curve change.
+    const stepped = !!(param.options || param.step || param.ui === 'toggle');
+    if (audioParam) rampParam(audioParam, normalize(param, value), atTime, now, stepped ? 0 : glide);
     else slot.built.set?.(param.id, value);
   }
 

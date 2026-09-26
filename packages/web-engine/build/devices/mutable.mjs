@@ -48,9 +48,9 @@ export const PLAITS_PARAMS = Object.freeze([
     group: 'Model',
     description: 'Which synthesis model runs. Every other control means something different in each.',
   },
-  { id: 'harmonics', name: 'Harmonics', min: 0, max: 1, default: 0.5, group: 'Model', description: "The first of the three model controls. Broadly: how much material there is - the number of partials, the spread of a chord, the depth of the FM. It means something different in every engine." },
-  { id: 'timbre', name: 'Timbre', min: 0, max: 1, default: 0.5, group: 'Model', description: "The second model control. Broadly: brightness, or the balance of what Harmonics set up. It means something different in every engine." },
-  { id: 'morph', name: 'Morph', min: 0, max: 1, default: 0.5, group: 'Model', description: "The third model control. Broadly: the character of the waveform itself, often from soft to hard. It means something different in every engine." },
+  { id: 'harmonics', name: 'Harmonics', min: 0, max: 1, default: 0.5, group: 'Model', description: "The first model control: broadly, how much material there is. Partials, chord spread, FM depth. Differs by engine." },
+  { id: 'timbre', name: 'Timbre', min: 0, max: 1, default: 0.5, group: 'Model', description: "The second model control: broadly, brightness. Differs by engine." },
+  { id: 'morph', name: 'Morph', min: 0, max: 1, default: 0.5, group: 'Model', description: "The third model control: broadly, the character of the waveform, soft to hard. Differs by engine." },
   {
     id: 'blend',
     name: 'Blend',
@@ -325,10 +325,10 @@ export const ELEMENTS_PARAMS = Object.freeze([
     max: 1,
     default: 0,
     group: 'Strike',
-    description: 'Adds the module\'s own noise and inharmonicity to the exciters, which is what stops it sounding like a clean physical model.',
+    description: 'Adds the module\'s own noise and inharmonicity to the exciters, so it sounds less like a clean model.',
   },
 
-  { id: 'geometry', name: 'Geometry', min: 0, max: 1, default: 0.4, group: 'Resonator', description: "What the resonator is made of and shaped like, sweeping through plates, strings, bars and tubes. Everything else is heard through this." },
+  { id: 'geometry', name: 'Geometry', min: 0, max: 1, default: 0.4, group: 'Resonator', description: "What the resonator is made of and shaped like: plates, strings, bars, tubes." },
   { id: 'brightness', name: 'Brightness', min: 0, max: 1, default: 0.6, group: 'Resonator', description: "How much high end the resonator keeps." },
   { id: 'damping', name: 'Damping', min: 0, max: 1, default: 0.7, group: 'Resonator', description: "How long it rings on. Near the top it barely decays, which is the drone end of this module." },
   { id: 'position', name: 'Position', min: 0, max: 1, default: 0.3, group: 'Resonator', description: "Where the exciters meet the resonator, which decides which partials are fed and which are missed." },
@@ -734,7 +734,7 @@ export const CLOUDS_PARAMS = Object.freeze([
     group: 'Buffer',
     description: 'Granular scatters grains; stretch holds and smears; looping delay is a delay you can freeze; spectral rebuilds the sound from its own spectrum.',
   },
-  { id: 'position', name: 'Position', min: 0, max: 1, default: 0.5, group: 'Buffer', description: "Where in the recorded buffer the grains are read from. Hold it still and the sound freezes there; sweep it and the buffer is scrubbed." },
+  { id: 'position', name: 'Position', min: 0, max: 1, default: 0.5, group: 'Buffer', description: "Where in the buffer the grains are read from. Hold it to freeze; sweep it to scrub." },
   { id: 'size', name: 'Size', min: 0, max: 1, default: 0.5, group: 'Buffer', description: "How long each grain is, from a click to most of a second. Short grains read as texture, long ones as the sound itself." },
   {
     id: 'density',
@@ -771,7 +771,7 @@ export const CLOUDS_PARAMS = Object.freeze([
   },
   { id: 'drywet', name: 'Mix', min: 0, max: 1, default: 0.5, group: 'Output', description: "The untouched signal against the cloud." },
   { id: 'spread', name: 'Stereo Spread', min: 0, max: 1, default: 0.5, group: 'Output', description: "How far grains are panned either way." },
-  { id: 'feedback', name: 'Feedback', min: 0, max: 1, default: 0, group: 'Output', description: "How much of the output is written back into the buffer, which is how a cloud builds on itself rather than only on what is played in." },
+  { id: 'feedback', name: 'Feedback', min: 0, max: 1, default: 0, group: 'Output', description: "How much of the output is written back into the buffer, so the cloud builds on itself." },
   { id: 'reverb', name: 'Reverb', min: 0, max: 1, default: 0, group: 'Output', description: "The reverb built into the module, after the grains." },
 ]);
 
@@ -967,10 +967,10 @@ export const RINGS_PARAMS = Object.freeze([
     group: 'Resonator',
     description: 'Which resonator is struck. The last two are the module\'s own extended models.',
   },
-  { id: 'structure', name: 'Structure', min: 0, max: 1, default: 0.35, group: 'Resonator', description: "What the resonator IS: the ratio of its partials, from a string through a bar to a bell. This is the control that decides whether it sounds struck or bowed material." },
+  { id: 'structure', name: 'Structure', min: 0, max: 1, default: 0.35, group: 'Resonator', description: "The ratio of the resonator's partials, from a string through a bar to a bell." },
   { id: 'brightness', name: 'Brightness', min: 0, max: 1, default: 0.5, group: 'Resonator', description: "How much high end the resonator keeps, and how hard the exciter hits it." },
   { id: 'damping', name: 'Damping', min: 0, max: 1, default: 0.5, group: 'Resonator', description: "How long the resonator rings on after it is struck." },
-  { id: 'position', name: 'Position', min: 0, max: 1, default: 0.25, group: 'Resonator', description: "Where along the resonator it is struck. Near the middle is round and fundamental-heavy; near the end is thin and full of odd partials." },
+  { id: 'position', name: 'Position', min: 0, max: 1, default: 0.25, group: 'Resonator', description: "Where the resonator is struck. The middle is round; the end is thin and full of odd partials." },
   {
     id: 'polyphony',
     name: 'Polyphony',

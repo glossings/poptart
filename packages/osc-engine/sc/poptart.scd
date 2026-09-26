@@ -1912,6 +1912,7 @@ buildTrack = { |key, birth|
                 ccs: IdentityDictionary.new,      // \slotN_param -> (bus:, index:, lo:, hi:, last:, binding:, defKey:)
                 oscs: IdentityDictionary.new,     // \slotN_param -> same shape as ccs, bound to an OSC address (see setParamOSC)
                 ramps: IdentityDictionary.new,    // \slotN_param -> (synth:, bus:, index:, slot:) - polled controls (see rampTo)
+                resting: IdentityDictionary.new,  // \slotN_param -> what the parameter was before the pattern took it (see \poptartHoldParam)
                 editWatch: Array.newClear(maxSlots), // slot -> [OSCFunc] watching for plugin edits
                 held: 0,                          // active-note count, drives env gates
                 sounding: Array.fill(maxSlots, { IdentityDictionary.new }) // slot -> (note -> when its off lands), see markSounding
@@ -2581,6 +2582,54 @@ OSCdef(\poptartSetParam, { |msg|
         };
     };
 }, '/poptart/setParam');
+
+// The pattern is about to drive a plugin parameter by poll: read what it is now and keep it, so
+// that a release can put it back. The read is asynchronous (the server answers /get with the
+// value); the first set is bundled a latency ahead, so the answer is what the parameter was before
+// the pattern reached it. A parameter already held keeps its first reading - a second hold is a
+// fresh Scheduler on the same track (an unmute), not a new starting point.
+OSCdef(\poptartHoldParam, { |msg|
+    var key = msg[1].asSymbol, slot = msg[2].asInteger, paramName = msg[3].asString;
+    var track = tracks[key];
+    var ctl, rampKey, index;
+    if (track.isKindOf(Event) and: { slot >= 0 }) {
+        ctl = track[\controllers][slot];
+        rampKey = ("slot" ++ slot ++ "_" ++ paramName).asSymbol;
+        if (ctl.notNil and: { ctl.info.notNil } and: { track[\resting][rampKey].isNil }) {
+            index = resolveParamIndex.(ctl.info, paramName);
+            if (index.notNil) {
+                // Marked before the answer lands, so a second hold in the meantime does not ask again.
+                track[\resting][rampKey] = \pending;
+                ctl.get(index, { |v| if (track[\resting][rampKey] == \pending) { track[\resting][rampKey] = v } });
+            };
+        };
+    };
+}, '/poptart/holdParam');
+
+// ...and is done with it. The ramp behind the poll goes (deferred, like any dropped modulator),
+// the parameter is unmapped from its bus, and set back to what the hold read. An answer that never
+// came (the plugin was not open to ask) leaves the parameter where the ramp left it.
+OSCdef(\poptartReleaseParam, { |msg|
+    var key = msg[1].asSymbol, slot = msg[2].asInteger;
+    var paramName = msg[3].asString, latency = msg[4].asFloat;
+    var track = tracks[key];
+    var ctl, rampKey, resting;
+    if (track.isKindOf(Event) and: { slot >= 0 }) {
+        ctl = track[\controllers][slot];
+        rampKey = ("slot" ++ slot ++ "_" ++ paramName).asSymbol;
+        resting = track[\resting].removeAt(rampKey);
+        if (ctl.notNil and: { ctl.info.notNil }) {
+            bundleNow.(latency, {
+                var index = resolveParamIndex.(ctl.info, paramName);
+                dropRamp.(key, track, rampKey);
+                if (index.notNil) {
+                    ctl.unmap(index);
+                    if (resting.isNumber) { ctl.set(index, resting) };
+                };
+            });
+        };
+    };
+}, '/poptart/releaseParam');
 
 // Pitch bend on its way out to a plugin (Sig#bend). The track synth posts its bend control at
 // bendPollHz while the track is bending (see buildTrackDef's SendReply); here that value becomes

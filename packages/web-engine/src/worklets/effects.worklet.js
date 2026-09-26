@@ -21,6 +21,7 @@ import { EQ, EqProcessor } from '../devices/eq.mjs';
 import { CHORUS, ChorusProcessor } from '../devices/chorus.mjs';
 import { FLANGER, FlangerProcessor } from '../devices/flanger.mjs';
 import { PHASER, PhaserProcessor } from '../devices/phaser.mjs';
+import { FREQSHIFT, FreqShiftProcessor } from '../devices/freqshift.mjs';
 import { DUCKER, DuckerProcessor } from '../devices/ducker.mjs';
 import { OVERDRIVE, OverdriveProcessor } from '../devices/overdrive.mjs';
 import { MULTIBAND, MultibandProcessor } from '../devices/multiband.mjs';
@@ -52,6 +53,11 @@ class EffectProcessor extends AudioWorkletProcessor {
     if (message.kind === 'noteOn') { this.fx.noteOn?.(message.note, message.velocity, message.time); return; }
     if (message.kind === 'noteOff') { this.fx.noteOff?.(message.note, message.time); return; }
     if (message.kind === 'noteRoute') { this.fx.setNoteRoute?.(!!message.on); return; }
+    // A curve somebody drew, already sampled into a table by the engine - see _loadShapeParam.
+    if (message.kind === 'shape' && typeof this.fx.loadShape === 'function') {
+      this.fx.loadShape(message.param, message.index, message.table);
+      return;
+    }
     if (message.kind === 'sample' && typeof this.fx.loadSample === 'function') {
       this.fx.loadSample(message.param, message.index, message);
     }
@@ -76,7 +82,7 @@ const EFFECTS = [
   [DELAY, DelayProcessor], [COMPRESSOR, CompressorProcessor], [LIMITER, LimiterProcessor],
   [EQ, EqProcessor], [CHORUS, ChorusProcessor], [FLANGER, FlangerProcessor], [PHASER, PhaserProcessor],
   [DUCKER, DuckerProcessor], [OVERDRIVE, OverdriveProcessor], [MULTIBAND, MultibandProcessor],
-  [STUTTER, StutterProcessor], [GRAINECHO, GrainEchoProcessor],
+  [STUTTER, StutterProcessor], [GRAINECHO, GrainEchoProcessor], [FREQSHIFT, FreqShiftProcessor],
 ];
 
 for (const [descriptor, Impl] of EFFECTS) {

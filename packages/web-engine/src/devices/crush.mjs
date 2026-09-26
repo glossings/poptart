@@ -32,7 +32,7 @@ export const CRUSH = defineDevice({
     { id: 'bits', name: 'Bits', min: 1, max: 16, default: 8, unit: 'bit', group: 'Digital',
       description: 'How many levels the signal is rounded to. Sixteen is transparent; under six is the sound of the rounding.' },
     { id: 'rate', name: 'Rate', min: 100, max: RATE_TOP, default: RATE_TOP, unit: 'Hz', curve: 'exp', group: 'Digital',
-      description: 'The rate the signal is held at. Everything above half of it folds back down as the aliasing this device is for. At the top of the range the signal is not held at all.' },
+      description: 'The rate the signal is held at. Everything above half of it folds back down as aliasing. At the top, nothing is held.' },
     { id: 'jitter', name: 'Jitter', min: 0, max: 1, default: 0, group: 'Digital',
       description: 'Wobbles the hold rate, which smears the aliasing into noise instead of leaving it as tones.' },
     { id: 'tone', name: 'Tone', min: 200, max: 20000, default: 20000, unit: 'Hz', curve: 'exp', group: 'Out',

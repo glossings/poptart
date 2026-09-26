@@ -205,6 +205,9 @@ export async function boot({
       looksLikeShapeData: patternCore.looksLikeShapeData,
       parseShapePoints: patternCore.parseShapePoints,
       sampleShape: patternCore.sampleShape,
+      // A curve named rather than drawn inline: the _shape(...) definitions the last evaluation
+      // registered, so a device control names a shape exactly as lfo() does.
+      lookupShape: patternCore.lookupShape,
     },
   });
   const transport = new patternCore.Transport(() => engine.getTime(), { cps: 0.5, paused: true });

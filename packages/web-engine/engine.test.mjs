@@ -199,6 +199,48 @@ test('a parameter set by name takes a position and reaches its AudioParam as one
   assert.ok(Math.abs(slot.values.cutoff - Math.sqrt(20 * 20000)) < 1e-6, 'and the slot remembers the real value, on the parameter curve');
 });
 
+test('a held parameter goes back to what it was when the pattern took it', () => {
+  const { engine } = makeEngine();
+  engine.createTrack('t1');
+  engine.loadEffect('t1', 'Filter', 1);
+  const slot = engine.tracks.get('t1').slots.get(1);
+  // Where the panel (or a preset) had it before the pattern spoke.
+  engine.setParam('t1', 1, 'Cutoff', 0.25, 0);
+  const before = slot.values.cutoff;
+  engine.holdParam('t1', 1, 'Cutoff');
+  engine.setParam('t1', 1, 'Cutoff', 0.9, 0);
+  engine.setParam('t1', 1, 'Cutoff', 0.7, 0);
+  assert.notEqual(slot.values.cutoff, before);
+  // A second hold - a fresh Scheduler on the same track - keeps the first reading.
+  engine.holdParam('t1', 1, 'Cutoff');
+  engine.releaseParam('t1', 1, 'Cutoff', 0);
+  assert.equal(slot.values.cutoff, before, 'released, it reads what it did before the pattern');
+  assert.ok(slot.built.params.cutoff.rampedTo(0.25), 'and the AudioParam went there');
+  // Released twice is nothing: there is nothing held to go back to.
+  engine.setParam('t1', 1, 'Cutoff', 0.6, 0);
+  engine.releaseParam('t1', 1, 'Cutoff', 0);
+  assert.notEqual(slot.values.cutoff, before);
+  // A parameter a modulator owns is the modulator's, hold or no hold.
+  engine.setParamLFO('t1', 1, 'Cutoff', { shape: 'sine', rateHz: 1, phaseCycles: 0, min: 0.2, max: 0.8 });
+  engine.releaseParam('t1', 1, 'Cutoff', 0);
+  assert.ok(engine.modulators.get('t1').has('1:Cutoff'), 'still the modulator\'s');
+});
+
+test('a choice steps from one setting to the next, whoever sets it, and a knob still glides', () => {
+  const { engine } = makeEngine();
+  engine.createTrack('t1');
+  engine.loadEffect('t1', 'Distort', 1);
+  const params = engine.tracks.get('t1').slots.get(1).built.params;
+  const mode = params.mode ?? engine.tracks.get('t1').slots.get(1).built.node.parameters.get('mode');
+  mode.calls.length = 0;
+  engine.setParam('t1', 1, 'Mode', 'fold', 0); // as the pattern's poll sends it: no glide given
+  assert.equal(mode.calls.some((c) => c.kind === 'ramp'), false, 'a mode ramped plays every mode between');
+  const drive = params.drive ?? engine.tracks.get('t1').slots.get(1).built.node.parameters.get('drive');
+  drive.calls.length = 0;
+  engine.setParam('t1', 1, 'Drive', 0.5, 0);
+  assert.ok(drive.calls.some((c) => c.kind === 'ramp'), 'a knob keeps its glide');
+});
+
 test('a parameter set out of range is clamped to what the device declares', () => {
   const { engine } = makeEngine();
   engine.createTrack('t1');

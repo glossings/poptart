@@ -564,6 +564,8 @@ export function createHost({
         start: body.start,
         arrangeFrom: body.arrangeFrom,
       });
+      // A shape the evaluation redefined reaches the devices already on it, playing or not.
+      engine.refreshNamedShapes?.();
       // A midicc() read in the pattern itself (not bound to a parameter) wants MIDI too, and only
       // the language knows it was written.
       if (midi && !midi.enabled && patternCore.midiInUse?.()) engine.onMidiWanted?.();

@@ -912,11 +912,16 @@ export class WebAudioEngine {
    * Takes a drawn curve on a parameter that accepts one, samples it, and points the parameter
    * at the table.
    *
-   * The same breakpoint format `lfo()` takes, sampled with pattern-core's own sampler rather
-   * than a second copy of it: a window drawn in the shape editor and a window played by the
-   * synth have to be the same curve, and the only way to be sure of that is to have one piece
-   * of code that says what the curve is. This runs on the main thread, so the worklet bundle
-   * never sees it.
+   * A curve arrives as a NAME - a `_shape(...)` definition in the buffer, the same thing an
+   * lfo() names, so `.param("Mode", "<grit soft>")` patterns between drawn curves the way
+   * lfo("<a b>") does - or as the breakpoints themselves. A name is looked up every time it is
+   * set and re-sampled when its definition has changed, into the slot the name already holds:
+   * redrawing a curve edits it in place rather than filling the menu with copies.
+   *
+   * Sampled with pattern-core's own sampler rather than a second copy of it: a curve drawn in
+   * the shape editor and a curve played by the device have to be the same curve, and the only
+   * way to be sure of that is to have one piece of code that says what the curve is. This runs
+   * on the main thread, so the worklet bundle never sees it.
    *
    * Unlike a sample there is nothing to fetch, so the table is posted in the same turn and the
    * control is usable on the next block.
@@ -924,37 +929,91 @@ export class WebAudioEngine {
   _loadShapeParam(trackId, slot, filled, param, data, atTime, glide) {
     const now = this.getTime();
     const track = this.tracks.get(trackId);
-    filled.loaded ??= new Map();
-    const held = filled.loaded.get(data);
-    if (held !== undefined) {
-      track.setParamValue(slot, param.id, held, atTime, now, glide);
-      return;
-    }
     const reader = this.shapeReader;
     if (!reader) {
       this._warnOnce('shape-reader', '[web-engine] this build cannot read drawn shapes, so a curve cannot be set here.');
       return;
     }
-    if (!reader.looksLikeShapeData(data)) {
-      this._warnOnce(`shape:${data}`, `[web-engine] ${JSON.stringify(data)} is not a drawn shape - write breakpoints like "0,0 0.1,1 1,0".`);
+    let points;
+    let name = null;
+    let key = data; // what the loaded table is filed under: a name AND its points, or the points
+    if (reader.looksLikeShapeData(data)) {
+      points = reader.parseShapePoints(data);
+    } else {
+      const defined = reader.lookupShape?.(data) ?? null;
+      if (!defined) {
+        this._warnOnce(`shape:${data}`, `[web-engine] there is no shape called ${JSON.stringify(data)} - draw one from the device's panel, or define it with _shape(${JSON.stringify(data)}, "0,0 0.5,1 1,0").`);
+        return;
+      }
+      name = data;
+      points = defined;
+      key = `${data}=${JSON.stringify(defined)}`;
+    }
+    filled.loaded ??= new Map();
+    const held = filled.loaded.get(key);
+    if (held !== undefined) {
+      track.setParamValue(slot, param.id, held, atTime, now, glide);
       return;
     }
-    const points = reader.parseShapePoints(data);
     if (!points.length) {
       this._warnOnce(`shape:${data}`, `[web-engine] ${JSON.stringify(data)} has no points in it.`);
       return;
     }
+    // A name keeps the slot it already has, so a redraw replaces the curve rather than adding one.
+    filled.named ??= new Map(); // name -> { index, param }: the slot each named curve holds
+    let optionIndex = name != null ? filled.named.get(name)?.index : undefined;
+    if (optionIndex === undefined) {
+      optionIndex = this._spareOption(filled, param, key);
+      if (optionIndex === null) return;
+      for (const [other, at] of filled.named) if (at.index === optionIndex) filled.named.delete(other);
+      if (name != null) filled.named.set(name, { index: optionIndex, param });
+    } else {
+      for (const [other, at] of filled.loaded) if (at === optionIndex) filled.loaded.delete(other);
+      filled.loaded.set(key, optionIndex);
+    }
+    // The option's label is the name where there is one - what the menu shows and the code says.
+    filled.extras[param.id][optionIndex] = name ?? data;
+    // The table first, the control second: the other way round the device spent a block on a
+    // slot with no table in it yet, which it can only play as a hard clip - a spike of harmonics
+    // and a crack, every time a curve was picked.
+    this._postShapeTable(filled, param, optionIndex, name ?? 'drawn', name ?? data, points);
+    track.setParamValue(slot, param.id, optionIndex, atTime, now, glide);
+  }
+
+  /**
+   * Re-reads every named curve a device holds against the shape definitions as they stand now,
+   * and re-samples the ones whose definition changed - into the slot they already hold, and
+   * WITHOUT moving any control onto them. Called after each evaluation: a redrawn shape has to
+   * reach a device that is on it even when nothing sets the control again, which on a stopped
+   * transport nothing does.
+   */
+  refreshNamedShapes() {
+    const reader = this.shapeReader;
+    if (!reader?.lookupShape) return;
+    for (const track of this.tracks.values()) {
+      for (const filled of track.slots.values()) {
+        for (const [name, { index, param }] of filled.named ?? []) {
+          const points = reader.lookupShape(name);
+          if (!points?.length) continue;
+          const key = `${name}=${JSON.stringify(points)}`;
+          if (filled.loaded?.get(key) === index) continue;
+          for (const [other, at] of filled.loaded) if (at === index) filled.loaded.delete(other);
+          filled.loaded.set(key, index);
+          this._postShapeTable(filled, param, index, name, name, points);
+        }
+      }
+    }
+  }
+
+  /** Samples `points` into a table and hands it to the device's slot `index` for `param`. */
+  _postShapeTable(filled, param, index, name, data, points) {
+    const reader = this.shapeReader;
     const table = new Float32Array(SHAPE_POINTS);
     for (let i = 0; i < SHAPE_POINTS; i++) table[i] = reader.sampleShape(points, i / (SHAPE_POINTS - 1));
-
-    const optionIndex = this._spareOption(filled, param, data);
-    if (optionIndex === null) return;
-    track.setParamValue(slot, param.id, optionIndex, atTime, now, glide);
-    // Kept here as well, for the picture the panel draws of the window.
-    (filled.shapes ??= {})[optionIndex] = { name: data, points: [...table] };
+    (filled.shapes ??= {})[index] = { name, data, points: [...table] };
     const built = filled.built;
-    if (typeof built.loadShape === 'function') built.loadShape(param.id, optionIndex, table);
-    else built.node?.port?.postMessage?.({ kind: 'shape', param: param.id, index: optionIndex, table }, [table.buffer]);
+    if (typeof built.loadShape === 'function') built.loadShape(param.id, index, table);
+    else built.node?.port?.postMessage?.({ kind: 'shape', param: param.id, index, table }, [table.buffer]);
   }
 
   /**
@@ -1270,6 +1329,18 @@ export class WebAudioEngine {
     if (found?.param && found.audioParam) {
       this.tracks.get(trackId).slots.get(slot).values[found.param.id] = denormalize(found.param, Math.min(1, Math.max(0, position)));
     }
+  }
+
+  /** The pattern is about to drive a plugin parameter by poll (see Track#holdParam). */
+  holdParam(trackId, slot, name) {
+    this.tracks.get(trackId)?.holdParam(slot, name);
+  }
+
+  /** ...and is done with it: back to what it was before (see Track#releaseParam). */
+  releaseParam(trackId, slot, name, atTime, glide) {
+    const track = this.tracks.get(trackId);
+    if (!track || this.modulators.get(trackId)?.has(keyOf(slot, name))) return;
+    track.releaseParam(slot, name, atTime, this.getTime(), glide);
   }
 
   clearParamLFO(trackId, slot, name) { this._clearModulator(trackId, slot, name); }
