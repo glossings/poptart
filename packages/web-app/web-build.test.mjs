@@ -14,7 +14,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { build, injectAnalytics, injectBoot, markDocsWeb, replaceSketch, WEB_SKETCH } from './build-web.mjs';
 
@@ -184,7 +184,8 @@ test('the pieces the page fetches at runtime are all there', () => {
 });
 
 test('the worklets the engine asks for are exactly the ones the build ships', async () => {
-  const engine = await import(path.join(out, 'web-engine', 'src', 'index.mjs'));
+  // As a file:// URL: a bare absolute path is not one on Windows, where "C:" reads as a scheme.
+  const engine = await import(pathToFileURL(path.join(out, 'web-engine', 'src', 'index.mjs')).href);
   for (const file of engine.WORKLET_FILES) {
     assert.ok(files.has(`web-engine/worklets/${file}`), `${file} is named by the engine and not built`);
   }
