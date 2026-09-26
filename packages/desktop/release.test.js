@@ -100,3 +100,14 @@ test('the real packages agree on a version today', () => {
   assert.ok(isVersion(agreedVersion()));
   assert.ok(!isVersion('v0.2.0') && !isVersion('0.2') && isVersion('0.2.0-beta.1'));
 });
+
+test('every workspace is bumped, so a release never leaves the lockfile out of step with one', () => {
+  // 0.2.0 failed at npm ci on both runners: packages/web-engine was a workspace the bump did not
+  // know about, so it kept its old version and the root lockfile had no entry for it.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const root = path.join(__dirname, '..', '..');
+  const { workspaces } = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
+  const { PACKAGES } = require('./release.js');
+  for (const w of workspaces) assert.ok(PACKAGES.includes(w), `${w} is a workspace the release bump does not version`);
+});

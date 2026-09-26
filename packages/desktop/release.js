@@ -21,7 +21,7 @@ const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 
 const REPO_ROOT = path.join(__dirname, '..', '..');
-const PACKAGES = ['.', 'packages/osc-engine', 'packages/pattern-core', 'packages/web-app', 'packages/desktop'];
+const PACKAGES = ['.', 'packages/osc-engine', 'packages/pattern-core', 'packages/web-app', 'packages/web-engine', 'packages/desktop'];
 const CHANGELOG = 'CHANGELOG.md';
 const CHANGELOG_HEAD = '# Changelog\n\nWhat changed in each release, newest first.\n';
 
