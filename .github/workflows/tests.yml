@@ -47,9 +47,9 @@ jobs:
       run:
         shell: bash
     env:
-      # Everything poptart writes - the private SuperCollider, its Extensions, the data folder -
-      # lands here rather than in the runner's home directory.
-      POPTART_HOME: ${{ runner.temp }}/poptart-home
+      # POPTART_HOME is set by the first step, not here: the `runner` context (runner.temp) is not
+      # available at job level, and using it here made GitHub reject the whole file - every run
+      # failed before starting a job.
       # The SuperCollider archive is cached between runs (below); this is where it is kept.
       POPTART_SC_CACHE_DIR: ${{ github.workspace }}/.sc-cache
       # private-sc.test.js's real half: download, checksum, unpack into a directory with a space
@@ -57,6 +57,10 @@ jobs:
       POPTART_SC_INSTALL_TEST: '1'
 
     steps:
+      # Everything poptart writes - the private SuperCollider, its Extensions, the data folder -
+      # lands in the runner's temp folder rather than its home directory.
+      - name: Point POPTART_HOME at the runner's temp folder
+        run: echo "POPTART_HOME=${{ runner.temp }}/poptart-home" >> "$GITHUB_ENV"
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       # The Node inside the Electron the app ships (electron-builder.yml's electronVersion), so
       # the tests run on what users will run.

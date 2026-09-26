@@ -461,6 +461,28 @@ built tree.
   bounce is keyed on the *block label*, which is why app+B works on any block without it.
 - **Plain HTTP + browser, no Electron.** Open the served page in any browser; keeps the footprint
   small.
+- **The DJ desk is desktop-only.** The web build refuses every `/api/mix` and `/api/song` route by
+  name (`REFUSALS` in `packages/web-app/public/web/host.mjs`); that is the intended state, not a
+  gap. A live set is the one use a browser punishes: a page cannot see the disk, so a music
+  library is a drag-in that is gone on reload; a backgrounded tab is throttled; choosing an output
+  device (`AudioContext.setSinkId`) exists only in Chromium; and a page cannot join a Link session
+  without a local helper. The desk is also ~1,200 lines of server state and ~20 routes, and every
+  later desk feature would have to be built for two engines. The web build's job is patterns with
+  no install - try it, share a link, read the docs - and the desk does not serve that.
+
+  The path back, cheapest first. Pattern decks: move the desk state and routes out of `server.js`
+  into a module both hosts call (the shape `evaluate.mjs` already has), give `evaluate.mjs` a deck
+  dimension, and add the DJ strip (trim, 3-band EQ, `djf`/`djres`, fader, crossfader) to the web
+  engine's track - a few days, since `client.js` already draws the desk. Song decks with repitch:
+  decode a file to an AudioBuffer and play it at a rate; `song-sync.js` is already pure, and
+  `song-detect.js`'s analysis would run in a worker - about a week more. Keylock, cue and Link are
+  open-ended. Link only works through a local bridge (the desktop's Link helper behind a
+  WebSocket), which defeats the point of a web build. A headphone cue on a second output device
+  needs two AudioContexts, whose clocks drift apart by up to ~6 ms a minute; the working design
+  is a SharedArrayBuffer ring between two worklets, read through a resampler whose ratio is a
+  servo on ring occupancy (what an aggregate device does), with 8-16 ms of added latency. It
+  needs cross-origin isolation, which the host can set with response headers. The web engine is
+  the only place that design could live: scsynth opens one device.
 
 ## Testing posture
 
@@ -481,6 +503,11 @@ hand.
 - **Slice analysis is WAV-only** and Node-side; other formats play but have no transient slices.
 - **Bouncing doesn't free the plugin.** A bounced track keeps its VST loaded in its slot (ready for
   the un-mute), so `.record()` is a bounce, not yet a freeze — it doesn't buy back CPU.
+- **Headphone cue needs one device with four outputs.** Cue is a channel offset inside the one
+  device scsynth opens (`cueOffset` in `poptart.scd`), and combining two devices is a CoreAudio
+  aggregate built by the Swift helper (`audio-devices.js`), which is macOS-only. On Windows, a
+  controller that presents master and headphones as two stereo endpoints, or a USB headphone
+  dongle, has no cue.
 - **A bounce assumes a steady tempo.** The window's edges are converted from cycles to seconds when
   the recording is armed, so a tempo change mid-window desyncs the result from the grid.
 
