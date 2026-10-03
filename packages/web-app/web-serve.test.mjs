@@ -12,7 +12,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { contentType, resolveRequest, serve } from './serve-web.mjs';
+import { contentType, lanAddresses, resolveRequest, serve } from './serve-web.mjs';
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'poptart-serve-'));
 fs.writeFileSync(path.join(root, 'index.html'), '<!doctype html><title>page</title>');
@@ -82,6 +82,48 @@ test('it serves the page, a module and a 404, with no caching in the way', async
     // In a finally because a server left listening keeps the process alive: a failed assertion
     // above would otherwise hang the whole suite instead of failing one test in it. fetch keeps
     // its socket for reuse and close() waits for open connections, so those go first.
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+// ---- reaching it from another device ---------------------------------------------------------
+
+test('the addresses offered to a phone are this machine\'s own, on the network and nowhere else', () => {
+  const addrs = lanAddresses({
+    lo0: [{ family: 'IPv4', address: '127.0.0.1', internal: true }],
+    en0: [
+      { family: 'IPv4', address: '192.168.1.76', internal: false },
+      { family: 'IPv6', address: 'fe80::1', internal: false },
+    ],
+    // A container's bridge is on this machine and reachable from nothing a phone can use, but it
+    // is still "not internal" - printing it is noise, not a wrong answer, so it is listed too.
+    bridge0: [{ family: 'IPv4', address: '10.0.0.1', internal: false }],
+  });
+  assert.deepEqual(addrs, ['192.168.1.76', '10.0.0.1']);
+  // Loopback is where it already says it is, and v6 is not what anyone is going to type in.
+  assert.ok(!addrs.includes('127.0.0.1'));
+  assert.ok(!addrs.some((a) => a.includes(':')));
+});
+
+test('a real interface list gives back only strings that look like addresses', () => {
+  for (const a of lanAddresses()) assert.match(a, /^\d{1,3}(\.\d{1,3}){3}$/);
+});
+
+test('serving past the loopback is something you have to ask for', async () => {
+  // The default is 127.0.0.1 (see serve's signature): this unhardened server is not handed to a
+  // network by accident. The flag that changes it is read in main, and 0.0.0.0 is what it takes.
+  const src = fs.readFileSync(new URL('./serve-web.mjs', import.meta.url), 'utf8');
+  assert.match(src, /host = '127\.0\.0\.1'/, 'the default must stay loopback');
+  assert.match(src, /argv\.indexOf\('--host'\)/, '--host is how it is opened up');
+
+  const server = await serve({ root, port: 0, host: '0.0.0.0', log: () => {} });
+  try {
+    const { port } = server.address();
+    // Bound on 0.0.0.0, the loopback still answers - that is the point of the wildcard, and it
+    // is the only address this test can be sure exists wherever it runs.
+    assert.equal((await fetch(`http://127.0.0.1:${port}/`)).status, 200);
+  } finally {
     server.closeAllConnections();
     await new Promise((resolve) => server.close(resolve));
   }

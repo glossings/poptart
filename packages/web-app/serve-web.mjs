@@ -19,6 +19,7 @@
 
 import fs from 'node:fs';
 import http from 'node:http';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -90,6 +91,17 @@ export function resolveRequest(urlPath, root) {
   return full;
 }
 
+/** This machine's addresses on the network, for the "open it on your phone" line. */
+export function lanAddresses(interfaces = os.networkInterfaces()) {
+  const out = [];
+  for (const addrs of Object.values(interfaces)) {
+    for (const a of addrs ?? []) {
+      if (a.family === 'IPv4' && !a.internal) out.push(a.address);
+    }
+  }
+  return out;
+}
+
 /** Starts the server. Resolves once it is listening, with the address it is listening on. */
 export function serve({ root, port = DEFAULT_PORT, host = '127.0.0.1', log = console.log } = {}) {  // eslint-disable-line no-console
   const server = http.createServer((req, res) => {
@@ -125,7 +137,13 @@ export function serve({ root, port = DEFAULT_PORT, host = '127.0.0.1', log = con
       } else reject(err);
     });
     server.listen(port, host, () => {
-      log(`\n  poptart is at http://localhost:${port}\n  ctrl-c to stop\n`);
+      log(`\n  poptart is at http://localhost:${port}`);
+      // Bound past the loopback on purpose: say so, and say where, because the whole reason for
+      // doing it is to open the page on something that is not this machine.
+      if (host !== '127.0.0.1' && host !== 'localhost') {
+        for (const a of lanAddresses()) log(`  and at http://${a}:${port} from this network`);
+      }
+      log('  ctrl-c to stop\n');
       resolve(server);
     });
   });
@@ -172,9 +190,15 @@ export async function main(argv = process.argv.slice(2)) {
   const portArg = argv.indexOf('--port');
   const port = portArg >= 0 ? Number(argv[portArg + 1]) : DEFAULT_PORT;
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error(`--port wants a port number, got ${argv[portArg + 1]}`);
+  // Loopback unless asked otherwise. `--host 0.0.0.0` is how you open the page on a phone on the
+  // same network; it is also how you hand this unhardened server to everyone else on that
+  // network, so it is never the default and never guessed at.
+  const hostArg = argv.indexOf('--host');
+  const host = hostArg >= 0 ? argv[hostArg + 1] : '127.0.0.1';
+  if (hostArg >= 0 && (!host || host.startsWith('--'))) throw new Error('--host wants an address, like 0.0.0.0');
 
   const { out } = build({ out: undefined, quiet: false });
-  await serve({ root: out, port, log });
+  await serve({ root: out, port, host, log });
   if (argv.includes('--watch')) {
     watch(out, log);
     log('  watching for changes\n');
