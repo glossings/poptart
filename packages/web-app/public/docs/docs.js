@@ -69,6 +69,22 @@ if (typeof document !== 'undefined') (function () {
     document.querySelector('.wrap')?.prepend(nav);
   }
   nav.innerHTML = '<a class="brand" href="/docs/"><span class="dot"></span> poptart</a><p class="tagline">the guide</p>';
+
+  // Too narrow for a column of its own and the list goes behind this button (docs.css shows it
+  // only there). Closed it names the chapter being read, so the list costs a screen only when it
+  // is asked for.
+  const toggle = document.createElement('button');
+  toggle.type = 'button';
+  toggle.className = 'chapters-toggle';
+  toggle.setAttribute('aria-expanded', 'false');
+  toggle.innerHTML = '<span class="num"></span><span></span><span class="caret">\u25b8</span>';
+  toggle.children[0].textContent = at > 0 ? String(at) : '';
+  toggle.children[1].textContent = (CHAPTERS[at] ?? CHAPTERS[0]).title;
+  toggle.addEventListener('click', () => {
+    toggle.setAttribute('aria-expanded', String(nav.classList.toggle('open')));
+  });
+  nav.append(toggle);
+
   CHAPTERS.forEach((c, i) => {
     const a = document.createElement('a');
     a.className = `chapter${i === at ? ' here' : ''}`;
