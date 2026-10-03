@@ -2835,9 +2835,10 @@ function showHoverDoc(doc, key, tokenBox) {
 
 const IDENTIFIER_RE = /^[A-Za-z_$][\w$]*$/;
 
-// The documented name under the pointer, if any. CodeMirror's coordsChar snaps to the nearest
-// character, so the pointer is checked against the token's own box before we call it a hover.
-function docAtCoords(editor, clientX, clientY) {
+// The name under the pointer, with the line it is on and its box on screen. CodeMirror's coordsChar
+// snaps to the nearest character, so the pointer is checked against the token's own box before we
+// call it a hover. Both hover affordances - the ctrl-docs and the handle underline - ask this.
+function tokenAtCoords(editor, clientX, clientY) {
   const pos = editor.coordsChar({ left: clientX, top: clientY }, 'window');
   const line = editor.getLine(pos.line);
   if (line == null) return null;
@@ -2852,9 +2853,16 @@ function docAtCoords(editor, clientX, clientY) {
   const endBox = editor.charCoords(CodeMirror.Pos(pos.line, token.end), 'window');
   if (clientY < startBox.top || clientY > startBox.bottom) return null;
   if (clientX < startBox.left || clientX > endBox.left) return null;
-  const context = /\.\s*$/.test(line.slice(0, token.start)) ? 'method' : 'builder';
-  const doc = lookupDoc(token.string, context);
-  return doc ? { doc, key: `${token.string}:${context}`, box: startBox } : null;
+  return { token, line, lineNo: pos.line, box: startBox };
+}
+
+// The documented name under the pointer, if any.
+function docAtCoords(editor, clientX, clientY) {
+  const hit = tokenAtCoords(editor, clientX, clientY);
+  if (!hit) return null;
+  const context = /\.\s*$/.test(hit.line.slice(0, hit.token.start)) ? 'method' : 'builder';
+  const doc = lookupDoc(hit.token.string, context);
+  return doc ? { doc, key: `${hit.token.string}:${context}`, box: hit.box } : null;
 }
 
 // The pane the pointer was last over, so holding ctrl without moving the mouse still opens the
@@ -2900,10 +2908,19 @@ function attachEditorWiring(editor) {
   // Backstop for show-hint's asymmetry: a completion session that already lost its popup closes
   // without signalling its result, so hang the panel's last word on the editor-level event.
   editor.on('endCompletion', hideHintDoc);
-  editor.on('scroll', hideHoverDoc); // the code moved out from under the pointer
+  // The code moved out from under the pointer: both hover affordances are about the name the
+  // pointer is ON, and neither can know where that is again until it moves.
+  editor.on('scroll', () => { hideHoverDoc(); clearHandleMark(); });
+  editor.on('changes', clearHandleMark);
   const wrapper = editor.getWrapperElement();
-  wrapper.addEventListener('mousemove', (e) => updateHoverDoc(editor, { x: e.clientX, y: e.clientY }, e.ctrlKey));
-  wrapper.addEventListener('mouseleave', () => updateHoverDoc(editor, null, false));
+  wrapper.addEventListener('mousemove', (e) => {
+    updateHoverDoc(editor, { x: e.clientX, y: e.clientY }, e.ctrlKey);
+    updateHandleMark(editor, { x: e.clientX, y: e.clientY });
+  });
+  wrapper.addEventListener('mouseleave', () => {
+    updateHoverDoc(editor, null, false);
+    updateHandleMark(editor, null);
+  });
 }
 
 attachEditorWiring(cm);
@@ -2939,8 +2956,75 @@ function attachWidgetHandles(editor) {
     if (e.detail !== 2 || e.button !== 0) return;
     const idx = editor.indexFromPos(editor.coordsChar({ left: e.clientX, top: e.clientY }, 'window'));
     const took = editor === cm ? openWidgetAt(editor.getValue(), idx) : openDeckBWidgetAt(editor.getValue(), idx);
-    if (took) e.preventDefault(); // the double-click WAS the gesture
+    if (took) {
+      clearHandleMark(); // the panel is up; the underline would be left pointing at nothing
+      e.preventDefault(); // the double-click WAS the gesture
+    }
   });
+}
+
+// ---------------------------------------------------------------------------------------------
+// The handle under the pointer, underlined.
+//
+// A handle is invisible until you already know it is there: `pianoroll(`, `lfo(`, a chain's
+// `synth(` all read as ordinary calls. Underlining one while the pointer is over it says "this
+// opens something" at the moment you could act on it, without marking up the buffer at rest -
+// these names are on most lines of a song, and underlining them all would read as a page of links
+// and fight the syntax colors. The underline is dotted and the text cursor is left alone on
+// purpose: the gesture is a DOUBLE click, and a solid underline over a pointer cursor would
+// promise a single one. Underline rather than a background, so nothing on the line moves.
+// ---------------------------------------------------------------------------------------------
+
+// Names that could be a handle. Checked before any finder runs: this is asked on every pointer
+// move, and parsing the buffer to discover the pointer is over `const` would be work for nothing.
+// The envelope panel's own words are asked separately, off the set the panel already keeps.
+const CALL_HANDLE_WORDS = new Set(['_arrange', 'auto', 'lfo', 'grainshape', 'pianoroll', 'preset',
+  'sp', 'slice', 'slices', 'record', 'synth', 'fx']);
+
+let handleMark = null; // the underline currently drawn, in whichever pane the pointer is over
+let handleMarkKey = null; // the name it was computed for, so a jiggle within it doesn't reparse
+
+function clearHandleMark() {
+  if (handleMark) handleMark.clear();
+  handleMark = null;
+  handleMarkKey = null;
+}
+
+function updateHandleMark(editor, point) {
+  const hit = point && tokenAtCoords(editor, point.x, point.y);
+  const word = hit?.token.string;
+  if (!hit || (!CALL_HANDLE_WORDS.has(word) && !ENV_HANDLE_WORDS.has(word))) {
+    clearHandleMark();
+    return;
+  }
+  const key = `${editor === cm ? 'a' : 'b'}:${hit.lineNo}:${hit.token.start}:${word}`;
+  if (key === handleMarkKey) return; // still the name we already answered for
+  clearHandleMark();
+  handleMarkKey = key;
+  const from = CodeMirror.Pos(hit.lineNo, hit.token.start);
+  if (!isWidgetHandleAt(editor, editor.getValue(), editor.indexFromPos(from))) return;
+  handleMark = editor.markText(from, CodeMirror.Pos(hit.lineNo, hit.token.end), { className: 'cm-widget-handle' });
+}
+
+/**
+ * Whether a double-click at `idx` would open an editor - openWidgetAt's question, asked without
+ * opening anything. It has to follow that function: a word is only a handle where its own finder
+ * says the call around it is real, which is what keeps `end(` in plain JavaScript, or a `synth` in
+ * a comment, from being underlined. Deck B is the one place the two differ, since only the plugin
+ * windows open for it (see openDeckBWidgetAt) - the rest would edit deck A's buffer, and a handle
+ * that answers with an explanation is not one worth advertising.
+ */
+function isWidgetHandleAt(editor, code, idx) {
+  if (editor !== cm) return !!findChainHandleAt(code, idx);
+  if (arrangeMod && (findArrangeCallAt(code, idx)?.onName || findAutoCallAt(code, idx)?.onName)) return true;
+  if (shapeMod && findLfoCallAt(code, idx)?.onName) return true;
+  if (pianorollMod && findPianorollCallAt(code, idx)?.onName) return true;
+  if (findPresetCallAt(code, idx)?.onName) return true;
+  if (findSpCallAt(code, idx)?.onName) return true;
+  if (slicesMod && findSliceCallAt(code, idx)?.onName) return true;
+  if (findEnvelopeHandleAt(code, idx)) return true;
+  if (findRecordCallAt(code, idx)?.onName) return true;
+  return !!findChainHandleAt(code, idx);
 }
 
 /**

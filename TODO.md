@@ -543,20 +543,21 @@ no completion notes.
     now, while plugin hosting, OSC input and Link cannot run in a page. A public, static site
     (no backend, no accounts); AGPL section 13 means a source link in the UI.
 
-    BUILT, and deployable: `npm run build:web` writes dist/web, vercel.json points a host at it.
+    SHIPPED (0.2.0): `npm run build:web` writes dist/web, vercel.json points a host at it.
     The editor, the pattern language, the arrangement, the pianoroll and the widgets all run
     against a host that lives in the page (packages/web-app/public/web - see ARCHITECTURE.md).
     Storage is IndexedDB under the same names the desktop uses on disk, with an export that
-    carries the whole store. Devices: twenty-seven. Ours are `Wavetable`, `Distort` and `Reverb`,
-    plus `Filter`/`Delay`/`Compressor`/`Pan`/`Gain` from stock nodes. Nineteen more are ported
-    C++ compiled to WebAssembly and committed as binaries, so nothing downstream of the port
-    needs a toolchain: nine Airwindows effects, eight Mutable Instruments modules (`Plaits`,
-    `Braids`, `Tides`, `Rings`, `Elements`, `Clouds`, `Warps`), `CloudSeed` and `Shift`.
+    carries the whole store. Devices: the catalog is the count (packages/web-engine/src/catalog.mjs),
+    and build/devices/sources.json is the per-device record - upstream, license, built/retired and
+    why. Ours are written here against the shared core in src/dsp/; the ported ones are C++ compiled
+    to WebAssembly and committed as binaries, so nothing downstream of the port needs a toolchain.
     They are built by packages/web-engine/build/devices/build-devices.mjs, which needs emscripten
-    and is run by hand when a device is added or a pin moves. Packs: `pt_kit` and `pt_keys` rendered from our
-    own DSP and committed; the sourced ones are built by packages/web-engine/build/fetch-packs.mjs
-    into a repository of their own. A device has no window of its own, so a double-click on a
-    synth("…")/fx("…") name opens one generated from its descriptor: turning a control is heard
+    and is run by hand when a device is added or a pin moves. Packs: `pt_kit` and `pt_keys` rendered
+    from our own DSP and committed; the sourced ones are assembled by
+    packages/web-engine/build/fetch-packs.mjs and published at the tag DEFAULT_PACK_BASE pins
+    (src/packs/library.mjs), loaded the first time a pattern names one. A device has no window of
+    its own, so a double-click on a synth("…")/fx("…") name opens one generated from its
+    descriptor: turning a control is heard
     at once and written into the code as a .param() call when the gesture ends. A descriptor may
     also declare FIGURES - the pictures its window draws, computed in web-engine's figures.mjs from
     the DSP that plays them - and the Wavetable declares seven: a waveform and a unison spread per
@@ -564,19 +565,7 @@ no completion notes.
     knobs. They drag like the knobs do. A ported module declares none and is fine as knobs.
 
     STILL TO DO, roughly in order:
-    (1) Publish the sample packs. `node build/fetch-packs.mjs --out ../../../poptart-packs` in
-        packages/web-engine assembles them beside this checkout; that folder then needs a
-        repository, a push and a TAG, and the tag goes in DEFAULT_PACK_BASE in
-        src/packs/library.mjs. Until that exists the app runs on the two rendered packs and says
-        so; once it does, a pack loads the first time a pattern names it.
-    (2) The first real load (09-22) played the sampler through the page. Still unheard: the
-        Wavetable, Distort and Reverb devices, a parameter driven by an LFO, the generated device
-        window and the figures in it, and whether a reload brings the store back. Everything
-        testable without a browser is tested - including every figure's numbers and every gesture's
-        arithmetic - but nothing in that window has been drawn on a screen once, so it needs a
-        careful look rather than a glance: work through a manual checklist of the rest before this
-        goes anywhere public.
-    (3) What the page still does differently from the desktop, each deliberately:
+    (1) What the page still does differently from the desktop, each deliberately:
         - An export with audio is one JSON file with the audio in base64, a third bigger than the
           audio itself and built in memory - fine for a set's worth of recordings, heavy for a
           wavetable folder of thousands. A zip, written as it goes, would carry more.
@@ -585,18 +574,19 @@ no completion notes.
           grain engine would not.
         - Web MIDI is Chrome, Edge and Firefox; setSinkId (choosing an output) is Chrome and Edge.
           Elsewhere the page says so and plays on the default.
-    (4) The compiled devices: nineteen are built and committed (see build/devices/sources.json
-        for every one and its license). What is left of that list is FAUST, and it is the entry
-        to be careful with - the license differs per FUNCTION, several reverbs are GPL where the
+    (2) The compiled devices: what is built and committed is in build/devices/sources.json
+        (every one, its license, and any that were built and retired). What is left of that list
+        is FAUST, and it is the entry to be careful with - the license differs per FUNCTION,
+        several reverbs are GPL where the
         filters are not, and GPL is a one-way door for a build that might ever want to be offered
         under other terms. Check the function, not the repository.
         Still open on what IS built: Rings and Elements resonate their own exciter only, so
         resonating a track's audio is not exposed; Plaits and Rings are monophonic, as the modules are. Nine of Mutable's modules cannot be
         ported at all - five are analog hardware with no DSP published, three make control
         voltages rather than audio, and one was never published; sources.json says which.
-    (5) Link, osc() input, plugins, the DJ desk, the sample map and the headphone cue: see (8) to
-        (13). Everything else the desktop's engine does, the page's now does too.
-    (6) A vocoder. One was written and taken out before the first release: it sounded wrong
+    (3) Link, osc() input, plugins, the DJ desk, the sample map and the headphone cue: see (6) to
+        (11). Everything else the desktop's engine does, the page's now does too.
+    (4) A vocoder. One was written and taken out before the first release: it sounded wrong
         (a bandpass bank with the carrier's bands copied from the modulator's, an emphasis tilt
         and a flat doubling of the wet sum - the intelligibility was never there), it had no
         picture, and a vocoder without a MIDI-played carrier is half of one. The engine now delivers
@@ -604,17 +594,17 @@ no completion notes.
         half is there. Bringing it back means a band-level picture (the
         modulator's envelope per band, live), a carrier played from .midi() as well as taken
         from .audio(), and a tuning pass against a voice.
-    (7) Move the host behind a message boundary so it can go in a worker or an opaque-origin
+    (5) Move the host behind a message boundary so it can go in a worker or an opaque-origin
         frame. The seam is already there - the editor calls one function and the host is a route
         table - so this is a postMessage shim on each side rather than a redesign. Note the audio
         context cannot follow it: Web Audio is main-thread only, so the engine stays where it is
         and only the storage and the language would move.
-    (8) Plugins (VST/AU). A page cannot load one: a plugin is native code that expects the
+    (6) Plugins (VST/AU). A page cannot load one: a plugin is native code that expects the
         operating system's windows, files and audio threads, and a page runs only sandboxed
         WebAssembly. Two ways in, not exclusive:
         - A local engine mode: the web editor drives a poptart engine running on the same machine
           (the desktop's scsynth + VSTPlugin) over a local WebSocket, in place of the in-page host.
-          The route table is already the seam, so (7) is the first step. Plugin windows open
+          The route table is already the seam, so (5) is the first step. Plugin windows open
           natively on that machine. A session runs on ONE engine - the page's audio and the
           helper's run on separate clocks, and streaming audio between them adds tens of
           milliseconds with jitter - so in-page devices and hosted plugins do not mix on one track
@@ -623,29 +613,29 @@ no completion notes.
         - Web Audio Modules (WAM 2): the open standard for plugins built for the browser, hosted
           in the page on the page's clock with no helper. Only plugins their makers ported; not a
           bought VST.
-    (9) The DJ desk and song player. Scope, not the browser: decoding is decodeAudioData, keylock
+    (7) The DJ desk and song player. Scope, not the browser: decoding is decodeAudioData, keylock
         would be the Signalsmith Stretch already ported for Shift (see the Rubber Band entry).
         The cost is memory - a decoded ten-minute stereo track is about 230 MB, two decks plus
         stretch buffers is a lot for a tab - so look at decoding in chunks before building it.
-    (10) The sample map. Scope, not the browser: its maths is plain JS, the feature analysis
+    (8) The sample map. Scope, not the browser: its maths is plain JS, the feature analysis
         would run in a Worker, the cache in IndexedDB, and the browser's decoder replaces the
         afconvert step. The folder is picked with the File System Access API, which keeps a handle
         to the files rather than a copy (never copy user files) - Chrome and Edge only; elsewhere
         the folder is picked again each visit. Indexing a large library is slower in a tab.
-    (11) The headphone cue. Two routes: on one interface with four or more outputs, a single
+    (9) The headphone cue. Two routes: on one interface with four or more outputs, a single
         AudioContext plays the cue on 3/4 - same clock, no added delay, on the multichannel output
         the page already has; on two devices, a second AudioContext on the headphones via setSinkId -
         separate clocks, tens of milliseconds late and drifting, fine for pre-listening only.
-        The cue exists mostly for the DJ desk, so it is built with (9); the roll's audition
+        The cue exists mostly for the DJ desk, so it is built with (7); the roll's audition
         button could use it sooner.
-    (12) A Link bridge. A page cannot join Link (UDP multicast), so a small local helper joins the
+    (10) A Link bridge. A page cannot join Link (UDP multicast), so a small local helper joins the
         session and relays tempo, beat and phase over a WebSocket. Check the existing ones before
         writing one: Carabiner (Deep Symmetry) already exposes Link over a local TCP socket and
-        would need only a WebSocket shim in front of it. The local engine mode in (8) gets Link
+        would need only a WebSocket shim in front of it. The local engine mode in (6) gets Link
         for free, since the desktop already runs it.
-    (13) An OSC bridge. A page cannot listen on a UDP port, so a local relay forwards OSC to the
+    (11) An OSC bridge. A page cannot listen on a UDP port, so a local relay forwards OSC to the
         page over a WebSocket, where the engine's feedOsc is waiting. osc.js ships a UDP-to-
-        WebSocket relay that may do this as it is. Again free under the local engine mode in (8).
+        WebSocket relay that may do this as it is. Again free under the local engine mode in (6).
     The nine-oh-nine and the rest: there is NO redistributable recording of any classic drum
     machine except the eight-oh-eight, checked exhaustively 09-22. The sets that circulate are
     either unlicensed (the widely used ones have open, unanswered requests for a license file

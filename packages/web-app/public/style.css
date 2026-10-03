@@ -1224,6 +1224,16 @@ footer#console {
   border-radius: 2px;
 }
 
+/* The name of a call that opens an editor - `pianoroll`, `lfo`, a chain's `synth` - while the
+   pointer is over it (see updateHandleMark in client.js). Only on hover: those names are on most
+   lines of a song, and underlining them at rest would read as a page of links. Dotted rather than
+   solid, and the text cursor is deliberately left alone, because the gesture is a DOUBLE click.
+   Accent, which is what everything else here turns on hover. */
+.cm-widget-handle {
+  text-decoration: underline dotted var(--accent);
+  text-underline-offset: 3px;
+}
+
 /* folded config blobs (captured plugin state, long lfo shapes) - click to expand */
 .cm-config-fold {
   display: inline-block;

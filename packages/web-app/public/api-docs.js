@@ -18,9 +18,15 @@
 // Writing a desc: it is shown on its own, so it must stand alone - never "same as x()" or "see
 // y()". Plain and neutral: no capitals for emphasis, no selling, no implementation details, no
 // underscore names (users never type those). Say what the arguments mean and their units.
+// Short: what it does and what its arguments take, in a sentence or two where possible. Detail
+// that belongs to another name's tooltip goes there, not here.
 
 // The waveform LFOs share their rate/phase wording, so every entry says it in full.
 const LFO_RATE = 'rate is passes per cycle and follows the tempo; write it with a unit, like "0.5hz", for a fixed speed. Also accepts { rate, phase }.';
+
+// The binops share their call-form wording the same way.
+const BINOP_FORMS = (v) =>
+  `A patterned x cuts each event where it changes; .${v}.in(x) reads x once per event, .${v}.out(x) plays on x's events, and .${v}.squeeze(x) fits a cycle of x into each event. Extra arguments, or one carrying its own controls, are layers: each event plays once per layer, edited by it.`;
 
 const API_DOCS = {
   // ----------------------------------------------------------------- pattern sources
@@ -63,7 +69,7 @@ const API_DOCS = {
   record: {
     kind: 'method',
     sig: 'record({ cycles, name, wrapTail, normalize })',
-    desc: 'Marks the track for recording; double-click the name, or press {app+b} inside the block, to open the recorder. cycles is the length (4 by default), name the file name (the track label by default), and wrapTail: true folds the release tail back onto the start, for a track that begins in silence. The finished take is scaled to a −1 dBFS peak; normalize: false keeps the recorded level.',
+    desc: 'Marks the track for recording; double-click the name, or press {app+b} inside the block, to open the recorder. cycles is the length (4 by default), name the file name (the track label by default), wrapTail: true folds the release tail back onto the start, and normalize: false keeps the recorded level instead of scaling to a −1 dBFS peak.',
     eg: 'note("c2 eb2").synth("Serum 2").record({ cycles: 8 })',
   },
   mini: {
@@ -131,7 +137,7 @@ const API_DOCS = {
   group: {
     kind: 'builder',
     sig: 'group({ ...tracks })',
-    desc: 'Mixes the tracks inside its braces into one channel. Members no longer play on their own, and .postgain(), .fx() or .bus() on the group apply to all of them. Groups can be nested. Select tracks and press {mod+g} to wrap them. A main: group() with no braces receives every track that is not in another group. Any other group written as name: group() with nothing inside gets its braces added on the next run, with the cursor placed between them.',
+    desc: 'Mixes the tracks inside its braces into one channel: members no longer play on their own, and .postgain(), .fx() or .bus() on the group apply to all of them. Groups can be nested; select tracks and press {mod+g} to wrap them. A main: group() with no braces receives every track that is not in another group.',
     eg: 'kick: group({\n  kickMain: s("mbd*4")\n  kickFill: s("mbd*8")\n}).postgain(0.8)',
   },
   copy: {
@@ -164,7 +170,8 @@ const API_DOCS = {
   saw: { kind: 'builder', sig: 'saw(rate)', desc: `Rising sawtooth: climbs from 0 to 1, then jumps back to 0. ${LFO_RATE}`, eg: 'pan(saw(0.25).range(-1, 1))' },
   isaw: { kind: 'builder', sig: 'isaw(rate)', desc: `Falling sawtooth: drops from 1 to 0, then jumps back to 1. ${LFO_RATE}`, eg: 'gain(isaw(4))' },
   tri: { kind: 'builder', sig: 'tri(rate)', desc: `Triangle wave: rises from 0 to 1 over the first half of each pass and falls back over the second. ${LFO_RATE}`, eg: 'gain(tri(0.5).range(0.4, 1))' },
-  square: { kind: 'builder', sig: 'square(rate)', desc: `Square wave: 1 for the first half of each pass, 0 for the second. ${LFO_RATE}`, eg: 'param("Sub On", square(1))' },  rand: {
+  square: { kind: 'builder', sig: 'square(rate)', desc: `Square wave: 1 for the first half of each pass, 0 for the second. ${LFO_RATE}`, eg: 'param("Sub On", square(1))' },
+  rand: {
     kind: 'builder',
     sig: 'rand({ seed })',
     desc: 'A random value from 0 to 1, drawn fresh wherever it is read, so every event gets its own. It has no rate: use .seg(n) or .hold(pattern) to step it evenly. Each rand() is an independent stream; give two the same seed to share one.',
@@ -236,7 +243,7 @@ const API_DOCS = {
   samples: {
     kind: 'builder',
     sig: 'samples(repo, prefix?)',
-    desc: 'Reads sample packs from a public GitHub repository: one pack per folder of audio files, named after the folder, files in name order. "user/repo@branch" picks a branch, tag or commit, and a path after the repository keeps only that folder. A repository with a strudel.json at its top is read from that file instead. The optional prefix goes in front of every pack name, so samples("tidalcycles/dirt-samples", "dirt") gives dirt_bd, dirt_sn and so on. Works in the prebake too. Browser build only.',
+    desc: 'Reads sample packs from a public GitHub repository: one pack per folder of audio files, named after the folder, files in name order. "user/repo@branch" picks a branch, tag or commit; a path after the repository keeps only that folder; a strudel.json at the top is read instead when present. The optional prefix goes in front of every pack name. Works in the prebake too. Browser build only.',
     eg: 'samples("tidalcycles/dirt-samples", "dirt")',
   },
   setscale: {
@@ -255,13 +262,13 @@ const API_DOCS = {
   fx: {
     kind: 'method',
     sig: 'fx(plugin, { label, state })',
-    desc: 'Adds an effect plugin to the end of the track\'s chain. Double-click the name to open the plugin\'s window; {app+f} inserts one at the cursor. .param() calls after it set this plugin\'s parameters. The optional label is a name .param() and .wet() can reach this device by from anywhere later in the chain, whatever order the chain is in.',
+    desc: 'Adds an effect plugin to the end of the track\'s chain. Double-click the name to open the plugin\'s window; {app+f} inserts one at the cursor. .param() calls after it set this plugin\'s parameters, and the optional label is a name .param() and .wet() can reach this device by from anywhere in the chain.',
     eg: '.fx("ValhallaRoom").param("Mix", 0.3)',
   },
   param: {
     kind: 'method',
     sig: 'param(device?, name, value)',
-    desc: 'Sets a parameter of the last plugin in the chain, by the name the plugin gives it. With a device named first, it sets that device\'s parameter wherever it sits in the chain: by its label, by its plugin name, or by "Name#2" for the second of two with that name, counting in chain order. A plain name two devices share reaches the later one. Inside a .when(), the setting holds while the condition does and then yields: to a .param() outside the .when(), or, with none, to whatever the parameter was before. Names autocomplete inside the quotes. The value is a number, pattern or signal: the parameter\'s position from 0 to 1, or its real units where a mapping file gives the plugin some (a filter frequency in Hz, for example). On the browser build\'s devices a switch also takes its option\'s name, an on/off takes 0 or 1, and a control that loads a sample takes "pack:index" or "pack:file". An audio() handle in place of the value wires that track or bus onto the parameter at the sample rate, with .mul() and .add() on the handle as its gain and offset; the browser build does this, and the desktop engine reports it on the console and plays the rest of the track.',
+    desc: 'Sets a parameter of the last plugin in the chain, by the name the plugin gives it. Naming a device first sets that device\'s parameter wherever it sits: by its label, its plugin name, or "Name#2" for the second of that name. The value is a number, pattern or signal: the parameter\'s position from 0 to 1, or its real units where a mapping file gives the plugin some. An audio() handle as the value wires that track or bus onto the parameter at the sample rate (browser build).',
     eg: '.param("Filter 1 Freq", sine(0.2).range(300, 6000))',
   },
   preset: {
@@ -304,7 +311,7 @@ const API_DOCS = {
   wet: {
     kind: 'method',
     sig: 'wet(device?, value)',
-    desc: 'Dry/wet mix for the plugin just before it in the chain: 1 (the default) is fully processed, 0 bypasses it. With a device named first, as .param() takes one, it sets that effect\'s mix wherever it sits. Accepts any signal, so an effect can fade in and out over a song. Plugins that add latency, such as linear-phase EQs, can sound hollow at in-between values.',
+    desc: 'Dry/wet mix for the plugin just before it in the chain: 1 (the default) is fully processed, 0 bypasses it. With a device named first, it sets that effect\'s mix wherever it sits. Plugins that add latency, such as linear-phase EQs, can sound hollow at in-between values.',
     eg: '.fx("ValhallaRoom").wet(auto("breakdown"))',
   },
   bsend: { kind: 'method', sig: 'bsend(name, amount)', desc: 'Sends the track\'s output to a named bus and silences its own output. Both arguments can be patterns.', eg: '.bsend("reverb")' },
@@ -374,7 +381,7 @@ const API_DOCS = {
   sometimes: {
     kind: 'method',
     sig: 'sometimes(share, fn, { seed })',
-    desc: 'Applies fn at a random share of the pattern\'s events: 0.3 is three in ten, and sometimes(fn) alone is one in two. Each call draws its own random numbers, so two sometimes() on one track fire independently; give both the same seed to make them agree. The draws repeat on every play of the same document.',
+    desc: 'Applies fn at a random share of the pattern\'s events: 0.3 is three in ten, and sometimes(fn) alone is one in two. Each call draws independently; give two the same seed to make them agree. The draws repeat on every play of the same document.',
     eg: '.sometimes(0.25, x => x.flip(1))',
   },
   as: {
@@ -415,7 +422,7 @@ const API_DOCS = {
   events: {
     kind: 'method',
     sig: 'events(fn)',
-    desc: 'Hands fn one cycle of events at a time, as { start, end, value, vel, clip, nudge, controls }, and plays what it returns. start and end are in cycles from the top of the song; controls holds the sampler controls by name. Move, stretch, drop, copy ({ ...e, start: e.start + 0.5 }) or add events; an event made from scratch needs start, end and value. An event can move up to one cycle either way. Each cycle is worked out once, so Math.random() gives one answer per cycle.',
+    desc: 'Hands fn one cycle of events at a time, as { start, end, value, vel, clip, nudge, controls }, and plays what it returns. start and end are in cycles from the top of the song. Events can be changed, dropped or added (start, end and value at minimum), and can move up to one cycle either way. Each cycle is worked out once, so Math.random() gives one answer per cycle.',
     eg: '.events((es) => es.map((e) => ({ ...e, vel: e.vel * 0.8 })))',
   },
 
@@ -423,14 +430,14 @@ const API_DOCS = {
   set: {
     kind: 'both',
     sig: 'set(x, ...)',
-    desc: 'Replaces each value with x; .set(vel(0.5)) puts 0.5 on the velocity channel. A patterned x cuts each event where it changes; .set.in(x) keeps this pattern\'s events and reads x at each onset, .set.out(x) plays on x\'s events instead, and .set.squeeze(x) fits a whole cycle of x into each event. Several arguments, or one that carries its own controls, are layers: each event plays once per layer, edited by it. A bare control inside a layer takes this verb too, and names another with a binop of its own. Under .set() a bare control is pinned: .set(note(30).clip(2), add(note(12)).vel(0.7)) plays a c1 twice as long plus the octave at exactly 0.7. As a top-level call it is that verb for one piece of a layer: .add(note(12).set(vel(0.7))) is the octave at 0.7 rather than 0.7 louder.',
+    desc: `Replaces each value with x; .set(vel(0.5)) puts 0.5 on the velocity channel. Under .set() a bare control is pinned to exactly its value. ${BINOP_FORMS('set')}`,
     eg: '.set(note(30).clip(2), add(note(12)).vel(0.7))',
   },
-  add: { kind: 'both', sig: 'add(x, ...)', desc: 'Adds x to each value. A patterned x cuts each event where it changes; .add.in(x) keeps this pattern\'s events and reads x at each onset, .add.out(x) plays on x\'s events instead, and .add.squeeze(x) fits a whole cycle of x into each event. On notes, .add(2) is two semitones and .add(n(2)) is two steps in the current scale. A stacked value like note("0,7") plays each layer at once. Several arguments, or one that carries its own controls, are layers: each event plays once per layer, edited by it. A bare control inside a layer takes this verb too, and names another with a binop of its own. .add(note(0), note(12).mul(vel(0.7))) plays each note plus its octave at 70% of the velocity. As a top-level call it is that verb for one piece of a layer: .set(note(30), add(note(12))).', eg: '.add(n("<0 2 -1>"))' },
-  sub: { kind: 'both', sig: 'sub(x, ...)', desc: 'Subtracts x from each value. A patterned x cuts each event where it changes; .sub.in(x) keeps this pattern\'s events and reads x at each onset, .sub.out(x) plays on x\'s events instead, and .sub.squeeze(x) fits a whole cycle of x into each event. On notes, .sub(1) is a semitone and .sub(n(1)) is one step in the current scale. A stacked value plays each layer at once. Several arguments, or one that carries its own controls, are layers: each event plays once per layer, edited by it. A bare control inside a layer takes this verb too, and names another with a binop of its own. As a top-level call it is that verb for one piece of a layer: sub(clip(0.5)).', eg: '.sub(12)' },
-  mul: { kind: 'both', sig: 'mul(x, ...)', desc: 'Multiplies each value by x. A patterned x cuts each event where it changes; .mul.in(x) keeps this pattern\'s events and reads x at each onset, .mul.out(x) plays on x\'s events instead, and .mul.squeeze(x) fits a whole cycle of x into each event. A stacked value plays each layer at once: .mul(speed("1.1,0.9")) plays two detuned hits. Several arguments, or one that carries its own controls, are layers: each event plays once per layer, edited by it. A bare control inside a layer takes this verb too, and names another with a binop of its own. As a top-level call it is that verb for one piece of a layer: mul(vel(0.7)).', eg: '.mul(speed(2))' },
-  div: { kind: 'both', sig: 'div(x, ...)', desc: 'Divides each value by x. A patterned x cuts each event where it changes; .div.in(x) keeps this pattern\'s events and reads x at each onset, .div.out(x) plays on x\'s events instead, and .div.squeeze(x) fits a whole cycle of x into each event. Several arguments, or one that carries its own controls, are layers: each event plays once per layer, edited by it. A bare control inside a layer takes this verb too, and names another with a binop of its own. As a top-level call it is that verb for one piece of a layer: div(clip(2)).', eg: 'irand(8).div(8)' },
-  mod: { kind: 'both', sig: 'mod(x, ...)', desc: 'Remainder after dividing by x, always positive. A patterned x cuts each event where it changes; .mod.in(x) keeps this pattern\'s events and reads x at each onset, .mod.out(x) plays on x\'s events instead, and .mod.squeeze(x) fits a whole cycle of x into each event. On notes, .mod(12) folds into one octave of semitones and .mod(n(7)) into one octave of the current scale. Several arguments, or one that carries its own controls, are layers: each event plays once per layer, edited by it. A bare control inside a layer takes this verb too, and names another with a binop of its own. As a top-level call it is that verb for one piece of a layer: mod(note(12)).', eg: '.mod(12)' },
+  add: { kind: 'both', sig: 'add(x, ...)', desc: `Adds x to each value. On notes, .add(2) is two semitones and .add(n(2)) is two steps in the current scale; a stacked value like note("0,7") plays each layer at once. ${BINOP_FORMS('add')}`, eg: '.add(n("<0 2 -1>"))' },
+  sub: { kind: 'both', sig: 'sub(x, ...)', desc: `Subtracts x from each value. On notes, .sub(1) is a semitone and .sub(n(1)) is one step in the current scale. ${BINOP_FORMS('sub')}`, eg: '.sub(12)' },
+  mul: { kind: 'both', sig: 'mul(x, ...)', desc: `Multiplies each value by x. A stacked value plays each layer at once: .mul(speed("1.1,0.9")) plays two detuned hits. ${BINOP_FORMS('mul')}`, eg: '.mul(speed(2))' },
+  div: { kind: 'both', sig: 'div(x, ...)', desc: `Divides each value by x. ${BINOP_FORMS('div')}`, eg: 'irand(8).div(8)' },
+  mod: { kind: 'both', sig: 'mod(x, ...)', desc: `Remainder after dividing by x, always positive. On notes, .mod(12) folds into one octave of semitones and .mod(n(7)) into one octave of the current scale. ${BINOP_FORMS('mod')}`, eg: '.mod(12)' },
   round: { kind: 'method', sig: 'round()', desc: 'Rounds each value to the nearest whole number.', eg: 'rand().range(0, 7).round()' },
   abs: { kind: 'method', sig: 'abs()', desc: 'Makes each value positive.', eg: '.abs()' },
   floor: { kind: 'method', sig: 'floor()', desc: 'Rounds each value down to a whole number.', eg: '.floor()' },
