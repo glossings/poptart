@@ -830,6 +830,16 @@ class OscEngine {
           },
         );
 
+        // Written down the instant it exists, not at /poptart/ready with scsynth's. Everything
+        // between the two is sclang's boot - compiling the class library, then the plugin scan -
+        // and that is a long time to be unreapable. A run killed in that window (a watcher
+        // restarting the server, a crash, a SIGKILL that runs no shutdown handler) leaves an
+        // sclang whose pid was never recorded, so no later boot can know to reap it, and they
+        // accumulate one per restart. Recorded here, the worst case is one orphan until the next
+        // start, which is what the pidfile is for. scsynth is not ours to record yet: sclang
+        // boots it, and reports its pid with the ready.
+        recordEnginePids({ sclang: this._sclangProcess.pid ?? null, scsynth: null }, { file: this._pidfile });
+
         // Forward sclang's output (prefixed) rather than letting it accumulate: an unread pipe
         // fills its OS buffer and then blocks sclang mid-print - and scan/load logs are the
         // main debugging surface for plugin problems anyway.

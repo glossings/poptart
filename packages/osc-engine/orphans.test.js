@@ -184,3 +184,35 @@ test('commandName() reports this process and nothing for a dead pid', () => {
   assert.match(orphans.commandName(process.pid), /node/i);
   assert.equal(orphans.commandName(2147483646), null, 'an unused pid is not running');
 });
+
+// ---- the window before the ready --------------------------------------------------------------
+// sclang's pid used to be written down only when it answered /poptart/ready, which is the far side
+// of compiling the class library and scanning the plugins. A run killed in between - a file watcher
+// restarting the server, a crash, any SIGKILL that runs no shutdown handler - left an sclang whose
+// pid had never been recorded, so no later boot could know to reap it, and they piled up one per
+// restart. The pid is recorded at spawn now, and these two pin the halves of that.
+
+test('a stack recorded before scsynth exists is still reapable', () => {
+  const file = tmpPidfile();
+  // What a boot writes the moment it has spawned sclang: scsynth is sclang's to start, and its
+  // pid does not arrive until the ready.
+  orphans.recordEnginePids({ sclang: 4001, scsynth: null }, { file });
+  const { killed, kill } = recorder();
+  const reaped = orphans.reapOrphanedEngine({ file, comm: table({ 4001: 'sclang' }), kill });
+  assert.deepEqual(killed, [4001]);
+  assert.deepEqual(reaped, ['sclang (pid 4001)']);
+  // And the pidfile goes, so the boot that just reaped it does not try again.
+  assert.deepEqual(orphans.readEnginePids({ file }), {});
+});
+
+test('the engine records sclang before it waits for the ready, not after', () => {
+  const src = fs.readFileSync(path.join(__dirname, 'index.js'), 'utf8');
+  const atSpawn = src.indexOf('recordEnginePids({ sclang: this._sclangProcess.pid ?? null, scsynth: null }');
+  const atReady = src.indexOf("'/poptart/ready'");
+  assert.ok(atSpawn > 0, 'the spawn should write the pid down with no scsynth yet');
+  assert.ok(atReady > 0, 'the ready handler should still be there');
+  assert.ok(
+    atSpawn < atReady,
+    'recording the pid only once sclang answers leaves every killed-while-booting sclang unreapable',
+  );
+});
