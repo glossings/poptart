@@ -13,7 +13,7 @@ import { Scheduler } from './src/scheduler.mjs';
 function shiftOf(sig, stepIndex = 0, cycle = 0) {
   const step = sig.stepsForCycle(cycle)[stepIndex];
   const at = cycle + step.start;
-  return timeShift(step, sig.noteChannels, at, 1, at);
+  return timeShift(step, sig.noteChannels, at, 1, at, sig.groove);
 }
 
 // Every step's shift for one cycle, rounded off the floating-point fuzz that exact fractions carry.

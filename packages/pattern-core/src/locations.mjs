@@ -31,6 +31,7 @@
 
 import { looksLikeNoteString } from './pianoroll.mjs';
 import { looksLikeShapeData } from './shape.mjs';
+import { grooveNameLike } from './groove.mjs';
 
 // Rewrites `code` so each pattern-position string/template literal is wrapped in mini(str, START),
 // where START = `base` + the literal's first-content-char offset within `code`. Pass the block's
@@ -115,6 +116,9 @@ const NAME_ARG_CALLS = new Set([
   // `.slices("<tight loose>")` is a pattern of names like `.preset()`, so it is deliberately not
   // listed - its argument wants highlighting exactly as pianoroll("<a b>") does.
   '_slices',
+  // ...and the groove definition: an id, then the drawn table. `.swing()` itself is NOT here - its
+  // shape argument is a name OR a patterned subdivision, so it is judged by what it says (below).
+  '_groove',
   'param', // only the NAME (first argument); .param("Filter Freq", "0.2 0.8") patterns the value
   // A place to read sample packs from - "user/repo", a URL - which a "/" would make a division.
   'samples',
@@ -123,7 +127,7 @@ const NAME_ARG_CALLS = new Set([
 // (.synth("Serum 2", "<state>")), an lfo() options object, pianoroll()'s grid, roll()'s drawn
 // notes, input()'s channel numbers (a hardware channel is wiring, not something that can vary per
 // step). param() is excluded: its second argument is the value pattern.
-const NAME_ONLY_CALLS = new Set(['samples', 'synth', 'fx', 'lfo', 'pianoroll', '_arrange', '_roll', 'roll', '_shape', 'shape', '_auto', 'auto', '_preset', '_pack', '_slices', 'midicc', 'midikeys', 'osc', 'input', 'copy', 'pcopy']);
+const NAME_ONLY_CALLS = new Set(['samples', 'synth', 'fx', 'lfo', 'pianoroll', '_arrange', '_roll', 'roll', '_shape', 'shape', '_auto', 'auto', '_preset', '_pack', '_slices', '_groove', 'midicc', 'midikeys', 'osc', 'input', 'copy', 'pcopy']);
 
 // Callee names whose METHOD form takes a literal name while the same-named builder takes mini:
 // .se("hits/stab.wav") is a plain path (a "/" would be a mini operator) and .sr("stab") a plain
@@ -209,6 +213,11 @@ export function isPatternPosition(before, after, text = '') {
   // argument list - a nested call (fx("Reverb").speed("1 2")) has its own first-argument rule.
   if (/,\s*\[?\s*$/.test(near)) {
     const enclosing = near.match(/\b([A-Za-z_$][\w$]*)\s*\(\s*[^()]*$/);
+    // .swing(amount, shape): the shape is either a GROOVE NAME to look up or the patterned
+    // subdivision it has always been, in one argument position - so it is judged by what it says,
+    // the way pianoroll()'s and lfo()'s first argument is. A name has letters in it and a
+    // subdivision never can (see grooveNameLike), which settles it.
+    if (enclosing && enclosing[1] === 'swing') return !grooveNameLike(text);
     return !(enclosing && NAME_ONLY_CALLS.has(enclosing[1]));
   }
   if (method) return true;

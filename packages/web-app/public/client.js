@@ -43,6 +43,7 @@ let groupsMod = null; // groups.mjs - the track tree: who is in which group, and
 let recordMod = null; // record.mjs - a live take into a roll (the ● rec and capture paths)
 let slicesMod = null; // slices.mjs - reading, tidying and writing a _slices() set's positions
 let samplerctlMod = null; // samplerctl.mjs - the envelope panel's sampler-control reads and code edits
+let grooveMod = null; // groove.mjs - the groove table's format, its presets and its slot arithmetic
 // Resolves once pattern-core is loaded (or failed) - the startup prebake waits on it so a
 // top-level noteToMidi()/etc. call in the prebake never races the import.
 const coreReady = Promise.all([
@@ -59,8 +60,10 @@ const coreReady = Promise.all([
   import('/pattern-core/slices.mjs'),
   import('/pattern-core/groups.mjs'),
   import('/pattern-core/samplerctl.mjs'),
+  import('/pattern-core/groove.mjs'),
 ])
-  .then(([m, l, s, pr, nt, mx, rc, ar, hm, ro, sl, gr, sc]) => {
+  .then(([m, l, s, pr, nt, mx, rc, ar, hm, ro, sl, gr, sc, gv]) => {
+    grooveMod = gv;
     groupsMod = gr;
     samplerctlMod = sc;
     slicesMod = sl;
@@ -83,6 +86,7 @@ const coreReady = Promise.all([
     initPackPanel();
     initSlicePanel();
     initEnvelopePanel();
+    initGroovePanel();
     initWidgetHandles(); // double-click a call's name to open its editor (needs all of the above)
     updateMutedDim();
     // Which spans are DATA (rather than roll ids) is a question only pianoroll.mjs can answer, so
@@ -297,8 +301,39 @@ const autoDefs = makeDefRegistry({
   },
 });
 
+// Grooves, for .swing(1, "samba"): a per-slot table of timing offsets and velocity scales under a
+// name (see groove.mjs). Drawn in the groove panel, and - like a shape - its argument position takes
+// either the data or a name, which is why isData has something to answer. Its "library" is the
+// built-in presets plus prebake's, so a buffer that defines its own `swing16` shadows the one that
+// ships, exactly as a shape does.
+const grooveDefs = makeDefRegistry({
+  kind: 'groove',
+  section: 'grooves',
+  defCall: '_groove',
+  useCall: 'swing',
+  emptyBody: `"${new Array(16).fill(0).join(' ')}"`, // straight at sixteen slots: drawn into from the first drag. One slot ("0") was a single bar spanning the whole lane
+  isData: (str) => (grooveMod ? grooveMod.looksLikeGrooveData(str) : null),
+  library: () => [...Object.keys(grooveMod?.GROOVE_PRESETS ?? {}), ...prPrebakeGrooves.map((g) => g.id)],
+  libraryNote: 'preset',
+  panel: {
+    current: () => grooveState?.grooveId ?? null,
+    open: (id) => openGrooveById(id, grooveCarry()),
+    close: () => closeGroovePanel(),
+    carry: () => grooveCarry(), // the call it is looking through - a table has no view state of its own
+    sourceCall: (refs) => sourceCallAmong(refs, grooveState?.callSource),
+    setCurrent: (from, to) => {
+      if (grooveState?.grooveId === from) {
+        grooveState.grooveId = to;
+        grooveState.idLiteral = JSON.stringify(to);
+      }
+    },
+    syncHead: () => grooveSyncHead(),
+    scheduleEval: () => grooveScheduleEval(),
+  },
+});
+
 // Every registry, for the passes that have to run over all of them (folding, auto-naming).
-const DEF_REGISTRIES = [rollDefs, shapeDefs, presetDefs, packDefs, sliceDefs, autoDefs];
+const DEF_REGISTRIES = [rollDefs, shapeDefs, presetDefs, packDefs, sliceDefs, autoDefs, grooveDefs];
 
 // The ★ library: what ~/.poptart/prebake/pinned.js holds, as last fetched (see prRefreshRollList) -
 // [{ kind, id, scope, code }]. Every registry reads it to draw its stars; see makeDefRegistry's pin.
@@ -3041,6 +3076,27 @@ function openWidgetAt(code, idx) {
     // Opening the roll on purpose hands it the keyboard: cmd-A, the arrows and delete belong to
     // the notes now, not to the code buffer.
     prCanvas.focus({ preventScroll: true });
+    return true;
+  }
+  // .swing(...) - the groove manager. A plain `.swing(1/3)` or `.swing(0.2, 16)` is a swing without
+  // a table, so opening it on one would have to invent the drawing; instead the panel opens on the
+  // equivalent table, which is exactly what the alternating shape is (see GROOVE_PRESETS.swing8).
+  const swingCall = grooveMod && findSwingCallAt(code, idx);
+  if (swingCall?.onName) {
+    const read = parseSwingCall(code.slice(swingCall.open + 1, swingCall.close));
+    // .swing(1, "<samba bossa>") NAMES grooves: the table lives in the definitions, so open
+    // whichever one is playing and follow the call from there (writing a table back into this call
+    // would serialize it over the names).
+    if (grooveDefs.isIdCall(code.slice(swingCall.open + 1, swingCall.close))) {
+      if (openGrooveFromIdCall(swingCall, code)) return true;
+    }
+    if (read.grid !== null || (read.name === null && read.data === null)) {
+      // A plain swing: turn it into the table that says the same thing, then open that. The numbers
+      // are unchanged by construction - a two-slot alternating table at the same depth IS this
+      // swing - so the sound does not move as the panel opens.
+      if (grooveMakeDrawable(swingCall, read)) return true;
+    }
+    if (!grooveState || swingCall.start !== grooveState.callStart) openGrooveEditor(swingCall);
     return true;
   }
   const preset = findPresetCallAt(code, idx);
@@ -7237,6 +7293,1290 @@ function initPresetPanel() {
 }
 
 // ---------------------------------------------------------------------------------------------
+// The groove manager - swing as a per-slot TABLE rather than one number.
+//
+// Opened by double-clicking the `swing` name in any `.swing(...)` call, and from the piano roll's
+// own swing box. A groove says what each slot of one bar does: how far its notes move, and how hard
+// they are played (see pattern-core's groove.mjs). A plain `.swing(1/3)` is one shape out of that -
+// the alternating table - which is why the panel offers to turn a call into a drawn one rather than
+// replacing the control that was already there.
+//
+// Two lanes, both drawn the same way: drag across either and the slots under the pointer take the
+// value at the pointer. The TIME lane is bipolar around zero (late below, early above, half a slot
+// either way at depth 1); the ACCENT lane is a velocity multiplier around 1. A slot left at zero is a
+// note left exactly where it was written, which is what makes the grid select double as the "unswung
+// above this level" control: draw at 16 and the quarters hold still while the sixteenths move.
+//
+// The depth sliders belong to the CALL, not to the table - the same split the lfo panel makes
+// between a shape and the rate it runs at - so the same groove can sit at full strength on one track
+// and a hint on another. Everything is serialized back into the code and re-evaluated (debounced),
+// and a named groove is re-filed live through /api/liveGroove so a drag is heard as you make it.
+// ---------------------------------------------------------------------------------------------
+
+const groovePanel = document.getElementById('groovePanel');
+const grooveTitle = document.getElementById('grooveTitle');
+const groovePickWrap = document.getElementById('groovePickWrap');
+const grooveNameInput = document.getElementById('grooveName');
+const groovePickBtn = document.getElementById('groovePickBtn');
+const groovePickBox = document.getElementById('groovePicker');
+const grooveSearch = document.getElementById('grooveSearch');
+const groovePickList = document.getElementById('groovePickList');
+const grooveUseBtn = document.getElementById('grooveUseBtn');
+const grooveCanvas = document.getElementById('grooveCanvas');
+const grooveGridSelect = document.getElementById('grooveGrid');
+const grooveFlatBtn = document.getElementById('grooveFlat');
+const grooveCloseBtn = document.getElementById('grooveClose');
+const grooveDepthBox = document.getElementById('grooveDepthBox');
+const grooveVelBox = document.getElementById('grooveVelBox');
+const grooveDepthWrap = document.getElementById('grooveDepthWrap');
+const grooveVelWrap = document.getElementById('grooveVelWrap');
+const grooveControlsRow = document.querySelector('#groovePanel .groove-controls'); // where the canvas sits when floating
+
+// The grids a groove can be drawn on. The same divisions the roll offers, which is what makes
+// "the roll's grid" and "the groove's grid" the same vocabulary.
+const GROOVE_GRID_DIVS = [['4', 4], ['8', 8], ['12', 12], ['16', 16], ['24', 24], ['32', 32]];
+const GROOVE_PAD = 14;
+// How far each lane reaches, as a value - NOT where playback clamps. The two are different numbers
+// and conflating them drew push16's bars at twice the lane's height (2026-09-30): a table VALUE of 1
+// means "a whole slot", which is what every alternating preset is written with, while what stops at
+// half a slot is the depth times the value, where it is applied (see timeShift). So a lane that only
+// reached the stop couldn't show - or draw - the ordinary case.
+const GROOVE_LANE_TIME = 1; // a whole slot either way
+const GROOVE_MAX_VEL = 2;
+// The canvas at rest, and the slimmer one docked under the roll - the lanes there borrow the roll's
+// width instead (see grooveDockLayout).
+const GROOVE_FLOAT_W = 640;
+const GROOVE_FLOAT_H = 300;
+const GROOVE_DOCK_H = 150; // slimmer in the roll's flow: two readable lanes, not a second panel
+const GROOVE_MAX_DEPTH = 2; // twice as drawn - a depth is a multiplier, so there is no musical stop
+
+let grooveState = null; // { marker, callStart, grooveId, idLiteral, callSource, rollSource, time[], vel[], depth, depthText, velDepth }
+let grooveDrag = null; // { lane, pointerId } while a lane is being drawn
+let grooveDepthSlider = null;
+let grooveVelSlider = null;
+let grooveEvalTimer = null;
+let grooveLiveTimer = null;
+let grooveWriteTimer = null;
+let grooveSuppressCursor = false;
+
+const grooveHead = makeNamePicker({
+  els: { wrap: groovePickWrap, title: grooveTitle, name: grooveNameInput, btn: groovePickBtn, picker: groovePickBox, search: grooveSearch, list: groovePickList },
+  reg: grooveDefs,
+  current: () => grooveState?.grooveId ?? null,
+  // The head stays up even on a table with no name: saving the thing you have just drawn under a
+  // name IS the ▾ here, which is what a kind whose data is usually written inline needs (see
+  // alwaysShow). The lfo's shapes get their names from an empty lfo() instead - a groove has no
+  // empty form to materialize, because .swing(1/3) is already a complete swing.
+  alwaysShow: true,
+  open: (id) => openGrooveById(id, grooveCarry()),
+  create: (id) => saveGrooveAs(id),
+  canUse: () => !!grooveState?.callSource?.find(),
+  use: (id) => grooveUseInCall(id),
+  refocus: () => grooveCanvas.focus({ preventScroll: true }),
+});
+
+const grooveRenderList = () => grooveHead.renderList();
+
+/**
+ * File what is on screen under `id` and point the call at it - "save this groove as". The table stops
+ * being written into the call and becomes a `_groove(...)` definition, which is what makes it
+ * reachable as `.swing(1, "name")` from any pattern in the song, and pinnable to the ★ library from
+ * the picker like every other named definition.
+ */
+function saveGrooveAs(id) {
+  const st = grooveState;
+  if (!st || !grooveMod) return;
+  const name = String(id).trim();
+  if (!grooveMod.grooveNameLike(name)) {
+    logLine(`a groove's name has to be one plain word starting with a letter - "${id}" isn't`, true);
+    return;
+  }
+  if (grooveDefs.defsInBuffer().some((d) => d.id === name)) {
+    logLine(`there is already a groove called "${name}" in this buffer - pick it from the list to open it, or choose another name`, true);
+    return;
+  }
+  // The definition first, so the call has something real to name by the time it is rewritten.
+  const [start, end, text] = grooveDefs.defsEdit(cm.getValue(), [name], () => JSON.stringify(grooveTableText(st)));
+  cm.replaceRange(text, cm.posFromIndex(start), cm.posFromIndex(end));
+  refoldAll(); // definitions start life folded away, like every other one
+  // The call now says the name instead of the numbers. For a roll that is its `groove` opt; for a
+  // .swing() it is the shape argument, which the panel's own marker still spans.
+  st.grooveId = name;
+  st.idLiteral = JSON.stringify(name);
+  if (st.rollSource && prState) {
+    prState.groove = name;
+    writePianorollCall();
+    drawPianoroll();
+  } else if (st.marker?.find()) {
+    // The marker spanned the .swing(...) the table was written into; it is now the call that names
+    // the definition, and the panel goes on looking THROUGH it (see callSource).
+    const range = st.marker.find();
+    grooveSuppressCursor = true;
+    try {
+      cm.replaceRange(serializeSwingCall(st), range.from, range.to);
+    } finally {
+      grooveSuppressCursor = false;
+    }
+    st.callSource = st.marker;
+    st.marker = null;
+  }
+  logLine(`saved this groove as "${name}" - any pattern can now play it with .swing(1, ${JSON.stringify(name)})`);
+  grooveSyncControls();
+  grooveScheduleEval();
+}
+
+/** What a switch between grooves carries over: the call the panel is looking through. */
+function grooveCarry() {
+  if (!grooveState) return {};
+  return {
+    callSource: grooveState.callSource,
+    options: {
+      depth: grooveState.depth,
+      velDepth: grooveState.velDepth,
+      // Carried too: browsing the list from the roll's panel must not quietly turn the roll's groove
+      // into an edit of some .swing() call that was never there.
+      rollSource: grooveState.rollSource ?? false,
+    },
+  };
+}
+
+// --- reading and writing the call -------------------------------------------------------------
+
+/**
+ * A `.swing(...)` call at `idx`, if the index is on the NAME. Only the name is a handle - the
+ * arguments are ordinary code - which is the rule every other widget handle follows.
+ */
+function findSwingCallAt(code, idx) {
+  return findNamedCallAt(code, idx, /\.\s*swing\s*\(/g, 'swing');
+}
+
+/**
+ * What a `.swing(...)` call says, as the panel's own state. The first argument is always the DEPTH
+ * and the second is the shape: a subdivision number (which this panel does not edit - it is a plain
+ * swing, and the panel offers to make it drawable instead), a groove name, or a table's own text.
+ */
+function parseSwingCall(inner) {
+  const [firstRaw, restRaw] = splitFirstArg(inner);
+  const first = String(firstRaw ?? '').trim();
+  const rest = String(restRaw ?? '').trim();
+  // Bare .swing() is the triplet shuffle (DEFAULT_SWING), not a swing of zero.
+  if (!first && !rest) return { depth: 1 / 3, depthText: '1/3', name: null, data: null, grid: null };
+  // `.swing(1/3)` is the documented spelling of a triplet shuffle - a third is not sayable as a
+  // decimal, and in a mini string "1/3" is the slow operator - so the division is read here rather
+  // than handed to Number(), which would make it NaN and the panel's depth 1.
+  const asNumber = (text) => {
+    const frac = /^(-?[\d.]+)\s*\/\s*([\d.]+)$/.exec(text);
+    return frac ? Number(frac[1]) / Number(frac[2]) : Number(text);
+  };
+  const quoted = (str) => /^(["'])((?:\\.|(?!\1).)*)\1$/.exec(str);
+  // .swing("name") - one argument, and a name rather than a patterned amount. Depth is then 1.
+  const firstQ = quoted(first);
+  if (!rest && firstQ && grooveMod?.grooveNameLike(firstQ[2])) {
+    return { depth: 1, depthText: '1', name: firstQ[2], data: null, grid: null };
+  }
+  const depth = asNumber(first);
+  const depthText = first || '1';
+  const secondQ = quoted(rest);
+  if (secondQ) {
+    const str = secondQ[2];
+    if (grooveMod?.grooveNameLike(str)) return { depth, depthText, name: str, data: null, grid: null };
+    // A string of numbers in the shape position is a patterned SUBDIVISION, which it has always
+    // been (".swing(0.5, '<8 16>')") - not a table. Only a name, or a bracketed list, is a groove.
+    return { depth, depthText, name: null, data: null, grid: str };
+  }
+  const list = /^\[([^\]]*)\]$/.exec(rest);
+  if (list) return { depth, depthText, name: null, data: list[1].split(',').map((v) => Number(v.trim())), grid: null };
+  return { depth, depthText, name: null, data: null, grid: rest || null };
+}
+
+/**
+ * Turn a plain `.swing(amount[, grid])` into the drawable table that says exactly the same thing,
+ * and open the panel on it. The alternating table at that grid IS that swing - offbeats late by the
+ * amount, onbeats untouched - so the sound does not move as the panel opens, which is the only
+ * reason this is allowed to rewrite the call at all.
+ *
+ * A grid that is a PATTERN (`.swing(0.5, "<8 16>")`) describes two grids over one bar and no single
+ * table can stand for it, so that one is left alone and says so.
+ */
+function grooveMakeDrawable(call, read) {
+  const code = cm.getValue();
+  const gridText = read.grid === null ? '' : String(read.grid).trim();
+  if (gridText && !/^\d+$/.test(gridText)) {
+    logLine(`swing: this call's grid is a pattern (${gridText}), which is two grids over one bar - a groove is one table, so there is nothing single to draw. Give it a plain grid to draw it.`, true);
+    return false;
+  }
+  const grid = gridText ? Math.max(1, Math.round(Number(gridText))) : 8; // 8 by the tradition the word comes from
+  // The depth is carried over as the TEXT it was written as, not as a float: `.swing(1/3)` is a third
+  // and `0.3333` is not, and a rewrite that moved the sound by that much would break the only reason
+  // it is allowed to rewrite the call at all.
+  const depthText = read.depthText || '1';
+  const table = Array.from({ length: grid }, (_, k) => (k % 2 ? 1 : 0)).join(' ');
+  grooveSuppressCursor = true;
+  try {
+    cm.replaceRange(
+      `.swing(${depthText}, ${JSON.stringify(table)})`,
+      cm.posFromIndex(call.start),
+      cm.posFromIndex(call.close + 1)
+    );
+  } finally {
+    grooveSuppressCursor = false;
+  }
+  // Re-found rather than reused: the call it was is not the call it now is, and the panel's marker
+  // has to span the new text.
+  const again = findSwingCallAt(cm.getValue(), call.start + 2);
+  if (!again) return false;
+  openGrooveEditor(again);
+  grooveScheduleEval();
+  return true;
+}
+
+/** The `.swing(...)` text for the panel's state - a name where it has one, the table where it hasn't. */
+function serializeSwingCall(st) {
+  const depth = grooveDepthText(st);
+  const shape = st.grooveId ? JSON.stringify(st.grooveId) : JSON.stringify(grooveTableText(st));
+  // Only when it says something: 1 is the resting value, and a groove's accents play as drawn.
+  const tail = st.velDepth === 1 ? '' : `.swingvel(${Number(st.velDepth.toFixed(4))})`;
+  return `.swing(${depth}, ${shape})${tail}`;
+}
+
+// The depth as it should READ, not as a float.
+//
+// A depth the panel has not touched is written back as the TEXT it was found as: `.swing(1/3, …)` has
+// to stay a third through a lane drag, because 0.3333 is a different feel by a hair and nobody asked
+// for it. Once the slider has moved it there is no text to keep - the number is what was asked for -
+// and a depth of 1 reads as a bare `1` rather than `1.0000`.
+const grooveDepthText = (st) => (st.depthText ?? String(Number((Number.isFinite(st.depth) ? st.depth : 1).toFixed(4))));
+
+/** The panel's two lanes as the text groove.mjs parses - the velocity row only when it says something. */
+function grooveTableText(st) {
+  if (!grooveMod) return '0';
+  return grooveMod.serializeGroove({ steps: st.time.length, time: st.time, vel: st.vel });
+}
+
+function writeGrooveCall() {
+  if (!grooveState) return;
+  // Opened from the roll's own swing box, the groove belongs to the roll's opts rather than to a
+  // .swing() call - so that is where it is written, and the roll's own writer lands it.
+  if (grooveState.rollSource) return writeGrooveIntoRoll();
+  // A named groove's data lives in its own _groove(...) definition; the call only says the name and
+  // the depth. An inline one is the whole of itself, so the table is written into the call.
+  if (grooveState.grooveId) {
+    writeGrooveDef();
+    writeGrooveCallOptions();
+    return;
+  }
+  const range = grooveState.marker?.find();
+  if (!range) return;
+  const text = serializeSwingCall(grooveState);
+  grooveSuppressCursor = true;
+  try {
+    cm.replaceRange(text, range.from, range.to);
+  } finally {
+    grooveSuppressCursor = false;
+  }
+  // Re-anchored for the reason writeGrooveDef re-anchors: a mark whose whole span was replaced is
+  // a mark that no longer exists.
+  grooveState.marker.clear();
+  grooveState.marker = cm.markText(range.from, cm.posFromIndex(cm.indexFromPos(range.from) + text.length), {});
+  grooveScheduleEval();
+}
+
+/**
+ * The panel's state into the ROLL it was opened from: the table into the roll's opts (or into its own
+ * definition, where the groove has a name), and the depths onto the roll's swing numbers. The roll's
+ * writer lands it, so the code and what the roll draws stay one thing.
+ */
+function writeGrooveIntoRoll() {
+  const st = grooveState;
+  if (!st || !prState) return;
+  writeGrooveDef(); // a roll's groove is always a named definition (see grooveMaterializeForRoll)
+  prState.swing = st.depth;
+  prState.swingvel = st.velDepth === 1 ? null : st.velDepth;
+  prSwingSlider?.set(st.depth);
+  prCommitSwingBtn.disabled = !prState.swing;
+  writePianorollCall();
+  drawPianoroll();
+}
+
+/** The depth half of the call, written while a named groove's own definition is on screen. */
+function writeGrooveCallOptions() {
+  const st = grooveState;
+  if (!st?.grooveId) return;
+  const range = st.callSource?.find();
+  if (!range) return;
+  const code = cm.getValue();
+  const from = cm.indexFromPos(range.from);
+  // The call may have been edited or deleted under us; only rewrite something that is still a
+  // .swing( - the same guard the lfo panel's option write makes.
+  if (!/^\.\s*swing\s*\(/.test(code.slice(from, from + 24))) return;
+  const text = serializeSwingCall(st);
+  grooveSuppressCursor = true;
+  try {
+    cm.replaceRange(text, range.from, range.to);
+  } finally {
+    grooveSuppressCursor = false;
+  }
+  st.callSource.clear();
+  st.callSource = cm.markText(range.from, cm.posFromIndex(cm.indexFromPos(range.from) + text.length), {});
+}
+
+/**
+ * The table into its `_groove(...)` definition - through the MARKER the editor holds over it, the
+ * way writeLfoCall writes a shape. defsEdit is for filing NEW definitions (it appends); writing an
+ * edit through it appended a duplicate `_groove(...)` on every stroke, whose un-edited original the
+ * sync then read back - so every drag reverted within a change event (found 2026-10-02, in the
+ * browser, after a day of it "feeling broken").
+ */
+function writeGrooveDef() {
+  const st = grooveState;
+  if (!st?.grooveId) return;
+  const text = `_groove(${st.idLiteral ?? JSON.stringify(st.grooveId)}, ${JSON.stringify(grooveTableText(st))})`;
+  const range = st.marker?.find();
+  if (range) {
+    grooveSuppressCursor = true;
+    try {
+      cm.replaceRange(text, range.from, range.to);
+    } finally {
+      grooveSuppressCursor = false;
+    }
+    // Replacing a mark's whole span clears it (CodeMirror drops a mark the moment it is empty), so
+    // the write re-anchors on its own text - without this the NEXT sync found nothing, read the
+    // call as gone, and closed the panel out from under the drag.
+    st.marker.clear();
+    const from = cm.indexFromPos(range.from);
+    st.marker = cm.markText(range.from, cm.posFromIndex(from + text.length), {});
+  } else {
+    // The definition left the buffer under us (undo, a hand edit): file it afresh, and re-anchor
+    // on what was filed so the next stroke writes rather than appending again.
+    const [start, end, out] = grooveDefs.defsEdit(cm.getValue(), [st.grooveId], () => JSON.stringify(grooveTableText(st)));
+    cm.replaceRange(out, cm.posFromIndex(start), cm.posFromIndex(end));
+    const def = grooveDefs.defsInBuffer().find((d) => d.id === st.grooveId);
+    if (def) st.marker = cm.markText(cm.posFromIndex(def.start), cm.posFromIndex(def.close + 1), {});
+  }
+  grooveScheduleEval();
+}
+
+// A drag re-files the definition live, so it is heard without waiting for the debounced eval - the
+// same channel the arrange view's automation lane uses, and for the same reason: a groove is looked
+// up by name at every read, so re-filing it is heard at the next onset.
+function grooveLiveSync() {
+  const st = grooveState;
+  if (!st?.grooveId) return;
+  if (grooveLiveTimer) return;
+  grooveLiveTimer = setTimeout(() => {
+    grooveLiveTimer = null;
+    if (!grooveState?.grooveId) return;
+    api('POST', '/api/liveGroove', { id: grooveState.grooveId, table: grooveTableText(grooveState) }).catch(() => {});
+  }, 40);
+}
+
+// A slider fires in bursts, so the code write is coalesced onto a slower beat - the roll's own
+// pattern (see prWriteSoon). The debounced eval behind it is what makes the change audible.
+function grooveWriteSoon() {
+  if (grooveWriteTimer) return; // already on the way - it will pick up whatever the state says by then
+  grooveWriteTimer = setTimeout(() => {
+    grooveWriteTimer = null;
+    if (grooveState) writeGrooveCall();
+  }, 60);
+}
+
+function grooveWriteNow() {
+  clearTimeout(grooveWriteTimer);
+  grooveWriteTimer = null;
+  if (grooveState) writeGrooveCall();
+}
+
+function grooveScheduleEval() {
+  if (grooveEvalTimer) clearTimeout(grooveEvalTimer);
+  grooveEvalTimer = setTimeout(() => {
+    grooveEvalTimer = null;
+    evaluate(false);
+  }, 240);
+}
+
+// --- opening and closing ----------------------------------------------------------------------
+
+function openGrooveEditor(call) {
+  const code = cm.getValue();
+  const from = cm.posFromIndex(call.start);
+  const to = cm.posFromIndex(call.close + 1);
+  const inner = code.slice(call.open + 1, call.close);
+  if (grooveState?.marker) grooveState.marker.clear();
+  // The call marker outlives a switch only while it is being carried INTO the new state
+  // (grooveCarry); any other one is the panel's last look at some other call, and dropping the
+  // reference without clearing it would leave the mark in the document for good.
+  if (grooveState?.callSource && grooveState.callSource !== call.callSource) grooveState.callSource.clear();
+  // A _groove(...) definition is the table with a name in front of it - drop the name and the rest
+  // reads identically, exactly as a roll(...) reads as a pianoroll().
+  const read = call.idLiteral ? null : parseSwingCall(inner);
+  const table = grooveOpenTable(call, read);
+  grooveState = {
+    marker: cm.markText(from, to, {}),
+    callStart: call.start,
+    // Set when this is a _groove(...) definition: the name it is filed under, and the literal to
+    // write back. Null for a table written inline, which is the whole of its own groove.
+    grooveId: call.id ?? null,
+    idLiteral: call.idLiteral ?? null,
+    // The .swing() a definition was opened THROUGH, if any: the depths belong to it, not to the
+    // table, so that is where the depth sliders write. Null when opened from the picker.
+    callSource: call.callSource ?? null,
+    time: table.time,
+    vel: table.vel,
+    depth: 1,
+    // The depth exactly as the call spells it, kept until the slider moves it (see grooveDepthText).
+    depthText: null,
+    velDepth: 1,
+    ...(call.options ?? {}),
+    ...(read ? { depth: Number.isFinite(read.depth) ? read.depth : 1, depthText: read.depthText } : {}),
+  };
+  grooveSyncControls();
+  // A named roll groove opens THROUGH its definition but still belongs in the roll's strip, with
+  // the roll's own side column as its controls; anything else is the floating editor, and takes a
+  // leftover dock down first.
+  if (grooveState.rollSource) {
+    grooveDockStart();
+  } else {
+    grooveDockStop();
+    groovePanel.classList.remove('hidden');
+    bringPanelToFront(groovePanel);
+    grooveCanvas.focus({ preventScroll: true });
+  }
+  drawGroove();
+}
+
+/**
+ * The groove lanes for the open ROLL, in the strip under its grid - what picking anything drawable
+ * in the side column's groove select opens.
+ *
+ * A roll that already has a table opens on it. A roll swinging plainly opens on the table that says
+ * the same thing (the alternating shape at whatever division it was swinging), so the sound does not
+ * move as the lanes open - the same promise the editor's own handle makes (see grooveMakeDrawable).
+ */
+function openGrooveForRoll() {
+  if (!prState || !grooveMod) return false;
+  let named = prState.groove && grooveMod.grooveNameLike(String(prState.groove).trim())
+    ? String(prState.groove).trim()
+    : null;
+  // A table still written inline in the roll's opts (an earlier shape of this branch) becomes a
+  // definition the moment it is opened: the lanes edit definitions, which is what makes a groove
+  // one thing however many rolls play it.
+  if (!named && prState.groove) named = grooveMaterializeForRoll(String(prState.groove));
+  if (named) {
+    // A named groove's numbers are in its definition, so that is what goes under the lanes - with
+    // the roll marked as where the depths belong. No fallback on a name that can't be opened (a
+    // prebake groove, or one defined nowhere): quietly editing a drawn copy instead would convert
+    // the roll's named reference to inline data on the first drag, and openGrooveById already said
+    // what the matter was.
+    return openGrooveById(named, { options: { rollSource: true, depth: prState.swing || 1, ...prRollVelOpts() } });
+  }
+  return false; // nothing set: the select's `new` is the creating gesture
+}
+
+/**
+ * Files `tableText` as a definition under the next free name and points the roll at it. What makes
+ * "edit this roll's groove" and "make me a groove" one gesture: the definition exists before the
+ * lanes open, exactly as an empty pianoroll materializes its roll before the editor does.
+ */
+function grooveMaterializeForRoll(tableText) {
+  if (!grooveMod || !prState) return null;
+  let text = String(tableText).trim();
+  try {
+    grooveMod.parseGroove(text);
+  } catch {
+    text = prRollPlainTable(); // unreadable leftovers start straight rather than refusing to open
+  }
+  const name = nextGrooveName();
+  const [start, end, out] = grooveDefs.defsEdit(cm.getValue(), [name], () => JSON.stringify(text));
+  cm.replaceRange(out, cm.posFromIndex(start), cm.posFromIndex(end));
+  refoldAll(); // the new definition starts life folded away, like every other one
+  prState.groove = name;
+  writePianorollCall();
+  return name;
+}
+
+const prRollVelOpts = () => ({ velDepth: prState?.swingvel == null ? 1 : prState.swingvel });
+
+// The alternating table at whatever division the roll was swinging - the plain swing written out as
+// the table it already is. Its length is that division, so the slots the roll was NOT moving stay at
+// zero and quarters on a sixteenth grid keep holding still.
+function prRollPlainTable() {
+  const n = Math.max(1, Math.round(Number(prState.swinggrid) || prState.grid));
+  return Array.from({ length: n }, (_, k) => (k % 2 ? 1 : 0)).join(' ');
+}
+
+/** The table the panel opens on: the call's own, the definition's, or straight at the chosen grid. */
+function grooveOpenTable(call, read) {
+  const fallback = () => ({ time: new Array(16).fill(0), vel: null });
+  if (!grooveMod) return fallback();
+  const text = call.idLiteral
+    ? (/(["'])((?:\\.|(?!\1).)*?)\1/.exec(cm.getValue().slice(call.open + 1, call.close).replace(call.idLiteral, '')) ?? [])[2]
+    : null;
+  const source = text ?? (read?.data ? read.data.join(' ') : null);
+  if (source == null && read?.name) {
+    // The panel was opened on a NAME with no definition in this buffer - a built-in preset. Its
+    // numbers are what to start from (see openGrooveById, which forks one into the buffer first).
+    const preset = grooveMod.GROOVE_PRESETS?.[read.name];
+    if (preset) return grooveSplit(grooveMod.parseGroove(preset));
+  }
+  if (source == null) return fallback();
+  try {
+    return grooveSplit(grooveMod.parseGroove(source));
+  } catch {
+    return fallback(); // unreadable text - start straight rather than refusing to open
+  }
+}
+
+// A frozen table as the panel's two mutable rows.
+const grooveSplit = (table) => ({ time: [...table.time], vel: table.vel ? [...table.vel] : null });
+
+/**
+ * Puts groove `id`'s definition under the editor. A built-in preset is copied into the buffer first
+ * (see forkGroovePreset); false (and a line) for anything else this buffer hasn't got.
+ */
+function openGrooveById(id, from = {}) {
+  const name = String(id);
+  const def = grooveDefs.defsInBuffer().find((d) => d.id === name);
+  if (!def) {
+    if (grooveMod?.GROOVE_PRESETS?.[name]) return forkGroovePreset(name, from);
+    logLine(
+      grooveDefs.allIds().some((r) => r.id === name)
+        ? `groove "${id}" is defined in prebake.js - open it there to edit its table`
+        : `no _groove(${JSON.stringify(name)}, …) in this buffer to open`,
+      true
+    );
+    return false;
+  }
+  openGrooveEditor({ ...def, ...from });
+  return true;
+}
+
+/**
+ * A built-in preset has no definition anywhere to put under the editor - `clave16` is a line of data
+ * in groove.mjs, not something this buffer wrote - so editing one can only mean starting FROM it.
+ * Write its table into the buffer under the same name and open that: the shadowing rule (buffer
+ * first, presets after - see resolveGroove) then hands every .swing(…, "clave16") already playing the
+ * copy on screen, slot for slot identical until one is moved.
+ */
+function forkGroovePreset(id, from = {}) {
+  const data = grooveMod?.GROOVE_PRESETS?.[id];
+  if (data == null) return false;
+  const [start, end, text] = grooveDefs.defsEdit(cm.getValue(), [id], () => JSON.stringify(data));
+  cm.replaceRange(text, cm.posFromIndex(start), cm.posFromIndex(end));
+  refoldAll(); // the new definition starts life hidden, like every other one
+  const def = grooveDefs.defsInBuffer().find((d) => d.id === id);
+  if (!def) return false;
+  logLine(`groove "${id}" was a built-in preset - copied into this buffer, where it now shadows it`);
+  openGrooveEditor({ ...def, ...from });
+  grooveScheduleEval();
+  return true;
+}
+
+// .swing(1, "<samba bossa>") NAMES grooves rather than drawing them: the table lives in the
+// _groove(...) definitions, so open the one you can HEAR - read off the playback highlighter's lit
+// spans, exactly as the shape and roll panels do. Stopped, it opens the first one named.
+function openGrooveFromIdCall(call, code) {
+  const range = idStringRange(call, code);
+  const id = range
+    && (activeIdIn(range[0], range[1]) ?? (code.slice(range[0], range[1]).match(/[\w$]+/) ?? [])[0]);
+  if (id == null) return false;
+  // Marked so the panel's depth sliders can write back into this call while a definition of its own
+  // is on screen (see writeGrooveCallOptions).
+  const callSource = cm.markText(cm.posFromIndex(call.start), cm.posFromIndex(call.close + 1), {});
+  const read = parseSwingCall(code.slice(call.open + 1, call.close));
+  const velDepth = swingVelAfter(code, call);
+  const options = { depth: Number.isFinite(read.depth) ? read.depth : 1, ...(velDepth === null ? {} : { velDepth }) };
+  if (openGrooveById(id, { callSource, options })) return true;
+  callSource.clear();
+  return false;
+}
+
+/** The `.swingvel(x)` immediately after this call, if it has one - the accent depth lives there. */
+function swingVelAfter(code, call) {
+  const m = /^\s*\.\s*swingvel\s*\(\s*(-?[\d.]+)\s*\)/.exec(code.slice(call.close + 1));
+  return m ? Number(m[1]) : null;
+}
+
+function closeGroovePanel() {
+  const wasDocked = !!grooveState?.rollSource;
+  if (grooveState?.marker) grooveState.marker.clear();
+  if (grooveState?.callSource) grooveState.callSource.clear();
+  grooveState = null;
+  grooveDockStop(); // after the state is gone, so the layout tick can't re-dock a closing panel
+  grooveHead.closePicker(false);
+  groovePanel.classList.add('hidden');
+  // The roll's side column was this editor's controls (the sw grid select editing the table's own
+  // division) - with the lanes gone it has to read as the roll again, not stay half theirs.
+  if (wasDocked && prState) prSyncGridLenInputs();
+}
+
+/** Plays groove `id` in the .swing() the panel was opened through - the head's → button. */
+function grooveUseInCall(id) {
+  const st = grooveState;
+  const range = st?.callSource?.find();
+  if (!range) return false;
+  grooveSuppressCursor = true;
+  try {
+    cm.replaceRange(`.swing(${grooveDepthText(st)}, ${JSON.stringify(String(id))})`, range.from, range.to);
+  } finally {
+    grooveSuppressCursor = false;
+  }
+  grooveScheduleEval();
+  return true;
+}
+
+// --- the controls -----------------------------------------------------------------------------
+
+function grooveSyncHead() {
+  // Docked there is no head: the roll's groove select is the name control, and a rename or delete
+  // from elsewhere reaches it through the same resync.
+  if (grooveState?.rollSource) {
+    if (prState) prSyncGridLenInputs();
+    return;
+  }
+  groovePickWrap.classList.remove('hidden');
+  const named = !!grooveState?.grooveId;
+  const onRoll = !!grooveState?.rollSource;
+  // The depths belong to the .swing() CALL - or, on a roll, to the roll's own swing numbers. An
+  // inline table is its own call; a definition has them only while the panel still knows which call
+  // it was opened through.
+  const editable = onRoll || !named || !!grooveState?.callSource?.find();
+  grooveDepthWrap.classList.toggle('hidden', !editable);
+  grooveVelWrap.classList.toggle('hidden', !editable);
+  // The → is offered only when it would change something: there is a call behind the panel, and it
+  // isn't already playing what you are looking at.
+  // ...and there is no call behind a roll's groove at all, so nothing to send it to.
+  const plays = named && !onRoll && editable ? parseSwingCall(grooveSourceInner()).name : grooveState?.grooveId;
+  grooveUseBtn.classList.toggle('hidden', onRoll || plays === grooveState?.grooveId);
+  grooveUseBtn.title = `play "${grooveState?.grooveId}" in the swing() this panel came from`
+    + (plays == null ? '' : ` (it plays "${plays}" now)`);
+  grooveHead.syncHead(named ? grooveDefs.refCalls(cm.getValue(), grooveState.grooveId).length : 0);
+}
+
+/**
+ * What a groove STRING means as a table, resolved the way the player resolves it: the buffer's own
+ * `_groove(...)` definitions first, then the library (prebake, then the built-in presets), and
+ * failing all of those the string read as a table of its own.
+ *
+ * The editor has to answer this for itself because the roll draws its own swung onsets - the panel
+ * and the scheduler must agree about where a note sounds, and the scheduler asks resolveGroove.
+ */
+function grooveTableFor(str) {
+  if (!grooveMod || str == null) return null;
+  const text = String(str).trim();
+  if (!text) return null;
+  const parse = (data) => {
+    try {
+      return grooveMod.parseGroove(data);
+    } catch {
+      return null;
+    }
+  };
+  if (grooveMod.grooveNameLike(text)) {
+    const def = grooveDefs.defsInBuffer().find((d) => d.id === text);
+    if (def) {
+      const inner = cm.getValue().slice(def.open + 1, def.close);
+      const body = (/(["'`])((?:\\.|(?!\1)[\s\S])*?)\1/.exec(inner.replace(def.idLiteral, '')) ?? [])[2];
+      if (body != null) return parse(body);
+    }
+    const lib = prPrebakeGrooves.find((g) => g.id === text);
+    if (lib?.table) return lib.table;
+    const preset = grooveMod.GROOVE_PRESETS?.[text];
+    return preset ? parse(preset) : null;
+  }
+  return parse(text);
+}
+
+/** The roll's own groove as a table, for the onsets it draws and for what commit folds in. */
+const prGrooveTable = () => (prState?.groove ? grooveTableFor(prState.groove) : null);
+
+/** The inner text of the .swing() the panel is looking through, or '' where there is none. */
+function grooveSourceInner() {
+  const range = grooveState?.callSource?.find();
+  if (!range) return '';
+  const code = cm.getValue();
+  const at = cm.indexFromPos(range.from);
+  const call = findSwingCallAt(code, at + 1);
+  return call ? code.slice(call.open + 1, call.close) : '';
+}
+
+/** (Re)populate the grid select and the depth boxes from state. */
+function grooveSyncControls() {
+  if (!grooveState) return;
+  // Docked, the roll's side column is this editor's controls - the swing box its depth, the sw grid
+  // its slots, the groove select its name - so that is what gets synced.
+  if (grooveState.rollSource) {
+    if (prState) prSyncGridLenInputs();
+    return;
+  }
+  const n = grooveState.time.length;
+  const opts = [...GROOVE_GRID_DIVS];
+  if (!opts.some(([, v]) => v === n)) opts.push([String(n), n]);
+  opts.sort((a, b) => a[1] - b[1]);
+  grooveGridSelect.innerHTML = '';
+  for (const [labelText, v] of opts) grooveGridSelect.add(new Option(labelText, String(v)));
+  grooveGridSelect.value = String(n);
+  grooveDepthSlider?.set(grooveState.depth);
+  grooveVelSlider?.set(grooveState.velDepth);
+  grooveSyncHead();
+}
+
+/**
+ * Re-draw the table at a new grid, keeping what was drawn: each new slot takes the value of the old
+ * slot it falls in. Doubling the grid therefore splits every slot in two without changing a thing
+ * you can hear, and halving it keeps the first of each pair - which is what makes the grid select
+ * safe to reach for while you are drawing.
+ */
+function grooveSetGrid(n) {
+  const st = grooveState;
+  if (!st || n === st.time.length) return;
+  const at = (row, k) => row[Math.floor((k * row.length) / n)] ?? (row === st.vel ? 1 : 0);
+  const time = Array.from({ length: n }, (_, k) => at(st.time, k));
+  const vel = st.vel ? Array.from({ length: n }, (_, k) => at(st.vel, k)) : null;
+  st.time = time;
+  st.vel = vel;
+  grooveSyncControls();
+  drawGroove();
+  writeGrooveCall();
+}
+
+// --- the lanes --------------------------------------------------------------------------------
+
+/**
+ * Whether the panel is DOCKED: opened from the roll, drawn directly under it, with its slots in the
+ * roll's own x space (see grooveDockLayout). Floating - opened from a .swing() call - it owns its
+ * x axis and spreads one bar across its width.
+ */
+const grooveDocked = () => !!(grooveState?.rollSource && prState);
+
+// Where each lane sits on the canvas. The time lane takes the larger share: it is the one that is
+// always drawn, and the one whose zero line has to be readable. Docked, the slot numbers go - the
+// roll's own ruler is right above - so the lanes take that room instead.
+function grooveMetrics() {
+  const W = grooveCanvas._cssW ?? grooveCanvas.width;
+  const H = grooveCanvas._cssH ?? grooveCanvas.height;
+  const docked = grooveDocked();
+  const pad = docked ? 8 : GROOVE_PAD;
+  const left = docked ? PR_GUTTER : GROOVE_PAD + 30; // the roll's own gutter, or room for the labels
+  const right = docked ? W : W - GROOVE_PAD;
+  const top = pad;
+  const gap = docked ? 10 : 16;
+  const bodyH = H - 2 * pad - gap;
+  const timeH = Math.round(bodyH * 0.62);
+  return {
+    left,
+    right,
+    width: right - left,
+    docked,
+    time: { top, height: timeH, bottom: top + timeH },
+    vel: { top: top + timeH + gap, height: bodyH - timeH, bottom: top + timeH + gap + (bodyH - timeH) },
+  };
+}
+
+/**
+ * Where each slot sits, as [x0, x1) spans. Floating, the bar is spread evenly across the lane.
+ * Docked, slot k of every visible cycle spans the same pixels as the roll cells under it - through
+ * the roll's own cell mapping, zoom, scroll and all - which is the whole reason to dock: a slot
+ * sits exactly under the notes it moves, and repeats down the loop the way it plays.
+ */
+function grooveSlotSpans(n, m) {
+  if (!m.docked) {
+    const slotW = m.width / n;
+    return Array.from({ length: n }, (_, k) => ({ k, x0: m.left + k * slotW, x1: m.left + (k + 1) * slotW }));
+  }
+  const pm = prMetrics();
+  const cellsPerSlot = prState.grid / n;
+  const spans = [];
+  const firstCycle = Math.floor(prCellFloat(m.left, pm) / prState.grid);
+  const lastCycle = Math.ceil(prCellFloat(pm.W, pm) / prState.grid);
+  for (let c = firstCycle; c <= lastCycle; c++) {
+    for (let k = 0; k < n; k++) {
+      const x0 = prCellToX((c * n + k) * cellsPerSlot, pm);
+      const x1 = prCellToX((c * n + k + 1) * cellsPerSlot, pm);
+      if (x1 <= m.left || x0 >= pm.W) continue;
+      spans.push({ k, x0: Math.max(m.left, x0), x1: Math.min(pm.W, x1) });
+    }
+  }
+  return spans;
+}
+
+/** Which slot `px` is over - the floating lane's even split, or the roll's cells when docked. */
+function grooveSlotFromPx(px, m, n) {
+  if (!m.docked) return Math.max(0, Math.min(n - 1, Math.floor(((px - m.left) / m.width) * n)));
+  const pm = prMetrics();
+  const cell = prCellFloat(px, pm);
+  const inCycle = ((cell % prState.grid) + prState.grid) % prState.grid;
+  return Math.max(0, Math.min(n - 1, Math.floor((inCycle / prState.grid) * n + 1e-6)));
+}
+
+/**
+ * The half-range the time lane is drawn at: a whole slot, or enough to hold the table if it was
+ * written with more than that. Rounded up to a half so the scale is a readable number, and taken off
+ * the table rather than fixed, so nothing a buffer can say draws outside its own box.
+ */
+function grooveTimeReach(row) {
+  const biggest = Math.max(...(row ?? []).map((v) => Math.abs(Number(v) || 0)), GROOVE_LANE_TIME);
+  return Math.ceil(biggest * 2) / 2;
+}
+
+// What one slot actually DOES at the current depths - the numbers the player computes, drawn so the
+// sliders are something you watch work. Time is the depth times the value with the half-slot stop
+// (timeShift's own clamp, which this makes visible: a whole-slot bar at full depth pins at half).
+// Accent is the interpolation grooveVelScale makes. Both are off entirely at a depth of zero, the
+// gate the player applies, so pulling depth to 0 visibly flattens every cap.
+function grooveEffective(lane, v) {
+  const depth = Number.isFinite(grooveState?.depth) ? grooveState.depth : 1;
+  if (lane === 'time') return depth === 0 ? 0 : Math.max(-0.5, Math.min(0.5, depth * v));
+  return depth === 0 ? 1 : Math.max(0, 1 + (grooveState?.velDepth ?? 1) * (v - 1));
+}
+
+function drawGroove() {
+  if (!grooveState || !grooveMod) return;
+  const css = getComputedStyle(document.documentElement);
+  const col = (v) => css.getPropertyValue(v).trim();
+  const ctx = grooveCanvas.getContext('2d');
+  // Everything below is in CSS pixels; the transform maps them onto the backing store, exactly as
+  // the roll's own draw does, so prCellToX's CSS-pixel answers land where they should when docked.
+  const dpr = grooveCanvas._dpr || 1;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const W = grooveCanvas._cssW ?? grooveCanvas.width;
+  const H = grooveCanvas._cssH ?? grooveCanvas.height;
+  ctx.clearRect(0, 0, W, H);
+  const m = grooveMetrics();
+  const n = grooveState.time.length;
+  const spans = grooveSlotSpans(n, m);
+
+  ctx.font = '10px ui-monospace, SFMono-Regular, Menlo, monospace'; // a canvas font string can't hold a CSS var
+  ctx.textBaseline = 'middle';
+
+  for (const lane of ['time', 'vel']) {
+    const box = m[lane];
+    const row = lane === 'time' ? grooveState.time : (grooveState.vel ?? new Array(n).fill(1));
+    const reach = lane === 'time' ? grooveTimeReach(grooveState.time) : GROOVE_MAX_VEL;
+    const zeroY = lane === 'time'
+      ? box.top + box.height / 2
+      : box.bottom - box.height / GROOVE_MAX_VEL; // 1 sits where a multiplier of 1 is
+    // A value to a y offset from the zero line. Down is LATE on the time lane (the bar falls the way
+    // the note does) and down is QUIETER on the accent lane, which is why the signs differ - and the
+    // result is held inside the box whatever the table says, because a bar that escapes its lane is
+    // the kind of thing nothing else would report.
+    const offOf = (v) => {
+      const raw = lane === 'time' ? (v / reach) * (box.height / 2) : -((v - 1) / GROOVE_MAX_VEL) * box.height;
+      return Math.max(box.top - zeroY, Math.min(box.bottom - zeroY, raw));
+    };
+    // The lane's frame and its "nothing happens here" line, which is the one thing both lanes have
+    // to say clearly: a flat lane is a straight bar.
+    ctx.strokeStyle = col('--border');
+    ctx.lineWidth = 1;
+    ctx.strokeRect(m.left + 0.5, box.top + 0.5, m.width - 1, box.height - 1);
+    // The beat lines, so the bar reads as a bar: every fourth of the cycle, through the roll's own
+    // mapping when docked so they fall with its columns.
+    ctx.beginPath();
+    if (m.docked) {
+      const pm = prMetrics();
+      const perBeat = prState.grid / 4;
+      for (let b = Math.ceil(prCellFloat(m.left, pm) / perBeat); ; b++) {
+        const gx = prCellToX(b * perBeat, pm);
+        if (gx >= m.right) break;
+        if (gx <= m.left) continue;
+        ctx.moveTo(gx, box.top); ctx.lineTo(gx, box.bottom);
+      }
+    } else {
+      const perBeat = Math.max(1, Math.round(n / 4));
+      for (let k = perBeat; k < n; k += perBeat) {
+        const gx = m.left + (k / n) * m.width;
+        ctx.moveTo(gx, box.top); ctx.lineTo(gx, box.bottom);
+      }
+    }
+    ctx.stroke();
+    ctx.save();
+    ctx.strokeStyle = col('--text-dim');
+    ctx.setLineDash([3, 3]);
+    ctx.beginPath(); ctx.moveTo(m.left, zeroY); ctx.lineTo(m.right, zeroY); ctx.stroke();
+    ctx.restore();
+
+    // Each slot as a bar from the zero line - a bar rather than a curve because a groove is per slot
+    // and nothing happens between two of them. Two readings in one bar: the SOFT bar is the table as
+    // drawn (what the pencil edits), and the bright fill with the cap is what PLAYS at the current
+    // depths (see grooveEffective) - so dragging a depth slider is something you see sweep.
+    for (const { k, x0, x1 } of spans) {
+      const v = Number(row[k]) || (lane === 'vel' ? 1 : 0);
+      const drawn = offOf(v);
+      const eff = offOf(grooveEffective(lane, v));
+      const x = x0 + 1;
+      const w = Math.max(1, x1 - x0 - 2);
+      if (Math.abs(drawn) >= 0.5) {
+        ctx.fillStyle = col('--accent-soft');
+        ctx.fillRect(x, Math.min(zeroY, zeroY + drawn), w, Math.abs(drawn));
+      }
+      if (Math.abs(eff) >= 0.5) {
+        ctx.fillStyle = col('--accent');
+        ctx.globalAlpha = 0.45;
+        ctx.fillRect(x, Math.min(zeroY, zeroY + eff), w, Math.abs(eff));
+        ctx.globalAlpha = 1;
+      }
+      if (Math.abs(drawn) >= 0.5 || Math.abs(eff) >= 0.5) {
+        ctx.fillStyle = col('--accent');
+        ctx.fillRect(x, zeroY + eff - (eff > 0 ? 1.5 : eff < 0 ? 0 : 0.75), w, 1.5);
+      }
+    }
+
+    // Outside the roll's loop window nothing plays, so the lane says so the way the roll itself
+    // does - same dimming, same bounds.
+    if (m.docked) {
+      const pm = prMetrics();
+      const lx0 = Math.min(m.right, Math.max(m.left, prCellToX(prState.start, pm)));
+      const lx1 = Math.min(m.right, Math.max(m.left, prCellToX(prLoopEnd(), pm)));
+      ctx.fillStyle = 'rgba(120,120,130,0.22)';
+      if (lx0 > m.left) ctx.fillRect(m.left, box.top, lx0 - m.left, box.height);
+      if (lx1 < m.right) ctx.fillRect(lx1, box.top, m.right - lx1, box.height);
+    }
+
+    ctx.fillStyle = col('--text-dim');
+    ctx.textAlign = 'right';
+    const labelX = m.docked ? m.left - 4 : m.left - 6;
+    ctx.fillText(lane === 'time' ? 'time' : 'accent', labelX, box.top + box.height / 2);
+  }
+
+  // The slot numbers along the bottom, on the beats only - every slot of a 32-grid would be a wall
+  // of digits, and the beats are what you count. Docked they go entirely: the roll's ruler is the
+  // same axis, two lanes up.
+  if (!m.docked) {
+    ctx.fillStyle = col('--text-dim');
+    ctx.textAlign = 'center';
+    const perBeat = Math.max(1, Math.round(n / 4));
+    for (let k = 0; k < n; k += perBeat) {
+      ctx.fillText(String(k / perBeat + 1), m.left + ((k + 0.5) / n) * m.width, H - GROOVE_PAD / 2);
+    }
+  }
+}
+
+function grooveValueAt(lane, py, m) {
+  const box = m[lane];
+  if (lane === 'time') {
+    const zeroY = box.top + box.height / 2;
+    const reach = grooveTimeReach(grooveState?.time);
+    const raw = ((zeroY - py) / (box.height / 2)) * reach * -1;
+    return grooveQuantize(Math.max(-reach, Math.min(reach, raw)));
+  }
+  const zeroY = box.bottom - box.height / GROOVE_MAX_VEL;
+  const raw = 1 + ((zeroY - py) / box.height) * GROOVE_MAX_VEL;
+  return grooveQuantize(Math.max(0, Math.min(GROOVE_MAX_VEL, raw)));
+}
+
+// Rounded to hundredths, which is what a person can read back out of the code: a groove that
+// serializes as 0.3333333333 is a groove nobody can edit by hand. A hundredth of a slot is finer
+// than the lane is tall in pixels, so there is nothing a modifier key would buy here.
+const grooveQuantize = (v) => Math.round(v * 100) / 100;
+
+function grooveLaneAt(py, m) {
+  if (py >= m.time.top && py <= m.time.bottom) return 'time';
+  if (py >= m.vel.top && py <= m.vel.bottom) return 'vel';
+  return null;
+}
+
+function grooveSetSlot(lane, slot, value) {
+  const st = grooveState;
+  if (!st) return;
+  if (lane === 'time') {
+    st.time[slot] = value;
+    return;
+  }
+  // The velocity row is only created once something is said about velocity: a table with no row
+  // serializes without one, which is the shorter and the honest text (see serializeGroove).
+  if (!st.vel) st.vel = new Array(st.time.length).fill(1);
+  st.vel[slot] = value;
+}
+
+// --- docking into the roll --------------------------------------------------------------------
+//
+// Opened from the roll, the lanes are not a second window: the canvas moves into a strip inside the
+// roll panel itself, right under the grid - the way the value lane lives there - and the panel
+// simply grows around it. The lanes borrow the roll's width, its backing resolution and its x space
+// outright, so prCellToX's answers are these lanes' answers and a slot sits under the notes it
+// moves. A slow tick keeps the borrowed width and the view in step - the roll zooms, scrolls and
+// resizes through its own gestures, and gluing into every one would couple this strip to all of
+// them; a quarter-second follow is plenty, and our own gestures redraw immediately anyway.
+
+let grooveDockTimer = null;
+
+function grooveDockStart() {
+  if (grooveCanvas.parentElement !== prGrooveStrip) prGrooveStrip.appendChild(grooveCanvas);
+  prGrooveStrip.classList.remove('hidden');
+  groovePanel.classList.add('hidden'); // the lanes are IN the roll now - two copies would both be live
+  if (!grooveDockTimer) grooveDockTimer = setInterval(grooveDockLayout, 250);
+  grooveDockLayout();
+}
+
+function grooveDockStop() {
+  if (grooveDockTimer) clearInterval(grooveDockTimer);
+  grooveDockTimer = null;
+  prGrooveStrip.classList.add('hidden');
+  if (grooveCanvas.parentElement === prGrooveStrip) groovePanel.insertBefore(grooveCanvas, grooveControlsRow);
+  grooveCanvas.style.marginLeft = '';
+  grooveSizeCanvas(GROOVE_FLOAT_W, GROOVE_FLOAT_H);
+}
+
+function grooveDockLayout() {
+  if (!grooveState?.rollSource) {
+    grooveDockStop();
+    return;
+  }
+  if (!prState) {
+    closeGroovePanel(); // the roll went away and took what the lanes were editing with it
+    return;
+  }
+  const cssW = prCanvas.clientWidth || prW;
+  if (grooveCanvas._cssW !== cssW || grooveCanvas._cssH !== GROOVE_DOCK_H) grooveSizeCanvas(cssW, GROOVE_DOCK_H);
+  // Flush under the grid: the strip spans the panel, so the lanes take the grid's own left edge.
+  const strip = prGrooveStrip.getBoundingClientRect();
+  const grid = prCanvas.getBoundingClientRect();
+  grooveCanvas.style.marginLeft = `${Math.max(0, Math.round(grid.left - strip.left - 12))}px`;
+  drawGroove();
+}
+
+/**
+ * The canvas at a CSS size with a matching backing store, the way prSizeCanvas runs the roll's own:
+ * docked, these lanes sit flush under that canvas, and a strip blurrier than the grid above it
+ * would read as a different kind of thing instead of more of the same picture.
+ */
+function grooveSizeCanvas(cssW, cssH) {
+  const dpr = Math.min(3, window.devicePixelRatio || 1);
+  grooveCanvas._cssW = cssW;
+  grooveCanvas._cssH = cssH;
+  grooveCanvas._dpr = dpr;
+  grooveCanvas.style.width = `${cssW}px`;
+  grooveCanvas.style.height = `${cssH}px`;
+  grooveCanvas.width = Math.round(cssW * dpr);
+  grooveCanvas.height = Math.round(cssH * dpr);
+}
+
+function initGrooveCanvas() {
+  const pointAt = (e) => {
+    const r = grooveCanvas.getBoundingClientRect();
+    return {
+      px: ((e.clientX - r.left) / r.width) * (grooveCanvas._cssW ?? grooveCanvas.width),
+      py: ((e.clientY - r.top) / r.height) * (grooveCanvas._cssH ?? grooveCanvas.height),
+    };
+  };
+
+  grooveCanvas.addEventListener('pointerdown', (e) => {
+    if (!grooveState || e.button !== 0) return;
+    const m = grooveMetrics();
+    const { px, py } = pointAt(e);
+    const lane = grooveLaneAt(py, m);
+    if (!lane) return;
+    // The double-click's second press: the dblclick handler has it (see below).
+    if (e.detail > 1) return;
+    try {
+      grooveCanvas.setPointerCapture(e.pointerId);
+    } catch {
+      // a pointer that is no longer active (or a synthetic one) has nothing to capture - the drag
+      // still works for as long as the pointer stays over the canvas
+    }
+    grooveDrag = { lane, pointerId: e.pointerId };
+    grooveSetSlot(lane, grooveSlotFromPx(px, m, grooveState.time.length), grooveValueAt(lane, py, m));
+    drawGroove();
+    grooveLiveSync();
+  });
+
+  grooveCanvas.addEventListener('pointermove', (e) => {
+    if (!grooveDrag || !grooveState) return;
+    const m = grooveMetrics();
+    const { px, py } = pointAt(e);
+    // The value comes from the pointer and the slot from where it is: dragging sideways paints a
+    // run of slots, which is what "penciled continuously" has to mean on a per-slot lane.
+    grooveSetSlot(grooveDrag.lane, grooveSlotFromPx(px, m, grooveState.time.length), grooveValueAt(grooveDrag.lane, py, m));
+    drawGroove();
+    grooveLiveSync();
+  });
+
+  const endDrag = () => {
+    if (!grooveDrag) return;
+    grooveDrag = null;
+    writeGrooveCall();
+  };
+  grooveCanvas.addEventListener('pointerup', endDrag);
+  grooveCanvas.addEventListener('pointercancel', endDrag);
+
+  // Double-click a slot: back to doing nothing. The gesture every other value control in the app
+  // uses for "back to the resting value".
+  grooveCanvas.addEventListener('dblclick', (e) => {
+    if (!grooveState) return;
+    const m = grooveMetrics();
+    const { px, py } = pointAt(e);
+    const lane = grooveLaneAt(py, m);
+    if (!lane) return;
+    grooveSetSlot(lane, grooveSlotFromPx(px, m, grooveState.time.length), lane === 'time' ? 0 : 1);
+    drawGroove();
+    writeGrooveCall();
+  });
+}
+
+/**
+ * The reverse direction: the panel re-reads what it is anchored to whenever the buffer is edited by
+ * hand, so typing a table (or a different depth) into the code updates the lanes instead of being
+ * silently reverted by the next drag. Same shape as syncLfoFromCode.
+ *
+ * A roll's groove has no marker of its own - it lives in the roll's opts, and the roll's own panel
+ * already re-reads those (see syncPianorollFromCode) - so that case only follows the roll closing.
+ */
+function syncGrooveFromCode() {
+  const st = grooveState;
+  if (!st || grooveSuppressCursor || !grooveMod) return;
+  if (st.rollSource && !prState) { closeGroovePanel(); return; } // the roll went away with its groove
+  const anchor = st.marker ?? st.callSource;
+  const range = anchor?.find();
+  // A roll's INLINE table has nothing on screen to re-read - it lives in the roll's opts, which the
+  // roll's own panel already re-reads (see syncPianorollFromCode) - so that one simply stands.
+  if (st.rollSource && !anchor) return;
+  // What the panel was editing was deleted, or typed into something that is no longer the call it
+  // opened on - there is nothing left to edit, so the panel goes with it. The only thing that closes
+  // it by itself, now that opening is an explicit double-click.
+  if (!range) { closeGroovePanel(); return; }
+  const text = cm.getRange(range.from, range.to);
+  if (!text.trim()) return; // a collapsed mark mid-write - the writer re-anchors it (writeGrooveDef)
+  // Read off the registry rather than spelled out, for the reason syncLfoFromCode gives: a
+  // definition is `_groove(`, and a guard that said `groove(` would fail on every one there is.
+  const stillTheCall = new RegExp(`^\\s*(?:${st.idLiteral ? grooveDefs.defCall : '\\.\\s*swing'})\\s*\\(`);
+  if (!stillTheCall.test(text)) { closeGroovePanel(); return; }
+  const open = text.indexOf('(');
+  const close = text.lastIndexOf(')');
+  if (open < 0 || close < open) return; // mid-edit, not a whole call right now - wait for the next change
+  const body = text.slice(open + 1, close);
+  if (st.marker) st.callStart = cm.indexFromPos(range.from);
+  if (st.idLiteral) {
+    // A definition carries only the table; the depths live on the .swing() that names it, so
+    // re-reading it must not reset them.
+    const data = (/(["'`])((?:\\.|(?!\1)[\s\S])*?)\1/.exec(splitFirstArg(body)[1] ?? '') ?? [])[2];
+    if (data == null) return;
+    let table = null;
+    try {
+      table = grooveMod.parseGroove(data);
+    } catch {
+      return; // half-typed table: leave the lanes as they are rather than flattening them
+    }
+    const split = grooveSplit(table);
+    st.time = split.time;
+    st.vel = split.vel;
+  } else {
+    const read = parseSwingCall(body);
+    // Typed into a name, or into a plain subdivision: a different thing to be editing, and the
+    // handle is how you open whatever it has become.
+    if (read.name || read.grid !== null) { closeGroovePanel(); return; }
+    if (Number.isFinite(read.depth)) { st.depth = read.depth; st.depthText = read.depthText; }
+    const source = read.data ? read.data.join(' ') : null;
+    if (source != null) {
+      try {
+        const split = grooveSplit(grooveMod.parseGroove(source));
+        st.time = split.time;
+        st.vel = split.vel;
+      } catch {
+        return;
+      }
+    }
+  }
+  grooveSyncControls();
+  drawGroove();
+}
+
+function initGroovePanel() {
+  grooveSizeCanvas(GROOVE_FLOAT_W, GROOVE_FLOAT_H);
+  initGrooveCanvas();
+  // Opening is initWidgetHandles' job (double-click the name) or the roll's own button. Closing is
+  // the ✕, Escape, or what it was editing leaving the buffer - see syncGrooveFromCode.
+  cm.on('change', syncGrooveFromCode);
+
+  grooveCloseBtn.addEventListener('click', () => closeGroovePanel());
+
+  grooveGridSelect.addEventListener('change', () => {
+    grooveSetGrid(Math.max(1, Math.round(Number(grooveGridSelect.value) || 16)));
+    grooveCanvas.focus({ preventScroll: true });
+  });
+
+  grooveFlatBtn.addEventListener('click', () => {
+    if (!grooveState) return;
+    grooveState.time = new Array(grooveState.time.length).fill(0);
+    grooveState.vel = null;
+    drawGroove();
+    writeGrooveCall();
+    grooveCanvas.focus({ preventScroll: true });
+  });
+
+  // The depths write to the CALL, not to the table, and apply as you drag them for the reason the
+  // roll's swing knob does: a feel is something you hear your way to.
+  grooveDepthSlider = prMakeBoxSlider(grooveDepthBox, {
+    min: 0,
+    max: GROOVE_MAX_DEPTH,
+    step: 0.01,
+    home: 1, // as drawn - what a double-click goes back to
+    fmt: (v) => String(Number(v.toFixed(2))),
+    onInput: () => {
+      if (!grooveState) return;
+      grooveState.depth = grooveDepthSlider.get();
+      grooveState.depthText = null; // the number is what was asked for now, not the text it was
+      drawGroove(); // the caps are the depths made visible, so they sweep with the slider
+      grooveWriteSoon();
+    },
+    onCommit: () => grooveWriteNow(),
+  });
+
+  grooveVelSlider = prMakeBoxSlider(grooveVelBox, {
+    min: 0,
+    max: GROOVE_MAX_DEPTH,
+    step: 0.01,
+    home: 1,
+    fmt: (v) => String(Number(v.toFixed(2))),
+    onInput: () => {
+      if (!grooveState) return;
+      grooveState.velDepth = grooveVelSlider.get();
+      drawGroove();
+      grooveWriteSoon();
+    },
+    onCommit: () => grooveWriteNow(),
+  });
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape' || !grooveState) return;
+    // Innermost first: the dropdown, then the panel. The name field stops the event itself.
+    if (grooveHead.isOpen()) { e.preventDefault(); grooveHead.closePicker(); return; }
+    // Docked, the lanes are part of the roll, and Escape there already means the roll's own ladder
+    // (drop the selection, then close - which takes the lanes along). Only a press on the lanes
+    // themselves closes just them.
+    if (grooveState.rollSource) {
+      if (!prGrooveStrip.contains(e.target)) return;
+      closeGroovePanel();
+      prCanvas.focus({ preventScroll: true });
+      return;
+    }
+    closeGroovePanel();
+    cm.focus();
+  });
+
+  // The name box, on the same terms as every other panel's: Enter commits, Escape reverts, and the
+  // transport chords still reach the page from inside it.
+  grooveNameInput.addEventListener('keydown', (e) => {
+    if (packTransportKey(e)) return;
+    if (e.key === 'Enter') { e.preventDefault(); grooveNameInput.blur(); }
+    else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); grooveHead.revertName(); grooveNameInput.blur(); return; }
+    e.stopPropagation();
+  });
+  grooveNameInput.addEventListener('blur', () => grooveHead.commitName());
+  groovePickBtn.addEventListener('click', () => (grooveHead.isOpen() ? grooveHead.closePicker() : grooveHead.openPicker()));
+  grooveUseBtn.addEventListener('click', () => {
+    if (grooveState?.grooveId) grooveUseInCall(grooveState.grooveId);
+  });
+  grooveSearch.addEventListener('keydown', (e) => {
+    if (packTransportKey(e)) return;
+    if (e.key === 'ArrowDown') { e.preventDefault(); grooveHead.move(1); return; }
+    if (e.key === 'ArrowUp') { e.preventDefault(); grooveHead.move(-1); return; }
+    if (e.key === 'Enter') { e.preventDefault(); grooveHead.choose(); return; }
+    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); grooveHead.closePicker(); return; }
+    e.stopPropagation();
+  });
+  grooveSearch.addEventListener('input', () => grooveHead.renderList());
+}
+
+// ---------------------------------------------------------------------------------------------
 // Interactive piano roll editor - double-click the `pianoroll` name in any `pianoroll(...)` call
 // (just the name: its arguments are code you may want to edit by hand) and a note grid opens
 // over the editor, with a real piano keyboard down the left edge and a playhead that sweeps the
@@ -7308,6 +8648,9 @@ const prLenInput = document.getElementById('pianorollLen');
 const prSwingBox = document.getElementById('pianorollSwing'); // a box slider, not a text field (see prMakeBoxSlider)
 const prSwingGridSelect = document.getElementById('pianorollSwingGrid');
 const prCommitSwingBtn = document.getElementById('pianorollCommitSwing');
+const prGrooveStrip = document.getElementById('pianorollGrooveStrip'); // the lanes, docked in the roll's own flow
+const prGrooveSel = document.getElementById('pianorollGrooveSel'); // plain / drawn / every named groove
+const prAccentsBox = document.getElementById('pianorollAccents'); // the groove's accent depth (see swingvel)
 const prHalveBtn = document.getElementById('pianorollHalve');
 const prDoubleBtn = document.getElementById('pianorollDouble');
 const prDupLoopBtn = document.getElementById('pianorollDupLoop');
@@ -7527,6 +8870,7 @@ let prPrebakePresets = []; // ...and for captured plugin presets, a sound librar
 let prPrebakePacks = []; // ...and for sample packs: [{ id, files }] - the files, since the pack panel shows them
 let prPrebakeSlices = []; // ...and for slice sets: [{ id, set }] - the markers, so the editor can draw a library set
 let prPrebakeAutos = []; // ...and for automation lanes: [{ id, points }] - the breakpoints, so the arrange view can draw a library lane
+let prPrebakeGrooves = []; // ...and for grooves: [{ id, table }] - the table, so the groove panel can draw a library one
 let prRaf = null; // requestAnimationFrame handle for the playhead sweep
 let prPlayheadOn = false; // whether the last frame drew a playhead (so we clear it once on stop)
 let prPointer = { px: -1, py: -1 }; // last pointer position, for live cursor updates on cmd-key changes
@@ -8139,12 +9483,25 @@ function parsePianorollCall(inner) {
   // swing: the roll's own groove knob, and the division it acts on. Both are left out of the code
   // at their defaults (straight, and the roll's own grid), like start and mode.
   const swingM = /\bswing\s*:\s*(-?[\d.]+)/.exec(inner);
-  const swing = swingM ? Math.min(0.5, Math.max(-0.5, Number(swingM[1]) || 0)) : 0;
+  const rawSwing = swingM ? Number(swingM[1]) || 0 : 0;
   const sgM = /\bswinggrid\s*:\s*(\d+)/.exec(inner);
   const swinggrid = sgM ? Math.max(1, Math.round(Number(sgM[1]))) : null;
   // bend: the roll's drawn pitch-bend curve, breakpoints in cells and semitones (see the bend
   // overlay below). Absent on every roll that doesn't bend, which is the point - a flat curve is
   // written as no curve at all, so the option only ever appears on a roll that uses it.
+  // groove: the roll's own per-slot table, in place of the alternating rule `swinggrid` describes
+  // (see groove.mjs). A name or the table's own text; absent on every roll that swings plainly, the
+  // way bend is absent on every roll that doesn't bend.
+  const grooveM = /\bgroove\s*:\s*(["'`])((?:\\.|(?!\1)[\s\S])*?)\1/.exec(inner);
+  const groove = grooveM?.[2]?.trim() ? grooveM[2] : null;
+  // Under a groove the swing number is a DEPTH on its table (0..2, as the builder reads it); only a
+  // plain swing is an offset held to half a slot. Clamping both to the plain range halved every
+  // groove to 0.5 on the first re-read of the call.
+  const swing = groove ? rawSwing : Math.min(0.5, Math.max(-0.5, rawSwing));
+  // swingvel: how much of the groove's VELOCITY row to apply. Absent it follows `swing`, so a roll
+  // that wants the whole feel says nothing - the number is here to break that tie.
+  const svM = /\bswingvel\s*:\s*(-?[\d.]+)/.exec(inner);
+  const swingvel = svM ? Number(svM[1]) : null;
   const bendM = /\bbend\s*:\s*(["'`])((?:\\.|(?!\1)[\s\S])*?)\1/.exec(inner);
   let bend = [];
   try {
@@ -8158,7 +9515,7 @@ function parsePianorollCall(inner) {
   } catch {
     // unparseable note string - start from an empty roll
   }
-  return { notes, grid, len, start, mode, wave, swing, swinggrid, bend };
+  return { notes, grid, len, start, mode, wave, swing, swinggrid, groove, swingvel, bend };
 }
 
 // Hidden notes (buried under another - see prResolveOverlaps) are left out: the code holds what
@@ -8168,7 +9525,7 @@ function parsePianorollCall(inner) {
  * the live push (prPushRoll) are both formed from this, so what a drag SOUNDS like can't drift from
  * what the code says once the drag is written down.
  */
-function prCallOpts({ grid, len, start, mode, wave, swing, swinggrid, bend }) {
+function prCallOpts({ grid, len, start, mode, wave, swing, swinggrid, groove, swingvel, bend }) {
   const opts = { grid, len };
   if (start) opts.start = start; // a window that opens at 0 is the default - don't write it
   if (mode && mode !== 'note') opts.mode = mode; // notes are the default - don't write it
@@ -8176,7 +9533,12 @@ function prCallOpts({ grid, len, start, mode, wave, swing, swinggrid, bend }) {
   // A straight roll writes no swing at all, and one swinging its own grid writes no division: both
   // are what the builder assumes, and a roll that says nothing about groove should look like one.
   if (swing) opts.swing = Math.round(swing * 100000) / 100000;
-  if (swing && swinggrid && swinggrid !== grid) opts.swinggrid = swinggrid;
+  // A groove carries its own grid - the table's length IS the division - so a roll with one writes
+  // no swinggrid beside it, and the depth it writes is the `swing` number above.
+  if (groove) opts.groove = groove;
+  else if (swing && swinggrid && swinggrid !== grid) opts.swinggrid = swinggrid;
+  // Only when it differs from the depth: equal is what the builder assumes.
+  if (groove && swingvel != null) opts.swingvel = Math.round(swingvel * 100000) / 100000;
   // A curve that bends nothing is not written - not as an empty string, not as a pair of zeroes.
   // Flattening a bend out has to leave the roll exactly as it would have been had one never been
   // drawn, because that is what the person just asked for; and on the playback side a channel that
@@ -9243,6 +10605,7 @@ function prFramePitch() {
  * Returns { get, set }, where set is silent: it's how the panel syncs the widget from state.
  */
 function prMakeBoxSlider(el, { min, max, step, home = 0, center = false, fmt, onInput, onCommit }) {
+  // min/max/center/home are reassignable - see setRange below.
   const fill = el.querySelector('.pr-box-fill');
   const label = el.querySelector('.pr-box-val');
   // Step-quantized, then trimmed: 0.1 + 0.2 arithmetic would otherwise reach the serializer.
@@ -9259,6 +10622,17 @@ function prMakeBoxSlider(el, { min, max, step, home = 0, center = false, fmt, on
   };
 
   const set = (v) => { value = quant(v); paint(); };
+  /** Re-aim the same box at a different range - the groove depth wears the swing box (0..2, resting
+   *  at 1) and a plain swing wears it back (±0.5 around 0). The current value is re-clamped into
+   *  the new range so the fill can never paint outside the box. */
+  const setRange = (nmin, nmax, ncenter, nhome = home) => {
+    min = nmin;
+    max = nmax;
+    center = ncenter;
+    home = nhome;
+    value = quant(value);
+    paint();
+  };
   // Reports whether the value actually moved, so a gesture that changed nothing - a plain click, an
   // arrow held against an end stop - doesn't commit, and so doesn't cost the buffer a re-eval.
   const apply = (v) => {
@@ -9309,10 +10683,11 @@ function prMakeBoxSlider(el, { min, max, step, home = 0, center = false, fmt, on
     apply(value - Math.sign(e.deltaY) * step * (e.shiftKey ? 1 : 5));
   }, { passive: false });
 
-  return { get: () => value, set };
+  return { get: () => value, set, setRange };
 }
 
 let prSwingSlider = null; // the swing box slider, built once the panel's controls are wired
+let prAccentsSlider = null; // the groove accent depth beside it (see pianorollAccents)
 
 // (Re)populate the grid <select> and len field from prState; a non-standard grid gets its own option.
 function prSyncGridLenInputs() {
@@ -9324,16 +10699,85 @@ function prSyncGridLenInputs() {
   for (const [label, n] of opts) prGridSelect.add(new Option(label, String(n)));
   prGridSelect.value = String(prState.grid);
   prLenInput.value = prState.len;
+  // The box is the groove DEPTH when there is a groove (0..2, resting at 1 - "as drawn") and the
+  // plain swing amount otherwise (half a slot either way, centered). Same knob, since they are the
+  // same number to the player; the range is what the number can mean.
+  if (prState.groove) prSwingSlider?.setRange(0, 2, false, 1);
+  else prSwingSlider?.setRange(-0.5, 0.5, true, 0);
+  prSwingBox.title = prState.groove
+    ? 'how much of the groove to apply - 1 is as drawn, 0 off; drag sideways, double-click for as drawn'
+    : 'how far offbeats are delayed, as a fraction of one sw-grid step - drag sideways (shift for fine), double-click for straight';
   prSwingSlider?.set(prState.swing ?? 0);
   // The division swing acts on. The blank first option is "whatever the roll's grid is", which is
   // the default and what most rolls want - a stated resolution, swung.
   prSwingGridSelect.innerHTML = '';
   prSwingGridSelect.add(new Option('grid', ''));
   for (const [label, n] of opts) prSwingGridSelect.add(new Option(label, String(n)));
-  prSwingGridSelect.value = prState.swinggrid ? String(prState.swinggrid) : '';
+  const grooved = !!prState.groove;
+  const lanesOpen = !!grooveState?.rollSource;
+  if (grooved) {
+    // Under a groove the division is the table's own length. With the lanes open the select EDITS
+    // it (see the change handler); closed it only reads, since the lanes' grid logic is what keeps
+    // a re-draw from losing what was drawn - disabled rather than hidden, so nothing moves.
+    prSwingGridSelect.innerHTML = '';
+    const n = lanesOpen && grooveState ? grooveState.time.length : (prGrooveTable()?.steps ?? prState.grid);
+    const gopts = [...GROOVE_GRID_DIVS];
+    if (!gopts.some(([, v]) => v === n)) gopts.push([String(n), n]);
+    gopts.sort((a, b) => a[1] - b[1]);
+    for (const [labelText, v] of gopts) prSwingGridSelect.add(new Option(labelText, String(v)));
+    prSwingGridSelect.value = String(n);
+    prSwingGridSelect.disabled = !lanesOpen;
+    prSwingGridSelect.title = lanesOpen
+      ? 'the groove\'s slots per cycle — a coarser slot left at zero keeps those notes on the beat'
+      : "the groove's own division — pick it under groove to edit";
+  } else {
+    prSwingGridSelect.value = prState.swinggrid ? String(prState.swinggrid) : '';
+    prSwingGridSelect.disabled = false;
+    prSwingGridSelect.title = 'which division swing swings';
+  }
+  prSyncGrooveSel();
+  prAccentsSlider?.set(prState.swingvel ?? 1);
+  // Nothing for the accents to act on without a groove: a plain swing has no velocity row. Dimmed
+  // rather than hidden, so the column never reflows.
+  prAccentsBox.classList.toggle('disabled', !grooved);
   // Nothing to commit on a straight roll, and saying so with the button is better than letting it
   // look like it did something.
   prCommitSwingBtn.disabled = !prState.swing;
+}
+
+// The roll's groove as the side column offers it: plain swing, a fresh groove, or any named groove
+// there is - buffer and library alike. Values are namespaced (`g:`) so a groove literally called
+// "plain" stays reachable. There is no unnamed middle: a groove is a NAMED definition everywhere
+// else in the app, so editing one here edits its definition and `new` makes one the way an empty
+// pianoroll materializes a roll - automatically, under the next free name.
+function prSyncGrooveSel() {
+  if (!prState) return;
+  prGrooveSel.innerHTML = '';
+  prGrooveSel.add(new Option('plain', 'plain'));
+  prGrooveSel.add(new Option('new\u2026', 'new'));
+  const seen = new Set();
+  for (const { id } of (grooveMod ? grooveDefs.allIds() : [])) {
+    if (seen.has(id)) continue;
+    seen.add(id);
+    prGrooveSel.add(new Option(id, `g:${id}`));
+  }
+  const g = prState.groove ? String(prState.groove).trim() : null;
+  const named = g && grooveMod?.grooveNameLike(g) ? g : null;
+  // A groove the code names but nothing defines is still SHOWN - the select reflecting the code is
+  // what makes it trustworthy - rather than quietly reading "plain" over a name that plays straight.
+  if (named && !seen.has(named)) prGrooveSel.add(new Option(named, `g:${named}`));
+  // ...and a table still written inline (an earlier shape of this branch) reads as `unnamed` until
+  // its first open files it under a name of its own (see openGrooveForRoll).
+  if (g && !named) prGrooveSel.add(new Option('unnamed', 'unnamed'));
+  prGrooveSel.value = g ? (named ? `g:${named}` : 'unnamed') : 'plain';
+}
+
+/** The next name nothing holds - groove1, groove2, ... - for the definitions made automatically. */
+function nextGrooveName() {
+  const used = new Set([...grooveDefs.allIds().map((r) => r.id), ...Object.keys(grooveMod?.GROOVE_PRESETS ?? {})]);
+  let i = 1;
+  while (used.has(`groove${i}`)) i++;
+  return `groove${i}`;
 }
 
 function openPianorollEditor(call, carry = null) {
@@ -9345,7 +10789,7 @@ function openPianorollEditor(call, carry = null) {
   if (prState?.marker) prState.marker.clear();
   // A roll(...) definition is a pianoroll() call with an id in front of it - drop the id and the
   // rest parses identically.
-  const { notes, grid, len, start, mode, swing, swinggrid, bend } = parsePianorollCall(call.idLiteral ? splitFirstArg(inner)[1] : inner);
+  const { notes, grid, len, start, mode, swing, swinggrid, groove, swingvel, bend } = parsePianorollCall(call.idLiteral ? splitFirstArg(inner)[1] : inner);
   prState = {
     marker: cm.markText(from, to, {}),
     callStart: call.start,
@@ -9363,6 +10807,8 @@ function openPianorollEditor(call, carry = null) {
     // and the commit button turns it into per-note nudges without changing a thing that sounds.
     swing,
     swinggrid,
+    groove,
+    swingvel,
     // The roll's pitch bend, drawn over the grid in the bend overlay: breakpoints in absolute
     // cells and semitones, empty on a roll that doesn't bend (see the bend section below).
     bend,
@@ -9935,16 +11381,22 @@ function prRefreshRollList() {
       prPrebakeAutos = (res.autos ?? [])
         .filter(inLibraryLayer)
         .map((r) => ({ id: String(r.id), points: Array.isArray(r.points) ? r.points : [] }));
+      prPrebakeGrooves = (res.grooves ?? [])
+        .filter(inLibraryLayer)
+        .map((r) => ({ id: String(r.id), table: r.table ?? null }));
       pinnedDefs = res.pinned ?? pinnedDefs; // the ★s every picker draws
       if (prState?.rollId && !prPicker.classList.contains('hidden')) prRenderPickList();
       if (packState) packRenderList();
       if (sliceState) sliceRenderList();
       if (arState) drawArrange();
+      if (grooveState) grooveRenderList();
     })
     .catch(() => {}); // the picker still lists this buffer's rolls without it
 }
 
 function closePianorollEditor() {
+  // The groove lanes live inside this panel when docked; no roll, nothing under the grid to edit.
+  if (grooveState?.rollSource) closeGroovePanel();
   prClosePicker();
   prCloseLaneMenu();
   prPreviewOff();
@@ -9982,8 +11434,8 @@ const PR_HISTORY_MAX = 200; // snapshots kept; the oldest are dropped past this
 // The roll as one undoable state. Swing is in it because committing is an edit like any other: it
 // zeroes the knob and writes the same offsets into the notes, and an undo that put the nudges back
 // while leaving the knob at 0 would double the groove.
-const prSnapshot = () => ({ notes: prState.notes.map((nt) => ({ ...nt })), grid: prState.grid, len: prState.len, start: prState.start, mode: prState.mode, wave: prState.wave, swing: prState.swing, swinggrid: prState.swinggrid, bend: prState.bend.map((p) => ({ ...p })) });
-const prSnapKey = (s) => `${pianorollMod.serializePianoRoll(prLiveNotes(s.notes))}|${s.grid}|${s.len}|${s.start}|${s.mode}|${s.swing}|${s.swinggrid}|${prBendKey(s.bend)}`;
+const prSnapshot = () => ({ notes: prState.notes.map((nt) => ({ ...nt })), grid: prState.grid, len: prState.len, start: prState.start, mode: prState.mode, wave: prState.wave, swing: prState.swing, swinggrid: prState.swinggrid, groove: prState.groove, swingvel: prState.swingvel, bend: prState.bend.map((p) => ({ ...p })) });
+const prSnapKey = (s) => `${pianorollMod.serializePianoRoll(prLiveNotes(s.notes))}|${s.grid}|${s.len}|${s.start}|${s.mode}|${s.swing}|${s.swinggrid}|${s.groove ?? ''}|${s.swingvel ?? ''}|${prBendKey(s.bend)}`;
 
 // Record the roll's current state, unless it's identical to the entry we're already sitting on -
 // which makes this safe to call from anywhere, including the code-sync path that fires on every
@@ -10012,6 +11464,8 @@ function prHistoryStep(delta) {
   prState.wave = snap.wave;
   prState.swing = snap.swing;
   prState.swinggrid = snap.swinggrid;
+  prState.groove = snap.groove;
+  prState.swingvel = snap.swingvel;
   prState.bend = snap.bend.map((p) => ({ ...p }));
   prState.bendHeld = null; // the restored points are new objects, like the notes below
   prState.bendSel = null;
@@ -10330,7 +11784,7 @@ const prCellFloat = (px, m) => m.scroll + (px - PR_GUTTER) / m.cellW; // fractio
  */
 function prDrawnCell(nt) {
   const at = ((Math.round(nt.start) % prState.grid) + prState.grid) % prState.grid;
-  return nt.start + pianorollMod.noteNudge(nt) + pianorollMod.pianoRollSwingCells(at, prState);
+  return nt.start + pianorollMod.noteNudge(nt) + pianorollMod.pianoRollSwingCells(at, { ...prState, groove: prGrooveTable() });
 }
 
 function prCanvasPos(e) {
@@ -14082,8 +15536,18 @@ function initPianorollEditor() {
   const prSetSwing = (live = false) => {
     if (!prState) return;
     prState.swing = prSwingSlider.get();
-    const sg = Number(prSwingGridSelect.value);
-    prState.swinggrid = sg >= 1 ? Math.round(sg) : null;
+    // With a groove the box is the DEPTH on its table and the grid select belongs to the table
+    // (see prSyncGridLenInputs), so the plain-swing division is left alone - and the open lanes'
+    // caps sweep with the drag, since they are this number made visible.
+    if (prState.groove) {
+      if (grooveState?.rollSource) {
+        grooveState.depth = prState.swing;
+        drawGroove();
+      }
+    } else {
+      const sg = Number(prSwingGridSelect.value);
+      prState.swinggrid = sg >= 1 ? Math.round(sg) : null;
+    }
     // Just the commit button, not prSyncGridLenInputs: rebuilding the inputs mid-drag would set the
     // slider back from state under the pointer that is moving it.
     prCommitSwingBtn.disabled = !prState.swing;
@@ -14099,7 +15563,74 @@ function initPianorollEditor() {
     onInput: () => prSetSwing(true),
     onCommit: () => prSetSwing(false),
   });
-  prSwingGridSelect.addEventListener('change', () => { prSetSwing(); prRefocus(); });
+  prSwingGridSelect.addEventListener('change', () => {
+    // With the groove lanes open this select is the GROOVE's grid - the table's own length, see
+    // prSyncGridLenInputs - so the change goes to the lanes' grid logic; otherwise it is the plain
+    // swing division it has always been.
+    if (grooveState?.rollSource && prState?.groove) {
+      grooveSetGrid(Math.max(1, Math.round(Number(prSwingGridSelect.value) || prState.grid)));
+    } else prSetSwing();
+    prRefocus();
+  });
+
+  // The groove select: plain swing, this roll's own drawn table, or a named groove - and picking
+  // anything drawable opens the lanes in the strip under the grid (see grooveDockStart).
+  prGrooveSel.addEventListener('change', () => {
+    if (!prState) return;
+    const v = prGrooveSel.value;
+    prPushHistory(); // one undo step covers the opt change and any table conversion behind it
+    if (v === 'plain') {
+      // Back to the ordinary swing controls. The depth stays - it was the swing - and the lanes
+      // close, since there is no table left for them to show. The definition stays too: taking a
+      // groove OFF one roll must not delete it out from under every other pattern naming it.
+      if (grooveState?.rollSource) closeGroovePanel();
+      prState.groove = null;
+      prState.swingvel = null;
+    } else if (v === 'new') {
+      // A groove of this roll's own, named automatically the way a fresh roll is: seeded from
+      // whatever the roll is already doing (its plain swing written out as the table it is), so
+      // the sound does not move as the lanes open.
+      prState.groove = grooveMaterializeForRoll(prRollPlainTable());
+      if (!prState.groove) return;
+    } else if (v !== 'unnamed') {
+      prState.groove = v.slice(2); // `g:` off the front (see prSyncGrooveSel)
+    }
+    // A groove at depth 0 is a groove switched off, which is never what picking one just asked for.
+    if (v !== 'plain' && !prState.swing) {
+      prState.swing = 1;
+      prSwingSlider?.set(1);
+    }
+    prSyncGridLenInputs();
+    writePianorollCall();
+    drawPianoroll();
+    if (v !== 'plain') openGrooveForRoll();
+    prRefocus();
+  });
+
+  // The accent depth: how much of the groove's velocity row to apply (see grooveVelScale). On the
+  // call it is the swingvel opt, written only when it says something.
+  prAccentsSlider = prMakeBoxSlider(prAccentsBox, {
+    min: 0,
+    max: 2,
+    step: 0.01,
+    home: 1, // as drawn - what a double-click goes back to
+    fmt: (v) => String(Number(v.toFixed(2))),
+    onInput: () => {
+      if (!prState?.groove) return;
+      const v = prAccentsSlider.get();
+      prState.swingvel = v === 1 ? null : v;
+      if (grooveState?.rollSource) {
+        grooveState.velDepth = v;
+        drawGroove();
+      }
+      prLiveSync();
+    },
+    onCommit: () => {
+      if (!prState?.groove) return;
+      prWriteNow();
+    },
+  });
+
 
   // Commit: the swing stops being a setting and becomes the notes' own offsets. Nothing about the
   // sound changes - that is the whole promise - so the onset ticks don't move as you click; what
@@ -14112,9 +15643,12 @@ function initPianorollEditor() {
       len: prState.len,
       swing: prState.swing,
       swinggrid: prState.swinggrid,
+      groove: prGrooveTable(),
     });
     prState.swing = 0;
     prState.swinggrid = null;
+    prState.groove = null; // the table is in the notes now - leaving it would double the feel
+    prState.swingvel = null;
     prSyncGridLenInputs();
     writePianorollCall();
     drawPianoroll();

@@ -143,6 +143,7 @@ const stores = {
   pack: makeStore('sample pack'),
   slices: makeStore('slice set'),
   auto: makeStore('automation'),
+  groove: makeStore('groove'),
 };
 
 /** Both stores, for the host passes that treat them alike (clearing per eval, listing). */
@@ -278,3 +279,11 @@ export const sliceSetIds = () => stores.slices.ids();
 export const registerAuto = (id, points) => stores.auto.register(id, points);
 export const lookupAuto = (id, layer = null) => stores.auto.lookup(id, layer);
 export const autoIds = () => stores.auto.ids();
+
+// A named groove's value is its table ({ steps, time, vel } - see groove.mjs), frozen plain data
+// like a shape's points. `.swing(1, "samba")` looks the name up at read time (resolveGroove), so a
+// drag in the groove lane is heard without a re-eval, and a groove defined here shadows a built-in
+// preset of the same name - the buffer-shadows-library rule, one step further out.
+export const registerGroove = (id, table) => stores.groove.register(id, table);
+export const lookupGroove = (id, layer = null) => stores.groove.lookup(id, layer);
+export const grooveIds = () => stores.groove.ids();

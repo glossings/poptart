@@ -1,8 +1,8 @@
 // Drawn note grids for pianoroll() - the textual format, its parser/serializer, the mini-notation
 // converter, and the small helpers the editor and the builder share. Like shape.mjs (the lfo()
 // shapes) this is served verbatim to the browser - so the interactive editor draws exactly the
-// notes the scheduler plays - and depends on nothing outside this package (notes.mjs, its one
-// import, is served the same way and is itself dependency-free).
+// notes the scheduler plays - and depends on nothing outside this package (notes.mjs and groove.mjs,
+// its two imports, are served the same way and are themselves dependency-free).
 //
 // Format: space-separated note events `[!]midi[:index[:slice]],start,len[,vel[,prob[,nudge]]]`, e.g.
 // "60,0,4 64,0,4,0.7 67,8,8" or "24:0,0,1 24:3,4,1".
@@ -61,6 +61,7 @@
 // It is in the call so that reopening the panel puts you back on the axis you were drawing on.
 
 import { DEFAULT_SCALE_OCTAVE, midiToDegree, noteToMidi, scaleAtOctave, scaleParts } from './notes.mjs';
+import { grooveTimeAt } from './groove.mjs';
 
 export const PIANOROLL_DEFAULT_STEPS = 16;
 export const PIANOROLL_MAX_GRID = 512; // finest grid the retime buttons will push a roll to
@@ -98,10 +99,18 @@ const SLOT_EPS = 1e-9;
  * as `start`, so the two agree by construction. Offbeats of the `swingGrid` division are delayed by
  * `amount` of one of its slots; everything else stays where it was drawn.
  */
-export function pianoRollSwingCells(cell, { grid, swing = 0, swinggrid = null } = {}) {
+export function pianoRollSwingCells(cell, { grid, swing = 0, swinggrid = null, groove = null } = {}) {
   const g = normalizePianoRollSteps(grid);
-  const amount = Math.min(0.5, Math.max(-0.5, Number(swing) || 0));
+  // With a groove the number is a DEPTH on the table's own values rather than an offset, so it is not
+  // held to half a slot here; the product is, below, exactly as timeShift holds it.
+  const amount = groove ? Number(swing) || 0 : Math.min(0.5, Math.max(-0.5, Number(swing) || 0));
   if (!amount) return 0;
+  if (groove) {
+    // The table describes every slot of the bar, and its own length is the grid it describes - so
+    // there is nothing for swinggrid to say about it (see groove.mjs).
+    const shift = Math.min(0.5, Math.max(-0.5, amount * grooveTimeAt(groove, cell / g))) / groove.steps;
+    return shift * g; // cycles -> cells
+  }
   // A roll knows exactly what it is written on, so its own grid is the division to swing unless the
   // roll says otherwise - the drum-machine reading of the word, where the knob acts on whatever
   // resolution the sequencer is set to.
@@ -156,13 +165,13 @@ function gcd(a, b) {
  *             lands on a different beat each time round and has no ONE offset to be committed to.
  *             What is written is the offset of its first pass.
  */
-export function commitPianoRollSwing(notes, { grid, len = null, swing = 0, swinggrid = null } = {}) {
+export function commitPianoRollSwing(notes, { grid, len = null, swing = 0, swinggrid = null, groove = null } = {}) {
   const g = normalizePianoRollSteps(grid);
   const window = Math.max(1, Math.round(len ?? g));
   let clamped = 0;
   for (const nt of notes) {
     const at = ((Math.round(nt.start) % g) + g) % g;
-    const swung = pianoRollSwingCells(at, { grid: g, swing, swinggrid });
+    const swung = pianoRollSwingCells(at, { grid: g, swing, swinggrid, groove });
     if (!swung) continue;
     const wanted = noteNudge(nt) + swung;
     const got = clampNudge(wanted);

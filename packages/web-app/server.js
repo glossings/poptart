@@ -2536,7 +2536,7 @@ function syncUserStringMethods() {
 const BUILDER_NAMES = ['Signal', 'n', 'note', 'mini', 's', 'se', 'sr', 'sp', 'synth', 'sine', 'saw', 'isaw', 'tri', 'square', 'rand', 'perlin', 'lfo', 'env', 'dur', 'midicc', 'midikeys', 'osc', 'macro', 'choose', 'cat', 'seq', 'irand', 'midi', 'audio', 'input', 'group', 'copy', 'pcopy', 'pianoroll', 'clips', 'auto',
   // Every control method also as a top-level control builder - speed("-1"), begin(0.5), clip(2) -
   // so a combinator can aim at one channel of a pattern it was handed: x.mul(speed("-1")).
-  'i', 'begin', 'end', 'loop', 'loopwrap', 'loopdir', 'speed', 'flip', 'stretch', 'fit', 'slice', 'splice', 'splicemode', 'attack', 'decay', 'sustain', 'release', 'envscale', 'grain', 'vel', 'clip', 'nudge', 'swing', 'swinggrid',
+  'i', 'begin', 'end', 'loop', 'loopwrap', 'loopdir', 'speed', 'flip', 'stretch', 'fit', 'slice', 'splice', 'splicemode', 'attack', 'decay', 'sustain', 'release', 'envscale', 'grain', 'vel', 'clip', 'nudge', 'swing', 'swinggrid', 'swingvel',
   // The binops as top-level builders - a layer piece's own verb: .set(note(30), add(note(12)))
   // pins one voice and transposes the other.
   'add', 'sub', 'mul', 'div', 'mod', 'set',
@@ -2552,7 +2552,7 @@ const BUILDER_NAMES = ['Signal', 'n', 'note', 'mini', 's', 'se', 'sr', 'sp', 'sy
 // BUILDER_NAMES - which is what drives autocomplete and the docs - so the plain names `roll` and
 // `shape` stay free for whatever they should mean to a person later. See the underscore in
 // pattern-core: these are the editor's own calls, not part of the language.
-const INTERNAL_BUILDERS = ['_roll', '_shape', '_preset', '_pack', '_slices', '_auto', '_arrange'];
+const INTERNAL_BUILDERS = ['_roll', '_shape', '_preset', '_pack', '_slices', '_auto', '_groove', '_arrange'];
 
 // The Macros panel's knobs, pre-bound as ready-made signals: `macro1`..`macro8` in evaluated
 // code are `macro(1)`..`macro(8)`, so a knob can be dropped straight into a control -
@@ -2956,6 +2956,10 @@ function rebuildDef(kind, id, scope) {
     const points = patternCore.lookupAuto(id);
     return points ? line('_auto', id, patternCore.serializeAutoPoints(points)) : null;
   }
+  if (kind === 'groove') {
+    const table = patternCore.lookupGroove(id);
+    return table ? line('_groove', id, patternCore.serializeGroove(table)) : null;
+  }
   return null;
 }
 
@@ -3113,7 +3117,7 @@ function highlightGrid(sig, start, end, from, count, clock = null) {
         const rel = offset + s.start;
         // Where the onset is HEARD - nudge/swing move the sound (see below), and everything that
         // fires off a note fires off the shifted one.
-        const startShift = patternCore.timeShift(s, sub.noteChannels, at, 1, at);
+        const startShift = patternCore.timeShift(s, sub.noteChannels, at, 1, at, sub.groove);
         // The track's note gates: every onset the engine will actually play, on the same test the
         // scheduler uses (_scheduleNoteEdges - a rest or a tie is not one). Note-gated lfo() modes
         // reset their phase on these (poptart.scd's noteOn/playSample gate every lfo on the
@@ -3137,7 +3141,7 @@ function highlightGrid(sig, start, end, from, count, clock = null) {
           // endEdgeStep), so a swung flash starts and stops with the sound it belongs to.
           const endAt = cycle + soundsTo;
           const endStep = patternCore.endEdgeStep(s, endAt - Math.floor(endAt));
-          const endShift = patternCore.timeShift(endStep, sub.noteChannels, endAt, 1, endAt);
+          const endShift = patternCore.timeShift(endStep, sub.noteChannels, endAt, 1, endAt, sub.groove);
           const chop = sampler && sub === sig ? chopAt(s, at) : null;
           out.push({
             start: rel + startShift,
@@ -5134,6 +5138,9 @@ const routes = {
       // An automation's breakpoints come too, for the reason a slice set's markers do: the arrange
       // view draws a library lane, and it is nowhere in the buffer to be read.
       autos: patternCore.autoIds().map((p) => ({ ...p, points: patternCore.lookupAuto(p.id, p.library ? 'prebake' : null) ?? [] })),
+      // A groove's table comes too, for the reason an automation's breakpoints do: the groove panel
+      // draws a library groove, and it is nowhere in the buffer to be read.
+      grooves: patternCore.grooveIds().map((p) => ({ ...p, table: patternCore.lookupGroove(p.id, p.library ? 'prebake' : null) ?? null })),
       pinned: pinnedList(),
     },
   }),
@@ -5185,6 +5192,16 @@ const routes = {
     const id = body?.id;
     if (typeof id !== 'number' && typeof id !== 'string') throw new Error('liveAuto needs the automation id');
     patternCore.liveAuto(id, String(body.points ?? ''));
+    return { status: 200, body: { ok: true } };
+  },
+
+  // Body: { id, table } - the same channel again, for the groove panel's lanes. A groove is resolved
+  // by name at every read (see resolveGroove), so re-filing the definition is heard at the next onset
+  // all through a drag, with no re-transpile behind it.
+  'POST /api/liveGroove': async (body) => {
+    const id = body?.id;
+    if (typeof id !== 'number' && typeof id !== 'string') throw new Error('liveGroove needs the groove id');
+    patternCore.liveGroove(id, String(body.table ?? ''));
     return { status: 200, body: { ok: true } };
   },
 

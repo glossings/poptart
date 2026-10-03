@@ -410,3 +410,20 @@ test('injectLocations leaves where samples() reads from alone: a repository, a U
   assert.equal(injectLocations('samples("tidalcycles/dirt-samples")', 0), 'samples("tidalcycles/dirt-samples")');
   assert.equal(injectLocations("samples('https://example.com/strudel.json')", 0), "samples('https://example.com/strudel.json')");
 });
+
+test('injectLocations leaves a groove definition alone, and judges swing\'s shape by what it says', () => {
+  // A _groove(...) definition is an id to look one up by and then the drawn table. Wrapping either in
+  // mini() hands _groove a Sig where it wants a name, which is what it threw about (2026-09-30).
+  assert.equal(
+    injectLocations('_groove("samba", "0 0.3 0.1 0.3 / 1 0.8 1 0.9")', 0),
+    '_groove("samba", "0 0.3 0.1 0.3 / 1 0.8 1 0.9")'
+  );
+  // .swing()'s second argument takes a groove NAME or the patterned subdivision it has always been,
+  // in one position - so it is judged by what the string says, as pianoroll()'s and lfo()'s first
+  // argument is. A name has letters in it and a subdivision never can.
+  assert.equal(injectLocations('.swing(1, "clave16")', 0), '.swing(1, "clave16")');
+  assert.equal(injectLocations('.swing(0.5, "<8 16>")', 0), '.swing(0.5, mini("<8 16>", 13))');
+  assert.equal(injectLocations('.swing(0.2, "16")', 0), '.swing(0.2, mini("16", 13))');
+  // ...and the AMOUNT in front of it is a pattern either way, name or not.
+  assert.equal(injectLocations('.swing("<0 0.33>")', 0), '.swing(mini("<0 0.33>", 8))');
+});

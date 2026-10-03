@@ -649,6 +649,42 @@
       <div class="lfo-help">drag points · drag a segment to bend it · double-click adds/removes · esc closes</div>
     </div>
 
+    <!-- The groove manager: swing as a per-slot table rather than one number (see groove.mjs). Two
+         drawn lanes - when each slot plays, and how hard - over one bar at the chosen grid. -->
+    <div id="groovePanel" class="groove-panel hidden">
+      <div class="groove-panel-head">
+        <span id="grooveTitle">groove</span>
+        <div id="groovePickWrap" class="def-pick-wrap hidden">groove
+          <input id="grooveName" class="def-name" type="text" spellcheck="false" title="groove name" />
+          <button id="groovePickBtn" class="small" title="find or create">▾</button>
+          <button id="grooveUseBtn" class="small hidden">→</button>
+          <div id="groovePicker" class="def-picker hidden">
+            <input id="grooveSearch" type="text" spellcheck="false" placeholder="groove name" />
+            <div id="groovePickList" class="def-pick-list"></div>
+          </div>
+        </div>
+        <span class="spacer"></span>
+        <!-- The grid is what the picture is OF - how many slots the bar is drawn in - so it heads the
+             figure rather than sitting in the knob row below it. -->
+        <label id="grooveGridWrap">grid <select id="grooveGrid" title="slots per bar — a coarser grid left at zero keeps those notes on the beat"></select></label>
+        <button id="grooveFlat" class="small pr-text-btn" title="back to straight — every slot on the grid, every velocity as written">straight</button>
+        <button id="grooveClose" class="small">✕</button>
+      </div>
+      <canvas id="grooveCanvas" width="640" height="300" title="drag across either lane to draw it — double-click a slot to put it back"></canvas>
+      <div class="groove-controls">
+        <label id="grooveDepthWrap">depth
+          <div id="grooveDepthBox" class="pr-box-slider" role="slider" tabindex="0" aria-label="groove depth"
+            aria-valuemin="0" aria-valuemax="2" aria-valuenow="1"
+            title="how much of the drawn timing to apply — 1 is as drawn, 0 is straight"><span class="pr-box-fill"></span><span class="pr-box-val">1</span></div>
+        </label>
+        <label id="grooveVelWrap">accents
+          <div id="grooveVelBox" class="pr-box-slider" role="slider" tabindex="0" aria-label="accent depth"
+            aria-valuemin="0" aria-valuemax="2" aria-valuenow="1"
+            title="how much of the drawn velocity to apply — follows depth until you move it"><span class="pr-box-fill"></span><span class="pr-box-val">1</span></div>
+        </label>
+      </div>
+    </div>
+
     <div id="recordPanel" class="record-panel hidden">
       <div class="record-panel-head">
         <span>record</span>
@@ -728,6 +764,12 @@
               title="how far offbeats are delayed, as a fraction of one sw-grid step — drag sideways (shift for fine), double-click for straight"><span class="pr-box-fill"></span><span class="pr-box-val">0</span></div>
           </div>
           <label class="pianoroll-ctl pr-side-ctl">sw grid <select id="pianorollSwingGrid" title="which division swing swings"></select></label>
+          <label class="pianoroll-ctl pr-side-ctl">groove <select id="pianorollGrooveSel" title="this roll's feel — plain swing, a drawn table, or a named groove; picking one opens its lanes under the roll"></select></label>
+          <div class="pianoroll-ctl pr-side-ctl">accents
+            <div id="pianorollAccents" class="pr-box-slider" role="slider" tabindex="0" aria-label="accent depth"
+              aria-valuemin="0" aria-valuemax="2" aria-valuenow="1"
+              title="how much of the groove's accents to apply — 1 is as drawn, 0 none; double-click for as drawn"><span class="pr-box-fill"></span><span class="pr-box-val">1</span></div>
+          </div>
           <div class="pr-side-row">
             <button id="pianorollCommitSwing" class="small pr-text-btn" title="write the swing into the notes as per-note offsets, and set swing back to 0">commit</button>
           </div>
@@ -735,6 +777,9 @@
         </div>
         <canvas id="pianorollCanvas" width="660" height="476"></canvas>
       </div>
+      <!-- The groove lanes, when a groove is being edited: the panel grows downward and the lanes
+           sit under the grid in the roll's own x space (see grooveDockLayout in client.js). -->
+      <div id="pianorollGrooveStrip" class="pr-groove-strip hidden"></div>
     </div>
 
     <!-- Outside #pianorollPanel on purpose: the panel is transform:translate-d, which would make

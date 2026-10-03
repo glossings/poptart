@@ -102,7 +102,7 @@ export function highlightGrid(patternCore, sig, start, end, from, count, clock =
         const at = cycle + s.start;          // the song position, where every channel is read
         const offset = cycle - delta - c;    // song cycle -> this transport cycle
         const rel = offset + s.start;
-        const startShift = patternCore.timeShift(s, sub.noteChannels, at, 1, at);
+        const startShift = patternCore.timeShift(s, sub.noteChannels, at, 1, at, sub.groove);
         // The track's note gates: every onset the engine will actually play. Note-gated shapes
         // reset their phase on these, so the shape editor's playhead has nothing to draw without
         // them. Only the track's own signal carries them.
@@ -115,7 +115,7 @@ export function highlightGrid(patternCore, sig, start, end, from, count, clock =
         const soundsTo = patternCore.soundingEnd(s, sub.noteChannels, at, 1, at);
         const endAt = cycle + soundsTo;
         const endStep = patternCore.endEdgeStep(s, endAt - Math.floor(endAt));
-        const endShift = patternCore.timeShift(endStep, sub.noteChannels, endAt, 1, endAt);
+        const endShift = patternCore.timeShift(endStep, sub.noteChannels, endAt, 1, endAt, sub.groove);
         const chop = sampler && sub === sig ? chopAt(s, at) : null;
         out.push({
           start: rel + startShift,

@@ -329,7 +329,7 @@ const API_DOCS = {
   swing: {
     kind: 'both',
     sig: 'swing(amount, grid)',
-    desc: 'Delays every second slot of a grid (8 slots per cycle by default). amount is a fraction of one slot: 1/3 is a triplet shuffle, 0.5 the maximum. A drum machine\'s swing percentage converts as (pct - 50) / 50. Adds to any .nudge(). Write fractions outside quotes, since "1/3" in mini-notation means slow.',
+    desc: 'Delays every second slot of a grid (8 slots per cycle by default). amount is a fraction of one slot: 1/3 is a triplet shuffle, 0.5 the maximum. A drum machine\'s swing percentage converts as (pct - 50) / 50. A groove name in place of the grid swings by that groove instead — a table saying what every slot of the bar does — and amount is then how much of it to apply, 1 being as written. Adds to any .nudge(). Write fractions outside quotes, since "1/3" in mini-notation means slow.',
     eg: 's("hh*8").swing(1/3)',
   },
   swinggrid: {
@@ -337,6 +337,12 @@ const API_DOCS = {
     sig: 'swinggrid(value)',
     desc: 'The number of swing slots per cycle: 8 (eighth notes) by default, 16 for sixteenth notes. Can be patterned.',
     eg: '.swing(0.2, 16)',
+  },
+  swingvel: {
+    kind: 'both',
+    sig: 'swingvel(amount)',
+    desc: 'How much of a groove\'s velocity row to apply: 0 leaves every velocity as written, 1 (the default) is the row as drawn. Independent of the swing amount, which turns the timing down - except at zero, where the whole groove is off. Only grooves carry velocities; a plain swing moves notes without changing how hard they are played.',
+    eg: '.swing(1, "myfeel").swingvel(0.5)',
   },
 
   // ----------------------------------------------------------------- shaping

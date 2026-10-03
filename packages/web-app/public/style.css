@@ -2115,7 +2115,8 @@ li.CodeMirror-hint-active {
   border-radius: 3px;
 }
 
-.lfo-panel {
+.lfo-panel,
+.groove-panel {
   position: fixed;
   left: 50%;
   top: 50%;
@@ -2132,16 +2133,19 @@ li.CodeMirror-hint-active {
   overflow: hidden;
 }
 
-.lfo-panel.hidden {
+.lfo-panel.hidden,
+.groove-panel.hidden {
   display: none;
 }
 
 /* Scoped, like the piano roll's - there is no global .hidden utility. */
-.lfo-panel .hidden {
+.lfo-panel .hidden,
+.groove-panel .hidden {
   display: none;
 }
 
-.lfo-panel-head {
+.lfo-panel-head,
+.groove-panel-head {
   display: flex;
   align-items: center;
   gap: 6px;
@@ -2156,11 +2160,13 @@ li.CodeMirror-hint-active {
 
 /* Header dropdowns share ONE treatment - see the rule beside .pianoroll-ctl select. Only the type
    size is this panel's own. */
-.lfo-panel-head select {
+.lfo-panel-head select,
+.groove-panel-head select {
   font-size: 11px;
 }
 
-#lfoCanvas {
+#lfoCanvas,
+#grooveCanvas {
   display: block;
   margin: 10px;
   border: 1px solid var(--border);
@@ -2170,7 +2176,8 @@ li.CodeMirror-hint-active {
   touch-action: none;
 }
 
-.lfo-controls {
+.lfo-controls,
+.groove-controls {
   display: flex;
   align-items: center;
   gap: 14px;
@@ -2179,13 +2186,15 @@ li.CodeMirror-hint-active {
   color: var(--text-dim);
 }
 
-.lfo-controls label {
+.lfo-controls label,
+.groove-controls label {
   display: flex;
   align-items: center;
   gap: 6px;
 }
 
-.lfo-controls input[type='number'] {
+.lfo-controls input[type='number'],
+.groove-controls input[type='number'] {
   width: 62px;
   padding: 3px 6px;
   font-size: 12px;
@@ -2197,14 +2206,55 @@ li.CodeMirror-hint-active {
   outline: none;
 }
 
-.lfo-controls input[type='number']:focus {
+.lfo-controls input[type='number']:focus,
+.groove-controls input[type='number']:focus {
   border-color: var(--accent);
 }
 
-.lfo-controls select {
+.lfo-controls select,
+.groove-controls select {
   padding: 3px 22px 3px 8px;
   background-position: right 8px center;
   font-size: 12px;
+}
+
+/* The groove lanes docked under the roll's grid: a strip in the panel's own flow, the way the
+   value lane lives inside the canvas above it. The canvas keeps #grooveCanvas's own face; only its
+   floating margin goes, since the strip's padding is the spacing here and the left offset is set
+   inline to land the lanes flush under the grid (see grooveDockLayout). */
+.pr-groove-strip {
+  padding: 0 12px 12px;
+}
+
+.pr-groove-strip.hidden {
+  display: none;
+}
+
+.pr-groove-strip #grooveCanvas {
+  margin: 0;
+}
+
+/* A box slider with nothing to act on - the accents knob on a roll that swings plainly. Same
+   dimming the app's disabled buttons wear; still visible, so the column never reflows. */
+.pr-box-slider.disabled {
+  opacity: 0.45;
+  pointer-events: none;
+}
+
+/* The grid select sits in the head, beside the title - the same row treatment the controls row
+   gives its labels (see .lfo-controls label). */
+.groove-panel-head label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 400;
+}
+
+/* The box sliders take the width the number fields beside them would have had. */
+.groove-controls .pr-box-slider {
+  width: 62px;
 }
 
 .lfo-help {
@@ -2748,7 +2798,8 @@ li.CodeMirror-hint-active {
   letter-spacing: 0;
 }
 
-.pianoroll-panel-head .pr-text-btn {
+.pianoroll-panel-head .pr-text-btn,
+.groove-panel-head .pr-text-btn {
   min-width: 40px;
   font-family: var(--mono);
   text-transform: none;
@@ -2824,7 +2875,8 @@ li.CodeMirror-hint-active {
    presets - is this one shape, so two panels open side by side don't show two different chevron
    insets. Anything new in a header joins this list rather than inventing its own metrics. */
 .pianoroll-ctl select,
-.lfo-panel-head select {
+.lfo-panel-head select,
+.groove-panel-head select {
   padding: 3px 22px 3px 8px;
   background-position: right 8px center;
 }

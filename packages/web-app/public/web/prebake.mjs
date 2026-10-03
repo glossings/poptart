@@ -111,6 +111,10 @@ export function createPrebake({ patternCore, storage, prebakeDefs, createBlockEv
       const points = patternCore.lookupAuto(id);
       return points ? line('_auto', id, patternCore.serializeAutoPoints(points)) : null;
     }
+    if (kind === 'groove') {
+      const table = patternCore.lookupGroove(id);
+      return table ? line('_groove', id, patternCore.serializeGroove(table)) : null;
+    }
     return null;
   }
 
