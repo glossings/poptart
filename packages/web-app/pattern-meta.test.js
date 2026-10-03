@@ -165,6 +165,24 @@ test('missing fields are tolerated', () => {
   assert.equal(matchesQuery({}, 'x'), false);
 });
 
+// A saved pattern carries its captured plugin states in full - base64 long enough to contain
+// nearly any short term - and a live buffer carries their `"@<id>"` handles. Neither is text
+// anyone is searching FOR, and leaving them in meant every search matched every file with a
+// state in it (which is most of them).
+test('captured states and their handles are not searchable text', () => {
+  const state = `"H4sI${'A'.repeat(23)}hot${'B'.repeat(50)}"`;
+  const withState = { name: 'night-drive', code: `k: note("c2").program(${state})` };
+  assert.equal(matchesQuery(withState, 'hot'), false);
+  assert.equal(matchesQuery(withState, 'note'), true); // the code around it still counts
+  const withHandle = { name: 'night-drive', code: 'k: note("c2").program("@0badcafe0bad")' };
+  assert.equal(matchesQuery(withHandle, 'cafe'), false);
+});
+
+test('a short or unterminated "H4sI…" literal is left alone', () => {
+  // Too short to be a state - a word in a comment, say - so it stays searchable.
+  assert.equal(matchesQuery({ name: 'x', code: '// "H4sIhotwire"' }, 'hotwire'), true);
+});
+
 // The naming dialog disables its button on whatever this returns, and patternFilePath throws on
 // it - so a name the editor accepts has to be one the server will take.
 test('a usable pattern name has no problem to report', () => {

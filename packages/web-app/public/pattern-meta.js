@@ -147,6 +147,39 @@ function displayLabel({ title, name, code, fallback, borrowBlockLabel = false })
     || 'untitled';
 }
 
+// Captured plugin states are base64 (`"H4sI…"` literals, sometimes megabytes of them), and
+// almost any short search term occurs somewhere in that much base64 - so a file that merely
+// *carries* states matched every search and the list never narrowed. They're cut out of the
+// searchable text, along with the `"@<id>"` handles that stand in for them in a live buffer
+// (12 hex characters are the same kind of noise, just shorter). The scan mirrors blobs.js's
+// findBlobs: a lone regex quantifier over an unbounded literal overflows V8's regex stack on a
+// real patch, so the base64 run is walked by hand.
+const STATE_START = /"H4sI/g;
+const MIN_STATE = 68; // as blobs.js: shorter can't be a real program, longer can't be a coincidence
+const isStateB64 = (c) =>
+  (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || (c >= 48 && c <= 57) || c === 43 || c === 47 || c === 61;
+
+function stripPatternStates(code) {
+  const text = String(code ?? '').replace(/"@[0-9a-f]{12}"/g, '""');
+  let out = '';
+  let at = 0;
+  STATE_START.lastIndex = 0;
+  let m;
+  while ((m = STATE_START.exec(text)) !== null) {
+    const start = m.index + 1; // past the opening quote
+    let end = start + 4; // past "H4sI"
+    while (end < text.length && isStateB64(text.charCodeAt(end))) end += 1;
+    if (text[end] !== '"' || end - start < MIN_STATE) {
+      STATE_START.lastIndex = m.index + 1;
+      continue;
+    }
+    out += text.slice(at, start);
+    at = end;
+    STATE_START.lastIndex = end + 1;
+  }
+  return out + text.slice(at);
+}
+
 // Does `entry` ({ name, title, by, tags, code }) match a search box's worth of text? Terms are
 // AND-ed; a bare term matches anywhere (name, title, author, tags, or the code itself), and
 // `tag:` / `by:` restrict it to that field. An incomplete `tag:` matches everything rather than
@@ -156,7 +189,7 @@ function matchesQuery(entry, query) {
   if (!terms.length) return true;
   const tags = (entry.tags || []).map((t) => String(t).toLowerCase());
   const by = String(entry.by || '').toLowerCase();
-  const haystack = [entry.name, entry.title, by, tags.join(' '), entry.code]
+  const haystack = [entry.name, entry.title, by, tags.join(' '), stripPatternStates(entry.code)]
     .filter(Boolean)
     .join('\n')
     .toLowerCase();
@@ -187,5 +220,5 @@ function patternNameProblem(name) {
 }
 
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { parseMeta, deriveLabel, displayLabel, matchesQuery, scanComments, patternNameProblem };
+  module.exports = { parseMeta, deriveLabel, displayLabel, matchesQuery, scanComments, patternNameProblem, stripPatternStates };
 }
