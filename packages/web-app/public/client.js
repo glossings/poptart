@@ -18955,12 +18955,13 @@ async function evaluate(start, { byHand = false } = {}) {
   const arrangeFrom = start && arMarkerFor('a') != null ? arMarkerFor('a') : undefined;
   // The eval request goes out FIRST and everything else follows it. Nothing about recording this
   // state - the history entry, the autosave - may sit between the keystroke and the sound.
-  const pending = api('POST', '/api/evaluate', { code, start, arrangeFrom });
+  const pending = api('POST', '/api/evaluate', { code, start, arrangeFrom, fresh: bufferFreshOpened || undefined });
   checkpointUrl(); // a state you played is a state worth finding again in browser history
   saveWip();       // ...and worth having on disk right now, not a debounce from now
   if (newPacks.length) openPackById(newPacks[0]); // it has no files - here is where to pick them
   try {
     const result = await pending;
+    bufferFreshOpened = false; // the fresh eval landed; from here edits are livecoding
     transport = result.transport ?? { cps: result.cps ?? transport.cps, baseSec: 0, baseCycle: 0, paused: !start };
     setPatchScale(result.scale); // a setscale() in the buffer re-colors (and re-folds) the roll
     // The arrangement's song clock, for the painter's playhead - but only when the painter is on
@@ -26144,6 +26145,11 @@ async function savePatternFileAs() {
   if (name) await writePatternFile(name);
 }
 
+// True from a wholesale buffer replacement (a file load, a session reopen, an import) until an
+// evaluation of it lands: that evaluation goes out marked `fresh`, and the server reaps the
+// previous song's warm tracks on a fresh buffer where a livecoding eval would keep them.
+let bufferFreshOpened = false;
+
 // Put `code` in the editor as the thing now being worked on: the outgoing buffer gets its own
 // autosave file to sit in, and the incoming one becomes a history checkpoint. `name` is the saved
 // pattern this code came out of, or null when it came from anywhere else - a session, an imported
@@ -26153,6 +26159,9 @@ async function savePatternFileAs() {
 async function openInEditor(code, name, wipSession = null) {
   await rollWipSession(wipSession);
   cm.setValue(code);
+  // The buffer was replaced wholesale, so the next evaluation is a fresh one: it says so to the
+  // server, which reaps the previous song's warm tracks (a livecoding eval keeps them warm).
+  bufferFreshOpened = true;
   // A reopened session is already exactly what its file holds, so nothing is written until the
   // code actually changes - which is what keeps the files tab, sorted by modified time, from
   // reshuffling the moment you look at something.

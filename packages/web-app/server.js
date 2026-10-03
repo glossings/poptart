@@ -4954,6 +4954,28 @@ const routes = {
       }
     }
 
+    // A fresh buffer - a file opened into the editor, not a livecoding edit of the one already
+    // playing - reaps every warm track this deck holds for a label the incoming code never
+    // mentions. Keeping a dropped label's track warm (dropTrack's comment) is for the label's
+    // RETURN during a performance; across whole songs warm tracks only accumulate, and what they
+    // hold - plugin instances, ramp synths, the RT memory under all of it - degrades sampler
+    // voices first and eventually stops /s_new entirely. Every label in the buffer keeps its
+    // track, muted or not; the song decks' own tracks are not the buffer's to reap.
+    if (body.fresh === true) {
+      const claimed = new Set(built.map((b) => keyOfBlock(b.label)));
+      let reaped = 0;
+      for (const key of [...trackIds.keys()]) {
+        if (deckOfKey(key) !== deck || claimed.has(key)) continue;
+        if (key === SONG_KEYS.a || key === SONG_KEYS.b) continue;
+        schedulers.get(key)?.stop();
+        schedulers.delete(key);
+        mappedEngine.removeChain(engineTrack(key));
+        dropTrack(key);
+        reaped++;
+      }
+      if (reaped) console.log(`[poptart] fresh buffer: destroyed ${reaped} idle track(s) left by the previous song`);
+    }
+
     // Where this eval's schedulers open their window: the clock's position NOW, read before
     // anything below advances it. A mid-performance eval leaves the clock alone, and so does
     // `start: false` (the editor's "Update" button): a stopped clock stays frozen (patterns load

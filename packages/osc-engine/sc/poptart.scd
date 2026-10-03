@@ -1210,6 +1210,12 @@ server.options.numOutputBusChannels = max(2, outChannels);
 // s("...")). The table itself is only a few hundred bytes per slot (the audio lives in separate
 // allocations made at read time), so size it for a whole library rather than one pack.
 server.options.numBuffers = 16384;
+// The pool behind every RTAlloc on the server - grain windows, per-voice envelopes, delay
+// lines. The scsynth default is 8MB, and a session's worth of loaded songs walks into it:
+// sampler voices degrade first (their window allocations fail quietly, which plays as
+// downsampled hash), then /s_new refuses outright and the server goes silent. The pool is
+// lookaside - unallocated headroom costs nothing - so size it for a long session.
+server.options.memSize = 262144; // KB: 256MB
 // Private SuperCollider only. This becomes scsynth's -U, which REPLACES the default plugin
 // search rather than adding to it, so the list has to carry the SC build's own plugins folder
 // as well as poptart's Extensions - without the former there would be no SinOsc, let alone
