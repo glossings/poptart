@@ -22,6 +22,7 @@ import { lookupRoll, registerRoll, lookupShape, registerShape, lookupPreset, reg
 import { latestCC, registerMidiDevice } from './midi.mjs';
 import { latestOsc, registerOscAddress, normalizeOscAddress } from './osc.mjs';
 import { macroValue, assertMacroIndex } from './macros.mjs';
+import { fxKnobValue, assertFxKnobIndex } from './fxknobs.mjs';
 import { Frac } from './frac.mjs';
 
 /**
@@ -7560,6 +7561,20 @@ export function osc(address, index = 0) {
 export function macro(index) {
   assertMacroIndex(index);
   return new Sig(() => macroValue(index));
+}
+
+/**
+ * `fxknob(1)` - the live 0..1 value of the DJ desk's FX knob, as a continuous signal. Bound into
+ * an FX chain's code as `fx1`, which is the form it is written in:
+ * `.fx("Pro-C 2").param("Threshold", fx1)`. Like macro(), the scheduler polls it.
+ *
+ * It is the whole point of an FX chain being code rather than a plugin name: on a player deck the
+ * knob is not only a dry/wet, it works whatever the effect makes it work - a filter's cutoff, a
+ * delay's feedback - and `.range()`/`.mul()` put it in that parameter's own units.
+ */
+export function fxknob(index) {
+  assertFxKnobIndex(index);
+  return new Sig(() => fxKnobValue(index));
 }
 
 /**

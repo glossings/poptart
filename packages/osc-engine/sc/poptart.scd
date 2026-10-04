@@ -395,11 +395,13 @@ buildTrackDef = { |key|
         grainpos = 0, grainsize = 0.08, grainrate = 20, grainpan = 0, grainOut,
         trim = 1, eqlo = 1, eqmid = 1, eqhi = 1, djf = 0, djres = 0, fader = 1, deck = 1, cue = 0, mdeck = -1,
         busOut1, busOut2, busOut3, busOut4, busSend1 = 0, busSend2 = 0, busSend3 = 0, busSend4 = 0,
+        fxOut, fxSend = 0,
         recOut, recSend = 0, mixOut, mixSend = 0|
         var sig = Silent.ar(2);
         var scBuses = (1..maxSlots - 1).collect { |i| ("scBus" ++ i).asSymbol.kr(0) };
         var mid, side; // the channel strip's mid/side pair (see the width control below)
         var live, djLow, djMid, djHigh, djLpf, djHpf, djWet, djv, djq; // the DJ stage (see below)
+        var fxAmt; // how far the DJ FX unit is switched in (see the insert below)
         // The channel's DJ fader, read out here because it applies to the named-bus SENDS as well
         // as to the direct output at the bottom - a post-fader send, the way a desk's are.
         //
@@ -600,7 +602,25 @@ buildTrackDef = { |key|
         // default outside DJ decks - multiplies the write to zeros. The buses always exist; the
         // SendPeakRMS readers run only while the strip is open (see the deck meter section).
         Out.ar(deckMeterBus.index + (mdeck.max(0) * 2), live * (mdeck > -0.5));
-        live = live * faderAmt * deck.lag(0.08).clip(0, 1);
+        // DJ FX unit (the desk's performance effects - see the mix-strip FX section in the web
+        // app's server.js): the finished DJ-stage signal (post trim/EQ/filter) to a named bus the
+        // deck's FX return track reads. Scaled by the DJ fader - a gated stem leaves the FX feed
+        // with the mix - but NOT by the deck (crossfader) gain: the return is a track of this
+        // deck and wears that gain itself, so a crossfade applies it exactly once, like every
+        // other routed path here. Parked at trashBus with fxSend 0 until the desk routes it (see
+        // the setFxSend OSCdef).
+        //
+        // An INSERT, not an aux: the direct path below closes by exactly as much as this opens.
+        // A unit is a compressor, a filter, a comb - effects that REPLACE a signal rather than
+        // sit beside it, and in parallel a compressor does nothing and a filter combs. The
+        // dry/wet lives inside the unit instead (the chain's `.wet(fx1)`), which is what a
+        // player's FX knob is, and at wet 0 the return passes the bus through untouched - so
+        // switching the unit in with the knob down is inaudible rather than a level jump.
+        // One lag constant for both halves, so the swap is a crossfade between two paths that
+        // carry the same signal and sums to unity throughout.
+        fxAmt = fxSend.lag(0.08).clip(0, 1);
+        Out.ar(fxOut, live * fxAmt * faderAmt);
+        live = live * (1 - fxAmt) * faderAmt * deck.lag(0.08).clip(0, 1);
         // `out` is the channel strip's stereo-pair selector (Sig#o, pseudo-slot -1 like gain/pan):
         // pair 1 = buses 0/1, pair 2 = 2/3, ..., wrapping past the device's last pair. Scaled by
         // `dry` (Sig#dry, channel control, default 1) so .dry(0)/.bsend() can mute the dry path
@@ -642,7 +662,8 @@ scArgsFor = {
     [\scSend, trashBus.index, \scSendGain, 1,
      \recOut, trashBus.index, \recSend, 0,
      \mixOut, trashBus.index, \mixSend, 0,
-     \busOut1, trashBus.index, \busOut2, trashBus.index, \busOut3, trashBus.index, \busOut4, trashBus.index]
+     \busOut1, trashBus.index, \busOut2, trashBus.index, \busOut3, trashBus.index, \busOut4, trashBus.index,
+     \fxOut, trashBus.index]
     ++ (1..maxSlots - 1).collect { |i| [("scBus" ++ i).asSymbol, silentBus.index] }.flatten;
 };
 // Dict key for a sidechain route, identifying the aux input by (target track, fx slot).
@@ -856,6 +877,11 @@ trackLevels = {
     tracks.keysValuesDo { |k, t|
         if (t.isKindOf(Event)) {
             t[\busSends] !? { |names| names.do { |n| var b = n.asSymbol; writers[b] = (writers[b] ?? { [] }).add(k) } };
+            // The DJ FX unit's send counts as a write too (see setFxSend): the unit's return
+            // track READS that bus, so without this the return sits at the same depth as the
+            // decks feeding it and reads the previous block - a block of delay on the insert,
+            // and an order that depends on which track happened to be built first.
+            t[\fxBus] !? { |n| var b = n.asSymbol; writers[b] = (writers[b] ?? { [] }).add(k) };
         };
     };
     sidechainByTarget.do { |e|
@@ -1795,8 +1821,24 @@ server.waitForBoot {
     }).add;
     // DJ deck meter reader (see the deck meter section below): same feed shape as the mixer's
     // per-track meter, one per deck while the strip is open, id 0 = deck A / 1 = deck B.
+    //
+    // Plus the three band energies that COLOR the deck's waveform strip. A song deck's waveform
+    // is colored from an offline pass over the file (osc-engine/wav.js's envelope: the same 200Hz
+    // and 2kHz split, one-pole, energy per band, normalized); a livecoded deck has no file, so
+    // its strip is drawn from this feed and had no spectrum to color by at all. OnePole with
+    // exp(-2pi f / sr) is that same one-pole filter, so the two agree about what "low" means,
+    // and the bands nest exactly as they do there: each one is the difference between two of the
+    // lowpasses. The energies are mean-square (the squared band, smoothed well under the reply
+    // rate) rather than peaks, because a share of the ENERGY is what the color mixes.
     SynthDef(\poptart_deck_meter, { |bus, id|
-        SendPeakRMS.kr(In.ar(bus, 2), 20, 3, '/poptart/deckLevel', id);
+        var frame = Impulse.kr(20);
+        var sig = In.ar(bus, 2);
+        var mono = (sig[0] + sig[1]) * 0.5;
+        var lp = [200, 2000].collect { |f| OnePole.ar(mono, exp(-2pi * f / SampleRate.ir)) };
+        var bands = [lp[0], lp[1] - lp[0], mono - lp[1]];
+        var energy = bands.collect { |b| A2K.kr(LPF.ar(b.squared, 10)) };
+        SendPeakRMS.kr(sig, 20, 3, '/poptart/deckLevel', id);
+        SendReply.kr(frame, '/poptart/deckBands', energy, id);
     }).add;
     // The bounce itself. Nothing but a DiskOut: everything about WHEN it runs is decided by the
     // timestamped bundles that start and free it (see the recordTrack OSCdef), so the file's
@@ -1985,6 +2027,7 @@ destroyTrack = { |key|
             track[\ccs].do { |e| MIDIdef.all[e[\defKey]] !? { |d| d.free }; e[\bus] !? { |b| b.free } };
             track[\oscs].do { |e| OSCdef.all[e[\defKey]] !? { |d| d.free }; e[\bus] !? { |b| b.free } };
             track[\busSends] !? { |names| names.do { |bn| releaseBus.(bn) } };
+            track[\fxBus] !? { |bn| releaseBus.(bn) }; // the DJ FX send's ref (see setFxSend)
             // A song deck's player synth dies with the group below; its buffer (the whole file,
             // real RAM) must not outlive the track.
             songs[key] !? { |e| e[\posFunc] !? { |f| f.free }; e[\buf] !? { |b| b.free }; songs[key] = nil };
@@ -3520,6 +3563,36 @@ OSCdef(\poptartClearBusSends, { |msg|
     };
 }, '/poptart/clearBusSends');
 
+// The DJ FX send (the desk's performance-FX unit; see the fxOut/fxSend tap in the track def).
+// msg = [trackId, busName, amount]. Routes the track's dedicated FX send to the named bus at
+// `amount`; an empty name parks it back at trashBus. Deliberately its OWN send rather than one
+// of the four .bus() slots: those are the song code's, replaced wholesale on every eval, and the
+// desk's routing must survive an eval it had no part in. Acquire-before-release like
+// setBusSends, so re-pointing at the same bus never briefly frees it.
+OSCdef(\poptartSetFxSend, { |msg|
+    var key = msg[1].asSymbol;
+    var name = msg[2].asString;
+    var amt = (msg[3] ? 0).asFloat;
+    fork {
+        var track = awaitTrack.(key);
+        track !? {
+            if (name.isEmpty) {
+                track[\synth].set(\fxOut, trashBus.index, \fxSend, 0);
+                track[\fxBus] !? { |prev| releaseBus.(prev); track[\fxBus] = nil };
+            } {
+                if (track[\fxBus] != name) {
+                    track[\synth].set(\fxOut, acquireBus.(name).index, \fxSend, amt);
+                    track[\fxBus] !? { |prev| releaseBus.(prev) };
+                    track[\fxBus] = name;
+                    reorderTracks.();
+                } {
+                    track[\synth].set(\fxSend, amt); // same bus: only the level moved
+                };
+            };
+        };
+    };
+}, '/poptart/setFxSend');
+
 // MIDI from a hardware device into the plugin at `slot` (Sig#midi injector, "dev:..." source).
 // Mirrors midiRoute but targets one slot's plugin and doesn't touch the track's held/env state -
 // it's a side channel, like noteOnSlot. Track sources are fanned out Node-side instead (see the
@@ -4366,6 +4439,13 @@ OSCdef(\poptartDeckMeters, { |msg|
 OSCFunc({ |m|
     nodeAddr.sendMsg('/poptart/deckLevel', m[2].asInteger, m[3], m[4], m[5], m[6]);
 }, '/poptart/deckLevel', server.addr);
+
+// ...and their band energies, the same way ([nodeID, deck, low, mid, high]): what colors the
+// livecoded decks' waveform strips. A reply of its own because SendPeakRMS writes its own
+// message; the two leave the same synth on the same trigger, so they arrive together.
+OSCFunc({ |m|
+    nodeAddr.sendMsg('/poptart/deckBands', m[2].asInteger, m[3], m[4], m[5]);
+}, '/poptart/deckBands', server.addr);
 
 // Bounce one track to a WAV. The window's edges are timestamped bundles, so the file is
 // sample-accurate rather than however long the messages took to arrive - but DiskOut drops

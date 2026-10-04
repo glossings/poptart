@@ -175,18 +175,40 @@ const mixState = {
   soloPrev: { a: null, b: null }, // key -> fader snapshot while solo is on, else null
   perDeck: { a: new Map(), b: new Map() }, // deck-broadcast values (the crossfader's `deck`, a deck-wide djf)
   perTrack: new Map(), // key -> Map(name -> value): faders, per-track EQ, trim
-  xf: -1, // crossfader position (-1 = hard at deck A) - the source of the two `deck` gains
+  // Crossfader position (-1 = hard at deck A, 0 = the center detent, 1 = hard at B) - the source
+  // of the two `deck` gains. The desk OPENS centered, like a mixer whose crossfader is parked in
+  // the middle and mixed on the channel faders.
+  xf: 0,
   // The channel faders (one per deck, like a hardware desk's, on top of the crossfader): each
   // deck's engine-side `deck` gain is xf-curve x its fader. NOT broadcast as `fader` - that
   // synth control belongs to the per-stem gates and mini-faders, and a deck-wide write to it
   // would clobber them all at once.
+  //
+  // BOTH rest UP. Deck B's rested down for one build, on the reasoning that a queued deck should
+  // arrive silent - but with the crossfader centered that is a deck that plays into a fader at
+  // zero and makes no sound at all, which reads as a broken deck rather than a cued one (and it
+  // was reported as one). Silence while cueing is a move the hand makes, not a state the desk
+  // opens in; the headphone cue is what auditions a deck that is not in the mix.
   faders: { a: 1, b: 1 },
-  // Tempo migration (phase 5): once the mix desk touches the clock (/api/mix/tempo), this holds
-  // the bpm it asked for and the MAIN deck's setbpm stops driving the transport (it still
-  // records the song's native tempo) - otherwise re-evaling deck a mid-migration would snap the
-  // clock back to its declared bpm. Cleared by eject (deck a's declared tempo is restored) and
+  // Tempo migration (phase 5): once the mix desk touches the clock (a livecode deck's pitch
+  // fader - see deckTempoApply), this holds the bpm it asked for and the MAIN deck's setbpm
+  // stops driving the transport (it still records the song's native tempo) - otherwise
+  // re-evaling deck a mid-ride would snap the clock back to its declared bpm. Cleared by eject
+  // (deck a's declared tempo is restored) and
   // by complete (the promoted song's own setbpm takes over on its promotion re-eval).
   tempoOverride: null,
+  // The per-deck tempo sliders (/api/mix/decktempo): frac is the fader's throw (-1..1, + =
+  // faster), range the selected % window (±6/10/16/100, a player's usual detents). What it
+  // scales depends on the deck: an unsynced song's own rate, the shared clock when the deck
+  // holds the grid (or plays code), nothing while a synced song follows another deck (the
+  // slider is inert there, as on hardware - the throw is remembered and lands on sync-off).
+  deckTempo: { a: { frac: 0, range: 6 }, b: { frac: 0, range: 6 } },
+  // The DJ FX unit (see the FX section below): one named CHAIN switched in as an insert per
+  // deck. `chain` is the loaded chain's name, `assign` which decks it is inserted on
+  // ('a' | 'ab' | 'b'), `knob` the 0..1 FX knob (the chain's `fx1`), `on` the latched pad and
+  // `held` the momentary one (either switches the unit in). Ephemeral like the rest of the desk;
+  // the chains themselves live in settings.djFx, so they are there for every session.
+  fx: { chain: null, on: false, held: false, knob: 0, assign: 'ab' },
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -430,11 +452,12 @@ function songBaseRate(deck) {
   const s = songDecks[deck];
   if (!s) return 1;
   // Paused with nothing else on the clock, a synced song will take the grid when it plays
-  // (see /api/song/play: the clock adopts ITS tempo, so it runs at 1) - say so now, or the pane
+  // (see /api/song/play: the clock adopts ITS tempo scaled by the deck's tempo slider, so it
+  // runs at the slider's rate - manualRate mirrors the slider) - say so now, or the pane
   // draws the strip at master/native against a clock the play is about to replace and the
   // waveform visibly rescales on the first press. The hand's tempo override is the exception:
   // play leaves the clock where it was put.
-  if (!s.playing && s.sync && s.bpm && !othersPlaying(deck) && mixState.tempoOverride == null) return 1;
+  if (!s.playing && s.sync && s.bpm && !othersPlaying(deck) && mixState.tempoOverride == null) return s.manualRate;
   if (s.sync && s.bpm && transport) {
     return songSync.syncRate(transport.cps * 240, s.bpm, songOctave(deck)) ?? s.manualRate;
   }
@@ -510,7 +533,7 @@ function songSendRate(deck) {
 function songApplyRate(deck) {
   const s = songDecks[deck];
   if (!s) return;
-  const eff = songSync.effectiveRate(songBaseRate(deck), s.nudge);
+  const eff = songSync.effectiveRate(songBaseRate(deck), s.nudge, s.bend ?? 0);
   if (eff === s.rate) return;
   if (s.playing && engine && engine.getTime() >= s.startSec) {
     const now = engine.getTime();
@@ -631,6 +654,7 @@ function songCue(deck, hold) {
     // fading under it) rather than a stop followed by a start.
     const startSec = engine.getTime() + SONG_START_LEAD_SEC;
     s.nudge = 0;
+    s.bend = 0;
     s.servo = 0;
     s.rate = songSync.effectiveRate(songBaseRate(deck), 0);
     engine.songStart(tid, s.cueSec, s.rate, startSec, s.keylock ? 1 : 0);
@@ -685,13 +709,18 @@ function songPlayDeck(deck, { pos, rate, now: startNow } = {}) {
   // it doesn't (no bpm, or sync deliberately off) it runs free and the response says so -
   // the next deck up will have nothing to lock onto, and that is worth a word.
   const takeGrid = !others && s.sync && !!s.bpm;
-  // Before the rate is read: the master's native tempo IS the clock.
+  // Quantize, the player-deck fact: ON (the default), a start waits for the matching grid position below;
+  // OFF, every start is immediate - the `now` flag, promoted to a per-deck fact the Q button
+  // and the `quant` pad toggle. Cue previews were never quantized either way.
+  const quant = !startNow && s.quantize !== false;
+  // Before the rate is read: the master's native tempo IS the clock - scaled by its deck's
+  // tempo slider, so a track corrected to +2% takes the grid at +2%.
   if (takeGrid) {
     songMasterDeck = deck;
     songMasterOctave = 1; // this song's own tempo is about to become the clock's
-    if (mixState.tempoOverride == null) transport.setBpm(s.bpm);
+    if (mixState.tempoOverride == null) transport.setBpm(s.bpm * deckTempoMult(deck));
   }
-  if (others && !startNow) {
+  if (others && quant) {
     const earliest = transport.cycleAt(nowSec + SONG_START_LEAD_SEC);
     let startCycle;
     if (s.sync && s.bpm) {
@@ -704,7 +733,7 @@ function songPlayDeck(deck, { pos, rate, now: startNow } = {}) {
       startCycle = Math.ceil(earliest / beat) * beat;
     }
     startSec = transport.secAt(startCycle);
-  } else if (takeGrid && !startNow) {
+  } else if (takeGrid && quant) {
     // Nothing else on the clock, but maybe a Link session to land on: this record's bar line
     // goes on the session's, so the room and the peers hear the same downbeat. The wait is at
     // most a bar; the tempo just pushed above is where the session's bars will fall from here.
@@ -712,6 +741,7 @@ function songPlayDeck(deck, { pos, rate, now: startNow } = {}) {
     if (at != null) startSec = at;
   }
   s.nudge = 0;
+  s.bend = 0;
   s.servo = 0;
   s.cueHeld = false; // a real start supersedes a preview - its release must not yank us home
   s.rate = songSync.effectiveRate(songBaseRate(deck), 0);
@@ -800,6 +830,49 @@ function songScrub(deck, deltaSec) {
   }, SONG_SCRUB_FLUSH_MS);
 }
 
+// The platter as a PITCH BEND (the `bend` MIDI target): a light wheel turn while the deck plays
+// bends the rate with the turn and eases back to base when the hand rests - the beatmatch
+// correction gesture, where scrub is the needle drop. Ticks are batched like the scrub's; the
+// rate math (proportional target, attack, release) is song-sync.js's bendStep, and the flush
+// keeps ticking until the bend has died away so the release is heard without further input.
+// The playhead model rides the bent rate (songApplyRate rebases on every step), so the phase a
+// bend moved STAYS moved - on a synced deck that is the whole point, and the drift servo, which
+// only measures engine-vs-model, has nothing to pull back.
+const SONG_BEND_FLUSH_MS = 30;
+const songBendState = {
+  a: { ticks: 0, timer: null, last: 0 },
+  b: { ticks: 0, timer: null, last: 0 },
+};
+
+/** One relative platter message's worth of bend (`ticks` signed, 64-centered cc convention). */
+function songBend(deck, ticks) {
+  const st = songBendState[deck];
+  if (!songDecks[deck]) return; // an empty deck's platter should feel like nothing
+  st.ticks += ticks || 0;
+  if (st.timer) return;
+  st.last = Date.now();
+  st.timer = setInterval(() => {
+    const s = songDecks[deck];
+    const now = Date.now();
+    const dt = Math.max(0.001, (now - st.last) / 1000);
+    st.last = now;
+    const t = st.ticks;
+    st.ticks = 0;
+    if (!s) {
+      clearInterval(st.timer);
+      st.timer = null;
+      return;
+    }
+    s.bend = songSync.bendStep(s.bend ?? 0, t, dt);
+    if (!t && s.bend === 0) {
+      clearInterval(st.timer);
+      st.timer = null;
+    }
+    songApplyRate(deck);
+    mixNotify(); // the pane's rate readout follows the bend (throttled like every desk frame)
+  }, SONG_BEND_FLUSH_MS);
+}
+
 /**
  * The facts row (bpm, key, the beatgrid anchor, sync, the tempo ratio, keylock) as one patch.
  * Only the keys PRESENT are touched, which is what lets the pane post a single edit and a MIDI
@@ -858,12 +931,91 @@ function songSetMeta(deck, patch) {
       songArmEndTimer(deck);
     }
   }
+  if ('quantize' in patch) s.quantize = !!patch.quantize; // see songPlayDeck's `quant`
   songApplyRate(deck); // bpm/sync edits change the effective rate; paused songs settle too
   mixNotify();
   return {
     deck, bpm: s.bpm, musicalKey: s.musicalKey, anchorSec: s.anchorSec,
-    sync: s.sync, syncMult: s.syncMult, keylock: s.keylock, rate: s.rate,
+    sync: s.sync, syncMult: s.syncMult, keylock: s.keylock, quantize: s.quantize !== false, rate: s.rate,
   };
+}
+
+// --- the per-deck tempo sliders (/api/mix/decktempo and the `tempo` MIDI fader) ---
+//
+// One slider per deck, a player's pitch fader: frac -1..1 (+ = faster) over a selectable ±range.
+// What it drives depends on what the deck holds, and the point is that the HAND never has to
+// know which:
+//   - a song deck that is unsynced, or that holds (or is about to take) the grid: its own rate -
+//     manualRate mirrors the slider always, and the grid-holder's clock is ramped so every
+//     synced follower moves with it, which is the hardware behavior ("changing the tempo of the
+//     leader changes both").
+//   - a synced song deck following someone else's grid: nothing, like a lit SYNC on hardware -
+//     the throw is remembered and takes effect the moment sync goes off (mixDeskBody says
+//     `locked` so the pane can gray it).
+//   - a livecode deck: the shared clock, scaled around the deck's native tempo. Two pattern
+//     decks share one Transport by design, so this is "the clock", not "this deck alone" - held
+//     via tempoOverride exactly like the migration slider, so a re-eval doesn't snap it back.
+const DECK_TEMPO_RANGES = [6, 10, 16, 100];
+const deckTempoMult = (deck) => {
+  const t = mixState.deckTempo[deck];
+  return 1 + (t.frac * t.range) / 100;
+};
+
+function deckTempoApply(deck, { frac, range } = {}) {
+  const t = mixState.deckTempo[deck];
+  if (range !== undefined) {
+    const r = Number(range);
+    if (!DECK_TEMPO_RANGES.includes(r)) throw new Error(`decktempo: range must be one of ±${DECK_TEMPO_RANGES.join('/±')}%`);
+    t.range = r;
+  }
+  if (frac !== undefined) {
+    const f = Number(frac);
+    if (!Number.isFinite(f) || f < -1 || f > 1) throw new Error('decktempo: frac must be -1..1');
+    t.frac = Math.abs(f) < 0.004 ? 0 : f; // a center detent, so zero is reachable from a jittery fader
+  }
+  const mult = deckTempoMult(deck);
+  const s = songDecks[deck];
+  if (s) {
+    s.manualRate = Math.min(songSync.RATE_MAX, Math.max(songSync.RATE_MIN, mult));
+    if (deck === songMasterDeck && s.playing && s.bpm && transport) {
+      // The grid-holder's slider IS the room's tempo: ramp the clock and let onCpsChange
+      // re-rate every synced deck, this one included.
+      transport.rampBpm(Math.min(400, Math.max(20, (s.bpm / songOctave(deck)) * mult)), 0);
+    } else {
+      songApplyRate(deck); // unsynced decks hear it now; a locked follower just remembers it
+    }
+  } else if (transport) {
+    const native = deckNativeBpm(deck);
+    if (native == null) throw new Error(`deck ${deck}'s tempo is signal-driven - no single native bpm to scale`);
+    const bpm = Math.min(400, Math.max(20, native * mult));
+    mixState.tempoOverride = bpm; // the desk holds the clock now, like the migration slider
+    transport.rampBpm(bpm, 0);
+  }
+  mixNotify();
+  return { deck, frac: t.frac, range: t.range, pct: Math.round((mult - 1) * 1000) / 10 };
+}
+
+/** Is a deck's slider inert right now - a synced song following someone else's grid? */
+function deckTempoLocked(deck) {
+  const s = songDecks[deck];
+  return !!(s && s.sync && s.bpm && deck !== songMasterDeck && othersPlaying(deck));
+}
+
+/**
+ * The tempo a deck is actually RUNNING at, for the readout under its pitch fader - the number a
+ * beatmatch is done by, which is otherwise only inferable from a percentage.
+ *
+ * A song deck: its own bpm times the rate it is playing at (sync stretch, slider, nudge and bend
+ * all included - `rate` is the truth of what is sounding). Null while its tempo is unknown,
+ * since a rate against no bpm is not a tempo.
+ *
+ * A livecode deck: the shared clock. Its patterns have no tempo of their own - they ride the
+ * transport - so the clock IS its resultant tempo, slider included (the slider moved the clock).
+ */
+function deckTempoBpm(deck) {
+  const s = songDecks[deck];
+  if (s) return s.bpm ? s.bpm * s.rate : null;
+  return transport ? transport.cps * 240 : null;
 }
 
 /**
@@ -1015,9 +1167,17 @@ async function songDetectKick(deck) {
 // channel, and it runs the gesture exactly as its own button does.
 const MIX_MIDI_KNOBS = ['trim', 'eqlo', 'eqmid', 'eqhi', 'djf', 'djres', 'fader'];
 const MIX_MIDI_HOLD = ['nudgedn', 'nudgeup', 'cue'];
-const MIX_MIDI_PRESS = ['jogdn', 'jogup', 'play', 'phones', 'sync', 'mult', 'keylock', 'next', 'prev'];
-const MIX_MIDI_DECK_CTLS = [...MIX_MIDI_KNOBS, ...MIX_MIDI_HOLD, ...MIX_MIDI_PRESS, 'scrub', 'search'];
-const MIX_MIDI_TARGETS = new Set(['xf',
+const MIX_MIDI_PRESS = ['jogdn', 'jogup', 'play', 'phones', 'sync', 'mult', 'keylock', 'quant', 'loop', 'temporange', 'next', 'prev'];
+// `tempo` is the deck's pitch fader and `bend` the platter's pitch-bend mode - continuous like
+// the platter pair, but dispatched to their own gestures rather than through mixMidiValue.
+const MIX_MIDI_DECK_CTLS = [...MIX_MIDI_KNOBS, ...MIX_MIDI_HOLD, ...MIX_MIDI_PRESS, 'scrub', 'search', 'bend', 'tempo'];
+// The FX unit's controls carry no deck prefix - the unit is one shared thing with an assign
+// switch, like the crossfader. fxon latches, fxhold sounds it only while held (the two pad
+// flavors hardware has); fxnext/fxprev step the chain list; fxknob is the unit's knob (`fx1`).
+const MIX_MIDI_GLOBAL_PRESS = ['fxon', 'fxnext', 'fxprev', 'fxassign'];
+const MIX_MIDI_GLOBAL_HOLD = ['fxhold'];
+const MIX_MIDI_GLOBAL = new Set(['xf', 'fxknob', ...MIX_MIDI_GLOBAL_PRESS, ...MIX_MIDI_GLOBAL_HOLD]);
+const MIX_MIDI_TARGETS = new Set([...MIX_MIDI_GLOBAL,
   ...['a', 'b'].flatMap((d) => MIX_MIDI_DECK_CTLS.map((c) => `${d}:${c}`))]);
 let mixMidiLearn = null; // { target, finish, timer } while a learn long-poll is armed
 let mixMidiMonitor = false; // while the desk's `midi` mode is on: say what the hardware sends
@@ -1034,9 +1194,9 @@ const midiSame = (m, device, channel, num, kind) => !!m
   && m.device === device && m.channel === channel && midiNum(m) === num && midiKind(m) === kind;
 const midiSay = (channel, num, kind) => `${kind} ${num} (ch ${channel})`;
 
-// Which target names are BUTTONS - the set the learn rule below needs, and the same two lists
+// Which target names are BUTTONS - the set the learn rule below needs, and the same lists
 // the dispatch reads.
-const MIX_MIDI_BUTTONS = new Set([...MIX_MIDI_HOLD, ...MIX_MIDI_PRESS]);
+const MIX_MIDI_BUTTONS = new Set([...MIX_MIDI_HOLD, ...MIX_MIDI_PRESS, ...MIX_MIDI_GLOBAL_PRESS, ...MIX_MIDI_GLOBAL_HOLD]);
 
 /**
  * Is this message the one the armed target is waiting for? A learn used to bind the very next
@@ -1049,7 +1209,7 @@ const MIX_MIDI_BUTTONS = new Set([...MIX_MIDI_HOLD, ...MIX_MIDI_PRESS]);
  * sends and what a platter drifting around its 64 center never does.
  */
 function mixMidiLearnable(target, kind, value) {
-  const name = target === 'xf' ? 'xf' : target.slice(2);
+  const name = MIX_MIDI_GLOBAL.has(target) ? target : target.slice(2);
   if (!MIX_MIDI_BUTTONS.has(name)) return kind === 'cc'; // knobs and the platter are continuous
   return value >= (kind === 'note' ? 0.004 : 0.9); // a note-on of any velocity; a cc at the top
 }
@@ -1149,12 +1309,45 @@ function mixMidiDrive(target, value) {
 }
 
 function mixMidiApply(target, value) {
+  if (target !== 'xf' && MIX_MIDI_GLOBAL.has(target)) {
+    // The FX unit's deck-less controls. The pads share the deck pads' edge detection.
+    if (target === 'fxknob') {
+      mixFxSet({ knob: value });
+      return;
+    }
+    const down = value >= 0.5;
+    if ((mixMidiDown.get(target) ?? false) === down) return;
+    mixMidiDown.set(target, down);
+    if (target === 'fxhold') mixFxSet({ held: down });
+    else if (!down) { /* press pads act on the press edge only */ }
+    else if (target === 'fxon') mixFxSet({ on: !mixState.fx.on });
+    else if (target === 'fxassign') mixFxSet({ assign: FX_ASSIGNS[(FX_ASSIGNS.indexOf(mixState.fx.assign) + 1) % FX_ASSIGNS.length] });
+    else {
+      // Stepping the chain list loads code off disk, so it is the one fx pad that is async.
+      // Its own reporting: a rejection here must not reach the MIDI listener unhandled.
+      mixFxStep(target === 'fxnext' ? 1 : -1)
+        .catch((err) => eventLogQueue.push(`[midi] ${target}: ${err?.message ?? err}`));
+    }
+    return;
+  }
   const deck = target[0];
   const name = target === 'xf' ? 'xf' : target.slice(2);
   if (name === 'scrub' || name === 'search') {
     // Both are the platter; they differ only in how far a tick carries. songScrub coalesces
     // either into one seek per flush, so a hand crossing modes mid-spin still moves once.
     songScrub(deck, mixMidiScrubDelta(value, name === 'search' ? SONG_SEARCH_TICK_SEC : SONG_SCRUB_TICK_SEC));
+    return;
+  }
+  if (name === 'bend') {
+    // The platter's pitch-bend mode: the same relative 64-centered convention as scrub, into
+    // the bend gesture instead of a seek (see songBend).
+    songBend(deck, Math.round(value * 127) - 64);
+    return;
+  }
+  if (name === 'tempo') {
+    // The deck's pitch fader, mounted the player way: hardware TOP is minus (slower), BOTTOM
+    // plus - so a fader at its top edge reads frac -1.
+    deckTempoApply(deck, { frac: (0.5 - value) * 2 });
     return;
   }
   const hold = MIX_MIDI_HOLD.includes(name);
@@ -1195,6 +1388,13 @@ function mixMidiButton(deck, name, down) {
     }
     case 'sync': songSetMeta(deck, { sync: !s?.sync }); return;
     case 'keylock': songSetMeta(deck, { keylock: !s?.keylock }); return;
+    case 'quant': songSetMeta(deck, { quantize: s?.quantize === false }); return;
+    case 'loop': setDeckLoops(deck, !deckLoopsOn[deck]); return;
+    case 'temporange': {
+      const cur = mixState.deckTempo[deck].range;
+      deckTempoApply(deck, { range: DECK_TEMPO_RANGES[(DECK_TEMPO_RANGES.indexOf(cur) + 1) % DECK_TEMPO_RANGES.length] });
+      return;
+    }
     case 'mult':
       // The deck that set the clock has no ratio to choose - its tempo IS the clock, and the
       // on-screen button is disabled for it. The pad matches.
@@ -1224,6 +1424,7 @@ function applyMixTo(key) {
     if (!per?.has(name)) engine.setParam(tid, -1, name, value, 0);
   }
   for (const [name, value] of per ?? []) engine.setParam(tid, -1, name, value, 0);
+  fxApplyTo(key); // the FX unit's send is desk state like the rest - a new stem joins it live
 }
 
 // The crossfader as ONE control, server-side: position -1..1 (u is this deck's own 0..1 share)
@@ -1275,6 +1476,11 @@ function applyMixTargets(targets) {
         if (deckOfKey(key) === t.deck && !mixState.perTrack.get(key)?.has(name)) {
           engine.setParam(engineTrack(key), -1, name, value, 0);
         }
+      }
+      // The FX return rides its deck's gain and headphone cue (it IS that deck's wet), but
+      // never the EQ/filter broadcasts - those already shaped its input, over the sends.
+      if (fxTracksLive[t.deck] && (name === 'deck' || name === 'cue')) {
+        engine.setParam(engineTrack(FX_KEYS[t.deck]), -1, name, value, 0);
       }
     } else {
       const key = String(t.key ?? '');
@@ -1335,6 +1541,19 @@ function mixDeskBody() {
       master: transport ? transport.cps * 240 : null,
       override: mixState.tempoOverride,
     },
+    // The per-deck tempo sliders: throw, range, the % it works out to, and whether the slider
+    // is inert right now (a synced song following someone else's grid - lit SYNC on hardware).
+    deckTempo: Object.fromEntries(['a', 'b'].map((d) => [d, {
+      ...mixState.deckTempo[d],
+      pct: Math.round((deckTempoMult(d) - 1) * 1000) / 10,
+      locked: deckTempoLocked(d),
+      bpm: deckTempoBpm(d), // what the deck is running at - a livecode deck's is the clock
+    }])),
+    // The decks' loop toggles: whether each deck's arrangement loop regions are armed at all
+    // (see /api/arrangeLoops - DJ mode opens with both off, so songs run start to end).
+    loops: { ...deckLoopsOn },
+    // The FX unit, plus the chain list the picker and the step pads walk.
+    fx: { ...mixState.fx, chains: djFxChainNames() },
     link: linkState.enabled ? { peers: linkState.peers } : null,
     // The CLOCK itself, not just its bpm. The browser mirrors cycle position from this snapshot
     // (playback highlighting, the livecoded decks' bar/beat grid, the arrangement playhead), and
@@ -1360,6 +1579,12 @@ function mixDeskBody() {
         decoded: s.decoded,
         playing: s.playing,
         rate: s.rate,
+        // The rate WITHOUT the momentary gestures (sync stretch x the deck's tempo slider).
+        // What the pane scales its strip by: a nudge or a platter bend is a phase correction,
+        // not a tempo, so it has to SLIDE the waveform (which it does - the playhead moves
+        // faster) and must not rescale it. Scaling by `rate` made a held nudge zoom the view in
+        // and out by 4% under the finger.
+        baseRate: songBaseRate(d),
         posSec: s.posSec,
         startSec: s.startSec,
         bpm: s.bpm,
@@ -1371,6 +1596,7 @@ function mixDeskBody() {
         syncMultEffective: songOctave(d),
         master: d === songMasterDeck, // this song holds the clock - its ratio is pinned, so the button is grayed
         keylock: s.keylock,
+        quantize: s.quantize !== false, // the Q button: off = play answers the finger, not the grid
         nudge: s.nudge,
         // Confidence (0..1) when a fact is a phase 5 ESTIMATE rather than a tag/typed value -
         // the pane marks these; a manual edit clears them (see /api/song/meta).
@@ -1417,7 +1643,30 @@ function serveMixEvents(res) {
 // the conservative side for gain staging), framed to the same SSE clients as a NAMED event
 // ('level', so the desk-state onmessage path never sees it) at most every ~40ms - the two
 // decks' ~20/sec replies land as one combined frame.
+//
+// Each deck's entry is { p, r, b }: peak, rms, and the [low, mid, high] SHARE of its energy,
+// which is what colors its waveform strip the way a song deck's file-analyzed waveform is
+// colored. The bands arrive as a second reply from the same reader synth, so they are held here
+// and ride out on the next frame with the level they were measured beside.
 const deckLevels = { a: null, b: null };
+const deckBands = { a: null, b: null };
+
+/**
+ * Three band energies as a share of the total, two decimals - exactly the form wav.js's offline
+ * envelope pass produces for a FILE (see normalizeBands there), because one color function reads
+ * both and a deck's strip has to mean the same thing whichever kind of deck it is.
+ *
+ * Silence has no balance to report, and answers as that pass does: all mid, a neutral color
+ * rather than whatever a divide by zero would make of it. (A deck that has not been measured at
+ * all is a different thing, and stays null until its first frame.)
+ */
+function deckBandShare(low, mid, high) {
+  const vals = [low, mid, high].map((v) => (Number.isFinite(v) && v > 0 ? v : 0));
+  const total = vals[0] + vals[1] + vals[2];
+  if (total <= 1e-12) return [0, 1, 0];
+  return vals.map((v) => Math.round((v / total) * 100) / 100);
+}
+
 let deckLevelTimer = null;
 function deckLevelNotify() {
   if (!mixEventClients.size || deckLevelTimer) return;
@@ -1448,9 +1697,11 @@ function mixBirthFor(key) {
   for (const [name, value] of mixState.perDeck[deckOfKey(key)] ?? []) birth[name] = value;
   for (const [name, value] of mixState.perTrack.get(key) ?? []) birth[name] = value;
   // The crossfader's deck gains enter perDeck only when the fader MOVES - after eject/complete
-  // (or on a fresh desk) the maps are empty while xf sits at hard-A, and a track born then
-  // would wear the synthdef's deck=1: wide open on the silent side (reported 2026-08-25, a
-  // deck-b song audible through a closed crossfader). Derive the gain when no gesture has.
+  // (or on a fresh desk) the maps are empty while the desk sits at its home position, and a
+  // track born then would wear the synthdef's deck=1: wide open on the side that is meant to be
+  // silent (reported 2026-08-25, a deck-b song audible through a closed crossfader). Derive the
+  // gain when no gesture has - which is also what makes deck B's resting fader of 0 reach the
+  // tracks its first eval births.
   if (!('deck' in birth)) birth.deck = deckXfGain(deckOfKey(key)) * mixState.faders[deckOfKey(key)];
   // Which deck meter bus the synth sums its pre-fader signal into (see the scd's deckMeterBus)
   // - a birth arg like the rest, so a stem born mid-set meters from its first sample.
@@ -1467,6 +1718,305 @@ function neutralizeMix(key) {
   // Post-mix every surviving track is the main deck: meter on the A side (a promoted deck-b
   // track's synth was born with mdeck 1).
   engine.setParam(tid, -1, 'mdeck', 0, 0);
+}
+
+// ---------------------------------------------------------------------------------------------
+// The DJ FX unit: one named CHAIN of effects, written as ordinary poptart code, switched in as
+// an INSERT on each assigned deck.
+//
+// A chain is a line of chain code with its head left off - `.fx("Pro-C 2").param("Threshold",
+// fx1).fx("kHs Comb Filter").param("Cutoff", fx1.range(0.2, 0.4))` - and it is code rather than
+// a plugin name for the reason a player's FX knob is not a dry/wet: the knob has to reach
+// whatever the effect makes it reach, in that parameter's own units, and several parameters of
+// several plugins at once. `fx1` is the desk's knob as a signal (pattern-core's fxknob), so
+// anything a signal can do to a parameter - .range(), arithmetic, a patterned bound - it can do.
+//
+// WHERE IT RUNS. Each deck's tracks carry a dedicated post-EQ/filter send (fxOut/fxSend in the
+// track def) onto a named bus, read by a RETURN track ('#fx' / 'b:#fx') that the chain is
+// evaluated onto: `song` in the chain's scope is that bus. The return wears its deck's
+// crossfader gain, so the gain applies exactly once however the signal is routed. Switching the
+// unit in closes the deck's direct path by as much as it opens the send (see the insert note in
+// the track def), which is what makes a compressor or a comb filter behave - in parallel the
+// first does nothing and the second combs. The dry/wet is inside the chain instead: `.wet(fx1)`,
+// appended for you unless the chain says otherwise (`knobWet`), so the knob down is the deck
+// untouched and the knob up is the effect.
+//
+// The return tracks are real evaluated blocks with Schedulers of their own, which is what makes
+// every patterned thing in a chain work - fx1 and any lfo()/mini-notation in it are polled like
+// any other track's. They are deliberately NOT in `schedulers`: that map is what the eval sweep
+// prunes, what `othersPlaying` reads to decide who holds the grid and what the strip lists as
+// channels, and a desk-owned track belongs in none of those.
+//
+// The chains live in settings.djFx - global on purpose, so a chain written once is there in
+// every session, which is also why they need no starring.
+// ---------------------------------------------------------------------------------------------
+const FX_KEYS = { a: '#fx', b: 'b:#fx' }; // '#' can't appear in a block label - no collisions
+const FX_BUSES = { a: '#fxa', b: '#fxb' };
+const FX_ASSIGNS = ['a', 'ab', 'b'];
+const fxTracksLive = { a: false, b: false };
+const fxSchedulers = { a: null, b: null };
+
+function djFxSettings() {
+  if (!settings.djFx) settings.djFx = { chains: {} };
+  settings.djFx.chains ??= {};
+  delete settings.djFx.plugins; // retired: a chain is in the list by existing, so nothing is starred
+  delete settings.djFx.presets; // retired: plugin state is pinned INTO a chain's own code
+  return settings.djFx;
+}
+
+/** The chains, as the desk lists them: names in the order they were written. */
+const djFxChainNames = () => Object.keys(djFxSettings().chains);
+
+// Every blob a chain's code references (a pinned `.preset("@…")` state), bare - handed to every
+// blob sweep's alsoKeep. No pattern file mentions these, and a swept one would leave a chain
+// loading a plugin with nobody's settings.
+const djFxBlobIds = () => Object.values(settings.djFx?.chains ?? {})
+  .flatMap((c) => [...blobs.referencedIds(String(c?.code ?? ''))]);
+
+/** Is the unit sounding - a chain loaded and a pad down (latched or held)? */
+const fxSounding = () => !!mixState.fx.chain && (mixState.fx.on || mixState.fx.held);
+
+// How far the unit is switched in, per deck: all the way on an assigned deck while it sounds,
+// else not at all. A LEVEL rather than a boolean because the track def crossfades the direct
+// path against it, lagged, so this is also what makes switching in and out click-free.
+function fxSendLevels() {
+  const on = fxSounding();
+  const { assign } = mixState.fx;
+  return {
+    a: on && assign.includes('a') ? 1 : 0,
+    b: on && assign.includes('b') ? 1 : 0,
+  };
+}
+
+/** Point one (possibly just-created) track's FX send where the unit wants it. */
+function fxApplyTo(key) {
+  const deck = deckOfKey(key);
+  if (!engine || !fxTracksLive[deck]) return;
+  engine.setFxSend(engineTrack(key), FX_BUSES[deck], fxSendLevels()[deck]);
+}
+
+/** Re-point every channel's send - what a pad or an assign flip means engine-side. */
+function fxApplySends() {
+  if (!engine) return;
+  const levels = fxSendLevels();
+  for (const key of mixKeys()) {
+    const deck = deckOfKey(key);
+    if (fxTracksLive[deck]) engine.setFxSend(engineTrack(key), FX_BUSES[deck], levels[deck]);
+  }
+}
+
+// The return track, created on first use: born wearing ONLY the deck gain, the deck's
+// headphone-cue state and the meter side - never the EQ/filter broadcasts, which already shaped
+// what reaches it (the signal must not be EQed twice). applyMixTargets keeps `deck` and `cue`
+// current on it.
+function fxEnsureTrack(deck) {
+  const tid = claimEngineTrack(FX_KEYS[deck]);
+  if (!fxTracksLive[deck]) {
+    mappedEngine.createTrack(tid, {
+      deck: deckXfGain(deck) * mixState.faders[deck],
+      cue: mixState.perDeck[deck].get('cue') ?? 0,
+      mdeck: deck === 'b' ? 1 : 0,
+    });
+    fxTracksLive[deck] = true;
+  }
+  return tid;
+}
+
+/**
+ * Build one deck's return Sig from a chain's code: `song` + the code, evaluated with the desk's
+ * knob bound as `fx1` and the ★ library in scope (so a chain may name a `.preset()` like any
+ * other code). `song` is the deck's FX bus, which is what makes the chain an insert on that
+ * deck without the code having to say where it is.
+ *
+ * Throws on bad code with the chain's own message - the caller reports it and leaves the unit
+ * where it was, so a half-written chain cannot take the desk down mid-set.
+ */
+function fxBuildSig(deck, code) {
+  const evalBlock = makeBlockEvaluator(new Map(prebakeDefs), {
+    ...HOST_BUILDERS,
+    // `song` is the grayed-out head the editor shows: the deck, as a signal.
+    song: patternCore.audio(`bus:${FX_BUSES[deck]}`),
+    ...fxKnobBuilders(),
+  });
+  const sig = evalBlock(`song${code}`);
+  if (!(sig instanceof patternCore.Sig)) {
+    throw new Error('an FX chain has to end up a chain - start it with .fx("…") and keep it one expression');
+  }
+  return sig;
+}
+
+// The knob signals an FX chain is written against: `fx1` (and whatever else the bank grows to).
+// Bound by name the way the Macros panel's knobs are (see macroSigNames).
+function fxKnobBuilders() {
+  const out = {};
+  for (let i = 1; i <= patternCore.FX_KNOB_COUNT; i++) out[`fx${i}`] = patternCore.fxknob(i);
+  return out;
+}
+/** The names a chain may use for the desk's knobs - what the editor's autocomplete offers. */
+const fxKnobNames = () => Object.keys(fxKnobBuilders());
+
+/**
+ * Load a chain onto both decks (or clear the unit with a null name). Both decks always carry it,
+ * so `assign` is routing rather than a plugin load - flipping it mid-set costs nothing and makes
+ * no sound. A chain is built, then applied: if its code throws, neither deck is touched.
+ *
+ * Async for one reason: a chain's code holds captured plugin states as `@handle` references
+ * (that is what keeps settings.json small), and hydrating them is a disk read.
+ */
+async function fxLoadChain(name) {
+  if (!engine || !mappedEngine) throw new Error(engineError ?? 'engine not loaded');
+  const chain = name == null ? null : djFxSettings().chains[String(name)];
+  if (name != null && !chain) throw new Error(`mix/fx: no FX chain called ${JSON.stringify(String(name))}`);
+  if (!chain) {
+    for (const deck of ['a', 'b']) {
+      fxSchedulers[deck]?.stop();
+      fxSchedulers[deck] = null;
+    }
+    mixState.fx.chain = null;
+    // Nothing to insert: every send parks, so the decks' direct paths open again.
+    fxApplySends();
+    mixNotify();
+    return null;
+  }
+  // `.wet(fx1)` unless the chain opted out: the knob is the unit's dry/wet as well as whatever
+  // the code aims it at, which is the default a player's FX knob sets up. Appended to the LAST
+  // slot the chain loaded, which is the unit's output.
+  const { code: hydrated, missing } = await blobs.hydrate(String(chain.code ?? ''));
+  if (missing?.length) {
+    eventLogQueue.push(`[fx] chain "${name}": ${missing.length} pinned plugin state(s) are gone from the store - those plugins load at their defaults`);
+  }
+  const code = chain.knobWet === false ? hydrated : `${hydrated}.wet(fx1)`;
+  const sigs = { a: fxBuildSig('a', code), b: fxBuildSig('b', code) }; // both first - see above
+  for (const deck of ['a', 'b']) {
+    const tid = fxEnsureTrack(deck);
+    mappedEngine.setChain(tid, [sigs[deck].instrument, ...sigs[deck].fxChain]);
+    let sch = fxSchedulers[deck];
+    if (!sch) {
+      sch = new patternCore.Scheduler(mappedEngine, { transport, trackId: tid, label: FX_KEYS[deck] });
+      fxSchedulers[deck] = sch;
+    }
+    sch.setPattern(sigs[deck]);
+    if (!sch.running) sch.start();
+  }
+  mixState.fx.chain = String(name);
+  fxApplySends();
+  mixNotify();
+  return mixState.fx.chain;
+}
+
+/**
+ * One FX-unit gesture - the endpoint and every fx MIDI pad go through here. Partial on purpose:
+ * only the keys present move, so the knob streams without restating the pads. Deliberately SYNC:
+ * loading a chain is the one async part and has its own call (fxLoadChain), so a knob arriving
+ * at MIDI rate never waits on a disk read.
+ */
+function mixFxSet({ on, held, knob, assign } = {}) {
+  if (!engine || !mappedEngine) throw new Error(engineError ?? 'engine not loaded');
+  if (on !== undefined) mixState.fx.on = !!on;
+  if (held !== undefined) mixState.fx.held = !!held;
+  if (knob !== undefined) {
+    const v = Number(knob);
+    if (!Number.isFinite(v) || v < 0 || v > 1) throw new Error('mix/fx: knob must be 0..1');
+    mixState.fx.knob = v;
+    // The chain reads this as `fx1` on its next poll (~30ms) - no engine traffic from here.
+    patternCore.setFxKnob(1, v);
+  }
+  if (assign !== undefined) {
+    if (!FX_ASSIGNS.includes(assign)) throw new Error("mix/fx: assign must be 'a', 'ab' or 'b'");
+    mixState.fx.assign = assign;
+  }
+  fxApplySends();
+  mixNotify();
+  return { ...mixState.fx };
+}
+
+/** Step the unit through the chain list (the fxnext/fxprev pads). */
+function mixFxStep(dir) {
+  const list = djFxChainNames();
+  if (!list.length) throw new Error('no FX chains yet - write one in the desk\'s FX editor');
+  const at = list.indexOf(mixState.fx.chain);
+  const next = list[((at < 0 ? (dir > 0 ? -1 : 0) : at) + dir + list.length) % list.length];
+  return fxLoadChain(next);
+}
+
+/**
+ * A plugin window opened from a chain was edited: capture its program and pin it into the
+ * CHAIN'S OWN CODE, since that code is where this plugin's settings live (the auto-pin writer
+ * works on the editor's buffer, and a chain is not in it - see handlePluginEdited).
+ *
+ * Returns true for a chain's track, which is what tells handlePluginEdited to keep its hands
+ * off. Debounced: a knob swept in a plugin window should cost one capture, not forty.
+ */
+let fxCaptureTimer = null;
+function fxMirrorEdit(key) {
+  const deck = key === FX_KEYS.a ? 'a' : key === FX_KEYS.b ? 'b' : null;
+  if (!deck || !mixState.fx.chain) return !!deck;
+  clearTimeout(fxCaptureTimer);
+  fxCaptureTimer = setTimeout(() => {
+    fxCaptureTimer = null;
+    fxPinState(deck).catch((err) => eventLogQueue.push(`[fx] pinning the edit failed: ${err?.message ?? err}`));
+  }, 800);
+  return true;
+}
+
+/**
+ * Capture every plugin in the loaded chain on `deck` and write the states into the chain's code
+ * as `.state("@…")` arguments, so reopening the session brings the sound back. Deck A's
+ * instances are the ones read (both carry the same chain; the edit is mirrored by the re-load).
+ */
+async function fxPinState(deck = 'a') {
+  const name = mixState.fx.chain;
+  const chain = name && djFxSettings().chains[name];
+  if (!chain || !fxTracksLive[deck] || !mappedEngine) return null;
+  const tid = engineTrack(FX_KEYS[deck]);
+  const sig = fxSchedulers[deck]?.pattern;
+  const states = [];
+  for (let slot = 1; slot <= (sig?.fxChain?.length ?? 0); slot++) {
+    // eslint-disable-next-line no-await-in-loop
+    const state = await mappedEngine.getPluginState(tid, slot);
+    // eslint-disable-next-line no-await-in-loop
+    states.push(state ? await blobs.putBlob(state) : null);
+  }
+  const written = fxWriteStates(chain.code, states);
+  if (written === chain.code) return null;
+  chain.code = written;
+  saveSettings();
+  await fxLoadChain(name); // the chain's code changed - rebuild both decks from it
+  return written;
+}
+
+// `.fx("Name")` / `.fx("Name", { state: "@id" })` -> the same call carrying `states[i]`. One
+// regex pass in chain order, so slot N's capture lands on the Nth .fx() call however the chain
+// is spaced. A null capture leaves its call exactly as it was.
+function fxWriteStates(code, states) {
+  let i = 0;
+  return String(code).replace(/\.fx\(\s*(["'])((?:\\.|(?!\1).)*)\1\s*(?:,\s*\{[^}]*\}\s*)?\)/g, (whole, q, plugin) => {
+    const handle = states[i++];
+    if (!handle) return whole;
+    return `.fx(${q}${plugin}${q}, { state: ${JSON.stringify(handle)} })`;
+  });
+}
+
+// Leaving DJ mode (eject / complete): park every channel's send, stop the chains, drop the
+// return tracks and quiet the pads. The chains themselves survive in settings - they are what
+// makes the unit the same unit next session.
+function fxTeardown() {
+  if (engine) {
+    for (const key of mixKeys()) {
+      try { engine.setFxSend(engineTrack(key), '', 0); } catch { /* engine between restarts */ }
+    }
+  }
+  for (const deck of ['a', 'b']) {
+    fxSchedulers[deck]?.stop();
+    fxSchedulers[deck] = null;
+    if (fxTracksLive[deck]) {
+      fxTracksLive[deck] = false;
+      dropTrack(FX_KEYS[deck]);
+    }
+  }
+  mixState.fx.chain = null;
+  mixState.fx.on = false;
+  mixState.fx.held = false;
 }
 
 // The "trackId|..."-keyed lease/capture maps, re-keyed or dropped together when a track changes
@@ -2328,6 +2878,18 @@ async function restartEngine(reason = 'unspecified') {
     mixArmedIds = '';
     mixLevels.clear();
     mixSpecs.clear();
+    // The FX unit's return tracks died with the old scsynth too: stop their schedulers (which
+    // would go on polling a track that no longer exists), forget the tracks - the sends died
+    // with the tracks that carried them - and quiet the pads. Picking a chain again is what
+    // rebuilds the unit against the fresh engine.
+    for (const d of ['a', 'b']) {
+      fxSchedulers[d]?.stop();
+      fxSchedulers[d] = null;
+      fxTracksLive[d] = false;
+    }
+    mixState.fx.on = false;
+    mixState.fx.held = false;
+    mixState.fx.chain = null;
     transport?.stop(); // playback is over - freeze the clock at cycle 0 until the next eval
     // Drop the shared references BEFORE the teardown, not after it. Everything that reaches for
     // `engine` outside a request - the VST transport re-sync on its 4s timer, the recorder ticks -
@@ -2470,13 +3032,21 @@ function wireEngine() {
   engine.onMixLevel = (key, peakL, rmsL, peakR, rmsR) => handleMixLevel(trackLabel(key), peakL, rmsL, peakR, rmsR);
   engine.onMixSpec = (key, values) => handleMixSpec(trackLabel(key), values); // "*" (master) has no label and passes through
   // The strip's channel meters (see deckLevelNotify): fold each ~20/sec reply to one
-  // conservative mono figure per deck and push over the desk SSE stream.
+  // conservative mono figure per deck and push over the desk SSE stream, carrying whichever
+  // band reading came with it.
   engine.onDeckLevel = (deck, peakL, rmsL, peakR, rmsR) => {
-    deckLevels[deck === 1 ? 'b' : 'a'] = {
+    const d = deck === 1 ? 'b' : 'a';
+    deckLevels[d] = {
       p: Math.max(peakL, peakR),
       r: Math.max(rmsL, rmsR),
+      b: deckBands[d],
     };
     deckLevelNotify();
+  };
+  // ...and the band energies behind each frame's color. Held rather than framed: they arrive as
+  // their own reply, and the level is what decides when a frame goes out.
+  engine.onDeckBands = (deck, low, mid, high) => {
+    deckBands[deck === 1 ? 'b' : 'a'] = deckBandShare(low, mid, high);
   };
   // An engine restart mid-DJ-session: the strip's SSE clients are still connected (EventSource
   // rides out the gap), so the fresh engine's readers must be re-armed here.
@@ -2713,6 +3283,24 @@ const HOST_BUILDERS = { setbpm, setscale, setgroove, samples };
 // doesn't forget which loop the playhead is in; an eval that changes the regions builds the new
 // clock where the old one stands (ArrangeClock#rebuilt). Null while the deck has no arrangement.
 const arrangeClocks = { a: null, b: null };
+
+// Whether each deck's arrangement loop regions are armed AT ALL - the DJ decks' loop toggle
+// (/api/arrangeLoops, the deck head's loop button, the `loop` pad). Off, the song runs straight
+// to its end and the deck stops there, the way an audio deck does; on again re-arms every
+// region ahead of the playhead (ArrangeClock#setLoops). DJ mode opens with both OFF and leaving
+// it puts them back on - outside a mix a fresh song looping over itself is the whole workflow.
+const deckLoopsOn = { a: true, b: true };
+
+function setDeckLoops(deck, on) {
+  deckLoopsOn[deck] = on !== false;
+  const clock = arrangeClocks[deck];
+  if (clock) {
+    const cycle = transport && engine && !transport.paused ? transport.cycleAt(engine.getTime()) : 0;
+    clock.setLoops(deckLoopsOn[deck], cycle);
+  }
+  mixNotify();
+  return deckLoopsOn[deck];
+}
 
 /** Is any of this deck's pattern tracks playing? */
 function deckRunning(deck) {
@@ -4212,6 +4800,9 @@ let autoPinTimer = null;
 let autoPinRun = null; // the capture pass in flight, so a flush can wait for it instead of racing
 
 function handlePluginEdited(trackId, slot) {
+  // The DJ FX unit's returns are nobody's pattern: an edit there is mirrored to the twin deck's
+  // instance (see fxMirrorEdit) and must never reach the auto-pin capture machinery.
+  if (fxMirrorEdit(trackId)) return;
   const key = markSlotDirty(trackId, slot, false);
   // Frozen from the GESTURE, not from the capture: the swap that would overwrite this edit can come
   // round long before the debounce has even fired (see the hand-editing section). A speculative
@@ -4415,7 +5006,7 @@ function schedulePrune() {
     // but pointless.
     Promise.resolve(expireWipSessions())
       .then(() => pruneSnapshots())
-      .then(() => blobs.sweepBlobs({ scanDirs: [WIP_DIR, SNAPSHOT_DIR, PREBAKE_DIR, snippets.SNIPPETS_DIR], alsoKeep: [...liveStateIds.a, ...liveStateIds.b] }))
+      .then(() => blobs.sweepBlobs({ scanDirs: [WIP_DIR, SNAPSHOT_DIR, PREBAKE_DIR, snippets.SNIPPETS_DIR], alsoKeep: [...liveStateIds.a, ...liveStateIds.b, ...djFxBlobIds()] }))
       .then(({ deleted, freed }) => {
         if (deleted) console.log(`[poptart] released ${deleted} captured plugin state(s), ${(freed / 1048576).toFixed(1)}MB`);
       })
@@ -5110,9 +5701,10 @@ const routes = {
       if (arrangeClocks[deck]?.key !== clockKey) {
         arrangeClocks[deck] = arrangeClocks[deck]
           ? arrangeClocks[deck].rebuilt({ regions }, nowCycle)
-          : new patternCore.ArrangeClock({ regions });
+          : new patternCore.ArrangeClock({ regions, loopsOn: deckLoopsOn[deck] });
         arrangeClocks[deck].key = clockKey;
       }
+      arrangeClocks[deck].setLoops(deckLoopsOn[deck], nowCycle); // the deck's loop toggle outlives any one clock
       arrangeClocks[deck].setEnd(songEnd);
       arrangeClips[deck] = clips; // what a clips() track plays by, until the next evaluation
       const clock = arrangeClocks[deck];
@@ -5298,7 +5890,8 @@ const routes = {
         if (holdKey.slice(0, holdKey.lastIndexOf('|')) === key) sch.holdChannel(held.name, held.value);
       }
       // The mix session's DJ-stage values (see mixState): a track (re)created into a live mix
-      // must come up wearing them - this is what makes a queued deck's tracks arrive silent.
+      // must come up wearing them, so an incoming deck arrives at the desk as it stands rather
+      // than at full level.
       // Already-live tracks get a re-assert; a NEW track had its values baked into its birth
       // args above, and this is a harmless no-op while it builds.
       applyMixTo(key);
@@ -5423,6 +6016,15 @@ const routes = {
     if (!clock || !engine || !transport) return { status: 200, body: { released: null, arrange: clock?.snapshot() ?? null } };
     const released = clock.release(transport.cycleAt(engine.getTime()));
     return { status: 200, body: { released, arrange: clock.snapshot() } };
+  },
+
+  // The deck's loop toggle: are the arrangement's loop regions armed at all? Body: { deck, on }.
+  // Off, the song plays straight to its end and the deck stops there; on re-arms every region
+  // ahead of the playhead. DJ mode opens with both decks OFF (see /api/mix's `loops`).
+  'POST /api/arrangeLoops': async (body) => {
+    const deck = body?.deck === 'b' ? 'b' : 'a';
+    const on = setDeckLoops(deck, !!body?.on);
+    return { status: 200, body: { deck, on, arrange: arrangeClocks[deck]?.snapshot() ?? null } };
   },
 
   // Body: { id, notes, opts } - re-files one roll definition from the piano roll panel while a
@@ -6181,29 +6783,112 @@ const routes = {
     return { status: 200, body: { learned } };
   },
 
-  // Tempo migration: move the shared clock (all decks, one Transport) toward a bpm - instantly
-  // (the slider ride) or as a glide over `seconds` (the detent buttons). Body: { bpm, seconds? }
-  // or { deck: 'a'|'b', seconds? } to target that deck's native tempo. Cycle position stays
-  // continuous through the whole ramp (Transport#rampBpm rebases every step) - nothing jumps,
-  // nothing re-triggers, multi-cycle structures keep their phase. Ephemeral like the rest of
-  // the desk: from the first touch, song-code setbpm stops driving the clock (see mixState).
-  'POST /api/mix/tempo': async (body) => {
+  // A deck's tempo slider / range switch (see deckTempoApply for what it drives per deck kind).
+  // Body: { deck, frac? (-1..1, + = faster), range? (6|10|16|100) }.
+  'POST /api/mix/decktempo': async (body) => {
     if (!transport) throw new Error(engineError ?? 'engine not loaded');
-    let bpm = Number(body.bpm);
-    if (body.deck === 'a' || body.deck === 'b') {
-      const native = deckNativeBpm(body.deck); // 120 when the deck's track specifies nothing
-      if (native == null) {
-        throw new Error(`deck ${body.deck}'s tempo is signal-driven - no single native bpm to migrate to`);
+    const deck = body.deck === 'b' ? 'b' : 'a';
+    return { status: 200, body: deckTempoApply(deck, body) };
+  },
+
+  // The DJ FX unit's live controls. Body, all optional: { chain (a chain's name, or null to
+  // clear the unit), on, held, knob (0..1 - the chain's `fx1`), assign ('a'|'ab'|'b'),
+  // editor (a 1-based slot, or true for the first: opens that plugin's own window) }.
+  'POST /api/mix/fx': async (body) => {
+    if (body.chain !== undefined && body.chain !== mixState.fx.chain) await fxLoadChain(body.chain);
+    const out = mixFxSet(body);
+    if (body.editor) {
+      // The window opens on deck A's instance unless the unit is assigned to B alone. Whatever
+      // is edited there is captured and pinned into the chain's own code (see fxMirrorEdit),
+      // then rebuilt onto both decks - so the two never drift apart.
+      if (!mixState.fx.chain) throw new Error('mix/fx: no chain on the unit to edit');
+      const deck = mixState.fx.assign === 'b' ? 'b' : 'a';
+      const slots = fxSchedulers[deck]?.pattern?.fxChain?.length ?? 0;
+      const slot = body.editor === true ? 1 : Number(body.editor);
+      if (!Number.isInteger(slot) || slot < 1 || slot > slots) {
+        throw new Error(`mix/fx: this chain has ${slots} effect${slots === 1 ? '' : 's'} - there is no slot ${slot}`);
       }
-      bpm = native;
+      engine.showPluginEditor(engineTrack(FX_KEYS[deck]), slot);
     }
-    if (!Number.isFinite(bpm) || bpm < 20 || bpm > 400) throw new Error('mix/tempo: bpm must be 20..400');
-    const seconds = Math.min(600, Math.max(0, Number(body.seconds) || 0));
-    const from = transport.cps * 240;
-    mixState.tempoOverride = bpm;
-    transport.rampBpm(bpm, seconds);
-    mixNotify();
-    return { status: 200, body: { from, bpm, seconds } };
+    return { status: 200, body: { ...out, chains: djFxChainNames() } };
+  },
+
+  // The FX chains themselves - global by design: a chain written once is in the desk's list in
+  // every session. Body:
+  //   { save: "name", code, knobWet? }  write (or rewrite) a chain. `code` is chain code with
+  //                                     its head left off (".fx(…)…"); `song` is prepended when
+  //                                     it is built, and `.wet(fx1)` appended unless knobWet is
+  //                                     false. Saving the loaded chain reloads it.
+  //   { rename: "old", to: "new" }      keep the code, change the name.
+  //   { remove: "name" }                forget it (and clear the unit if it was loaded).
+  // A save COMPILES the code first and refuses a chain that doesn't build, so a broken chain is
+  // a message in the editor rather than a unit that dies when its pad is pressed mid-set.
+  'POST /api/mix/fxchain': async (body) => {
+    if (!engine || !mappedEngine) throw new Error(engineError ?? 'engine not loaded');
+    const djFx = djFxSettings();
+    if (body.save != null) {
+      const name = String(body.save).trim();
+      if (!name) throw new Error('fxchain: the chain needs a name');
+      const code = String(body.code ?? '').trim();
+      if (!code) throw new Error('fxchain: the chain needs some code - start it with .fx("…")');
+      if (!code.startsWith('.')) throw new Error('fxchain: the code continues `song`, so it starts with a dot - e.g. .fx("Pro-C 2")');
+      const knobWet = body.knobWet !== false;
+      // Compile it (both the code as written and what the unit will actually build) before it is
+      // allowed into the settings file.
+      const { code: hydrated } = await blobs.hydrate(code);
+      fxBuildSig('a', knobWet ? `${hydrated}.wet(fx1)` : hydrated);
+      const { code: stored } = await blobs.dehydrate(code); // inline states -> @handles
+      djFx.chains[name] = { code: stored, knobWet };
+      saveSettings();
+      if (mixState.fx.chain === name) await fxLoadChain(name); // the loaded chain just changed
+      else mixNotify();
+      return { status: 200, body: { saved: name, chains: djFxChainNames() } };
+    }
+    if (body.rename != null) {
+      const from = String(body.rename);
+      const to = String(body.to ?? '').trim();
+      if (!djFx.chains[from]) throw new Error(`fxchain: no chain called ${JSON.stringify(from)}`);
+      if (!to) throw new Error('fxchain: the new name cannot be empty');
+      if (to !== from && djFx.chains[to]) throw new Error(`fxchain: there is already a chain called ${JSON.stringify(to)}`);
+      if (to !== from) {
+        djFx.chains[to] = djFx.chains[from];
+        delete djFx.chains[from];
+        if (mixState.fx.chain === from) mixState.fx.chain = to;
+        saveSettings();
+      }
+      mixNotify();
+      return { status: 200, body: { renamed: to, chains: djFxChainNames() } };
+    }
+    if (body.remove != null) {
+      const name = String(body.remove);
+      if (!djFx.chains[name]) throw new Error(`fxchain: no chain called ${JSON.stringify(name)}`);
+      delete djFx.chains[name];
+      saveSettings();
+      if (mixState.fx.chain === name) await fxLoadChain(null);
+      else mixNotify();
+      return { status: 200, body: { removed: name, chains: djFxChainNames() } };
+    }
+    throw new Error('fxchain: nothing to do - pass save, rename or remove');
+  },
+
+  // One chain's code, for the editor: hydrated, so the modal holds what the plugins are actually
+  // set to, and the names a chain may use. Query: { name } (omitted = the loaded one).
+  'GET /api/mix/fxchain': async (query) => {
+    const djFx = djFxSettings();
+    const name = query?.name != null ? String(query.name) : mixState.fx.chain;
+    const chain = name == null ? null : djFx.chains[name];
+    const { code } = chain ? await blobs.hydrate(String(chain.code ?? '')) : { code: '' };
+    return {
+      status: 200,
+      body: {
+        name: chain ? name : null,
+        code,
+        knobWet: chain ? chain.knobWet !== false : true,
+        chains: djFxChainNames(),
+        knobs: fxKnobNames(), // what `fx1`… are called in a chain's scope
+        head: 'song', // the grayed-out head the editor shows before the code
+      },
+    };
   },
 
   // Set DJ-stage controls, ephemerally (never into code). Body: one { name, value, key? | deck? }
@@ -6331,6 +7016,7 @@ const routes = {
   // forgotten, and the performance state resets: deck a comes back to a clean desk.
   'POST /api/mix/eject': async () => {
     if (!mappedEngine) throw new Error(engineError ?? 'engine not loaded');
+    fxTeardown(); // park every FX send and drop the unit's return tracks (both decks')
     songUnload('b'); // the queued song goes with its deck; the track dies in the sweep below
     for (const [key, sch] of [...schedulers]) {
       if (deckOfKey(key) !== 'b') continue;
@@ -6343,7 +7029,9 @@ const routes = {
     mixState.perDeck.a.clear();
     mixState.perDeck.b.clear();
     mixState.perTrack.clear();
-    mixState.xf = -1; // desk home: the next mix session re-arms from hard-A
+    // Desk home: the next session opens with the crossfader centered and both channel faders
+    // up (see mixState).
+    mixState.xf = 0;
     mixState.faders = { a: 1, b: 1 };
     if (mixState.tempoOverride != null) {
       mixState.tempoOverride = null;
@@ -6354,6 +7042,9 @@ const routes = {
       else if (deckNativeBpm('a') != null) transport?.rampBpm(deckNativeBpm('a'), 2);
     }
     for (const key of mixAllKeys()) neutralizeMix(key);
+    mixState.deckTempo = { a: { frac: 0, range: 6 }, b: { frac: 0, range: 6 } };
+    setDeckLoops('a', true); // outside a mix, loop regions are the workflow again
+    setDeckLoops('b', true);
     decks.b = { scale: null, bpm: null, groove: null };
     liveStateIds.b = new Set();
     patternCore.clearRolls('buffer', 'b');
@@ -6371,6 +7062,7 @@ const routes = {
     if (!mappedEngine) throw new Error(engineError ?? 'engine not loaded');
     const promoted = [...schedulers.keys()].filter((k) => deckOfKey(k) === 'b');
     if (!promoted.length) throw new Error('deck b has nothing playing - nothing to promote');
+    fxTeardown(); // park every FX send and drop the unit's return tracks (both decks')
     songUnload('a'); // the outgoing song (if any) goes with its deck...
     for (const [key, sch] of [...schedulers]) {
       if (deckOfKey(key) !== 'a') continue;
@@ -6401,11 +7093,18 @@ const routes = {
     mixState.perDeck.a.clear();
     mixState.perDeck.b.clear();
     mixState.perTrack.clear();
-    mixState.xf = -1; // desk home: the next mix session re-arms from hard-A
+    // Desk home: the next session opens with the crossfader centered and both channel faders
+    // up (see mixState).
+    mixState.xf = 0;
     mixState.faders = { a: 1, b: 1 };
     // The promoted song's declared tempo takes over on the client's promotion re-eval (override
     // gone, its setbpm drives again) - a no-op when the migration already landed on its native.
     mixState.tempoOverride = null;
+    mixState.deckTempo = { a: { frac: 0, range: 6 }, b: { frac: 0, range: 6 } };
+    // The promoted deck's loop flag travels with its song: it is deck A now, and leaving DJ
+    // mode re-arms the regions either way - the next session opens with them off again.
+    setDeckLoops('a', true);
+    setDeckLoops('b', true);
     for (const key of mixAllKeys()) neutralizeMix(key);
     mixNotify();
     return { status: 200, body: { promoted: promoted.map((k) => k.slice(k.indexOf(':') + 1)) } };
@@ -6416,10 +7115,10 @@ const routes = {
   // Load a file onto a deck's song track, replacing whatever song it held. Body: { deck, path,
   // bpm?, title?, key? }. wav/aiff/flac/mp3 load directly; m4a/aac/caf go through the afconvert
   // cache (~/.poptart/cache/songs). The track is created (or reused) wearing the desk's current
-  // state, so a song queued onto deck b arrives silent exactly like a queued pattern deck.
+  // state, so a song queued onto deck b arrives at the desk exactly like a queued pattern deck.
   // The song's native bpm - the playlist item's if it says, the file's own tags otherwise
   // (ID3 TBPM/TKEY, vorbis comments, mp4 tmpo - see song-tags.js) - feeds decks[].bpm, which is
-  // what lets /api/mix/tempo migrate toward it; rate-lock (sync) defaults on when it's known.
+  // what its pitch fader rides around; rate-lock (sync) defaults on when it's known.
   // Everything stays editable via /api/song/meta.
   'POST /api/song/load': async (body) => {
     if (!engine || !mappedEngine) throw new Error(engineError ?? 'engine not loaded');
@@ -6460,14 +7159,17 @@ const routes = {
       sync: bpm != null,
       syncMult: 'auto', // tempo octave for sync: 'auto' | 0.5 | 1 | 2 (see songSync.syncOctave)
       keylock: false,
-      manualRate: 1,
+      quantize: true, // the Q button: starts wait for the grid until this is turned off
+      manualRate: deckTempoMult(deck), // the deck's tempo slider has a position; a loaded track wears it
       nudge: 0,
+      bend: 0,
       servo: 0,
       cueSec: 0, // the CUE gesture's home (see songCue) - the top until a press while paused moves it
       cueHeld: false,
     };
     decks[deck].bpm = bpm; // null included: an untagged song reads as the 120 default, never the previous track's
     songApplyRate(deck); // not playing: just settles s.rate so the pane's readout is honest
+    fxApplyTo(key); // the FX unit's send is desk state - a fresh song track joins it like a stem
     mixNotify();
     songDetectKick(deck); // fire-and-forget: fills any fact still missing, once analyzed (phase 5)
     return {
@@ -6821,7 +7523,7 @@ const routes = {
     saveSettings();
     const { deleted, freed } = months > 0 ? pruneWipSessions(months) : { deleted: 0, freed: 0 };
     // The states those sessions were holding alive can go with them, if nothing else names them.
-    const swept = await blobs.sweepBlobs({ scanDirs: [WIP_DIR, SNAPSHOT_DIR, PREBAKE_DIR, snippets.SNIPPETS_DIR], alsoKeep: [...liveStateIds.a, ...liveStateIds.b] });
+    const swept = await blobs.sweepBlobs({ scanDirs: [WIP_DIR, SNAPSHOT_DIR, PREBAKE_DIR, snippets.SNIPPETS_DIR], alsoKeep: [...liveStateIds.a, ...liveStateIds.b, ...djFxBlobIds()] });
     return { status: 200, body: { months, deleted, freed: freed + swept.freed } };
   },
 

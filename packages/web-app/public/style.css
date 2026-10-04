@@ -4764,6 +4764,10 @@ body.mix-on #deckAHead .deck-song {
   background: var(--bg-panel);
   border-color: var(--border);
 }
+.deck-loop.on {
+  color: var(--accent);
+  border-color: var(--accent);
+}
 
 #mixStrip {
   display: flex;
@@ -5025,10 +5029,6 @@ body.mix-on #deckAHead .deck-song {
   --cap-h: 24px;
   --groove: 6px;
 }
-#mixTempoSlider {
-  --cap-w: 10px;
-  --cap-h: 20px;
-}
 /* The per-stem mini-faders: a hand-sized cap on a slot that takes the width the row has. */
 .mix-ctl {
   --cap-w: 12px;
@@ -5040,6 +5040,136 @@ body.mix-on #deckAHead .deck-song {
 .mix-actions {
   display: flex;
   gap: 6px;
+}
+/* The FX unit: three compact rows between the crossfader and the action buttons. Everything
+   fixed-width or ellipsized, so neither a long plugin name nor the pad lighting can widen the
+   desk's center column. The depth knob is an ordinary mix-knob. */
+.mix-fx {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 180px; /* the crossfader's width - the center column's one agreed measure */
+}
+.mix-fx-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.mix-fx-row select {
+  flex: 1;
+  min-width: 0;
+  text-overflow: ellipsis;
+}
+.mix-fx-name {
+  flex: 1;
+  min-width: 0;
+}
+.mix-fx-on {
+  min-width: 40px;
+  text-align: center;
+}
+.mix-fx-on.on,
+#mixFxStar.on {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.mix-fx-assign {
+  min-width: 58px;
+  text-align: center;
+}
+.mix-fx-knob {
+  display: inline-flex;
+  justify-content: center;
+  flex: none;
+}
+
+/* --- the FX chain editor: a modal that is a real editor (see openFxEditor) --- */
+#fxEdModal {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: color-mix(in srgb, var(--bg) 70%, transparent);
+}
+/* An ID's `display: flex` outranks the `.hidden` class, so the hidden state has to be said at
+   the same specificity - as #askModal's is. Without it the panel is up on every page load,
+   before anything has wired its close button (see fxEditorBuild). */
+#fxEdModal.hidden {
+  display: none;
+}
+#fxEdPanel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: min(820px, 92vw);
+  max-height: 80vh;
+  padding: 10px 12px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--bg-panel);
+  box-shadow: 0 8px 32px var(--shadow);
+}
+/* Scoped, like every other panel here - there is no global .hidden utility, and `button.small`
+   outranks a bare class anyway. Without this the delete button is up on a chain that does not
+   exist yet (openFxEditor hides it by class). */
+#fxEdPanel .hidden {
+  display: none;
+}
+.fx-ed-head,
+.fx-ed-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.fx-ed-name {
+  width: 220px;
+}
+/* The code row: the grayed head, then the editor taking the rest. */
+.fx-ed-body {
+  display: flex;
+  align-items: flex-start;
+  gap: 0;
+  min-height: 0;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-raised);
+  overflow: hidden;
+}
+.fx-ed-song {
+  flex: none;
+  padding: 6px 0 6px 8px;
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-dim);
+  user-select: none;
+}
+.fx-ed-cm {
+  flex: 1;
+  min-width: 0;
+  overflow: auto;
+}
+.fx-ed-cm .CodeMirror {
+  height: auto;
+  min-height: 120px;
+  max-height: 46vh;
+  background: transparent;
+  font-size: 13px;
+}
+.fx-ed-wet {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-dim);
+}
+.fx-ed-msg {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.fx-ed-msg.bad {
+  color: var(--err);
 }
 /* Swap is a toggle button, drawn like the desk's other latching buttons (stack, cue, midi).
    The checkbox is still there - client.js reads .checked and listens for change - it just
@@ -5086,48 +5216,6 @@ body.mix-on #deckAHead .deck-song {
   color: var(--warn);
   border-color: var(--warn);
 }
-.mix-tempo {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-#mixTempoSlider {
-  width: 110px;
-}
-.mix-tempo-detent {
-  /* FIXED width, not min-width: the whole strip is a flex row whose two track columns split
-     whatever the center leaves (flex 1 1 0 each), so anything in the center that resizes with
-     its text drags every knob, fader and meter sideways with it. A native tempo with a decimal
-     ("121.1" vs "121") did exactly that. Wide enough for a 3-digit bpm and one decimal. */
-  width: 52px;
-  padding: 2px 2px;
-  overflow: hidden;
-  font-family: var(--mono);
-  font-variant-numeric: tabular-nums;
-}
-.mix-tempo-detent.at {
-  color: var(--ok);
-  border-color: var(--ok);
-}
-.mix-tempo-status {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 11px;
-  color: var(--text-dim);
-}
-#mixTempoNow {
-  /* fixed for the same reason as the detents above - it counts through a ramp, one frame per
-     100ms, and every digit it gains or loses would otherwise shove the desk */
-  font-family: var(--mono);
-  font-variant-numeric: tabular-nums;
-  width: 66px;
-  text-align: right;
-}
-#mixTempoSecs {
-  width: 44px;
-}
-
 /* The ctrl+hover tooltip (see tipBox in client.js): every title in the app, shown only while
    ctrl is held over the control - never a wall of text over what you are reaching for. */
 #tipBox {
@@ -5387,12 +5475,47 @@ body.mix-on #deckAHead .deck-song {
    mixMakeFader/mixMeterPaint). Mirrored pairs like everything on the desk: deck A runs
    knobs | fader | meter toward the center, deck B meter | fader | knobs away from it. --- */
 .mix-dfader-col,
+.mix-tempo-col,
 .mix-meter-col {
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 2px;
   padding: 2px 0;
+}
+/* The deck's pitch fader column: the same fader chrome as the channel fader beside it, plus the
+   range switch and two readouts. Everything is fixed-width and tabular, so a tempo ticking over
+   under the hand cannot widen the column and shift the whole desk. */
+.mix-tempo-col {
+  width: 54px;
+  flex: none;
+}
+.mix-tempo-col > .mix-tempo-range {
+  min-width: 46px;
+  padding: 0 2px;
+  font-size: 9px;
+}
+.mix-tempo-read,
+.mix-tempo-pct {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.1;
+  white-space: nowrap;
+}
+.mix-tempo-read {
+  font-size: 10px;
+  color: var(--text);
+}
+.mix-tempo-pct {
+  font-size: 9px;
+  color: var(--text-dim);
+}
+/* A fader that is following someone else's grid: dimmed, and its grip holds still. Not
+   `disabled` - the element is a div, and the throw it is showing still counts the moment sync
+   lets go (see deckTempoApply). */
+.mix-tempo-fader.locked {
+  opacity: 0.4;
+  pointer-events: none;
 }
 .mix-dfader-col > span {
   font-size: 9px;

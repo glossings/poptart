@@ -101,6 +101,7 @@
             <button id="deckAPlay" class="small deck-only" data-chord-title="{mod+enter}">&#9654; play</button>
             <button id="deckAUpdate" class="small deck-only" title="evaluate without changing play state">&#8635;</button>
             <button id="deckAKeep" class="small deck-only" title="leave DJ mode keeping THIS pane as the song (deck B is dropped)">&#9167; keep</button>
+            <button id="deckALoops" class="small deck-only deck-loop" title="arrangement loops: lit, the song's loop regions hold playback until released (and this button re-arms them); off, the song runs start to end and the deck stops there. DJ mode opens with loops off on both decks, and {app+l} is this button for whichever deck you are on">loop</button>
           </div>
           <textarea id="editor" spellcheck="false">keys: n("0 2 3 <5 7>")
   .scale("F minor")
@@ -132,6 +133,7 @@
               <span class="song-ctl-gap"></span>
               <label class="song-bpm-label">bpm <input id="songBpmA" class="song-bpm" type="number" min="20" max="400" step="any" placeholder="&mdash;" /></label>
               <button id="songAnchorA" class="small" title="anchor the beatgrid's downbeat at the playhead without moving the cue (a cue press does both)">&#9875;</button>
+              <button id="songQuantA" class="small song-quant" title="quantize: lit, play waits for the matching grid position (a bar at most) so the entry lands in time; off, play starts the moment it is pressed. Shift+play is one unquantized start either way; cue previews are always immediate">Q</button>
               <button id="songSyncA" class="small" title="rate-lock to the master clock: rate = master / native bpm, riding every tempo migration">sync</button>
               <button id="songMultA" class="small song-mult" title="tempo ratio to the clock: 1× beat-matched, ½× half-time, 2× double-time; chosen automatically, click to pin">1×</button>
               <button id="songKeylockA" class="small" title="keylock: rate changes stretch time, not pitch">key</button>
@@ -152,6 +154,7 @@
             <button id="deckBPlay" class="small" data-chord-title="{mod+enter} in this pane">▶ play</button>
             <button id="deckBUpdate" class="small" title="evaluate without changing play state">↻</button>
             <button id="deckBKeep" class="small" data-chord-title="leave DJ mode keeping THIS pane as the song - it is promoted with zero engine churn ({mod+shift+enter})">&#9167; keep</button>
+            <button id="deckBLoops" class="small deck-loop" title="arrangement loops: lit, the song's loop regions hold playback until released (and this button re-arms them); off, the song runs start to end and the deck stops there. DJ mode opens with loops off on both decks, and {app+l} is this button for whichever deck you are on">loop</button>
           </div>
           <textarea id="deckBEditor" spellcheck="false"></textarea>
           <!-- Songs phase 3: when deck B holds a disk FILE this replaces the editor - a zoomed
@@ -175,6 +178,7 @@
               <span class="song-ctl-gap"></span>
               <label class="song-bpm-label">bpm <input id="songBpmB" class="song-bpm" type="number" min="20" max="400" step="any" placeholder="&mdash;" /></label>
               <button id="songAnchorB" class="small" title="anchor the beatgrid's downbeat at the playhead without moving the cue (a cue press does both)">&#9875;</button>
+              <button id="songQuantB" class="small song-quant" title="quantize: lit, play waits for the matching grid position (a bar at most) so the entry lands in time; off, play starts the moment it is pressed. Shift+play is one unquantized start either way; cue previews are always immediate">Q</button>
               <button id="songSyncB" class="small" title="rate-lock to the master clock: rate = master / native bpm, riding every tempo migration">sync</button>
               <button id="songMultB" class="small song-mult" title="tempo ratio to the clock: 1× beat-matched, ½× half-time, 2× double-time; chosen automatically, click to pin">1×</button>
               <button id="songKeylockB" class="small" title="keylock: rate changes stretch time, not pitch">key</button>
@@ -527,6 +531,10 @@
              the center, like a mixer's channel strips. Knobs are built by client.js with the same
              ids the sliders had (mixTrimA...), so refresh/learn/reset all keep working. -->
         <div class="mix-knobs" id="mixKnobsA"></div>
+        <!-- The deck's PITCH FADER (vertical, like a player's): down speeds the deck up, up slows
+             it. Built by client.js beside the channel fader, mirrored on deck B's side, with the
+             range switch and the tempo it works out to underneath. -->
+        <div class="mix-tempo-col" id="mixTempoColA"></div>
         <!-- Channel fader (long-throw, on top of the crossfader like a hardware desk's) and the
              deck's channel meter (pre-fader, for gain staging with trim) - both built by
              client.js, both mirrored on deck B's side. -->
@@ -535,33 +543,63 @@
         <div class="mix-center">
           <label class="mix-swap-label" title="swap mode: gating a stem in throws the other deck's same-named stem out (and back out brings it back) - the phase-continuous stem swap. Also flips the crossfader to the hold-through-center curve (both decks full at center, gates decide)">
             <input id="mixSwap" type="checkbox" /> swap</label>
-          <div class="mix-tempo">
-            <button id="mixTempoA" class="small mix-tempo-detent" title="migrate the clock to deck A's native tempo (over the ramp time)">—</button>
-            <input id="mixTempoSlider" class="dj-fader" type="range" min="0" max="1" step="0.001" value="0"
-              title="tempo migration: ride the shared clock between the decks' native tempos" />
-            <button id="mixTempoB" class="small mix-tempo-detent" title="migrate the clock to deck B's native tempo (over the ramp time)">—</button>
-          </div>
-          <div class="mix-tempo-status">
-            <span id="mixTempoNow" title="the shared clock, right now"></span>
-            <label title="how long a detent migration takes; the slider is always instant">ramp
-              <input id="mixTempoSecs" type="number" min="0" max="300" step="1" value="16" /> s</label>
-          </div>
           <div class="xf-scale">
-            <input id="crossfader" class="dj-fader" type="range" min="-1" max="1" step="0.01" value="-1"
+            <input id="crossfader" class="dj-fader" type="range" min="-1" max="1" step="0.01" value="0"
               title="crossfader - constant power (each deck ~-3 dB at center, energy stays level); with swap on it holds both decks full through center instead" />
+          </div>
+          <!-- The DJ FX unit: one plugin as a performance effect on a per-deck send/return
+               (the dry stems keep playing underneath). Server state, like the rest of the desk. -->
+          <div class="mix-fx">
+            <div class="mix-fx-row">
+              <select id="mixFxChain" title="the FX unit's chain - a line of effects written as code, with the knob wired into it. Pick one, or write a new one"></select>
+              <button id="mixFxEdit" class="small" title="edit this chain's code (double-click an fx in there to open that plugin's own window - what you set is pinned into the chain)">&#9998;</button>
+            </div>
+            <div class="mix-fx-row">
+              <button id="mixFxOn" class="small mix-fx-on" title="the FX pad (latched): switches the chain in as an insert on the assigned decks - a learned fxhold pad switches it in only while held">on</button>
+              <span id="mixFxKnobWrap" class="mix-fx-knob"></span>
+              <button id="mixFxAssign" class="small mix-fx-assign" title="which decks the unit is inserted on - click to cycle deck A, both, deck B">A+B</button>
+            </div>
           </div>
           <div class="mix-actions">
             <button id="mixStack" class="small" title="stack the decks: deck B's waveform directly under deck A's, playheads on one vertical line, so the beats of the two can be read against each other (side by side again with another press)">&#8645;</button>
-            <button id="mixLearn" class="small" title="MIDI learn: arm this, then click a control and move the hardware one that should drive it, over and over; click again or press esc to finish. Alt+click a control to unbind it. Learnable: the crossfader and every channel strip, and on each deck cue, play, sync, 1×, key, the platter (click the waveform, then spin a jog wheel), the jog and drag buttons, the headphone button and the ⏮/⏭ queue steps">midi</button>
+            <button id="mixLearn" class="small" title="MIDI learn: arm this, then click a control and move the hardware one that should drive it, over and over; click again or press esc to finish. Alt+click a control to unbind it. Learnable: the crossfader, every channel strip and the FX unit (the on pad binds latched, shift+click it for the momentary hold pad; the plugin picker binds the step-forward pad, shift+click for back), and on each deck cue, play, sync, 1×, key, Q, loop, the tempo slider and its range, the platter (click the waveform, then spin a jog wheel - shift+click for its coarse search mode, alt-free), the drag buttons (shift+click binds the wheel's pitch-bend instead), the jog steps, the headphone button and the ⏮/⏭ queue steps">midi</button>
           </div>
         </div>
         <div class="mix-meter-col" id="mixMeterColB"></div>
         <div class="mix-dfader-col" id="mixDfaderColB"></div>
+        <div class="mix-tempo-col" id="mixTempoColB"></div>
         <div class="mix-knobs" id="mixKnobsB"></div>
         <div class="mix-tracks-col">
           <div class="mix-deck-head"><button id="mixCueB" class="small mix-cue" title="cue deck B in the headphones (post-EQ, pre-fader) - needs a cue device (settings tab)">&#127911;</button>
             <button id="mixMuteAllB" class="small" title="mute every stem on deck B at once - a blank canvas to mix into, brought back one gate at a time. One-way: the gates just go out, so the gates (or a solo) are what bring them back. The desk - crossfader, EQ, faders - stays exactly where you left it">mute all</button><span class="spacer"></span><strong>deck B</strong></div>
           <div class="mix-tracks-wrap"><div class="mix-tracks" id="mixTracksB"></div></div>
+        </div>
+      </div>
+
+      <!-- The FX chain editor (DJ mode): a modal that is a real editor - the poptart mode,
+           completions, ctrl-hover docs, and double-click on a plugin name to open its own
+           window. `song` is the head every chain continues, shown grayed because which deck
+           that is belongs to the desk. Built lazily by client.js's fxEditorBuild. -->
+      <div id="fxEdModal" class="hidden">
+        <div id="fxEdPanel">
+          <div class="fx-ed-head">
+            <strong>FX chain</strong>
+            <input id="fxEdNameInput" class="fx-ed-name" type="text" spellcheck="false" placeholder="chain name" />
+            <span class="spacer"></span>
+            <button id="fxEdDelete" class="small" title="delete this chain">delete</button>
+            <button id="fxEdClose" class="small" title="close without saving (esc)">&times;</button>
+          </div>
+          <div class="fx-ed-body">
+            <span class="fx-ed-song" title="every chain starts from the deck it is inserted on - the desk decides which deck, so the head is not yours to change">song</span>
+            <div class="fx-ed-cm"><textarea id="fxEdCode" spellcheck="false"></textarea></div>
+          </div>
+          <div class="fx-ed-foot">
+            <label class="fx-ed-wet" title="on: the knob is the unit's dry/wet as well (the chain gets .wet(fx1) added at its end), which is what a player's FX knob does. Off: the knob only drives what the code names">
+              <input id="fxEdWet" type="checkbox" checked /> knob controls mix</label>
+            <span class="spacer"></span>
+            <span id="fxEdMsg" class="fx-ed-msg"></span>
+            <button id="fxEdSave" class="primary">save</button>
+          </div>
         </div>
       </div>
 

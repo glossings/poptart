@@ -30,10 +30,12 @@ const CLIENT = fs.readFileSync(path.join(__dirname, 'public', 'client.js'), 'utf
 // own dependencies - the same trick mix-gate-all.test.js and highlight-grid.test.js use.
 const NAMES = ['mixMidiValue', 'mixMidiScrubDelta', 'mixMidiApply', 'mixMidiButton', 'clockHeldByDesk'];
 const CONSTS = ['MIX_MIDI_KNOBS', 'MIX_MIDI_HOLD', 'MIX_MIDI_PRESS', 'MIX_MIDI_DECK_CTLS',
-  'SONG_SCRUB_TICK_SEC', 'SONG_SEARCH_TICK_SEC'];
+  'MIX_MIDI_GLOBAL_PRESS', 'MIX_MIDI_GLOBAL_HOLD', 'MIX_MIDI_GLOBAL',
+  'SONG_SCRUB_TICK_SEC', 'SONG_SEARCH_TICK_SEC', 'FX_ASSIGNS', 'DECK_TEMPO_RANGES'];
 const DEPS = ['mixState', 'songDecks', 'songMasterDeck', 'mixMidiDown', 'applyMixTargets',
   'songScrub', 'songNudge', 'songCue', 'songTogglePlay', 'songSetMeta', 'songMultNext',
-  'mixActionNotify'];
+  'mixActionNotify', 'songBend', 'deckTempoApply', 'mixFxSet', 'mixFxStep',
+  'setDeckLoops', 'deckLoopsOn'];
 
 function grabFn(name) {
   const at = SRC.indexOf(`function ${name}(`);
@@ -62,7 +64,7 @@ const makeMidi = new Function(...DEPS, `
  * A desk with `songs` loaded (deck letters), and a log of everything the dispatch reached for.
  * `master` is the deck holding the grid, `override` the tempo migration's held bpm.
  */
-function rig({ songs = ['a', 'b'], master = null, override = null, playing = true, phones = {} } = {}) {
+function rig({ songs = ['a', 'b'], master = null, override = null, playing = true, phones = {}, fx = {} } = {}) {
   const log = [];
   const mixState = {
     tempoOverride: override,
@@ -70,9 +72,12 @@ function rig({ songs = ['a', 'b'], master = null, override = null, playing = tru
       a: new Map(phones.a ? [['cue', phones.a]] : []),
       b: new Map(phones.b ? [['cue', phones.b]] : []),
     },
+    deckTempo: { a: { frac: 0, range: 6 }, b: { frac: 0, range: 6 } },
+    fx: { plugin: null, on: false, held: false, depth: 0.5, assign: 'ab', ...fx },
   };
   const songDecks = { a: null, b: null };
   for (const d of songs) songDecks[d] = { playing, sync: false, keylock: false, syncMult: 'auto' };
+  const deckLoopsOn = { a: true, b: true };
   const api = makeMidi(
     mixState,
     songDecks,
@@ -86,9 +91,18 @@ function rig({ songs = ['a', 'b'], master = null, override = null, playing = tru
     (deck, patch) => log.push(['meta', deck, patch]),
     (deck) => (deck === 'a' ? 0.5 : 2),
     (deck, action) => log.push(['toClient', deck, action]),
+    (deck, ticks) => log.push(['bend', deck, ticks]),
+    (deck, patch) => log.push(['tempo', deck, patch]),
+    (patch) => log.push(['fx', patch]),
+    // Stepping the chain list loads code off disk, so the real one is async and the dispatch
+    // attaches its own .catch - the stub has to be a promise or that call throws.
+    (dir) => { log.push(['fxstep', dir]); return Promise.resolve(); },
+    (deck, on) => log.push(['loops', deck, on]),
+    deckLoopsOn,
   );
   api.log = log;
   api.state = mixState;
+  api.deckLoopsOn = deckLoopsOn;
   return api;
 }
 
@@ -241,6 +255,71 @@ test('search is the same platter in a much coarser gear', () => {
   assert.equal(m.log[1][1], 'a');
 });
 
+// --- the pitch fader and the platter's bend mode ---
+
+test('the tempo fader is mounted the player way: hardware top is minus', () => {
+  const m = rig();
+  m.mixMidiApply('a:tempo', 1); // fader pushed to its top
+  m.mixMidiApply('a:tempo', 0.5);
+  m.mixMidiApply('a:tempo', 0); // pulled to the bottom
+  assert.deepEqual(m.log, [
+    ['tempo', 'a', { frac: -1 }],
+    ['tempo', 'a', { frac: 0 }],
+    ['tempo', 'a', { frac: 1 }],
+  ]);
+});
+
+test('bend speaks the platter convention: 64 still, either side signed ticks', () => {
+  const m = rig();
+  m.mixMidiApply('b:bend', 64 / 127);
+  m.mixMidiApply('b:bend', 66 / 127);
+  m.mixMidiApply('b:bend', 62 / 127);
+  assert.deepEqual(m.log, [['bend', 'b', 0], ['bend', 'b', 2], ['bend', 'b', -2]]);
+});
+
+test('quant, loop and the range switch are press buttons on the deck', () => {
+  const m = rig();
+  m.mixMidiButton('a', 'quant', true);
+  m.mixMidiButton('a', 'loop', true);
+  m.mixMidiButton('a', 'temporange', true);
+  assert.deepEqual(m.log, [
+    ['meta', 'a', { quantize: false }], // the rig's song has no quantize key - reads as on, toggles off
+    ['loops', 'a', false], // deckLoopsOn starts true
+    ['tempo', 'a', { range: 10 }], // 6 -> 10 -> 16 -> 100 -> 6
+  ]);
+});
+
+// --- the FX unit's deck-less targets ---
+
+test('the fx knob is continuous; the pads edge like the deck pads', () => {
+  const m = rig();
+  m.mixMidiApply('fxknob', 0.3);
+  m.mixMidiApply('fxknob', 0.3); // a knob needs no edge
+  m.mixMidiApply('fxon', 1);
+  m.mixMidiApply('fxon', 1); // a pad restating itself is not a second press
+  m.mixMidiApply('fxon', 0); // ...and the release is not one either
+  assert.deepEqual(m.log, [
+    ['fx', { knob: 0.3 }],
+    ['fx', { knob: 0.3 }],
+    ['fx', { on: true }],
+  ]);
+});
+
+test('fxhold is the momentary pad: both edges reach the unit', () => {
+  const m = rig();
+  m.mixMidiApply('fxhold', 1);
+  m.mixMidiApply('fxhold', 0);
+  assert.deepEqual(m.log, [['fx', { held: true }], ['fx', { held: false }]]);
+});
+
+test('fxassign cycles a -> ab -> b, and the step pads walk the chain list', () => {
+  const m = rig({ fx: { assign: 'ab' } });
+  m.mixMidiApply('fxassign', 1);
+  m.mixMidiApply('fxnext', 1);
+  m.mixMidiApply('fxprev', 1);
+  assert.deepEqual(m.log, [['fx', { assign: 'b' }], ['fxstep', 1], ['fxstep', -1]]);
+});
+
 // --- who holds the clock ---
 
 test('the clock is the desk\'s while a migration holds it', () => {
@@ -308,7 +387,8 @@ test('the tempo ratio cycles the same way by pad and by click', () => {
 // bound to the same jog cc and none of them worked (2026-09-09).
 
 const LEARN_NAMES = ['mixMidiLearnable', 'handleMixMidi'];
-const LEARN_CONSTS = ['MIX_MIDI_HOLD', 'MIX_MIDI_PRESS', 'MIX_MIDI_BUTTONS',
+const LEARN_CONSTS = ['MIX_MIDI_HOLD', 'MIX_MIDI_PRESS', 'MIX_MIDI_GLOBAL_PRESS',
+  'MIX_MIDI_GLOBAL_HOLD', 'MIX_MIDI_GLOBAL', 'MIX_MIDI_BUTTONS',
   'midiKind', 'midiNum', 'midiSame', 'midiSay'];
 const LEARN_DEPS = ['mixMidiMonitor', 'mixMidiSaid', 'mixMidiLearn', 'settings', 'saveSettings',
   'eventLogQueue', 'mixMidiDrive'];

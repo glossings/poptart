@@ -470,6 +470,9 @@ test('every path the editor asks for is one the host has an answer for', () => {
     'POST /api/song/play', 'POST /api/song/cue', 'POST /api/song/pause', 'POST /api/song/seek',
     'POST /api/song/stop', 'POST /api/song/meta', 'POST /api/song/nudge',
     'GET /api/song/onsets', 'GET /api/song/waveform',
+    // the DJ desk's own controls, same door: the loop toggles and tempo sliders live in the
+    // deck heads (hidden outside mix mode), the FX unit in the mix strip
+    'POST /api/arrangeLoops', 'POST /api/mix/decktempo', 'POST /api/mix/fx', 'POST /api/mix/fxchain',
     // the organizer's disk tab: not drawn, and refused at setOrgPane3
     'GET /api/songfiles/find',
     // asked inside a try whose failure is expected: a playlist's file rows render as missing

@@ -117,6 +117,42 @@ test('injecting into a page with no editor says so rather than producing a silen
   assert.throws(() => injectBoot('<html></html>'), /could not find the editor script tag/);
 });
 
+test('a panel the editor hides by class can actually be hidden by it', () => {
+  // `.hidden` is a CLASS and an id selector outranks it, so a panel styled as `#panel { display:
+  // flex }` is VISIBLE with the class on - and a modal that comes up on page load, before
+  // anything has wired its close button, is a page you have to reload (the FX chain editor
+  // shipped that way for one build). Said once here so the next panel cannot repeat it.
+  const html = fs.readFileSync(path.join(here, 'public', 'index.html'), 'utf8');
+  const css = fs.readFileSync(path.join(here, 'public', 'style.css'), 'utf8');
+  // The ids that start hidden in the markup: those are the ones a class has to be able to hide.
+  const startsHidden = [...html.matchAll(/\bid="([^"]+)"[^>]*\bclass="(?:[^"]*\s)?hidden(?:\s[^"]*)?"/g)]
+    .map((m) => m[1]);
+  const alsoHidden = [...html.matchAll(/\bclass="(?:[^"]*\s)?hidden(?:\s[^"]*)?"[^>]*\bid="([^"]+)"/g)]
+    .map((m) => m[1]);
+  const ids = new Set([...startsHidden, ...alsoHidden]);
+  assert.ok(ids.size > 3, `the scan should have found the page's hidden panels, found ${ids.size}`);
+  // The modal this was written for, named so the check cannot quietly stop covering it (the
+  // attribute order in the markup is all that puts a panel in the set above).
+  assert.ok(ids.has('fxEdModal'), 'the FX chain editor should be among the panels scanned');
+  const overridden = [...ids].filter((id) => {
+    // Does an ID rule for it set `display` at all? If so, `.hidden` loses unless the same
+    // specificity says otherwise.
+    const rule = new RegExp(`^#${id}\\s*\\{([^}]*)\\}`, 'm').exec(css);
+    if (!rule || !/\bdisplay\s*:/.test(rule[1])) return false;
+    // Either on its own or grouped with others (`#a.hidden,\n#b.hidden { … }`), which is how
+    // the panes next to the decks are written.
+    return !new RegExp(`^#${id}\\.hidden\\s*[,{]`, 'm').test(css);
+  });
+  assert.deepEqual(overridden, [], 'these set display on their id, so they need a #id.hidden rule too');
+  // The other half of the same trap, for the controls INSIDE a panel: there is no global
+  // `.hidden` utility in this stylesheet (every panel scopes its own), and `button.small` -
+  // which most of these are - outranks a bare class even where one exists. The FX editor hides
+  // its delete button by class on a chain that does not exist yet, and without the scoped rule
+  // that button is simply up.
+  assert.match(css, /^#fxEdPanel \.hidden\s*\{/m,
+    'the FX chain editor hides controls of its own by class, so it needs a scoped .hidden rule');
+});
+
 test('every element the editor looks up by id is in the page it is served with', () => {
   // The editor reaches for its panels by id as it loads, and a lookup that comes back null is
   // not an error anywhere near the cause: it is a TypeError on the next line, at load, which
@@ -128,6 +164,27 @@ test('every element the editor looks up by id is in the page it is served with',
   const asked = new Set([...js.matchAll(/getElementById\(\s*'([^']+)'\s*\)/g)].map((m) => m[1]));
   assert.ok(asked.size > 100, `the scan should have found the editor's lookups, found ${asked.size}`);
   assert.deepEqual([...asked].filter((id) => !present.has(id)), []);
+});
+
+test('an id the editor mints for a control it builds is not already on the page', () => {
+  // The other direction of the same bookkeeping, and a quieter failure: an id used TWICE is not
+  // an error anywhere - getElementById just answers with whichever came first in the document,
+  // which is the one in the markup. The deck pitch faders were built as #mixTempoA/#mixTempoB
+  // while two buttons in the middle of the desk already had those ids, so every update meant for
+  // a fader went to a button: the faders never moved, and a deck's bpm was printed on a button
+  // the other side of the strip.
+  const html = fs.readFileSync(path.join(out, 'index.html'), 'utf8');
+  const js = fs.readFileSync(path.join(out, 'client.js'), 'utf8');
+  const present = new Set([...html.matchAll(/\bid="([^"]+)"/g)].map((m) => m[1]));
+  const minted = new Set();
+  for (const m of js.matchAll(/\.id = ['`]([^'`\n]+)['`]/g)) {
+    // The desk is built as mirrored pairs, so a minted id is usually a template on the deck
+    // letter. Both spellings count - an id only has to collide on one deck to be a bug.
+    if (!m[1].includes('${')) minted.add(m[1]);
+    else for (const deck of ['A', 'B', 'a', 'b']) minted.add(m[1].replace(/\$\{[^}]*\}/g, deck));
+  }
+  assert.ok(minted.size > 3, `the scan should have found the ids the editor mints, found ${minted.size}`);
+  assert.deepEqual([...minted].filter((id) => present.has(id)), []);
 });
 
 test('rebuilding empties the output folder without replacing it', () => {

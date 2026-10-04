@@ -620,6 +620,11 @@ document.addEventListener('keydown', (e) => {
     if (dialogs.some((d) => !d.classList.contains('keeps-transport'))) return;
     if (!TRANSPORT_KEY(e)) return;
   }
+  // An APP chord belongs to whatever modal is up. Those are full editors (a chain, the prebake),
+  // and opening the arrangement or flipping a deck's loops out from under a hand that is typing
+  // in one is not what it asked for. The transport family is left alone: stopping a deck is
+  // worth being able to do from anywhere.
+  if (app && anyModalOpen()) return;
   if (edit && e.key === 'Enter') {
     e.preventDefault();
     transportPlay();
@@ -643,7 +648,12 @@ document.addEventListener('keydown', (e) => {
     // An app chord like the arrangement's own, and not only by meaning: mod+L is the sublime
     // keymap's selectLine on every platform, so with the editor focused it never got this far.
     e.preventDefault();
-    arrangeUnlock(); // release the loop region the arrangement is in (see the arrange section)
+    // On the DESK this is the deck's loop switch, the chord for the button in its head - because
+    // DJ mode opens with the loops OFF, so there is usually no armed region for the one-region
+    // release below to let go of, and the thing the hand wants is the loops back. Off the desk
+    // it stays what the arrangement's docs say: release the region playback is in.
+    if (mixModeOn) deckLoopsToggle(djActiveDeck);
+    else arrangeUnlock(); // see the arrange section
   } else if (app && e.key.toLowerCase() === 'a' && !e.shiftKey && !arKeyInField()) {
     // The arrangement, both ways: it opens the painter and it puts it away again - on the deck you
     // are working on (in DJ mode, the armed one). The app modifier rather than the editing one
@@ -3050,6 +3060,9 @@ function updateHandleMark(editor, point) {
  * that answers with an explanation is not one worth advertising.
  */
 function isWidgetHandleAt(editor, code, idx) {
+  // The FX chain editor holds a chain and nothing else, so its handles are its own (there is no
+  // labeled block for findChainHandleAt to find) - see fxChainSlotAt.
+  if (editor === fxEdCM) return !!fxChainSlotAt(code, idx);
   if (editor !== cm) return !!findChainHandleAt(code, idx);
   if (arrangeMod && (findArrangeCallAt(code, idx)?.onName || findAutoCallAt(code, idx)?.onName)) return true;
   if (shapeMod && findLfoCallAt(code, idx)?.onName) return true;
@@ -27707,7 +27720,9 @@ async function runHotkey(hk, e) {
 // through it.
 function anyModalOpen() {
   // askEl only exists once something has asked; it is built shown, so "not hidden" means open.
-  return [prebakeBackdrop, dirPickerBackdrop, midiImportBackdrop, snippetSaveBackdrop, snippetBrowseBackdrop, askEl]
+  // The FX chain editor is one of these: it is a full editor over the desk, and a chord typed in
+  // it belongs to it - the loop switch and the mixer are not what a hand in a chain is after.
+  return [prebakeBackdrop, dirPickerBackdrop, midiImportBackdrop, snippetSaveBackdrop, snippetBrowseBackdrop, askEl, fxEdEl]
     .some((el) => el && !el.classList.contains('hidden'));
 }
 
@@ -27933,7 +27948,8 @@ coreReady
 // Mix mode - the performance mixer (ctrl+D). The screen splits into two decks: the
 // main editor keeps playing as deck A while the second pane holds the INCOMING song, evaluated
 // as deck "b" (same clock, so it joins in phase; namespaced labels, so its kick and yours are
-// separate tracks; born wearing the crossfader's gain, so it arrives silent). Between them the
+// separate tracks; born wearing the desk's gains, so it arrives mixed as the desk stands).
+// Between them the
 // strip: per-track gate / trim / 3-band EQ / fader, a one-knob filter per deck, the equal-power
 // crossfader, swap mode, eject and complete.
 //
@@ -28203,10 +28219,16 @@ async function openMixMode() {
   }
   deckBCM.refresh();
   cm.refresh();
-  // The crossfader's position becomes real state NOW, before anything plays on deck B: hard at
-  // A means deck b's gain is 0 in mixState, so the first eval's tracks are BORN silent (see
-  // server.js's applyMixTo) - the whole "arrives silent" design in one post.
+  // The desk's gains become real state NOW, before anything plays on deck B: the crossfader
+  // opens centered and deck B's channel fader opens DOWN, so deck b's gain is 0 in mixState and
+  // the first eval's tracks are BORN silent (see server.js's mixBirthFor) - the whole "arrives
+  // silent" design, which the incoming channel fader carries now that the crossfader rests in
+  // the middle like a mixer's.
   sendCrossfader();
+  // DJ decks open with every arrangement loop OFF - a song runs start to end like a record,
+  // and the deck heads' loop buttons arm the regions back mid-set. The server re-arms both on
+  // eject/complete, so normal mode keeps its loop-by-default workflow.
+  for (const d of ['a', 'b']) api('POST', '/api/arrangeLoops', { deck: d, on: false }).catch(() => {});
   refreshDeckFiles();
   mixRefresh();
   mixPushStart(); // mirrors MIDI-driven desk moves back onto the sliders, pushed live
@@ -28454,14 +28476,14 @@ async function loadDeckBFile(value = document.getElementById('deckBFile').value)
       deckBCM.setValue(`// ♪ ${title}\n// ${item.path}\n// ${m}:${s}${res.bpm ? ` · ${res.bpm} bpm` : ''}`);
       deckBCM.setOption('readOnly', true);
       songPanes.b.tookLoad(res, item.path, title);
-      logLine(`${songLoadLine('b', res, title)} (it arrives silent)`);
+      logLine(songLoadLine('b', res, title));
     } else {
       const { code } = await api('POST', '/api/patterns/load', { name: value });
       songPanes.b.clear();
       deckBCM.setOption('readOnly', false);
       deckBCM.setValue(code);
       deckBFileName = value;
-      logLine(`deck B loaded "${value}" - play it when ready (it arrives silent)`);
+      logLine(`deck B loaded "${value}" - play it when ready`);
     }
     if (mixModeOn) mixRefresh(); // the old song's stems left the strip; a song track arrived
   } catch (e) {
@@ -28528,7 +28550,52 @@ function deckHeadRender(state) {
     playBtnD.innerHTML = on ? '&#9632; stop' : '&#9654; play';
     playBtnD.classList.toggle('is-playing', on);
     playBtnD.title = on ? `stop deck ${U} (${chordLabel('mod+.')} in this pane)` : `${chordLabel('mod+enter')} in this pane`;
+    // The deck's pitch fader / range / readouts, mirrored from server truth like every other
+    // desk control (a learned fader moves the on-screen one).
+    const dt = state?.deckTempo?.[d];
+    if (dt) {
+      deckTempoNow[d] = { frac: dt.frac, range: dt.range };
+      const fader = document.getElementById(`mixTempo${U}`);
+      if (!fader.classList.contains('dragging')) fader.value = tempoValOf(dt.frac);
+      fader.classList.toggle('locked', !!dt.locked);
+      fader.title = dt.locked
+        ? `deck ${U} is following the other deck's grid - its own tempo rides again with sync off (or when it holds the grid)`
+        : `deck ${U} tempo - down speeds it up, up slows it down, over the range below; double-click resets`;
+      document.getElementById(`mixTempoRange${U}`).textContent = dt.range === 100 ? 'wide' : `±${dt.range}`;
+      // The tempo it works out to. A song deck's is its own playing tempo; a livecode deck's IS
+      // the shared clock, which is what its patterns run at - so a pattern deck finally has a
+      // bpm on screen, slider and all.
+      const read = document.getElementById(`mixTempoRead${U}`);
+      read.textContent = dt.bpm != null ? `${dt.bpm.toFixed(1)}` : '—';
+      read.title = dt.bpm != null
+        ? `deck ${U} is running at ${dt.bpm.toFixed(2)} bpm${songPanes[d].song ? '' : ' (the shared clock)'}`
+        : `deck ${U} has no tempo to show`;
+      deckTempoPctShow(d, dt.pct);
+    }
+    if (state?.loops) {
+      const loopsOn = !!state.loops[d];
+      if (loopsOn !== deckLoopsNow[d]) {
+        // Flipped somewhere this side didn't post (a learned pad, DJ mode opening): the clock
+        // twins (the end timer's, the painter's) are stale - fetch the clock as it stands.
+        deckLoopsNow[d] = loopsOn;
+        api('GET', `/api/arrange?deck=${d}`).then((r) => {
+          songEndSetClock(d, r.arrange ?? null);
+          if (arState && arDeck === d) {
+            arSetClock(r.arrange ?? null);
+            drawArrange();
+          }
+        }).catch(() => {});
+      }
+      document.getElementById(`deck${U}Loops`).classList.toggle('on', loopsOn);
+    }
   }
+}
+
+// Fixed-width % readout under each pitch fader: sign always shown, one decimal, so nothing
+// beside it moves as the value does.
+function deckTempoPctShow(deck, pct) {
+  const el = document.getElementById(`mixTempoPct${deck.toUpperCase()}`);
+  if (el) el.textContent = `${pct > 0 ? '+' : ''}${pct.toFixed(1)}%`;
 }
 
 // --- the song decks' waveform panes (songs phase 3; one per deck since deck A learned files) ---
@@ -28575,6 +28642,36 @@ function songThemeColors() {
   };
 }
 
+// --- the end-of-track warning -----------------------------------------------------------------
+//
+// A deck that is running out flashes its waveform strip, the way a player does: the thing that
+// has to reach you while you are looking at the OTHER deck is movement, not a number. Both kinds
+// of deck warn - a song from its duration, a livecoded one from where its arrangement ends - and
+// both draw it the same way.
+
+const DJ_END_WARN_SEC = 30; // how far out the flash starts, as on a player
+const DJ_END_WARN_HURRY = 10; // ...and where it starts flashing faster
+
+/**
+ * How strong the flash is right now, 0..1, for a deck with `remainSec` of track left. Nothing
+ * (0) for a deck that is not running out, that is stopped, or that has no end to run into - a
+ * livecoded deck with no arrangement end plays until it is stopped, so there is nothing to warn
+ * about.
+ */
+function djEndWarnAt(remainSec, nowMs) {
+  if (!Number.isFinite(remainSec) || remainSec < 0 || remainSec > DJ_END_WARN_SEC) return 0;
+  const hz = remainSec <= DJ_END_WARN_HURRY ? 2.4 : 1.2;
+  return (1 - Math.cos((nowMs / 1000) * hz * 2 * Math.PI)) / 2;
+}
+
+/** The flash itself: a frame inside the strip's edge, which leaves the waveform readable. */
+function djEndWarnPaint(ctx, w, h, strength, warn) {
+  if (strength <= 0) return;
+  ctx.strokeStyle = rgbaFrom(ctx, warn, 0.2 + strength * 0.7);
+  ctx.lineWidth = 4;
+  ctx.strokeRect(2, 2, Math.max(0, w - 4), Math.max(0, h - 4));
+}
+
 // The waveform is drawn NORMALIZED, like the recorder's finished takes: a quietly-mastered file
 // still fills the pane, and the desk's meters are what say how loud it actually is.
 function songNormOf(env) {
@@ -28607,6 +28704,7 @@ function makeSongPane(deck) {
   const timeEl = byId('songTime');
   const rateEl = byId('songRate');
   const bpmEl = byId('songBpm');
+  const quantEl = byId('songQuant');
   const syncEl = byId('songSync');
   const multEl = byId('songMult');
   const keylockEl = byId('songKeylock');
@@ -28684,6 +28782,14 @@ function makeSongPane(deck) {
   P.zoomSec = () => zoomSec;
   /** The deck's playing rate (the sync/nudge rate even while paused - what a start would use). */
   P.rateNow = () => (P.mirror && Number.isFinite(P.mirror.rate) && P.mirror.rate > 0 ? P.mirror.rate : 1);
+  // The rate the strip is SCALED by: the deck's base rate (sync x its tempo slider), never the
+  // momentary gestures. A nudge or a platter bend moves the playhead, so the waveform slides
+  // under it on its own; scaling by the bent rate instead zoomed the whole view by 4% for as
+  // long as a nudge was held, and back again on release.
+  P.scaleRateNow = () => {
+    const base = P.mirror?.baseRate;
+    return Number.isFinite(base) && base > 0 ? base : P.rateNow();
+  };
 
   // The desk state's song half for this deck, run on every SSE frame and every mixRefresh.
   // Keeps the mirror current, and adopts a song this page never loaded (a reload mid-set: the
@@ -28841,7 +28947,7 @@ function makeSongPane(deck) {
     // 0.82 shows 0.82 song-seconds per real second, so its beats sit exactly as far apart on
     // screen as the other deck's and scroll at the same speed - which is what lets two stacked
     // waveforms be read against each other at all (and, paused, what a sync will produce).
-    const span = zoomSec * P.rateNow();
+    const span = zoomSec * P.scaleRateNow();
     const pxPerSec = w / span; // per SONG second
     const t0 = pos - span / 2; // the playhead is pinned at center; time scrolls under it
     const dur = wave?.seconds ?? P.mirror?.duration ?? 0;
@@ -28856,8 +28962,8 @@ function makeSongPane(deck) {
     // Beatgrid from the song's own facts (songs phase 4): bpm out of its tags/playlist/edits,
     // downbeats every 4th beat from the user-settable anchor (the ⚓ button drops it at the
     // playhead). The k = 0 line IS the anchor - drawn a little stronger.
-    // Only the song's OWN bpm draws a grid. The desk's native slot (mixNativeBpm) defaults to
-    // 120 for a track that specifies nothing - fine for the tempo slider, wrong as a beatgrid.
+    // Only the song's OWN bpm draws a grid. The desk's native slot defaults to 120 for a track
+    // that specifies nothing - fine for the pitch fader to ride around, wrong as a beatgrid.
     const bpm = P.mirror ? P.mirror.bpm : P.song?.bpm;
     const anchor = P.mirror?.anchorSec ?? 0;
     if (Number.isFinite(bpm) && bpm >= 20 && bpm <= 400 && dur) {
@@ -28935,6 +29041,12 @@ function makeSongPane(deck) {
     ctx.moveTo(w / 2, 0);
     ctx.lineTo(w / 2, h);
     ctx.stroke();
+
+    // Running out: flash the strip (see djEndWarnAt). Only while it is PLAYING - a deck parked
+    // near the end of a track is where you left it, not an emergency.
+    if (dur && P.mirror?.playing) {
+      djEndWarnPaint(ctx, w, h, djEndWarnAt(dur - pos, performance.now()), warn);
+    }
   }
 
   function drawOverview() {
@@ -29021,7 +29133,7 @@ function makeSongPane(deck) {
   });
   detailEl.addEventListener('pointermove', (e) => {
     if (!drag) return;
-    const pxPerSec = detailEl.clientWidth / (zoomSec * P.rateNow()); // per song second, as drawn
+    const pxPerSec = detailEl.clientWidth / (zoomSec * P.scaleRateNow()); // per song second, as drawn
     // The magnet: within a few screen pixels of a transient the playhead lands ON it (so a
     // cue placed by feel sits on the hit), further away it goes exactly where the hand is.
     // Zooming in shrinks the window in seconds - fine placement between hits is a zoom away.
@@ -29089,6 +29201,7 @@ function makeSongPane(deck) {
     titleEl.textContent = P.song ? `♪ ${P.song.title}${m?.musicalKey ? ` · ${m.musicalKey}${est}` : ''}` : '';
     titleEl.title = m?.keyDetected != null
       ? `key estimated from the audio (~${Math.round(m.keyDetected * 100)}% sure)` : '';
+    quantEl.classList.toggle('on', m?.quantize !== false);
     syncEl.classList.toggle('on', !!m?.sync);
     // The tempo ratio the sync is riding - the song's tempo over the clock's: 1× beat-matched,
     // ½× half-time, 2× double-time. Dim when chosen automatically (nearest to native speed),
@@ -29128,6 +29241,12 @@ function makeSongPane(deck) {
     const at = P.playheadNow();
     metaPost({ anchorSec: at }, (r) => `beatgrid anchored at ${songFmt(r.anchorSec, true)}`
       + (Math.abs(r.anchorSec - at) > 0.002 ? ' (snapped to the transient)' : ''));
+  });
+  quantEl.addEventListener('click', () => {
+    if (!P.song || mixLearnArmed) return;
+    metaPost({ quantize: P.mirror?.quantize === false }, (r) => (r.quantize
+      ? `${D} quantize on - play waits for the grid`
+      : `${D} quantize off - play answers the finger`));
   });
   syncEl.addEventListener('click', () => {
     if (!P.song || mixLearnArmed) return;
@@ -29217,8 +29336,11 @@ function makeSongPane(deck) {
   // press the control here, move the hardware one. The WAVEFORM is the platter's surface - the
   // strip you drag to scrub is where a jog wheel binds, which is the same control by hand and
   // by wheel (see the `scrub` target in server.js's mix-strip MIDI section).
-  mixLearnAttach(nudgeDnEl, `${deck}:nudgedn`);
-  mixLearnAttach(nudgeUpEl, `${deck}:nudgeup`);
+  // ...and SHIFT+click on either drag button binds the platter's PITCH-BEND mode instead
+  // (`bend`): a relative wheel whose light turns bend the rate with the turn and ease back when
+  // the hand rests - the beatmatch correction - where the waveform's `scrub` binding seeks.
+  mixLearnAttach(nudgeDnEl, `${deck}:nudgedn`, `${deck}:bend`);
+  mixLearnAttach(nudgeUpEl, `${deck}:nudgeup`, `${deck}:bend`);
   mixLearnAttach(byId('songJogDn'), `${deck}:jogdn`);
   mixLearnAttach(byId('songJogUp'), `${deck}:jogup`);
   mixLearnAttach(cueEl, `${deck}:cue`);
@@ -29231,6 +29353,7 @@ function makeSongPane(deck) {
   // the two modes are two ordinary targets rather than a modifier the server has to model.
   mixLearnAttach(detailEl, `${deck}:scrub`, `${deck}:search`);
   mixLearnAttach(overviewEl, `${deck}:scrub`, `${deck}:search`);
+  mixLearnAttach(quantEl, `${deck}:quant`);
   mixLearnAttach(syncEl, `${deck}:sync`);
   mixLearnAttach(multEl, `${deck}:mult`);
   mixLearnAttach(keylockEl, `${deck}:keylock`);
@@ -29251,6 +29374,12 @@ const songPanes = { a: makeSongPane('a'), b: makeSongPane('b') };
 // though: a reading reaches here some tens of ms after the sound it measures, so it is slid back
 // by DJ_LIVE_TRACE_LAG, which is an estimate and the only guessed number on the strip.
 //
+// It is drawn exactly as a song deck's waveform is, down to the colors: the same mirrored peak
+// envelope with the rms body inside it, each column tinted by where its energy sits (bandColor,
+// off the three band shares the same meter feed now carries - see poptart_deck_meter). The two
+// strips are stacked to be read against each other, and a difference in how they are drawn is a
+// difference the eye has to discount before it can do that.
+//
 // The bar lines are exact, straight off the clock, and they are what this is really for: the same
 // downbeats and beats a song deck draws from its own detected tempo, so a pattern stacked over a
 // song can be lined up by eye. Deliberately NOT drawn from the pattern's events - the grid is
@@ -29263,7 +29392,7 @@ const songPanes = { a: makeSongPane('a'), b: makeSongPane('b') };
 
 const DJ_LIVE_TRACE_LAG = 90; // ms: the meter's analysis window plus the SSE coalesce (see above)
 const DJ_LIVE_TRACE_MAX = 2000; // ~80s of history at the feed's ~25/sec - past the widest zoom
-const djLiveTrace = { a: [], b: [] }; // [{ t: performance.now() as it landed, p, r }]
+const djLiveTrace = { a: [], b: [] }; // [{ t: performance.now() as it landed, p, r, b }]
 
 /** Every level frame kept with the moment it arrived, rather than only the latest. */
 function djLiveTracePush(frame) {
@@ -29272,7 +29401,7 @@ function djLiveTracePush(frame) {
     const v = frame?.[deck];
     if (!v) continue;
     const ring = djLiveTrace[deck];
-    ring.push({ t, p: v.p ?? 0, r: v.r ?? 0 });
+    ring.push({ t, p: v.p ?? 0, r: v.r ?? 0, b: v.b ?? null });
     if (ring.length > DJ_LIVE_TRACE_MAX) ring.splice(0, ring.length - DJ_LIVE_TRACE_MAX);
   }
 }
@@ -29334,7 +29463,7 @@ function djLiveWaveDraw(deck) {
   const w = canvas.clientWidth;
   const h = canvas.clientHeight;
   ctx.clearRect(0, 0, w, h);
-  const { accent, dim, text } = songThemeColors();
+  const { accent, dim, text, warn } = songThemeColors();
   const mid = h / 2;
   const maxAmp = mid - 6;
 
@@ -29374,11 +29503,12 @@ function djLiveWaveDraw(deck) {
     }
   }
 
-  // The level trace, mirrored around the center like a song's waveform: translucent peak with the
-  // solid rms body inside it, one column per meter frame. Columns are placed by the timestamp
-  // each frame arrived under, not by their position in the ring, so a stalled feed leaves a gap
-  // rather than quietly sliding the whole history off the beat. Normalized to the loudest thing
-  // still on screen, with a floor so a silent deck doesn't magnify its own noise into a waveform.
+  // The level trace, mirrored around the center exactly as a song's waveform is: translucent peak
+  // with the solid rms body inside it, each column colored by its band balance (the same read and
+  // the same two alphas as songDrawColumns). Columns are placed by the timestamp each frame
+  // arrived under, not by their position in the ring, so a stalled feed leaves a gap rather than
+  // quietly sliding the whole history off the beat. Normalized to the loudest thing still on
+  // screen, with a floor so a silent deck doesn't magnify its own noise into a waveform.
   const ring = djLiveTrace[deck];
   const nowMs = performance.now();
   const cycOfT = (t) => djLiveTraceCycle(t, nowMs, cycNow, cps);
@@ -29392,18 +29522,29 @@ function djLiveWaveDraw(deck) {
     const to = xOf(cycOfT(i + 1 < ring.length ? ring[i + 1].t : nowMs));
     cols.push({ x, cw: Math.max(1, to - x) + 0.6, s: ring[i] });
   }
-  for (const [alpha, key] of [[0.28, 'p'], [0.7, 'r']]) {
-    ctx.fillStyle = rgbaFrom(ctx, accent, alpha);
-    for (const col of cols) {
-      const amp = Math.min(1, col.s[key] * norm) * maxAmp;
-      ctx.fillRect(col.x, mid - amp, col.cw, amp * 2 || 1);
-    }
+  for (const col of cols) {
+    const [r, g, b] = bandColor(col.s.b);
+    const peakAmp = Math.min(1, col.s.p * norm) * maxAmp;
+    const rmsAmp = Math.min(peakAmp, Math.min(1, col.s.r * norm) * maxAmp);
+    ctx.fillStyle = `rgba(${r}, ${g}, ${b}, 0.32)`;
+    ctx.fillRect(col.x, mid - peakAmp, col.cw, peakAmp * 2 || 1);
+    ctx.fillStyle = `rgba(${r}, ${g}, ${b}, 0.95)`;
+    ctx.fillRect(col.x, mid - rmsAmp, col.cw, rmsAmp * 2 || 1);
   }
 
   // The playhead is the one line that does NOT move, so it is the one line worth snapping to
   // whole pixels: it stays hard-edged while everything else slides under it.
   ctx.fillStyle = accent;
   ctx.fillRect(Math.round(w / 2) - 1, 0, 2, h);
+
+  // Running out, the same warning a song deck gets - here the end is where the ARRANGEMENT ends
+  // (the clock twin the end timer keeps; see songEndSetClock), which is the cycle this deck will
+  // stop at. A deck whose arrangement has no end never flashes, because it never runs out.
+  if (deckPlayingNow[deck] && cps > 0) {
+    const end = songEndClocks[deck]?.endCycle();
+    const remain = end == null ? NaN : (end - cycNow) / cps;
+    djEndWarnPaint(ctx, w, h, djEndWarnAt(remain, nowMs), warn);
+  }
 }
 
 // One loop for both strips, running for as long as the stack is up. It decides visibility itself
@@ -29794,15 +29935,16 @@ function songPaneSync(state) {
   for (const d of ['a', 'b']) songPanes[d].sync(state?.song?.[d] ?? null);
 }
 
-/** ▶ for a song deck: play/resume through the desk (cycle-quantized against a running clock). */
-async function songPlay(deck) {
+/** ▶ for a song deck: play/resume through the desk (cycle-quantized against a running clock,
+ * unless the deck's Q is off or this press came with shift - one unquantized start). */
+async function songPlay(deck, unquantized = false) {
   const pane = songPanes[deck];
   if (!pane.song) return;
   const U = deck.toUpperCase();
   try {
     // Same as the cue: a paused deck resumes from where its pane shows the playhead.
     const pos = pane.mirror && !pane.mirror.playing ? pane.playheadNow() : undefined;
-    const res = await api('POST', '/api/song/play', { deck, pos });
+    const res = await api('POST', '/api/song/play', { deck, pos, now: unquantized || undefined });
     logLine(`deck ${U} ♪ playing "${pane.song.title}" from ${res.pos.toFixed(1)}s`
       + (res.master ? ` - master: the clock is its grid at ${res.bpm.toFixed(2)} bpm` : ''));
     // Nothing else was playing and this song couldn't take the clock over, so it is running
@@ -29975,15 +30117,15 @@ for (const deck of ['a', 'b']) {
 // level (post trim/EQ/filter - the same point the cue tap reads), which is what makes it a gain
 // staging meter: ride trim until the deck peaks around the top of the green, whatever the
 // faders are doing.
-function mixMakeFader(id, title) {
+function mixMakeFader(id, title, neutral = 1, extraClass = '') {
   const el = document.createElement('div');
-  el.className = 'mix-dfader';
+  el.className = `mix-dfader${extraClass ? ` ${extraClass}` : ''}`;
   el.id = id;
   el.title = title;
   const grip = document.createElement('div');
   grip.className = 'mix-dfader-grip';
   el.appendChild(grip);
-  let v = 1;
+  let v = neutral;
   const paint = () => el.style.setProperty('--pos', String(v));
   Object.defineProperty(el, 'value', {
     get: () => v,
@@ -30229,13 +30371,13 @@ function mixSyncValues(state) {
     btn.classList.toggle('on', (state.perDeck[deck].cue ?? 0) > 0);
   }
   // The CLOCK, mirrored from server truth on every desk frame. The desk moves the tempo far
-  // more often than an eval does - the migration slider, a detent, a song deck taking the grid -
-  // and until this frame carried the snapshot, everything drawn from currentCyclePos() (playback
-  // highlighting, the livecoded decks' bar grid, the arrangement playhead) kept running at
-  // whatever cps the last eval's setbpm() had baked in.
+  // more often than an eval does - a pitch fader, a song deck taking the grid - and until this
+  // frame carried the snapshot, everything drawn from currentCyclePos() (playback highlighting,
+  // the livecoded decks' bar grid, the arrangement playhead) kept running at whatever cps the
+  // last eval's setbpm() had baked in.
   if (state.transport) transport = state.transport;
-  mixTempoRender(state);
-  songPaneSync(state); // after the tempo render: adoption reads mixNativeBpm for its beatgrid
+  mixFxRender(state.fx);
+  songPaneSync(state);
   deckHeadRender(state);
 }
 
@@ -30285,92 +30427,371 @@ function mixPushStop() {
   mixEvents = null;
 }
 
-// --- tempo migration (phase 5): the shared clock rides between the songs' native tempos ---
+// --- the per-deck pitch faders (the strip) and loop toggles (the deck heads) ---
+//
+// A player deck's pitch fader, vertical and beside the channel fader: DOWN speeds the deck up,
+// UP slows it, over the range its switch selects. What it drives depends on what the deck holds
+// (its own song's rate, the shared clock when it holds the grid or plays code, nothing while it
+// follows someone else's sync) and the server sorts that out - see deckTempoApply there. The
+// readout under it is the tempo the deck is actually running at, which for a livecode deck is
+// the clock it is driving.
+//
+// The loop button is the deck's arrangement loop toggle, up in the deck head: DJ mode opens with
+// both OFF so a song runs start to end like a record, and the button arms the regions back.
+const DECK_TEMPO_RANGES = [6, 10, 16, 100];
+const deckTempoNow = { a: { frac: 0, range: 6 }, b: { frac: 0, range: 6 } }; // server truth's mirror
+const deckLoopsNow = { a: true, b: true };
 
-let mixNativeBpm = { a: null, b: null }; // what each deck's song declared (setbpm), via /api/mix
-let mixTempoAnim = null; // local mirror of a server-side ramp, so the readout glides w/o polling
+// The fader's 0..1 (1 = top) and the slider's frac (-1..1, + = faster) are mirror images: a
+// pitch fader's PLUS is at the bottom, as on every player deck.
+const tempoFracOf = (v) => (0.5 - Number(v)) * 2;
+const tempoValOf = (frac) => 0.5 - frac / 2;
 
-const mixTempoNowEl = document.getElementById('mixTempoNow');
-const mixTempoSliderEl = document.getElementById('mixTempoSlider');
+for (const deck of ['a', 'b']) {
+  const U = deck.toUpperCase();
+  const col = document.getElementById(`mixTempoCol${U}`);
+  const fader = mixMakeFader(`mixTempo${U}`,
+    `deck ${U} tempo - down speeds it up, up slows it down, over the range below; double-click resets`,
+    0.5, 'mix-tempo-fader');
+  const rangeBtn = document.createElement('button');
+  rangeBtn.className = 'small mix-tempo-range';
+  rangeBtn.id = `mixTempoRange${U}`;
+  rangeBtn.textContent = '±6';
+  rangeBtn.title = 'tempo range - click to cycle ±6 / ±10 / ±16 / wide (±100%)';
+  const readout = document.createElement('span');
+  readout.className = 'mix-tempo-read';
+  readout.id = `mixTempoRead${U}`;
+  const pct = document.createElement('span');
+  pct.className = 'mix-tempo-pct';
+  pct.id = `mixTempoPct${U}`;
+  pct.textContent = '0.0%';
+  col.append(fader, rangeBtn, readout, pct);
 
-let mixLinkPeers = null; // peers on the Link session while it is on (the desk's push says), else null
-
-function mixTempoShow(bpm) {
-  mixTempoNowEl.textContent = bpm == null ? '' : `${bpm.toFixed(1)} bpm${mixLinkPeers == null ? '' : ` · link ${mixLinkPeers}`}`;
-  const { a, b } = mixNativeBpm;
-  if (bpm != null && a != null && b != null && a !== b && document.activeElement !== mixTempoSliderEl) {
-    mixTempoSliderEl.value = Math.min(1, Math.max(0, (bpm - a) / (b - a)));
-  }
+  const loopBtn = document.getElementById(`deck${U}Loops`);
+  let pendFrac = null;
+  let flushTimer = null;
+  const postFrac = (frac) => {
+    pendFrac = frac;
+    deckTempoPctShow(deck, frac * deckTempoNow[deck].range); // local echo; the frame corrects
+    if (flushTimer) return;
+    flushTimer = setTimeout(() => {
+      flushTimer = null;
+      api('POST', '/api/mix/decktempo', { deck, frac: pendFrac })
+        .catch((e) => logLine(e.message ?? String(e), true));
+    }, 50);
+  };
+  fader.addEventListener('input', () => postFrac(tempoFracOf(fader.value)));
+  fader.addEventListener('dblclick', () => {
+    fader.value = 0.5;
+    postFrac(0);
+  });
+  rangeBtn.addEventListener('click', () => {
+    if (mixLearnArmed) return;
+    const next = DECK_TEMPO_RANGES[(DECK_TEMPO_RANGES.indexOf(deckTempoNow[deck].range) + 1) % DECK_TEMPO_RANGES.length];
+    api('POST', '/api/mix/decktempo', { deck, range: next })
+      .then((r) => logLine(`deck ${U} tempo range ${r.range === 100 ? 'wide (±100%)' : `±${r.range}%`}`))
+      .catch((e) => logLine(e.message ?? String(e), true));
+  });
+  loopBtn.addEventListener('click', () => {
+    if (mixLearnArmed) return;
+    deckLoopsToggle(deck);
+  });
+  mixLearnAttach(fader, `${deck}:tempo`);
+  mixLearnAttach(rangeBtn, `${deck}:temporange`);
+  mixLearnAttach(loopBtn, `${deck}:loop`);
 }
 
-function mixTempoAnimStop() {
-  if (mixTempoAnim) clearInterval(mixTempoAnim);
-  mixTempoAnim = null;
-}
-
-function mixTempoAnimStart(from, to, seconds) {
-  mixTempoAnimStop();
-  if (!(seconds > 0)) return mixTempoShow(to);
-  const t0 = performance.now();
-  mixTempoAnim = setInterval(() => {
-    const u = Math.min(1, (performance.now() - t0) / (seconds * 1000));
-    mixTempoShow(from + (to - from) * u);
-    if (u >= 1) mixTempoAnimStop();
-  }, 100);
-}
-
-function mixTempoRender(state) {
-  mixNativeBpm = state.deckBpm;
-  mixLinkPeers = state.link ? state.link.peers : null;
-  for (const deck of ['a', 'b']) {
-    const btn = document.getElementById(deck === 'a' ? 'mixTempoA' : 'mixTempoB');
-    const bpm = state.deckBpm[deck];
-    // One decimal at most: a detected bpm can carry float noise, and the button is fixed-width
-    // (see .mix-tempo-detent - the center must not resize, or the whole desk shifts).
-    btn.textContent = bpm != null ? bpm.toFixed(1).replace(/\.0$/, '') : '—';
-    btn.disabled = bpm == null;
-    btn.classList.toggle('at', bpm != null && state.tempo.master != null
-      && Math.abs(state.tempo.master - bpm) < 0.05);
-  }
-  mixTempoSliderEl.disabled = !(state.deckBpm.a != null && state.deckBpm.b != null
-    && state.deckBpm.a !== state.deckBpm.b);
-  if (!mixTempoAnim) mixTempoShow(state.tempo.master);
-}
-
-// A detent: glide the clock to that deck's native tempo over the ramp time. One clean request
-// per click - no throttle needed.
-async function mixTempoDetent(deck) {
-  const seconds = Math.max(0, Number(document.getElementById('mixTempoSecs').value) || 0);
+/**
+ * Arm or disarm one deck's arrangement loops - the deck head's loop button, and what the loop
+ * chord does while the desk is up. Everything that twins the clock follows: the end timer that
+ * stops a finished song, and the painter's playhead and ruler bands if that deck is on screen.
+ */
+async function deckLoopsToggle(deck) {
+  const U = deck.toUpperCase();
   try {
-    const res = await api('POST', '/api/mix/tempo', { deck, seconds });
-    mixTempoAnimStart(res.from, res.bpm, res.seconds);
-    logLine(`tempo → ${res.bpm} bpm (deck ${deck.toUpperCase()}'s native)${res.seconds ? ` over ${res.seconds}s` : ''}`);
-    mixRefresh(); // the detent highlight (and, at 0s, the readout) comes from server truth
+    const res = await api('POST', '/api/arrangeLoops', { deck, on: !deckLoopsNow[deck] });
+    deckLoopsNow[deck] = res.on;
+    document.getElementById(`deck${U}Loops`).classList.toggle('on', res.on);
+    logLine(`deck ${U} loops ${res.on ? 'armed - regions hold playback again' : 'off - the song plays through to its end'}`);
+    songEndSetClock(deck, res.arrange ?? null);
+    if (arState && arDeck === deck) {
+      arSetClock(res.arrange ?? null);
+      drawArrange();
+    }
   } catch (e) {
     logLine(e.message ?? String(e), true);
   }
 }
 
-// The slider ride: position 0..1 maps deck A's native to deck B's, applied instantly and
-// throttled like every other streamed control (latest value wins, one POST per ~50ms).
-let mixTempoFlushTimer = null;
-let mixTempoPendingBpm = null;
-mixTempoSliderEl.addEventListener('input', () => {
-  const { a, b } = mixNativeBpm;
-  if (a == null || b == null || a === b) return;
-  mixTempoAnimStop();
-  const bpm = a + (b - a) * Number(mixTempoSliderEl.value);
-  mixTempoShow(bpm);
-  mixTempoPendingBpm = bpm;
-  if (mixTempoFlushTimer) return;
-  mixTempoFlushTimer = setTimeout(() => {
-    mixTempoFlushTimer = null;
-    api('POST', '/api/mix/tempo', { bpm: mixTempoPendingBpm, seconds: 0 })
-      .catch((e) => logLine(e.message ?? String(e), true));
+// --- the DJ FX unit (center of the strip) ---
+//
+// A named CHAIN of effects, written as code in the editor below, switched in as an insert on the
+// assigned decks. The knob is the chain's `fx1`, so what it does is whatever the code aims it at
+// (plus the dry/wet, unless the chain turns that off). All server state (/api/mix/fx and
+// /api/mix/fxchain); this is the on-screen face, mirrored from the desk frames like every knob.
+const mixFxChainEl = document.getElementById('mixFxChain');
+const mixFxOnEl = document.getElementById('mixFxOn');
+const mixFxAssignEl = document.getElementById('mixFxAssign');
+const MIX_FX_NEW = '\u0000new'; // the picker's "write a new one" row - can't collide with a name
+let mixFxNow = { chain: null, on: false, held: false, knob: 0, assign: 'ab', chains: [] };
+
+const mixFxKnob = mixMakeKnob('mixFxKnob', 0, 1, 0,
+  'the FX knob - the chain\'s fx1: its dry/wet, and whatever else the chain aims it at; drag up/down, double-click closes it');
+document.getElementById('mixFxKnobWrap').appendChild(mixFxKnob);
+
+function mixFxPost(body, said) {
+  return api('POST', '/api/mix/fx', body)
+    .then((r) => { if (said) logLine(said(r)); return r; })
+    .catch((e) => logLine(e.message ?? String(e), true));
+}
+
+let mixFxKnobTimer = null;
+mixFxKnob.addEventListener('input', () => {
+  if (mixFxKnobTimer) return;
+  mixFxKnobTimer = setTimeout(() => {
+    mixFxKnobTimer = null;
+    mixFxPost({ knob: Number(mixFxKnob.value) });
   }, 50);
 });
-document.getElementById('mixTempoA').addEventListener('click', () => mixTempoDetent('a'));
-document.getElementById('mixTempoB').addEventListener('click', () => mixTempoDetent('b'));
+mixFxKnob.addEventListener('dblclick', () => {
+  mixFxKnob.value = 0; // closed: with the default dry/wet, the deck untouched
+  mixFxPost({ knob: 0 });
+});
+
+/** The chain picker: every chain there is, then the row that opens the editor on a new one. */
+function mixFxFillChains() {
+  mixFxChainEl.innerHTML = '';
+  const add = (value, label) => {
+    const opt = document.createElement('option');
+    opt.value = value;
+    opt.textContent = label ?? value;
+    mixFxChainEl.appendChild(opt);
+  };
+  add('', 'fx: none');
+  for (const name of mixFxNow.chains) add(name);
+  add(MIX_FX_NEW, 'new chain…');
+  mixFxChainEl.value = mixFxNow.chain ?? '';
+}
+
+function mixFxRender(fx) {
+  if (!fx) return;
+  const listChanged = fx.chains.join('\n') !== mixFxNow.chains.join('\n')
+    || fx.chain !== mixFxNow.chain
+    || !mixFxChainEl.options.length;
+  mixFxNow = fx;
+  if (listChanged && document.activeElement !== mixFxChainEl) mixFxFillChains();
+  mixFxOnEl.classList.toggle('on', !!(fx.on || fx.held));
+  mixFxOnEl.disabled = !fx.chain;
+  mixFxAssignEl.textContent = fx.assign === 'ab' ? 'A+B' : `deck ${fx.assign.toUpperCase()}`;
+  if (!mixFxKnob.classList.contains('dragging')) mixFxKnob.value = fx.knob;
+}
+
+mixFxChainEl.addEventListener('change', () => {
+  const picked = mixFxChainEl.value;
+  if (picked === MIX_FX_NEW) {
+    mixFxChainEl.value = mixFxNow.chain ?? ''; // the picker goes back; the editor is the gesture
+    openFxEditor(null);
+    return;
+  }
+  mixFxPost({ chain: picked || null }, (r) => (r.chain
+    ? `fx unit: "${r.chain}" (the pad switches it in on ${r.assign === 'ab' ? 'both decks' : `deck ${r.assign.toUpperCase()}`})`
+    : 'fx unit cleared'));
+});
+mixFxOnEl.addEventListener('click', () => {
+  if (mixLearnArmed) return;
+  mixFxPost({ on: !mixFxNow.on });
+});
+mixFxAssignEl.addEventListener('click', () => {
+  if (mixLearnArmed) return;
+  const order = ['a', 'ab', 'b'];
+  mixFxPost({ assign: order[(order.indexOf(mixFxNow.assign) + 1) % order.length] });
+});
+document.getElementById('mixFxEdit').addEventListener('click', () => {
+  if (mixLearnArmed) return;
+  openFxEditor(mixFxNow.chain);
+});
+mixLearnAttach(mixFxKnob, 'fxknob');
+mixLearnAttach(mixFxOnEl, 'fxon', 'fxhold'); // shift+click binds the momentary pad
+mixLearnAttach(mixFxAssignEl, 'fxassign');
+mixLearnAttach(mixFxChainEl, 'fxnext', 'fxprev'); // the step pads; shift+click binds backward
+
+// --- the FX chain editor (a modal, and a real editor) ---
+//
+// A chain is code, so this is the editor the rest of the app is: the poptart mode, autocomplete
+// and ctrl-hover docs, and double-click on a plugin name opens that plugin's own window - with
+// the difference that what you set in there is captured and pinned into THIS chain's code (the
+// buffer's auto-pin writer only ever writes the main buffer; see fxMirrorEdit in server.js).
+//
+// `song` is the head, shown grayed and not editable: a chain always starts from the deck it is
+// inserted on, and which deck that is belongs to the desk, not to the code.
+let fxEdEl = null;
+let fxEdCM = null;
+let fxEdName = null; // the chain being edited, or null for one that does not exist yet
+
+// The ways OUT of the modal are wired at load, not on first open: a panel that is somehow up
+// with nothing listening is a page you have to reload (which is exactly what a missing
+// `#fxEdModal.hidden` rule produced once). Everything here is idempotent and costs nothing while
+// the panel is hidden.
+fxEdEl = document.getElementById('fxEdModal');
+fxEdEl.addEventListener('click', (e) => { if (e.target === fxEdEl) closeFxEditor(); });
+document.getElementById('fxEdClose').addEventListener('click', () => closeFxEditor());
+window.addEventListener('keydown', fxEditorKey, true);
+
+/**
+ * Which effect of a chain a position in its code is on, 1-based, or 0 for none - the slot the FX
+ * unit's plugin windows are numbered by (see /api/mix/fx's `editor`). Only the `fx` NAME counts
+ * as being on one, which is the buffer's rule for every other handle.
+ *
+ * Commented-out calls are skipped rather than counted: the chain's slots are the slots the
+ * EVALUATED chain has, and a call behind a `//` never reached the engine.
+ */
+function fxChainSlotAt(code, idx) {
+  const isCode = codeOnly(code);
+  const re = /\bfx\s*\(/g;
+  let slot = 0;
+  let m;
+  while ((m = re.exec(code))) {
+    if (!isCode(m.index)) continue;
+    slot += 1;
+    if (idx >= m.index && idx <= m.index + 2) return slot; // 2 = the length of `fx`
+  }
+  return 0;
+}
+
+// Built on first open rather than at load: it carries a CodeMirror, and the panel exists in the
+// page from the start (see index.html) precisely so these lookups are never null.
+function fxEditorBuild() {
+  fxEdCM = CodeMirror.fromTextArea(document.getElementById('fxEdCode'), {
+    mode: 'poptart',
+    theme: 'poptart',
+    keyMap: 'sublime',
+    matchBrackets: true,
+    autoCloseBrackets: true,
+    lineWrapping: true,
+    viewportMargin: Infinity,
+    // The one place the app turns SMART indent off, and the reason is this buffer's shape: a
+    // chain is a bare continuation (`.fx("…")` with its `song` head outside the editor), so the
+    // mode - which indents a line starting with `.` one level in from the line it extends - has
+    // nothing above the first line to extend and indents it anyway. Typing `.fx` pulled the line
+    // right (the mode's electric `.`, which this also turns off), and Enter carried that on down,
+    // so a three-effect chain walked off to the right a level at a time. Off, Enter keeps the
+    // previous line's indent and Tab is how you ask for one.
+    smartIndent: false,
+    extraKeys: {
+      'Tab': 'indentMore', // as in the main editor - the default inserts a literal tab
+      'Cmd-Enter': () => fxEditorSave(),
+      'Ctrl-Enter': () => fxEditorSave(),
+      'Ctrl-Space': (ed) => showPoptartHint(ed),
+    },
+  });
+  attachEditorWiring(fxEdCM); // completions, hover docs, the handle underline
+  fxEdCM.on('mousedown', (_ed, e) => {
+    if (e.detail !== 2 || e.button !== 0) return;
+    // Double-click an `fx` to open that effect's own window. The NAME is the handle, exactly as
+    // in the buffer (see the widget handles section): the arguments are ordinary code, and a
+    // double-click inside one still selects the word there.
+    const idx = fxEdCM.indexFromPos(fxEdCM.coordsChar({ left: e.clientX, top: e.clientY }, 'window'));
+    const slot = fxChainSlotAt(fxEdCM.getValue(), idx);
+    if (!slot) return;
+    e.preventDefault();
+    if (fxEdName && fxEdName === mixFxNow.chain) {
+      mixFxPost({ editor: slot }, () => `fx: opened effect ${slot}'s window - what you set there is pinned into "${fxEdName}"`);
+    } else {
+      fxEditorSay('save the chain and load it on the unit first - a plugin window is the running chain\'s');
+    }
+  });
+  document.getElementById('fxEdSave').addEventListener('click', () => fxEditorSave());
+  document.getElementById('fxEdDelete').addEventListener('click', () => fxEditorDelete());
+}
+
+function fxEditorSay(msg, bad = true) {
+  const el = document.getElementById('fxEdMsg');
+  el.textContent = msg ?? '';
+  el.classList.toggle('bad', !!msg && bad);
+}
+
+async function openFxEditor(name) {
+  if (!fxEdCM) fxEditorBuild(); // the CodeMirror is the lazy part; the panel is already wired
+  fxEdName = name ?? null;
+  let got = { code: '', knobWet: true };
+  if (name) {
+    try {
+      got = await api('GET', `/api/mix/fxchain?name=${encodeURIComponent(name)}`);
+    } catch (e) {
+      logLine(e.message ?? String(e), true);
+      return;
+    }
+  }
+  document.getElementById('fxEdNameInput').value = name ?? '';
+  document.getElementById('fxEdWet').checked = got.knobWet !== false;
+  document.getElementById('fxEdDelete').classList.toggle('hidden', !name);
+  fxEditorSay(null);
+  fxEdCM.setValue(got.code || '.fx("")');
+  fxEdEl.classList.remove('hidden');
+  fxEdCM.refresh();
+  fxEdCM.focus();
+  // A new chain opens with the cursor between the quotes, where the plugin name goes.
+  if (!name) {
+    const at = fxEdCM.getValue().indexOf('""');
+    if (at >= 0) fxEdCM.setCursor(fxEdCM.posFromIndex(at + 1));
+  }
+}
+
+function closeFxEditor() {
+  fxEdEl.classList.add('hidden');
+  cm.focus();
+}
+
+function fxEditorKey(e) {
+  if (e.key !== 'Escape' || fxEdEl?.classList.contains('hidden')) return;
+  if (fxEdCM?.state.completionActive) return; // esc closes the completion popup first
+  e.stopPropagation();
+  e.preventDefault();
+  closeFxEditor();
+}
+
+async function fxEditorSave() {
+  const name = document.getElementById('fxEdNameInput').value.trim();
+  if (!name) {
+    fxEditorSay('the chain needs a name');
+    document.getElementById('fxEdNameInput').focus();
+    return;
+  }
+  const code = fxEdCM.getValue().trim();
+  const knobWet = document.getElementById('fxEdWet').checked;
+  try {
+    // A rename is the name input having changed on an existing chain: move it, then save the code
+    // under the new name, so the unit keeps playing the chain it is on.
+    if (fxEdName && fxEdName !== name) await api('POST', '/api/mix/fxchain', { rename: fxEdName, to: name });
+    await api('POST', '/api/mix/fxchain', { save: name, code, knobWet });
+    fxEdName = name;
+    fxEditorSay(null);
+    logLine(`fx chain "${name}" saved`);
+    // Saving is also how you audition: put it on the unit if nothing else is there.
+    if (!mixFxNow.chain) await mixFxPost({ chain: name });
+    else mixRefresh();
+    closeFxEditor();
+  } catch (e) {
+    fxEditorSay(e.message ?? String(e)); // a chain that doesn't compile stays in the editor
+  }
+}
+
+async function fxEditorDelete() {
+  if (!fxEdName) return;
+  const yes = await askDialog(`Delete the FX chain "${fxEdName}"?`, [
+    { label: 'keep it', value: false },
+    { label: 'delete', value: true, primary: true },
+  ]);
+  if (!yes) return;
+  try {
+    await api('POST', '/api/mix/fxchain', { remove: fxEdName });
+    logLine(`fx chain "${fxEdName}" deleted`);
+    closeFxEditor();
+    mixRefresh();
+  } catch (e) {
+    fxEditorSay(e.message ?? String(e));
+  }
+}
 
 // The groups the DESK has been asked to look inside, by stem key. A group is one channel until you
 // say otherwise - that is what grouping bought - so this starts empty on every open and is written
@@ -30584,7 +31005,7 @@ for (const deck of ['a', 'b']) {
 
 document.getElementById('crossfader').addEventListener('input', sendCrossfader);
 document.getElementById('crossfader').addEventListener('dblclick', (e) => {
-  e.target.value = -1; // home: all deck A
+  e.target.value = 0; // home: the center detent, where the desk also opens
   sendCrossfader();
 });
 document.getElementById('mixSwap').addEventListener('change', (e) => {
@@ -30601,12 +31022,12 @@ for (const deck of ['a', 'b']) {
   }
 }
 document.getElementById('deckBSong').addEventListener('click', () => openOrganize('b'));
-document.getElementById('deckBPlay').addEventListener('click', () => deckPlayPress('b'));
+document.getElementById('deckBPlay').addEventListener('click', (e) => deckPlayPress('b', e.shiftKey));
 document.getElementById('deckBUpdate').addEventListener('click', () => evalDeckB(false));
 document.getElementById('deckAKeep').addEventListener('click', () => exitDjMode('a'));
 document.getElementById('deckBKeep').addEventListener('click', () => exitDjMode('b'));
 document.getElementById('deckASong').addEventListener('click', () => openOrganize('a'));
-document.getElementById('deckAPlay').addEventListener('click', () => deckPlayPress('a'));
+document.getElementById('deckAPlay').addEventListener('click', (e) => deckPlayPress('a', e.shiftKey));
 
 /**
  * The deck head's ▶/■, as one gesture both the button and a learned play pad press. A deck
@@ -30614,10 +31035,10 @@ document.getElementById('deckAPlay').addEventListener('click', () => deckPlayPre
  * a pad never waits on the browser); a deck holding CODE plays by evaluating its buffer, which
  * only this side has, which is why the server forwards that press here as an `action` frame.
  */
-function deckPlayPress(deck) {
+function deckPlayPress(deck, unquantized = false) {
   if (mixLearnArmed) return; // the learn handler (registered after this one) takes the click
   if (deckPlayingNow[deck]) return doStop(deck);
-  if (mixModeOn && songPanes[deck].song) return songPlay(deck);
+  if (mixModeOn && songPanes[deck].song) return songPlay(deck, unquantized);
   return deck === 'b' ? evalDeckB(true) : evaluate(true, { byHand: true });
 }
 
@@ -35183,7 +35604,10 @@ function drawArrange() {
     r._x1 = x1; r._x2 = x2; // where it was drawn, for the ruler's hit-testing
     if (x2 <= x1) continue;
     const looping = clockState?.looping === r.name;
-    const released = clockState?.released.includes(r.name);
+    // Loops OFF on this deck (the deck head's loop button - DJ mode opens that way): no region
+    // holds playback, so none of them may read as armed. Drawn like a released one, which is
+    // what they all effectively are until the button arms them again.
+    const released = clockState?.released.includes(r.name) || clockState?.loopsOn === false;
     const selected = arState.selRegion === r;
     ctx.fillStyle = col('--accent');
     ctx.globalAlpha = looping ? 0.55 : released ? 0.12 : 0.28;
@@ -37315,10 +37739,12 @@ function arSetClock(snap) {
   arClockTwin = snap && arrangeMod ? new arrangeMod.ArrangeClock(snap) : null;
 }
 
-/** Where the song is now, by the clock: { pos, looping, released }, or null without an arrangement. */
+/** Where the song is now, by the clock: { pos, looping, released, loopsOn }, or null without an
+ *  arrangement. `loopsOn` is the deck's loop toggle - off, no region holds playback at all, and
+ *  the ruler has to say so (see drawArrange's loops strip) rather than drawing them all armed. */
 function arClockState() {
   if (!arClockTwin) return null;
-  return arClockTwin.stateAt(currentCyclePos());
+  return { ...arClockTwin.stateAt(currentCyclePos()), loopsOn: arClockTwin.loopsOn !== false };
 }
 
 // --- the end of the song ---

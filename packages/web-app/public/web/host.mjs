@@ -97,7 +97,6 @@ const REFUSALS = {
   // The DJ desk is two decks, a crossfader and a song player, none of which is here. Every one
   // of its routes says so rather than half-answering, which would be a desk that never updates.
   'GET /api/mix': ['the DJ desk', 'it stays on the desktop'],
-  'POST /api/mix/tempo': ['the DJ desk', 'it stays on the desktop'],
   'POST /api/mix/set': ['the DJ desk', 'it stays on the desktop'],
   'POST /api/mix/gate': ['the DJ desk', 'it stays on the desktop'],
   'POST /api/mix/gateall': ['the DJ desk', 'it stays on the desktop'],

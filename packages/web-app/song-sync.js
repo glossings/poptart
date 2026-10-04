@@ -18,6 +18,35 @@ const BEATS_PER_CYCLE = 4;
 // Momentary nudge: the classic platter push/drag, ±4% while held.
 const NUDGE_PCT = 0.04;
 
+// Platter pitch-bend (the `bend` MIDI target): a light wheel turn while the deck plays bends the
+// rate in proportion to how fast the wheel is turning, and the deck eases back to its base rate
+// when the hand stops - the standard beatmatch-correction gesture. The playhead model rides the
+// bent rate (songApplyRate rebases on every change), so what a bend leaves behind is exactly the
+// phase it moved - the correction sticks, synced or not, and the drift servo has nothing to undo.
+//   SENS   - rate offset per (tick/second): a patient quarter-turn-a-second (~150 ticks/s on the
+//            usual ~600-tick platter) bends ~3%, about nudge-sized.
+//   MAX    - the bend's cap either way, just above nudge territory; a spin is not a seek.
+//   ATTACK - seconds for the bend to reach a new target; short enough to answer the hand,
+//            long enough that the 30ms message batches read as one motion.
+//   RELEASE- seconds for the bend to die away once the wheel rests.
+const BEND_SENS = 0.0002;
+const BEND_MAX = 0.08;
+const BEND_ATTACK_SEC = 0.05;
+const BEND_RELEASE_SEC = 0.12;
+
+/**
+ * One bend step: where the bend offset stands after `dtSec` in which the wheel moved `ticks`
+ * (signed; 0 = resting). Toward the tick-rate's target while turning, exponentially home to 0
+ * at rest. Pure, so the flush timer's cadence is all the server owns.
+ */
+function bendStep(bend, ticks, dtSec) {
+  const b = Number.isFinite(bend) ? bend : 0;
+  if (!(dtSec > 0)) return b;
+  if (!ticks) return Math.abs(b) < 1e-4 ? 0 : b * Math.exp(-dtSec / BEND_RELEASE_SEC);
+  const target = Math.min(BEND_MAX, Math.max(-BEND_MAX, (ticks / dtSec) * BEND_SENS));
+  return b + (target - b) * Math.min(1, dtSec / BEND_ATTACK_SEC);
+}
+
 // Drift servo: |err| below the deadband is measurement noise (the report quantizes to control
 // blocks); above HARD seconds it isn't drift, it's a dropout - adopt reality instead of chasing
 // it. In between, trim rate to close the error over ~8s, capped so the correction itself is
@@ -57,9 +86,9 @@ function syncRate(masterBpm, nativeBpm, mult = 'auto') {
   return Math.min(RATE_MAX, Math.max(RATE_MIN, (masterBpm * syncOctave(masterBpm, nativeBpm, mult)) / nativeBpm));
 }
 
-/** The playing rate: base with the momentary nudge (hold = -1 | 0 | 1) applied. */
-function effectiveRate(baseRate, nudgeHold = 0) {
-  return baseRate * (1 + NUDGE_PCT * Math.sign(nudgeHold || 0));
+/** The playing rate: base with the momentary nudge (hold = -1 | 0 | 1) and the platter bend applied. */
+function effectiveRate(baseRate, nudgeHold = 0, bend = 0) {
+  return baseRate * (1 + NUDGE_PCT * Math.sign(nudgeHold || 0) + (Number.isFinite(bend) ? bend : 0));
 }
 
 /**
@@ -133,6 +162,7 @@ function servoTrim(errSec) {
 }
 
 module.exports = {
-  syncRate, syncOctave, effectiveRate, snapToGrid, alignToGrid, gridPhase, servoTrim,
-  NUDGE_PCT, RATE_MIN, RATE_MAX, SERVO_HARD_SEC, BEATS_PER_CYCLE,
+  syncRate, syncOctave, effectiveRate, bendStep, snapToGrid, alignToGrid, gridPhase, servoTrim,
+  NUDGE_PCT, BEND_SENS, BEND_MAX, BEND_ATTACK_SEC, BEND_RELEASE_SEC,
+  RATE_MIN, RATE_MAX, SERVO_HARD_SEC, BEATS_PER_CYCLE,
 };

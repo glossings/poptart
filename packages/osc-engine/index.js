@@ -1109,8 +1109,9 @@ class OscEngine {
 
   // DJ deck meters: while on, one reader synth per deck streams the deck's summed PRE-FADER
   // level (post trim/EQ/filter - the cue tap's point) through onDeckLevel at ~20/sec, for the
-  // mix strip's channel meters. Which tracks sum into which deck is the `mdeck` birth arg
-  // (0 = A, 1 = B, -1 = neither); this only starts/stops the readers. Idempotent.
+  // mix strip's channel meters, and its low/mid/high energy through onDeckBands, which is what
+  // colors a livecoded deck's waveform strip. Which tracks sum into which deck is the `mdeck`
+  // birth arg (0 = A, 1 = B, -1 = neither); this only starts/stops the readers. Idempotent.
   deckMeters(on) {
     this._send('/poptart/deckMeters', [on ? 1 : 0]);
   }
@@ -1959,6 +1960,14 @@ class OscEngine {
     this._send('/poptart/setBusSendAmount', [trackId, index, amount, this._latency(targetTime)]);
   }
 
+  // The DJ FX send (the performance desk's FX unit): point a track's dedicated fxOut/fxSend tap
+  // at a named bus, at `amount`. Deliberately its own send rather than one of the four .bus()
+  // slots - those belong to the song code and are replaced wholesale on every eval, while the
+  // desk's routing has to survive evals it had no part in. An empty name parks the tap.
+  setFxSend(trackId, busName, amount) {
+    this._send('/poptart/setFxSend', [trackId, String(busName ?? ''), amount ?? 0]);
+  }
+
   // Inject audio into the plugin at `slot` as its aux/sidechain input (Sig#audio injector). A
   // track source: sclang allocates a cross-track bus, maps it into that slot's VSTPlugin aux bus,
   // adds a send from the source track's output, and orders the source ahead so the send lands the
@@ -2149,6 +2158,15 @@ class OscEngine {
       const [deck, peakL, rmsL, peakR, rmsR] = (msg.args ?? []).map((a) => a?.value ?? a);
       if (typeof this.onDeckLevel === 'function') {
         this.onDeckLevel(Number(deck), Number(peakL), Number(rmsL), Number(peakR), Number(rmsR));
+      }
+      return;
+    }
+    if (msg.address === '/poptart/deckBands') {
+      // The same feed's band energies: [deck, low, mid, high], mean-square per band over the
+      // frame (see poptart_deck_meter). Shares, not levels - what colors the deck's waveform.
+      const [deck, low, mid, high] = (msg.args ?? []).map((a) => a?.value ?? a);
+      if (typeof this.onDeckBands === 'function') {
+        this.onDeckBands(Number(deck), Number(low), Number(mid), Number(high));
       }
       return;
     }

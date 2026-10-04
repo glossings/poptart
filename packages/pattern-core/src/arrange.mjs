@@ -383,8 +383,9 @@ export function _arrange(str = '', opts = {}) {
  * anchors past its cycle and they are walked again.
  */
 export class ArrangeClock {
-  constructor({ end = 0, regions = [], anchors = null } = {}) {
+  constructor({ end = 0, regions = [], anchors = null, loopsOn = true } = {}) {
     this.setEnd(end);
+    this.loopsOn = loopsOn !== false;
     this.regions = (regions ?? [])
       .map((r) => ({ name: String(r.name), start: Math.max(0, Number(r.start)), end: Number(r.end) }))
       .filter((r) => Number.isFinite(r.start) && Number.isFinite(r.end) && r.end > r.start + EPS)
@@ -423,13 +424,17 @@ export class ArrangeClock {
   rebuilt({ end = this.end, regions = [] } = {}, cycle = 0) {
     const { pos, released } = this.stateAt(cycle);
     const names = new Set((regions ?? []).map((r) => String(r.name)));
-    return new ArrangeClock({ end, regions, anchors: [{ cycle, pos, released: released.filter((n) => names.has(n)) }] });
+    return new ArrangeClock({
+      end, regions, loopsOn: this.loopsOn,
+      anchors: [{ cycle, pos, released: released.filter((n) => names.has(n)) }],
+    });
   }
 
   /** What the editor needs to run an identical clock: plain data, sets as arrays. */
   snapshot() {
     return {
       end: this.end,
+      loopsOn: this.loopsOn,
       regions: this.regions.map((r) => ({ ...r })),
       anchors: this.anchors.map((a) => ({ cycle: a.cycle, pos: a.pos, released: [...a.released] })),
     };
@@ -443,6 +448,7 @@ export class ArrangeClock {
 
   /** The region that will next wrap the playhead moving forward from `pos` under `released`, if any. */
   _loopFrom(pos, released) {
+    if (!this.loopsOn) return null;
     let best = null;
     for (const r of this.regions) {
       if (released.has(r.name)) continue;
@@ -497,6 +503,26 @@ export class ArrangeClock {
     const next = { cycle, pos, released: new Set([...released, looping]) };
     this.anchors.splice(i + 1, this.anchors.length, next);
     return looping;
+  }
+
+  /**
+   * Turn the loop regions OFF or back ON at `cycle` - the DJ decks' loop toggle. Off, every
+   * region is passed over and the song runs straight through to its end (endCycle names one, so
+   * the deck stops there); on again, every region ahead of the playhead is armed afresh - the
+   * one the playhead is inside loops again at its own end. Recorded like a release: an anchor at
+   * that cycle, and whatever had been walked beyond it is dropped and walked again. The position
+   * is read under the OLD setting first, so the flip never moves the playhead.
+   */
+  setLoops(on, cycle = 0) {
+    const want = on !== false;
+    if (want === this.loopsOn) return this.loopsOn;
+    const pos = this.posAt(cycle);
+    const i = this._anchorIndexAt(cycle);
+    const released = want ? new Set() : new Set(this.anchors[i].released);
+    this.loopsOn = want;
+    const from = this.anchors[i] && Math.abs(this.anchors[i].cycle - cycle) < EPS ? i : i + 1;
+    this.anchors.splice(from, this.anchors.length, { cycle, pos, released });
+    return this.loopsOn;
   }
 
   /**

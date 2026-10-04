@@ -298,6 +298,41 @@ test('ArrangeClock: walking ahead then releasing re-walks, and a snapshot replay
   assert.equal(twin.endCycle(), clock.endCycle());
 });
 
+test('ArrangeClock.setLoops: off, every region is passed over and the song has an end', () => {
+  const clock = new ArrangeClock({ end: 8, regions: [{ name: 'A', start: 2, end: 4 }, { name: 'B', start: 6, end: 7 }] });
+  assert.equal(clock.posAt(9), 3, 'looping A');
+  assert.equal(clock.setLoops(false, 9), false);
+  assert.equal(clock.posAt(9), 3, 'the flip moves nothing');
+  assert.equal(clock.posAt(10), 4, 'A no longer holds');
+  assert.equal(clock.posAt(13), 7, 'neither does B further on');
+  assert.equal(clock.endCycle(), 14, 'with nothing armed the song ends - the deck can stop there');
+  assert.equal(clock.release(9), null, 'nothing is looping while loops are off');
+  // The editor's twin replays the same positions off a snapshot - the flag rides it.
+  const twin = new ArrangeClock(clock.snapshot());
+  for (const c of [0, 3, 5, 9, 10, 13, 20]) assert.equal(twin.posAt(c), clock.posAt(c));
+  assert.equal(twin.endCycle(), clock.endCycle());
+});
+
+test('ArrangeClock.setLoops: on again arms every region ahead, released ones included', () => {
+  const clock = new ArrangeClock({ end: 8, regions: [{ name: 'A', start: 2, end: 4 }] });
+  clock.release(9); // let A go the hands-on way first
+  clock.setLoops(false, 10);
+  assert.equal(clock.setLoops(true, 11), true);
+  assert.equal(clock.posAt(11), 5, 'the flip moves nothing');
+  const wrapAt = 11 + (8 - 5) + 4; // runs to the end... nothing ahead of pos 5 but walking on
+  assert.equal(clock.posAt(wrapAt), wrapAt - 11 + 5, 'A is behind the playhead - nothing wraps');
+  // ...but a seek back before A finds it armed again: the release was forgotten with the re-arm.
+  clock.seek(20, 0);
+  assert.equal(clock.posAt(23), 3);
+  assert.equal(clock.posAt(25), 3, 'A loops again');
+  // Starting OFF from construction (a deck whose toggle was already off when the clock was built).
+  const off = new ArrangeClock({ end: 8, regions: [{ name: 'A', start: 2, end: 4 }], loopsOn: false });
+  assert.equal(off.posAt(6), 6);
+  assert.equal(off.endCycle(), 8);
+  assert.equal(off.rebuilt({ regions: [{ name: 'A', start: 2, end: 4 }] }, 3).loopsOn, false, 'a rebuild keeps the toggle');
+  assert.equal(off.setLoops(false, 3), false, 'setting what it already is is a no-op');
+});
+
 test('ArrangeClock.seek: from that cycle on the song is at that bar, regions armed afresh', () => {
   const clock = new ArrangeClock({ end: 16, regions: [{ name: 'A', start: 0, end: 4 }] });
   // stopped, so the transport restarts at cycle 0: a seek there is where the song starts

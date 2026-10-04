@@ -7,8 +7,8 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const {
-  syncRate, syncOctave, effectiveRate, snapToGrid, alignToGrid, gridPhase, servoTrim,
-  NUDGE_PCT, RATE_MIN, RATE_MAX, BEATS_PER_CYCLE,
+  syncRate, syncOctave, effectiveRate, bendStep, snapToGrid, alignToGrid, gridPhase, servoTrim,
+  NUDGE_PCT, BEND_SENS, BEND_MAX, BEND_ATTACK_SEC, RATE_MIN, RATE_MAX, BEATS_PER_CYCLE,
 } = require('./song-sync');
 
 test('syncRate: master over native, clamped, null without a native tempo', () => {
@@ -39,6 +39,40 @@ test('effectiveRate: ±4% while a nudge is held, exactly the base otherwise', ()
   assert.equal(effectiveRate(1, 1), 1 + NUDGE_PCT);
   assert.equal(effectiveRate(1, -1), 1 - NUDGE_PCT);
   assert.equal(effectiveRate(1.1, 1), 1.1 * (1 + NUDGE_PCT));
+});
+
+test('effectiveRate: the platter bend rides on top of the base and the nudge', () => {
+  assert.equal(effectiveRate(1, 0, 0.02), 1.02);
+  assert.equal(effectiveRate(1, 1, 0.02), 1 + NUDGE_PCT + 0.02);
+  assert.equal(effectiveRate(2, 0, -0.01), 2 * 0.99);
+  assert.equal(effectiveRate(1, 0, NaN), 1, 'a bend that is not a number is no bend');
+});
+
+test('bendStep: turning bends with the tick rate, resting eases home, never past the cap', () => {
+  // A steady light turn (2 ticks per 30ms flush) settles toward its proportional target.
+  let b = 0;
+  for (let i = 0; i < 40; i++) b = bendStep(b, 2, 0.03);
+  const target = (2 / 0.03) * BEND_SENS;
+  assert.ok(Math.abs(b - target) < target * 0.05, `settles on ticks/sec x sens (${b} vs ${target})`);
+  assert.ok(b > 0.01 && b < 0.02, 'a patient correcting turn is nudge-sized');
+  // Backward turns bend down the same way.
+  assert.ok(bendStep(0, -2, 0.03) < 0);
+  // A spin is not a seek: however fast the wheel, the bend stops at the cap.
+  for (let i = 0; i < 40; i++) b = bendStep(b, 500, 0.03);
+  assert.ok(Math.abs(b - BEND_MAX) < 1e-12, `caps at BEND_MAX (${b})`);
+  // Hands off: the bend decays toward 0 and snaps to exactly 0 at the end - the deck is BACK
+  // on its base rate, not forever a hair off it.
+  for (let i = 0; i < 100; i++) b = bendStep(b, 0, 0.03);
+  assert.equal(b, 0);
+  // One resting step alone only eases - the release is a fade, not a cliff.
+  const eased = bendStep(BEND_MAX, 0, 0.03);
+  assert.ok(eased > 0 && eased < BEND_MAX);
+  // Degenerate inputs stay harmless.
+  assert.equal(bendStep(NaN, 0, 0.03), 0);
+  assert.equal(bendStep(0.05, 2, 0), 0.05, 'a zero-length step moves nothing');
+  // The attack answers the hand: one step most of the way to a new target within ~50ms.
+  const first = bendStep(0, 2, BEND_ATTACK_SEC);
+  assert.ok(first > ((2 / BEND_ATTACK_SEC) * BEND_SENS) * 0.95);
 });
 
 test('snapToGrid: nearest gridpoint from the anchor, always inside the file', () => {

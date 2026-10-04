@@ -182,7 +182,7 @@ function listWipPatterns() {
 //   { kind: 'file', path, title?, bpm?, key? }
 //
 // A file item carries what its file can't say to poptart yet - a display title, the native
-// tempo /api/mix/tempo migrates toward, the musical key - entered by hand until tag parsing
+// tempo its pitch fader rides around, the musical key - entered by hand until tag parsing
 // (phase 4) fills them in. Items of either kind may repeat (a set that comes back to a song is
 // a real set). An item whose save was deleted - or whose file moved - stays in the list and
 // renders as missing: the playlist is the user's document, not an index to be silently repaired.
