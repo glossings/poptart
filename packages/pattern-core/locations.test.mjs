@@ -52,6 +52,22 @@ test('injectLocations wraps a second-position .param() value but not its name', 
   assert.ok(out.includes('.param("Filter Freq", mini("0.2 0.8"'), out);
 });
 
+test('the device-named .param() form keeps BOTH names plain and patterns only the value', () => {
+  // The name is the SECOND argument here; wrapped, it reached the engine as a Sig where a
+  // parameter name belongs - which crashed the eval and wedged every one after it.
+  const out = injectLocations('x.param("Serum 2", "A Warp 2 Var", "0.2 0.8")');
+  assert.ok(out.includes('.param("Serum 2", "A Warp 2 Var", mini("0.2 0.8"'), out);
+  // ...whatever the value is: a signal argument leaves both names alone too.
+  const sig = injectLocations('x.param("Serum 2", "A Warp 2 Var", midicc("x")(12))');
+  assert.ok(sig.includes('.param("Serum 2", "A Warp 2 Var", midicc('), sig);
+});
+
+test('the device-named .wet() form keeps its name plain; a lone .wet value still patterns', () => {
+  const out = injectLocations('x.wet("ValhallaRoom", "0 1")');
+  assert.ok(out.includes('.wet("ValhallaRoom", mini("0 1"'), out);
+  assert.match(injectLocations('x.wet("<1 0>")'), /\.wet\(mini\("<1 0>", \d+\)\)/);
+});
+
 test('a single-quoted string is plain JavaScript, never mini notation', () => {
   const helper = 'const chord = (root, ...ivs) => note(ivs.map((iv) => noteToMidi(root) + iv).join(\',\'));';
   assert.equal(injectLocations(helper), helper);

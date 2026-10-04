@@ -1053,7 +1053,7 @@ export class Scheduler {
         }
         continue;
       }
-      this.engine[MODULATOR_CLEARS[prev.kind]](this.trackId, prev.slot, prev.name);
+      this._clearModulator(prev);
     }
     this._activeModulators = nextModulators;
 
@@ -1100,6 +1100,23 @@ export class Scheduler {
       if (vel <= 0) return null;
     }
     return [onset, cycle - delta + this._soundingEnd(step, onsetSec, songOnset)];
+  }
+
+  /**
+   * Clears one engine-side modulator, and never lets the clear itself fail the caller. Clearing
+   * runs inside stop() and the eval diff - the paths every LATER evaluation takes - so a clear
+   * the engine cannot take (state left by an eval that failed mid-apply) would otherwise abort
+   * every evaluation after it, wedging the server on state only a restart could shed (found
+   * 2026-10-03). The modulator is dropped from the table either way; worst case is an engine
+   * synth that runs until the next eval re-programs that parameter.
+   */
+  _clearModulator(m) {
+    try {
+      this.engine[MODULATOR_CLEARS[m.kind]](this.trackId, m.slot, m.name);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error(`[scheduler] track "${this.label}" could not clear a ${m.kind} modulator on "${m.name}": ${err.message ?? err}`);
+    }
   }
 
   /**
@@ -1215,7 +1232,7 @@ export class Scheduler {
     // unmute - the fresh Scheduler an unmute creates never saw them and so can't clear them itself.
     // setPattern re-establishes any the pattern still carries on the next eval.
     for (const m of this._activeModulators.values()) {
-      this.engine[MODULATOR_CLEARS[m.kind]](this.trackId, m.slot, m.name);
+      this._clearModulator(m);
     }
     this._activeModulators = new Map();
     // Held parameters are NOT handed back here. Stopping leaves the sound as it is - a stopped

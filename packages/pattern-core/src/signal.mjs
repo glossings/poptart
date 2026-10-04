@@ -235,6 +235,11 @@ export class Sig {
     // OUTSIDE `sampler` on purpose: that object is walked generically wherever a pattern is
     // time-warped or condition-switched, and everything in it has to be a signal.
     this.samplerKind = opts.samplerKind ?? null;
+    // The source argument as the chain named it - .s("hosd")'s string, or the Sig a patterned
+    // source arrives as - kept so a grid-replacing swap (.copy()/.pcopy(), see _samplerRegrid)
+    // can rebuild the source conversion over new notes. Outside `sampler` for the same reason
+    // samplerKind is: it may be a plain string, and that object must hold only signals.
+    this.samplerSrc = opts.samplerSrc ?? null;
     // .record()'s settings: { cycles, name, wrapTail, normalize }, or null. Nothing in playback reads this -
     // it's a marker for the editor's recorder panel, which finds the call in the code (see
     // client.js's findRecordCallAt) and bounces the block by its label.
@@ -300,6 +305,7 @@ export class Sig {
       sampler: this.sampler,
       samplerPending: this.samplerPending,
       samplerKind: this.samplerKind,
+      samplerSrc: this.samplerSrc,
       recordOpts: this.recordOpts,
       slotStates: this.slotStates,
       presetPatterns: this.presetPatterns,
@@ -1148,6 +1154,13 @@ export class Sig {
   }
 
   _paramAt(slot, name, value) {
+    // A parameter is addressed by its plain string name, and nothing downstream can use anything
+    // else - the engine encodes the name into OSC, and a non-string there failed AFTER the eval
+    // had half-applied, leaving modulator state no later evaluation could clear (found
+    // 2026-10-03). Thrown here instead, it is a build error the evaluate route rolls back whole.
+    if (typeof name !== 'string') {
+      throw new Error('[signal] .param() takes the parameter name as a plain string - .param("Cutoff", 0.4), or .param("Serum 2", "Cutoff", 0.4) with a device named first');
+    }
     const key = `${slot}:${name}`;
     // An audio handle in value position is a CONNECTION: wire that track or bus onto the
     // parameter and let it run at the sample rate. `.param("Osc 1 Phase", audio("mod"))` is
@@ -3010,7 +3023,9 @@ export class Sig {
       warnUser('[copy] a control head has no notes to swap into a copy - write the control after it instead: copy("kick").vel(...)');
       return sig;
     }
-    return sig._noteLike(this);
+    // A sampler can't take the swap through _noteLike - that is .note()'s repitch semantics,
+    // which keeps the copied grid - so it re-grids instead (see _samplerRegrid).
+    return sig.sampler ? sig._samplerRegrid(this) : sig._noteLike(this);
   }
 
   /**
@@ -3021,8 +3036,10 @@ export class Sig {
    * there is no chain yet to keep.
    */
   pcopy(name) {
-    // `pcopy` here is the builder, same trick as .copy() above.
-    return this._noteLike(pcopy(name));
+    // `pcopy` here is the builder, same trick as .copy() above. A sampler chain re-grids for the
+    // reason .copy() does: the incoming notes must BE the events, not a repitch channel.
+    const notes = pcopy(name);
+    return this.sampler ? this._samplerRegrid(notes) : this._noteLike(notes);
   }
 
   /**
@@ -3262,7 +3279,7 @@ export class Sig {
         }
       : (t, cps, pos) => (this.sample(t, cps, pos) == null ? null : name);
     const eventAt = nameSig ? mapEventAt(nameSig, (v) => String(v)) : mapEventAt(this, () => name);
-    return new Sig(sample, { stepsForCycle, eventAt, ...this._meta(), sampler, samplerPending: null, samplerKind: kind });
+    return new Sig(sample, { stepsForCycle, eventAt, ...this._meta(), sampler, samplerPending: null, samplerKind: kind, samplerSrc: nameSig ?? name });
   }
 
   /**
@@ -3343,6 +3360,44 @@ export class Sig {
     // noteChannels is empty here and this is a plain grid swap.
     const stepsForCycle = applyNoteChannels(sig.stepsForCycle, this.noteChannels);
     return sig._clone({ ...this._meta(), stepsForCycle, midiNotes: sig.midiNotes ?? this.midiNotes, pitchKind: sig.pitchKind });
+  }
+
+  /**
+   * The grid-REPLACING swap .copy()/.pcopy() mean, on a SAMPLER track: `noteSig`'s events become
+   * the grid, and this track's source, controls and chain re-fold onto them - exactly the track
+   * that typing the same chain over the new notes would build. _noteLike can't serve here: its
+   * sampler branch is .note()'s repitch semantics - the incoming pitches sampled AT the sampler's
+   * own onsets - which for a copy kept the copied grid and dropped every new note falling between
+   * its onsets: a track that never sounded (found 2026-10-03).
+   */
+  _samplerRegrid(noteSig) {
+    // A sampler whose source can't be recovered (none was ever recorded on this Sig) keeps the
+    // old annotate behavior rather than silencing or throwing.
+    if (this.samplerSrc == null) {
+      const stepsForCycle = crossMerge(this.stepsForCycle, noteSig, stampCfg('note'));
+      return this._clone({ sampler: { ...this.sampler, note: noteSig }, stepsForCycle });
+    }
+    const method = { pack: 's', file: 'se', rec: 'sr', named: 'sp' }[this.samplerKind] ?? 's';
+    let out = noteSig._asSampler(method, this.samplerSrc, this.samplerKind, 'a sample source');
+    for (const [key, v] of Object.entries(this.sampler)) {
+      if (v == null || key === 'note') continue; // the new notes ARE the repitch now
+      // slices/grainShape are set without a grid merge (they add no structure); every other key
+      // is a control and folds in exactly as its chain method did.
+      if (key === 'slices' || key === 'grainShape') out = out._clone({ sampler: { ...out.sampler, [key]: v } });
+      else out = out._samplerOpt(key, key, v);
+    }
+    // The chain, params, channel strip and note channels carry over exactly as the synth path's
+    // grid swap carries them (see _noteLike above); the grid and sampler stay the rebuilt ones.
+    return out._clone({
+      ...this._meta(),
+      sampler: out.sampler,
+      samplerPending: null,
+      samplerKind: this.samplerKind,
+      samplerSrc: this.samplerSrc,
+      stepsForCycle: applyNoteChannels(out.stepsForCycle, this.noteChannels),
+      pitchKind: noteSig.pitchKind,
+      midiNotes: noteSig.midiNotes ?? this.midiNotes,
+    });
   }
 }
 
@@ -5059,13 +5114,17 @@ export function sp(value) {
 // ref it sends.
 function samplerPattern(builder, value, kind) {
   assertBuilderInput(builder, value);
-  if (value instanceof Sig) return value._clone({ sampler: {}, samplerKind: kind });
+  // The head form IS its own source: the pattern's values are the names, so a grid-replacing
+  // swap (see _samplerRegrid) samples them from the pattern itself.
+  if (value instanceof Sig) return value._clone({ sampler: {}, samplerKind: kind, samplerSrc: value });
   const ast = parseMini(String(value));
-  return new Sig(miniStepSampler(ast), {
+  const out = new Sig(miniStepSampler(ast), {
     stepsForCycle: miniStepsForCycle(ast),
     sampler: {},
     samplerKind: kind,
   });
+  out.samplerSrc = out;
+  return out;
 }
 
 // ---------------------------------------------------------------------------------------------

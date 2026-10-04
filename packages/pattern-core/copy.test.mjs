@@ -53,6 +53,30 @@ test(".copy(): the method form swaps THIS signal in as the copy's notes", () => 
   });
 });
 
+test('.copy() of a SAMPLER track swaps the new notes in as the grid', () => {
+  // The sampler path used to merge the new notes as a repitch CHANNEL onto the copied grid, so
+  // a note falling between the copied onsets was dropped - two rolls with no shared onset made
+  // a track that never sounded at all.
+  withResolver({ kick: () => note('36 ~ 38 ~').s('bd').speed(2) }, () => {
+    const out = note('40 41 42').copy('kick');
+    const steps = out.stepsForCycle(0).filter((st) => st.value != null);
+    assert.equal(steps.length, 3, 'the copy plays the NEW notes, wherever they fall');
+    assert.deepEqual(steps.map((st) => st.value), ['bd', 'bd', 'bd'], 'through the copied source');
+    assert.deepEqual(steps.map((st) => st.cfg?.note), [40, 41, 42], 'each repitched to its own pitch');
+    assert.ok(out.sampler, 'still a sampler track');
+    assert.equal(out.sampler.speed.sample(0, 1), 2, 'the copied controls still apply');
+  });
+});
+
+test('.pcopy() on a sampler chain plays the copied notes through this sampler', () => {
+  withResolver({ lead: () => note('50 52') }, () => {
+    const out = s('bd').pcopy('lead');
+    const steps = out.stepsForCycle(0).filter((st) => st.value != null);
+    assert.deepEqual(steps.map((st) => st.value), ['bd', 'bd']);
+    assert.deepEqual(steps.map((st) => st.cfg?.note), [50, 52]);
+  });
+});
+
 test('.copy() on a control head warns and hands back the plain copy', () => {
   const warnings = [];
   setPatternWarn((msg) => warnings.push(msg));

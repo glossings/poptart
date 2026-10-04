@@ -7,7 +7,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { s, lfo, env, _shape, Sig } from './src/signal.mjs';
+import { s, lfo, env, mini, _shape, Sig } from './src/signal.mjs';
 import { Scheduler } from './src/scheduler.mjs';
 
 function mockEngine(now = 0) {
@@ -152,4 +152,34 @@ test('a lone modulator with a signal-valued bound is still native and dynamic', 
   const argsTo = sent(t);
   assert.equal(argsTo('setParamLFO').length, 1);
   assert.equal(argsTo('setParam').filter(([, slot]) => slot >= 0).length, 0);
+});
+
+test('.param() refuses a non-string name at build time', () => {
+  // A Sig in name position can't address anything downstream - sent, it reached the engine's
+  // OSC encoder mid-apply and left modulator state no later evaluation could clear. Thrown at
+  // build, the evaluate route rolls it back whole.
+  assert.throws(() => s('808f').fx('Decapitator').param('Decapitator', mini('Mix'), 0.5), /plain string/);
+  assert.throws(() => s('808f').fx('Decapitator').param(mini('Mix'), 0.5), /plain string/);
+});
+
+test('a modulator clear the engine rejects fails neither the eval diff nor stop()', () => {
+  const quiet = console.error;
+  const logged = [];
+  console.error = (line) => logged.push(String(line));
+  try {
+    const { engine } = mockEngine(0.2);
+    engine.clearParamLFO = () => { throw new TypeError('cannot encode OSC argument: [object Object]'); };
+    const sched = new Scheduler(engine, { trackId: 'kick' });
+    sched.setPattern(s('808f').fx('Decapitator').param('Mix', lfo('0,0 0.5,1 1,0')));
+    // The next eval drops the modulator; the failing clear must not abort the diff...
+    sched.setPattern(s('808f').fx('Decapitator').param('Mix', 0.5));
+    assert.equal(sched._activeModulators.size, 0, 'the modulator is dropped from the table regardless');
+    // ...and the teardown path survives it too.
+    sched.setPattern(s('808f').fx('Decapitator').param('Mix', lfo('0,0 0.5,1 1,0')));
+    sched.stop();
+    assert.equal(sched._activeModulators.size, 0);
+    assert.match(logged.join('\n'), /could not clear/);
+  } finally {
+    console.error = quiet;
+  }
 });

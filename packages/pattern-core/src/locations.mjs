@@ -115,7 +115,7 @@ const NAME_ARG_CALLS = new Set([
   // `.slices("<tight loose>")` is a pattern of names like `.preset()`, so it is deliberately not
   // listed - its argument wants highlighting exactly as pianoroll("<a b>") does.
   '_slices',
-  'param', // only the NAME (first argument); .param("Filter Freq", "0.2 0.8") patterns the value
+  'param', // the NAME: the first argument, and the second in the device form (see the later-argument rule below); only the final argument patterns the value
   // A place to read sample packs from - "user/repo", a URL - which a "/" would make a division.
   'samples',
 ]);
@@ -195,6 +195,9 @@ export function isPatternPosition(before, after, text = '') {
     if (first[1] === 'pianoroll') return !!text.trim() && !looksLikeNoteString(text);
     if (first[1] === 'lfo' || first[1] === 'grainshape') return !!text.trim() && !looksLikeShapeData(text);
     if (NAME_ARG_CALLS.has(first[1])) return false;
+    // .wet(target, value) names a device first - the comma after the literal is what says this is
+    // the two-argument form. A lone .wet("<1 0>") stays the value pattern it is.
+    if (first[1] === 'wet' && /^\s*,/.test(after)) return false;
     if (METHOD_NAME_ARG_CALLS.has(first[1])) {
       // Method form only: scan left from the callee (a suffix of `before` starting inside `near`)
       // over whitespace for the chaining dot; the bare builder of the same name stays a pattern.
@@ -209,7 +212,13 @@ export function isPatternPosition(before, after, text = '') {
   // argument list - a nested call (fx("Reverb").speed("1 2")) has its own first-argument rule.
   if (/,\s*\[?\s*$/.test(near)) {
     const enclosing = near.match(/\b([A-Za-z_$][\w$]*)\s*\(\s*[^()]*$/);
-    return !(enclosing && NAME_ONLY_CALLS.has(enclosing[1]));
+    if (enclosing && NAME_ONLY_CALLS.has(enclosing[1])) return false;
+    // param()'s device-named form puts the NAME second - .param("Serum 2", "A Warp 2 Var", 0.5) -
+    // and only the final argument is ever the value pattern, so a later literal with another
+    // argument after it is a name. Wrapped, it reached the engine as a Sig where a parameter
+    // name belongs, which poisoned every later evaluation (found 2026-10-03).
+    if (enclosing?.[1] === 'param' && /^\s*,/.test(after)) return false;
+    return true;
   }
   if (method) return true;
   return false;

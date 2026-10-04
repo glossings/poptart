@@ -5,6 +5,40 @@ no completion notes.
 
 ---
 
+[ ] Patternable LFO rate. A modulator's rate is the one argument that still refuses a pattern:
+    parseRate() takes a number of cycles or an "0.5hz" string and throws on anything else, and
+    .fast()/.phase() on an LFO rebuild the IR with plain numbers at build time. That breaks the
+    language's own rule (every argument defaults to toSignal) and blocks real musical material -
+    a sweep that doubles its speed per section (`sine("<1 2 4>")`), a wobble whose rate rides an
+    automation lane, scan-rate motion on a wavetable position. The plumbing mostly exists: the
+    scheduler already re-sends a synced LFO's rateHz when the tempo moves (_sendModulator's
+    dynamic path), and the engine updates the running synth in place, phase-continuous - a
+    patterned rate is "the same, but sampled from a signal per tick", exactly how signal-valued
+    .range() bounds work today. The real work is phase honesty: lfoPhaseCount computes phase as
+    position x rate, so a rate change must ACCUMULATE phase from a ledger (the per-modulator
+    phaseOriginSec/phaseOriginCycle that shape swaps already keep) or the JS-side sampler, the
+    native synth and the highlighter disagree the moment the rate moves. Open question: what the
+    cycle-grid anchor of a SYNCED rate means under a varying rate (rate 0.25 starts its pass on
+    cycles 0, 4, 8 today) - likely "integral of the rate, re-anchored at each change", which is
+    what the ledger computes anyway.
+
+[ ] Reach the preset-state-only plugin settings by patching pinned preset blobs. Some of the most
+    musically important plugin settings are not VST parameters at all but preset STATE - Serum 2's
+    wavetable choice per oscillator, the mod matrix's source/dest routings (only Mod n Amount/Out
+    enumerate), which effect sits in each internal FX slot - so no .param() can ever reach them,
+    and a palette that needs "this patch, sixteen different tables" means sixteen manual trips
+    through the plugin's own browser. But a pinned `_preset()` blob is decodable: b64 -> gzip ->
+    VST3/XferJson wrapper -> zstd-compressed CBOR of named fields, which is exactly where those
+    settings live. A tool that decodes a base patch, patches named fields and re-encodes could
+    GENERATE pinned presets offline from a spec (table name, mod amounts, envelope times), and
+    playback then patterns them with the `.preset("<a b>")` machinery that already exists - a
+    per-phrase device, since a whole-state push resets sounding voices. First milestone, before
+    building anything on it: a byte-faithful round trip of a known blob (decode, re-encode
+    untouched, confirm the plugin loads it and nulls against the original), then patch exactly
+    one field (oscillator A's table) and verify in the plugin's UI. zstd level, CBOR field order
+    and the wrapper framing are the failure modes; if the round trip doesn't hold, the decode
+    half is still useful for VERIFYING what a hand-built preset contains.
+
 [ ] Resolve plugin names on demand instead of scanning everything first. A first run with 400
     plugins is 15-20 minutes of probing (serial, ~2-3s each) before a plugin name resolves, and
     that is the first thing a new user sees. The reason a full scan exists is that a plugin's
