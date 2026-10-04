@@ -14,7 +14,7 @@ import {
   globalScale, scaleAtOctave, scaleParts, DEFAULT_SCALE, DEFAULT_SCALE_OCTAVE,
 } from './notes.mjs';
 import { parseShapePoints, serializeShapePoints, SHAPE_PRESETS, sampleShape, parseAutoPoints, sampleAutoPoints, parseBendPoints, sampleBendPoints, bendIsFlat } from './shape.mjs';
-import { grooveRef, resolveGroove, grooveTimeAt, grooveVelAt, grooveNameLike, parseGroove, serializeGroove, GROOVE_NAMES } from './groove.mjs';
+import { grooveRef, resolveGroove, grooveTimeAt, grooveVelAt, grooveNameLike, looksLikeGrooveData, parseGroove, serializeGroove, setSessionGroove, sessionGroove, GROOVE_NAMES } from './groove.mjs';
 import { parsePianoRoll, normalizePianoRollSteps, noteIndex, noteSlice, noteNudgeChannel, pianoRollNoteGrid, PIANOROLL_DEFAULT_INDEX, PIANOROLL_MAX_NUDGE, PIANOROLL_MODES, looksLikeNoteString } from './pianoroll.mjs';
 import { inSpans, clipShiftNow } from './arrange.mjs';
 import { normalizeSlicePositions, normalizeSliceSet, sliceSetIsEmpty } from './slices.mjs';
@@ -1080,6 +1080,14 @@ export class Sig {
    *   s("hh*16").swing(0.4, "clave16")  // ...at 40% of the way there
    *   s("hh*16").swing("clave16")       // the same at full depth
    *
+   * A pattern of names is a pattern of grooves, read at each onset like any other patterned value:
+   *
+   *   s("hh*16").swing(1, "<clave16 push16>")  // one bar of the clave feel, then one pushed
+   *   s("hh*16").swing(1, "metric16 ~")        // laid back for half a bar, straight for the rest
+   *
+   * Switching grooves never changes the notes: a name that rests is simply no groove for that
+   * stretch, and a note ringing across a switch is not cut in two by it.
+   *
    * Swing is applied where the event is emitted (see timeShift), never by rewriting the pattern: the
    * notes keep their written positions, and swing adds to whatever per-event .nudge() is in force
    * rather than replacing it.
@@ -1098,17 +1106,23 @@ export class Sig {
     // per-slot offsets; a string of numbers stays what it has always been, a patterned subdivision
     // ("<8 16>" is eighths for half the bar and sixteenths for the other half), which is why only a
     // name is read out of a string here.
-    // The editor's transpile hands a pattern of names through as a Sig (it wraps one in mini() so the
-    // playing atom can be highlighted, exactly as it does a pianoroll's roll ids). A groove is ONE
-    // table per pattern - Sig#groove is data, not a channel - so a pattern of them can't be played as
-    // one: the first name is taken and the rest said out loud, rather than the whole thing falling
-    // through to the subdivision rule and quietly becoming a shuffle nobody wrote.
+    // The editor's transpile hands a pattern of names through as a Sig (it wraps one in mini() the
+    // way it does a pianoroll's roll ids). A pattern of names is a pattern of GROOVES - the feel
+    // changes bar by bar - and is carried as a patterned reference read at each onset (see
+    // groovePatternRef), which is also why it is kept out of the note grid: a groove belongs to the
+    // bar, so switching one may not split a note that is ringing across the switch, nor silence a
+    // bar whose name is a rest, the way a resting control does.
     const patterned = grid instanceof Sig ? grooveNamesIn(grid) : null;
-    if (patterned && patterned.length > 1) {
-      warnUser(`[signal] .swing() can't switch groove per cycle yet - playing ${JSON.stringify(patterned[0])} and ignoring ${patterned.slice(1).map((n) => JSON.stringify(n)).join(', ')}. A groove is one table per pattern; put the alternatives on separate tracks, or pattern the AMOUNT instead.`);
-    }
-    const name = patterned ? patterned[0] : (typeof grid === 'string' && grooveNameLike(grid) ? grid : null);
-    const shape = name ? grooveRef(name) : Array.isArray(grid) || (grid && typeof grid === 'object' && !(grid instanceof Sig)) ? grooveRef(grid) : null;
+    // One name covering every cycle is that groove, not a pattern of them: the transpile wraps even
+    // a lone name in mini(), and a plain reference is what the panel reads back off Sig#groove.
+    const name = patterned ? grooveLoneName(grid) : typeof grid === 'string' && grooveNameLike(grid) ? grid : null;
+    const shape = patterned && !name
+      ? groovePatternRef(grid)
+      : name
+        ? grooveRef(name)
+        : Array.isArray(grid) || (grid && typeof grid === 'object' && !(grid instanceof Sig))
+          ? grooveRef(grid)
+          : null;
     const sig = toSignal(amount === undefined ? DEFAULT_SWING : amount);
     // Past half a slot an offbeat has swapped places with the onbeat after it, so that is where the
     // amount stops - but only where the amount IS an offset. Under a groove it is a depth on the
@@ -4695,14 +4709,52 @@ const clampAbs = (v, max) => Math.max(-max, Math.min(max, v));
 function grooveNamesIn(sig) {
   if (!sig?.stepsForCycle) return null;
   const names = [];
+  const others = [];
   for (let cycle = 0; cycle < 2; cycle++) {
     for (const step of sig.stepsForCycle(cycle)) {
       if (step.value == null) continue;
-      if (typeof step.value !== 'string' || !grooveNameLike(step.value)) return null;
-      if (!names.includes(step.value)) names.push(step.value);
+      const name = typeof step.value === 'string' && grooveNameLike(step.value);
+      const bag = name ? names : others;
+      if (!bag.includes(step.value)) bag.push(step.value);
     }
   }
-  return names.length ? names : null;
+  if (!names.length) return null;
+  // Names and subdivisions in one pattern: the two readings of this argument position can't be
+  // alternated, since a groove brings its own grid and a subdivision is one. The names win (they are
+  // the only half that can't be read any other way) and the rest is said out loud - rather than the
+  // whole thing failing the name test and quietly becoming a shuffle at the default grid.
+  if (others.length) {
+    warnUser(`[signal] .swing() can't alternate a groove with a subdivision - playing the grooves (${names.map((n) => JSON.stringify(n)).join(', ')}) and ignoring ${others.map((n) => JSON.stringify(n)).join(', ')}. A groove carries its own grid, so write the straight bars as a rest - .swing(1, "<clave16 ~>") - or put them on their own track.`);
+  }
+  return names;
+}
+
+/**
+ * The ONE name a signal of groove names yields everywhere, or null where it yields more than one or
+ * leaves part of a cycle empty. `"samba"` as the transpile hands it over (a lone atom wrapped in
+ * mini()) is this; `"<a b>"` and `"a ~"` are not.
+ */
+function grooveLoneName(sig) {
+  let only = null;
+  for (let cycle = 0; cycle < 2; cycle++) {
+    const steps = sig.stepsForCycle(cycle).filter((s) => s.value != null);
+    if (steps.length !== 1) return null;
+    const [s] = steps;
+    if (s.start > 1e-9 || s.end < 1 - 1e-9) return null; // part of the cycle has no groove
+    if (only !== null && s.value !== only) return null;
+    only = s.value;
+  }
+  return only;
+}
+
+/**
+ * A groove reference that is a PATTERN of grooves rather than one: `.swing(1, "<swing16 push16>")`
+ * swings one bar and pushes the next. The signal is carried as-is and read at each onset (see
+ * grooveRefAt), for the same reason a table is carried as data - a reference stands for whatever it
+ * resolves to at the moment it is read, and here that includes which groove it names.
+ */
+function groovePatternRef(sig) {
+  return Object.freeze({ sig, name: null, steps: 0, time: null, vel: null });
 }
 
 // A groove is resolved by name where it is READ, so a name nothing defines can only be reported from
@@ -4723,9 +4775,50 @@ function grooveMissing(name) {
  * rides on its events (see buildPianoroll). Setting swing on the track clears that stamp, which is
  * what keeps a `.swing(...)` on the chain replacing a roll's groove rather than losing to it.
  */
-export function grooveAt(step, groove = null) {
-  const ref = step?.groove ?? groove;
+export function grooveAt(step, groove = null, time = undefined, cps = 1, pos = undefined) {
+  const ref = grooveRefAt(step, groove, time, cps, pos);
   return ref ? resolveGroove(ref, lookupGroove) : null;
+}
+
+/**
+ * The groove REFERENCE in force at one event, before it is looked up: the stamp where there is one,
+ * else the pattern's own, and for a PATTERNED groove - `.swing(1, "<swing16 push16>")` - whichever
+ * name that pattern is yielding at this onset.
+ *
+ * A patterned reference carries the signal rather than a table (see groovePatternRef) because the
+ * table it stands for changes with time, and it is read here, at the event, for the same reason
+ * every other channel is: the value belongs to the onset, not to where the pattern was built.
+ */
+function grooveRefAt(step, groove, time, cps = 1, pos = undefined) {
+  return grooveRefNow(step?.groove ?? groove, time, cps, pos);
+}
+
+/** One reference, resolved to the groove it names at this instant (see grooveRefAt). */
+function grooveRefNow(ref, time, cps = 1, pos = undefined) {
+  if (!ref?.sig) return ref ?? null;
+  const raw = ref.sig.sample(time, cps, pos);
+  // A rest in the groove pattern - or anything that isn't a name - is NO groove for that stretch,
+  // which plays straight rather than holding the last one: `<swing16 ~>` is a swung bar and a
+  // straight one, the reading a rest has in every other control.
+  if (typeof raw !== 'string' || !grooveNameLike(raw)) return null;
+  return grooveRef(raw);
+}
+
+/**
+ * The depth and the groove reference in force for one event - the pattern's own, or the session
+ * groove where the pattern says nothing about swing at all (see groove.mjs's setSessionGroove).
+ *
+ * "Says nothing" is the UNSET channel, not a zero: `.swing(0)` is a track asking to play straight,
+ * and a session default that overrode it would make straight unsayable. A groove with no depth of
+ * its own can't happen - .swing() always sets the amount - so a reference alone is enough to tell
+ * a track that has its own feel from one that is borrowing the session's.
+ */
+function grooveForce(step, channels, time, cps, pos, groove) {
+  const own = step?.groove ?? groove;
+  const amount = channelAt('swing', step, channels, time, cps, pos);
+  if (amount !== undefined || own) return { amount: amount ?? 0, ref: own ?? null };
+  const sess = sessionGroove();
+  return sess ? { amount: sess.depth, ref: sess.ref } : { amount: 0, ref: null };
 }
 
 /**
@@ -4745,9 +4838,10 @@ export function grooveAt(step, groove = null) {
  * about velocity as well, and switching a groove off never leaves half of it playing.
  */
 export function grooveVelScale(step, channels, time, cps = 1, pos = undefined, groove = null) {
-  const table = grooveAt(step, groove);
+  const force = grooveForce(step, channels, time, cps, pos, groove);
+  if (!force.amount) return 1;
+  const table = resolveGroove(grooveRefNow(force.ref, time, cps, pos), lookupGroove);
   if (!table?.vel) return 1;
-  if (!channelAt('swing', step, channels, time, cps, pos)) return 1;
   const own = channelAt('swingvel', step, channels, time, cps, pos);
   const depth = own === undefined ? 1 : own;
   if (!depth) return 1;
@@ -4776,7 +4870,8 @@ export function grooveVelScale(step, channels, time, cps = 1, pos = undefined, g
  * `groove` is the pattern's own Sig#groove, where it has one: a table saying what every slot of the
  * bar does (see groove.mjs), which the `swing` channel is then the DEPTH on. It is passed rather than
  * read off the channels because a table is data, not a signal. With a groove in force the alternating
- * offbeat rule steps aside entirely - the table describes every slot, the plain swing among them.
+ * offbeat rule steps aside entirely - the table describes every slot, the plain swing among them -
+ * and that holds even where a patterned groove names nothing for a stretch (see grooveRefAt).
  */
 export function timeShift(step, channels, time, cps = 1, pos = undefined, groove = null) {
   let shift = 0;
@@ -4787,10 +4882,13 @@ export function timeShift(step, channels, time, cps = 1, pos = undefined, groove
   // makes that distance sayable (see buildPianoroll). Wider than half its width, never wider than the
   // grid it was drawn on.
   if (nudge) shift += clampAbs(nudge, step.nudgeReach ?? MAX_NUDGE) * (step.end - step.start);
-  const amount = channelAt('swing', step, channels, time, cps, pos);
+  // The depth and the feel this event plays by: its own, or the session's where it has none (see
+  // grooveForce). `own` is the reference as the pattern carries it and `ref` what that names at THIS
+  // onset - the two differ under a patterned groove, which may name nothing for a stretch.
+  const { amount, ref: own } = grooveForce(step, channels, time, cps, pos, groove);
   if (amount) {
-    const ref = step.groove ?? groove;
-    const table = grooveAt(step, groove);
+    const ref = grooveRefNow(own, time, cps, pos);
+    const table = ref ? resolveGroove(ref, lookupGroove) : null;
     if (table) {
       // The table's own length is the grid it describes, and its value at this slot is what the depth
       // scales. The PRODUCT is what clamps: half a slot is as far as any slot can move whether the
@@ -4801,6 +4899,10 @@ export function timeShift(step, channels, time, cps = 1, pos = undefined, groove
       // alternating rule: the amount is a depth on a table that isn't there, and inventing an
       // offbeat shuffle out of it would be a feel nobody asked for. Said once, per name.
       grooveMissing(ref.name);
+    } else if (own) {
+      // A patterned groove naming nothing here - `"metric16 ~"` over the rest - plays straight for
+      // the same reason: the pattern asked for a groove, and the alternating shuffle is not one of
+      // the grooves it asked for. Nothing to warn about; a rest is a deliberate gap in a feel.
     } else {
       const raw = channelAt('swinggrid', step, channels, time, cps, pos);
       const n = Math.round(raw >= 1 ? raw : DEFAULT_SWING_GRID);
@@ -6378,6 +6480,57 @@ function defineGroove(id, str, quiet) {
   const sig = new Sig(() => null);
   sig.isDef = key; // see _roll(): a definitions block must not become an extra voice
   return sig;
+}
+
+/**
+ * The session groove: the feel every track plays by where it sets no swing of its own.
+ *
+ *   setgroove("clave16")        // the whole document laid back by that groove
+ *   setgroove("clave16", 0.5)   // ...halfway there
+ *   setgroove("<clave16 ~>")    // one bar of it, one bar straight
+ *   setgroove(null)             // nothing; back to straight
+ *
+ * The shape is whatever .swing() takes in the same position - a groove name, a pattern of names, or
+ * a drawn table - and the depth is how much of it to apply, 1 (as drawn) by default.
+ *
+ * A `.swing(...)` anywhere on a track replaces this outright rather than combining with it, which
+ * is the controls-replace rule a level up: a track that states its own feel states all of it, and
+ * `.swing(0)` is how a track plays straight under a session groove.
+ */
+export function setGlobalGroove(shape, depth = 1) {
+  if (shape == null || shape === '') return setSessionGroove(null);
+  // A name, a drawn table, or - via mini - a pattern of names, which is how `"<a b>"` arrives: the
+  // host builder's argument stays a plain string (see locations.mjs), so the reading that .swing()
+  // gets from the transpile is done here instead.
+  let ref = null;
+  if (typeof shape === 'string' && !grooveNameLike(shape) && !looksLikeGrooveData(shape)) {
+    const sig = mini(shape);
+    const names = grooveNamesIn(sig);
+    if (!names) {
+      throw new Error(`[signal] setgroove(${JSON.stringify(shape)}) is neither a groove name, a pattern of names, nor a drawn table - the grooves that ship are ${GROOVE_NAMES.join(', ')}`);
+    }
+    ref = grooveLoneName(sig) ? grooveRef(grooveLoneName(sig)) : groovePatternRef(sig);
+  } else {
+    ref = grooveRef(shape);
+  }
+  const amount = Number(depth);
+  if (!Number.isFinite(amount)) throw new Error('[signal] setgroove()\'s second argument is how much of the groove to apply - a number, 1 being as drawn');
+  return setSessionGroove({ ref, depth: amount, text: typeof shape === 'string' ? shape.trim() : null });
+}
+
+/** The session groove as `{ ref, depth }`, or null - what the host reports back to the editor. */
+export function globalGroove() {
+  return sessionGroove();
+}
+
+/**
+ * Puts a session groove back exactly as it was read off globalGroove(), reference and all - which
+ * setgroove() itself can't do, since what it takes is the shape a person writes. The host swaps the
+ * session groove around each deck's evaluation (one deck's feel is not the other's), and this is
+ * how it hands back what it saved.
+ */
+export function restoreGlobalGroove(entry) {
+  return setSessionGroove(entry ?? null);
 }
 
 /** A named groove's table as the text it was written from - what the panel reads back. */

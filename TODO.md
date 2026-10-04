@@ -508,69 +508,27 @@ no completion notes.
     voice-leading pass (minimal total movement picks the suggested chord's inversion) which also
     improves the phase-2 voicing menu's ordering. Build last - most design-heavy.
 
-[ ] Swing manager - phased plan settled 2026-09-29. Swing today is one number on the offbeats of a
-    subdivision: `swing` (the amount) and `swinggrid` (the subdivision) are note channels, read per
-    onset and turned into a time offset where the event is EMITTED (timeShift in signal.mjs), never
-    by rewriting the pattern. The general case of that is a per-slot TABLE - one time offset, and
-    later one velocity scale, per slot of a grid covering the cycle - and every part of the idea
-    reduces to one: a standard swing is the two-slot table [0, 1], a named groove is a stored
-    table, a drawn groove is a table penciled by hand, an extracted one is a table measured off a
-    recording. The table is the model; the amount stays a plain depth multiplier on it.
+[ ] Swing manager - what is still open after the phases. Swing is a per-slot TABLE now (groove.mjs):
+    a time offset and a velocity scale per slot of a bar, with the `swing` channel as the depth on
+    it. Grooves are drawn in the lanes under the roll, saved by name through the two-layer registry,
+    switchable per bar (`.swing(1, "<clave16 push16>")`), settable for the whole document
+    (`setgroove`), and readable off a recording (a file dropped on the lanes).
 
-    Decisions that hold across the phases:
-    - The table is `{ steps, time: [steps], vel: [steps] | null, name }`. Offsets are in SLOT
-      fractions, so the product of depth and offset is what clamps to the existing half-slot stop,
-      and the table's own length IS the grid - `swinggrid` stays the plain-swing spelling and a
-      groove needs no second opinion about its subdivision. One cycle long; a multi-cycle groove
-      wants a `cycles` field and is deliberately not in the first pass.
-    - It lives on Sig#groove as plain frozen data, NOT in noteChannels: that map is walked
-      generically as Sigs (warp/patWarp/mergeChannelMaps), which is the same reason samplerKind is
-      held outside `sampler`. Keeping it out is also correct rather than merely safe - a table must
-      not cross-merge (it would subdivide the grid it is describing) and must not warp, because a
-      groove belongs to the bar and not to the pattern's phase, the same rule that puts
-      swingFigure after rotateFigure in rollops.
-    - Depth is the existing `swing` channel, so it stays patternable and every `.swing(amount)` /
-      `.swing(amount, grid)` call keeps its exact numbers (pinned in swing.test.mjs).
-    - API shape: the SECOND argument of .swing() is what shape to use - a subdivision number as
-      today, or a groove name or table - and the first is always the depth. `.swing("name")` on its
-      own is that groove at depth 1. A string argument holding letters is a name; one holding only
-      numbers is the patterned amount it already is.
-    - Built-in grooves ship only where the numbers are derivable - the two-slot shapes, and
-      timing-from-accent-weight shapes computed from the ACCENT_SHAPES already in rollops.mjs.
-      Culturally named grooves (samba, bossa, boom bap) are NOT invented: they arrive by extraction
-      (phase 6) or a sourced transcription, on the same terms as the cascara entry above.
-    - Velocity is its own phase because it lands on a different path: timing goes through
-      timeShift, velocity through channelAt('vel') / the scheduler's _velAt.
-
-    Phases 1-4 are in: the table format and its arithmetic (groove.mjs), Sig#groove and timeShift's
-    groove branch, the .swing() readings, the drawn panel with both lanes, the velocity row applied
-    at the vel read (grooveVelScale / .swingvel()), and grooves saved by name through the same
-    two-layer registry every other named definition uses. Delete each remaining phase as it lands.
-
-    Still open, none of it blocking: a groove can't be switched per cycle at all - `.swing(1, "<a b>")`
-    plays the first and says so, since Sig#groove is one table of data rather than a channel; a table
-    describes ONE cycle (a multi-cycle groove wants the `cycles` field above); the panel's depth is
-    written into the code rather than pushed live, so a depth drag is heard on the debounce rather
-    than instantly - unlike a lane drag, which re-files the definition through /api/liveGroove;
-    committing a roll's groove folds its TIMING into per-note nudges but not its accents, because a
-    note's velocity is already its own field and there is nothing to fold; and a roll's groove is
-    always a named definition now (`new` auto-names them groove1, groove2, ... the way rolls take
-    ids), but RENAMING one from the roll's side column isn't offered - the rename gesture lives in
-    the floating editor's name head, reached by double-clicking a .swing() call that names it.
-
-[ ] Swing manager phase 5 - a global groove. Every other groove is per track; a global one is a
-    session-level default the emitter falls back to where a pattern sets no swing of its own, with
-    any `.swing(...)` on a track replacing it outright (the controls-replace rule, one level up).
-    Touches the scheduler and MappedEngine forwarding, and clearing the global has to un-swing
-    every track that was riding on it - the re-eval teardown case. Build after the panel, not
-    folded into it.
-
-[ ] Swing manager phase 6 - extract a groove from audio. Drop a file, or pick one from the sample
-    library, detect onsets against a grid, and turn the deviations into a table plus a velocity row
-    from onset strength; hand the result to the groove panel's lanes as a draft to correct rather than
-    presenting it as finished. Needs tempo and bar alignment for the file before any of the numbers
-    mean anything. This is also the honest source for the culturally named grooves the built-in set
-    refuses to invent. Nothing in phases 1-5 depends on it.
+    - A table describes ONE cycle. A multi-cycle groove wants a `cycles` field on the table, and
+      every reader to divide by it; deliberately not in the first pass.
+    - The panel's depth is written into the code rather than pushed live, so a depth drag is heard
+      on the debounce. A lane drag is instant (it re-files the definition through /api/liveGroove);
+      the depth has no such channel because it lives on the CALL, not on the definition.
+    - Committing a roll's groove folds its TIMING into per-note nudges but not its accents: a
+      note's velocity is already its own field, so there is nothing to fold.
+    - A roll's groove can't be RENAMED from the side column - that gesture lives in the floating
+      editor's name head, reached by double-clicking a .swing() that names it.
+    - Extraction reads a loop as starting on the bar, which is what a loop is. A file that does NOT
+      (a break lifted out of a track with a gap at the front) extracts rotated, and there is no
+      control for the offset yet; the fitted beat anchor is reported but deliberately unused, since
+      it anchors on whichever beat carries the bass energy rather than the first.
+    - Extraction is WAV only, Node-side, like every other analysis here. The browser build has the
+      same detector (web-engine's sample-plan.mjs) but no route to run this through.
 
 [ ] MIDI clock in - follow an external MIDI clock (24 ppqn ticks + start/stop/continue/song
     position) for hardware and apps without Link. Assessed 2026-09-12, 1-2 days, mostly tuning:

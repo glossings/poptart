@@ -428,8 +428,8 @@ test('the editing verbs take the edit modifier, never both - the app chords are 
   const keys = grab('initArrangeCanvas');
   assert.match(keys, /const mod = editMod\(e\);/);
   assert.ok(!/const mod = e\.metaKey \|\| e\.ctrlKey;/.test(keys), 'no key handler takes either modifier');
-  // ...and the roll, the sample lists and the organize windows answer the same way
-  assert.equal((SRC.match(/const (mod|meta) = editMod\(e\);/g) ?? []).length, 5);
+  // ...and the roll, the sample lists, the organize windows and the groove lanes answer the same way
+  assert.equal((SRC.match(/const (mod|meta) = editMod\(e\);/g) ?? []).length, 6);
 });
 
 test('a marked span is shaded over the tracks, not only on the ruler', () => {

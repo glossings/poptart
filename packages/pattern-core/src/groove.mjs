@@ -183,6 +183,44 @@ export const GROOVE_PRESETS = {
 
 export const GROOVE_NAMES = Object.freeze(Object.keys(GROOVE_PRESETS));
 
+// ---------------------------------------------------------------------------------------------
+// The session groove. A feel is nearly always the WHOLE track's feel rather than one part's, so it
+// can be a property of the document the way the key is (see notes.mjs's global scale):
+// `setgroove("clave16")` sets it (the host binds that builder and hoists it, so the last one in a
+// buffer wins for the whole buffer) and every pattern that says nothing about swing plays by it.
+// A `.swing(...)` on a track replaces it outright - the controls-replace rule, one level up.
+// ---------------------------------------------------------------------------------------------
+
+let session = null;
+
+/**
+ * Sets the session groove to `{ ref, depth, text }`, or clears it with null. The reference is built
+ * by the caller (see signal.mjs's setGlobalGroove), which is also where a patterned one comes from -
+ * this file holds the state and knows nothing about signals.
+ *
+ * `text` is the shape as it was written - a name, a pattern of names, or a table. A patterned
+ * reference carries a signal, which no reader outside the pattern can make sense of, so the text is
+ * what the host reports to the editor and what the editor writes back into the setgroove() line.
+ */
+export function setSessionGroove(entry) {
+  if (!entry?.ref) {
+    session = null;
+    return null;
+  }
+  const depth = Number(entry.depth);
+  session = Object.freeze({
+    ref: entry.ref,
+    depth: Number.isFinite(depth) ? depth : 1,
+    text: entry.text ?? (entry.ref.name || (entry.ref.time ? serializeGroove(entry.ref) : null)),
+  });
+  return session;
+}
+
+/** The session groove, or null where nothing has called setgroove() in this process. */
+export function sessionGroove() {
+  return session;
+}
+
 function freezeGroove(table) {
   return Object.freeze({
     steps: table.steps,

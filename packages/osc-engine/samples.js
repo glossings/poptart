@@ -326,11 +326,26 @@ const SENSITIVITY_MIN = 1 / 8;
 const SENSITIVITY_MAX = 8;
 const clampSensitivity = (v) => Math.min(SENSITIVITY_MAX, Math.max(SENSITIVITY_MIN, Number(v) || 1));
 
-function detectOnsets(samples, sampleRate, { sensitivity = 1 } = {}) {
+// How long after an onset to look for how HARD it was hit: a drum's peak lands within a few
+// milliseconds of its attack, and reading further would measure the tail of the hit before it.
+const HIT_WINDOW_SEC = 0.05;
+
+/**
+ * The detected onsets with a strength for each: `[{ at, strength }]`, `at` normalized 0..1 like
+ * detectOnsets' positions and `strength` the hit's peak energy against the loudest hit's, so the
+ * hardest hit in the file is 1. Measured off the RMS the detector already has in hand rather than
+ * in a second pass - and off RMS rather than the flux peak, because what a groove's accents want
+ * is how hard a hit was, not how sharp its attack was.
+ */
+function detectOnsetHits(samples, sampleRate, { sensitivity = 1 } = {}) {
+  return detectOnsets(samples, sampleRate, { sensitivity, hits: true });
+}
+
+function detectOnsets(samples, sampleRate, { sensitivity = 1, hits = false } = {}) {
   // Half sensitivity doubles what a peak must clear; double it halves it.
   const strictness = 1 / clampSensitivity(sensitivity);
   const nHops = Math.floor(samples.length / HOP);
-  if (nHops < 4) return [0];
+  if (nHops < 4) return hits ? [{ at: 0, strength: 1 }] : [0];
 
   const rms = new Float32Array(nHops);
   for (let h = 0; h < nHops; h++) {
@@ -349,6 +364,7 @@ function detectOnsets(samples, sampleRate, { sensitivity = 1 } = {}) {
   const floor = peak * 0.02; // ignore "onsets" inside near-silence
 
   const onsets = [0];
+  const onsetHops = [0]; // the FLUX PEAK hop of each, for the strengths and timings below
   let lastOnset = -minGapHops;
   for (let h = 1; h < nHops; h++) {
     if (flux[h] <= 0 || rms[h] < floor) continue;
@@ -363,12 +379,55 @@ function detectOnsets(samples, sampleRate, { sensitivity = 1 } = {}) {
       // The flux peak lands on the first fully-loud window, ~one hop after the transient
       // actually starts - back off a hop so the slice keeps its attack.
       onsets.push(Math.max(0, h - 1) * HOP / samples.length);
+      onsetHops.push(h);
       lastOnset = h;
     }
   }
   // Slice 0 is always the file start; drop a detected onset that's effectively at 0 anyway.
-  if (onsets.length > 1 && onsets[1] < 0.002) onsets.splice(1, 1);
-  return onsets;
+  if (onsets.length > 1 && onsets[1] < 0.002) {
+    onsets.splice(1, 1);
+    onsetHops.splice(1, 1);
+  }
+  if (!hits) return onsets;
+
+  // How hard each one was hit: its loudest hop within HIT_WINDOW_SEC, against the loudest of all
+  // of them. A file whose hits are all equally loud comes out flat, which is the honest answer.
+  const winHops = Math.max(1, Math.round((HIT_WINDOW_SEC * sampleRate) / HOP));
+  const levels = onsetHops.map((h) => {
+    let loudest = 0;
+    for (let k = h; k < Math.min(nHops, h + winHops); k++) loudest = Math.max(loudest, rms[k]);
+    return loudest;
+  });
+  const loudest = Math.max(...levels, 0);
+  // The file start is slice 0 BY CONVENTION, which is right for chopping and wrong for measuring:
+  // a loop that begins with a rest would hand the extractor a hit nobody played. Kept only where
+  // there is actually sound there.
+  const startIsReal = rms[0] >= floor;
+  return onsetHops
+    .map((h, i) => ({
+      // To the SAMPLE, not to the hop. A hop is ~5ms wide and the whole content of a groove is
+      // often smaller than that, so the hop index - and especially the one-hop back-off the slicer
+      // takes to keep an attack - would read as a feel of its own, every hit a few milliseconds
+      // early. See refineOnset.
+      at: refineOnset(samples, h) / samples.length,
+      strength: loudest > 0 ? levels[i] / loudest : 0,
+    }))
+    .filter((hit, i) => i > 0 || startIsReal);
+}
+
+// Where inside a hop the transient actually begins: the first sample in the hop before the flux
+// peak, or the two after it, that reaches a fifth of the attack's peak level. A fifth rather than
+// the peak itself because a drum's rise takes a millisecond or two and the start of the rise is
+// what a player hears as the hit.
+function refineOnset(samples, hop) {
+  const from = Math.max(0, (hop - 1) * HOP);
+  const to = Math.min(samples.length, (hop + 2) * HOP);
+  let peak = 0;
+  for (let i = from; i < to; i++) peak = Math.max(peak, Math.abs(samples[i]));
+  if (!peak) return hop * HOP;
+  const threshold = peak * 0.2;
+  for (let i = from; i < to; i++) if (Math.abs(samples[i]) >= threshold) return i;
+  return hop * HOP;
 }
 
 /**
@@ -398,5 +457,6 @@ module.exports = {
   matchAudioPaths,
   detectSlices,
   detectOnsets,
+  detectOnsetHits,
   readWav,
 };

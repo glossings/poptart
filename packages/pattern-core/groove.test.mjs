@@ -5,7 +5,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { s, note, pianoroll, timeShift, grooveVelScale, setPatternWarn, _groove, liveGroove, grooveText } from './src/signal.mjs';
+import { s, note, pianoroll, mini, timeShift, grooveVelScale, setPatternWarn, _groove, liveGroove, grooveText, setGlobalGroove, globalGroove } from './src/signal.mjs';
 import { parsePianoRoll, serializePianoRoll, pianoRollSwingCells, commitPianoRollSwing } from './src/pianoroll.mjs';
 import {
   parseGroove,
@@ -545,4 +545,162 @@ test('a definition is not a track, so a block of them plays nothing', () => {
   const def = _groove('inert', '0 1');
   assert.equal(def.isDef, 'inert');
   assert.deepEqual(play(def), []);
+});
+
+// ---------------------------------------------------------------------------------------------
+// A pattern of grooves
+// ---------------------------------------------------------------------------------------------
+
+// The transpile hands .swing()'s shape argument over as a Sig whenever it isn't a lone name (see
+// locations.mjs), so that is how these are written: mini() is what the editor would have done.
+test('a pattern of names switches groove bar by bar', () => {
+  _groove('pgLate', '0 1 0 1 0 1 0 1');
+  _groove('pgEarly', '0 -1 0 -1 0 -1 0 -1');
+  const sig = s('hh*8').swing(1, mini('<pgLate pgEarly>'));
+  const late = shifts(s('hh*8').swing(1, 'pgLate'));
+  const early = shifts(s('hh*8').swing(1, 'pgEarly'));
+  assert.notDeepEqual(late, early, 'the two grooves are telling apart in the first place');
+  assert.deepEqual(shifts(sig, 0), late, 'the first bar is the first groove');
+  assert.deepEqual(shifts(sig, 1), early, 'the second bar is the second');
+  assert.deepEqual(shifts(sig, 2), late, 'and it comes round again');
+});
+
+test('a patterned groove carries its accents too', () => {
+  _groove('pgQuiet', '0 0 / 1 0.5');
+  _groove('pgLoud', '0 0 / 0.5 1');
+  const sig = note('c3*2').swing(1, mini('<pgQuiet pgLoud>'));
+  assert.deepEqual(velsOf(sig), [1, 0.5], 'the second note held back on the first bar');
+  const second = play(sig, { cycles: 2 }).slice(2).map((e) => Number(e.vel.toFixed(10)));
+  assert.deepEqual(second, [0.5, 1], 'and the first one held back on the second - the accents switch with the timing');
+});
+
+test('the depth still applies - and still patterns - under a pattern of grooves', () => {
+  _groove('pgHalf', '0 0.5 0 0.5 0 0.5 0 0.5');
+  const full = s('hh*8').swing(1, mini('<pgHalf pgHalf>'));
+  const half = s('hh*8').swing(0.5, mini('<pgHalf pgHalf>'));
+  assert.deepEqual(shifts(half), full.stepsForCycle(0).map((_, i) => Number((shiftOf(full, i) / 2).toFixed(10))));
+  const swept = s('hh*8').swing('<1 0>', mini('<pgHalf pgHalf>'));
+  assert.deepEqual(shifts(swept, 0), shifts(full, 0), 'depth 1 on the first bar');
+  assert.deepEqual(shifts(swept, 1), new Array(8).fill(0), 'and off on the second');
+});
+
+test('a bar whose groove is a rest plays straight, and keeps its notes', () => {
+  _groove('pgRest', '0 1 0 1 0 1 0 1');
+  const sig = s('hh*8').swing(1, mini('pgRest ~'));
+  const swung = shifts(s('hh*8').swing(1, 'pgRest'));
+  assert.equal(sig.stepsForCycle(0).length, 8, 'a resting groove drops no events - it is a feel, not a control');
+  assert.deepEqual(shifts(sig).slice(0, 4), swung.slice(0, 4), 'swung while the groove is named');
+  assert.deepEqual(shifts(sig).slice(4), [0, 0, 0, 0], 'and straight where it rests - not the alternating shuffle');
+});
+
+test('switching groove never cuts a note in two', () => {
+  _groove('pgWhole', '0 1 0 1');
+  const plain = note('c3');
+  const switched = note('c3').swing(1, mini('<pgWhole ~>'));
+  assert.deepEqual(
+    switched.stepsForCycle(0).map((st) => [st.start, st.end]),
+    plain.stepsForCycle(0).map((st) => [st.start, st.end]),
+    'the note grid is what it was: a groove belongs to the bar, not to the structure',
+  );
+});
+
+test('one name, however it arrives, is a plain groove reference', () => {
+  _groove('pgLone', '0 1');
+  const lone = s('hh*8').swing(1, mini('pgLone'));
+  assert.equal(lone.groove?.name, 'pgLone', 'so the panel can still read the name back off it');
+  assert.equal(lone.groove?.sig, undefined);
+  assert.deepEqual(shifts(lone), shifts(s('hh*8').swing(1, 'pgLone')));
+});
+
+test('a groove alternated with a subdivision says so and plays the grooves', () => {
+  _groove('pgMixed', '0 1 0 1 0 1 0 1');
+  const said = warningsFrom(() => s('hh*8').swing(1, mini('<pgMixed 16>')));
+  assert.equal(said.length, 1);
+  assert.match(said[0], /can't alternate a groove with a subdivision/);
+  assert.match(said[0], /pgMixed/);
+  const sig = s('hh*8').swing(1, mini('<pgMixed 16>'));
+  assert.deepEqual(shifts(sig, 0), shifts(s('hh*8').swing(1, 'pgMixed')), 'the groove bar is the groove');
+  assert.deepEqual(shifts(sig, 1), new Array(8).fill(0), 'and the subdivision bar is straight, as a rest is');
+});
+
+// ---------------------------------------------------------------------------------------------
+// The session groove
+// ---------------------------------------------------------------------------------------------
+
+// setgroove() is process-wide state (see groove.mjs), so every test here puts it back - the host
+// does the same between evaluations, and a leaked one would swing every later test's patterns.
+function withSessionGroove(shape, depth, fn) {
+  setGlobalGroove(shape, depth);
+  try {
+    return fn();
+  } finally {
+    setGlobalGroove(null);
+  }
+}
+
+test('the session groove plays on a track that says nothing about swing', () => {
+  _groove('sgLate', '0 1 0 1 0 1 0 1 / 1 0.6 1 0.6 1 0.6 1 0.6');
+  const straight = shifts(s('hh*8'));
+  assert.deepEqual(straight, new Array(8).fill(0), 'straight before anything is set');
+  withSessionGroove('sgLate', 1, () => {
+    assert.deepEqual(shifts(s('hh*8')), shifts(s('hh*8').swing(1, 'sgLate')), 'and swung by it after');
+    assert.deepEqual(velsOf(note('c3*8')), velsOf(note('c3*8').swing(1, 'sgLate')), 'accents included');
+  });
+  assert.deepEqual(shifts(s('hh*8')), straight, 'and straight again once it is cleared');
+});
+
+test("a track's own swing replaces the session groove rather than combining with it", () => {
+  _groove('sgSess', '0 1 0 1 0 1 0 1');
+  _groove('sgOwn', '0 -1 0 -1 0 -1 0 -1');
+  withSessionGroove('sgSess', 1, () => {
+    assert.deepEqual(shifts(s('hh*8').swing(1, 'sgOwn')), shifts(s('hh*8').swing(1, 'sgOwn')), 'its own groove wins');
+    assert.ok(shifts(s('hh*8').swing(1, 'sgOwn')).every((v) => v <= 0), 'the session groove is not added on top of it');
+    assert.deepEqual(shifts(s('hh*8').swing(1 / 3)), shifts(s('hh*8').swing(1 / 3)), 'a plain swing of its own wins too');
+    assert.deepEqual(
+      shifts(s('hh*8').swing(1 / 3)),
+      [0, 1 / 3 / 8, 0, 1 / 3 / 8, 0, 1 / 3 / 8, 0, 1 / 3 / 8].map((v) => Number(v.toFixed(10))),
+      'at its own numbers, with no table read into it',
+    );
+  });
+});
+
+test('.swing(0) is how a track plays straight under a session groove', () => {
+  _groove('sgGate', '0 1 0 1 0 1 0 1 / 1 0.5 1 0.5 1 0.5 1 0.5');
+  withSessionGroove('sgGate', 1, () => {
+    assert.deepEqual(shifts(s('hh*8').swing(0)), new Array(8).fill(0), 'no timing');
+    const quiet = note('c3*8').swing(0);
+    for (let k = 0; k < 8; k++) assert.equal(scaleAt(quiet, k), 1, `slot ${k} keeps its own velocity`);
+  });
+});
+
+test('the session groove takes a depth, a pattern of names and a drawn table', () => {
+  _groove('sgDepth', '0 0.25 0 0.25 0 0.25 0 0.25');
+  withSessionGroove('sgDepth', 0.5, () => {
+    assert.deepEqual(shifts(s('hh*8')), shifts(s('hh*8').swing(0.5, 'sgDepth')));
+  });
+  withSessionGroove('<sgDepth ~>', 1, () => {
+    assert.deepEqual(shifts(s('hh*8'), 0), shifts(s('hh*8').swing(1, 'sgDepth')), 'the named bar');
+    assert.deepEqual(shifts(s('hh*8'), 1), new Array(8).fill(0), 'and the resting one straight');
+  });
+  withSessionGroove('0 0.25', 1, () => {
+    assert.deepEqual(shifts(s('hh*8')), shifts(s('hh*8').swing(1, [0, 0.25])), 'a table, not a name');
+  });
+});
+
+test('setgroove() reports what it stored, and refuses what it cannot read', () => {
+  _groove('sgStored', '0 1');
+  withSessionGroove('sgStored', 0.25, () => {
+    assert.equal(globalGroove()?.ref?.name, 'sgStored');
+    assert.equal(globalGroove()?.depth, 0.25);
+  });
+  assert.equal(globalGroove(), null, 'clearing it leaves nothing behind');
+  assert.throws(() => setGlobalGroove('sgStored', 'loud'), /how much of the groove to apply/);
+  assert.equal(globalGroove(), null, 'and a refused call sets nothing');
+});
+
+test('a patterned groove still loses to a swing set after it', () => {
+  _groove('pgReplaced', '0 1 0 1 0 1 0 1');
+  const over = s('hh*8').swing(1, mini('<pgReplaced pgReplaced>')).swing(0.25, 8);
+  assert.equal(over.groove, null, 'setting swing replaces the feel outright');
+  assert.deepEqual(shifts(over), shifts(s('hh*8').swing(0.25, 8)));
 });

@@ -111,6 +111,11 @@ test('injectLocations leaves every name-lookup argument a plain string', () => {
     ['x.fx("Pro-Q 3")', '.fx("Pro-Q 3")'],
     ['x.scale("F minor")', '.scale("F minor")'],
     ['setscale("F minor")', 'setscale("F minor")'],
+    // setgroove() reads its own shape - name, pattern of names or table - so the string stays plain,
+    // and so does the depth after it.
+    ['setgroove("clave16")', 'setgroove("clave16")'],
+    ['setgroove("<clave16 push16>")', 'setgroove("<clave16 push16>")'],
+    ['setgroove("0 0.3 0 0.3", "0.5")', 'setgroove("0 0.3 0 0.3", "0.5")'],
     ['x.as("note:vel:clip")', '.as("note:vel:clip")'],
     ['midicc("dev:Keystep")', 'midicc("dev:Keystep")'],
     ['midikeys("dev:Keystep")', 'midikeys("dev:Keystep")'],
@@ -424,6 +429,10 @@ test('injectLocations leaves a groove definition alone, and judges swing\'s shap
   assert.equal(injectLocations('.swing(1, "clave16")', 0), '.swing(1, "clave16")');
   assert.equal(injectLocations('.swing(0.5, "<8 16>")', 0), '.swing(0.5, mini("<8 16>", 13))');
   assert.equal(injectLocations('.swing(0.2, "16")', 0), '.swing(0.2, mini("16", 13))');
+  // A PATTERN of names is a pattern of grooves, so it is tagged like any other - which is also what
+  // lets the groove playing this bar be highlighted.
+  assert.equal(injectLocations('.swing(1, "<clave16 push16>")', 0), '.swing(1, mini("<clave16 push16>", 11))');
+  assert.equal(injectLocations('.swing(1, "metric16 ~")', 0), '.swing(1, mini("metric16 ~", 11))');
   // ...and the AMOUNT in front of it is a pattern either way, name or not.
   assert.equal(injectLocations('.swing("<0 0.33>")', 0), '.swing(mini("<0 0.33>", 8))');
 });

@@ -36,6 +36,9 @@ export const TEMPO_BLOCK = Object.freeze({ poptartTempoBlock: true });
 /** The same, for `setscale(...)`. */
 export const SCALE_BLOCK = Object.freeze({ poptartScaleBlock: true });
 
+/** The same, for `setgroove(...)` - the session feel (see pattern-core's groove.mjs). */
+export const GROOVE_BLOCK = Object.freeze({ poptartGrooveBlock: true });
+
 /**
  * Pure helpers a prebake file may call.
  *
@@ -104,7 +107,8 @@ export function builtinSigMethods(patternCore) {
  *
  * `defs` accumulates down the buffer and is seeded from the prebake, so a binding made once is
  * in scope everywhere below it. `hostBuilders` is what the HOST provides rather than the
- * language - setbpm and setscale, which need a transport and a global key to act on.
+ * language - setbpm, setscale and setgroove, which need a transport, a global key and a global
+ * feel to act on.
  */
 export function createBlockEvaluator(patternCore, {
   defs = new Map(),

@@ -91,7 +91,7 @@ function inRanges(ranges, at) {
 // and treats everything else as a pattern - a new builder (choose(), and whatever comes next)
 // highlights its arguments with no entry here. Add a call only when its string is a lookup key.
 const NAME_ARG_CALLS = new Set([
-  'synth', 'fx', 'scale', 'setscale', 'as', 'midi', 'audio', 'input', 'copy', 'pcopy', 'lfo', 'midicc', 'midikeys', 'osc', 'pianoroll',
+  'synth', 'fx', 'scale', 'setscale', 'setgroove', 'as', 'midi', 'audio', 'input', 'copy', 'pcopy', 'lfo', 'midicc', 'midikeys', 'osc', 'pianoroll',
   // `.bus("<reverb delay>")` / `.bsend(...)` are deliberately NOT here: a send's destination is a
   // pattern of names like `.preset()`'s, so its literal wants wrapping (and highlighting) too.
   // The painter's clips, then its options - drawn data, never mini (see arrange.mjs).
@@ -118,6 +118,9 @@ const NAME_ARG_CALLS = new Set([
   '_slices',
   // ...and the groove definition: an id, then the drawn table. `.swing()` itself is NOT here - its
   // shape argument is a name OR a patterned subdivision, so it is judged by what it says (below).
+  // setgroove() IS here (above, beside setscale): the session feel takes the same shapes .swing()
+  // does - including a pattern of names - but reads them itself, so its argument stays the plain
+  // string it was written as, and its second (the depth) is a number rather than a pattern.
   '_groove',
   'param', // only the NAME (first argument); .param("Filter Freq", "0.2 0.8") patterns the value
   // A place to read sample packs from - "user/repo", a URL - which a "/" would make a division.
@@ -127,7 +130,7 @@ const NAME_ARG_CALLS = new Set([
 // (.synth("Serum 2", "<state>")), an lfo() options object, pianoroll()'s grid, roll()'s drawn
 // notes, input()'s channel numbers (a hardware channel is wiring, not something that can vary per
 // step). param() is excluded: its second argument is the value pattern.
-const NAME_ONLY_CALLS = new Set(['samples', 'synth', 'fx', 'lfo', 'pianoroll', '_arrange', '_roll', 'roll', '_shape', 'shape', '_auto', 'auto', '_preset', '_pack', '_slices', '_groove', 'midicc', 'midikeys', 'osc', 'input', 'copy', 'pcopy']);
+const NAME_ONLY_CALLS = new Set(['samples', 'synth', 'fx', 'lfo', 'pianoroll', '_arrange', '_roll', 'roll', '_shape', 'shape', '_auto', 'auto', '_preset', '_pack', '_slices', '_groove', 'setgroove', 'midicc', 'midikeys', 'osc', 'input', 'copy', 'pcopy']);
 
 // Callee names whose METHOD form takes a literal name while the same-named builder takes mini:
 // .se("hits/stab.wav") is a plain path (a "/" would be a mini operator) and .sr("stab") a plain

@@ -105,6 +105,17 @@ function songDetect(wavPath, opts = {}) {
 }
 
 /**
+ * song-detect.js's detectGrooveHits (every hit in a file, with a strength each, plus the tempo and
+ * downbeat to read them against), off-thread. Same arguments and same return. `wavPath` must
+ * already be a WAV. What the groove panel's "extract" reads a feel off (see pattern-core's
+ * groove-extract.mjs for the half that turns these into a table).
+ * @returns {Promise<{ hits: Array<{ at: number, strength: number }>, seconds: number, bpm: number|null, bpmConfidence: number|null, anchorSec: number, bars: number } | null>}
+ */
+function grooveHits(wavPath, opts = {}) {
+  return run('groovehits', { path: wavPath, ...opts });
+}
+
+/**
  * sample-map.js's readAudioHead + extractFeatures over a batch of WAV paths, off-thread. One
  * entry per path, in order: { features: Float32Array, seconds } or null where the file couldn't
  * be decoded. The sample index feeds this a few dozen files at a time (see sample-index.js).
@@ -135,4 +146,4 @@ async function shutdownAnalysis() {
   await w.terminate();
 }
 
-module.exports = { analyzeSlices, trimRecording, songWaveform, songDetect, mapFeatures, mapDerive, shutdownAnalysis };
+module.exports = { analyzeSlices, trimRecording, songWaveform, songDetect, grooveHits, mapFeatures, mapDerive, shutdownAnalysis };

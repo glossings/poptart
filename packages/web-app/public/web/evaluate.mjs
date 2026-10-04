@@ -12,7 +12,7 @@
 // up yet and the engine says so itself. What remains is the pattern language, which is the part
 // both builds share and the part that must not differ.
 
-import { createBlockEvaluator, SCALE_BLOCK, TEMPO_BLOCK } from './block-eval.mjs';
+import { createBlockEvaluator, GROOVE_BLOCK, SCALE_BLOCK, TEMPO_BLOCK } from './block-eval.mjs';
 
 /** Cycles built up front, to surface an error in the buffer rather than in the audio thread. */
 const DRY_RUN_CYCLES = 8;
@@ -216,6 +216,9 @@ export function createEvaluator({ patternCore, engine, transport, prebakeDefs = 
     // that fails to put back: the tracks still playing are still in that key.
     const scaleBefore = patternCore.globalScale();
     patternCore.setGlobalScale(null);
+    // ...and the same for the buffer's feel (see setgroove below).
+    const grooveBefore = patternCore.globalGroove();
+    patternCore.restoreGlobalGroove(null);
 
     let sawSetbpm = false;
     const hostBuilders = {
@@ -231,6 +234,12 @@ export function createEvaluator({ patternCore, engine, transport, prebakeDefs = 
       setscale: (name) => {
         patternCore.setGlobalScale(name);
         return SCALE_BLOCK;
+      },
+      // The groove every track plays by where it sets no swing of its own. Global and hoisted on
+      // the same terms as setscale: a document has one feel at a time.
+      setgroove: (shape, depth) => {
+        patternCore.setGlobalGroove(shape, depth === undefined ? 1 : depth);
+        return GROOVE_BLOCK;
       },
       // Sample packs from a repository (remote-packs.mjs). The host reads every samples() in the
       // buffer before evaluating, so by here a literal one has usually been read already; this
@@ -272,13 +281,23 @@ export function createEvaluator({ patternCore, engine, transport, prebakeDefs = 
           // not evaluable up here - it keeps its place in the pass below, and reports there
         }
       }
+      // setgroove is hoisted on the same terms - the document's feel applies to the whole document.
+      for (const b of blocks) {
+        if (!patternCore.isBareCallBlock(b.code, 'setgroove')) continue;
+        try {
+          evalBlock(b.code, b.start);
+          hoisted.set(b, GROOVE_BLOCK);
+        } catch {
+          // as above
+        }
+      }
 
       evaluated = blocks.map((b) => {
         try {
           patternCore.setClipsOwner?.(b.label);
           const value = hoisted.has(b) ? hoisted.get(b) : evalBlock(b.code, b.start);
           const isPattern = value instanceof patternCore.Sig;
-          const setupValue = value === TEMPO_BLOCK || value === SCALE_BLOCK || value?.poptartArrangeBlock;
+          const setupValue = value === TEMPO_BLOCK || value === SCALE_BLOCK || value === GROOVE_BLOCK || value?.poptartArrangeBlock;
           // Only a NAMED block promises sound. Anything anonymous that makes none is a setup
           // block - declarations shared downward, a language extension, a side effect.
           if (!isPattern && !setupValue && !b.label.startsWith('$')) {
@@ -313,10 +332,13 @@ export function createEvaluator({ patternCore, engine, transport, prebakeDefs = 
       arrangeClips = clipsBefore;
       patternCore.restoreRolls(definitionsBefore, 'buffer', 'a');
       patternCore.setGlobalScale(scaleBefore);
+      patternCore.restoreGlobalGroove(grooveBefore);
       throw err;
     }
     patternCore.setCopyResolver(null);
     const scale = patternCore.globalScale();
+    const sessionFeel = patternCore.globalGroove();
+    const groove = sessionFeel ? { shape: sessionFeel.text, depth: sessionFeel.depth } : null;
     if (!sawSetbpm) { /* the tempo simply stays where it was */ }
 
     const built = evaluated.filter((b) => b.sig instanceof patternCore.Sig && !b.sig.isDef);
@@ -455,6 +477,7 @@ export function createEvaluator({ patternCore, engine, transport, prebakeDefs = 
       cps: transport.cps,
       transport: transportForEditor(),
       scale,
+      groove, // what setgroove() left in force - the editor's groove control shows it
       arrange: arrangeClock ? arrangeClock.snapshot() : null,
       gridFrom,
       gridCount: HL_WINDOW,

@@ -527,6 +527,9 @@ export function createHost({
       loaded: true,
       error: null,
       scale: patternCore.globalScale(),
+      groove: patternCore.globalGroove()
+        ? { shape: patternCore.globalGroove().text, depth: patternCore.globalGroove().depth }
+        : null,
       scan: null,
       build: 'web',
       version,

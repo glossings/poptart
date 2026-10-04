@@ -245,6 +245,12 @@ const API_DOCS = {
     desc: 'Sets the key that .sc() uses, as "<root> <mode>". If there is more than one, the last in the buffer applies everywhere.',
     eg: 'setscale("F minor")',
   },
+  setgroove: {
+    kind: 'builder',
+    sig: 'setgroove(groove, depth?)',
+    desc: 'Sets the groove every track plays by where it sets no swing of its own: a groove name, a pattern of names, or a drawn table. depth is how much of it to apply, 1 (as drawn) by default. A .swing() on a track replaces it, and .swing(0) is how a track plays straight. If there is more than one, the last in the buffer applies everywhere.',
+    eg: 'setgroove("clave16")',
+  },
 
   // ----------------------------------------------------------------- music-theory helpers
   noteToMidi: { kind: 'builder', sig: 'noteToMidi(name)', desc: 'Converts a note name to a MIDI number, with c3 = 60.', eg: 'noteToMidi("f#3")' },
@@ -329,7 +335,7 @@ const API_DOCS = {
   swing: {
     kind: 'both',
     sig: 'swing(amount, grid)',
-    desc: 'Delays every second slot of a grid (8 slots per cycle by default). amount is a fraction of one slot: 1/3 is a triplet shuffle, 0.5 the maximum. A drum machine\'s swing percentage converts as (pct - 50) / 50. A groove name in place of the grid swings by that groove instead — a table saying what every slot of the bar does — and amount is then how much of it to apply, 1 being as written. Adds to any .nudge(). Write fractions outside quotes, since "1/3" in mini-notation means slow.',
+    desc: 'Delays every second slot of a grid (8 slots per cycle by default). amount is a fraction of one slot: 1/3 is a triplet shuffle, 0.5 the maximum. A drum machine\'s swing percentage converts as (pct - 50) / 50. A groove name in place of the grid swings by that groove instead — a table saying what every slot of the bar does — and amount is then how much of it to apply, 1 being as written. A pattern of groove names switches feel bar by bar, and a name that rests plays straight for that stretch. Adds to any .nudge(). Write fractions outside quotes, since "1/3" in mini-notation means slow.',
     eg: 's("hh*8").swing(1/3)',
   },
   swinggrid: {

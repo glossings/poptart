@@ -10,7 +10,7 @@ const { parentPort } = require('node:worker_threads');
 
 const { detectSlices } = require('./samples');
 const { trimRecording, songWaveform } = require('./wav');
-const { detectSongFacts } = require('./song-detect');
+const { detectSongFacts, detectGrooveHits } = require('./song-detect');
 const { readAudioHead, extractFeatures, deriveMap } = require('./sample-map');
 
 const JOBS = {
@@ -18,6 +18,9 @@ const JOBS = {
   trim: ({ srcPath, destPath, ...opts }) => trimRecording(srcPath, destPath, opts),
   songwave: ({ path, ...opts }) => songWaveform(path, opts),
   songdetect: ({ path, ...opts }) => detectSongFacts(path, opts),
+  // Every hit in a file and how hard it was struck, for extracting a groove off a recording. Here
+  // rather than on the main thread for the reason the rest of these are: it reads the whole file.
+  groovehits: ({ path, ...opts }) => detectGrooveHits(path, opts),
   // A batch of files per message: one file is ~10ms of work, so per-file messaging would be
   // mostly overhead, while a whole library in one message would block the slice jobs behind it.
   mapfeatures: ({ paths }) => paths.map((p) => {
