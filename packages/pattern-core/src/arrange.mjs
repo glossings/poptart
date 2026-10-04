@@ -296,6 +296,30 @@ export function arrangementLoops(clips, opts = {}) {
 }
 
 /**
+ * Has this song been arranged at all? False when its regions are ONE loop reaching the end of its
+ * last clip - which is the shape a fresh arrangement is seeded with (see arrangementLoops and the
+ * painter's `loops` option), and the shape a pre-09-19 call that looped over its whole length is
+ * read as. Nothing has been carved into parts: the "song" is a loop with a row per track, the thing
+ * you turn tracks on and off over by hand, and its end is not an ending anybody wrote.
+ *
+ * Asked of `regions` rather than of the clips, so it reads the same regions playback does.
+ *
+ * It is the SHAPE that answers, not the region's name: a whole-song region painted and named by
+ * hand means the same thing as the seeded one, and the name is editor metadata. Carving is what
+ * says otherwise, and any of it shows here - a second region, a region that starts after the top,
+ * a region the song outlasts (clips painted past its end), or no region at all, which is the
+ * explicit "play through" that deleting the seeded one makes.
+ *
+ * `end` is the song's end (arrangementEnd). With nothing painted there is no song to loop and no
+ * arrangement either, so that answers false as well.
+ */
+export function isWholeSongLoop(regions, end) {
+  if (!Array.isArray(regions) || regions.length !== 1 || !(end > 0)) return false;
+  const [r] = regions;
+  return Math.abs(r.start) <= EPS && r.end >= end - EPS;
+}
+
+/**
  * Where each label sounds: label -> sorted, merged [start, end) spans in cycles, lanes forgotten.
  * Two clips of one label that touch or overlap (on any lanes) are one span - the block is either
  * sounding at a moment or it isn't.

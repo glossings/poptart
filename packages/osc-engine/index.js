@@ -1821,6 +1821,27 @@ class OscEngine {
     return this._request('/poptart/midiClockOut', [name ? String(name) : '']);
   }
 
+  // Point the desk's TALK-BACK port at a destination (same substring match as the clock's), or
+  // turn it off with '' / null. This is what a control surface is written to: its level meters
+  // and the lamps in its buttons. Resolves { active: name | null }; rejects when nothing matches.
+  setMidiFeedback(name) {
+    return this._request('/poptart/midiFeedback', [name ? String(name) : '']);
+  }
+
+  /**
+   * Short messages to that port: `[[kind, channel, num, value], ...]`, kind 'cc' or 'note',
+   * channel 0-15, the rest 0-127. Fire and forget, and nothing at all when no port is chosen -
+   * a meter feed writes on every reading whether or not anybody is listening.
+   */
+  midiOut(messages) {
+    if (!messages?.length) return;
+    const flat = [];
+    for (const [kind, channel, num, value] of messages) {
+      flat.push(kind === 'note' ? 1 : 0, Number(channel) | 0, Number(num) | 0, Math.round(Number(value) || 0));
+    }
+    this._send('/poptart/midiOut', flat);
+  }
+
   // Route a device's live performance stream (notes/velocity/bend/aftertouch/raw CC) to the
   // track's instrument, entirely engine-side - live playing never goes through the lookahead
   // scheduler. channel 0 = all channels. Device names match by case-insensitive substring.

@@ -189,6 +189,12 @@ var midiEnable, midiNameForUid, midiSourceFor, midiWarnMissing, midiRefreshSourc
 var oscInitialized = false, oscEnable;
 // The host transport's mirror (see hostClockSync) and what hangs off it: MIDI clock out.
 var hostClock, hostClockSync, clockOut, clockOutName, clockOutLatency = 0.05, clockRunning = false, clockLocate = false;
+// The desk's talk-back port ('/poptart/midiFeedback'): one destination the host writes short
+// messages to, for a control surface that SHOWS state - level meters, lit pads. Separate from
+// the clock's destination because they are different jobs and may be different ports, and
+// latency 0 rather than the clock's lead: a meter is about now, and a scheduled one would show
+// the level it had a moment ago.
+var feedbackOut, feedbackOutName, midiFeedbackSet;
 var clockTicker, clockTickerStart, clockTickerStop, clockNextTick, midiClockSet, midiDestName;
 // Cross-track audio routing (the audio() head source and the .audio(...) sidechain injector).
 // silentBus is the read-only default for every fx slot's aux input (never written -> silence);
@@ -2369,6 +2375,55 @@ OSCdef(\poptartMidiClockOut, { |msg|
         replyOk.("/poptart/midiClockOut", requestId, toJson.((active: active)));
     };
 }, '/poptart/midiClockOut');
+
+// --- the desk's talk-back port (see the feedbackOut declaration) ---
+//
+// Point it at a destination ("" = off), by the same case-insensitive substring match the clock's
+// uses. Answers the matched name, or nil when nothing matched.
+midiFeedbackSet = { |name|
+    var p = name.asString.toLower, dest;
+    var find = { MIDIClient.destinations.detect { |d| midiDestName.(d).toLower.contains(p) } };
+    feedbackOut = nil;
+    feedbackOutName = nil;
+    if (p.size > 0) {
+        midiEnable.();
+        dest = find.value;
+        if (dest.isNil) { MIDIClient.list; dest = find.value }; // plugged in since the client came up
+        dest !? {
+            feedbackOut = MIDIOut(0, dest.uid).latency_(0);
+            feedbackOutName = midiDestName.(dest);
+            ("poptart: MIDI feedback to " ++ feedbackOutName).postln;
+        };
+    } {
+        "poptart: MIDI feedback off".postln;
+    };
+    feedbackOutName;
+};
+
+OSCdef(\poptartMidiFeedback, { |msg|
+    var requestId = msg[1], name = msg[2].asString;
+    var active = midiFeedbackSet.(name);
+    if (name.size > 0 and: { active.isNil }) {
+        replyErr.("/poptart/midiFeedback", requestId, "no MIDI destination matching '" ++ name ++ "' - connected: "
+            ++ MIDIClient.destinations.collect({ |d| midiDestName.(d) }).join(", "));
+    } {
+        replyOk.("/poptart/midiFeedback", requestId, toJson.((active: active)));
+    };
+}, '/poptart/midiFeedback');
+
+// Short messages to that port, as flat quadruples [kind, channel, num, value, ...]: kind 0 is a
+// control change, 1 a note. Batched because the things that send them send several at once (two
+// decks' meters off one reading), and silently nothing with no port chosen - the desk calls this
+// on every frame whether or not anybody is listening.
+OSCdef(\poptartMidiOut, { |msg|
+    feedbackOut !? { |out|
+        (1, 5 .. msg.size - 4).do { |i|
+            var kind = msg[i].asInteger, chan = msg[i + 1].asInteger;
+            var num = msg[i + 2].asInteger.clip(0, 127), val = msg[i + 3].asInteger.clip(0, 127);
+            if (kind == 1) { out.noteOn(chan, num, val) } { out.control(chan, num, val) };
+        };
+    };
+}, '/poptart/midiOut');
 
 OSCdef(\poptartGetMidiDestinations, { |msg|
     var requestId = msg[1];

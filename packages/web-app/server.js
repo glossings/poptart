@@ -1704,6 +1704,130 @@ function applyMixTargets(targets) {
   mixNotify();
 }
 
+// --- TALK-BACK: what the desk writes to a control surface --------------------------------------
+//
+// A controller that shows you anything - a lit pad, a level meter - is shown it by the host. It
+// has no idea what the software is doing otherwise, so every lamp on it is a message somebody
+// sent. This is that end of the desk: the levels it already measures, and the state its own
+// buttons are bound to, written back out to the hardware.
+//
+// Two halves, and only one of them needs to know anything about the device:
+//
+//   - LAMPS need nothing. The convention these surfaces use is that a button lights when you
+//     send back the message it SENDS, so a learned binding is already the address to answer on
+//     (it records device, channel, kind and number - see handleMixMidi). Velocity 127 lights it,
+//     0 puts it out. That works on a surface nobody has ever written a profile for.
+//   - METERS do, because a meter is not a control: you cannot press it, so there is nothing to
+//     learn from, and its address has to come from somewhere. MIX_METER_PROFILES is that
+//     somewhere, matched against the name the device reports.
+//
+// OFF until a port is chosen, deliberately. The desk's controls can be learned from anything with
+// a MIDI socket, and echoing note-ons at a device that is actually a KEYBOARD would play it.
+const MIX_METER_PROFILES = [
+  // Two-deck surfaces that meter each deck pre-fader, which is the same point poptart's own deck
+  // meters tap (see deckMeters) - so the hardware and the screen show the same thing.
+  { match: /ddj-flx4|ddj-flx\s*4/i, meters: { a: { channel: 0, num: 2 }, b: { channel: 1, num: 2 } } },
+];
+
+/** The meter addresses for the chosen port, or null for a device nothing is known about. */
+function mixMeterProfile() {
+  const port = settings.mixFeedback;
+  if (!port) return null;
+  return MIX_METER_PROFILES.find((p) => p.match.test(port))?.meters ?? null;
+}
+
+// The same dB window the on-screen meters draw (see MIX_METER_DB there), mapped onto a 0..127
+// control value: a hardware meter and the strip's meter read alike, which they have to, because
+// you gain-stage by whichever one you happen to be looking at.
+const MIX_FEEDBACK_DB_MIN = -42;
+
+function mixMeterValue(level) {
+  const db = 20 * Math.log10(Math.max(Number(level) || 0, 1e-5));
+  if (db <= MIX_FEEDBACK_DB_MIN) return 0;
+  return Math.min(127, Math.round(((db - MIX_FEEDBACK_DB_MIN) / -MIX_FEEDBACK_DB_MIN) * 127));
+}
+
+/** Write both decks' levels to the surface's meters - called on each reading from the engine. */
+function mixFeedbackLevels() {
+  // No gate on the desk being open: these readings only exist while the deck meters are
+  // running, which is itself the strip being up (see serveMixEvents).
+  const meters = mixMeterProfile();
+  if (!meters || !engine) return;
+  const out = [];
+  for (const deck of ['a', 'b']) {
+    const at = meters[deck];
+    const level = deckLevels[deck]?.p;
+    if (!at || level == null) continue;
+    out.push(['cc', at.channel, at.num, mixMeterValue(level)]);
+  }
+  try { engine.midiOut(out); } catch { /* engine between restarts */ }
+}
+
+/**
+ * Whether a learned control is lit right now - true, false, or null for one with nothing to
+ * show (a jog step has no state; a knob is not a lamp). Everything here is read from the desk's
+ * own truth, so a lamp cannot disagree with the screen.
+ */
+function mixFeedbackLit(target) {
+  const [deck, name] = target.includes(':') ? target.split(':') : [null, target];
+  const s = deck ? songDecks[deck] : null;
+  switch (name) {
+    case 'play': return deckPlaying(deck);
+    case 'cue': return !!s?.cueHeld;
+    case 'phones': return (mixState.perDeck[deck]?.get('cue') ?? 0) > 0;
+    case 'sync': return !!s?.sync;
+    case 'keylock': return !!s?.keylock;
+    case 'quant': return s ? s.quantize !== false : null;
+    case 'regions': return !!deckLoopsOn[deck];
+    case 'loop': return !!deckLoopLive(deck);
+    case 'fxon': return !!mixState.fx.on;
+    case 'fxhold': return !!mixState.fx.held;
+    default: return null; // jogs, steps, the length pads: momentary, with no state to report
+  }
+}
+
+// What each lamp was last told, so a frame only sends what CHANGED. The desk frames ~30 times a
+// second and most of it is a fader moving; re-lighting every pad each time would be a hundred
+// messages a second at a surface that asked for none of them.
+const mixLampSent = new Map();
+
+/** Light every learned button to match the desk. */
+function mixFeedbackLamps({ force = false } = {}) {
+  if (!settings.mixFeedback || !engine) return;
+  const out = [];
+  for (const [target, m] of Object.entries(settings.mixMidi ?? {})) {
+    // Only a pad can be a lamp. A knob or fader binding is left alone: sending a value back at
+    // one says nothing (there is no motor in it) and some surfaces answer their own echo.
+    if (m.kind !== 'note') continue;
+    // The desk's state is the desk's state whether or not a browser is watching it - a
+    // learned pad still works with the page closed, and its lamp still has to follow.
+    const lit = mixFeedbackLit(target);
+    if (lit == null) continue;
+    if (!force && mixLampSent.get(target) === lit) continue;
+    mixLampSent.set(target, lit);
+    out.push(['note', m.channel ?? 0, m.num, lit ? 127 : 0]);
+  }
+  if (out.length) {
+    try { engine.midiOut(out); } catch { /* engine between restarts */ }
+  }
+}
+
+/** Put every lamp out and both meters to zero - leaving the desk, or changing port. */
+function mixFeedbackBlank() {
+  if (!settings.mixFeedback || !engine) return;
+  const out = [];
+  for (const [target, m] of Object.entries(settings.mixMidi ?? {})) {
+    if (m.kind !== 'note' || mixFeedbackLit(target) == null) continue;
+    out.push(['note', m.channel ?? 0, m.num, 0]);
+  }
+  const meters = mixMeterProfile();
+  for (const deck of ['a', 'b']) {
+    if (meters?.[deck]) out.push(['cc', meters[deck].channel, meters[deck].num, 0]);
+  }
+  mixLampSent.clear();
+  try { engine.midiOut(out); } catch { /* engine between restarts */ }
+}
+
 /**
  * The strip's rows: the desk's channels (mixKeys) plus the tracks INSIDE groups, each carrying the
  * key of the group it plays through. A group is one channel until you ask to see in - that is what
@@ -1759,8 +1883,9 @@ function mixDeskBody() {
       locked: deckTempoLocked(d),
       bpm: deckTempoBpm(d), // what the deck is running at - a livecode deck's is the clock
     }])),
-    // The decks' loop toggles: whether each deck's arrangement loop regions are armed at all
-    // (see /api/arrangeLoops - DJ mode opens with both off, so songs run start to end).
+    // The decks' loop toggles: whether each deck's arrangement loop regions are armed at all (see
+    // /api/arrangeLoops - DJ mode opens with both off, so songs run start to end, except on a deck
+    // holding a song nobody has arranged, which loops either way: see deckLoopsOn).
     loops: { ...deckLoopsOn },
     // ...and the performance loop on each deck: the button's state, its length in beats, and the
     // window it is holding (seconds into the file on a song deck, cycles into the arrangement on
@@ -1896,12 +2021,26 @@ function deckLevelNotify() {
 
 let mixNotifyTimer = null;
 function mixNotify() {
+  // The surface is told first, and on its own schedule: a learned pad moves the desk whether or
+  // not a browser is watching, and its lamp has to follow with the page closed.
+  mixLampNotify();
   if (!mixEventClients.size || mixNotifyTimer) return;
   mixNotifyTimer = setTimeout(() => {
     mixNotifyTimer = null;
     if (!mixEventClients.size) return;
     const frame = `data: ${JSON.stringify(mixDeskBody())}\n\n`;
     for (const res of mixEventClients) res.write(frame);
+  }, 30);
+}
+
+// Lamps on the same ~30ms coalesce as the desk frames, and free when no port is chosen - this is
+// called on every desk change there is.
+let mixLampTimer = null;
+function mixLampNotify() {
+  if (!settings.mixFeedback || mixLampTimer) return;
+  mixLampTimer = setTimeout(() => {
+    mixLampTimer = null;
+    mixFeedbackLamps();
   }, 30);
 }
 
@@ -1916,8 +2055,8 @@ function mixBirthFor(key) {
   // (or on a fresh desk) the maps are empty while the desk sits at its home position, and a
   // track born then would wear the synthdef's deck=1: wide open on the side that is meant to be
   // silent (reported 2026-08-25, a deck-b song audible through a closed crossfader). Derive the
-  // gain when no gesture has - which is also what makes deck B's resting fader of 0 reach the
-  // tracks its first eval births.
+  // gain when no gesture has - which is also what carries the resting channel faders into the
+  // tracks a deck's first eval births.
   if (!('deck' in birth)) birth.deck = deckXfGain(deckOfKey(key)) * mixState.faders[deckOfKey(key)];
   // Which deck meter bus the synth sums its pre-fader signal into (see the scd's deckMeterBus)
   // - a birth arg like the rest, so a stem born mid-set meters from its first sample.
@@ -2350,6 +2489,7 @@ function syncEngineClock(event = 'sync') {
 // MIDI clock out: sclang sends the ticks from its mirror of the transport, to the destination
 // chosen in the settings tab (persisted as settings.midiClockOut).
 let midiClockActive = null; // the destination the running engine actually ticks to
+let mixFeedbackActive = null; // ...and the one it writes the desk's lamps and meters to
 
 // ---------------------------------------------------------------------------------------------
 // Ableton Link. The session peer is a helper process (see osc-engine's link.js); this is the
@@ -2712,6 +2852,25 @@ function applyMidiClockSetting() {
     (r) => { if (engine === eng) midiClockActive = r.active ?? null; },
     // eslint-disable-next-line no-console
     (err) => console.warn(`[poptart] MIDI clock out: ${err.message}`),
+  );
+}
+
+// ...and the same for the desk's talk-back port (see the TALK-BACK section). A fresh sclang has
+// no destination, and a surface that was lit when the engine went down is still lit - so the
+// lamps are re-sent whole once the port is back, rather than waiting for each to change.
+function applyMixFeedbackSetting() {
+  if (!engine || !settings.mixFeedback) return;
+  const eng = engine;
+  mixFeedbackActive = null;
+  mixLampSent.clear();
+  eng.setMidiFeedback(settings.mixFeedback).then(
+    (r) => {
+      if (engine !== eng) return;
+      mixFeedbackActive = r.active ?? null;
+      if (mixFeedbackActive) mixFeedbackLamps({ force: true });
+    },
+    // eslint-disable-next-line no-console
+    (err) => console.warn(`[poptart] MIDI feedback: ${err.message}`),
   );
 }
 
@@ -3187,6 +3346,7 @@ function wireEngine() {
   };
   syncVstTransport(); // a fresh sclang needs the surviving transport's tempo, not 120
   applyMidiClockSetting();
+  applyMixFeedbackSetting();
   // Live CC events (forwarded from sclang once MIDI is enabled) feed pattern-core's
   // live-value store - what a Tier-1 midicc() signal samples.
   engine.onMidiIn = (device, channel, num, value, kind) => {
@@ -3258,6 +3418,7 @@ function wireEngine() {
       b: deckBands[d],
     };
     deckLevelNotify();
+    mixFeedbackLevels(); // ...and out to the surface's own meters, if one is listening
   };
   // ...and the band energies behind each frame's color. Held rather than framed: they arrive as
   // their own reply, and the level is what decides when a frame goes out.
@@ -3505,11 +3666,40 @@ const arrangeClocks = { a: null, b: null };
 // to its end and the deck stops there, the way an audio deck does; on again re-arms every
 // region ahead of the playhead (ArrangeClock#setLoops). DJ mode opens with both OFF and leaving
 // it puts them back on - outside a mix a fresh song looping over itself is the whole workflow.
+//
+// ...with one exception, and it is the whole reason the toggle has a default rather than a value:
+// a song NOBODY HAS ARRANGED has no run-to-the-end to play. Its regions are one loop over its
+// whole length (pattern-core's isWholeSongLoop) - what a fresh arrangement is seeded with, and
+// what a track turned on and off by hand over a looping bed looks like forever - so switching
+// that off would not make it play like a record, it would make it stop after eight bars at the
+// end of something no one wrote an ending for. A deck holding one of those loops whatever the
+// blanket default says (see deckLoopsDefault), and so does a deck with no arrangement AT ALL,
+// which has nothing to gate it and loops by nature: the button says what the deck is doing.
 const deckLoopsOn = { a: true, b: true };
+// Whether the performer has set this deck's toggle BY HAND, which pins it - the arrangement gets
+// to choose the opening position, and then stops choosing. Cleared when a deck takes a new song
+// (/api/mix/clear, eject, complete): the next song decides for itself.
+const deckLoopsPinned = { a: false, b: false };
 
-function setDeckLoops(deck, on) {
-  deckLoopsOn[deck] = on !== false;
+/**
+ * The toggle's resting position for a deck about to play `regions` (null: no arrangement at all).
+ * `on` is what was asked for, and the answer only ever differs by coming back ON: an unarranged
+ * song loops, and nothing about being in a mix changes that.
+ */
+function deckLoopsDefault(deck, on, regions, end) {
+  if (on !== false || deckLoopsPinned[deck]) return on !== false;
+  return !regions || patternCore.isWholeSongLoop(regions, end);
+}
+
+function setDeckLoops(deck, on, { pinned = true } = {}) {
   const clock = arrangeClocks[deck];
+  // `clock.end` is the song's end in its OWN cycles, which is what the regions are measured in -
+  // endCycle() is a transport reading and says nothing about how long the song is.
+  if (!pinned) on = deckLoopsDefault(deck, on, clock ? clock.regions : null, clock ? clock.end : 0);
+  // A DEFAULT being applied is the one moment the arrangement gets to choose, so it releases an
+  // earlier pin as well as declining to set one.
+  deckLoopsPinned[deck] = pinned;
+  deckLoopsOn[deck] = on !== false;
   if (clock) {
     const cycle = transport && engine && !transport.paused ? transport.cycleAt(engine.getTime()) : 0;
     clock.setLoops(deckLoopsOn[deck], cycle);
@@ -5628,6 +5818,33 @@ const routes = {
     return { status: 200, body: { selected: device, active: midiClockActive } };
   },
 
+  // The desk's talk-back port (settings tab): which destination its lamps and meters are
+  // written to. Off by default - see the TALK-BACK section for why that matters.
+  'GET /api/mix/feedback': async () => ({
+    status: 200,
+    body: {
+      destinations: engine ? await engine.getMidiDestinations() : [],
+      selected: settings.mixFeedback ?? null,
+      active: mixFeedbackActive,
+      meters: !!mixMeterProfile(), // whether anything is known about this one's meters
+    },
+  }),
+
+  // Body: { device } - a destination name (substring), or null/"" for off. The surface being
+  // left is blanked first, so a port change doesn't leave a pad lit on the old one.
+  'POST /api/mix/feedback': async (body) => {
+    const device = body.device ? String(body.device).trim() : null;
+    mixFeedbackBlank();
+    let active = null;
+    if (engine) ({ active } = await engine.setMidiFeedback(device ?? ''));
+    settings.mixFeedback = device;
+    mixFeedbackActive = active ?? null;
+    saveSettings();
+    mixLampSent.clear();
+    if (mixFeedbackActive) mixFeedbackLamps({ force: true });
+    return { status: 200, body: { selected: device, active: mixFeedbackActive, meters: !!mixMeterProfile() } };
+  },
+
   // Body: { dir } - a folder path, or null/"" to reset to the default (~/.poptart/samples).
   // Persisted and applied immediately; the next `s(...)` eval reads packs from the new root.
   'POST /api/samplesDir': async (body) => {
@@ -5911,6 +6128,15 @@ const routes = {
       }
       const regions = arrangements.flatMap((a) => patternCore.arrangementLoops(a.clips, a.opts));
       const nowCycle = transport ? transport.cycleAt(engine ? engine.getTime() : transport.getTime()) : 0;
+      // An unarranged song loops whatever DJ mode's blanket default says (see deckLoopsOn): the
+      // arrangement is read here, so a deck that comes up holding one arms itself. Asked on every
+      // eval and reported only when it moves, so carving the song later - which is what makes the
+      // toggle mean something - leaves it where the last answer put it.
+      const loops = deckLoopsDefault(deck, deckLoopsOn[deck], regions, songEnd);
+      if (loops !== deckLoopsOn[deck]) {
+        deckLoopsOn[deck] = loops;
+        eventLogQueue.push(`[arrange] deck ${deck.toUpperCase()} is one loop over its whole length, so its regions stay armed - carve it into parts to play it through`);
+      }
       // The clock is a function of the regions alone - where the song ends is not part of where
       // the playhead is - so painting clips keeps it, and changed regions rebuild it in place.
       const clockKey = JSON.stringify(regions);
@@ -5972,6 +6198,11 @@ const routes = {
     } else {
       arrangeClocks[deck] = null;
       arrangeClips[deck] = null; // no arrangement: a clips() track has nothing to play, and says so
+      // No arrangement at all - a song that has never had the painter opened on it (nothing writes
+      // the call until then, see arReconcileTracks). Nothing gates these tracks and nothing can
+      // stop them: every one of them is the bare loop it is written as, so the toggle reads ON
+      // whatever a mix asked for, because that is what the deck is doing.
+      if (!deckLoopsPinned[deck]) deckLoopsOn[deck] = true;
     }
 
     // Mute and solo travel DOWN the group tree: a marker sits on one label, but a group is the
@@ -6237,9 +6468,13 @@ const routes = {
   // The deck's loop toggle: are the arrangement's loop regions armed at all? Body: { deck, on }.
   // Off, the song plays straight to its end and the deck stops there; on re-arms every region
   // ahead of the playhead. DJ mode opens with both decks OFF (see /api/mix's `loops`).
+  //
+  // `pin: false` says this is a DEFAULT being set, not the performer pressing the button - DJ mode
+  // opening both decks off - and an unarranged song, which has no end to run to, stays looping
+  // through it (see deckLoopsOn). The answer says where the toggle actually landed.
   'POST /api/arrangeLoops': async (body) => {
     const deck = body?.deck === 'b' ? 'b' : 'a';
-    const on = setDeckLoops(deck, !!body?.on);
+    const on = setDeckLoops(deck, !!body?.on, { pinned: body?.pin !== false });
     return { status: 200, body: { deck, on, arrange: arrangeClocks[deck]?.snapshot() ?? null } };
   },
 
@@ -7225,6 +7460,7 @@ const routes = {
     for (const key of [...trackIds.keys()]) if (deckOfKey(key) === deck) dropTrack(key);
     mixState.solo[deck].clear();
     mixState.soloPrev[deck] = null;
+    deckLoopsPinned[deck] = false; // a new song decides its own regions default (see deckLoopsOn)
     decks[deck] = { scale: null, bpm: null, groove: null };
     if (deck === 'a') {
       patternCore.setGlobalScale(null); // the resting scale was this deck's fact
@@ -7242,6 +7478,7 @@ const routes = {
   'POST /api/mix/eject': async () => {
     if (!mappedEngine) throw new Error(engineError ?? 'engine not loaded');
     fxTeardown(); // park every FX send and drop the unit's return tracks (both decks')
+    mixFeedbackBlank(); // and put the surface's lamps and meters out - the desk is gone
     songUnload('b'); // the queued song goes with its deck; the track dies in the sweep below
     for (const [key, sch] of [...schedulers]) {
       if (deckOfKey(key) !== 'b') continue;
@@ -7268,8 +7505,10 @@ const routes = {
     }
     for (const key of mixAllKeys()) neutralizeMix(key);
     mixState.deckTempo = { a: { frac: 0, range: 6 }, b: { frac: 0, range: 6 } };
-    setDeckLoops('a', true); // outside a mix, loop regions are the workflow again
-    setDeckLoops('b', true);
+    // Outside a mix, loop regions are the workflow again - and unpinned, so the next session's
+    // songs get to choose for themselves (see deckLoopsOn).
+    setDeckLoops('a', true, { pinned: false });
+    setDeckLoops('b', true, { pinned: false });
     decks.b = { scale: null, bpm: null, groove: null };
     liveStateIds.b = new Set();
     patternCore.clearRolls('buffer', 'b');
@@ -7288,6 +7527,7 @@ const routes = {
     const promoted = [...schedulers.keys()].filter((k) => deckOfKey(k) === 'b');
     if (!promoted.length) throw new Error('deck b has nothing playing - nothing to promote');
     fxTeardown(); // park every FX send and drop the unit's return tracks (both decks')
+    mixFeedbackBlank(); // and put the surface's lamps and meters out - the desk is gone
     songUnload('a'); // the outgoing song (if any) goes with its deck...
     for (const [key, sch] of [...schedulers]) {
       if (deckOfKey(key) !== 'a') continue;
@@ -7327,9 +7567,10 @@ const routes = {
     mixState.tempoOverride = null;
     mixState.deckTempo = { a: { frac: 0, range: 6 }, b: { frac: 0, range: 6 } };
     // The promoted deck's loop flag travels with its song: it is deck A now, and leaving DJ
-    // mode re-arms the regions either way - the next session opens with them off again.
-    setDeckLoops('a', true);
-    setDeckLoops('b', true);
+    // mode re-arms the regions either way - the next session opens with them off again, and
+    // unpinned, so the songs it opens on choose for themselves (see deckLoopsOn).
+    setDeckLoops('a', true, { pinned: false });
+    setDeckLoops('b', true, { pinned: false });
     for (const key of mixAllKeys()) neutralizeMix(key);
     mixNotify();
     return { status: 200, body: { promoted: promoted.map((k) => k.slice(k.indexOf(':') + 1)) } };

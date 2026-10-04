@@ -20562,7 +20562,7 @@ function activateTab(name) {
   settingsTab.classList.toggle('hidden', name !== 'settings');
   if (name === 'sounds') loadSamples();
   if (name === 'files') refreshPatternFiles();
-  if (name === 'settings') { refreshAudioDevices(); refreshAudioInputs(); refreshSamplesDir().then(refreshMapSources); refreshPreferVst3(); refreshWipRetention(); refreshMidiClock(); refreshLink(); if (window.__poptartHostReady) refreshDownloads(); }
+  if (name === 'settings') { refreshAudioDevices(); refreshAudioInputs(); refreshSamplesDir().then(refreshMapSources); refreshPreferVst3(); refreshWipRetention(); refreshMidiClock(); refreshMixFeedback(); refreshLink(); if (window.__poptartHostReady) refreshDownloads(); }
 }
 
 for (const btn of document.querySelectorAll('.side-tab')) {
@@ -21652,6 +21652,46 @@ midiClockSelect.addEventListener('change', async () => {
   } finally {
     midiClockSelect.disabled = false;
     refreshMidiClock().catch(() => {});
+  }
+});
+
+// The desk's talk-back port (settings → sync), the same picker as the clock's: which MIDI
+// destination the desk writes its lamps and meters to. Everything about WHAT it writes is the
+// server's - see the TALK-BACK section there - so this is a port and nothing else.
+const mixFeedbackSelect = document.getElementById('mixFeedbackSelect');
+const mixFeedbackTitle = mixFeedbackSelect.title;
+
+async function refreshMixFeedback() {
+  try {
+    const { destinations, selected, active, meters } = await api('GET', '/api/mix/feedback');
+    mixFeedbackSelect.innerHTML = '';
+    mixFeedbackSelect.appendChild(new Option('off', ''));
+    for (const name of destinations) mixFeedbackSelect.appendChild(new Option(name, name));
+    if (selected && !destinations.includes(selected)) mixFeedbackSelect.appendChild(new Option(`${selected} (not connected)`, selected));
+    mixFeedbackSelect.value = selected ?? '';
+    mixFeedbackSelect.title = selected && !active
+      ? `"${selected}" is chosen but the running engine found no such destination - is it plugged in? (pick it again to retry)`
+      : selected && !meters
+        ? `${mixFeedbackTitle}\n\nThe pads you have learned will light. This surface's meters are not among the ones poptart knows the addresses of, so the levels stay on screen.`
+        : mixFeedbackTitle;
+  } catch (e) {
+    logLine(e.message ?? String(e), true);
+  }
+}
+
+mixFeedbackSelect.addEventListener('change', async () => {
+  const device = mixFeedbackSelect.value || null;
+  mixFeedbackSelect.disabled = true;
+  try {
+    const { active, meters } = await api('POST', '/api/mix/feedback', { device });
+    logLine(active
+      ? `desk talk-back: ${active}${meters ? ' (lamps and meters)' : ' (lamps - no meter addresses known for this one)'}`
+      : 'desk talk-back: off');
+  } catch (e) {
+    logLine(e.message ?? String(e), true);
+  } finally {
+    mixFeedbackSelect.disabled = false;
+    refreshMixFeedback().catch(() => {});
   }
 });
 
@@ -28219,16 +28259,19 @@ async function openMixMode() {
   }
   deckBCM.refresh();
   cm.refresh();
-  // The desk's gains become real state NOW, before anything plays on deck B: the crossfader
-  // opens centered and deck B's channel fader opens DOWN, so deck b's gain is 0 in mixState and
-  // the first eval's tracks are BORN silent (see server.js's mixBirthFor) - the whole "arrives
-  // silent" design, which the incoming channel fader carries now that the crossfader rests in
-  // the middle like a mixer's.
+  // The desk's gains become real state NOW, before anything plays on deck B: the crossfader opens
+  // centered and both channel faders up, so the first eval's tracks are BORN wearing the desk's
+  // own gain (see server.js's mixBirthFor) rather than the synthdef's wide-open default - which is
+  // what a deck B audible through a closed crossfader was.
   sendCrossfader();
   // DJ decks open with every arrangement loop OFF - a song runs start to end like a record,
   // and the deck heads' loop buttons arm the regions back mid-set. The server re-arms both on
   // eject/complete, so normal mode keeps its loop-by-default workflow.
-  for (const d of ['a', 'b']) api('POST', '/api/arrangeLoops', { deck: d, on: false }).catch(() => {});
+  //
+  // `pin: false` because this is the DEFAULT, not a press of the button: a song nobody has
+  // arranged has no end to run to, and stays looping through it (see server.js's deckLoopsOn).
+  // Which is why the toggles are read back off the desk stream rather than assumed off here.
+  for (const d of ['a', 'b']) api('POST', '/api/arrangeLoops', { deck: d, on: false, pin: false }).catch(() => {});
   refreshDeckFiles();
   mixRefresh();
   mixPushStart(); // mirrors MIDI-driven desk moves back onto the sliders, pushed live

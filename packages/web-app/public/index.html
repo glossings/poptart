@@ -493,6 +493,9 @@
               <label class="settings-row">midi clock out
                 <select id="midiClockSelect" title="send MIDI clock (24 ticks a beat, with start/stop and song position) to a MIDI destination, so a drum machine or sequencer follows poptart's clock - in mix mode that is the desk's clock, tempo migrations included"></select>
               </label>
+              <label class="settings-row">desk talk-back
+                <select id="mixFeedbackSelect" title="write the desk's state back to a control surface: the pads and buttons you have learned light up with it, and a surface poptart knows the meters of shows each deck's level. Off unless you pick a port - the desk can be learned from anything with a MIDI socket, and a keyboard would PLAY the notes sent at it"></select>
+              </label>
               <label class="settings-check"
                 title="join the Ableton Link session on this network: tempo is shared both ways, poptart's play button starts and stops the other apps (and theirs starts poptart, outside mix mode), and a start lands on the session's bar">
                 <input id="linkToggle" type="checkbox" />

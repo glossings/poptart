@@ -14,6 +14,7 @@ import {
   normalizeArrangeOpts,
   arrangementEnd,
   arrangementLoops,
+  isWholeSongLoop,
   arrangementSpans,
   arrangementLabels,
   reconcileArrangement,
@@ -189,6 +190,31 @@ test('loops: a call without the key looped over its whole length, and is read as
   assert.deepEqual(arrangementLoops([]), [{ name: 'song', start: 0, end: 1 }], 'never less than a bar');
   const opts = normalizeArrangeOpts({ len: 8 });
   assert.deepEqual(arrangementLoops(clips, normalizeArrangeOpts(opts)), [{ name: 'song', start: 0, end: 8 }], 'normalizing twice reads the same');
+});
+
+// A song that has never been carved reads as one loop over its whole length, which is the only
+// thing that separates "the performer turns tracks on and off over this forever" from "this song
+// has an ending". A host that gets the question wrong either stops a livecoded set dead at bar 8
+// or loops the first part of an arranged song for the rest of the night.
+test('an unarranged song is one loop over its whole length, and says so', () => {
+  const clips = parseArrangement('a,0,8 b,0,8');
+  assert.equal(isWholeSongLoop(arrangementLoops(clips, { loops: [['song', 0, 8]] }), 8), true, 'the region a fresh arrangement is seeded with');
+  assert.equal(isWholeSongLoop(arrangementLoops(clips), 8), true, 'and a call from before the song could end, read as that same region');
+  // The shape answers, not the name: a whole-song region painted by hand means the same thing.
+  assert.equal(isWholeSongLoop([{ name: 'loop1', start: 0, end: 8 }], 8), true);
+  assert.equal(isWholeSongLoop([{ name: 'song', start: 0, end: 12 }], 8), true, 'a region the song does not fill is still one loop over all of it');
+});
+
+test('any carving at all, and the song has an arrangement to play through', () => {
+  assert.equal(isWholeSongLoop([{ name: 'song', start: 0, end: 8 }, { name: 'b', start: 8, end: 12 }], 12), false, 'a second region');
+  assert.equal(isWholeSongLoop([{ name: 'b', start: 4, end: 8 }], 8), false, 'a region that does not start at the top');
+  assert.equal(isWholeSongLoop([{ name: 'song', start: 0, end: 8 }], 16), false, 'clips painted past the region - the song outlasts its loop');
+  assert.equal(isWholeSongLoop([], 8), false, 'and no region at all, which is the explicit play-through');
+  assert.equal(isWholeSongLoop(null, 8), false);
+});
+
+test('nothing painted is no song to loop', () => {
+  assert.equal(isWholeSongLoop(arrangementLoops([]), 0), false, 'an empty arrangement is not a loop over nothing');
 });
 
 test('spans merge per label across touching clips', () => {
