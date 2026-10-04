@@ -8,7 +8,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
 
-const { detectOnsets } = require('./samples');
+const { detectOnsets, detectOnsetHits } = require('./samples');
 
 const RATE = 48000;
 const SECONDS = 3;
@@ -84,4 +84,67 @@ test('a sensitivity out of range is clamped rather than turning the detector off
   assert.deepStrictEqual(detectOnsets(samples, RATE, { sensitivity: -3 }), detectOnsets(samples, RATE, { sensitivity: SENSITIVITY_MIN }));
   // 0 is not "as strict as possible" - it's no answer at all, and the default is what it means.
   assert.deepStrictEqual(detectOnsets(samples, RATE, { sensitivity: 0 }), detectOnsets(samples, RATE, { sensitivity: 1 }));
+});
+
+// ---------------------------------------------------------------------------------------------
+// The strength of each hit - what a groove's accents are measured from (see groove-extract.mjs)
+// ---------------------------------------------------------------------------------------------
+
+test('the hits come back with a strength, the loudest being 1', () => {
+  const found = detectOnsetHits(ladder(), RATE, { sensitivity: 2 });
+  assert.ok(found.length > 4, 'something to compare');
+  assert.strictEqual(found[0].at, 0, 'the file start is still the first of them');
+  for (const h of found) {
+    assert.ok(h.strength >= 0 && h.strength <= 1, `strength in range (${h.strength})`);
+  }
+  assert.strictEqual(Math.max(...found.map((h) => h.strength)), 1, 'the loudest hit is the reference');
+  // The ladder decays by 0.7 per hit, so the strengths have to fall with it - that is the whole
+  // claim: this measures how hard a hit was, not merely that there was one. It holds while the
+  // hits are above the noise bed; below that the reading levels off at the bed, because a hit
+  // quieter than the noise it sits in cannot be measured and should not be invented.
+  const ABOVE_BED = 8;
+  for (let i = 1; i < ABOVE_BED; i++) {
+    assert.ok(found[i].strength < found[i - 1].strength, `hit ${i} is quieter than the one before`);
+    const ideal = Math.pow(0.7, i);
+    assert.ok(Math.abs(found[i].strength - ideal) < 0.2, `hit ${i} is read near its real level (${found[i].strength} vs ${ideal})`);
+  }
+});
+
+test('asking for strengths finds the same hits, timed more precisely', () => {
+  // The same detection either way - the strengths path only times what it found differently. For
+  // slicing, a position is backed off a hop so the slice keeps its attack; for measuring a feel
+  // that back-off would read as every hit being played a few milliseconds early, so the hits path
+  // refines to the sample instead (see refineOnset). Within one hop of each other, never before.
+  const samples = ladder();
+  const HOP_SEC = 256 / RATE;
+  for (const sensitivity of [0.5, 1, 4]) {
+    const plain = detectOnsets(samples, RATE, { sensitivity });
+    const withStrength = detectOnsetHits(samples, RATE, { sensitivity });
+    assert.strictEqual(withStrength.length, plain.length, `same count at sensitivity ${sensitivity}`);
+    for (let i = 0; i < plain.length; i++) {
+      const diff = (withStrength[i].at - plain[i]) * SECONDS;
+      assert.ok(diff >= -1e-9, `hit ${i} is not timed earlier than the slice position (${diff})`);
+      // The refinement searches the hop before the flux peak and the two after it, so the answer
+      // sits inside that window - never earlier than the slice position, never 3 hops past it.
+      assert.ok(diff <= HOP_SEC * 3, `hit ${i} is inside the refinement window (${diff})`);
+    }
+  }
+});
+
+test('a loop that begins with a rest is not credited with a hit at zero', () => {
+  // Slice 0 is the file start by convention, which is right for chopping and wrong for measuring.
+  const samples = ladder();
+  const quietStart = new Float32Array(samples.length);
+  quietStart.set(samples.subarray(0, samples.length - RATE / 2), RATE / 2); // half a second of bed first
+  for (let i = 0; i < RATE / 2; i++) quietStart[i] = 0.0001 * rnd(i);
+  const hits = detectOnsetHits(quietStart, RATE, { sensitivity: 2 });
+  assert.ok(hits.length, 'the hits after the rest are still found');
+  assert.ok(hits[0].at * SECONDS > 0.4, `the first hit is where the sound is, not at 0 (${hits[0].at * SECONDS})`);
+  // ...while the slicer still answers with its start, because a chop needs one.
+  assert.strictEqual(detectOnsets(quietStart, RATE, { sensitivity: 2 })[0], 0);
+});
+
+test('a file too short to analyze still answers with its one hit', () => {
+  const tiny = new Float32Array(100);
+  assert.deepStrictEqual(detectOnsetHits(tiny, RATE), [{ at: 0, strength: 1 }]);
 });

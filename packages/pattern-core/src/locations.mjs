@@ -31,6 +31,7 @@
 
 import { looksLikeNoteString } from './pianoroll.mjs';
 import { looksLikeShapeData } from './shape.mjs';
+import { grooveNameLike } from './groove.mjs';
 
 // Rewrites `code` so each pattern-position string/template literal is wrapped in mini(str, START),
 // where START = `base` + the literal's first-content-char offset within `code`. Pass the block's
@@ -90,7 +91,7 @@ function inRanges(ranges, at) {
 // and treats everything else as a pattern - a new builder (choose(), and whatever comes next)
 // highlights its arguments with no entry here. Add a call only when its string is a lookup key.
 const NAME_ARG_CALLS = new Set([
-  'synth', 'fx', 'scale', 'setscale', 'as', 'midi', 'audio', 'input', 'copy', 'pcopy', 'lfo', 'midicc', 'midikeys', 'osc', 'pianoroll',
+  'synth', 'fx', 'scale', 'setscale', 'setgroove', 'as', 'midi', 'audio', 'input', 'copy', 'pcopy', 'lfo', 'midicc', 'midikeys', 'osc', 'pianoroll',
   // `.bus("<reverb delay>")` / `.bsend(...)` are deliberately NOT here: a send's destination is a
   // pattern of names like `.preset()`'s, so its literal wants wrapping (and highlighting) too.
   // The painter's clips, then its options - drawn data, never mini (see arrange.mjs).
@@ -115,6 +116,12 @@ const NAME_ARG_CALLS = new Set([
   // `.slices("<tight loose>")` is a pattern of names like `.preset()`, so it is deliberately not
   // listed - its argument wants highlighting exactly as pianoroll("<a b>") does.
   '_slices',
+  // ...and the groove definition: an id, then the drawn table. `.swing()` itself is NOT here - its
+  // shape argument is a name OR a patterned subdivision, so it is judged by what it says (below).
+  // setgroove() IS here (above, beside setscale): the session feel takes the same shapes .swing()
+  // does - including a pattern of names - but reads them itself, so its argument stays the plain
+  // string it was written as, and its second (the depth) is a number rather than a pattern.
+  '_groove',
   'param', // the NAME: the first argument, and the second in the device form (see the later-argument rule below); only the final argument patterns the value
   // A place to read sample packs from - "user/repo", a URL - which a "/" would make a division.
   'samples',
@@ -123,7 +130,7 @@ const NAME_ARG_CALLS = new Set([
 // (.synth("Serum 2", "<state>")), an lfo() options object, pianoroll()'s grid, roll()'s drawn
 // notes, input()'s channel numbers (a hardware channel is wiring, not something that can vary per
 // step). param() is excluded: its second argument is the value pattern.
-const NAME_ONLY_CALLS = new Set(['samples', 'synth', 'fx', 'lfo', 'pianoroll', '_arrange', '_roll', 'roll', '_shape', 'shape', '_auto', 'auto', '_preset', '_pack', '_slices', 'midicc', 'midikeys', 'osc', 'input', 'copy', 'pcopy']);
+const NAME_ONLY_CALLS = new Set(['samples', 'synth', 'fx', 'lfo', 'pianoroll', '_arrange', '_roll', 'roll', '_shape', 'shape', '_auto', 'auto', '_preset', '_pack', '_slices', '_groove', 'setgroove', 'midicc', 'midikeys', 'osc', 'input', 'copy', 'pcopy']);
 
 // Callee names whose METHOD form takes a literal name while the same-named builder takes mini:
 // .se("hits/stab.wav") is a plain path (a "/" would be a mini operator) and .sr("stab") a plain
@@ -213,6 +220,11 @@ export function isPatternPosition(before, after, text = '') {
   if (/,\s*\[?\s*$/.test(near)) {
     const enclosing = near.match(/\b([A-Za-z_$][\w$]*)\s*\(\s*[^()]*$/);
     if (enclosing && NAME_ONLY_CALLS.has(enclosing[1])) return false;
+    // .swing(amount, shape): the shape is either a GROOVE NAME to look up or the patterned
+    // subdivision it has always been, in one argument position - so it is judged by what it says,
+    // the way pianoroll()'s and lfo()'s first argument is. A name has letters in it and a
+    // subdivision never can (see grooveNameLike), which settles it.
+    if (enclosing && enclosing[1] === 'swing') return !grooveNameLike(text);
     // param()'s device-named form puts the NAME second - .param("Serum 2", "A Warp 2 Var", 0.5) -
     // and only the final argument is ever the value pattern, so a later literal with another
     // argument after it is a name. Wrapped, it reached the engine as a Sig where a parameter

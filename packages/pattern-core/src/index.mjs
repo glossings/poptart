@@ -1,11 +1,11 @@
-export { Sig, Signal, n, note, mini, s, se, sr, sp, synth, sine, saw, isaw, tri, square, rand, perlin, lfo, env, dur, midicc, midikeys, osc, macro, choose, cat, seq, irand, resetRandomSeeds, midi, audio, input, group, copy, pcopy, setCopyResolver, clips, setClipsOwner, setClipsResolver, clipsOwnerNow, pianoroll, _roll, liveRoll, _shape, _preset, _pack, _slices, liveSlices, _auto, liveAuto, auto } from './signal.mjs';
+export { Sig, Signal, n, note, mini, s, se, sr, sp, synth, sine, saw, isaw, tri, square, rand, perlin, lfo, env, dur, midicc, midikeys, osc, macro, choose, cat, seq, irand, resetRandomSeeds, midi, audio, input, group, copy, pcopy, setCopyResolver, clips, setClipsOwner, setClipsResolver, clipsOwnerNow, pianoroll, _roll, liveRoll, _shape, _preset, _pack, _slices, liveSlices, _auto, liveAuto, auto, _groove, liveGroove, grooveText, setGlobalGroove, globalGroove, restoreGlobalGroove } from './signal.mjs';
 export { normalizeSlicePositions, parseSlicePositions, serializeSlicePositions, normalizeSliceSet, normalizeSliceEntry, normalizeSliceFit, sliceSetIsEmpty, slicePositionsFor, sliceEntryFor, sliceSetKeys, parseSliceSet, serializeSliceSet, SLICE_DECIMALS } from './slices.mjs';
 // Controls as top-level builders (Strudel's control patterns) - the method form of each still lives
 // on Sig; these are what let a combinator aim at one channel, x.mul(speed("-1")) / x.mul(clip(2)).
-export { i, begin, end, loop, loopwrap, loopdir, speed, flip, stretch, fit, slice, splice, splicemode, attack, decay, sustain, release, envscale, grain, vel, clip, nudge, swing, swinggrid, SAMPLER_CONTROL_NAMES } from './signal.mjs';
+export { i, begin, end, loop, loopwrap, loopdir, speed, flip, stretch, fit, slice, splice, splicemode, attack, decay, sustain, release, envscale, grain, vel, clip, nudge, swing, swinggrid, swingvel, SAMPLER_CONTROL_NAMES } from './signal.mjs';
 // The binops as top-level builders - a layer piece's own verb: .set(note(30), add(note(12))).
 export { add, sub, mul, div, mod, set } from './signal.mjs';
-export { channelAt, soundingEnd, timeShift, endEdgeStep, withSoundingSpan, MAX_FX_SLOTS } from './signal.mjs';
+export { channelAt, soundingEnd, timeShift, grooveAt, grooveVelScale, endEdgeStep, withSoundingSpan, MAX_FX_SLOTS } from './signal.mjs';
 export { setPatternWarn, lfoShapes, lfoPoints, withNoteGate, withEventSpan, noteGateFromGrid, sampleEnvIR, NOTE_GATE_LOOKBACK_CYCLES } from './signal.mjs';
 export { feedMidiCC, midiInUse } from './midi.mjs';
 export { feedOsc, oscInUse, latestOsc, normalizeOscAddress } from './osc.mjs';
@@ -21,6 +21,8 @@ export { splitLabeledBlocks, isBareCallBlock, isBusBlock, isBodylessGroup, isRow
 export { isGroupSig, routeGroups, treeOfBlocks, normalizeGroupTree, parentsOf, ancestorsOf, descendantsOf, markerResolver, groupOrder, GROUP_ROOT } from './groups.mjs';
 export { injectLocations, isPatternPosition, miniOffRanges } from './locations.mjs';
 export { looksLikeShapeData, parseShapePoints, serializeShapePoints, sampleShape, curveInterp, SHAPE_PRESETS, parseAutoPoints, serializeAutoPoints, sampleAutoPoints, parseBendPoints, serializeBendPoints, sampleBendPoints, bendIsFlat } from './shape.mjs';
+export { extractGroove, fitGrooveGrid, grooveHitsOnGrid, grooveHitsInCycles, grooveHitsFromFile } from './groove-extract.mjs';
+export { looksLikeGrooveData, grooveNameLike, parseGroove, serializeGroove, grooveIsFlat, grooveHasVel, grooveSlot, grooveTimeAt, grooveVelAt, grooveRef, resolveGroove, grooveByName, GROOVE_PRESETS, GROOVE_NAMES } from './groove.mjs';
 export { parsePianoRoll, serializePianoRoll, normalizePianoRollSteps, normalizePianoRollMode, pianoRollEventAt, noteIndex, noteSlice, noteNudge, noteNudgeChannel, pianoRollNotePos, placePianoRollNote, looksLikeNoteString, sliceNotesFor, PIANOROLL_DEFAULT_STEPS, PIANOROLL_MODES, PIANOROLL_DEFAULT_NOTE, PIANOROLL_DEFAULT_INDEX, PIANOROLL_DEFAULT_SLICE, PIANOROLL_MAX_NUDGE, PIANOROLL_MIN_LEN, pianoRollSwingCells, commitPianoRollSwing, pianoRollNoteGrid } from './pianoroll.mjs';
-export { clearRolls, restoreRolls, setRollLayer, setDefOwner, adoptDefs, lookupRoll, rollIds, lookupShape, shapeIds, lookupPreset, presetIds, lookupPack, packIds, lookupSlices, sliceSetIds, lookupAuto, autoIds } from './rolls.mjs';
+export { clearRolls, restoreRolls, setRollLayer, setDefOwner, adoptDefs, lookupRoll, rollIds, lookupShape, shapeIds, lookupPreset, presetIds, lookupPack, packIds, lookupSlices, sliceSetIds, lookupAuto, autoIds, lookupGroove, grooveIds } from './rolls.mjs';
 export { parseArrangement, serializeArrangement, looksLikeArrangeString, normalizeArrangeOpts, arrangementEnd, arrangementLoops, arrangementSpans, arrangementLabels, clipsOfLabel, reconcileArrangement, inSpans, ArrangeClock, ClipClock, songSteps, withClipShift, clipShiftNow, stepsUnderShift, _arrange, ARRANGE_DEFAULT_SNAP, ARRANGE_DEFAULT_LEN, ARRANGE_SONG_LOOP } from './arrange.mjs';

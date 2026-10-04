@@ -108,10 +108,11 @@ const trackLabel = (id) => trackLabels.get(id) ?? id;
 // the namespace can't collide), and its song-level facts - the key setscale() left in force, the
 // tempo setbpm() asked for - are recorded HERE rather than applied globally: deck b plays in its
 // own key but at the main deck's tempo until the mix migrates it (phase 5). The process-global
-// scale holds deck a's key at rest; a deck's eval borrows it and puts it back.
+// scale holds deck a's key at rest; a deck's eval borrows it and puts it back. The feel setgroove()
+// left in force is a song-level fact on exactly the same terms (see restoreGlobalGroove).
 const decks = {
-  a: { scale: null, bpm: null },
-  b: { scale: null, bpm: null },
+  a: { scale: null, bpm: null, groove: null },
+  b: { scale: null, bpm: null, groove: null },
 };
 const deckOfKey = (key) => (key.includes(':') ? key.slice(0, key.indexOf(':')) : 'a');
 
@@ -2536,7 +2537,7 @@ function syncUserStringMethods() {
 const BUILDER_NAMES = ['Signal', 'n', 'note', 'mini', 's', 'se', 'sr', 'sp', 'synth', 'sine', 'saw', 'isaw', 'tri', 'square', 'rand', 'perlin', 'lfo', 'env', 'dur', 'midicc', 'midikeys', 'osc', 'macro', 'choose', 'cat', 'seq', 'irand', 'midi', 'audio', 'input', 'group', 'copy', 'pcopy', 'pianoroll', 'clips', 'auto',
   // Every control method also as a top-level control builder - speed("-1"), begin(0.5), clip(2) -
   // so a combinator can aim at one channel of a pattern it was handed: x.mul(speed("-1")).
-  'i', 'begin', 'end', 'loop', 'loopwrap', 'loopdir', 'speed', 'flip', 'stretch', 'fit', 'slice', 'splice', 'splicemode', 'attack', 'decay', 'sustain', 'release', 'envscale', 'grain', 'vel', 'clip', 'nudge', 'swing', 'swinggrid',
+  'i', 'begin', 'end', 'loop', 'loopwrap', 'loopdir', 'speed', 'flip', 'stretch', 'fit', 'slice', 'splice', 'splicemode', 'attack', 'decay', 'sustain', 'release', 'envscale', 'grain', 'vel', 'clip', 'nudge', 'swing', 'swinggrid', 'swingvel',
   // The binops as top-level builders - a layer piece's own verb: .set(note(30), add(note(12)))
   // pins one voice and transposes the other.
   'add', 'sub', 'mul', 'div', 'mod', 'set',
@@ -2552,7 +2553,7 @@ const BUILDER_NAMES = ['Signal', 'n', 'note', 'mini', 's', 'se', 'sr', 'sp', 'sy
 // BUILDER_NAMES - which is what drives autocomplete and the docs - so the plain names `roll` and
 // `shape` stay free for whatever they should mean to a person later. See the underscore in
 // pattern-core: these are the editor's own calls, not part of the language.
-const INTERNAL_BUILDERS = ['_roll', '_shape', '_preset', '_pack', '_slices', '_auto', '_arrange'];
+const INTERNAL_BUILDERS = ['_roll', '_shape', '_preset', '_pack', '_slices', '_auto', '_groove', '_arrange'];
 
 // The Macros panel's knobs, pre-bound as ready-made signals: `macro1`..`macro8` in evaluated
 // code are `macro(1)`..`macro(8)`, so a knob can be dropped straight into a control -
@@ -2587,6 +2588,22 @@ function setscale(name) {
   return SCALE_BLOCK;
 }
 
+// The setgroove equivalent of TEMPO_BLOCK.
+const GROOVE_BLOCK = Object.freeze({ poptartGrooveBlock: true });
+
+// The session groove as the EDITOR needs it: the shape as it was written, plus the depth. The
+// reference itself is no use over the wire - a patterned one carries a signal - and the text is
+// what the groove control shows and rewrites (see client.js's setgroove line).
+const grooveReport = (entry) => (entry ? { shape: entry.text, depth: entry.depth } : null);
+
+// setgroove sets the buffer's FEEL - the groove every track plays by where it sets no swing of its
+// own (see pattern-core's groove.mjs). Global and hoisted exactly as setscale is, and for the same
+// reason: a document has one feel at a time, and changing it is one edit wherever you make it.
+function setgroove(shape, depth) {
+  patternCore.setGlobalGroove(shape, depth === undefined ? 1 : depth);
+  return GROOVE_BLOCK;
+}
+
 // samples("user/repo") reads sample packs in from a repository, and that is the browser build's
 // (public/web/remote-packs.mjs): the desktop's packs are folders in the samples folder. Bound here
 // all the same, so a pattern written in the browser opens and plays on the desktop with one line
@@ -2598,7 +2615,7 @@ function samples(source, _prefix) {
 // The builders the HOST provides (as opposed to pattern-core's), bound alongside BUILDER_NAMES in
 // every evaluated block. Read out of this source by api-docs.test.js, so adding one here is what
 // makes the editor's reference cover it.
-const HOST_BUILDERS = { setbpm, setscale, samples };
+const HOST_BUILDERS = { setbpm, setscale, setgroove, samples };
 
 
 // Each deck's song clock (pattern-core's ArrangeClock): transport cycle -> arrangement position,
@@ -2956,6 +2973,10 @@ function rebuildDef(kind, id, scope) {
     const points = patternCore.lookupAuto(id);
     return points ? line('_auto', id, patternCore.serializeAutoPoints(points)) : null;
   }
+  if (kind === 'groove') {
+    const table = patternCore.lookupGroove(id);
+    return table ? line('_groove', id, patternCore.serializeGroove(table)) : null;
+  }
   return null;
 }
 
@@ -3113,7 +3134,7 @@ function highlightGrid(sig, start, end, from, count, clock = null) {
         const rel = offset + s.start;
         // Where the onset is HEARD - nudge/swing move the sound (see below), and everything that
         // fires off a note fires off the shifted one.
-        const startShift = patternCore.timeShift(s, sub.noteChannels, at, 1, at);
+        const startShift = patternCore.timeShift(s, sub.noteChannels, at, 1, at, sub.groove);
         // The track's note gates: every onset the engine will actually play, on the same test the
         // scheduler uses (_scheduleNoteEdges - a rest or a tie is not one). Note-gated lfo() modes
         // reset their phase on these (poptart.scd's noteOn/playSample gate every lfo on the
@@ -3137,7 +3158,7 @@ function highlightGrid(sig, start, end, from, count, clock = null) {
           // endEdgeStep), so a swung flash starts and stops with the sound it belongs to.
           const endAt = cycle + soundsTo;
           const endStep = patternCore.endEdgeStep(s, endAt - Math.floor(endAt));
-          const endShift = patternCore.timeShift(endStep, sub.noteChannels, endAt, 1, endAt);
+          const endShift = patternCore.timeShift(endStep, sub.noteChannels, endAt, 1, endAt, sub.groove);
           const chop = sampler && sub === sig ? chopAt(s, at) : null;
           out.push({
             start: rel + startShift,
@@ -4312,6 +4333,7 @@ const routes = {
       loaded: !!engine,
       error: engineError,
       scale: patternCore ? patternCore.globalScale() : null,
+      groove: patternCore ? grooveReport(patternCore.globalGroove()) : null,
       scan: engine?.scanStatus ? engine.scanStatus() : null,
     },
   }),
@@ -4555,6 +4577,47 @@ const routes = {
     return { status: 200, body: { file, sensitivity, slices } };
   },
 
+  // The feel of a recording, as a groove table: every hit in the file is found and timed (the
+  // analysis worker), then measured against a grid (pattern-core's groove-extract). The editor
+  // hands the result to the groove panel's lanes as a DRAFT to correct, never straight into a
+  // definition - what came off the file is a measurement, and whether it is the feel somebody
+  // wanted is theirs to say.
+  //
+  // `grid` and `bars` are what the person can correct: unset, both are read off the file, and the
+  // reply says what was read so the editor can show it. WAV only, like every Node-side analysis.
+  'GET /api/grooveFromFile': async (query) => {
+    if (!patternCore) throw new Error('pattern-core not loaded');
+    const { isAudioName, samplesRoot, clampSensitivity } = require('@poptart/osc-engine/samples');
+    const raw = String(query.file ?? '').trim();
+    if (!raw || !isAudioName(raw)) throw new Error('grooveFromFile needs an audio file');
+    const file = path.isAbsolute(raw) ? path.resolve(raw) : path.resolve(samplesRoot(), raw);
+    const sensitivity = clampSensitivity(query.sensitivity);
+    const askedBars = Number(query.bars) > 0 ? Number(query.bars) : null;
+    const read = await analysis.grooveHits(file, { sensitivity, bars: askedBars, bpmHint: Number(query.bpm) || null });
+    if (!read) throw new Error(`can't analyze ${path.basename(file)} - groove extraction reads WAV files`);
+    // Against the tempo where one was fitted, since a break lifted out of a track is rarely a whole
+    // number of bars; by its length in bars otherwise (see grooveHitsFromFile).
+    const hits = read.bpm
+      ? patternCore.grooveHitsFromFile(read.hits, { seconds: read.seconds, bpm: read.bpm, anchorSec: read.anchorSec })
+      : patternCore.grooveHitsInCycles(read.hits, read.bars);
+    const grid = Number(query.grid) > 0 ? Math.round(Number(query.grid)) : (patternCore.fitGrooveGrid(hits) ?? 16);
+    const table = patternCore.extractGroove(hits, { grid, minStrength: Number(query.minStrength) || 0 });
+    return {
+      status: 200,
+      body: {
+        file,
+        table: patternCore.serializeGroove(table),
+        slots: table.slots, // which slots were actually played, so a draft can say what it knows
+        grid,
+        bars: read.bars,
+        bpm: read.bpm,
+        bpmConfidence: read.bpmConfidence,
+        hits: hits.length,
+        sensitivity,
+      },
+    };
+  },
+
   // Prefer-VST3 toggle (settings tab). Default on; body: { enabled }. Applied on the next
   // plugin-list fetch - no rescan needed, the filter sits on the endpoints above.
   'GET /api/preferVst3': async () => ({
@@ -4659,6 +4722,9 @@ const routes = {
     // deck's previous scale instead is how one track's key used to leak into the next - a
     // song without a setscale must play in the default key, not whatever the last song left.
     patternCore.setGlobalScale(null);
+    // ...and no feel either: the buffer's own setgroove is the only thing that sets one, for the
+    // same reason (see the groove hoist below).
+    patternCore.setGlobalGroove(null);
 
     // Fresh copy of the prebake bindings each eval: they're the starting scope for the buffer,
     // and a redeclared name in the buffer overrides the copy without clobbering the original.
@@ -4739,6 +4805,17 @@ const routes = {
           // not evaluable up here - it keeps its place in the pass below (and reports errors there)
         }
       }
+      // setgroove is hoisted on the same terms: the document's feel, like its key, applies to the
+      // whole document however far down the line that sets it sits.
+      for (const b of blocks) {
+        if (!patternCore.isBareCallBlock(b.code, 'setgroove')) continue;
+        try {
+          evalBlock(b.code, b.start);
+          hoisted.set(b, GROOVE_BLOCK);
+        } catch {
+          // as above - it runs in its own position instead
+        }
+      }
 
       evaluated = blocks.map((b) => {
         try {
@@ -4749,7 +4826,7 @@ const routes = {
           // language extensions (Signal.prototype.co = ...), one-off side effects - whatever
           // it evaluated to is simply not played. (A pattern is dry-run below, not here.)
           const isPattern = value instanceof patternCore.Sig;
-          const setupValue = value === TEMPO_BLOCK || value === SCALE_BLOCK
+          const setupValue = value === TEMPO_BLOCK || value === SCALE_BLOCK || value === GROOVE_BLOCK
             || value?.poptartArrangeBlock;
           if (!isPattern && !setupValue && !b.label.startsWith('$')) {
             throw new Error('must evaluate to a pattern (e.g. n("0 2 3").scale("F minor").synth("Serum 2"))');
@@ -4801,6 +4878,8 @@ const routes = {
       patternCore.setDefOwner('a'); // definitions filed outside an eval (live roll edits) are the main pane's
       decks[deck].scale = patternCore.globalScale();
       patternCore.setGlobalScale(decks.a.scale ?? null); // the global holds the main deck's key at rest
+      decks[deck].groove = patternCore.globalGroove();
+      patternCore.restoreGlobalGroove(decks.a.groove ?? null); // ...and the main deck's feel with it
       throw err;
     }
     patternCore.setCopyResolver(null); // copies are resolved at build time; nothing later may reach back
@@ -4809,6 +4888,9 @@ const routes = {
     // deck's, which is what every non-eval reader (/api/status, live-note quantization) means.
     const deckScale = (decks[deck].scale = patternCore.globalScale());
     patternCore.setGlobalScale(decks.a.scale ?? null);
+    // Same for the feel setgroove() left in force (see restoreGlobalGroove).
+    const deckGroove = (decks[deck].groove = patternCore.globalGroove());
+    patternCore.restoreGlobalGroove(decks.a.groove ?? null);
     // Same for tempo: a buffer with no setbpm() specifies nothing, so nothing of the previous
     // track's may stand - its native reads as the 120 default (deckNativeBpm), and on the main
     // deck the clock itself returns there (unless the mix desk holds it), exactly as if the
@@ -4948,6 +5030,28 @@ const routes = {
         schedulers.delete(key);
         mappedEngine.removeChain(engineTrack(key));
       }
+    }
+
+    // A fresh buffer - a file opened into the editor, not a livecoding edit of the one already
+    // playing - reaps every warm track this deck holds for a label the incoming code never
+    // mentions. Keeping a dropped label's track warm (dropTrack's comment) is for the label's
+    // RETURN during a performance; across whole songs warm tracks only accumulate, and what they
+    // hold - plugin instances, ramp synths, the RT memory under all of it - degrades sampler
+    // voices first and eventually stops /s_new entirely. Every label in the buffer keeps its
+    // track, muted or not; the song decks' own tracks are not the buffer's to reap.
+    if (body.fresh === true) {
+      const claimed = new Set(built.map((b) => keyOfBlock(b.label)));
+      let reaped = 0;
+      for (const key of [...trackIds.keys()]) {
+        if (deckOfKey(key) !== deck || claimed.has(key)) continue;
+        if (key === SONG_KEYS.a || key === SONG_KEYS.b) continue;
+        schedulers.get(key)?.stop();
+        schedulers.delete(key);
+        mappedEngine.removeChain(engineTrack(key));
+        dropTrack(key);
+        reaped++;
+      }
+      if (reaped) console.log(`[poptart] fresh buffer: destroyed ${reaped} idle track(s) left by the previous song`);
     }
 
     // Where this eval's schedulers open their window: the clock's position NOW, read before
@@ -5096,6 +5200,7 @@ const routes = {
         cps: transport.cps,
         transport: transport.snapshot(),
         scale: deckScale, // what setscale() left in force for this deck - the piano roll colors by it
+        groove: grooveReport(deckGroove), // ...and the feel it left, which the editor's groove control shows
         arrange: arrangeClocks[deck]?.snapshot() ?? null, // the song clock the painter's playhead runs
         deck,
         deckBpm: deckNativeBpm(deck),
@@ -5134,6 +5239,9 @@ const routes = {
       // An automation's breakpoints come too, for the reason a slice set's markers do: the arrange
       // view draws a library lane, and it is nowhere in the buffer to be read.
       autos: patternCore.autoIds().map((p) => ({ ...p, points: patternCore.lookupAuto(p.id, p.library ? 'prebake' : null) ?? [] })),
+      // A groove's table comes too, for the reason an automation's breakpoints do: the groove panel
+      // draws a library groove, and it is nowhere in the buffer to be read.
+      grooves: patternCore.grooveIds().map((p) => ({ ...p, table: patternCore.lookupGroove(p.id, p.library ? 'prebake' : null) ?? null })),
       pinned: pinnedList(),
     },
   }),
@@ -5185,6 +5293,16 @@ const routes = {
     const id = body?.id;
     if (typeof id !== 'number' && typeof id !== 'string') throw new Error('liveAuto needs the automation id');
     patternCore.liveAuto(id, String(body.points ?? ''));
+    return { status: 200, body: { ok: true } };
+  },
+
+  // Body: { id, table } - the same channel again, for the groove panel's lanes. A groove is resolved
+  // by name at every read (see resolveGroove), so re-filing the definition is heard at the next onset
+  // all through a drag, with no re-transpile behind it.
+  'POST /api/liveGroove': async (body) => {
+    const id = body?.id;
+    if (typeof id !== 'number' && typeof id !== 'string') throw new Error('liveGroove needs the groove id');
+    patternCore.liveGroove(id, String(body.table ?? ''));
     return { status: 200, body: { ok: true } };
   },
 
@@ -6030,8 +6148,11 @@ const routes = {
     for (const key of [...trackIds.keys()]) if (deckOfKey(key) === deck) dropTrack(key);
     mixState.solo[deck].clear();
     mixState.soloPrev[deck] = null;
-    decks[deck] = { scale: null, bpm: null };
-    if (deck === 'a') patternCore.setGlobalScale(null); // the resting scale was this deck's fact
+    decks[deck] = { scale: null, bpm: null, groove: null };
+    if (deck === 'a') {
+      patternCore.setGlobalScale(null); // the resting scale was this deck's fact
+      patternCore.restoreGlobalGroove(null); // ...and so was the resting feel
+    }
     liveStateIds[deck] = new Set();
     patternCore.clearRolls('buffer', deck);
     mixNotify();
@@ -6066,7 +6187,7 @@ const routes = {
       else if (deckNativeBpm('a') != null) transport?.rampBpm(deckNativeBpm('a'), 2);
     }
     for (const key of mixAllKeys()) neutralizeMix(key);
-    decks.b = { scale: null, bpm: null };
+    decks.b = { scale: null, bpm: null, groove: null };
     liveStateIds.b = new Set();
     patternCore.clearRolls('buffer', 'b');
     mixNotify();
@@ -6102,8 +6223,9 @@ const routes = {
     for (const key of promoted) rekeyTrack(key, key.slice(key.indexOf(':') + 1));
     for (const key of [...trackIds.keys()]) if (deckOfKey(key) === 'b') dropTrack(key); // never-promoted leftovers
     decks.a = { ...decks.b };
-    decks.b = { scale: null, bpm: null };
+    decks.b = { scale: null, bpm: null, groove: null };
     patternCore.setGlobalScale(decks.a.scale ?? null);
+    patternCore.restoreGlobalGroove(decks.a.groove ?? null);
     liveStateIds.a = liveStateIds.b;
     liveStateIds.b = new Set();
     patternCore.clearRolls('buffer', 'a'); // the outgoing song's definitions

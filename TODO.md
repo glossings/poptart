@@ -542,6 +542,28 @@ no completion notes.
     voice-leading pass (minimal total movement picks the suggested chord's inversion) which also
     improves the phase-2 voicing menu's ordering. Build last - most design-heavy.
 
+[ ] Swing manager - what is still open after the phases. Swing is a per-slot TABLE now (groove.mjs):
+    a time offset and a velocity scale per slot of a bar, with the `swing` channel as the depth on
+    it. Grooves are drawn in the lanes under the roll, saved by name through the two-layer registry,
+    switchable per bar (`.swing(1, "<clave16 push16>")`), settable for the whole document
+    (`setgroove`), and readable off a recording (a file dropped on the lanes).
+
+    - A table describes ONE cycle. A multi-cycle groove wants a `cycles` field on the table, and
+      every reader to divide by it; deliberately not in the first pass.
+    - The panel's depth is written into the code rather than pushed live, so a depth drag is heard
+      on the debounce. A lane drag is instant (it re-files the definition through /api/liveGroove);
+      the depth has no such channel because it lives on the CALL, not on the definition.
+    - Committing a roll's groove folds its TIMING into per-note nudges but not its accents: a
+      note's velocity is already its own field, so there is nothing to fold.
+    - A roll's groove can't be RENAMED from the side column - that gesture lives in the floating
+      editor's name head, reached by double-clicking a .swing() that names it.
+    - Extraction reads a loop as starting on the bar, which is what a loop is. A file that does NOT
+      (a break lifted out of a track with a gap at the front) extracts rotated, and there is no
+      control for the offset yet; the fitted beat anchor is reported but deliberately unused, since
+      it anchors on whichever beat carries the bass energy rather than the first.
+    - Extraction is WAV only, Node-side, like every other analysis here. The browser build has the
+      same detector (web-engine's sample-plan.mjs) but no route to run this through.
+
 [ ] MIDI clock in - follow an external MIDI clock (24 ppqn ticks + start/stop/continue/song
     position) for hardware and apps without Link. Assessed 2026-09-12, 1-2 days, mostly tuning:
     sclang's sysrt MIDI responders receive the ticks; a smoothing filter (a PLL over the last N

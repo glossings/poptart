@@ -49,6 +49,9 @@ function harness({ mode = 'note', notes = [], chain = null, grid = 16, duration 
     prRowOf: (nt) => (prState.mode === 'index' ? pianorollMod.noteIndex(nt)
       : prState.mode === 'slice' ? (pianorollMod.noteSlice(nt) ?? 0) : nt.midi),
     prWaveFor: () => (duration ? { duration, peaks: {} } : null),
+    // The roll's groove as a table, where it has one. These rolls swing plainly (or not at all), and
+    // what a groove does to a drawn cell is pattern-core's own to answer (see groove.test.mjs).
+    prGrooveTable: () => null,
     // playSample's own fit arithmetic, as client.js's prFitCycles does it.
     prFitCycles: (fit, dur) => {
       const measures = dur * cps;

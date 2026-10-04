@@ -24,7 +24,7 @@
 //    Same signal, same shape either way: a note-gated modulator sampled here reads the track's
 //    own note grid (withNoteGate), which is what the engine gates the native one from too.
 
-import { sampleBound, CHANNEL_DEFAULTS, GRAIN_CHANNELS, MAX_FX_SLOTS,DEFAULT_BEND_RANGE, bendRangeWarning, LOOP_MODES, loopModeAt, channelAt, soundingEnd, timeShift, endEdgeStep, warnPattern, lfoRateHz, lfoPhaseCount, lfoShapes, resolvePreset, withNoteGate, withEventSpan, noteGateFromGrid } from './signal.mjs';
+import { sampleBound, CHANNEL_DEFAULTS, GRAIN_CHANNELS, MAX_FX_SLOTS,DEFAULT_BEND_RANGE, bendRangeWarning, LOOP_MODES, loopModeAt, channelAt, soundingEnd, timeShift, grooveVelScale, endEdgeStep, warnPattern, lfoRateHz, lfoPhaseCount, lfoShapes, resolvePreset, withNoteGate, withEventSpan, noteGateFromGrid } from './signal.mjs';
 import { scalePitchClasses } from './notes.mjs';
 import { songSteps, stepsUnderShift, withClipShift } from './arrange.mjs';
 import { sliceSetIsEmpty } from './slices.mjs';
@@ -1592,8 +1592,15 @@ export class Scheduler {
     return null;
   }
 
+  // Velocity, with a groove's accent row folded in where the pattern has one (see grooveVelScale).
+  // Scaled HERE rather than written into the pattern, for the same reason swing is applied at emit
+  // time: `.vel()` keeps the values it was given, and the accents come off again the moment the
+  // groove does. Returns undefined where nothing sets velocity at all - the callers' own default
+  // stands - so a groove that says nothing about accents leaves that untouched.
   _velAt(step, onsetSec, onsetCycle) {
-    return channelAt('vel', step, this.pattern.noteChannels, onsetSec, this.transport.cps, onsetCycle);
+    const vel = channelAt('vel', step, this.pattern.noteChannels, onsetSec, this.transport.cps, onsetCycle);
+    const scale = grooveVelScale(step, this.pattern.noteChannels, onsetSec, this.transport.cps, onsetCycle, this.pattern.groove);
+    return scale === 1 ? vel : (vel ?? 1) * scale;
   }
 
   // Where this event stops sounding, in cycle-relative coordinates (see soundingEnd): the step's own
@@ -1622,7 +1629,7 @@ export class Scheduler {
   // `songCycle` is where the channels are read and `delta` the song-minus-transport offset that puts
   // the shifted position back on the transport (see setSongClock).
   _shiftSecAt(step, songCycle, delta, atSec) {
-    const shift = timeShift(step, this.pattern.noteChannels, atSec, this.transport.cps, songCycle);
+    const shift = timeShift(step, this.pattern.noteChannels, atSec, this.transport.cps, songCycle, this.pattern.groove);
     if (!shift) return 0;
     return this.transport.secAt(songCycle - delta + shift) - atSec;
   }

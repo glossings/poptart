@@ -527,6 +527,9 @@ export function createHost({
       loaded: true,
       error: null,
       scale: patternCore.globalScale(),
+      groove: patternCore.globalGroove()
+        ? { shape: patternCore.globalGroove().text, depth: patternCore.globalGroove().depth }
+        : null,
       scan: null,
       build: 'web',
       version,
@@ -692,6 +695,7 @@ export function createHost({
         packs: patternCore.packIds().map((p) => ({ ...p, files: patternCore.lookupPack(p.id, inLibrary(p))?.files ?? [] })),
         sliceSets: patternCore.sliceSetIds().map((p) => ({ ...p, set: patternCore.lookupSlices(p.id, inLibrary(p)) ?? [] })),
         autos: patternCore.autoIds().map((p) => ({ ...p, points: patternCore.lookupAuto(p.id, inLibrary(p)) ?? [] })),
+        grooves: patternCore.grooveIds().map((p) => ({ ...p, table: patternCore.lookupGroove(p.id, inLibrary(p)) ?? null })),
         pinned: prebake ? await prebake.pinnedList() : [],
       };
     },
@@ -702,6 +706,7 @@ export function createHost({
       return { ok: true };
     },
     'POST /api/liveAuto': async (body) => ({ ok: patternCore.liveAuto(body.id, body.points) !== undefined }),
+    'POST /api/liveGroove': async (body) => ({ ok: patternCore.liveGroove(body.id, String(body.table ?? '')) !== undefined }),
     'POST /api/liveSlices': async (body) => ({ ok: patternCore.liveSlices(body.id, body.set) !== undefined }),
 
     // ---- devices --------------------------------------------------------------------------------
