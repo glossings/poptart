@@ -1333,6 +1333,11 @@ async function songDetectKick(deck) {
       s.keyDetected = facts.keyConfidence ?? 0;
       changed = true;
     }
+    // The collection learns what the deck just measured. Loading a track is the most expensive
+    // analysis there is and it has already happened here, so throwing the answer away and making
+    // the library measure the same file again later would be silly. setTrackFacts keeps the
+    // tag's word and anything typed by hand, so this only ever fills a blank.
+    try { setTrackFacts(srcPath, { bpm: facts.bpm, key: facts.key }); } catch { /* not in the collection */ }
     if (!changed) return;
     songApplyRate(deck);
     mixNotify();
@@ -4272,6 +4277,8 @@ const {
   PATTERNS_DIR,
   WIP_DIR,
   patternFilePath,
+  patternRelName,
+  ensurePatternDir,
   wipFilePath,
   listSavedPatterns,
   listWipPatterns,
@@ -4279,8 +4286,145 @@ const {
   pruneWipSessions,
   readLibrary,
   writeLibrary,
+  importTracks,
+  editTrack,
+  setTrackFacts,
+  forgetTracks,
 } = require('./pattern-files');
 const { matchesQuery } = require('./public/pattern-meta.js');
+
+// One import call's ceiling. A folder walk can turn up a whole archive, and the collection is
+// written as one JSON document - past this, the honest answer is "a folder at a time".
+const IMPORT_MAX = 5000;
+
+// ---------------------------------------------------------------------------------------------
+// Analyzing the collection: tempo and key for tracks whose files never said.
+//
+// Most music files carry no tempo tag at all (a store or rip writes title/artist/album and
+// nothing else), so for most of a collection the only way to a bpm is to measure it. The same
+// detector the song decks use does it - one track at a time, on the shared analysis worker.
+//
+// Two rules keep this from being felt:
+//
+//   The TAG WINS. Analysis fills a tempo or key the file did not state and never overwrites one
+//   it did (setTrackFacts); a field typed by hand outranks both.
+//
+//   The LIVE PATH COMES FIRST. One analysis worker serves the decks' own beatgrid fits and
+//   waveforms, and a queue of several hundred library tracks posted ahead of a deck load would
+//   put the picture minutes behind the music. So the queue only dispatches while neither deck
+//   holds a song, and it stops dead the moment one does, picking up where it left off after.
+//
+//   Livecoding is deliberately NOT a reason to pause: the detection itself is on the worker, and
+//   the only main-thread cost is one library.json write per track, measured at 0.3ms for a
+//   900-track document against a 150ms lookahead. Waiting for silence instead would mean the
+//   pass never ran at all for someone who always has something playing.
+// ---------------------------------------------------------------------------------------------
+
+const libAnalyze = {
+  queue: [], // paths still to measure, in order
+  done: 0,
+  total: 0,
+  now: null, // the path being measured
+  running: false,
+  stopped: false,
+};
+
+/** What the browser shows while a pass is on, or null when nothing is being measured. */
+function libAnalyzeState() {
+  if (!libAnalyze.running && !libAnalyze.queue.length) return null;
+  return { done: libAnalyze.done, total: libAnalyze.total, now: libAnalyze.now };
+}
+
+// A deck holding a song is a set in progress (or about to be): the worker is wanted for its
+// grid fit and its waveform, not for the library.
+const libAnalyzeBlocked = () => !!(songDecks.a || songDecks.b);
+
+function libAnalyzeQueue(paths) {
+  const waiting = new Set(libAnalyze.queue);
+  let added = 0;
+  for (const p of paths) {
+    if (typeof p !== 'string' || !p || waiting.has(p)) continue;
+    libAnalyze.queue.push(p);
+    waiting.add(p);
+    added++;
+  }
+  if (!added) return 0;
+  libAnalyze.total += added;
+  libAnalyze.stopped = false;
+  if (!libAnalyze.running) libAnalyzeRun();
+  return added;
+}
+
+function libAnalyzeStop() {
+  const dropped = libAnalyze.queue.length;
+  libAnalyze.queue = [];
+  libAnalyze.stopped = true;
+  libAnalyze.total = libAnalyze.done;
+  return dropped;
+}
+
+async function libAnalyzeRun() {
+  if (libAnalyze.running) return;
+  libAnalyze.running = true;
+  try {
+    while (libAnalyze.queue.length && !libAnalyze.stopped) {
+      if (libAnalyzeBlocked()) {
+        // Give the decks the worker and come back. The queue is kept, so a pass interrupted by a
+        // set resumes once both decks are empty rather than losing its place.
+        await new Promise((r) => { setTimeout(r, 4000); });
+        continue;
+      }
+      const srcPath = libAnalyze.queue.shift();
+      libAnalyze.now = srcPath;
+      try {
+        const resolved = await resolveSongFile(srcPath, { wav: true });
+        const facts = await analysis.songDetect(resolved.path);
+        if (facts) setTrackFacts(srcPath, { bpm: facts.bpm, key: facts.key });
+        else setTrackFacts(srcPath, {}); // unreadable: marked analyzed so it is not retried forever
+      } catch {
+        // A file that cannot be decoded is not a failure of the pass - mark it and move on.
+        try { setTrackFacts(srcPath, {}); } catch { /* the record went away mid-pass */ }
+      }
+      libAnalyze.done++;
+    }
+  } finally {
+    libAnalyze.running = false;
+    libAnalyze.now = null;
+    if (!libAnalyze.queue.length) {
+      libAnalyze.done = 0;
+      libAnalyze.total = 0;
+    }
+  }
+}
+
+/** The paths in a collection still worth measuring: no tempo or no key, and not already tried. */
+function libAnalyzeWanted(tracks, { force = false } = {}) {
+  return tracks
+    .filter((t) => (force ? true : (t.bpm == null || t.key == null) && !t.analyzed))
+    .filter((t) => {
+      try { return fs.statSync(t.path).isFile(); } catch { return false; }
+    })
+    .map((t) => t.path);
+}
+
+/**
+ * Empty folders left behind when a nested save is deleted or moved out, cleared upward so the
+ * browser's folder tree says what is actually there. Stops at the patterns directory itself, and
+ * stops at the first folder that still holds something - a folder with other saves in it stays.
+ */
+function pruneEmptyPatternDirs(dir) {
+  const root = path.resolve(PATTERNS_DIR);
+  let at = path.resolve(dir);
+  while (at !== root && at.startsWith(`${root}${path.sep}`)) {
+    try {
+      if (fs.readdirSync(at).length) return;
+      fs.rmdirSync(at);
+    } catch {
+      return; // not ours to remove, or already gone
+    }
+    at = path.dirname(at);
+  }
+}
 
 // ---------------------------------------------------------------------------------------------
 // Live notes - every note edge played by hand on a track, kept for a while.
@@ -6960,7 +7104,7 @@ const routes = {
   'POST /api/patterns/save': async (body) => {
     const file = patternFilePath(body.name);
     const { code, missing } = await blobs.hydrate(String(body.code ?? ''));
-    fs.mkdirSync(PATTERNS_DIR, { recursive: true });
+    ensurePatternDir(file); // a name may put it in a folder ("techno/stomper")
     fs.writeFileSync(file, code, 'utf8');
     // Saved anyway: the patch is worth more than the states it couldn't fill in, and the handles
     // are still in the file - if the store turns up, so do the sounds. But say so.
@@ -6983,26 +7127,99 @@ const routes = {
     const file = patternFilePath(body.name);
     if (!fs.existsSync(file)) throw new Error(`no saved pattern named "${body.name}"`);
     fs.unlinkSync(file);
+    pruneEmptyPatternDirs(path.dirname(file));
     return { status: 200, body: {} };
   },
 
-  // Body: { from, to }.
+  // Body: { from, to }. Either name may put the pattern in a folder, so this doubles as the move:
+  // renaming "stomper" to "techno/stomper" files it away.
   'POST /api/patterns/rename': async (body) => {
     const from = patternFilePath(body.from);
     const to = patternFilePath(body.to);
     if (!fs.existsSync(from)) throw new Error(`no saved pattern named "${body.from}"`);
     if (fs.existsSync(to)) throw new Error(`a pattern named "${body.to}" already exists`);
+    ensurePatternDir(to);
     fs.renameSync(from, to);
+    pruneEmptyPatternDirs(path.dirname(from)); // the folder it left, if it was the last one there
     // The rename follows the song into every playlist that plays it - a set is a list of names,
     // and the name just changed. (A DELETE deliberately does not do this: the slot stays and
     // renders as missing; the playlist is the user's document, not an index to repair.)
+    const was = patternRelName(body.from);
+    const now = patternRelName(body.to);
     const lib = readLibrary();
     let inSets = false;
     for (const p of lib.playlists) {
-      p.items = p.items.map((k) => (k === body.from ? ((inSets = true), String(body.to)) : k));
+      p.items = p.items.map((k) => (k === was || k === body.from ? ((inSets = true), now) : k));
     }
     if (inSets) writeLibrary(lib);
     return { status: 200, body: {} };
+  },
+
+  // Body: { paths: [...] } or { dir }, plus { mode: 'rescan' } -> { library, added, already }.
+  // The intake: disk files into the track collection, each one's own tags read for what it can
+  // say about itself. A path already in the collection is a no-op that only fills gaps (see
+  // importTracks), so this is safe to fire from any gesture that merely USES a file. `rescan` is
+  // the asked-for exception that lets a retagged file update what it already said.
+  'POST /api/library/import': async (body) => {
+    let paths = Array.isArray(body?.paths) ? body.paths : [];
+    if (body?.dir) {
+      // A folder imports every playable file anywhere under it. Bounded by the same walk the
+      // browser's folder adds use, so a sample-pack-sized tree can't run away with it.
+      const dir = path.resolve(String(body.dir));
+      let walked;
+      try {
+        if (!fs.statSync(dir).isDirectory()) throw new Error('not a folder');
+        walked = await cachedWalk(`songs:${dir}`, () => walkSongFiles(dir));
+      } catch {
+        throw new Error(`can't read ${dir}`);
+      }
+      paths = paths.concat((walked.files ?? []).map((f) => path.join(dir, f)));
+    }
+    if (paths.length > IMPORT_MAX) throw new Error(`that is more than ${IMPORT_MAX} files - import a folder at a time`);
+    const mode = body?.mode === 'rescan' ? 'rescan' : 'fill';
+    const { library, added, already } = importTracks(paths, { readTags: readSongTags, mode });
+    // What the file said is in; what it did not say gets measured, in the background. A new
+    // import almost never carries a tempo tag, so without this a fresh collection has no bpm
+    // column worth sorting by.
+    const touched = mode === 'rescan' ? [...added, ...already] : added;
+    const queued = libAnalyzeQueue(libAnalyzeWanted(touched));
+    return {
+      status: 200,
+      body: { library, added: added.length, already: already.length, queued, analyzing: libAnalyzeState() },
+    };
+  },
+
+  // Body: { ids?: [...], all?: true, force?: false } -> { queued, analyzing }. Measures tempo and
+  // key for tracks whose files never stated them. `force` re-measures even what has been tried.
+  'POST /api/library/analyze': async (body) => {
+    const lib = readLibrary();
+    const wanted = Array.isArray(body?.ids) && body.ids.length
+      ? lib.tracks.filter((t) => body.ids.map(String).includes(t.id))
+      : lib.tracks;
+    const queued = libAnalyzeQueue(libAnalyzeWanted(wanted, { force: !!body?.force }));
+    return { status: 200, body: { queued, analyzing: libAnalyzeState() } };
+  },
+
+  // Stops the pass and forgets what was still queued. What has already been measured stays.
+  'POST /api/library/analyze/stop': async () => ({
+    status: 200,
+    body: { dropped: libAnalyzeStop(), analyzing: libAnalyzeState() },
+  }),
+
+  // Body: { id | ids, fields: { title?, artist?, album?, bpm?, key?, rating? } } -> { library }.
+  // The one way the collection is edited: a tag field set here is marked as typed by hand, so a
+  // later rescan or analysis leaves it alone.
+  'POST /api/library/track': async (body) => {
+    const library = editTrack(body?.ids ?? body?.id, body?.fields ?? {});
+    if (!library) throw new Error('no such track');
+    return { status: 200, body: { library, analyzing: libAnalyzeState() } };
+  },
+
+  // Body: { ids: [...] } -> { library, forgot }. Out of the collection and out of every set that
+  // played them. The files on disk are untouched.
+  'POST /api/library/forget': async (body) => {
+    const { library, forgot } = forgetTracks(body?.ids);
+    return { status: 200, body: { library, forgot, analyzing: libAnalyzeState() } };
   },
 
   // --- the library (playlists; see pattern-files.js) ---
@@ -7010,8 +7227,10 @@ const routes = {
   // The whole document both ways: the client edits its copy and posts it back coalesced (a drag
   // through a playlist is one write, not one per row). POST returns what was actually kept, so
   // the client's copy converges on the normalized truth.
-  'GET /api/library': async () => ({ status: 200, body: readLibrary() }),
-  'POST /api/library': async (body) => ({ status: 200, body: writeLibrary(body) }),
+  // `analyzing` rides along so the window that is open can show a pass running without a second
+  // poll of its own; it is not part of the document and writeLibrary ignores it coming back.
+  'GET /api/library': async () => ({ status: 200, body: { ...readLibrary(), analyzing: libAnalyzeState() } }),
+  'POST /api/library': async (body) => ({ status: 200, body: { ...writeLibrary(body), analyzing: libAnalyzeState() } }),
 
   // --- work in progress (the editor autosaves the live buffer here; see wipFilePath) ---
 

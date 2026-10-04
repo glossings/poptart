@@ -2051,7 +2051,8 @@ li.CodeMirror-hint-active {
    buttons (client.js, desktopOnly). */
 .web-build #viewDjBtn,
 .web-build #sampleMapBtn,
-.web-build #orgTabDisk {
+.web-build #orgDiskSource,
+.web-build #orgTracksSource {
   display: none;
 }
 
@@ -5653,6 +5654,14 @@ body.mix-on #deckAHead .deck-song {
   color: var(--text);
 }
 
+/* ---------------------------------------------------------------------------------------------
+   The library browser (the organize window - see the library browser section in client.js).
+
+   Two regions: the sources on the left, and whatever the chosen one holds on the right, as a
+   table with sortable columns. The table is laid out FIXED, with a width on every column class,
+   so a row whose artist or tempo arrives late cannot shuffle the columns under the pointer.
+   --------------------------------------------------------------------------------------------- */
+
 #orgModal {
   position: fixed;
   inset: 0;
@@ -5666,8 +5675,9 @@ body.mix-on #deckAHead .deck-song {
   display: none;
 }
 #orgPanel {
-  width: min(880px, 92vw);
-  height: min(560px, 84vh);
+  /* Wider and taller than the old three-pane window: the columns are the feature now. */
+  width: min(1060px, 94vw);
+  height: min(640px, 88vh);
   display: flex;
   flex-direction: column;
   background: var(--bg-panel);
@@ -5693,12 +5703,12 @@ body.mix-on #deckAHead .deck-song {
   flex: 1;
   min-height: 0;
   display: grid;
-  /* the tracks are written by orgApplyCols (col | seam | col | seam | col) */
-  grid-template-columns: minmax(0, 1fr) 7px minmax(0, 1.2fr) 7px minmax(0, 1.4fr);
+  /* the tracks are written by orgApplyCols (sidebar | seam | table) */
+  grid-template-columns: minmax(0, 0.28fr) 7px minmax(0, 1fr);
 }
 .org-col {
   min-width: 0;
-  /* Grid items default to min-height auto, so without this a long list stretches every column
+  /* Grid items default to min-height auto, so without this a long list stretches the region
      (and its separator border) past the panel into the footer instead of scrolling. */
   min-height: 0;
   overflow: hidden;
@@ -5706,7 +5716,7 @@ body.mix-on #deckAHead .deck-song {
   flex-direction: column;
   position: relative;
 }
-/* The seam between two columns: the DJ seams' grip, turned on its side. */
+/* The seam between the two regions: the DJ seams' grip, turned on its side. */
 .org-seam {
   position: relative;
   cursor: col-resize;
@@ -5733,7 +5743,7 @@ body.mix-on #deckAHead .deck-song {
 .org-seam.dragging {
   background: color-mix(in srgb, var(--accent) 12%, var(--bg-panel));
 }
-/* Folded to a rail: the column's contents go, its name stands on end; a click brings it back. */
+/* Folded to a rail: the region's contents go, its name stands on end; a click brings it back. */
 .org-rail {
   display: none;
 }
@@ -5758,246 +5768,358 @@ body.mix-on #deckAHead .deck-song {
 .org-col.min > .org-rail:hover {
   color: var(--accent);
 }
-.org-col h3 {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin: 0;
-  padding: 7px 10px;
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--text-dim);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-}
-.org-col ul {
+
+/* --- the sidebar: the sources, and the folder trees under two of them --- */
+
+#orgSide {
   flex: 1;
   min-height: 0;
   margin: 0;
-  padding: 0 6px 8px;
+  padding: 6px 4px 8px;
   list-style: none;
   overflow-y: auto;
   scrollbar-width: thin;
   scrollbar-color: var(--border) transparent;
 }
-.org-col ul::-webkit-scrollbar {
+#orgSide::-webkit-scrollbar {
   width: 8px;
 }
-.org-col ul::-webkit-scrollbar-thumb {
+#orgSide::-webkit-scrollbar-thumb {
   background: var(--border);
   border-radius: 4px;
 }
-.org-col ul::-webkit-scrollbar-track {
+#orgSide::-webkit-scrollbar-track {
   background: transparent;
 }
-.org-col li {
+.org-side-row {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
   padding: 4px 6px;
   border-radius: 5px;
   font-size: 12px;
-  cursor: default;
-  border-top: 2px solid transparent;
-  border-bottom: 2px solid transparent;
+  cursor: pointer;
+  position: relative;
 }
-.org-col li.on {
+.org-side-row:hover {
+  background: var(--bg-raised);
+}
+.org-side-row.on,
+.org-side-row.on:hover {
   background: var(--accent-soft);
   color: var(--accent);
 }
-.org-col li:hover {
-  background: var(--bg-raised);
+/* The four source headings read as headings; the folders and sets under them read as contents. */
+.org-side-group > .org-side-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
 }
-.org-col li.on:hover,
-.org-col li.selected:hover {
-  background: var(--accent-soft);
+.org-side-crumb > .org-side-label {
+  font-family: var(--mono);
+  font-size: 11px;
 }
-.org-col li > span {
+.org-side-folder > .org-side-label {
+  color: var(--text-dim);
+}
+.org-side-label {
   flex: 1;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.org-col li em {
+.org-side-row em {
   font-style: normal;
   color: var(--text-dim);
-  font-size: 11px;
+  font-size: 10px;
+  flex: none;
 }
-.org-col li .org-bpm {
-  font-family: var(--mono);
+.org-twisty {
+  flex: none;
+  width: 12px;
+  padding: 0;
+  background: none;
+  border: none;
+  font: inherit;
+  font-size: 9px;
+  line-height: 1;
+  color: var(--text-dim);
+  cursor: pointer;
+  text-align: center;
 }
-/* A row's buttons (✎ ↑ ↓ ✕, +, the star) float over the row's tail on hover instead of
-   holding a lane open: four hidden-but-present buttons were costing every title ~110px.
-   Slotted from the right by nth-last-of-type, so however many a row has they pack the same. */
-.org-col li {
-  position: relative;
-  padding-right: 30px; /* the always-on star's lane */
+.org-twisty:hover {
+  color: var(--accent);
 }
-.org-col li button {
-  display: none;
-  position: absolute;
-  top: 50%;
-  transform: translateY(-50%);
-  width: 22px;
+.org-twisty-none {
+  cursor: default;
+}
+/* The + on the playlists heading, and the active-set marker on a set, both ride the row. */
+.org-side-row > button.small {
+  flex: none;
+  width: 20px;
   padding: 1px 0;
   text-align: center;
 }
-.org-col li:hover button,
-.org-col li button.org-star {
-  display: inline-block;
-}
-.org-col li button:nth-last-of-type(1) { right: 4px; }
-.org-col li button:nth-last-of-type(2) { right: 28px; }
-.org-col li button:nth-last-of-type(3) { right: 52px; }
-.org-col li button:nth-last-of-type(4) { right: 76px; }
-.org-col li button:disabled {
-  opacity: 0.35;
-}
-.org-del:hover {
-  color: var(--err);
-}
-.org-col li.org-pick {
-  cursor: pointer;
-}
-.org-col li.org-pick:hover {
-  color: var(--accent);
-}
-.org-star {
+.org-side-row .org-star {
   color: var(--ok);
+  order: -1;
 }
-.org-n {
-  font-style: normal;
-  font-family: var(--mono);
-  font-size: 10px;
-  color: var(--text-dim);
-  width: 16px;
-  text-align: right;
-}
-.org-empty {
-  color: var(--text-dim);
-  font-style: italic;
-}
-.org-missing {
-  color: var(--err);
-  font-style: italic;
-}
-.org-over {
+.org-side-row.org-over {
   background: var(--selection);
+  box-shadow: inset 0 0 0 1px var(--accent);
 }
-.org-before {
-  border-top-color: var(--accent) !important;
+
+/* --- the bar over the table: where you are, and this source's own actions --- */
+
+#orgBar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--border);
 }
-.org-after {
-  border-bottom-color: var(--accent) !important;
-}
-/* pane 3's disk mode (songs phase 2): the all songs / disk tabs and the path bar */
-.org-tab {
-  background: none;
-  border: none;
-  padding: 0;
-  font: inherit;
+#orgWhere {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: 11px;
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.04em;
   color: var(--text-dim);
-  opacity: 0.55;
-  cursor: pointer;
 }
-.org-tab.on {
-  opacity: 1;
-}
-#orgSort.hidden {
-  display: none;
+#orgCount {
+  flex: none;
+  font-style: normal;
+  font-size: 10px;
+  color: var(--text-dim);
 }
 /* Scoped, like every other panel here - there is no global .hidden utility, so a bare `hidden`
    class on one of these would do nothing at all. */
-#orgSongAdd.hidden {
+#orgUp.hidden,
+#orgImport.hidden,
+#orgMeasure.hidden,
+#orgRescan.hidden,
+#orgClean.hidden {
   display: none;
 }
-/* Outranks the always-on `.org-col li button.org-star` above, which is what makes the star the
-   one row button that does not wait for a hover. */
-.org-col li button.org-star.hidden {
-  display: none;
-}
-/* The ← add buttons sit in a flex row that can get narrow - without this the arrow and the word
-   land on separate lines. */
-#orgSongAdd,
-#orgDiskAdd {
+#orgUp,
+#orgImport,
+#orgMeasure,
+#orgRescan,
+#orgClean {
   flex: none;
   white-space: nowrap;
 }
-#orgDiskBar {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 0 10px 6px;
-}
-#orgDiskBar.hidden {
-  display: none;
-}
-#orgBrowsePath {
+
+/* --- the table --- */
+
+#orgTableWrap {
   flex: 1;
-  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+#orgTableWrap::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+#orgTableWrap::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 4px;
+}
+#orgTableWrap::-webkit-scrollbar-track {
+  background: transparent;
+}
+#orgTable {
+  width: 100%;
+  /* Fixed, so the column widths below are the widths - a late-arriving artist or tempo must not
+     move the columns under the pointer. */
+  table-layout: fixed;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+#orgTable thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 6px 8px;
+  text-align: left;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+  overflow: hidden;
+}
+#orgTable thead th:hover {
+  color: var(--accent);
+}
+#orgTable thead th.sorted {
+  color: var(--text);
+}
+.org-caret {
+  font-style: normal;
+  font-size: 8px;
+  margin-left: 3px;
+  color: var(--accent);
+}
+#orgBody:focus {
+  outline: none; /* the selection IS the focus here, as in the pack browser */
+}
+#orgBody tr {
+  cursor: default;
+  border-top: 2px solid transparent;
+  border-bottom: 2px solid transparent;
+}
+#orgBody td {
+  padding: 3px 8px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  direction: rtl; /* a long path keeps its tail (the folder you are in) visible */
-  text-align: left;
-  font-family: var(--mono);
-  font-size: 11px;
-  color: var(--text-dim);
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 45%, transparent);
 }
-.org-browse-dir {
-  cursor: pointer;
+#orgBody tr:hover td {
+  background: var(--bg-raised);
 }
-#orgAll li.org-added > span::after {
-  content: ' ✓';
-  color: var(--ok);
-}
-/* The disk tab picks like the pack browser: focus ring off (the selection IS the focus),
-   selected rows in the accent wash, the playing row's name in the accent. */
-#orgAll:focus,
-#orgItems:focus {
-  outline: none;
-}
-.org-col li.selected {
+/* THE selected row. The accent wash the other browsers use, plus a hairline along the row's top
+   and bottom so it reads as lit rather than merely tinted - a table row cannot take the glow the
+   list rows get (a box-shadow on a tr does not paint reliably), so the ring is drawn per cell. */
+#orgBody tr.selected td,
+#orgBody tr.selected:hover td {
   background: var(--accent-soft);
   color: var(--accent);
+  border-top: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
 }
-
-/* THE selected row, wherever a browser has one - the preset picker's highlighted row, organize's
-   selection, the snippet browser's current row. The accent wash all three already had, plus a
-   glow: a hairline in the accent and a soft halo, so the chosen row reads as lit rather than
-   merely tinted, and reads the same from one window to the next. */
-.def-pick-row.on,
-.org-col li.selected,
-.org-col li.on,
-.snippet-row.current {
-  box-shadow:
-    inset 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent),
-    0 0 8px color-mix(in srgb, var(--accent) 22%, transparent);
-}
-/* The row being auditioned, in either list. In the contents pane the first child is the slot
-   number, so the marker goes on the name - the child that carries the title in both. */
-#orgAll li.playing > span:first-child,
-#orgItems li.playing > span {
+#orgBody tr.playing td.org-c-name {
   color: var(--accent);
 }
-#orgAll li.playing > span:first-child::before,
-#orgItems li.playing > span::before {
+#orgBody tr.playing td.org-c-name::before {
   content: '▶ ';
   font-size: 9px;
 }
-
-.org-tags {
-  display: flex;
-  gap: 3px;
-  flex: none !important;
-  overflow: hidden;
+/* Already in the collection - the disk view's ✓, which is what tells you at a glance what you
+   have got without opening tracks. */
+#orgBody tr.org-added td.org-c-name::after {
+  content: ' ✓';
+  color: var(--ok);
 }
-.org-tags i {
+#orgBody tr.org-missing td.org-c-name {
+  color: var(--err);
+  font-style: italic;
+}
+/* A cell being corrected. Sized to the cell it replaces so the table does not move when a row
+   goes into editing - the columns are fixed, and the field has to live inside one. */
+input.org-edit {
+  width: 100%;
+  min-width: 0;
+  padding: 0 2px;
+  font: inherit;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--accent);
+  border-radius: 3px;
+}
+.org-c-bpm input.org-edit,
+.org-c-key input.org-edit {
+  font-family: var(--mono);
+}
+.org-rowdir {
+  font-style: normal;
+  color: var(--text-dim);
+}
+.org-rowmissing {
+  font-style: italic;
+  color: var(--err);
+}
+/* The drop markers, for reordering a set in its own order. */
+#orgBody tr.org-before td {
+  border-top: 2px solid var(--accent);
+}
+#orgBody tr.org-after td {
+  border-bottom: 2px solid var(--accent);
+}
+.org-over {
+  background: var(--selection);
+}
+
+/* The columns. Name takes what is left; everything else is sized to what it holds, which is what
+   keeps the table from moving as rows come and go. */
+.org-c-n {
+  width: 34px;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text-dim);
+  text-align: right;
+}
+#orgTable thead th.org-c-n {
+  text-align: right;
+}
+.org-c-name {
+  width: auto;
+}
+.org-c-folder {
+  width: 120px;
+  color: var(--text-dim);
+}
+.org-c-text {
+  width: 140px;
+}
+/* The stars. Five glyphs always, so rating a row never changes its width (and the hollow ones
+   are the click target for raising it). */
+.org-c-rating {
+  width: 72px;
+}
+.org-stars {
+  cursor: pointer;
+  letter-spacing: 1px;
+  font-size: 11px;
+  color: var(--text-dim);
+  user-select: none;
+}
+.org-stars.rated {
+  color: var(--accent);
+}
+.org-stars:hover {
+  color: var(--accent);
+}
+/* A tempo or key we MEASURED rather than read off the file - an estimate, and marked as one. */
+.org-guess {
+  opacity: 0.62;
+  font-style: italic;
+}
+.org-c-bpm {
+  width: 52px;
+  font-family: var(--mono);
+  text-align: right;
+}
+#orgTable thead th.org-c-bpm,
+#orgTable thead th.org-c-when {
+  text-align: right;
+}
+.org-c-key {
+  width: 48px;
+  font-family: var(--mono);
+}
+.org-c-when {
+  width: 68px;
+  color: var(--text-dim);
+  text-align: right;
+}
+.org-c-tags {
+  width: 140px;
+}
+.org-c-tags i {
   font-style: normal;
   font-size: 10px;
   color: var(--text-dim);
@@ -6005,7 +6127,31 @@ body.mix-on #deckAHead .deck-song {
   border: 1px solid var(--border);
   border-radius: 3px;
   padding: 0 4px;
+  margin-right: 3px;
 }
+td.org-empty {
+  padding: 10px;
+  color: var(--text-dim);
+  font-style: italic;
+}
+.org-empty {
+  color: var(--text-dim);
+  font-style: italic;
+}
+
+/* THE chosen row, wherever a browser has one - the preset picker's highlighted row, the browser
+   sidebar's open source, the snippet browser's current row. The accent wash all three already
+   had, plus a glow: a hairline in the accent and a soft halo, so the chosen row reads as lit
+   rather than merely tinted, and reads the same from one window to the next. (The table's own
+   selected rows are lit per cell instead - see above - because a tr cannot carry this.) */
+.def-pick-row.on,
+.org-side-row.on,
+.snippet-row.current {
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent),
+    0 0 8px color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
 #orgFoot {
   padding: 6px 12px;
   border-top: 1px solid var(--border);

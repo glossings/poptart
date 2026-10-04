@@ -16,6 +16,7 @@ process.env.POPTART_PATTERNS_DIR = DIR; // read at require time, so set it first
 
 const {
   patternFilePath,
+  savedPatternNames,
   wipFilePath,
   listSavedPatterns,
   listWipPatterns,
@@ -25,6 +26,10 @@ const {
   nativeBpmOf,
   readLibrary,
   writeLibrary,
+  importTracks,
+  editTrack,
+  setTrackFacts,
+  forgetTracks,
 } = require('./pattern-files');
 
 function write(rel, code) {
@@ -34,13 +39,34 @@ function write(rel, code) {
   return file;
 }
 
-test('patternFilePath keeps a name to one segment inside the patterns dir', () => {
+test('patternFilePath builds a path inside the patterns dir, folders and all', () => {
   assert.equal(patternFilePath('drift'), path.join(DIR, 'drift.js'));
   assert.equal(patternFilePath('  drift  '), path.join(DIR, 'drift.js'));
-  for (const bad of ['', '   ', '.hidden', '../escape', 'sub/drift', 'sub\\drift', 'x'.repeat(129)]) {
-    assert.throws(() => patternFilePath(bad), /plain file name/, `expected "${bad}" to be refused`);
+  // A name may name folders - that is how a save is filed - and each segment is trimmed.
+  assert.equal(patternFilePath('techno/drift'), path.join(DIR, 'techno', 'drift.js'));
+  assert.equal(patternFilePath(' techno / drift '), path.join(DIR, 'techno', 'drift.js'));
+  assert.equal(patternFilePath('a/b/c/drift'), path.join(DIR, 'a', 'b', 'c', 'drift.js'));
+});
+
+test('patternFilePath refuses a name that could climb out of the patterns dir', () => {
+  const bad = [
+    '', '   ',
+    '.hidden',
+    '../escape',
+    'sub/../../escape',
+    'sub/.hidden',
+    'techno/',              // trailing slash: a mis-typed name, not a folder
+    '/techno/drift',        // leading slash likewise
+    'techno//drift',
+    'sub\\drift',           // one separator, on every platform
+    'x'.repeat(256),
+    `${'a/'.repeat(17)}drift`, // deeper than the segment cap
+  ];
+  for (const name of bad) {
+    assert.throws(() => patternFilePath(name), /pattern name/, `expected "${name}" to be refused`);
   }
 });
+
 
 test('wipFilePath accepts only a month/session id, under wip/', () => {
   assert.equal(
@@ -87,6 +113,38 @@ test('listSavedPatterns reads metadata out of each file and labels it', () => {
 
 test('listSavedPatterns includes the code, so a caller can search file contents', () => {
   assert.match(listSavedPatterns().find((p) => p.name === 'night-drive').code, /note\("c2"\)/);
+});
+
+// A save may be filed in a folder, and the name carries the folders ("techno/stomper") - it is
+// one string, so a playlist holding it needs no second notion of where it lives. Cleans up after
+// itself: the listing tests around it assert on exactly what they put there.
+test('savedPatternNames walks subfolders, skipping sessions and dot-folders', () => {
+  const made = [
+    write(path.join('zz-set', 'stomper.js'), '// @title stomper\nbass: note("c1")'),
+    write(path.join('zz-set', 'deep', 'buried.js'), '// buried'),
+    write(path.join('zz-set', 'notes.txt'), 'not a pattern'),
+    write(path.join('.zz-hidden', 'secret.js'), '// skipped'),
+    write(path.join('wip', '2026-01', '2026-01-01-010101.js'), '// a session'),
+  ];
+  try {
+    const names = savedPatternNames();
+    assert.ok(names.includes('zz-set/stomper'), 'a nested save is found');
+    assert.ok(names.includes('zz-set/deep/buried'), 'nesting goes deeper than one level');
+    assert.ok(!names.some((n) => n.startsWith('wip/')), 'sessions are their own kind, not saves');
+    assert.ok(!names.some((n) => n.includes('zz-hidden')), 'a dot-folder stays out of the library');
+    assert.ok(!names.some((n) => n.endsWith('notes')), 'only .js files are patterns');
+
+    const byName = Object.fromEntries(listSavedPatterns().map((p) => [p.name, p]));
+    assert.equal(byName['zz-set/stomper'].folder, 'zz-set', 'the row says where it is filed');
+    assert.equal(byName['zz-set/deep/buried'].folder, 'zz-set/deep');
+    assert.equal(byName['night-drive'].folder, undefined, 'a top-level save has no folder');
+    assert.equal(byName['zz-set/stomper'].label, 'stomper', '@title still wins for a nested save');
+  } finally {
+    for (const file of made) fs.rmSync(file, { force: true });
+    fs.rmSync(path.join(DIR, 'zz-set'), { recursive: true, force: true });
+    fs.rmSync(path.join(DIR, '.zz-hidden'), { recursive: true, force: true });
+    fs.rmSync(path.join(DIR, 'wip', '2026-01'), { recursive: true, force: true });
+  }
 });
 
 test('listWipPatterns groups sessions by month and falls back to a time-of-day label', () => {
@@ -200,9 +258,9 @@ test('listings carry the native bpm', () => {
 // --- the library (playlists; one library.json beside the pattern files) ---
 
 test('an empty or unreadable library reads as an empty one', () => {
-  assert.deepEqual(readLibrary(), { version: 1, playlists: [], active: null });
+  assert.deepEqual(readLibrary(), { version: 2, tracks: [], playlists: [], active: null });
   write('library.json', 'not json at all {');
-  assert.deepEqual(readLibrary(), { version: 1, playlists: [], active: null });
+  assert.deepEqual(readLibrary(), { version: 2, tracks: [], playlists: [], active: null });
 });
 
 test('writeLibrary normalizes and round-trips', () => {
@@ -215,7 +273,7 @@ test('writeLibrary normalizes and round-trips', () => {
     active: 'set1',
     extra: 'ignored',
   });
-  assert.equal(kept.version, 1);
+  assert.equal(kept.version, 2);
   assert.equal(kept.playlists.length, 2);
   assert.deepEqual(kept.playlists[0], { id: 'set1', name: 'friday', items: ['a', 'b', 'a'] });
   assert.ok(kept.playlists[1].id, 'a playlist without an id is given one');
@@ -224,7 +282,10 @@ test('writeLibrary normalizes and round-trips', () => {
   assert.deepEqual(readLibrary(), kept, 'what was kept is what a later read sees');
 });
 
-test('playlists hold disk-file items beside saved names (songs phase 2)', () => {
+// A set holds a reference; the facts live on the track record. What goes IN is the hydrated
+// shape the UI reads and posts back ({ kind: 'file', path, ... }), and a path with no record yet
+// is imported on the spot - which is what makes every gesture that uses a file also file it.
+test('a file item is collapsed to a track reference and hydrated back', () => {
   const kept = writeLibrary({
     playlists: [{
       id: 'set1',
@@ -241,13 +302,329 @@ test('playlists hold disk-file items beside saved names (songs phase 2)', () => 
     }],
     active: 'set1',
   });
-  assert.deepEqual(kept.playlists[0].items, [
-    'a-save',
-    { kind: 'file', path: '/music/one.mp3', title: 'One', bpm: 124, key: 'Am' },
-    { kind: 'file', path: '/music/two.wav' },
-    { kind: 'file', path: '/x.mp3' },
-  ]);
-  assert.deepEqual(readLibrary(), kept, 'file items round-trip');
+
+  assert.equal(kept.tracks.length, 3, 'three distinct paths became three tracks');
+  const byPath = Object.fromEntries(kept.tracks.map((t) => [t.path, t]));
+  assert.equal(byPath['/music/one.mp3'].title, 'One', 'the item\'s facts moved onto the record');
+  assert.equal(byPath['/music/one.mp3'].bpm, 124);
+  assert.equal(byPath['/music/one.mp3'].key, 'Am');
+  assert.equal(byPath['/music/one.mp3'].junk, undefined, 'junk fields do not ride along');
+  assert.equal(byPath['/music/two.wav'].title, 'two', 'an untitled file is called its file name');
+  assert.equal(byPath['/x.mp3'].bpm, undefined, 'a silly tempo is no tempo');
+  assert.equal(byPath['/x.mp3'].key, undefined, 'a blank key is no key');
+  assert.ok(byPath['/x.mp3'].added > 0, 'a track records when it was added');
+
+  const items = kept.playlists[0].items;
+  assert.equal(items.length, 4);
+  assert.equal(items[0], 'a-save', 'a named save stays a bare string');
+  assert.equal(items[1].kind, 'file', 'a track reads back in the shape the decks speak');
+  assert.equal(items[1].path, '/music/one.mp3');
+  assert.equal(items[1].title, 'One');
+  assert.equal(items[1].trackId, byPath['/music/one.mp3'].id, 'the row can find its record again');
+  assert.equal(items[1].id, undefined, 'the record\'s id rides as trackId, not as the item\'s own');
+
+  assert.deepEqual(readLibrary(), kept, 'the collapse round-trips');
+  // On disk it is a reference, not a copy of the facts - that is the point of the collection.
+  const raw = JSON.parse(fs.readFileSync(path.join(DIR, 'library.json'), 'utf8'));
+  assert.deepEqual(raw.playlists[0].items[1], { kind: 'track', id: byPath['/music/one.mp3'].id });
+});
+
+test('one file in two sets is one track, and editing it is one edit', () => {
+  const kept = writeLibrary({
+    tracks: [], // stated, because a document with no tracks key keeps the collection on disk
+    playlists: [
+      { id: 'a', name: 'friday', items: [{ kind: 'file', path: '/music/same.mp3', title: 'Same' }] },
+      { id: 'b', name: 'saturday', items: [{ kind: 'file', path: '/music/same.mp3' }] },
+    ],
+  });
+  assert.equal(kept.tracks.length, 1, 'the same path is the same track');
+  const id = kept.tracks[0].id;
+  assert.equal(kept.playlists[0].items[0].trackId, id);
+  assert.equal(kept.playlists[1].items[0].trackId, id);
+  assert.equal(kept.playlists[1].items[0].title, 'Same', 'both sets read the one record');
+
+  // The browser edits the record, not the row: the correction shows up in every set at once.
+  const edited = writeLibrary({ ...kept, tracks: [{ ...kept.tracks[0], bpm: 128 }] });
+  assert.equal(edited.playlists[0].items[0].bpm, 128);
+  assert.equal(edited.playlists[1].items[0].bpm, 128);
+});
+
+test('a track nothing plays is still in the collection', () => {
+  const kept = writeLibrary({
+    tracks: [{ id: 't1', path: '/music/lonely.mp3', title: 'Lonely' }],
+    playlists: [],
+  });
+  assert.equal(kept.tracks.length, 1, 'importing is not queueing - the collection stands alone');
+  assert.deepEqual(readLibrary().tracks, kept.tracks);
+});
+
+// A reference whose record is gone is the one slot that CANNOT be kept as missing: the record
+// held the path and the title, so a dangling id says nothing about what the song was and gives
+// the user nothing to repair. It drops, which is why removing a track from the collection has to
+// say how many sets play it before it goes (a deleted FILE is different - its record and its row
+// both stay, and render as missing).
+test('a reference to a track that is gone drops out of its playlist', () => {
+  const kept = writeLibrary({
+    tracks: [],
+    playlists: [{ id: 'a', name: 'friday', items: [{ kind: 'track', id: 'vanished' }] }],
+  });
+  assert.deepEqual(kept.playlists[0].items, []);
+
+  // Same for a library edited by hand: it reads as a shorter set, never as a throw.
+  write('library.json', JSON.stringify({
+    version: 2,
+    tracks: [],
+    playlists: [{ id: 'a', name: 'friday', items: [{ kind: 'track', id: 'vanished' }, 'a-save'] }],
+    active: null,
+  }));
+  assert.deepEqual(readLibrary().playlists[0].items, ['a-save']);
+});
+
+test('a duplicated track id or path resolves to one record', () => {
+  const kept = writeLibrary({
+    tracks: [
+      { id: 'dup', path: '/music/first.mp3', title: 'First', bpm: 120 },
+      { id: 'dup', path: '/music/second.mp3', title: 'Second' }, // same id, another file
+      { id: 'other', path: '/music/first.mp3', title: 'Also first' }, // same file, another id
+    ],
+    playlists: [{ id: 'a', name: 'friday', items: [{ kind: 'track', id: 'other' }] }],
+  });
+  const paths = kept.tracks.map((t) => t.path).sort();
+  assert.deepEqual(paths, ['/music/first.mp3', '/music/second.mp3'], 'one record per file');
+  assert.equal(kept.tracks.find((t) => t.path === '/music/first.mp3').title, 'First',
+    'the first record for a path wins - a later bare one never overwrites a corrected one');
+  // The loser's id still resolves, so a set pointing at it keeps playing the right file.
+  assert.equal(kept.playlists[0].items[0].path, '/music/first.mp3');
+});
+
+test('playlists carry a folder, flat on disk', () => {
+  const kept = writeLibrary({
+    playlists: [
+      { id: 'a', name: 'friday', folder: ' club / 2026 ' },
+      { id: 'b', name: 'loose', folder: '   ' }, // blank -> no folder
+      { id: 'c', name: 'odd', folder: '//x//' },
+    ],
+  });
+  assert.equal(kept.playlists[0].folder, 'club/2026');
+  assert.equal(kept.playlists[1].folder, undefined);
+  assert.equal(kept.playlists[2].folder, 'x');
+});
+
+// The intake. Tag reading is injected, so this is plain filesystem work with no audio file.
+test('importTracks adds a file once and fills only gaps on re-import', () => {
+  writeLibrary({ tracks: [], playlists: [] });
+  const tags = {
+    '/music/tagged.mp3': { title: 'Real Title', artist: 'Someone', bpm: 128, key: 'Am' },
+    '/music/bare.wav': {},
+  };
+  const readTags = (p) => tags[p] ?? {};
+
+  const first = importTracks(['/music/tagged.mp3', '/music/bare.wav'], { readTags });
+  assert.equal(first.added.length, 2);
+  assert.equal(first.already.length, 0);
+  const byPath = Object.fromEntries(first.library.tracks.map((t) => [t.path, t]));
+  assert.equal(byPath['/music/tagged.mp3'].title, 'Real Title', 'tags name the track');
+  assert.equal(byPath['/music/tagged.mp3'].artist, 'Someone');
+  assert.equal(byPath['/music/tagged.mp3'].bpm, 128);
+  assert.equal(byPath['/music/bare.wav'].title, 'bare', 'an untagged file is called its file name');
+
+  // Importing again is the no-op that lets any gesture fire it.
+  const again = importTracks(['/music/tagged.mp3'], { readTags });
+  assert.equal(again.added.length, 0);
+  assert.equal(again.already.length, 1);
+  assert.equal(again.library.tracks.length, 2, 'no second record for the same file');
+
+  // A hand-corrected tempo outlives a re-import; a field the record lacks is filled.
+  const corrected = writeLibrary({
+    ...again.library,
+    tracks: again.library.tracks.map((t) => (t.path === '/music/tagged.mp3' ? { ...t, bpm: 174 } : t)),
+  });
+  assert.equal(corrected.tracks.find((t) => t.path === '/music/tagged.mp3').bpm, 174);
+  tags['/music/tagged.mp3'].album = 'An Album';
+  const third = importTracks(['/music/tagged.mp3'], { readTags });
+  const track = third.library.tracks.find((t) => t.path === '/music/tagged.mp3');
+  assert.equal(track.bpm, 174, 'the tempo typed by hand is the better fact');
+  assert.equal(track.album, 'An Album', 'a field the record lacked is filled from the tags');
+});
+
+test('importTracks survives a file whose tags cannot be read', () => {
+  writeLibrary({ tracks: [], playlists: [] });
+  const { library, added } = importTracks(['/music/broken.mp3'], {
+    readTags: () => { throw new Error('unreadable'); },
+  });
+  assert.equal(added.length, 1, 'a tag read is advisory, never a failed import');
+  assert.equal(library.tracks[0].title, 'broken');
+});
+
+// --- ratings, hand edits, rescans and what analysis is allowed to write ----------------------
+
+test('a rating is 1 to 5 stars, or absent', () => {
+  const kept = writeLibrary({
+    tracks: [
+      { id: 'a', path: '/m/a.mp3', rating: 4 },
+      { id: 'b', path: '/m/b.mp3', rating: 3.6 }, // rounded
+      { id: 'c', path: '/m/c.mp3', rating: 0 }, // unrated, not zero stars
+      { id: 'd', path: '/m/d.mp3', rating: 9 },
+      { id: 'e', path: '/m/e.mp3', rating: 'lots' },
+    ],
+    playlists: [],
+  });
+  const by = Object.fromEntries(kept.tracks.map((t) => [t.id, t.rating]));
+  assert.deepEqual(by, { a: 4, b: 4, c: undefined, d: undefined, e: undefined });
+});
+
+test('editTrack marks what it set as typed by hand', () => {
+  writeLibrary({ tracks: [{ id: 't', path: '/m/one.mp3', title: 'One' }], playlists: [] });
+  const lib = editTrack('t', { artist: 'Someone', bpm: 128 });
+  const t = lib.tracks[0];
+  assert.equal(t.artist, 'Someone');
+  assert.equal(t.bpm, 128);
+  assert.deepEqual(t.byHand, ['artist', 'bpm'], 'both are now the user\'s word');
+});
+
+test('editTrack clears a field, and a cleared title falls back to the file name', () => {
+  writeLibrary({ tracks: [{ id: 't', path: '/m/one.mp3', title: 'One', artist: 'Someone' }], playlists: [] });
+  const lib = editTrack('t', { artist: '', title: null });
+  assert.equal(lib.tracks[0].artist, undefined);
+  assert.equal(lib.tracks[0].title, 'one', 'the file name stands in');
+});
+
+test('editTrack rates several tracks in one call, and 0 unrates', () => {
+  writeLibrary({
+    tracks: [{ id: 'a', path: '/m/a.mp3' }, { id: 'b', path: '/m/b.mp3' }],
+    playlists: [],
+  });
+  let lib = editTrack(['a', 'b'], { rating: 5 });
+  assert.deepEqual(lib.tracks.map((t) => t.rating), [5, 5]);
+  lib = editTrack(['a'], { rating: 0 });
+  assert.equal(lib.tracks.find((t) => t.id === 'a').rating, undefined);
+  assert.equal(lib.tracks.find((t) => t.id === 'b').rating, 5);
+  // A rating is nobody's but the listener's, so it is never claimed as a tag field.
+  assert.equal(lib.tracks.find((t) => t.id === 'b').byHand, undefined);
+});
+
+test('editTrack answers null for a track that is not there', () => {
+  writeLibrary({ tracks: [], playlists: [] });
+  assert.equal(editTrack('nope', { rating: 3 }), null);
+});
+
+test('a rescan takes the file\'s word, except where the user typed one', () => {
+  writeLibrary({ tracks: [], playlists: [] });
+  const tags = { '/m/one.mp3': { title: 'Old Title', artist: 'Old Artist', bpm: 120 } };
+  const readTags = (p) => tags[p] ?? {};
+  importTracks(['/m/one.mp3'], { readTags });
+
+  // The user fixes the tempo by hand; the file is then retagged in some other app.
+  editTrack(readLibrary().tracks[0].id, { bpm: 174 });
+  tags['/m/one.mp3'] = { title: 'New Title', artist: 'New Artist', bpm: 125, key: 'Am' };
+
+  // A plain re-import cannot correct any of it - those fields are no longer gaps.
+  let t = importTracks(['/m/one.mp3'], { readTags }).library.tracks[0];
+  assert.equal(t.title, 'Old Title', 'gap filling leaves a wrong value alone');
+  assert.equal(t.key, 'Am', '...but still fills what was missing');
+
+  // A rescan does, and still keeps the tempo that was typed.
+  t = importTracks(['/m/one.mp3'], { readTags, mode: 'rescan' }).library.tracks[0];
+  assert.equal(t.title, 'New Title');
+  assert.equal(t.artist, 'New Artist');
+  assert.equal(t.bpm, 174, 'the tempo typed by hand outlives a rescan');
+});
+
+test('a rescan never empties a field the file has stopped mentioning', () => {
+  writeLibrary({ tracks: [], playlists: [] });
+  const readTags = () => ({ title: 'One', artist: 'Someone', album: 'An Album' });
+  importTracks(['/m/one.mp3'], { readTags });
+  // An absent tag and a deleted tag both arrive as null, so clearing on absence would throw good
+  // metadata away every time a file happened to be tagged thinly. A rescan adds and corrects.
+  const t = importTracks(['/m/one.mp3'], { readTags: () => ({ title: 'One v2' }), mode: 'rescan' })
+    .library.tracks[0];
+  assert.equal(t.title, 'One v2', 'what the file says is taken');
+  assert.equal(t.artist, 'Someone', 'what it no longer says is kept');
+  assert.equal(t.album, 'An Album');
+});
+
+test('analysis fills a tempo the file never stated, and never one it did', () => {
+  writeLibrary({ tracks: [], playlists: [] });
+  // One file with a tempo tag, one without.
+  const tags = {
+    '/m/tagged.mp3': { title: 'Tagged', bpm: 128 },
+    '/m/bare.mp3': { title: 'Bare' },
+  };
+  importTracks(Object.keys(tags), { readTags: (p) => tags[p] });
+
+  setTrackFacts('/m/tagged.mp3', { bpm: 127.98, key: 'Am' });
+  setTrackFacts('/m/bare.mp3', { bpm: 124.5, key: 'Fm' });
+  const by = Object.fromEntries(readLibrary().tracks.map((t) => [t.path, t]));
+
+  assert.equal(by['/m/tagged.mp3'].bpm, 128, "the file's own tempo is trusted over a measurement");
+  assert.equal(by['/m/tagged.mp3'].key, 'Am', '...but the key it never stated is filled in');
+  assert.deepEqual(by['/m/tagged.mp3'].detected, ['key'], 'and only that one reads as an estimate');
+  assert.equal(by['/m/bare.mp3'].bpm, 124.5, 'an untagged tempo is measured');
+  assert.deepEqual(by['/m/bare.mp3'].detected, ['bpm', 'key']);
+  assert.ok(by['/m/bare.mp3'].analyzed > 0, 'and the record remembers it was measured');
+});
+
+test('analysis leaves a hand-typed tempo alone, even when the record had none', () => {
+  writeLibrary({ tracks: [{ id: 't', path: '/m/one.mp3', title: 'One' }], playlists: [] });
+  editTrack('t', { bpm: 140 });
+  setTrackFacts('/m/one.mp3', { bpm: 70.1 });
+  assert.equal(readLibrary().tracks[0].bpm, 140);
+});
+
+test('a measurement that found nothing still marks the record, so it is not retried forever', () => {
+  writeLibrary({ tracks: [{ id: 't', path: '/m/one.mp3' }], playlists: [] });
+  setTrackFacts('/m/one.mp3', {});
+  const t = readLibrary().tracks[0];
+  assert.ok(t.analyzed > 0);
+  assert.equal(t.bpm, undefined);
+  assert.equal(t.detected, undefined);
+});
+
+test('a hand edit takes a field off the estimate list', () => {
+  writeLibrary({ tracks: [{ id: 't', path: '/m/one.mp3' }], playlists: [] });
+  setTrackFacts('/m/one.mp3', { bpm: 124.5, key: 'Fm' });
+  const lib = editTrack('t', { bpm: 125 });
+  assert.deepEqual(lib.tracks[0].detected, ['key'], 'the tempo is no longer a guess; the key still is');
+});
+
+test('forgetTracks takes records out of the collection and out of every set', () => {
+  writeLibrary({
+    tracks: [{ id: 'a', path: '/m/a.mp3' }, { id: 'b', path: '/m/b.mp3' }],
+    playlists: [{
+      id: 'p',
+      name: 'friday',
+      items: [{ kind: 'file', path: '/m/a.mp3' }, 'a-save', { kind: 'file', path: '/m/b.mp3' }],
+    }],
+  });
+  const { library, forgot } = forgetTracks(['a']);
+  assert.equal(forgot, 1);
+  assert.deepEqual(library.tracks.map((t) => t.id), ['b']);
+  // The slot goes with the record (a reference with no record says nothing), the save stays.
+  assert.deepEqual(library.playlists[0].items.map((i) => (typeof i === 'string' ? i : i.path)),
+    ['a-save', '/m/b.mp3']);
+});
+
+// The collection is the server's: a background pass writes tempos into records while the editor
+// has the document open, so the editor posts playlists WITHOUT tracks and the write keeps its own.
+test('a document posted with no tracks keeps the collection that is on disk', () => {
+  writeLibrary({
+    tracks: [{ id: 't', path: '/m/one.mp3', title: 'One', bpm: 128, rating: 5 }],
+    playlists: [{ id: 'p', name: 'friday', items: [] }],
+  });
+  const posted = writeLibrary({ playlists: [{ id: 'p', name: 'renamed', items: [] }] });
+  assert.equal(posted.playlists[0].name, 'renamed', 'the playlist edit landed');
+  assert.equal(posted.tracks.length, 1, 'the collection survived');
+  assert.equal(posted.tracks[0].bpm, 128);
+  assert.equal(posted.tracks[0].rating, 5);
+  // An EMPTY array is still a deliberate statement, and empties it.
+  assert.deepEqual(writeLibrary({ tracks: [], playlists: [] }).tracks, []);
+});
+
+test('importTracks skips blanks and leaves the sets it is not about alone', () => {
+  writeLibrary({ tracks: [], playlists: [{ id: 'a', name: 'friday', items: ['a-save'] }] });
+  const { library, added } = importTracks(['', '   ', null, '/music/one.mp3'], { readTags: null });
+  assert.equal(added.length, 1);
+  assert.deepEqual(library.playlists[0].items, ['a-save']);
 });
 
 test('an active id that names no playlist clears to null', () => {

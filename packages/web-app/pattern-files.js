@@ -23,7 +23,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { poptartHome } = require('@poptart/osc-engine/home');
 
-const { parseMeta, displayLabel, patternNameProblem } = require('./public/pattern-meta.js');
+const { parseMeta, displayLabel, patternPathProblem } = require('./public/pattern-meta.js');
 
 const PATTERNS_DIR = process.env.POPTART_PATTERNS_DIR || path.join(poptartHome(), 'patterns');
 const WIP_DIR = path.join(PATTERNS_DIR, 'wip');
@@ -31,14 +31,31 @@ const WIP_DIR = path.join(PATTERNS_DIR, 'wip');
 // Don't slurp something enormous that wandered into the folder just to search it.
 const MAX_INDEXED_BYTES = 512 * 1024;
 
-// Names are used as filenames directly, so keep them to a single path segment. The rule itself
-// lives in pattern-meta.js, which the editor also loads - so the naming dialog can refuse a name
-// for the same reason, before it gets this far.
+// A name is used as its path under patterns/ directly, so it may name folders ("techno/stomper")
+// but every segment has to be an ordinary file name. The rule itself lives in pattern-meta.js,
+// which the editor also loads - so the naming dialog can refuse a name for the same reason,
+// before it gets this far - and it is what keeps ".." and dotfiles from climbing out of the
+// patterns directory.
 function patternFilePath(name) {
-  if (patternNameProblem(name)) {
-    throw new Error('pattern name must be a plain file name (no slashes, not starting with ".")');
-  }
-  return path.join(PATTERNS_DIR, `${String(name).trim()}.js`);
+  const problem = patternPathProblem(name);
+  if (problem) throw new Error(`pattern name: ${problem}`);
+  const rel = patternRelName(name);
+  const file = path.join(PATTERNS_DIR, `${rel}.js`);
+  // Belt to the rule's braces: whatever the segments were, the result has to land inside the
+  // patterns directory. A path that escapes is a bug in the rule, not something to write to.
+  const root = path.resolve(PATTERNS_DIR);
+  if (path.resolve(file) !== path.join(root, `${rel}.js`)) throw new Error('pattern name: bad path');
+  return file;
+}
+
+/** A name as it is stored and listed: trimmed segments joined by "/", the one spelling. */
+function patternRelName(name) {
+  return String(name ?? '').trim().split('/').map((p) => p.trim()).join('/');
+}
+
+/** The folders a saved pattern's name implies, created so a nested save can be written. */
+function ensurePatternDir(file) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
 }
 
 // A WIP id is "<month>/<session>" - "2026-08/2026-08-02-143205" - which is also its path under
@@ -101,23 +118,54 @@ function indexEntry({ kind, name, id, file, displayName, fallbackLabel, borrowBl
   };
 }
 
-function listSavedPatterns() {
-  let names = [];
+// How deep a nested save is looked for. Matches the segment cap in patternPathProblem - a tree
+// deeper than that was not made by saving a pattern, and walking it is someone else's problem.
+const SAVED_MAX_DEPTH = 16;
+
+/**
+ * Every saved pattern's name, relative to PATTERNS_DIR with "/" separators, so a nested save is
+ * called "techno/stomper" - the same string its playlists store and its routes name. The `wip`
+ * subtree is skipped: sessions live inside the patterns folder but are their own kind, listed by
+ * listWipPatterns. Dot-folders are skipped too, which keeps a .git or a sync tool's scratch
+ * directory out of the library.
+ */
+function savedPatternNames(dir = PATTERNS_DIR, prefix = '', depth = 0) {
+  if (depth > SAVED_MAX_DEPTH) return [];
+  let entries = [];
   try {
-    names = fs.readdirSync(PATTERNS_DIR).filter((f) => f.endsWith('.js'));
+    entries = fs.readdirSync(dir, { withFileTypes: true });
   } catch {
-    // directory doesn't exist yet - nothing saved
+    return []; // directory doesn't exist yet - nothing saved
   }
-  return names.map((f) => {
-    const name = f.slice(0, -3);
-    // A saved pattern is called what it was saved as, unless it gives itself an @title.
-    return indexEntry({
+  const out = [];
+  for (const ent of entries) {
+    if (ent.name.startsWith('.')) continue;
+    const rel = prefix ? `${prefix}/${ent.name}` : ent.name;
+    if (ent.isDirectory()) {
+      if (!prefix && ent.name === 'wip') continue;
+      out.push(...savedPatternNames(path.join(dir, ent.name), rel, depth + 1));
+    } else if (ent.isFile() && ent.name.endsWith('.js')) {
+      out.push(rel.slice(0, -3));
+    }
+  }
+  return out;
+}
+
+function listSavedPatterns() {
+  return savedPatternNames().map((name) => {
+    // A saved pattern is called what it was saved as, unless it gives itself an @title. The
+    // folders are part of the name, so a row can say where it is filed and the list can be
+    // grouped by it without a second source of truth.
+    const entry = indexEntry({
       kind: 'saved',
       name,
       id: name,
-      file: path.join(PATTERNS_DIR, f),
+      file: path.join(PATTERNS_DIR, `${name}.js`),
       displayName: name,
     });
+    const cut = name.lastIndexOf('/');
+    if (cut > 0) entry.folder = name.slice(0, cut);
+    return entry;
   });
 }
 
@@ -167,74 +215,460 @@ function listWipPatterns() {
   return out;
 }
 
-// --- the library (playlists; the organize modal and deck B's song queue) ---
+// --- the library (the track collection, the playlists, and deck B's song queue) ---
 //
-// One library.json alongside the pattern files, so a set travels with the songs it plays. It
-// holds only what the files can't say for themselves: the playlists and which one is the
-// ACTIVE set (deck B's picker follows it). Tags stay in the files (@tags), tempo is read
-// from the source (nativeBpmOf) - nothing here duplicates a file's own facts.
+// One library.json alongside the pattern files, so a collection and the sets built from it travel
+// with the songs they play. It holds only what the files can't say for themselves. Livecode saves
+// say everything about themselves already (@title/@tags in the source, tempo read by nativeBpmOf),
+// so the library never names one except to put it in a set; a disk track can't talk to poptart at
+// all, so the library is where what we know about it lives.
 //
-//   { version: 1, playlists: [{ id, name, items: [item, ...] }], active: id | null }
+//   { version: 2,
+//     tracks: [{ id, path, title, artist?, album?, bpm?, key?, added }],
+//     playlists: [{ id, name, folder?, items: [item, ...] }],
+//     active: id | null }
 //
-// An item is either a named save (a bare string) or a real audio file on disk (songs phase 2):
+// TRACKS are the imported collection: one record per audio file on disk, deduplicated by path,
+// holding the metadata read from the file's own tags at import (see importTracks) and whatever
+// was then corrected by hand. It is the collection the browser sorts and searches, and the one
+// place a track's title/bpm/key is edited - two playlists holding the same file hold the same
+// record, not two copies of a typo.
+//
+// A track is never a copy of the audio: `path` points at the file where it lives, and a file that
+// moves or is deleted renders as missing rather than being silently repaired or dropped.
+//
+// PLAYLIST ITEMS are either a named livecode save (a bare string, which is also its path under
+// patterns/ - "techno/stomper") or a reference to a track:
 //
 //   "saved-name"
-//   { kind: 'file', path, title?, bpm?, key? }
+//   { kind: 'track', id }
 //
-// A file item carries what its file can't say to poptart yet - a display title, the native
-// tempo its pitch fader rides around, the musical key - entered by hand until tag parsing
-// (phase 4) fills them in. Items of either kind may repeat (a set that comes back to a song is
-// a real set). An item whose save was deleted - or whose file moved - stays in the list and
-// renders as missing: the playlist is the user's document, not an index to be silently repaired.
+// Items of either kind may repeat - a set that comes back to a song is a real set - and an item
+// whose save was deleted keeps its slot: a playlist is the user's document, not an index.
+//
+// The shape ABOVE is what is on disk. What readLibrary returns, and what the UI posts back, has
+// each track reference hydrated into the track's own facts (see hydrateLibrary) so that walking a
+// set needs no second lookup. writeLibrary collapses them again - and any hydrated item naming a
+// path that has no track yet is imported on the spot, which is what makes every gesture that
+// USES a file (loading it onto a deck, dropping it into a set) also file it in the collection.
 
 const LIBRARY_FILE = path.join(PATTERNS_DIR, 'library.json');
 
 const newLibraryId = () => Math.random().toString(36).slice(2, 10);
 
-// One item coerced to the shapes above, or null for junk. Field rules match their consumers:
-// bpm the /api/song/load sanity range, title/key non-empty trimmed strings or absent.
-function normalizeLibraryItem(it) {
-  if (typeof it === 'string') return it;
-  if (!it || typeof it !== 'object' || it.kind !== 'file') return null;
+// Field rules match their consumers: bpm the /api/song/load sanity range, text non-empty and
+// bounded so a corrupt tag can't put something enormous in a list row.
+const MAX_TRACK_TEXT = 300;
+
+// The fields a file's own tags can speak for, and so the only ones a rescan may rewrite or a
+// hand edit may claim. `rating` is deliberately not among them.
+const TRACK_TAG_FIELDS = ['title', 'artist', 'album', 'bpm', 'key'];
+
+function cleanTrackText(s) {
+  if (typeof s !== 'string') return null;
+  const clean = s.replace(/\0/g, '').trim();
+  return clean ? clean.slice(0, MAX_TRACK_TEXT) : null;
+}
+
+function cleanTrackBpm(n) {
+  const bpm = Number(n);
+  return Number.isFinite(bpm) && bpm >= 20 && bpm <= 400 ? bpm : null;
+}
+
+/** The title a track falls back to when neither its tags nor the user gave it one. */
+function titleFromPath(p) {
+  return String(p).split(/[/\\]/).pop().replace(/\.[^.]+$/, '') || String(p);
+}
+
+// One track record coerced to the shape above, or null for junk. `added` keeps whatever it had
+// (the collection's "date added" column is only useful if it survives a rewrite).
+function normalizeTrack(t) {
+  if (!t || typeof t !== 'object') return null;
+  const p = typeof t.path === 'string' ? t.path.trim() : '';
+  if (!p) return null;
+  const track = {
+    id: String(t.id ?? newLibraryId()),
+    path: p,
+    title: cleanTrackText(t.title) ?? titleFromPath(p),
+  };
+  for (const field of ['artist', 'album', 'key']) {
+    const value = cleanTrackText(t[field]);
+    if (value) track[field] = value;
+  }
+  const bpm = cleanTrackBpm(t.bpm);
+  if (bpm != null) track.bpm = bpm;
+  // Stars, 1 to 5. No tag is read into this and no rescan touches it - a rating is the one fact
+  // here that is nobody's but the listener's, so absent means unrated rather than zero.
+  const rating = Math.round(Number(t.rating));
+  if (Number.isFinite(rating) && rating >= 1 && rating <= 5) track.rating = rating;
+  // Which fields were typed by hand, and so outlive a rescan that would otherwise take the
+  // file's word for them (the same rule the song decks' bpmByHand/anchorByHand follow).
+  const byHand = (Array.isArray(t.byHand) ? t.byHand : []).filter((f) => TRACK_TAG_FIELDS.includes(f));
+  if (byHand.length) track.byHand = [...new Set(byHand)].sort();
+  // Which fields the AUDIO was measured for rather than tagged with, so a row can mark them as
+  // estimates; and when it was measured, so a pass over the collection can skip what it has done.
+  const detected = (Array.isArray(t.detected) ? t.detected : []).filter((f) => TRACK_TAG_FIELDS.includes(f));
+  if (detected.length) track.detected = [...new Set(detected)].sort();
+  const analyzed = Number(t.analyzed);
+  if (Number.isFinite(analyzed) && analyzed > 0) track.analyzed = analyzed;
+  const added = Number(t.added);
+  track.added = Number.isFinite(added) && added > 0 ? added : Date.now();
+  return track;
+}
+
+/**
+ * The collection, deduplicated by path: one record per file, the first mention winning so an
+ * older hand-corrected record is never replaced by a later bare one. Returns { tracks, byPath,
+ * byId } - the two indexes the item collapse below needs anyway.
+ */
+function indexTracks(list) {
+  const tracks = [];
+  const byPath = new Map();
+  const byId = new Map();
+  for (const raw of Array.isArray(list) ? list : []) {
+    const track = normalizeTrack(raw);
+    if (!track) continue;
+    const seen = byPath.get(track.path);
+    if (seen) {
+      // A duplicate path is two records for one file (a hand-edited library, or an import that
+      // raced a write). Keep the first and let the second's id resolve to it, so any playlist
+      // item still pointing at the loser keeps working.
+      byId.set(track.id, seen);
+      continue;
+    }
+    if (byId.has(track.id)) track.id = newLibraryId(); // a repeated id would alias two files
+    tracks.push(track);
+    byPath.set(track.path, track);
+    byId.set(track.id, track);
+  }
+  return { tracks, byPath, byId };
+}
+
+/**
+ * An item coerced to its stored shape, importing a file that has no track yet. Returns null for
+ * junk, so a damaged entry drops out of its playlist instead of taking the library down.
+ *
+ * The hydrated shape the UI posts back ({ kind: 'file', path, ... }) collapses to a reference:
+ * whatever title or tempo rode along with the item is the TRACK's to hold, and the record
+ * already has it. The one exception is a path with no record at all - a file being used for the
+ * first time - which is imported here, from what the item says plus the file name.
+ */
+function collapseLibraryItem(it, index) {
+  // A named save is kept exactly as written, even if no such file exists (or could): the row is
+  // the user's note that this set plays that song, and a save can come back.
+  if (typeof it === 'string') return it.trim() ? it : null;
+  if (!it || typeof it !== 'object') return null;
+  if (it.kind === 'track') {
+    const track = index.byId.get(String(it.id));
+    return track ? { kind: 'track', id: track.id } : null;
+  }
+  if (it.kind !== 'file') return null;
   const p = typeof it.path === 'string' ? it.path.trim() : '';
   if (!p) return null;
-  const item = { kind: 'file', path: p };
-  if (typeof it.title === 'string' && it.title.trim()) item.title = it.title.trim();
-  const bpm = Number(it.bpm);
-  if (Number.isFinite(bpm) && bpm >= 20 && bpm <= 400) item.bpm = bpm;
-  if (typeof it.key === 'string' && it.key.trim()) item.key = it.key.trim();
-  return item;
+  const known = index.byPath.get(p) ?? (it.trackId ? index.byId.get(String(it.trackId)) : null);
+  if (known) return { kind: 'track', id: known.id };
+  const track = normalizeTrack({ ...it, id: newLibraryId(), path: p });
+  index.tracks.push(track);
+  index.byPath.set(track.path, track);
+  index.byId.set(track.id, track);
+  return { kind: 'track', id: track.id };
+}
+
+// A playlist's folder, for the browser's sidebar tree: "club/2026" or absent for a top-level set.
+// Stored as a path string rather than as nesting, so the document stays flat and an old library
+// (or a hand-edited one) normalizes without a structural migration.
+function cleanPlaylistFolder(s) {
+  const clean = cleanTrackText(s);
+  if (!clean) return null;
+  const parts = clean.split('/').map((x) => x.trim()).filter(Boolean).slice(0, 8);
+  return parts.length ? parts.join('/') : null;
 }
 
 // Whatever is on disk (or handed to writeLibrary) is coerced to the shape above - a hand-edited
 // or truncated file degrades to an empty library rather than taking the UI down with it.
 function normalizeLibrary(doc) {
   const src = doc && typeof doc === 'object' ? doc : {};
+  const index = indexTracks(src.tracks);
   const playlists = (Array.isArray(src.playlists) ? src.playlists : [])
     .filter((p) => p && typeof p.name === 'string')
-    .map((p) => ({
-      id: String(p.id ?? newLibraryId()),
-      name: p.name,
-      items: Array.isArray(p.items) ? p.items.map(normalizeLibraryItem).filter((k) => k != null) : [],
-    }));
+    .map((p) => {
+      const list = {
+        id: String(p.id ?? newLibraryId()),
+        name: p.name,
+        items: Array.isArray(p.items)
+          ? p.items.map((it) => collapseLibraryItem(it, index)).filter((k) => k != null)
+          : [],
+      };
+      const folder = cleanPlaylistFolder(p.folder);
+      if (folder) list.folder = folder;
+      return list;
+    });
   const active = playlists.some((p) => p.id === src.active) ? src.active : null;
-  return { version: 1, playlists, active };
+  // A collection nobody references is still the collection: imported tracks are kept whether or
+  // not a set happens to name them, which is the whole point of importing rather than queueing.
+  return { version: 2, tracks: index.tracks, playlists, active };
+}
+
+/**
+ * The document as everything downstream wants to read it: each track reference replaced by the
+ * track's own facts, in the { kind: 'file', path, title, bpm?, key?, ... } shape the decks and
+ * the pickers already speak, with `trackId` kept so an edit can find the record again.
+ *
+ * Every caller normalizes first, which has already dropped any reference whose record is gone
+ * (there is nothing left to say about one - see the tests); the stand-in row below is this
+ * function keeping its own promise to return one item per item, whatever it is handed.
+ */
+function hydrateLibrary(doc) {
+  const byId = new Map(doc.tracks.map((t) => [t.id, t]));
+  return {
+    ...doc,
+    playlists: doc.playlists.map((p) => ({
+      ...p,
+      items: p.items.map((it) => {
+        if (typeof it === 'string') return it;
+        const track = byId.get(it.id);
+        if (!track) return { kind: 'file', path: '', title: 'missing track', trackId: it.id };
+        const { id, ...facts } = track; // the record's id rides as trackId, not as the item's own
+        return { ...facts, kind: 'file', trackId: id };
+      }),
+    })),
+  };
 }
 
 function readLibrary() {
+  let raw = null;
   try {
-    return normalizeLibrary(JSON.parse(fs.readFileSync(LIBRARY_FILE, 'utf8')));
+    raw = JSON.parse(fs.readFileSync(LIBRARY_FILE, 'utf8'));
   } catch {
-    return normalizeLibrary(null); // no library yet (or unreadable) - start empty
+    // no library yet (or unreadable) - start empty
+  }
+  return hydrateLibrary(normalizeLibrary(raw));
+}
+
+/**
+ * Normalizes, writes, and returns what was actually kept, hydrated as readLibrary returns it.
+ *
+ * A document with NO `tracks` key keeps the collection that is already on disk. That is how the
+ * editor posts a playlist edit: background analysis writes tempos and keys into records while the
+ * window is open, so a UI that sent back the whole collection it read a minute ago would undo
+ * them. The collection is changed through the track calls below, never by posting the document.
+ */
+function writeLibrary(doc) {
+  const src = doc && typeof doc === 'object' ? doc : {};
+  const held = src.tracks === undefined ? (readLibraryRaw()?.tracks ?? []) : src.tracks;
+  const clean = normalizeLibrary({ ...src, tracks: held });
+  fs.mkdirSync(PATTERNS_DIR, { recursive: true });
+  fs.writeFileSync(LIBRARY_FILE, JSON.stringify(clean, null, 2), 'utf8');
+  return hydrateLibrary(clean);
+}
+
+/**
+ * Track records changed in place, by id, and the document written. `fields` may carry any of the
+ * tag fields plus `rating`; a tag field given here is marked `byHand`, which is what makes it
+ * outlive a later rescan or analysis. A field set to null or '' is cleared (the one way a field
+ * goes away - see rescanTrack on why a rescan never empties one).
+ *
+ * Takes one id or several, so rating a selection is one call rather than one per row. Returns
+ * the hydrated library, or null when none of the ids names a track.
+ */
+function editTrack(ids, fields = {}) {
+  const want = (Array.isArray(ids) ? ids : [ids]).map(String);
+  const doc = normalizeLibrary(readLibraryRaw());
+  const hit = doc.tracks.filter((t) => want.includes(t.id));
+  if (!hit.length) return null;
+  for (const track of hit) editOneTrack(track, fields);
+  return writeLibrary(doc);
+}
+
+function editOneTrack(track, fields) {
+  const byHand = new Set(track.byHand ?? []);
+  for (const [field, value] of Object.entries(fields)) {
+    if (field === 'rating') {
+      const rating = Math.round(Number(value));
+      if (Number.isFinite(rating) && rating >= 1 && rating <= 5) track.rating = rating;
+      else delete track.rating; // 0, blank or junk is unrated
+      continue;
+    }
+    if (!TRACK_TAG_FIELDS.includes(field)) continue;
+    byHand.add(field); // typed by hand, whatever it was set to
+    if (field === 'bpm') {
+      const bpm = cleanTrackBpm(value);
+      if (bpm != null) track.bpm = bpm;
+      else if (value === null || value === '') delete track.bpm;
+      else byHand.delete('bpm'); // refused, so nothing was typed after all
+      continue;
+    }
+    const text = cleanTrackText(value);
+    if (text) track[field] = text;
+    else if (field === 'title') track.title = titleFromPath(track.path);
+    else delete track[field];
+  }
+  track.byHand = [...byHand].sort();
+  if (!track.byHand.length) delete track.byHand;
+  // Whatever was typed is no longer an estimate; the fields nobody touched keep their marks.
+  if (track.detected) {
+    const left = track.detected.filter((f) => !byHand.has(f));
+    if (left.length) track.detected = left;
+    else delete track.detected;
   }
 }
 
-/** Normalizes, writes, and returns what was actually kept. */
-function writeLibrary(doc) {
-  const clean = normalizeLibrary(doc);
-  fs.mkdirSync(PATTERNS_DIR, { recursive: true });
-  fs.writeFileSync(LIBRARY_FILE, JSON.stringify(clean, null, 2), 'utf8');
-  return clean;
+/**
+ * What analysis measured, written onto the record for a path. Her rule, and the right one: a
+ * tempo or key the FILE already stated is trusted over anything we measure, so this only fills
+ * what is missing - and never touches a field typed by hand. `detected` lists the fields that
+ * came from the audio rather than from a tag, so a row can show them as estimates.
+ */
+function setTrackFacts(trackPath, facts = {}) {
+  const doc = normalizeLibrary(readLibraryRaw());
+  const track = doc.tracks.find((t) => t.path === trackPath);
+  if (!track) return null;
+  const held = new Set(track.byHand ?? []);
+  const detected = new Set(track.detected ?? []);
+  let changed = false;
+  const bpm = cleanTrackBpm(facts.bpm);
+  if (bpm != null && track.bpm == null && !held.has('bpm')) {
+    track.bpm = bpm;
+    detected.add('bpm');
+    changed = true;
+  }
+  const key = cleanTrackText(facts.key);
+  if (key && track.key == null && !held.has('key')) {
+    track.key = key;
+    detected.add('key');
+    changed = true;
+  }
+  // Analyzed either way, so an analysis that found nothing is not retried forever.
+  track.analyzed = Number(facts.at) > 0 ? Number(facts.at) : Date.now();
+  if (detected.size) track.detected = [...detected].sort();
+  return { library: writeLibrary(doc), changed };
+}
+
+/** Records out of the collection, and out of every set that referenced them. */
+function forgetTracks(ids) {
+  const want = new Set((Array.isArray(ids) ? ids : []).map(String));
+  const doc = normalizeLibrary(readLibraryRaw());
+  const gone = doc.tracks.filter((t) => want.has(t.id));
+  doc.tracks = doc.tracks.filter((t) => !want.has(t.id));
+  for (const p of doc.playlists) {
+    p.items = p.items.filter((it) => typeof it === 'string' || !want.has(String(it.id)));
+  }
+  return { library: writeLibrary(doc), forgot: gone.length };
+}
+
+/**
+ * Import: file paths into the collection, reading each file's own tags for what it can say about
+ * itself. Returns { library (hydrated), added, already } so the caller can report what happened
+ * rather than guessing.
+ *
+ * Importing the same file twice is a no-op on purpose - every gesture that uses a track also
+ * imports it, so this runs far more often than it does anything. A path already in the collection
+ * only has its GAPS filled from the tags: a tempo or title corrected by hand is the better fact,
+ * and re-importing must never undo it.
+ *
+ * `mode: 'rescan'` is the deliberate exception, asked for by hand: the file's tags become the
+ * better word for everything the user did not type themselves (see rescanTrack). That is the only
+ * way a file retagged AFTER it was imported gets its new metadata in, since the field that would
+ * be corrected is no longer a gap.
+ *
+ * `readTags` is injected so this stays plain filesystem work the tests can drive without an
+ * audio file (and so a caller can skip tag reading on a hot path).
+ */
+function importTracks(paths, { readTags = null, now = Date.now, mode = 'fill' } = {}) {
+  const doc = normalizeLibrary(readLibraryRaw());
+  const index = indexTracks(doc.tracks);
+  const added = [];
+  const already = [];
+  for (const raw of Array.isArray(paths) ? paths : []) {
+    const p = typeof raw === 'string' ? raw.trim() : '';
+    if (!p) continue;
+    const tags = readTags ? safeTags(readTags, p) : {};
+    const seen = index.byPath.get(p);
+    if (seen) {
+      already.push(seen);
+      if (mode === 'rescan') rescanTrack(seen, tags);
+      else fillTrackGaps(seen, tags);
+      continue;
+    }
+    const track = normalizeTrack({
+      id: newLibraryId(),
+      path: p,
+      title: cleanTrackText(tags.title) ?? titleFromPath(p),
+      artist: tags.artist,
+      album: tags.album,
+      bpm: tags.bpm,
+      key: tags.key,
+      added: now(),
+    });
+    index.tracks.push(track);
+    index.byPath.set(track.path, track);
+    index.byId.set(track.id, track);
+    added.push(track);
+  }
+  const next = { ...doc, tracks: index.tracks };
+  return { library: writeLibrary(next), added, already };
+}
+
+// A tag read is advisory: a file that can't be read is a track with no tags, never a failed import.
+function safeTags(readTags, p) {
+  try {
+    return readTags(p) ?? {};
+  } catch {
+    return {};
+  }
+}
+
+// Tags fill only what the record is missing - see importTracks on why hand-entered facts win.
+function fillTrackGaps(track, tags) {
+  for (const field of ['artist', 'album', 'key']) {
+    if (track[field] == null) {
+      const value = cleanTrackText(tags[field]);
+      if (value) track[field] = value;
+    }
+  }
+  if (track.bpm == null) {
+    const bpm = cleanTrackBpm(tags.bpm);
+    if (bpm != null) track.bpm = bpm;
+  }
+  // A title standing in for an untagged file (its own file name) gives way to a real one.
+  const title = cleanTrackText(tags.title);
+  if (title && track.title === titleFromPath(track.path)) track.title = title;
+}
+
+/**
+ * A rescan: the file's tags are taken as the better word for everything EXCEPT what was typed by
+ * hand (`byHand`) and the rating, which no tag speaks for. This is what picks up a file that has
+ * been retagged since it was imported - gap-filling cannot, because the field it would correct
+ * already holds the old value.
+ *
+ * It never EMPTIES a field. A tag that is absent reads the same as a tag that was deleted (both
+ * arrive null), so clearing on absence would quietly throw away good metadata every time a file
+ * happened to be tagged more thinly than the record. A rescan adds and corrects; it does not
+ * prune, and an edit by hand is how a field goes away.
+ */
+function rescanTrack(track, tags) {
+  const held = new Set(track.byHand ?? []);
+  for (const field of ['artist', 'album', 'key']) {
+    if (held.has(field)) continue;
+    const value = cleanTrackText(tags[field]);
+    if (value) track[field] = value;
+  }
+  if (!held.has('bpm')) {
+    const bpm = cleanTrackBpm(tags.bpm);
+    if (bpm != null) track.bpm = bpm;
+  }
+  if (!held.has('title')) {
+    const title = cleanTrackText(tags.title);
+    if (title) track.title = title;
+  }
+}
+
+function readLibraryRaw() {
+  try {
+    return JSON.parse(fs.readFileSync(LIBRARY_FILE, 'utf8'));
+  } catch {
+    return null;
+  }
 }
 
 // --- session retention (off unless the settings tab turns it on) ---
@@ -310,6 +744,9 @@ module.exports = {
   pruneWipSessions,
   WIP_DIR,
   patternFilePath,
+  patternRelName,
+  ensurePatternDir,
+  savedPatternNames,
   wipFilePath,
   listSavedPatterns,
   listWipPatterns,
@@ -317,4 +754,9 @@ module.exports = {
   nativeBpmOf,
   readLibrary,
   writeLibrary,
+  importTracks,
+  editTrack,
+  setTrackFacts,
+  forgetTracks,
+  titleFromPath,
 };

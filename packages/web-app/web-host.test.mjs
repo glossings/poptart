@@ -474,8 +474,15 @@ test('every path the editor asks for is one the host has an answer for', () => {
     // deck heads (hidden outside mix mode), the FX unit in the mix strip
     'POST /api/arrangeLoops', 'POST /api/mix/decktempo', 'POST /api/mix/loop', 'POST /api/mix/fx', 'POST /api/mix/fxchain',
     'POST /api/mix/feedback',
-    // the organizer's disk tab: not drawn, and refused at setOrgPane3
+    // The library browser's disk source - the intake - is not drawn here and is refused at
+    // orgGoto, so there is no way to produce a disk path. That makes the TRACK COLLECTION
+    // unreachable too (it is the disk's), so its source row is not drawn either and everything
+    // reached from it goes with it: importing, measuring tempo and key, editing or rating a
+    // record, forgetting one. The livecode saves and the playlists are all this build browses.
     'GET /api/songfiles/find',
+    'POST /api/library/import',
+    'POST /api/library/analyze', 'POST /api/library/analyze/stop',
+    'POST /api/library/track', 'POST /api/library/forget',
     // asked inside a try whose failure is expected: a playlist's file rows render as missing
     'POST /api/songfiles/stat',
     // the headphone cue device row, drawn disabled from cueAvailable: false

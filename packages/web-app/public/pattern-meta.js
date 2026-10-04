@@ -206,10 +206,10 @@ function matchesQuery(entry, query) {
   });
 }
 
-// A pattern's name is used as its file name directly (see patternFilePath), so it has to stay a
-// single path segment. Returns why the name can't be used, or null when it can - which is how the
-// editor's naming dialog can disable its own button with a reason on it, saying exactly what the
-// server would have refused.
+// A single path segment - one file's name, no directories. Returns why the name can't be used, or
+// null when it can - which is how the editor's naming dialog can disable its own button with a
+// reason on it, saying exactly what the server would have refused. Snippets are named by this
+// rule (one flat store); saved patterns use patternPathProblem below, which allows folders.
 function patternNameProblem(name) {
   const clean = String(name ?? '').trim();
   if (!clean) return 'give it a name';
@@ -219,6 +219,34 @@ function patternNameProblem(name) {
   return null;
 }
 
+/**
+ * A saved pattern's name, which doubles as its path under patterns/ (see patternFilePath) and so
+ * may name folders: "techno/stomper" is a pattern called "stomper" filed under "techno". Every
+ * segment has to pass the single-name rule above, which is what keeps ".." and dotfiles out - a
+ * name arriving from a request never gets to climb out of the patterns directory. Forward slash
+ * is the one separator, on every platform, because this string is also the name a playlist stores
+ * and a set has to travel between machines.
+ */
+function patternPathProblem(name) {
+  const clean = String(name ?? '').trim();
+  if (!clean) return 'give it a name';
+  if (clean.length > 255) return 'that name is too long';
+  if (clean.includes('\\')) return 'use "/" to put it in a folder';
+  const parts = clean.split('/');
+  if (parts.length > 16) return 'that is too many folders deep';
+  for (const part of parts) {
+    // A blank segment is a doubled, leading or trailing slash - all three mean the name is
+    // mis-typed rather than nested, and saying so beats quietly writing somewhere else.
+    if (!part.trim()) return 'a folder name cannot be empty';
+    const problem = patternNameProblem(part);
+    if (problem) return part === clean ? problem : `"${part}": ${problem}`;
+  }
+  return null;
+}
+
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { parseMeta, deriveLabel, displayLabel, matchesQuery, scanComments, patternNameProblem, stripPatternStates };
+  module.exports = {
+    parseMeta, deriveLabel, displayLabel, matchesQuery, scanComments,
+    patternNameProblem, patternPathProblem, stripPatternStates,
+  };
 }

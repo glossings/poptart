@@ -1,13 +1,20 @@
 'use strict';
 
-// Tempo/key metadata out of a song file's own tags (songs phase 4): ID3v2 TBPM/TKEY (mp3, and
-// the id3 chunk wav/aiff files carry), vorbis comments (flac), and the mp4 ilst atoms (m4a/aac).
-// All sync and bounded - a handful of header-sized reads, never the audio - so the song/load
-// route can call it inline. Detection is by magic bytes, not extension: a "wav" that is really
-// an mp3 tags like what it is. Anything unreadable or untagged is { bpm: null, key: null } -
-// tags are a convenience, and the deck's bpm stays user-editable either way.
+// Descriptive metadata out of a song file's own tags (songs phase 4): title/artist/album plus
+// tempo and key, from ID3v2 (mp3, and the id3 chunk wav/aiff files carry), the container's own
+// text chunks (RIFF LIST/INFO, AIFF NAME/AUTH), vorbis comments (flac), and the mp4 ilst atoms
+// (m4a/aac). All sync and bounded - a handful of header-sized reads, never the audio - so the
+// song/load route can call it inline. Detection is by magic bytes, not extension: a "wav" that
+// is really an mp3 tags like what it is.
+//
+// Every field is always present and null when absent, so callers can destructure without
+// guarding for missing keys; tags are a convenience, and the deck's bpm stays user-editable
+// either way.
 
 const fs = require('node:fs');
+
+/** The shape every parser in here returns, and what an untagged or unreadable file reads as. */
+const noTags = () => ({ title: null, artist: null, album: null, bpm: null, key: null });
 
 // A parsed bpm has to be a plausible native tempo; TKEY-style keys are short ("F#m", "11B").
 // Values outside that are tagging noise, and null (manual entry) beats noise.
@@ -17,6 +24,26 @@ function cleanBpm(n) {
 function cleanKey(s) {
   const key = String(s ?? '').trim();
   return key && key.length <= 12 ? key : null;
+}
+
+// Free text is whatever a tagger wrote, so it gets the least trust of the three: a NUL ends it
+// (padding in fixed-width chunk fields, and the multi-value separator ID3v2.4 allows - the first
+// value is the one we want), and the length cap keeps a corrupt or hostile frame from handing the
+// UI a megabyte of "title".
+const TEXT_CAP = 300;
+function cleanText(s) {
+  const raw = String(s ?? '');
+  const z = raw.indexOf('\0');
+  const text = (z < 0 ? raw : raw.slice(0, z)).trim();
+  return text ? text.slice(0, TEXT_CAP).trim() : null;
+}
+
+// Merge a second read over a first, keeping whatever the second actually found. Used where one
+// file can carry two tags at once and one of them is the more authoritative.
+function overlay(base, over) {
+  const out = { ...base };
+  for (const field of Object.keys(out)) if (over[field] != null) out[field] = over[field];
+  return out;
 }
 
 // --- ID3v2 ---
@@ -56,9 +83,14 @@ function id3Text(payload) {
   return text.replace(/\0+$/, '').trim();
 }
 
-/** Parse an ID3v2 tag sitting at the start of `buf`. Returns { bpm, key } (nulls when absent). */
+// Which frame carries which field. v2.2 ids are three characters, everything later is four;
+// the frame bodies are identical text frames either way.
+const ID3_FIELDS_V22 = { TT2: 'title', TP1: 'artist', TAL: 'album', TBP: 'bpm', TKE: 'key' };
+const ID3_FIELDS = { TIT2: 'title', TPE1: 'artist', TALB: 'album', TBPM: 'bpm', TKEY: 'key' };
+
+/** Parse an ID3v2 tag sitting at the start of `buf`. Returns the five-field shape, nulls when absent. */
 function parseId3(buf) {
-  if (buf.length < 10 || buf.toString('latin1', 0, 3) !== 'ID3') return { bpm: null, key: null };
+  if (buf.length < 10 || buf.toString('latin1', 0, 3) !== 'ID3') return noTags();
   const major = buf[3];
   const flags = buf[5];
   const tagSize = SYNCSAFE(buf, 6);
@@ -69,12 +101,13 @@ function parseId3(buf) {
     if (major >= 4) at += Math.max(4, SYNCSAFE(body, 0));
     else at += 4 + body.readUInt32BE(0);
   }
-  const wantBpm = major === 2 ? 'TBP' : 'TBPM';
-  const wantKey = major === 2 ? 'TKE' : 'TKEY';
+  const fields = major === 2 ? ID3_FIELDS_V22 : ID3_FIELDS;
   const idLen = major === 2 ? 3 : 4;
   const headLen = major === 2 ? 6 : 10;
-  let bpm = null;
-  let key = null;
+  const out = noTags();
+  // The loop runs to the end of the frames rather than stopping once it has what it came for:
+  // with five fields in play an early exit would almost never fire, since few tags carry all of
+  // them, so it bought nothing while quietly making a late duplicate frame unreachable.
   while (at + headLen <= body.length) {
     const id = body.toString('latin1', at, at + idLen);
     if (!/^[A-Z0-9]+$/.test(id)) break; // padding (or a torn tag) - nothing further to read
@@ -83,12 +116,15 @@ function parseId3(buf) {
     if (size < 0 || at + headLen + size > body.length) break;
     let payload = body.subarray(at + headLen, at + headLen + size);
     if (major === 4 && (body[at + 9] & 0x02)) payload = deUnsync(payload); // frame-level unsync
-    if (id === wantBpm) bpm = cleanBpm(parseFloat(id3Text(payload)));
-    if (id === wantKey) key = cleanKey(id3Text(payload));
-    if (bpm != null && key != null) break;
+    const field = fields[id];
+    if (field) {
+      const text = id3Text(payload);
+      out[field] = field === 'bpm' ? cleanBpm(parseFloat(text))
+        : field === 'key' ? cleanKey(text) : cleanText(text);
+    }
     at += headLen + size;
   }
-  return { bpm, key };
+  return out;
 }
 
 // --- container walks (all on an open fd, reading only what each header names) ---
@@ -103,13 +139,39 @@ const ID3_READ_CAP = 2 * 1024 * 1024; // TBPM/TKEY sit early; never slurp a tag'
 
 function tagsFromId3At(fd, at) {
   const head = readAt(fd, at, 10);
-  if (head.length < 10 || head.toString('latin1', 0, 3) !== 'ID3') return { bpm: null, key: null };
+  if (head.length < 10 || head.toString('latin1', 0, 3) !== 'ID3') return noTags();
   const size = Math.min(SYNCSAFE(head, 6), ID3_READ_CAP);
   return parseId3(readAt(fd, at, 10 + size));
 }
 
-// RIFF (wav, little-endian sizes) and FORM (aiff, big-endian): scan chunks for an id3 chunk.
+const TEXT_CHUNK_CAP = 4 * 1024; // one chunk's worth of text; cleanText trims it far shorter
+const INFO_LIST_CAP = 64 * 1024; // an INFO list is a handful of short strings, never more
+
+// RIFF LIST/INFO: 'INFO' then plain NUL-terminated latin1 chunks, by the usual convention
+// INAM/IART/IPRD for title/artist/album. First writer of a field wins, as in a vorbis block.
+function tagsFromRiffInfo(buf) {
+  const out = noTags();
+  if (buf.length < 4 || buf.toString('latin1', 0, 4) !== 'INFO') return out;
+  let at = 4;
+  for (let hops = 0; hops < 512 && at + 8 <= buf.length; hops++) {
+    const id = buf.toString('latin1', at, at + 4);
+    const size = buf.readUInt32LE(at + 4);
+    const field = id === 'INAM' ? 'title' : id === 'IART' ? 'artist' : id === 'IPRD' ? 'album' : null;
+    if (field && out[field] == null) {
+      out[field] = cleanText(buf.toString('latin1', at + 8, Math.min(at + 8 + size, buf.length)));
+    }
+    at += 8 + size + (size % 2);
+  }
+  return out;
+}
+
+// RIFF (wav, little-endian sizes) and FORM (aiff, big-endian): scan chunks for an id3 chunk and
+// for the container's own text chunks. Both can be present in one file - an editor writes
+// LIST/INFO or NAME/AUTH, a tagger adds id3 - so collect both and let the id3 chunk win where
+// they overlap: it is the richer, more deliberately written tag.
 function tagsFromChunks(fd, littleEndian) {
+  const out = noTags();
+  let fromId3 = null;
   let at = 12;
   const end = fs.fstatSync(fd).size;
   for (let hops = 0; hops < 512 && at + 8 <= end; hops++) {
@@ -117,10 +179,19 @@ function tagsFromChunks(fd, littleEndian) {
     if (head.length < 8) break;
     const id = head.toString('latin1', 0, 4);
     const size = littleEndian ? head.readUInt32LE(4) : head.readUInt32BE(4);
-    if (id.toLowerCase().trim() === 'id3') return tagsFromId3At(fd, at + 8);
+    if (id.toLowerCase().trim() === 'id3') {
+      fromId3 = tagsFromId3At(fd, at + 8);
+    } else if (littleEndian && id === 'LIST') {
+      const list = tagsFromRiffInfo(readAt(fd, at + 8, Math.min(size, INFO_LIST_CAP)));
+      for (const field of ['title', 'artist', 'album']) out[field] ??= list[field];
+    } else if (!littleEndian && (id === 'NAME' || id === 'AUTH')) {
+      const text = cleanText(readAt(fd, at + 8, Math.min(size, TEXT_CHUNK_CAP)).toString('latin1'));
+      if (id === 'NAME') out.title ??= text;
+      else out.artist ??= text;
+    }
     at += 8 + size + (size % 2); // chunks are word-aligned
   }
-  return { bpm: null, key: null };
+  return fromId3 ? overlay(out, fromId3) : out;
 }
 
 // FLAC metadata blocks: type 4 is the vorbis comment block.
@@ -134,12 +205,11 @@ function tagsFromFlac(fd) {
     if (head[0] & 0x80) break; // last-block flag
     at += 4 + size;
   }
-  return { bpm: null, key: null };
+  return noTags();
 }
 
 function parseVorbisComments(buf) {
-  let bpm = null;
-  let key = null;
+  const out = noTags();
   try {
     let at = 4 + buf.readUInt32LE(0); // vendor string
     const count = buf.readUInt32LE(at);
@@ -152,11 +222,14 @@ function parseVorbisComments(buf) {
       if (eq < 0) continue;
       const name = line.slice(0, eq).toUpperCase();
       const value = line.slice(eq + 1);
-      if (bpm == null && (name === 'BPM' || name === 'TEMPO')) bpm = cleanBpm(parseFloat(value));
-      if (key == null && (name === 'INITIALKEY' || name === 'INITIAL_KEY' || name === 'KEY')) key = cleanKey(value);
+      if (out.title == null && name === 'TITLE') out.title = cleanText(value);
+      if (out.artist == null && name === 'ARTIST') out.artist = cleanText(value);
+      if (out.album == null && name === 'ALBUM') out.album = cleanText(value);
+      if (out.bpm == null && (name === 'BPM' || name === 'TEMPO')) out.bpm = cleanBpm(parseFloat(value));
+      if (out.key == null && (name === 'INITIALKEY' || name === 'INITIAL_KEY' || name === 'KEY')) out.key = cleanKey(value);
     }
   } catch { /* a torn comment block reads as untagged */ }
-  return { bpm, key };
+  return out;
 }
 
 // MP4/M4A: find moov (top-level box walk on the fd), read it whole (small - it's the index, not
@@ -181,11 +254,11 @@ function tagsFromMp4(fd) {
       const udta = mp4Child(moov, 'udta');
       const meta = udta && mp4Child(udta, 'meta');
       const ilst = meta && mp4Child(meta.subarray(4), 'ilst'); // skip meta's version/flags
-      return ilst ? tagsFromIlst(ilst) : { bpm: null, key: null };
+      return ilst ? tagsFromIlst(ilst) : noTags();
     }
     at += size;
   }
-  return { bpm: null, key: null };
+  return noTags();
 }
 
 function mp4Child(buf, want) {
@@ -204,49 +277,58 @@ function mp4DataPayload(item) {
   return data && data.length >= 8 ? data.subarray(8) : null; // past type-indicator + locale
 }
 
+// The text atoms are named with a leading copyright sign, which is the single byte 0xa9 in the
+// latin1 the atom ids are compared as - spelled with an escape here so the source cannot be
+// mistaken for (or re-saved as) the two-byte UTF-8 encoding of the same character, which would
+// never match a real file.
+const MP4_TEXT_FIELDS = { '\xa9nam': 'title', '\xa9ART': 'artist', '\xa9alb': 'album' };
+
 function tagsFromIlst(ilst) {
-  let bpm = null;
-  let key = null;
+  const out = noTags();
   let at = 0;
   while (at + 8 <= ilst.length) {
     const size = ilst.readUInt32BE(at);
     if (size < 8) break;
     const type = ilst.toString('latin1', at + 4, at + 8);
     const item = ilst.subarray(at + 8, at + size);
-    if (type === 'tmpo') {
+    const textField = MP4_TEXT_FIELDS[type];
+    if (textField) {
       const payload = mp4DataPayload(item);
-      if (payload && payload.length >= 2) bpm = cleanBpm(payload.readUInt16BE(0));
+      if (payload) out[textField] = cleanText(payload.toString('utf8'));
+    } else if (type === 'tmpo') {
+      const payload = mp4DataPayload(item);
+      if (payload && payload.length >= 2) out.bpm = cleanBpm(payload.readUInt16BE(0));
     } else if (type === '----') {
       const name = mp4Child(item, 'name');
       if (name && name.subarray(4).toString('utf8').toLowerCase() === 'initialkey') {
         const payload = mp4DataPayload(item);
-        if (payload) key = cleanKey(payload.toString('utf8'));
+        if (payload) out.key = cleanKey(payload.toString('utf8'));
       }
     }
     at += size;
   }
-  return { bpm, key };
+  return out;
 }
 
 /**
- * Read a song file's tempo/key tags: { bpm, key }, each null when absent or implausible.
- * Never throws - an unreadable or unrecognized file is simply untagged.
+ * Read a song file's tags: { title, artist, album, bpm, key }, each null when absent or
+ * implausible. Never throws - an unreadable or unrecognized file is simply untagged.
  */
 function readSongTags(filePath) {
   let fd = null;
   try {
     fd = fs.openSync(filePath, 'r');
     const magic = readAt(fd, 0, 12);
-    if (magic.length < 12) return { bpm: null, key: null };
+    if (magic.length < 12) return noTags();
     const four = magic.toString('latin1', 0, 4);
     if (four.startsWith('ID3')) return tagsFromId3At(fd, 0);
     if (four === 'RIFF' && magic.toString('latin1', 8, 12) === 'WAVE') return tagsFromChunks(fd, true);
     if (four === 'FORM') return tagsFromChunks(fd, false);
     if (four === 'fLaC') return tagsFromFlac(fd);
     if (magic.toString('latin1', 4, 8) === 'ftyp') return tagsFromMp4(fd);
-    return { bpm: null, key: null };
+    return noTags();
   } catch {
-    return { bpm: null, key: null };
+    return noTags();
   } finally {
     if (fd != null) fs.closeSync(fd);
   }
