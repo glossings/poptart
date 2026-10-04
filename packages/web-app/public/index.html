@@ -101,7 +101,12 @@
             <button id="deckAPlay" class="small deck-only" data-chord-title="{mod+enter}">&#9654; play</button>
             <button id="deckAUpdate" class="small deck-only" title="evaluate without changing play state">&#8635;</button>
             <button id="deckAKeep" class="small deck-only" title="leave DJ mode keeping THIS pane as the song (deck B is dropped)">&#9167; keep</button>
-            <button id="deckALoops" class="small deck-only deck-loop" title="arrangement loops: lit, the song's loop regions hold playback until released (and this button re-arms them); off, the song runs start to end and the deck stops there. DJ mode opens with loops off on both decks, and {app+l} is this button for whichever deck you are on">loop</button>
+            <button id="deckALoops" class="small deck-only deck-loop" title="arrangement loop regions: lit, the regions painted into this song hold playback until released (and this button re-arms them); off, the song runs start to end and the deck stops there. DJ mode opens with them off on both decks, and {app+l} is this button for whichever deck you are on">regions</button>
+            <span class="deck-head-gap"></span>
+            <button id="deckALoop" class="small deck-only deck-loop" title="loop the next stretch of this deck from where it is playing, like a player’s loop button - the length is beside it, and it holds until you press again. Works on a deck playing code and on one playing a file; nothing is written into the song">loop</button>
+            <button id="deckALoopHalve" class="small deck-only deck-loop-len-btn" title="halve the loop length (the loop you are hearing keeps its start and gets shorter)">&divide;2</button>
+            <span id="deckALoopLen" class="deck-loop-len" title="how long a loop on this deck is, in bars of its own tempo"></span>
+            <button id="deckALoopDouble" class="small deck-only deck-loop-len-btn" title="double the loop length (the loop you are hearing keeps its start and runs further)">&times;2</button>
           </div>
           <textarea id="editor" spellcheck="false">keys: n("0 2 3 <5 7>")
   .scale("F minor")
@@ -154,7 +159,12 @@
             <button id="deckBPlay" class="small" data-chord-title="{mod+enter} in this pane">▶ play</button>
             <button id="deckBUpdate" class="small" title="evaluate without changing play state">↻</button>
             <button id="deckBKeep" class="small" data-chord-title="leave DJ mode keeping THIS pane as the song - it is promoted with zero engine churn ({mod+shift+enter})">&#9167; keep</button>
-            <button id="deckBLoops" class="small deck-loop" title="arrangement loops: lit, the song's loop regions hold playback until released (and this button re-arms them); off, the song runs start to end and the deck stops there. DJ mode opens with loops off on both decks, and {app+l} is this button for whichever deck you are on">loop</button>
+            <button id="deckBLoops" class="small deck-loop" title="arrangement loop regions: lit, the regions painted into this song hold playback until released (and this button re-arms them); off, the song runs start to end and the deck stops there. DJ mode opens with them off on both decks, and {app+l} is this button for whichever deck you are on">regions</button>
+            <span class="deck-head-gap"></span>
+            <button id="deckBLoop" class="small deck-loop" title="loop the next stretch of this deck from where it is playing, like a player’s loop button - the length is beside it, and it holds until you press again. Works on a deck playing code and on one playing a file; nothing is written into the song">loop</button>
+            <button id="deckBLoopHalve" class="small deck-loop-len-btn" title="halve the loop length (the loop you are hearing keeps its start and gets shorter)">&divide;2</button>
+            <span id="deckBLoopLen" class="deck-loop-len" title="how long a loop on this deck is, in bars of its own tempo"></span>
+            <button id="deckBLoopDouble" class="small deck-loop-len-btn" title="double the loop length (the loop you are hearing keeps its start and runs further)">&times;2</button>
           </div>
           <textarea id="deckBEditor" spellcheck="false"></textarea>
           <!-- Songs phase 3: when deck B holds a disk FILE this replaces the editor - a zoomed
@@ -562,7 +572,7 @@
           </div>
           <div class="mix-actions">
             <button id="mixStack" class="small" title="stack the decks: deck B's waveform directly under deck A's, playheads on one vertical line, so the beats of the two can be read against each other (side by side again with another press)">&#8645;</button>
-            <button id="mixLearn" class="small" title="MIDI learn: arm this, then click a control and move the hardware one that should drive it, over and over; click again or press esc to finish. Alt+click a control to unbind it. Learnable: the crossfader, every channel strip and the FX unit (the on pad binds latched, shift+click it for the momentary hold pad; the plugin picker binds the step-forward pad, shift+click for back), and on each deck cue, play, sync, 1×, key, Q, loop, the tempo slider and its range, the platter (click the waveform, then spin a jog wheel - shift+click for its coarse search mode, alt-free), the drag buttons (shift+click binds the wheel's pitch-bend instead), the jog steps, the headphone button and the ⏮/⏭ queue steps">midi</button>
+            <button id="mixLearn" class="small" title="MIDI learn: arm this, then click a control and move the hardware one that should drive it, over and over; click again or press esc to finish. Alt+click a control to unbind it. Learnable: the crossfader, every channel strip and the FX unit (the on pad binds latched, shift+click it for the momentary hold pad; the plugin picker binds the step-forward pad, shift+click for back), and on each deck cue, play, sync, 1×, key, Q, the regions switch, the loop and its two length buttons, the tempo slider and its range, the platter (click the waveform, then spin a jog wheel - shift+click for its coarse search mode, alt-free), the drag buttons (shift+click binds the wheel's pitch-bend instead), the jog steps, the headphone button and the ⏮/⏭ queue steps">midi</button>
           </div>
         </div>
         <div class="mix-meter-col" id="mixMeterColB"></div>

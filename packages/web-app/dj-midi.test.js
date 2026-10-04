@@ -35,7 +35,7 @@ const CONSTS = ['MIX_MIDI_KNOBS', 'MIX_MIDI_HOLD', 'MIX_MIDI_PRESS', 'MIX_MIDI_D
 const DEPS = ['mixState', 'songDecks', 'songMasterDeck', 'mixMidiDown', 'applyMixTargets',
   'songScrub', 'songNudge', 'songCue', 'songTogglePlay', 'songSetMeta', 'songMultNext',
   'mixActionNotify', 'songBend', 'deckTempoApply', 'mixFxSet', 'mixFxStep',
-  'setDeckLoops', 'deckLoopsOn'];
+  'setDeckLoops', 'deckLoopsOn', 'deckLoopApply', 'deckLoopLive'];
 
 function grabFn(name) {
   const at = SRC.indexOf(`function ${name}(`);
@@ -64,7 +64,7 @@ const makeMidi = new Function(...DEPS, `
  * A desk with `songs` loaded (deck letters), and a log of everything the dispatch reached for.
  * `master` is the deck holding the grid, `override` the tempo migration's held bpm.
  */
-function rig({ songs = ['a', 'b'], master = null, override = null, playing = true, phones = {}, fx = {} } = {}) {
+function rig({ songs = ['a', 'b'], master = null, override = null, playing = true, phones = {}, fx = {}, loops = {} } = {}) {
   const log = [];
   const mixState = {
     tempoOverride: override,
@@ -78,6 +78,7 @@ function rig({ songs = ['a', 'b'], master = null, override = null, playing = tru
   const songDecks = { a: null, b: null };
   for (const d of songs) songDecks[d] = { playing, sync: false, keylock: false, syncMult: 'auto' };
   const deckLoopsOn = { a: true, b: true };
+  const looping = { a: null, b: null, ...loops };
   const api = makeMidi(
     mixState,
     songDecks,
@@ -99,6 +100,8 @@ function rig({ songs = ['a', 'b'], master = null, override = null, playing = tru
     (dir) => { log.push(['fxstep', dir]); return Promise.resolve(); },
     (deck, on) => log.push(['loops', deck, on]),
     deckLoopsOn,
+    (deck, patch) => log.push(['loop', deck, patch]),
+    (deck) => looping[deck],
   );
   api.log = log;
   api.state = mixState;
@@ -277,15 +280,48 @@ test('bend speaks the platter convention: 64 still, either side signed ticks', (
   assert.deepEqual(m.log, [['bend', 'b', 0], ['bend', 'b', 2], ['bend', 'b', -2]]);
 });
 
-test('quant, loop and the range switch are press buttons on the deck', () => {
+test('quant, regions and the range switch are press buttons on the deck', () => {
   const m = rig();
   m.mixMidiButton('a', 'quant', true);
-  m.mixMidiButton('a', 'loop', true);
+  m.mixMidiButton('a', 'regions', true);
   m.mixMidiButton('a', 'temporange', true);
   assert.deepEqual(m.log, [
     ['meta', 'a', { quantize: false }], // the rig's song has no quantize key - reads as on, toggles off
     ['loops', 'a', false], // deckLoopsOn starts true
     ['tempo', 'a', { range: 10 }], // 6 -> 10 -> 16 -> 100 -> 6
+  ]);
+});
+
+test('the loop pad arms a loop on a deck that has none and ends the one on a deck that has', () => {
+  // The pad is a toggle against the deck's OWN truth, not against a flag of its own: a loop
+  // armed from the screen is one the pad ends, and the other way round.
+  const idle = rig();
+  idle.mixMidiButton('a', 'loop', true);
+  assert.deepEqual(idle.log, [['loop', 'a', { on: true }]]);
+  const held = rig({ loops: { b: { from: 4, to: 8 } } });
+  held.mixMidiButton('b', 'loop', true);
+  assert.deepEqual(held.log, [['loop', 'b', { on: false }]]);
+});
+
+test('the length pads halve and double, and say which deck', () => {
+  const m = rig();
+  m.mixMidiButton('a', 'loophalve', true);
+  m.mixMidiButton('b', 'loopdouble', true);
+  assert.deepEqual(m.log, [['loop', 'a', { scale: 0.5 }], ['loop', 'b', { scale: 2 }]]);
+});
+
+test('the loop pads act on the press, not the release', () => {
+  // Through the real dispatch, where the edge gate is: a pad sends 127 then 0, and a loop that
+  // ended on the release would be a loop you could only hear while holding the button down.
+  const m = rig();
+  for (const name of ['loop', 'loophalve', 'loopdouble']) {
+    m.mixMidiApply(`a:${name}`, 1);
+    m.mixMidiApply(`a:${name}`, 0);
+  }
+  assert.deepEqual(m.log, [
+    ['loop', 'a', { on: true }],
+    ['loop', 'a', { scale: 0.5 }],
+    ['loop', 'a', { scale: 2 }],
   ]);
 });
 

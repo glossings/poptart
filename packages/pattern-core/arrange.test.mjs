@@ -19,6 +19,7 @@ import {
   reconcileArrangement,
   inSpans,
   ArrangeClock,
+  ARRANGE_HOLD,
   ClipClock,
   clipsOfLabel,
   songSteps,
@@ -331,6 +332,86 @@ test('ArrangeClock.setLoops: on again arms every region ahead, released ones inc
   assert.equal(off.endCycle(), 8);
   assert.equal(off.rebuilt({ regions: [{ name: 'A', start: 2, end: 4 }] }, 3).loopsOn, false, 'a rebuild keeps the toggle');
   assert.equal(off.setLoops(false, 3), false, 'setting what it already is is a no-op');
+});
+
+// --- the desk's performance loop (the deck's loop button) -------------------------------------
+
+test('ArrangeClock.setHold: the playhead is held inside the window, wherever the regions are', () => {
+  const clock = new ArrangeClock({ end: 32, regions: [{ name: 'A', start: 0, end: 8 }] });
+  clock.release(0); // out of A, running on
+  clock.setHold({ start: 10, end: 14 }, 9);
+  assert.equal(clock.posAt(9), 9, 'arming moves nothing');
+  assert.equal(clock.posAt(13), 13, 'it runs in');
+  assert.equal(clock.posAt(15), 11, 'and wraps at the end');
+  assert.equal(clock.posAt(19), 11, 'every time round');
+  assert.equal(clock.stateAt(15).looping, ARRANGE_HOLD);
+  assert.equal(clock.endCycle(), null, 'a held deck has no end to stop at');
+  // The editor's twin draws the same playhead off a snapshot.
+  const twin = new ArrangeClock(clock.snapshot());
+  for (const c of [9, 13, 15, 19, 23.5]) assert.equal(twin.posAt(c), clock.posAt(c));
+});
+
+test('ArrangeClock.setHold: it holds with the written regions switched OFF, which is how the desk runs', () => {
+  const clock = new ArrangeClock({ end: 32, regions: [{ name: 'A', start: 0, end: 8 }], loopsOn: false });
+  assert.equal(clock.posAt(10), 10, 'A is passed over');
+  // The window starts BEHIND the playhead, so the first wrap takes it back to the window's top:
+  // 10, 11 and then round to 8 - the loop you asked for, entered from inside it.
+  clock.setHold({ start: 8, end: 12 }, 10);
+  assert.equal(clock.posAt(13), 9);
+  assert.equal(clock.posAt(17), 9, 'held all the same');
+  assert.equal(clock.loopsOn, false, 'and the toggle is untouched');
+});
+
+test('ArrangeClock.setHold: ending one runs on from where it had got to', () => {
+  const clock = new ArrangeClock({ end: 32 });
+  clock.setHold({ start: 4, end: 8 }, 4);
+  assert.equal(clock.posAt(13), 5, 'two laps in');
+  clock.setHold(null, 13);
+  assert.equal(clock.posAt(13), 5, 'ending it moves nothing');
+  assert.equal(clock.posAt(16), 8, 'and the song runs on past the window');
+  assert.equal(clock.endCycle(), 40);
+});
+
+test('ArrangeClock.setHold: halving under the hand pulls the playhead back inside, in phase', () => {
+  const clock = new ArrangeClock({ end: 32 });
+  clock.setHold({ start: 4, end: 8 }, 4);
+  assert.equal(clock.posAt(7), 7, 'three quarters through the window');
+  clock.setHold({ start: 4, end: 6 }, 7); // halve it: 7 is past the new end
+  assert.equal(clock.posAt(7), 5, 'back inside at the same phase, not at the top');
+  assert.equal(clock.posAt(8), 4, 'and it wraps on the new end');
+  // Doubling leaves the playhead alone - the loop simply runs further before it wraps.
+  clock.setHold({ start: 4, end: 12 }, 8);
+  assert.equal(clock.posAt(8), 4);
+  assert.equal(clock.posAt(15), 11);
+});
+
+test('ArrangeClock: a hold is let go of by name-less release, and survives a rebuild', () => {
+  const clock = new ArrangeClock({ end: 32, regions: [{ name: 'A', start: 20, end: 24 }] });
+  clock.setHold({ start: 4, end: 8 }, 4);
+  assert.equal(clock.release(7), ARRANGE_HOLD, 'ctrl+L lets go of the hold it is in');
+  assert.equal(clock.hold, null, 'and it is gone rather than remembered as released');
+  assert.equal(clock.posAt(9), 9);
+  clock.setHold({ start: 10, end: 12 }, 9);
+  const rebuilt = clock.rebuilt({ regions: [{ name: 'A', start: 20, end: 24 }] }, 10);
+  assert.deepEqual(rebuilt.hold, { start: 10, end: 12 }, 'an eval mid-loop does not drop the loop');
+  assert.equal(rebuilt.posAt(13), 11);
+});
+
+test('ArrangeClock.reset: a stop lets go of the hold as well as the wraps', () => {
+  const clock = new ArrangeClock({ end: 32 });
+  clock.setHold({ start: 4, end: 8 }, 4);
+  clock.reset();
+  assert.equal(clock.hold, null);
+  assert.equal(clock.posAt(9), 9, 'and the deck runs from the top rather than inside an old loop');
+});
+
+test('ArrangeClock.setHold: a window that is not one is no hold at all', () => {
+  const clock = new ArrangeClock({ end: 32 });
+  for (const bad of [{ start: 4, end: 4 }, { start: 8, end: 4 }, { start: 0, end: NaN }, null]) {
+    clock.setHold(bad, 0);
+    assert.equal(clock.hold, null, JSON.stringify(bad));
+  }
+  assert.equal(clock.posAt(9), 9);
 });
 
 test('ArrangeClock.seek: from that cycle on the song is at that bar, regions armed afresh', () => {

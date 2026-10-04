@@ -4768,6 +4768,25 @@ body.mix-on #deckAHead .deck-song {
   color: var(--accent);
   border-color: var(--accent);
 }
+/* The loop length, between its two buttons. Fixed width and tabular, because halving a loop under
+   the hand must not shove the buttons either side of it out from under the pointer. */
+.deck-loop-len {
+  min-width: 52px;
+  text-align: center;
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 10px;
+  color: var(--text-dim);
+}
+.deck-loop-len-btn {
+  min-width: 28px;
+  padding: 2px 4px;
+}
+/* A little air between the arrangement's regions switch and the loop controls: they both say
+   "loop" and they are not the same thing. */
+.deck-head-gap {
+  width: 6px;
+}
 
 #mixStrip {
   display: flex;

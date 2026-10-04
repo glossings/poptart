@@ -108,6 +108,10 @@ export const ARRANGE_DEFAULT_LEN = 8;
 // The name of the region a fresh arrangement loops over, and of the one a retired whole-song loop
 // is read as.
 export const ARRANGE_SONG_LOOP = 'song';
+// What stateAt reports while the playhead is inside a HOLD - the desk's performance loop (see
+// setHold). Not a region name: a hold is not in the arrangement and is never written to one, so
+// this is deliberately not something a user can name a region (labels are identifiers).
+export const ARRANGE_HOLD = '#hold';
 const EPS = 1e-9;
 
 const num = (s) => {
@@ -382,10 +386,20 @@ export function _arrange(str = '', opts = {}) {
  * time (the highlight grid asks cycles early) simply records the wraps early; a release cuts the
  * anchors past its cycle and they are walked again.
  */
+/** A hold window as the clock keeps it, or null for anything that is not one. */
+function holdOf(hold) {
+  if (!hold) return null;
+  const start = Math.max(0, Number(hold.start));
+  const end = Number(hold.end);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start + EPS) return null;
+  return { start, end };
+}
+
 export class ArrangeClock {
-  constructor({ end = 0, regions = [], anchors = null, loopsOn = true } = {}) {
+  constructor({ end = 0, regions = [], anchors = null, loopsOn = true, hold = null } = {}) {
     this.setEnd(end);
     this.loopsOn = loopsOn !== false;
+    this.hold = holdOf(hold);
     this.regions = (regions ?? [])
       .map((r) => ({ name: String(r.name), start: Math.max(0, Number(r.start)), end: Number(r.end) }))
       .filter((r) => Number.isFinite(r.start) && Number.isFinite(r.end) && r.end > r.start + EPS)
@@ -395,9 +409,14 @@ export class ArrangeClock {
       : [{ cycle: 0, pos: 0, released: new Set() }];
   }
 
-  /** Back to the top, every region armed - what a transport stop means. */
+  /**
+   * Back to the top, every region armed - what a transport stop means. A hold goes with it: the
+   * desk's loop is a live gesture on the music that was playing, and a deck restarted from the
+   * top inside a window somebody looped two songs ago is not what the button said it did.
+   */
   reset() {
     this.anchors = [{ cycle: 0, pos: 0, released: new Set() }];
+    this.hold = null;
   }
 
   /** Where the song ends (see arrangementEnd). No position depends on it, so it is simply set. */
@@ -425,7 +444,7 @@ export class ArrangeClock {
     const { pos, released } = this.stateAt(cycle);
     const names = new Set((regions ?? []).map((r) => String(r.name)));
     return new ArrangeClock({
-      end, regions, loopsOn: this.loopsOn,
+      end, regions, loopsOn: this.loopsOn, hold: this.hold,
       anchors: [{ cycle, pos, released: released.filter((n) => names.has(n)) }],
     });
   }
@@ -435,6 +454,7 @@ export class ArrangeClock {
     return {
       end: this.end,
       loopsOn: this.loopsOn,
+      hold: this.hold ? { ...this.hold } : null,
       regions: this.regions.map((r) => ({ ...r })),
       anchors: this.anchors.map((a) => ({ cycle: a.cycle, pos: a.pos, released: [...a.released] })),
     };
@@ -448,6 +468,10 @@ export class ArrangeClock {
 
   /** The region that will next wrap the playhead moving forward from `pos` under `released`, if any. */
   _loopFrom(pos, released) {
+    // A HOLD outranks everything: it is the desk's performance loop, put there by a hand on a
+    // button a moment ago, and it holds whether or not this deck's written regions are armed
+    // (on the desk they are not, by default) and whichever of them have been let go of.
+    if (this.hold && this.hold.end > pos + EPS) return { name: ARRANGE_HOLD, ...this.hold };
     if (!this.loopsOn) return null;
     let best = null;
     for (const r of this.regions) {
@@ -499,10 +523,47 @@ export class ArrangeClock {
   release(cycle) {
     const { pos, looping, released } = this.stateAt(cycle);
     if (!looping) return null;
+    // A hold is not a region and has no name to remember letting go of: it simply ends, which is
+    // what its own button does too.
+    if (looping === ARRANGE_HOLD) {
+      this.setHold(null, cycle);
+      return looping;
+    }
     const i = this._anchorIndexAt(cycle);
     const next = { cycle, pos, released: new Set([...released, looping]) };
     this.anchors.splice(i + 1, this.anchors.length, next);
     return looping;
+  }
+
+  /**
+   * The desk's performance loop: from `cycle` on, hold the song inside [start, end) however the
+   * arrangement is written - a player's loop button, which loops where the playhead IS rather
+   * than where a region was painted. `null` ends it and playback runs on from where it had got
+   * to inside the loop.
+   *
+   * Recorded like a release, and for the same reason: the clock may already have been walked
+   * (and the pattern scheduled) past this cycle under the old answer, so everything beyond it is
+   * dropped and walked again. The position is read under the OLD hold first, so arming, resizing
+   * and ending one never move the playhead.
+   */
+  setHold(hold, cycle = 0) {
+    const next = holdOf(hold);
+    const was = this.hold;
+    if (!next && !was) return null;
+    if (next && was && Math.abs(next.start - was.start) < EPS && Math.abs(next.end - was.end) < EPS) return this.hold;
+    const pos = this.posAt(cycle);
+    const i = this._anchorIndexAt(cycle);
+    const released = new Set(this.anchors[i].released);
+    this.hold = next;
+    const from = this.anchors[i] && Math.abs(this.anchors[i].cycle - cycle) < EPS ? i : i + 1;
+    // A playhead that is already PAST a shortened hold's end belongs back inside it, at the same
+    // phase it had - shortening a loop under the hand moves the music, which is the point of the
+    // gesture. (Lengthening one leaves the playhead where it is: the loop simply runs further.)
+    const at = next && pos >= next.end - EPS
+      ? next.start + ((pos - next.start) % (next.end - next.start) + (next.end - next.start)) % (next.end - next.start)
+      : pos;
+    this.anchors.splice(from, this.anchors.length, { cycle, pos: at, released });
+    return this.hold;
   }
 
   /**

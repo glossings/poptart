@@ -28588,6 +28588,7 @@ function deckHeadRender(state) {
       }
       document.getElementById(`deck${U}Loops`).classList.toggle('on', loopsOn);
     }
+    deckLoopRender(d, state?.deckLoop?.[d]);
   }
 }
 
@@ -29019,6 +29020,23 @@ function makeSongPane(deck) {
       }
     }
 
+    // The loop, where one is held: the stretch of track the deck is going round. Drawn UNDER the
+    // cue and the playhead and as a wash rather than a block, so the waveform inside it still
+    // reads - what it has to say is "this is where you are going round", which is a shape, not a
+    // pair of numbers.
+    const loop = P.mirror?.loop;
+    if (loop && dur && loop.to > t0 && loop.from < t0 + span) {
+      const x0 = (Math.max(loop.from, t0) - t0) * pxPerSec;
+      const x1 = (Math.min(loop.to, t0 + span) - t0) * pxPerSec;
+      ctx.fillStyle = rgbaFrom(ctx, accent, 0.14);
+      ctx.fillRect(x0, 0, Math.max(1, x1 - x0), h);
+      ctx.fillStyle = rgbaFrom(ctx, accent, 0.65);
+      for (const [edge, x] of [[loop.from, x0], [loop.to, x1]]) {
+        if (edge < t0 || edge > t0 + span) continue;
+        ctx.fillRect(Math.round(x) - 1, 0, 2, h);
+      }
+    }
+
     // The cue point: a marked line the playhead scrolls past, so where the CUE button will land
     // is visible before it is pressed. Warn-colored rather than accent - it must not read as
     // another playhead - with a flag at the top the way a hardware waveform display marks it.
@@ -29083,6 +29101,14 @@ function makeSongPane(deck) {
     const px = (P.playheadNow() / dur) * w;
     ctx.fillStyle = rgbaFrom(ctx, bg, 0.55); // what's already played sits dimmed behind the playhead
     ctx.fillRect(0, 0, px, h);
+    // The loop, where the whole track is in view: on the overview it is the one mark that says
+    // WHERE in the record you are going round, which the zoomed strip cannot show.
+    const loop = P.mirror?.loop;
+    if (loop) {
+      const lx = (loop.from / dur) * w;
+      ctx.fillStyle = rgbaFrom(ctx, accent, 0.3);
+      ctx.fillRect(lx, 0, Math.max(1.5, ((loop.to - loop.from) / dur) * w), h);
+    }
     const cue = P.mirror?.cueSec ?? 0;
     if (cue > 0) { // the top needs no marker - that is where an untouched cue already is
       const cx = Math.round((cue / dur) * w) + 0.5;
@@ -30498,7 +30524,54 @@ for (const deck of ['a', 'b']) {
   });
   mixLearnAttach(fader, `${deck}:tempo`);
   mixLearnAttach(rangeBtn, `${deck}:temporange`);
-  mixLearnAttach(loopBtn, `${deck}:loop`);
+  mixLearnAttach(loopBtn, `${deck}:regions`);
+
+  // ...and the performance loop beside it: the button, and the two that resize it.
+  const loopNow = document.getElementById(`deck${U}Loop`);
+  const halveBtn = document.getElementById(`deck${U}LoopHalve`);
+  const doubleBtn = document.getElementById(`deck${U}LoopDouble`);
+  const post = (body, say) => api('POST', '/api/mix/loop', { deck, ...body })
+    .then((r) => { deckLoopRender(deck, r); if (say) logLine(say(r)); })
+    .catch((e) => logLine(e.message ?? String(e), true));
+  loopNow.addEventListener('click', () => {
+    if (mixLearnArmed) return;
+    post({ on: !deckLoopNow[deck].on }, (r) => (r.on
+      ? `deck ${U} looping ${deckLoopLabel(r.beats)}`
+      : `deck ${U} loop out`));
+  });
+  halveBtn.addEventListener('click', () => { if (!mixLearnArmed) post({ scale: 0.5 }); });
+  doubleBtn.addEventListener('click', () => { if (!mixLearnArmed) post({ scale: 2 }); });
+  mixLearnAttach(loopNow, `${deck}:loop`);
+  mixLearnAttach(halveBtn, `${deck}:loophalve`);
+  mixLearnAttach(doubleBtn, `${deck}:loopdouble`);
+}
+
+// --- the deck's performance loop (the deck head's loop button and its two length buttons) -----
+//
+// Server state like the rest of the desk - the button only ever shows what the desk says, so a
+// learned pad and a click are the same gesture arriving by different roads. What the loop IS
+// depends on the deck (a clock hold for code, a scheduled wrap for a file); none of that is the
+// browser's business, which is why this end of it is three buttons and a label.
+const deckLoopNow = { a: { on: false, beats: 16 }, b: { on: false, beats: 16 } };
+
+/**
+ * A loop length as a musician would say it. Bars where it is bars (a bar is a cycle, four beats);
+ * beats below that, because "1/4 bar" is not what anyone counts.
+ */
+function deckLoopLabel(beats) {
+  const b = Number(beats);
+  if (!Number.isFinite(b) || b <= 0) return '';
+  if (b >= 4) return `${b / 4} bar${b === 4 ? '' : 's'}`;
+  if (b >= 1) return `${b} beat${b === 1 ? '' : 's'}`;
+  return `1/${Math.round(1 / b)} beat`;
+}
+
+function deckLoopRender(deck, loop) {
+  if (!loop) return;
+  deckLoopNow[deck] = { on: !!loop.on, beats: loop.beats };
+  const U = deck.toUpperCase();
+  document.getElementById(`deck${U}Loop`).classList.toggle('on', !!loop.on);
+  document.getElementById(`deck${U}LoopLen`).textContent = deckLoopLabel(loop.beats);
 }
 
 /**

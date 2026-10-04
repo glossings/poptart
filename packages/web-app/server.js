@@ -203,6 +203,10 @@ const mixState = {
   // holds the grid (or plays code), nothing while a synced song follows another deck (the
   // slider is inert there, as on hardware - the throw is remembered and lands on sync-off).
   deckTempo: { a: { frac: 0, range: 6 }, b: { frac: 0, range: 6 } },
+  // The per-deck performance loop (/api/mix/loop): how long the next loop will be, in beats of
+  // that deck's own time. Whether one is RUNNING is not kept here - it is the deck's own truth
+  // (a song deck's window, a livecoded deck's clock hold), and deckLoopState reads it from there.
+  deckLoop: { a: { beats: 16 }, b: { beats: 16 } },
   // The DJ FX unit (see the FX section below): one named CHAIN switched in as an insert per
   // deck. `chain` is the loaded chain's name, `assign` which decks it is inserted on
   // ('a' | 'ab' | 'b'), `knob` the 0..1 FX knob (the chain's `fx1`), `on` the latched pad and
@@ -387,6 +391,12 @@ function songMarkPaused(deck, posSec = null) {
   s.playing = false;
   if (s.endTimer) clearTimeout(s.endTimer);
   s.endTimer = null;
+  // The loop's WINDOW survives a pause (a player keeps its loop over one, and the button is
+  // still lit); only the wrap it had scheduled is called off.
+  if (s.loopTimer) clearTimeout(s.loopTimer);
+  if (s.loopApplyTimer) clearTimeout(s.loopApplyTimer);
+  s.loopTimer = null;
+  s.loopApplyTimer = null;
   songHandGridOver(deck); // a deck that has stopped playing is not the grid any more
 }
 
@@ -417,7 +427,15 @@ function songEndOfFile(deck, endAt) {
   mixNotify();
 }
 
-// Arm the end of the file. Re-armed on every start and seek (and, later, rate change).
+// Arm what happens NEXT on a playing deck: the end of the file, and the loop's wrap if one is
+// held. Re-armed together on every start, seek and rate change, because every one of those moves
+// when they fall.
+function songArmTimers(deck) {
+  songArmEndTimer(deck);
+  songArmLoopTimer(deck);
+}
+
+// Arm the end of the file.
 function songArmEndTimer(deck) {
   const s = songDecks[deck];
   if (!s) return;
@@ -435,6 +453,52 @@ function songArmEndTimer(deck) {
     s.endTimer = null;
     songEndOfFile(deck, endAt);
   }, Math.max(0, (secondsLeft - SONG_RELEASE_SEC) * 1000));
+}
+
+// How early the wrap's seek is SENT. The seek itself is timestamped for the exact moment the
+// playhead reaches the loop's end, so this only has to cover the trip to scsynth - but it is also
+// the window in which a rate change (a pitch fader, a nudge) can land after the message has gone
+// and leave the wrap a hair early or late, so it is as small as it can comfortably be.
+const SONG_LOOP_LEAD_SEC = 0.08;
+
+/**
+ * Arm the next wrap of a song deck's loop: send the seek that closes it, timestamped, and move
+ * the MODEL at the moment it lands rather than when it was sent - everything that reads the
+ * playhead (the pane's mirror, the drift servo, the end timer) has to believe the loop until the
+ * loop actually happens.
+ *
+ * The wrap re-pins the engine to the model every lap, so a looping deck cannot drift; and because
+ * the model's start time moves with it, the servo's settle window covers each wrap and no report
+ * measured on the far side of one is ever read as drift.
+ */
+function songArmLoopTimer(deck) {
+  const s = songDecks[deck];
+  if (!s) return;
+  if (s.loopTimer) clearTimeout(s.loopTimer);
+  if (s.loopApplyTimer) clearTimeout(s.loopApplyTimer);
+  s.loopTimer = null;
+  s.loopApplyTimer = null;
+  if (!s.playing || !s.loop || !(s.rate > 0) || !engine) return;
+  const now = engine.getTime();
+  const begin = Math.max(now, s.startSec); // a quantized start may not have begun yet
+  const left = Math.max(0, (begin - now) + (s.loop.to - songPlayheadSec(deck, begin)) / s.rate);
+  const wrapAt = now + left;
+  s.loopTimer = setTimeout(() => {
+    s.loopTimer = null;
+    if (!s.playing || !s.loop || !engine) return;
+    const to = s.loop.from;
+    try {
+      engine.songSeek(engineTrack(SONG_KEYS[deck]), to, wrapAt);
+    } catch { /* engine between restarts */ }
+    s.loopApplyTimer = setTimeout(() => {
+      s.loopApplyTimer = null;
+      if (!s.playing || !s.loop) return;
+      s.posSec = to;
+      s.startSec = wrapAt;
+      songArmTimers(deck); // the next lap
+      mixNotify(); // the pane mirrors the playhead itself - tell it the loop came round
+    }, Math.max(0, (wrapAt - engine.getTime()) * 1000));
+  }, Math.max(0, (left - SONG_LOOP_LEAD_SEC) * 1000));
 }
 
 // --- tempo sync + nudge + drift servo (songs phase 4; the math lives in song-sync.js) ---
@@ -541,7 +605,7 @@ function songApplyRate(deck) {
     s.startSec = now;
     s.rate = eff;
     songSendRate(deck);
-    songArmEndTimer(deck);
+    songArmTimers(deck);
   } else {
     s.rate = eff;
     if (s.playing && engine && !s.pendingRateTimer) {
@@ -605,7 +669,7 @@ function songNudge(deck, { hold, jog }) {
       s.posSec = to;
       s.startSec = engine.getTime();
       s.servo = 0;
-      songArmEndTimer(deck);
+      songArmTimers(deck);
     } else {
       s.posSec = to;
     }
@@ -662,7 +726,7 @@ function songCue(deck, hold) {
     s.startSec = startSec;
     s.playing = true;
     s.cueHeld = true;
-    songArmEndTimer(deck);
+    songArmTimers(deck);
     // eslint-disable-next-line no-console
     console.log(`[song] deck ${deck} cue press: ${wasPlaying ? 'playing -> back to cue' : 'paused -> cue set'} at ${s.cueSec.toFixed(3)}s (playhead was ${before.toFixed(3)}s, anchor ${s.anchorSec.toFixed(3)}s, bpm ${s.bpm})`);
   } else if (s.cueHeld) {
@@ -759,7 +823,7 @@ function songPlayDeck(deck, { pos, rate, now: startNow } = {}) {
     transport.startAt(startSec, 1 + songSync.gridPhase(from, songGridBpm(deck), s.anchorSec));
     syncVstTransport(); // plugins' host transport just jumped - don't wait out the 4s timer
   }
-  songArmEndTimer(deck);
+  songArmTimers(deck);
   mixNotify();
   return {
     deck, pos: from, rate: s.rate, startSec, master: takeGrid,
@@ -798,7 +862,7 @@ function songSeekTo(deck, posSec) {
       s.servo = 0; // the drift the trim was closing jumped away with the playhead
       songSendRate(deck);
     }
-    songArmEndTimer(deck);
+    songArmTimers(deck);
   } else {
     s.posSec = to;
   }
@@ -928,7 +992,7 @@ function songSetMeta(deck, patch) {
       engine.songStart(engineTrack(SONG_KEYS[deck]), pos, s.rate + s.servo, startSec, s.keylock ? 1 : 0);
       s.posSec = pos;
       s.startSec = startSec;
-      songArmEndTimer(deck);
+      songArmTimers(deck);
     }
   }
   if ('quantize' in patch) s.quantize = !!patch.quantize; // see songPlayDeck's `quant`
@@ -1016,6 +1080,146 @@ function deckTempoBpm(deck) {
   const s = songDecks[deck];
   if (s) return s.bpm ? s.bpm * s.rate : null;
   return transport ? transport.cps * 240 : null;
+}
+
+// --- the per-deck performance LOOP (/api/mix/loop and the `loop` / `loophalve` / `loopdouble`
+// MIDI pads) -------------------------------------------------------------------------------
+//
+// A player's loop button: hold the next N beats from where the playhead IS, and halve or double
+// that length under the hand. Nothing to do with the arrangement's written loop regions (the
+// deck head's `regions` button arms those) - this loops a deck that has no arrangement at all,
+// and it loops one whose regions are switched off, which on the desk they are by default.
+//
+// Both kinds of deck loop, by two mechanisms, because they keep time by two different things:
+//
+//   - a LIVECODE deck rides the song clock, so the loop is a HOLD on that clock (see
+//     ArrangeClock#setHold). The patterns are generated from clock positions, so a held clock IS
+//     a looped deck, exactly as a loop region is - no audio is moved, and the editor's playhead
+//     and highlighting follow because they read the same snapshot.
+//   - a SONG deck is a file under a playhead, so the loop is a SEEK scheduled for the moment the
+//     playhead reaches the end of the window. It is sample-accurate because the seek travels in
+//     a TIMESTAMPED bundle (engine.songSeek's targetTime - the same mechanism that lands a
+//     quantized start on the beat), so the wrap happens on the sample scsynth was told, not
+//     whenever Node's timer happened to fire. What Node's timer decides is only when to SEND.
+//
+// The length is in beats, laddered the way a player's is, and the deck's own beat is what counts:
+// a song deck's own bpm (so a 4-bar loop is 4 of the track's bars however it is being stretched),
+// a livecoded deck's cycle (a bar is a cycle, by definition - see BEATS_PER_CYCLE).
+const DECK_LOOP_BEATS = [0.25, 0.5, 1, 2, 4, 8, 16, 32, 64];
+// Four bars: long enough to be a passage of the music rather than a stutter, which is what a
+// loop is for most of the time it is used.
+const DECK_LOOP_DEFAULT_BEATS = 16;
+
+/** The nearest rung of the ladder to `beats`, so a halved or doubled length lands on one. */
+function deckLoopRung(beats) {
+  const want = Number(beats);
+  if (!Number.isFinite(want)) return DECK_LOOP_DEFAULT_BEATS;
+  return DECK_LOOP_BEATS.reduce((best, b) => (Math.abs(b - want) < Math.abs(best - want) ? b : best));
+}
+
+/**
+ * The window a loop armed NOW would hold, in the deck's own units - seconds into the file for a
+ * song deck, cycles into the arrangement for a livecoded one - or null where the deck has no
+ * beat to measure in.
+ *
+ * It begins at the BEAT the playhead is in, not at the playhead: a loop that starts mid-beat is
+ * one that will never line up with anything else on the desk. (A song deck with quantize off
+ * takes the playhead exactly, which is what that switch means everywhere else.)
+ */
+function deckLoopWindow(deck, beats) {
+  const s = songDecks[deck];
+  if (s) {
+    const bpm = songGridBpm(deck);
+    if (!(bpm > 0)) return null; // no grid, no beats to count
+    const beatSec = 60 / bpm;
+    const pos = songPlayheadSec(deck);
+    const from = s.quantize === false
+      ? pos
+      : s.anchorSec + Math.floor((pos - s.anchorSec) / beatSec) * beatSec;
+    return { from: Math.max(0, from), to: Math.max(0, from) + beats * beatSec };
+  }
+  const clock = arrangeClocks[deck];
+  if (!clock || !transport || !engine) return null;
+  const beatCyc = 1 / songSync.BEATS_PER_CYCLE;
+  const pos = clock.posAt(transport.cycleAt(engine.getTime()));
+  const from = Math.max(0, Math.floor(pos / beatCyc) * beatCyc);
+  return { from, to: from + beats * beatCyc };
+}
+
+/**
+ * The loop button and its two length buttons. Body: { on? (false ends it, true arms one here),
+ * beats? (a rung), scale? (2 or 0.5 - the x2 / div-2 buttons) }.
+ *
+ * Scaling while a loop is RUNNING keeps its start and moves its end, as a player does: the loop
+ * you are hearing gets longer or shorter rather than jumping somewhere else. Scaling with no
+ * loop running just picks the length the next one will be.
+ */
+function deckLoopApply(deck, { on, beats, scale } = {}) {
+  const want = mixState.deckLoop[deck];
+  if (beats !== undefined) want.beats = deckLoopRung(beats);
+  if (scale !== undefined) {
+    const by = Number(scale);
+    if (by !== 2 && by !== 0.5) throw new Error('mix/loop: scale must be 2 or 0.5');
+    const at = DECK_LOOP_BEATS.indexOf(want.beats);
+    want.beats = DECK_LOOP_BEATS[Math.min(DECK_LOOP_BEATS.length - 1, Math.max(0, at + (by === 2 ? 1 : -1)))];
+  }
+  const live = deckLoopLive(deck);
+  const arm = on === undefined ? !!live : !!on;
+  if (!arm) {
+    deckLoopSet(deck, null);
+  } else if (live && (beats !== undefined || scale !== undefined)) {
+    // Resizing the loop under the hand: the start stays where it was put.
+    deckLoopSet(deck, { from: live.from, to: live.from + want.beats * deckLoopBeatLen(deck) });
+  } else {
+    const window = deckLoopWindow(deck, want.beats);
+    if (!window) {
+      throw new Error(songDecks[deck]
+        ? `deck ${deck}'s song has no tempo to count beats in - give it a bpm in the pane`
+        : `deck ${deck} has nothing to loop yet`);
+    }
+    deckLoopSet(deck, window);
+  }
+  mixNotify();
+  return deckLoopState(deck);
+}
+
+/** One beat of the deck's own time, in whatever units its loop window is measured in. */
+function deckLoopBeatLen(deck) {
+  const bpm = songDecks[deck] ? songGridBpm(deck) : 0;
+  return bpm > 0 ? 60 / bpm : 1 / songSync.BEATS_PER_CYCLE;
+}
+
+/** The loop a deck is actually holding right now, in its own units, or null. */
+function deckLoopLive(deck) {
+  const s = songDecks[deck];
+  if (s) return s.loop ?? null;
+  const hold = arrangeClocks[deck]?.hold;
+  return hold ? { from: hold.start, to: hold.end } : null;
+}
+
+/** Put a loop window on a deck (null to end it), by whichever mechanism that deck loops with. */
+function deckLoopSet(deck, window) {
+  const s = songDecks[deck];
+  if (s) {
+    s.loop = window;
+    songArmTimers(deck);
+    return;
+  }
+  const clock = arrangeClocks[deck];
+  if (!clock) return;
+  const cycle = transport && engine && !transport.paused ? transport.cycleAt(engine.getTime()) : 0;
+  clock.setHold(window ? { start: window.from, end: window.to } : null, cycle);
+}
+
+/** What the desk frame says about a deck's loop: the button's state and the window it holds. */
+function deckLoopState(deck) {
+  const live = deckLoopLive(deck);
+  return {
+    on: !!live,
+    beats: mixState.deckLoop[deck].beats,
+    from: live?.from ?? null,
+    to: live?.to ?? null,
+  };
 }
 
 /**
@@ -1167,7 +1371,8 @@ async function songDetectKick(deck) {
 // channel, and it runs the gesture exactly as its own button does.
 const MIX_MIDI_KNOBS = ['trim', 'eqlo', 'eqmid', 'eqhi', 'djf', 'djres', 'fader'];
 const MIX_MIDI_HOLD = ['nudgedn', 'nudgeup', 'cue'];
-const MIX_MIDI_PRESS = ['jogdn', 'jogup', 'play', 'phones', 'sync', 'mult', 'keylock', 'quant', 'loop', 'temporange', 'next', 'prev'];
+const MIX_MIDI_PRESS = ['jogdn', 'jogup', 'play', 'phones', 'sync', 'mult', 'keylock', 'quant',
+  'regions', 'loop', 'loophalve', 'loopdouble', 'temporange', 'next', 'prev'];
 // `tempo` is the deck's pitch fader and `bend` the platter's pitch-bend mode - continuous like
 // the platter pair, but dispatched to their own gestures rather than through mixMidiValue.
 const MIX_MIDI_DECK_CTLS = [...MIX_MIDI_KNOBS, ...MIX_MIDI_HOLD, ...MIX_MIDI_PRESS, 'scrub', 'search', 'bend', 'tempo'];
@@ -1389,7 +1594,12 @@ function mixMidiButton(deck, name, down) {
     case 'sync': songSetMeta(deck, { sync: !s?.sync }); return;
     case 'keylock': songSetMeta(deck, { keylock: !s?.keylock }); return;
     case 'quant': songSetMeta(deck, { quantize: s?.quantize === false }); return;
-    case 'loop': setDeckLoops(deck, !deckLoopsOn[deck]); return;
+    case 'regions': setDeckLoops(deck, !deckLoopsOn[deck]); return;
+    // The performance loop: the pad arms one here or ends the one running, and the two
+    // length pads resize it under the hand (see deckLoopApply).
+    case 'loop': deckLoopApply(deck, { on: !deckLoopLive(deck) }); return;
+    case 'loophalve': deckLoopApply(deck, { scale: 0.5 }); return;
+    case 'loopdouble': deckLoopApply(deck, { scale: 2 }); return;
     case 'temporange': {
       const cur = mixState.deckTempo[deck].range;
       deckTempoApply(deck, { range: DECK_TEMPO_RANGES[(DECK_TEMPO_RANGES.indexOf(cur) + 1) % DECK_TEMPO_RANGES.length] });
@@ -1552,6 +1762,10 @@ function mixDeskBody() {
     // The decks' loop toggles: whether each deck's arrangement loop regions are armed at all
     // (see /api/arrangeLoops - DJ mode opens with both off, so songs run start to end).
     loops: { ...deckLoopsOn },
+    // ...and the performance loop on each deck: the button's state, its length in beats, and the
+    // window it is holding (seconds into the file on a song deck, cycles into the arrangement on
+    // a livecoded one - the pane that draws it knows which kind it is drawing).
+    deckLoop: { a: deckLoopState('a'), b: deckLoopState('b') },
     // The FX unit, plus the chain list the picker and the step pads walk.
     fx: { ...mixState.fx, chains: djFxChainNames() },
     link: linkState.enabled ? { peers: linkState.peers } : null,
@@ -1598,6 +1812,8 @@ function mixDeskBody() {
         keylock: s.keylock,
         quantize: s.quantize !== false, // the Q button: off = play answers the finger, not the grid
         nudge: s.nudge,
+        loop: s.loop ? { ...s.loop } : null, // the held window, in song seconds - the pane shades it
+
         // Confidence (0..1) when a fact is a phase 5 ESTIMATE rather than a tag/typed value -
         // the pane marks these; a manual edit clears them (see /api/song/meta).
         bpmDetected: s.bpmDetected ?? null,
@@ -6791,6 +7007,15 @@ const routes = {
     return { status: 200, body: deckTempoApply(deck, body) };
   },
 
+  // A deck's performance loop (see deckLoopApply): hold the next so-many beats from here, and
+  // resize it under the hand. Body: { deck, on? (true arms one, false ends it), beats? (a rung
+  // of the ladder), scale? (2 or 0.5 - the length buttons) }.
+  'POST /api/mix/loop': async (body) => {
+    if (!transport) throw new Error(engineError ?? 'engine not loaded');
+    const deck = body.deck === 'b' ? 'b' : 'a';
+    return { status: 200, body: { deck, ...deckLoopApply(deck, body) } };
+  },
+
   // The DJ FX unit's live controls. Body, all optional: { chain (a chain's name, or null to
   // clear the unit), on, held, knob (0..1 - the chain's `fx1`), assign ('a'|'ab'|'b'),
   // editor (a 1-based slot, or true for the first: opens that plugin's own window) }.
@@ -7147,6 +7372,11 @@ const routes = {
       posSec: 0,
       startSec: 0,
       endTimer: null,
+      // The performance loop (see deckLoopApply): the window in SONG seconds, and the two timers
+      // that send each wrap's seek and move the model when it lands.
+      loop: null,
+      loopTimer: null,
+      loopApplyTimer: null,
       // The musical facts (songs phase 4) - the playlist item's word beats the file's tags,
       // and /api/song/meta edits any of it later.
       bpm,
