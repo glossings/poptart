@@ -30,7 +30,7 @@ const CLIENT = fs.readFileSync(path.join(__dirname, 'public', 'client.js'), 'utf
 // own dependencies - the same trick mix-gate-all.test.js and highlight-grid.test.js use.
 const NAMES = ['mixMidiValue', 'mixMidiScrubDelta', 'mixMidiApply', 'mixMidiButton', 'clockHeldByDesk'];
 const CONSTS = ['MIX_MIDI_KNOBS', 'MIX_MIDI_HOLD', 'MIX_MIDI_PRESS', 'MIX_MIDI_DECK_CTLS',
-  'MIX_MIDI_GLOBAL_PRESS', 'MIX_MIDI_GLOBAL_HOLD', 'MIX_MIDI_GLOBAL',
+  'MIX_MIDI_GLOBAL_PRESS', 'MIX_MIDI_GLOBAL_HOLD', 'MIX_MIDI_FX_POS', 'MIX_MIDI_GLOBAL',
   'SONG_SCRUB_TICK_SEC', 'SONG_SEARCH_TICK_SEC', 'FX_ASSIGNS', 'DECK_TEMPO_RANGES'];
 const DEPS = ['mixState', 'songDecks', 'songMasterDeck', 'mixMidiDown', 'applyMixTargets',
   'songScrub', 'songNudge', 'songCue', 'songTogglePlay', 'songSetMeta', 'songMultNext',
@@ -356,6 +356,58 @@ test('fxassign cycles a -> ab -> b, and the step pads walk the chain list', () =
   assert.deepEqual(m.log, [['fx', { assign: 'b' }], ['fxstep', 1], ['fxstep', -1]]);
 });
 
+// The three-way deck-select SWITCH, as opposed to the cycling pad above. A switch sends one
+// message per position and its message is a STATE, so these three targets are absolute and
+// deliberately not edge-detected - which is the whole bug: with one binding on a cycling pad, a
+// switch moved the unit onto whatever came next in the cycle rather than onto the deck printed
+// beside the position, and half its positions did nothing at all.
+test('each fxassign position puts the unit where the switch says, not one step on', () => {
+  const m = rig({ fx: { assign: 'ab' } });
+  m.mixMidiApply('fxassignb', 1);
+  m.mixMidiApply('fxassigna', 1);
+  m.mixMidiApply('fxassignab', 1);
+  assert.deepEqual(m.log, [['fx', { assign: 'b' }], ['fx', { assign: 'a' }], ['fx', { assign: 'ab' }]]);
+});
+
+test('a switch flipped back to a position it has been in before still lands', () => {
+  // The edge detection the PADS need is wrong here. A surface that sends no note-off when the
+  // switch leaves a position (and one that simply re-states where it is) would otherwise have
+  // the second visit read as "no edge" and swallowed - the switch would work once per position
+  // and then go dead, which is far worse than not working at all.
+  const m = rig({ fx: { assign: 'ab' } });
+  m.mixMidiApply('fxassigna', 1);
+  m.mixMidiApply('fxassignb', 1);
+  m.mixMidiApply('fxassigna', 1);
+  assert.deepEqual(m.log.map((e) => e[1].assign), ['a', 'b', 'a']);
+});
+
+test('a switch position leaving (its note-off) moves nothing', () => {
+  // Only the position being ENTERED says anything. Acting on the release too would move the unit
+  // onto the deck the switch just left, every time.
+  const m = rig({ fx: { assign: 'ab' } });
+  m.mixMidiApply('fxassigna', 0);
+  assert.deepEqual(m.log, []);
+});
+
+test('the switch positions the desk offers are the ones the server knows, and they are real assigns', () => {
+  // Three names spelled in two files: the menu that learns them and the table that dispatches
+  // them. A typo in either is a menu entry that arms a target the server refuses, which fails
+  // at bind time with nothing on screen to explain it.
+  // eslint-disable-next-line no-new-func
+  const { MIX_MIDI_FX_POS, FX_ASSIGNS } = new Function(
+    `${grabConst('MIX_MIDI_FX_POS')}\n${grabConst('FX_ASSIGNS')}\nreturn { MIX_MIDI_FX_POS, FX_ASSIGNS };`,
+  )();
+  const offered = [...CLIENT.matchAll(/mixLearnDo\('(fxassign[a-z]+)'/g)].map((m) => m[1]);
+  assert.deepEqual([...offered].sort(), Object.keys(MIX_MIDI_FX_POS).sort(),
+    'the desk offers a switch position the server has no target for, or the other way round');
+  for (const [target, assign] of Object.entries(MIX_MIDI_FX_POS)) {
+    assert.ok(FX_ASSIGNS.includes(assign), `${target} sets "${assign}", which is not an fx assign`);
+  }
+  // ...and every one of them is global, so the dispatch reads it as a deck-less target rather
+  // than slicing a deck letter off the front of its name.
+  assert.match(grabConst('MIX_MIDI_GLOBAL'), /Object\.keys\(MIX_MIDI_FX_POS\)/);
+});
+
 // --- who holds the clock ---
 
 test('the clock is the desk\'s while a migration holds it', () => {
@@ -424,7 +476,7 @@ test('the tempo ratio cycles the same way by pad and by click', () => {
 
 const LEARN_NAMES = ['mixMidiLearnable', 'handleMixMidi'];
 const LEARN_CONSTS = ['MIX_MIDI_HOLD', 'MIX_MIDI_PRESS', 'MIX_MIDI_GLOBAL_PRESS',
-  'MIX_MIDI_GLOBAL_HOLD', 'MIX_MIDI_GLOBAL', 'MIX_MIDI_BUTTONS',
+  'MIX_MIDI_GLOBAL_HOLD', 'MIX_MIDI_FX_POS', 'MIX_MIDI_GLOBAL', 'MIX_MIDI_BUTTONS',
   'midiKind', 'midiNum', 'midiSame', 'midiSay'];
 const LEARN_DEPS = ['mixMidiMonitor', 'mixMidiSaid', 'mixMidiLearn', 'settings', 'saveSettings',
   'eventLogQueue', 'mixMidiDrive'];

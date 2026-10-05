@@ -1394,7 +1394,14 @@ const MIX_MIDI_DECK_CTLS = [...MIX_MIDI_KNOBS, ...MIX_MIDI_HOLD, ...MIX_MIDI_PRE
 // flavors hardware has); fxnext/fxprev step the chain list; fxknob is the unit's knob (`fx1`).
 const MIX_MIDI_GLOBAL_PRESS = ['fxon', 'fxnext', 'fxprev', 'fxassign'];
 const MIX_MIDI_GLOBAL_HOLD = ['fxhold'];
-const MIX_MIDI_GLOBAL = new Set(['xf', 'fxknob', ...MIX_MIDI_GLOBAL_PRESS, ...MIX_MIDI_GLOBAL_HOLD]);
+// `fxassign` above is the one-BUTTON form: a press cycles A -> A+B -> B, which is what a surface
+// with a single assign pad can drive. A surface with a three-position SWITCH cannot: it sends a
+// different message per position, so one binding only ever hears one of the three, and flipping
+// the switch cycled the unit onto whatever came next instead of the deck printed on the switch.
+// These are that switch - one target per position, each saying absolutely where the unit goes.
+const MIX_MIDI_FX_POS = { fxassigna: 'a', fxassignb: 'b', fxassignab: 'ab' };
+const MIX_MIDI_GLOBAL = new Set(['xf', 'fxknob', ...MIX_MIDI_GLOBAL_PRESS, ...MIX_MIDI_GLOBAL_HOLD,
+  ...Object.keys(MIX_MIDI_FX_POS)]);
 const MIX_MIDI_TARGETS = new Set([...MIX_MIDI_GLOBAL,
   ...['a', 'b'].flatMap((d) => MIX_MIDI_DECK_CTLS.map((c) => `${d}:${c}`))]);
 let mixMidiLearn = null; // { target, finish, timer } while a learn long-poll is armed
@@ -1414,7 +1421,8 @@ const midiSay = (channel, num, kind) => `${kind} ${num} (ch ${channel})`;
 
 // Which target names are BUTTONS - the set the learn rule below needs, and the same lists
 // the dispatch reads.
-const MIX_MIDI_BUTTONS = new Set([...MIX_MIDI_HOLD, ...MIX_MIDI_PRESS, ...MIX_MIDI_GLOBAL_PRESS, ...MIX_MIDI_GLOBAL_HOLD]);
+const MIX_MIDI_BUTTONS = new Set([...MIX_MIDI_HOLD, ...MIX_MIDI_PRESS, ...MIX_MIDI_GLOBAL_PRESS,
+  ...MIX_MIDI_GLOBAL_HOLD, ...Object.keys(MIX_MIDI_FX_POS)]);
 
 /**
  * Is this message the one the armed target is waiting for? A learn used to bind the very next
@@ -1531,6 +1539,14 @@ function mixMidiApply(target, value) {
     // The FX unit's deck-less controls. The pads share the deck pads' edge detection.
     if (target === 'fxknob') {
       mixFxSet({ knob: value });
+      return;
+    }
+    // A switch POSITION, which is a state and not a press: the message says where the switch is,
+    // so it is applied whenever it arrives and never edge-detected. A surface that re-sends the
+    // position it is already in (and one that sends no note-off when the switch leaves a
+    // position) would otherwise have its flip back to that position swallowed as "no edge".
+    if (Object.hasOwn(MIX_MIDI_FX_POS, target)) {
+      if (value >= 0.5) mixFxSet({ assign: MIX_MIDI_FX_POS[target] });
       return;
     }
     const down = value >= 0.5;
@@ -2988,12 +3004,79 @@ function plainOutputDevice(devices) {
 // settings action with an engine restart, like every other device choice.
 const cueDevice = () => settings.audioCueDevice ?? null;
 
+// Which stereo pair of that device the headphones are on: 0 (the device's own first pair) for a
+// separate cue device, and 1 or more when the cue is another pair of the OUTPUT device - a DJ
+// controller with four outputs is one box whose channels 1/2 are the master and 3/4 the
+// headphone jack, so "the cue device" and "the output device" are the same device there.
+const cuePair = () => Math.max(0, Math.floor(Number(cueDevice()?.pair) || 0));
+
+/**
+ * What to call the cue out loud. A pair names its channels, because the device name alone is
+ * already what the main output is called and would say nothing about where the sound goes.
+ */
+function cueName() {
+  const cue = cueDevice();
+  if (!cue) return null;
+  const pair = cuePair();
+  return pair > 0 ? `${cue.name} channels ${pair * 2 + 1}/${pair * 2 + 2}` : cue.name;
+}
+
+/**
+ * Where the cue pair starts inside the device scsynth is opening, as a channel index, or null for
+ * no cue this boot. Pure arithmetic, because getting it wrong is silent: an offset of 0 is the
+ * master out, so a cue that resolves wrong does not fail, it plays the headphone mix over the
+ * mix the room is hearing.
+ *
+ * Two shapes reach this. A SEPARATE cue device sits at the sum of the output channels of every
+ * aggregate member ahead of it, at pair 0 of itself. A cue on the OUTPUT device is pair 1 or
+ * more of a device that is either the aggregate's first member (offset 0) or the only device
+ * open - so in both of those the member offset is 0 and the pair is the whole answer.
+ */
+function cueOffsetIn({ activeUid, aggregateUid, layout, cueUid, pair = 0 }) {
+  if (!cueUid || !activeUid) return null;
+  if (activeUid === aggregateUid) {
+    let offset = 0;
+    for (const d of layout?.subDevices ?? []) {
+      if (d.uid === cueUid) return offset + pair * 2;
+      offset += d.outChannels ?? 0;
+    }
+    return null; // the cue's device is not in the combined device at all
+  }
+  // No aggregate: the one device open is the cue's own, on a pair further into it. Pair 0 there
+  // would BE the master out, which is not a cue.
+  return activeUid === cueUid && pair > 0 ? pair * 2 : null;
+}
+
+/** Is the cue a spare pair of the device we play through, rather than a device of its own? */
+function cueOnOutputDevice(devices = null) {
+  const cue = cueDevice();
+  // Short-circuited before the device list is read: this is asked on the paths that build the
+  // aggregate, and with no cue set (the usual case) there is nothing to compare against.
+  if (!cue?.uid) return false;
+  return cue.uid === plainOutputDevice(devices ?? audioOutputDevices())?.uid;
+}
+
+/**
+ * The spare stereo pairs of the output device - the ones the headphones could be on, which is
+ * every pair after the first. Empty for the usual two-channel device, so the picker offers this
+ * only where the hardware actually has somewhere else to send a cue.
+ */
+function cuePairChoices(devices = audioOutputDevices()) {
+  const out = plainOutputDevice(devices);
+  const pairs = [];
+  for (let pair = 1; (pair + 1) * 2 <= (out?.channels ?? 0); pair++) pairs.push(pair);
+  return { device: out?.name ?? null, pairs };
+}
+
 // Everything the aggregate must contain beyond the output device: the extra inputs, in their
 // saved order (input() offsets follow it), then the cue device.
 function aggregateExtraUids() {
   const uids = [...(settings.audioInputDevices ?? [])];
   const cue = cueDevice();
-  if (cue?.uid && !uids.includes(cue.uid)) uids.push(cue.uid);
+  // A cue that is a pair of the OUTPUT device adds no member: the aggregate is built around that
+  // device already, and CoreAudio cannot hold the same device twice (it is also what made the
+  // cue's offset come out as 0, pointing the headphone send straight back at the master out).
+  if (cue?.uid && !uids.includes(cue.uid) && !cueOnOutputDevice()) uids.push(cue.uid);
   return uids;
 }
 
@@ -3150,31 +3233,30 @@ async function loadEngine() {
     const devices = audioOutputDevices();
     const active = deviceToOpen(devices);
     activeAudioDevice = active ?? null;
-    // The headphone cue is real only when the aggregate is what's being opened AND the cue
-    // device is actually inside it - its pair starts after every member before it. Anything
-    // else (helper missing, cue unplugged, aggregate fallen back) means no cue this boot, said
-    // out loud: silent headphones at a gig should never need debugging.
+    // The headphone cue is real only when its pair can actually be reached inside the device
+    // being opened - a member of the aggregate for a cue device of its own, or another pair of
+    // the output device for a controller whose headphone jack is channels 3/4 of itself
+    // (cueOffsetIn has both). Anything else (helper missing, cue unplugged, aggregate fallen
+    // back) means no cue this boot, said out loud: silent headphones at a gig should never need
+    // debugging.
     activeCue = null;
     const cueWanted = cueDevice();
-    if (cueWanted?.uid && active?.uid === audioDevices.AGGREGATE_UID) {
-      const layout = audioDevices.deviceLayout(audioDevices.AGGREGATE_UID);
-      let offset = 0;
-      let found = false;
-      for (const d of layout?.subDevices ?? []) {
-        if (d.uid === cueWanted.uid) {
-          found = true;
-          break;
-        }
-        offset += d.outChannels ?? 0;
-      }
-      if (found) activeCue = { offset, name: cueWanted.name };
+    const cueOnOut = cueOnOutputDevice(devices);
+    if (cueWanted?.uid) {
+      const offset = cueOffsetIn({
+        activeUid: active?.uid ?? null,
+        aggregateUid: audioDevices.AGGREGATE_UID,
+        layout: active?.uid === audioDevices.AGGREGATE_UID
+          ? audioDevices.deviceLayout(audioDevices.AGGREGATE_UID) : null,
+        cueUid: cueWanted.uid,
+        pair: cuePair(),
+      });
+      if (offset != null) activeCue = { offset, name: cueName() };
       else {
         // eslint-disable-next-line no-console
-        console.warn(`[poptart] cue device "${cueWanted.name}" is not in the combined device - no headphone cue this boot (is it plugged in?)`);
+        console.warn(`[poptart] no headphone cue this boot: "${cueName()}" is not reachable in the `
+          + `device being opened (${active?.name ?? 'none'}) - is it plugged in?`);
       }
-    } else if (cueWanted?.uid) {
-      // eslint-disable-next-line no-console
-      console.warn('[poptart] a cue device is configured but the engine is not opening the combined device - no headphone cue this boot');
     }
     // Pass the device name only when it isn't the system default: naming it pins inDevice too
     // (see poptart.scd), which is exactly what we want for a chosen device or the aggregate.
@@ -3184,10 +3266,16 @@ async function loadEngine() {
       outChannels: active?.channels ?? 2,
       // What .o(n) wraps at: the channels anyone can actually hear, capped by the user's own
       // "output channels" choice - stereo unless they went looking for more (audio-selection.js).
-      playChannels: audioSelection.playbackChannels({
-        devices, wanted: settings.audioOutputDevice ?? null, active, aggregateUid: audioDevices.AGGREGATE_UID,
-        cap: settings.audioOutputChannels ?? null,
-      }),
+      // ...and never INTO the cue pair when the headphones are on a pair of this same device:
+      // .o(n) wrapping at 4 on a four-channel controller would put an orbit on channels 3/4,
+      // which is the headphones, so a pattern would quietly play over the cue.
+      playChannels: Math.max(2, Math.min(
+        audioSelection.playbackChannels({
+          devices, wanted: settings.audioOutputDevice ?? null, active, aggregateUid: audioDevices.AGGREGATE_UID,
+          cap: settings.audioOutputChannels ?? null,
+        }),
+        activeCue && cueOnOut ? activeCue.offset : Infinity,
+      )),
       inChannels: active?.inChannels ?? 0,
       cueOffset: activeCue?.offset ?? null,
     });
@@ -7470,7 +7558,26 @@ const routes = {
         if (!engine) throw new Error(engineError ?? 'engine not loaded');
         engine.enableMidi();
       }
-      return { status: 200, body: { monitor: mixMidiMonitor } };
+      // ...and what is bound already, so arming learn mode can say so. Without this the desk
+      // gives no sign which of its controls a hand on the hardware will move, which makes the
+      // unbind gesture look like it isn't there at all.
+      return {
+        status: 200,
+        body: {
+          monitor: mixMidiMonitor,
+          // Whether the surface is being written back to at all (see the TALK-BACK section).
+          // Null here is why none of its pads light up, and there is nothing on the desk that
+          // would otherwise say so.
+          feedback: settings.mixFeedback ?? null,
+          bound: Object.entries(settings.mixMidi ?? {}).map(([target, m]) => ({
+            target,
+            device: m.device,
+            channel: m.channel,
+            kind: midiKind(m), // normalized: entries learned before the note feed carry neither
+            num: midiNum(m),
+          })),
+        },
+      };
     }
     const target = String(body.target ?? '');
     if (!MIX_MIDI_TARGETS.has(target)) throw new Error(`"${target}" is not a learnable mix control`);
@@ -8293,29 +8400,52 @@ const routes = {
         audibleChannels: audible,
         cueAvailable: audioDevices.helperAvailable(),
         cueSelected: settings.audioCueDevice?.name ?? null,
+        cuePair: settings.audioCueDevice ? cuePair() : null,
+        // The spare pairs of the output device, so the tab can offer "this controller's own
+        // headphone jack" where the hardware has one.
+        cuePairs: cuePairChoices(devices),
+        // The device a BROWSER audition may be pointed at. A pair is not addressable from the
+        // browser (setSinkId picks a device, not a pair), and pointing an audition at the device
+        // would send it to channels 1/2 - the master out, over the top of the mix. So a cue on a
+        // pair offers nothing here, and auditions stay on the default output.
+        cuePreviewDevice: cueOnOutputDevice(devices) ? null : (settings.audioCueDevice?.name ?? null),
         cueActive: activeCue?.name ?? null, // what the RUNNING engine actually has (null = no cue this boot)
       },
     };
   },
 
-  // Body: { device } - the headphone/cue output device's name, or null/"" for no cue. The cue
-  // rides the combined (aggregate) device as its last member, and the track SynthDefs compile a
-  // cue send only when the engine boots with the pair - so this is a before-the-gig settings
+  // Body: { device, pair } - the headphone/cue output's device name, or null/"" for no cue, with
+  // `pair` the stereo pair inside that device (0 = its first pair). A separate cue device rides
+  // the combined (aggregate) device as its last member at pair 0; `device` may also be the OUTPUT
+  // device itself with a pair of 1 or more, which is how a DJ controller's own headphone jack is
+  // reached - one box, master on channels 1/2 and phones on 3/4. The track SynthDefs compile a
+  // cue send only when the engine boots with the pair, so this is a before-the-gig settings
   // choice: it MUTATES the audio configuration and restarts the engine, like every device change.
   'POST /api/audioCueDevice': async (body) => {
     const name = body.device ? String(body.device) : null;
+    const pair = Math.max(0, Math.floor(Number(body.pair) || 0));
     if (!name) {
       settings.audioCueDevice = null;
     } else {
       if (!audioDevices.helperAvailable()) {
         throw new Error('the headphone cue needs the poptart-audio helper, which is not available on this system');
       }
-      const dev = audioOutputDevices().find((d) => d.name === name && !d.isAggregate);
+      const devices = audioOutputDevices();
+      const dev = devices.find((d) => d.name === name && !d.isAggregate);
       if (!dev) throw new Error(`no audio output device named "${name}"`);
-      if (dev.uid && dev.uid === plainOutputDevice(audioOutputDevices())?.uid) {
-        throw new Error('the cue device must be different from the main output device - it is the separate pair your headphones are on');
+      const isOut = dev.uid && dev.uid === plainOutputDevice(devices)?.uid;
+      // The output device CAN be the cue device, on one of its other pairs - a four-output
+      // controller's channels 3/4 are its headphone jack. What it cannot be is the cue on its
+      // own first pair, which is the master out: that is not a cue, it is the mix.
+      if (isOut && pair < 1) {
+        throw new Error('the cue has to be somewhere other than the main output - pick another device, '
+          + 'or one of this device\'s own spare channel pairs if it has any');
       }
-      settings.audioCueDevice = { uid: dev.uid, name: dev.name };
+      if ((pair + 1) * 2 > dev.channels) {
+        throw new Error(`"${dev.name}" has ${dev.channels} output channel(s), so it has no channels `
+          + `${pair * 2 + 1}/${pair * 2 + 2} to cue through`);
+      }
+      settings.audioCueDevice = { uid: dev.uid, name: dev.name, pair };
     }
     let rebuildWarning = null;
     try {
@@ -8334,7 +8464,8 @@ const routes = {
     return {
       status: 200,
       body: {
-        device: settings.audioCueDevice?.name ?? null,
+        device: cueName(), // names the channels when the cue is a pair of the output device
+        pair: settings.audioCueDevice ? cuePair() : null,
         active: activeCue?.name ?? null,
         warning: rebuildWarning ?? audioDeviceWarning(),
       },

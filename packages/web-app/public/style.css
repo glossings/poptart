@@ -6113,8 +6113,9 @@ input.org-edit {
   opacity: 0.62;
   font-style: italic;
 }
+/* No width here: this column's width, its floor and the point below which it drops the
+   hundredths all live together in ORG_COLUMNS.bpm, because they are one decision. */
 .org-c-bpm {
-  width: 52px;
   font-family: var(--mono);
   text-align: right;
 }
@@ -6141,10 +6142,11 @@ input.org-edit {
   text-align: left;
 }
 /* The resize grip on a header's right edge. Sits over the boundary rather than beside it, so the
-   pointer finds it without hunting, and it is the one part of a header that is not a sort. */
-#orgTable thead th {
-  position: relative;
-}
+   pointer finds it without hunting, and it is the one part of a header that is not a sort.
+   It needs a positioned header to sit in, and it already has one: the `position: sticky` above
+   is a containing block for an absolute child just as `relative` would be. Restating `relative`
+   here (the same selector, further down the file) is what un-stuck the headers - they scrolled
+   away with the rows until 2026-10-04. */
 .org-th-grip {
   position: absolute;
   top: 0;

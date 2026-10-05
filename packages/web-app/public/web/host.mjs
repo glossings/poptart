@@ -1466,7 +1466,20 @@ export function createHost({
   const channelInfo = () => (typeof engine.outputChannelChoices === 'function'
     ? { outputChannels: engine.outputChannels, outputChannelChoices: engine.outputChannelChoices(), audibleChannels: Math.max(...engine.outputChannelChoices()) }
     : {});
-  routes['GET /api/audioDevices'] = async () => ({ ...(outputs ? await outputs.describe() : structuredClone(NO_OUTPUTS)), ...channelInfo() });
+  // The headphone cue is a desktop thing twice over: it wants a second channel pair on a real
+  // device, and it wants an engine restart to compile the send. A page has one stereo destination
+  // and no restart, so these answer empty rather than being left out - the settings tab reads
+  // every one of them as the panel opens, and a missing field there is a row that logs an error
+  // instead of drawing itself.
+  const NO_CUE = {
+    cueAvailable: false,
+    cueSelected: null,
+    cuePair: null,
+    cuePairs: { device: null, pairs: [] },
+    cuePreviewDevice: null,
+    cueActive: null,
+  };
+  routes['GET /api/audioDevices'] = async () => ({ ...NO_CUE, ...(outputs ? await outputs.describe() : structuredClone(NO_OUTPUTS)), ...channelInfo() });
   // More than two outputs: .o(n) reaches the other pairs. Instant here, as the device switch is.
   routes['POST /api/audioOutputChannels'] = async (body) => {
     if (typeof engine.setOutputChannels !== 'function') throw new Unsupported('choosing output channels', 'this engine is stereo only');

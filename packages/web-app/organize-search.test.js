@@ -289,3 +289,56 @@ test('a measured field is marked on the row, so it can read as an estimate', () 
   const stated = o.orgTrackRow({ id: 'u', path: '/m/b.mp3', title: 'B', bpm: 128 });
   assert.deepEqual(stated.detected, [], 'a tagged tempo is not an estimate');
 });
+
+// --- the table's own geometry ------------------------------------------------------------------
+//
+// Two separate failures, both of them "the column is there and you still can't read it".
+//
+// A tempo is a NUMBER, so ellipsizing it is worse than useless: "170…" is wider than the "170" it
+// hides and says less than either it or "170.25". So the bpm column carries three measurements of
+// its own - the width it opens at, the width below which it gives up the hundredths, and the width
+// no drag may take it past - and they have to stay in that order or one of them does nothing.
+//
+// And the headers float. They are declared `position: sticky`, which is easy to lose, because the
+// grip inside a header also wants a positioned header and `position: relative` is the reflex -
+// restating it under the same selector further down the file is exactly what un-stuck them.
+
+const CSS = fs.readFileSync(path.join(__dirname, 'public', 'style.css'), 'utf8');
+
+test('a tempo drops its hundredths rather than being cut short', () => {
+  const { orgBpmText } = org('');
+  assert.equal(orgBpmText(170.25), '170.25');
+  assert.equal(orgBpmText(170.25, true), '170', 'the whole beat, not four characters and a stub');
+  // A whole tempo has nothing to give up, so it reads the same either way.
+  assert.equal(orgBpmText(128), '128');
+  assert.equal(orgBpmText(128, true), '128');
+  // Rounded, not truncated: 169.8 is a 170 track.
+  assert.equal(orgBpmText(169.8, true), '170');
+  assert.equal(orgBpmText(null, true), '');
+});
+
+test('the bpm column opens wide enough for a measured tempo, and cannot be dragged under one', () => {
+  const { ORG_COLUMNS } = org('');
+  const bpm = ORG_COLUMNS.bpm;
+  assert.ok(bpm.w > bpm.minFull, 'the column opens too narrow to show what it is holding');
+  assert.ok(bpm.minFull > bpm.min, 'there is no width at which the short form is what shows');
+  // Measured in a browser: "170.25" is 43.4px of 12px mono, in a cell with 8px of padding a side.
+  assert.ok(bpm.w >= 60, `${bpm.w}px cannot hold six mono characters and its padding`);
+});
+
+test('a column with a short form declares the width it needs, and the other way round', () => {
+  const { ORG_COLUMNS } = org('');
+  for (const [name, spec] of Object.entries(ORG_COLUMNS)) {
+    assert.equal(!!spec.short, spec.minFull != null,
+      `${name}: a short form with no width to trigger it (or a width with no short form) is dead code`);
+  }
+});
+
+test('the organize headers are sticky, and nothing later takes it back', () => {
+  const rules = [...CSS.matchAll(/#orgTable thead th\s*\{([^}]*)\}/g)].map((m) => m[1]);
+  assert.ok(rules.length > 0, '#orgTable thead th is not styled - this test needs updating');
+  const positions = rules.flatMap((body) => [...body.matchAll(/position:\s*([a-z-]+)/g)].map((m) => m[1]));
+  assert.deepEqual(positions, ['sticky'],
+    'the header cells take exactly one position, and it is sticky - a second rule under the same '
+    + 'selector wins by order, which is how they came to scroll away with the rows');
+});

@@ -36,7 +36,13 @@ test('the guard asks only while a scan is running, and reports how much would be
   assert.match(fn, /if \(!lastScan\?\.scanning\) return true/, 'nothing to warn about when no scan is running');
   assert.match(fn, /lastScan\.probed/, 'the count already probed is what makes the choice informed');
   assert.match(fn, /lastScan\.total/);
-  assert.match(fn, /window\.confirm/, 'the person losing the work is the one who decides');
+  // The app's own dialog, not the browser's: this question is asked in the settings panel and
+  // has to look like it belongs there (a native confirm() offers "OK" and "Cancel", which do not
+  // name either outcome). askDialog answers null for esc and the backdrop, so the guard has to
+  // test for the affirmative rather than for truthiness.
+  assert.match(fn, /askDialog\(/, 'the person losing the work is the one who decides, in the app\'s own box');
+  assert.doesNotMatch(fn, /window\.confirm/, 'the unstyled system box is gone');
+  assert.match(fn, /go === true/, 'esc and the backdrop must not read as consent');
 });
 
 // Each audio setting whose server endpoint calls restartEngine(). Keeping this list complete is
@@ -51,6 +57,10 @@ for (const [what, listener, endpoint] of [
   test(`changing ${what} asks first, before anything is torn down`, () => {
     const body = handler(listener, endpoint);
     assert.match(body, /scanSurvivesRestart\(/, `${endpoint} restarts the engine without asking`);
+    // AWAITED. The guard is async now, and an un-awaited call returns a Promise - which is
+    // always truthy, so `if (!scanSurvivesRestart(...))` would never once be true and every
+    // one of these settings would go back to restarting the engine silently.
+    assert.match(body, /await scanSurvivesRestart\(/, `${endpoint} does not await the question`);
     // Before the teardown, not after: the point is to not have started.
     const asked = body.indexOf('scanSurvivesRestart(');
     const disabled = body.search(/\.disabled = true|engineStatus\.textContent/);

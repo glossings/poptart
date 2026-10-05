@@ -19396,14 +19396,22 @@ function scanPanelText(scan) {
 // on a machine whose plugins sit in one big folder, that is very nearly the whole scan, and the
 // scan is measured in minutes. So the choice gets made by the person who would lose the work,
 // with the numbers in front of them, instead of silently on their behalf.
-function scanSurvivesRestart(what) {
+async function scanSurvivesRestart(what) {
   if (!lastScan?.scanning) return true;
   const done = lastScan.total ? `${lastScan.probed} of ${lastScan.total} plugins` : `${lastScan.probed} plugins`;
-  return window.confirm(
-    `A plugin scan is running (${done} probed).\n\n`
-      + `Changing ${what} restarts the audio engine, which starts the scan over - folders it has `
-      + 'already finished are kept, the one in progress is not.\n\nChange it anyway?',
+  // The app's own dialog, like every other question it asks: a native confirm() answers this in a
+  // gray system box whose buttons say "OK" and "Cancel", which is no help at all when the choice
+  // is between a device change and a scan.
+  const go = await askDialog(
+    `A plugin scan is running (${done} probed). Changing ${what} restarts the audio engine, `
+      + 'which starts the scan over - the folders it has already finished are kept, the one in '
+      + 'progress is not.',
+    [
+      { label: 'keep scanning', value: false },
+      { label: 'change it anyway', value: true, primary: true },
+    ],
   );
+  return go === true; // esc and the backdrop answer null, which is "leave it alone"
 }
 
 function applyScanState(scan) {
@@ -20323,7 +20331,11 @@ const auditionNorm = (t) => String(t).toLowerCase().replace(/[^a-z0-9]+/g, '');
  */
 async function syncPreviewRouting() {
   try {
-    ({ cueSelected: previewCue } = await api('GET', '/api/audioDevices'));
+    // `cuePreviewDevice`, not the cue device itself: a cue on a channel PAIR of the output
+    // device is not something a browser audition can be pointed at (setSinkId names a device,
+    // and that device's first pair is the master out), so there it answers null and auditions
+    // stay where they were.
+    ({ cuePreviewDevice: previewCue } = await api('GET', '/api/audioDevices'));
   } catch {
     previewCue = null; // no answer is no cue: the guard below then refuses, which is the safe way
   }
@@ -20602,19 +20614,38 @@ function renderChannelChoices(choices, current, audible) {
     : 'how many output channels .o(n) may play to - stereo folds every orbit onto channels 1/2; raise it to reach this interface\'s other pairs';
 }
 
+// The output device's name, as the last device refresh reported it: what a `pair:n` choice in the
+// cue menu is a pair OF. Read from the server rather than from the output menu's own value, which
+// is blank while the system default is in use. Declared above refreshAudioDevices because that
+// function assigns it and runs on the way in, before the listeners further down are reached.
+let audioCueOutName = null;
+
 async function refreshAudioDevices() {
   try {
     const {
       devices, selected, outputChannels, outputChannelChoices, audibleChannels,
-      cueAvailable, cueSelected, cueActive, canReveal, canChoose, warning,
+      cueAvailable, cueSelected, cuePair, cuePairs, cueActive, canReveal, canChoose, warning,
     } = await api('GET', '/api/audioDevices');
     audioCueSelect.innerHTML = '';
     audioCueSelect.appendChild(new Option('none', ''));
-    for (const d of devices.filter((x) => !x.isAggregate)) {
+    // The output device's own spare pairs first: on a DJ controller that is the headphone jack
+    // on the front of it, which is the one anybody reaches for. Their values carry the `pair:`
+    // prefix because a device can offer several, so its name alone would not say which.
+    audioCueOutName = cuePairs?.device ?? null;
+    for (const pair of cuePairs?.pairs ?? []) {
+      const opt = new Option(`${cuePairs.device} · channels ${pair * 2 + 1}/${pair * 2 + 2}`, `pair:${pair}`);
+      opt.title = 'the output device\'s own second pair - a controller\'s headphone jack, with the '
+        + 'master still on channels 1/2';
+      audioCueSelect.appendChild(opt);
+    }
+    // ...then the separate devices. Not the output device itself: cueing to its FIRST pair is
+    // the master out, which the server refuses, and its other pairs are the options above.
+    for (const d of devices.filter((x) => !x.isAggregate && x.name !== cuePairs?.device)) {
       audioCueSelect.appendChild(new Option(`${d.name} · ${d.channels} ch`, d.name));
     }
-    audioCueSelect.value = cueSelected ?? '';
-    if (audioCueSelect.value !== (cueSelected ?? '')) audioCueSelect.value = '';
+    const cueValue = cuePair ? `pair:${cuePair}` : (cueSelected ?? '');
+    audioCueSelect.value = cueValue;
+    if (audioCueSelect.value !== cueValue) audioCueSelect.value = '';
     audioCueSelect.disabled = !cueAvailable;
     if (!cueAvailable) audioCueSelect.title = 'the headphone cue needs the poptart-audio helper, which is not available on this system';
     else if (cueSelected && !cueActive) audioCueSelect.title = `"${cueSelected}" is chosen but the running engine has no cue pair - is it plugged in? (restart the engine to retry)`;
@@ -20654,8 +20685,14 @@ async function refreshAudioDevices() {
 
 const audioCueSelect = document.getElementById('audioCueSelect');
 audioCueSelect.addEventListener('change', async () => {
-  const device = audioCueSelect.value || null;
-  if (!scanSurvivesRestart('the headphone cue device')) {
+  // Two kinds of choice in one menu: a device by name, or `pair:n` for the nth stereo pair of
+  // the output device (a controller's own headphone jack), which goes as that device plus a pair.
+  const raw = audioCueSelect.value || '';
+  const onPair = raw.startsWith('pair:');
+  const device = onPair ? (audioCueOutName ?? null) : (raw || null);
+  const pair = onPair ? Number(raw.slice('pair:'.length)) : 0;
+  const label = onPair ? audioCueSelect.selectedOptions[0]?.textContent ?? device : device;
+  if (!await scanSurvivesRestart('the headphone cue device')) {
     refreshAudioDevices().catch(() => {}); // put the menu back on the cue still in use
     return;
   }
@@ -20663,9 +20700,9 @@ audioCueSelect.addEventListener('change', async () => {
   audioDeviceSelect.disabled = true;
   engineStatus.textContent = 'restarting engine…';
   engineStatus.className = 'status';
-  logLine(device ? `cueing to ${device} - restarting the engine…` : 'headphone cue off - restarting the engine…');
+  logLine(device ? `cueing to ${label} - restarting the engine…` : 'headphone cue off - restarting the engine…');
   try {
-    const res = await api('POST', '/api/audioCueDevice', { device });
+    const res = await api('POST', '/api/audioCueDevice', { device, pair });
     stopHighlighting();
     playing = false;
     updateTransportButtons();
@@ -20706,7 +20743,7 @@ async function chooseWebOutputChannels(channels) {
 audioChannelSelect.addEventListener('change', async () => {
   if (window.__poptartHostReady) { chooseWebOutputChannels(Number(audioChannelSelect.value)); return; }
   const channels = Number(audioChannelSelect.value);
-  if (!scanSurvivesRestart('the output channel count')) {
+  if (!await scanSurvivesRestart('the output channel count')) {
     refreshAudioDevices().catch(() => {});
     return;
   }
@@ -20766,7 +20803,7 @@ audioDeviceSelect.addEventListener('change', async () => {
   if (window.__poptartHostReady) { chooseWebAudioOutput(audioDeviceSelect.value); return; }
   const device = audioDeviceSelect.value || null;
   const label = device ?? 'the system default';
-  if (!scanSurvivesRestart('the output device')) {
+  if (!await scanSurvivesRestart('the output device')) {
     refreshAudioDevices().catch(() => {}); // put the menu back on the device still in use
     return;
   }
@@ -20959,7 +20996,7 @@ async function applyWebAudioInputs(uids) {
 audioInputApply.addEventListener('click', async () => {
   const uids = [...audioInputSelection];
   if (window.__poptartHostReady) { applyWebAudioInputs(uids); return; }
-  if (!scanSurvivesRestart('the input devices')) return; // the selection stands; apply again later
+  if (!await scanSurvivesRestart('the input devices')) return; // the selection stands; apply again later
   audioInputApply.disabled = true;
   engineStatus.textContent = 'restarting engine…';
   engineStatus.className = 'status';
@@ -29671,6 +29708,11 @@ function applyMixStack() {
     // deck holds a file or it holds code), so this fixed order is the visual order either way -
     // and no path that changes what a deck holds has to reorder the stack.
     stack.append(songPanes.a.detailEl, djLiveWaveEls.a, songPanes.b.detailEl, djLiveWaveEls.b);
+    // A deck's waveform shows exactly when that deck holds a file. Said here rather than trusted
+    // to have been said already: inside its pane the canvas was hidden by the PANE, so a deck
+    // that has never held a song has never had its own `hidden` class set - and up here, where
+    // the canvas is its own flex item, that left a third empty lane above deck B's strip.
+    for (const d of ['a', 'b']) songPanes[d].detailEl.classList.toggle('hidden', !songPanes[d].song);
     songPanes.b.setZoom(songPanes.a.zoomSec(), { propagate: false }); // one scale from here on
     djLiveWaveStart();
   } else {
@@ -30739,6 +30781,29 @@ mixLearnAttach(mixFxOnEl, 'fxon', 'fxhold'); // shift+click binds the momentary 
 mixLearnAttach(mixFxAssignEl, 'fxassign');
 mixLearnAttach(mixFxChainEl, 'fxnext', 'fxprev'); // the step pads; shift+click binds backward
 
+// A three-way deck-select SWITCH, which is a different thing from the cycling pad `fxassign`
+// binds: it sends one message per position, so each position is learned on its own and says
+// absolutely where the unit goes. Three bindings need three learn gestures and the button has
+// one click, so they come off its context menu - the desk's growth point, as in the editor.
+// Outside learn mode the button has no menu: there would be nothing in it.
+mixFxAssignEl.addEventListener('contextmenu', (e) => {
+  if (!mixLearnArmed) return;
+  e.preventDefault();
+  const menu = document.getElementById('mixMenu');
+  openCtxMenu(menu, e.clientX, e.clientY, {
+    head: 'bind a switch position',
+    items: [
+      ['deck A', () => mixLearnDo('fxassigna'), 'flip the switch to its deck-1 position'],
+      ['deck B', () => mixLearnDo('fxassignb'), 'flip the switch to its deck-2 position'],
+      ['A + B', () => mixLearnDo('fxassignab'), 'flip the switch to its both-decks position'],
+      '-',
+      ['unbind all three', async () => {
+        for (const t of ['fxassigna', 'fxassignb', 'fxassignab']) await mixLearnDo(t, true);
+      }, 'leave the switch unmapped'],
+    ],
+  });
+});
+
 // --- the FX chain editor (a modal, and a real editor) ---
 //
 // A chain is code, so this is the editor the rest of the app is: the poptart mode, autocomplete
@@ -31049,7 +31114,27 @@ function setMixLearn(on) {
     : 'MIDI learn off');
   // The server names incoming messages in the console for as long as this is on, whether or not
   // a target is armed: without it, a control that won't bind gives you nothing to go on.
-  api('POST', '/api/mix/midilearn', { monitor: on }).catch((e) => logLine(e.message ?? String(e), true));
+  api('POST', '/api/mix/midilearn', { monitor: on })
+    .then((res) => {
+      // ...and, on the way in, what is bound already. The desk shows nothing about its own
+      // mappings, so without this line there is no way to see that the crossfader is being
+      // driven from the hardware - and no reason to guess that alt+click is what stops it.
+      if (!on) return;
+      if (res?.bound?.length) {
+        const say = res.bound
+          .map((b) => `${b.target} ← ${b.kind} ${b.num} (ch ${b.channel})`)
+          .join(', ');
+        logLine(`already bound: ${say} - alt+click any of those controls to unbind it`);
+        // Learned pads light up only once the desk has a port to write BACK to, which is a
+        // separate choice and off until it is made - so a surface whose buttons stay dark is
+        // working exactly as configured, and this is the one place that is visible.
+        if (!res.feedback) {
+          logLine('desk talk-back is off, so nothing lights up on the controller and its meters stay '
+            + 'dark - pick its port in settings → desk talk-back');
+        }
+      }
+    })
+    .catch((e) => logLine(e.message ?? String(e), true));
 }
 mixLearnBtn.addEventListener('click', () => setMixLearn(!mixLearnArmed));
 document.addEventListener('keydown', (e) => {
@@ -31413,7 +31498,21 @@ const ORG_COLUMNS = {
   album: { label: 'album', cls: 'org-c-text', text: (r) => r.album ?? '', key: (r) => (r.album ?? '').toLowerCase() },
   // A measured tempo reads to a hundredth; a tagged or typed one is a whole number and shows as
   // one, so the column says which kind of fact it is holding without a word of explanation.
-  bpm: { label: 'bpm', cls: 'org-c-bpm', num: true, text: (r) => orgBpmText(r.bpm), key: (r) => r.bpm ?? null },
+  // `w`/`min`/`minFull` are this column's own geometry, because a number must not be clipped: a
+  // tempo ellipsized to "170…" is wider than the "170" it is hiding and says less. Narrower than
+  // `minFull` the cell drops to `short` (the whole beat) instead, and `min` stops a drag going
+  // below even that. The hundredths are still on the cell's own title either way.
+  bpm: {
+    label: 'bpm',
+    cls: 'org-c-bpm',
+    num: true,
+    w: 64,
+    min: 44,
+    minFull: 61,
+    text: (r) => orgBpmText(r.bpm),
+    short: (r) => orgBpmText(r.bpm, true),
+    key: (r) => r.bpm ?? null,
+  },
   key: { label: 'key', cls: 'org-c-key', text: (r) => r.musKey ?? '', key: (r) => (r.musKey ?? '').toLowerCase() },
   rating: { label: 'rating', cls: 'org-c-rating', num: true, stars: true, text: (r) => (r.rating ? `${r.rating}` : ''), key: (r) => r.rating ?? null },
   // Where the file actually is. Shows the folder rather than the whole path - the file's own name
@@ -31513,10 +31612,31 @@ function orgResetCols() {
   orgRenderMain();
 }
 
-/** A tempo as its own provenance: 128 came from a tag or a hand, 127.98 was measured. */
-function orgBpmText(bpm) {
+/**
+ * A tempo as its own provenance: 128 came from a tag or a hand, 127.98 was measured. `tight` is
+ * the same tempo for a column too narrow to hold the hundredths - the whole beat, which is the
+ * part you read at a glance, rather than six characters cut to four and an ellipsis.
+ */
+function orgBpmText(bpm, tight = false) {
   if (bpm == null) return '';
-  return Number.isInteger(bpm) ? String(bpm) : bpm.toFixed(2).replace(/0$/, '');
+  if (Number.isInteger(bpm)) return String(bpm);
+  return tight ? String(Math.round(bpm)) : bpm.toFixed(2).replace(/0$/, '');
+}
+
+/**
+ * A column's width right now: what a drag saved for it, else the width its own spec asks for.
+ * Null for the columns whose width is the stylesheet's business, which is most of them - only a
+ * column that reads differently when it is narrow has to know its own number.
+ */
+function orgColWidth(name) {
+  return orgColConf[orgSrc.kind]?.w?.[name] ?? ORG_COLUMNS[name]?.w ?? null;
+}
+
+/** Whether `name` is too narrow for its full text, so the cells show `short` instead. */
+function orgColTight(name) {
+  const spec = ORG_COLUMNS[name];
+  const w = orgColWidth(name);
+  return !!spec?.short && spec.minFull != null && w != null && w < spec.minFull;
 }
 
 const orgView = () => ORG_VIEWS[orgSrc.kind] ?? ORG_VIEWS.livecode;
@@ -31974,7 +32094,9 @@ function orgRenderHead() {
     // what lets a drag set it without measuring anything else.
     const colEl = document.createElement('col');
     colEl.className = spec.cls;
-    if (widths[name]) colEl.style.width = `${widths[name]}px`;
+    // A saved drag first, then the spec's own width; a column with neither is left to its class.
+    const w = widths[name] ?? spec.w;
+    if (w) colEl.style.width = `${w}px`;
     group.appendChild(colEl);
 
     const th = document.createElement('th');
@@ -32026,13 +32148,17 @@ function orgColGrip(name, th) {
     e.stopPropagation();
     const startX = e.clientX;
     const startW = th.getBoundingClientRect().width;
+    const tight0 = orgColTight(name); // a release that crossed the threshold has to redraw cells
     orgResized = false;
     grip.classList.add('dragging');
     grip.setPointerCapture(e.pointerId);
     const onMove = (ev) => {
       if (Math.abs(ev.clientX - startX) > 2) orgResized = true;
       if (!orgResized) return;
-      const want = Math.max(ORG_COL_MIN_W, Math.round(startW + (ev.clientX - startX)));
+      // A column that reads differently when narrow sets its own floor - the bpm column's is
+      // the width of a whole tempo, so no drag can cut a number in half.
+      const floor = ORG_COLUMNS[name].min ?? ORG_COL_MIN_W;
+      const want = Math.max(floor, Math.round(startW + (ev.clientX - startX)));
       const conf = orgConf();
       conf.w ??= {};
       conf.w[name] = want;
@@ -32045,7 +32171,12 @@ function orgColGrip(name, th) {
       grip.removeEventListener('pointermove', onMove);
       grip.removeEventListener('pointerup', onUp);
       grip.removeEventListener('pointercancel', onUp);
-      if (orgResized) orgSaveColConf();
+      if (orgResized) {
+        orgSaveColConf();
+        // Only the width moved while dragging; if the column crossed into (or out of) being too
+        // narrow for its full text, the cells themselves now say the wrong thing.
+        if (orgColTight(name) !== tight0) orgRenderMain();
+      }
       // Cleared on the next frame, so the click this release produces still sees it and does
       // not sort the column that was just resized.
       setTimeout(() => { orgResized = false; }, 0);
@@ -32122,7 +32253,7 @@ function orgRenderMain() {
       else if (name === 'name') orgFillNameCell(td, row);
       else if (spec.stars) orgFillRatingCell(td, row);
       else if (spec.chips) orgFillTagCell(td, row);
-      else td.textContent = spec.text(row);
+      else td.textContent = orgColTight(name) ? spec.short(row) : spec.text(row);
       if (!editing && name !== 'name' && !spec.chips && !spec.stars) {
         // A tempo or key the AUDIO was measured for is an estimate, and says so rather than
         // sitting in the column looking like something the file stated.

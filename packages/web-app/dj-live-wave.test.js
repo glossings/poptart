@@ -200,3 +200,56 @@ test('the shares add up, so the painter never has to rescale them', () => {
     assert.ok(Math.abs(sum - 1) <= 0.02, `${e} -> ${got} sums to ${sum}`);
   }
 });
+
+// --- how many lanes the stack has -------------------------------------------------------------
+//
+// Four canvases go into the stack, two per deck: the deck's own waveform (it holds a file) and the
+// livecode strip (it holds code). A deck is one or the other, so the stack shows TWO lanes.
+//
+// It showed three. Inside its pane a deck's waveform canvas is hidden by the PANE, so a deck that
+// has never held a song has never had `hidden` set on the canvas itself - and up in the stack,
+// where the canvas is its own flex item, that unhidden empty canvas is a third lane. Which lane
+// is which is decided in two different places (the strip works it out every frame, the waveform is
+// told by the pane opening and closing), so what has to be pinned is that the stack settles both
+// of them against the same fact at the moment it takes the canvases.
+
+const CLIENT_SRC = fs.readFileSync(path.join(__dirname, 'public/client.js'), 'utf8');
+
+function grabFunction(name) {
+  const at = CLIENT_SRC.indexOf(`function ${name}(`);
+  assert.ok(at > 0, `${name} not found in public/client.js - this test needs updating`);
+  const end = CLIENT_SRC.indexOf('\n}\n', at) + 3;
+  return CLIENT_SRC.slice(at, end);
+}
+
+test('the stack hides each deck\'s waveform unless that deck holds a song', () => {
+  const fn = grabFunction('applyMixStack');
+  assert.match(fn, /stack\.append\(/, 'applyMixStack no longer fills the stack - this test needs updating');
+  // Said at the append, not trusted to have been said earlier: this is the one moment the
+  // canvases become their own lanes, and the only moment that catches a deck which has never
+  // held a song at all.
+  assert.match(
+    fn,
+    /detailEl\.classList\.toggle\('hidden', !songPanes\[d\]\.song\)/,
+    'nothing sets the waveform lanes\' visibility as they enter the stack - a deck that has never '
+    + 'held a file leaves a blank third lane',
+  );
+});
+
+test('the two lanes of one deck are mutually exclusive by construction', () => {
+  // The strip is for a deck playing CODE, so it tests for the absence of the song the waveform
+  // tests for the presence of. If both ever tested the same way the stack could show a deck
+  // twice, which is the same three lanes by another route.
+  assert.match(grabFunction('djLiveWaveOn'), /!songPanes\[deck\]\.song/);
+  assert.match(grabFunction('applyMixStack'), /!songPanes\[d\]\.song/);
+});
+
+test('both decks\' pairs go into the stack, in a fixed order', () => {
+  const fn = grabFunction('applyMixStack');
+  const append = fn.slice(fn.indexOf('stack.append('));
+  const order = [...append.matchAll(/(songPanes\.[ab]\.detailEl|djLiveWaveEls\.[ab])/g)].map((m) => m[1]);
+  assert.deepEqual(order, [
+    'songPanes.a.detailEl', 'djLiveWaveEls.a', 'songPanes.b.detailEl', 'djLiveWaveEls.b',
+  ], 'deck A\'s pair then deck B\'s - the visual order either way round, so no path that changes '
+    + 'what a deck holds has to reorder the stack');
+});
