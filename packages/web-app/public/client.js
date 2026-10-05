@@ -16801,6 +16801,7 @@ setInterval(() => {
   updatePhraseViz();
   updateRecButton();
   updateRecordButton();
+  projectorTick(); // after highlightTick: the projector shows the spans it just worked out
 }, 33);
 
 function stopHighlighting() {
@@ -16810,6 +16811,7 @@ function stopHighlighting() {
     for (const mk of r.marks) mk.clear();
     r.marks = [];
     r.lastKey = '';
+    r.litSpans = []; // nothing is sounding, and the projector reads these rather than the marks
   }
 }
 
@@ -30643,12 +30645,11 @@ document.getElementById('fileOrganizeBtn').addEventListener('click', () => openO
 
 // ---------------------------------------------------------------------------------------------
 // The library - playlists over saved patterns, and the organize modal (three panes: playlists /
-// the open one's contents / every saved song). Ported from fizzle (~/td-livecode). One
-// library.json lives WITH the pattern files server-side, so a set travels with its songs; this
-// side holds a working copy and posts the whole document back, coalesced. Tags are read-only
-// here - they are the files' own @tags, edited in the code - and bpm is read from each song's
-// setbpm, so the library never duplicates what a file already says. The ACTIVE playlist is the
-// set deck B's picker follows.
+// the open one's contents / every saved song). One library.json lives WITH the pattern files
+// server-side, so a set travels with its songs; this side holds a working copy and posts the
+// whole document back, coalesced. Tags are read-only here - they are the files' own @tags,
+// edited in the code - and bpm is read from each song's setbpm, so the library never duplicates
+// what a file already says. The ACTIVE playlist is the set deck B's picker follows.
 // ---------------------------------------------------------------------------------------------
 
 let libDoc = null; // the working copy; null until first needed
@@ -38370,3 +38371,347 @@ function arWatchBuffer(ed) {
     drawArrange();
   });
 }
+
+// ---------------------------------------------------------------------------------------------
+// The projector - F1.
+//
+// A second window for the screen behind the set: the code of every deck that is PLAYING, white on
+// black, blown up until it fills the screen, with the same box around the atom that is sounding
+// that the editor draws. It is a view and only ever a view - nothing in it can touch a buffer.
+//
+// The window is this app's own page (public/projector.html), opened by window.open and fed from
+// the 33ms ticker right AFTER highlightTick: the spans it draws are the ones the highlighter just
+// computed (region.litSpans, document offsets into that deck's buffer), so the wall and the
+// editor can never disagree about what is playing. Nothing about the music is worked out twice.
+//
+// What the projector page itself decides is what only that window knows: how big it is, and so
+// how large the text can be. Running the code together (whitespace to single spaces) happens
+// there too, because the spans have to be carried through the same transform the text is.
+// ---------------------------------------------------------------------------------------------
+
+const PROJECTOR_RES_KEY = 'poptartProjectorRes';
+const PROJECTOR_COLLAPSE_KEY = 'poptartProjectorCollapse';
+const PROJECTOR_FEED_KEY = 'poptartProjectorFeed';
+const PROJECTOR_DEFAULT_RES = '1920x1080';
+
+let projectorRes = localStorage.getItem(PROJECTOR_RES_KEY) || PROJECTOR_DEFAULT_RES;
+let projectorCollapse = localStorage.getItem(PROJECTOR_COLLAPSE_KEY) !== '0'; // default on
+// The feed is OFF until it is asked for. It is readable from any origin - that is what makes it
+// reachable from another program - so it is a switch rather than something always running: with
+// it off, nothing leaves this machine's browser even to the server.
+let projectorFeedOn = localStorage.getItem(PROJECTOR_FEED_KEY) === '1' && !window.__poptartHostReady;
+let projectorListeners = 0; // what the server last said is subscribed
+let projectorWin = null;
+let projectorFrame = ''; // signature of the last frame sent; the window is only written to on change
+// Which page sent the frame on the wall, and which frame it was. The projector names both back in
+// every hello (see the message handler below), which is how "it has what we sent" is told apart
+// from "it is showing a frame from the page we were before a reload".
+const PROJECTOR_TOKEN = Math.random().toString(36).slice(2);
+let projectorSeq = 0;
+
+/**
+ * The pixel size behind a resolution setting. 'screen' is whichever screen this is, and anything
+ * that isn't a WxH (a value saved by an older build, or edited by hand) falls back to the default
+ * rather than opening a window of nothing.
+ */
+function projectorSize(res, availWidth, availHeight) {
+  if (res === 'screen') return { width: availWidth, height: availHeight };
+  const m = /^(\d+)x(\d+)$/.exec(String(res ?? ''));
+  return m ? { width: Number(m[1]), height: Number(m[2]) } : { width: 1920, height: 1080 };
+}
+const projectorWantedSize = () => projectorSize(projectorRes, screen.availWidth, screen.availHeight);
+
+/**
+ * What the projector is showing: one entry per deck that is playing CODE, its whole buffer plus
+ * the spans sounding in it. A deck holding a file has no code to put on a wall, so it is simply
+ * not there - and with nothing playing at all the projector goes black, which is the honest
+ * picture of a stopped set.
+ *
+ * Outside DJ mode there is one deck and `playing` is its answer; inside it each deck plays on its
+ * own, and deckPlayingNow is the server's per-deck truth (pushed on every desk frame).
+ */
+function projectorDecks() {
+  const decks = [];
+  const add = (deck, ed) => {
+    if (!ed || songPanes[deck].song) return;
+    const text = ed.getValue();
+    decks.push({ deck, text, spans: [], omit: projectorOmit(deck, text) });
+  };
+  if (mixModeOn) {
+    if (deckPlayingNow.a) add('a', cm);
+    if (deckPlayingNow.b) add('b', deckBCM);
+  } else if (playing) {
+    add('a', cm);
+  }
+  for (const d of decks) {
+    for (const r of patternRegions) {
+      if (r.deck === d.deck && r.litSpans) d.spans.push(...r.litSpans);
+    }
+  }
+  return decks;
+}
+
+/**
+ * The editor's own data in a deck's buffer: where it sits, and what the projector puts there
+ * instead ([from, to] takes it out, [from, to, text] stands something in its place).
+ *
+ * This is foldConfigBlobs' set, found the same ways, for the same reason - none of it is written
+ * by hand and none of it can be read. What the editor folds to a chip, the wall can do without
+ * entirely; the difference is only that a chip is something to click and the wall is not.
+ *
+ *   - a definitions run (_roll, _shape, _preset, _pack, _slices, _auto, _groove) and the
+ *     _arrange(...) call: gone, by whole LINES (runLineRange), so the `rolls:` label over a block
+ *     and the blank lines under it go with it rather than leaving a hole where it was;
+ *   - a captured plugin state, `{ state: "…" }` on a .synth()/.fx(): gone with the comma in front
+ *     of it, which leaves `.fx("Kickstart 2")` - the part that says what is playing;
+ *   - drawn data that is an ARGUMENT of live code - an lfo shape, a page of piano roll notes, the
+ *     program of a preset definition that chains: down to an ellipsis, since the call around it
+ *     is code someone wrote and reads perfectly with the data out of it.
+ *
+ * The last of those is the reason this is worth doing at all rather than only dropping the blocks
+ * at the foot: a patch with its plugin state written out inline runs to hundreds of kilobytes of
+ * base64, and the projector's whole job is to fit what is there onto a screen.
+ */
+const PROJECTOR_ELLIPSIS = '"⋯"';
+function projectorOmitRanges(code) {
+  const ranges = [];
+  let m;
+  for (const reg of DEF_REGISTRIES) {
+    for (const run of reg.runs(code)) ranges.push(runLineRange(code, run));
+  }
+  // The arrangement is one call rather than a run of definitions, and the painter owns all of it.
+  const arrangeRe = /\b_arrange\s*\(/g;
+  while ((m = arrangeRe.exec(code))) {
+    const close = matchParen(code, m.index + m[0].length - 1);
+    if (close >= 0) ranges.push(runLineRange(code, [{ start: m.index, close }]));
+  }
+  const stateRe = /(?:,\s*)?\{\s*state:\s*"[A-Za-z0-9+/=]+"\s*\}/g;
+  while ((m = stateRe.exec(code))) ranges.push([m.index, m.index + m[0].length]);
+  // Names are not data: pianoroll("<0 chorus>") and lfo("<pluck swell>") say which roll or shape
+  // is playing, which is the whole point of the named form. Telling one from the other is the
+  // loaded module's job, and until it has loaded nothing here is touched rather than the wrong
+  // thing - the same choice the folding pass makes.
+  const dataArgRe = /\b(lfo|grainshape|pianoroll)\s*\(\s*("(?:[^"\\\n]|\\.)*")/g;
+  while ((m = dataArgRe.exec(code))) {
+    const str = m[2];
+    if (str.length <= 2) continue;
+    if (m[1] === 'pianoroll' && (!pianorollMod || rollDefs.isIdString(str.slice(1, -1)))) continue;
+    if (m[1] !== 'pianoroll' && !shapeMod?.looksLikeShapeData(str.slice(1, -1))) continue;
+    const start = m.index + m[0].length - str.length;
+    ranges.push([start, start + str.length, PROJECTOR_ELLIPSIS]);
+  }
+  // A preset or roll definition that chains, which no run covers: the id and the plugin stay -
+  // they are what it is FOR - and only the program or the notes come down.
+  const presetStateRe = /\b_preset\s*\(\s*(?:"[^"\n]*"|'[^'\n]*'|-?[\d.]+)\s*,\s*(?:"[^"\n]*"|'[^'\n]*')\s*,\s*("[A-Za-z0-9+/=]+")/g;
+  const rollArgRe = /(?<![\w$])_?roll\s*\(\s*(?:"[^"\n]*"|'[^'\n]*'|[^,()\n]*?)\s*,\s*("(?:[^"\\\n]|\\.)*")/g;
+  for (const re of [presetStateRe, rollArgRe]) {
+    while ((m = re.exec(code))) {
+      const str = m[1];
+      if (str.length <= 2) continue;
+      const start = m.index + m[0].length - str.length;
+      ranges.push([start, start + str.length, PROJECTOR_ELLIPSIS]);
+    }
+  }
+  return ranges;
+}
+
+// Finding them costs a pass over the buffer per registry and per pattern above, which is far too
+// much to pay thirty times a second - and the answer only moves when the text does. The modules
+// that tell a roll's NAME from its notes load after the page, so which one answered is part of
+// the key: the first buffer of a session is read again once they are there.
+const projectorOmitCache = new Map(); // deck -> { key, ranges }
+function projectorOmit(deck, text) {
+  const key = `${pianorollMod ? 1 : 0}${shapeMod ? 1 : 0}\u0000${text}`;
+  const hit = projectorOmitCache.get(deck);
+  if (hit && hit.key === key) return hit.ranges;
+  const ranges = projectorOmitRanges(text);
+  projectorOmitCache.set(deck, { key, ranges });
+  return ranges;
+}
+
+/**
+ * Push a frame, but only when there is a new one to push - see the 33ms ticker above.
+ *
+ * One frame, shaped once (projector-frame.js), to however many consumers there are: the window,
+ * and the feed the server fans out to anything else drawing the code. Shaping here rather than
+ * in each consumer is what lets the feed hand out a plain string with offsets into it.
+ */
+function projectorTick() {
+  if (projectorWin?.closed) projectorWin = null; // closed from its own title bar; F1 opens it again
+  if (!projectorWin && !projectorFeedOn) return;
+  // Shaped as far as the editor's own data going out, and no further. Running the code together
+  // is the last step and it is left to each consumer: the window takes this setting, and a feed
+  // subscriber may ask for the other (?collapse=), which the server could not undo for them.
+  const decks = projectorDecks().map((d) => shapeProjectorDeck(d, false));
+  const { width, height } = projectorWantedSize();
+  const sig = `${projectorCollapse}|${width}x${height}|`
+    + decks.map((d) => `${d.deck}\u0000${d.text}\u0000${d.spans.join(',')}`).join('\u0001');
+  if (sig === projectorFrame) return;
+  projectorFrame = sig;
+  projectorSeq++;
+  if (projectorWin) {
+    const shown = projectorCollapse
+      ? decks.map((d) => ({ deck: d.deck, ...collapseWithSpans(d.text, d.spans) }))
+      : decks;
+    projectorWin.postMessage({
+      type: 'poptart-projector', token: PROJECTOR_TOKEN, seq: projectorSeq,
+      collapse: projectorCollapse, width, height,
+      decks: shown.map((d) => ({ deck: d.deck, text: d.text, spans: d.spans })),
+    }, location.origin);
+  }
+  if (projectorFeedOn) pushProjectorFeed({ collapse: projectorCollapse, decks });
+}
+
+// The feed, posted at the same moments the window is written to. Never two requests at once: a
+// frame that lands while one is in flight is held and sent after it, so a burst of typing cannot
+// stack requests on the scheduler's event loop - and only the LAST one is held, since an
+// out-of-date frame has no value once a newer one exists.
+let projectorPosting = false;
+let projectorPending = null;
+function pushProjectorFeed(frame) {
+  if (window.__poptartHostReady) return; // the browser build has no server to hand it to
+  projectorPending = frame;
+  if (projectorPosting) return;
+  projectorPosting = true;
+  const send = () => {
+    const next = projectorPending;
+    projectorPending = null;
+    api('POST', '/api/projector', next)
+      .then((res) => {
+        projectorListeners = res?.listeners ?? 0;
+        renderProjectorFeedNote();
+      })
+      .catch(() => {}) // the feed is never worth a console line per frame
+      .finally(() => {
+        if (projectorPending) send();
+        else projectorPosting = false;
+      });
+  };
+  send();
+}
+
+function openProjector() {
+  if (projectorWin && !projectorWin.closed) {
+    projectorWin.focus();
+    return;
+  }
+  const { width, height } = projectorWantedSize();
+  // Named, so a reload of this page re-targets the window that is already on the wall instead of
+  // leaving it orphaned and opening a second one beside it.
+  projectorWin = window.open('projector.html', 'poptartProjector', `width=${width},height=${height}`);
+  if (!projectorWin) {
+    logLine('the projector window did not open - this browser is blocking pop-up windows for poptart', true);
+    return;
+  }
+  projectorFrame = '';
+}
+
+function toggleProjector() {
+  if (projectorWin && !projectorWin.closed) {
+    projectorWin.close();
+    projectorWin = null;
+    return;
+  }
+  openProjector();
+}
+
+// The projector says hello on its way up, and keeps saying it - naming the frame it is showing.
+// Adopting whichever window that is covers both of the cases where a frame would otherwise never
+// arrive: a page that finished loading after the first one was sent, and a window left standing
+// through a reload of THIS page, which would otherwise sit there showing the set as it was.
+// A hello that names the frame already sent is the ordinary case, and answers nothing.
+window.addEventListener('message', (e) => {
+  if (e.origin !== location.origin || e.data?.type !== 'poptart-projector-ready') return;
+  projectorWin = e.source;
+  if (e.data.token !== PROJECTOR_TOKEN || e.data.seq !== projectorSeq) projectorFrame = '';
+});
+
+// F1 has no modifier, so it comes nowhere near the two chord families (see chords.js) and is taken
+// on its own. CodeMirror binds nothing to it, so this reaches the editor as readily as anywhere.
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'F1' || e.metaKey || e.ctrlKey || e.altKey || e.shiftKey || e.defaultPrevented) return;
+  e.preventDefault();
+  toggleProjector();
+});
+
+const projectorResSelect = document.getElementById('projectorResSelect');
+projectorResSelect.value = projectorRes;
+if (!projectorResSelect.value) projectorResSelect.value = projectorRes = PROJECTOR_DEFAULT_RES;
+projectorResSelect.addEventListener('change', () => {
+  projectorRes = projectorResSelect.value;
+  localStorage.setItem(PROJECTOR_RES_KEY, projectorRes);
+  // An open projector takes the new size off the very next frame - the size rides in every one.
+});
+
+const projectorCollapseToggle = document.getElementById('projectorCollapseToggle');
+projectorCollapseToggle.checked = projectorCollapse;
+projectorCollapseToggle.addEventListener('change', () => {
+  projectorCollapse = projectorCollapseToggle.checked;
+  localStorage.setItem(PROJECTOR_COLLAPSE_KEY, projectorCollapse ? '1' : '0');
+});
+
+document.getElementById('projectorOpenBtn').addEventListener('click', openProjector);
+
+// --- the feed ---
+//
+// The projector's frame over SSE, for a visuals environment (or anything else) drawing the code
+// as part of its own picture rather than as a rectangle of captured pixels. The URL is shown
+// because the desktop takes a fresh port every launch, so it is not a thing anyone can memorize.
+
+const projectorFeedToggle = document.getElementById('projectorFeedToggle');
+const projectorFeedUrlEl = document.getElementById('projectorFeedUrl');
+const projectorFeedCopyBtn = document.getElementById('projectorFeedCopy');
+const projectorFeedNoteEl = document.getElementById('projectorFeedNote');
+/**
+ * Always an IP LITERAL, even when this page was opened on `localhost` (the dev server prints that
+ * address, and the desktop shell does not). A page served over https reaching a loopback address
+ * is a Local Network Access request, and the browser can only tell the target is local before it
+ * resolves the name - which an IP literal says outright and `localhost` does not. Handing out the
+ * name would leave the hosted consumer blocked as mixed content with nothing to explain it.
+ */
+function projectorFeedUrl() {
+  const url = new URL('/api/projector/events', location.origin);
+  if (url.hostname === 'localhost') url.hostname = '127.0.0.1';
+  return url.href;
+}
+
+function renderProjectorFeedNote() {
+  projectorFeedNoteEl.textContent = !projectorFeedOn
+    ? ''
+    : projectorListeners === 1
+      ? '1 listener'
+      : `${projectorListeners} listeners`;
+}
+
+/** The address and the count follow the switch; the switch itself is the only state. */
+function renderProjectorFeedUi() {
+  projectorFeedUrlEl.classList.toggle('hidden', !projectorFeedOn);
+  projectorFeedCopyBtn.classList.toggle('hidden', !projectorFeedOn);
+  renderProjectorFeedNote();
+}
+
+function setProjectorFeed(on) {
+  projectorFeedOn = !!on;
+  localStorage.setItem(PROJECTOR_FEED_KEY, projectorFeedOn ? '1' : '0');
+  projectorFrame = ''; // whichever way it went, the next tick says so
+  if (!projectorFeedOn) {
+    projectorListeners = 0;
+    // Nothing is left behind on the wire for whoever is still subscribed: turning the feed off
+    // blanks it, rather than leaving the last frame of the set standing in somebody's scene.
+    pushProjectorFeed({ collapse: projectorCollapse, decks: [] });
+  }
+  renderProjectorFeedUi();
+}
+
+projectorFeedUrlEl.textContent = projectorFeedUrl();
+projectorFeedToggle.checked = projectorFeedOn;
+renderProjectorFeedUi();
+projectorFeedToggle.addEventListener('change', () => setProjectorFeed(projectorFeedToggle.checked));
+projectorFeedCopyBtn.addEventListener('click', async () => {
+  try {
+    await navigator.clipboard.writeText(projectorFeedUrl());
+    logLine(`copied the projector feed's address: ${projectorFeedUrl()}`);
+  } catch {
+    logLine(`the projector feed is at ${projectorFeedUrl()}`);
+  }
+});

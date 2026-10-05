@@ -169,10 +169,10 @@ function listWipPatterns() {
 
 // --- the library (playlists; the organize modal and deck B's song queue) ---
 //
-// One library.json alongside the pattern files, so a set travels with the songs it plays
-// (fizzle's model). It holds only what the files can't say for themselves: the playlists and
-// which one is the ACTIVE set (deck B's picker follows it). Tags stay in the files (@tags),
-// tempo is read from the source (nativeBpmOf) - nothing here duplicates a file's own facts.
+// One library.json alongside the pattern files, so a set travels with the songs it plays. It
+// holds only what the files can't say for themselves: the playlists and which one is the
+// ACTIVE set (deck B's picker follows it). Tags stay in the files (@tags), tempo is read
+// from the source (nativeBpmOf) - nothing here duplicates a file's own facts.
 //
 //   { version: 1, playlists: [{ id, name, items: [item, ...] }], active: id | null }
 //

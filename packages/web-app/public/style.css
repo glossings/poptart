@@ -822,6 +822,19 @@ aside h2 {
   margin-top: 6px;
 }
 
+/* The projector feed's address and its copy button, which are only there while the feed is on.
+   Scoped, like every other panel here - there is no global .hidden utility. The address is a
+   .settings-note so it ellipsizes rather than widening the sidebar, and it is selectable because
+   the copy button cannot reach the clipboard everywhere. */
+#projectorSection .hidden {
+  display: none;
+}
+
+#projectorFeedUrl {
+  font-family: var(--mono);
+  user-select: text;
+}
+
 /* a settings row whose control is a block (a list) rather than a single inline field */
 .settings-row-block {
   display: block;
@@ -2039,6 +2052,13 @@ li.CodeMirror-hint-active {
 .web-build #viewDjBtn,
 .web-build #sampleMapBtn,
 .web-build #orgTabDisk {
+  display: none;
+}
+
+/* Nor a projector feed: that is a server handing the frame to another program on the same
+   machine, and the browser build has no server. The projector window itself works there. */
+.web-build #projectorFeedRow,
+.web-build #projectorFeedActions {
   display: none;
 }
 

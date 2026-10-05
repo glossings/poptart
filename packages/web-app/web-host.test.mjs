@@ -476,6 +476,10 @@ test('every path the editor asks for is one the host has an answer for', () => {
     'POST /api/songfiles/stat',
     // the headphone cue device row, drawn disabled from cueAvailable: false
     'POST /api/audioCueDevice',
+    // the projector feed: a server handing the frame to another program on the machine, which
+    // this build has no server for. Its switch is not drawn (style.css, .web-build) and
+    // pushProjectorFeed returns on __poptartHostReady before it can ask.
+    'POST /api/projector',
   ]);
 
   // An entry that has since been given a handler is a stale promise: take it off the list.

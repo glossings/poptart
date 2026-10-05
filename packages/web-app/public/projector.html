@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>poptart projector</title>
+    <link rel="icon" href="favicon.svg" />
+    <!-- Deliberately not style.css: this window is white on black whatever theme the editor is
+         wearing, and it has no chrome of its own to style. Everything it needs is here. -->
+    <style>
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        height: 100%;
+        margin: 0;
+        overflow: hidden;
+        background: #000;
+        color: #fff;
+      }
+      body {
+        font-family: 'SF Mono', ui-monospace, Menlo, monospace;
+      }
+      /* #stage holds the margin, #box is exactly the room the text has (so clientWidth and
+         clientHeight are the numbers the fit bisects against), #fit is the text itself. */
+      #stage {
+        position: absolute;
+        inset: 0;
+        padding: 2.5vmin;
+      }
+      #box {
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+      }
+      #fit {
+        width: 100%;
+        line-height: 1.15;
+      }
+      .deck {
+        white-space: pre-wrap;
+        overflow-wrap: break-word;
+      }
+      .deck + .deck {
+        margin-top: 0.75em;
+      }
+      /* Collapsed, the newlines are already gone from the string - this stops the one space
+         between two decks' worth of code from being honored as a line of its own. */
+      body.collapsed .deck {
+        white-space: normal;
+      }
+      /* The same box the editor draws around the atom that is sounding (style.css's .cm-playing),
+         in em so it grows with the text. A box-shadow costs no layout, so the sounding atom can
+         move thirty times a second without the font size ever being measured again. */
+      .lit {
+        box-shadow: 0 0 0 0.08em #fff;
+        border-radius: 0.08em;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="stage">
+      <div id="box"><div id="fit"></div></div>
+    </div>
+    <script src="projector.js"></script>
+  </body>
+</html>

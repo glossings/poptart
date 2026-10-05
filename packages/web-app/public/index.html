@@ -335,6 +335,36 @@
                   data-chord-title="level meters, spectrum and stereo field for every playing track ({app+g})">open mixer…</button>
               </div>
             </section>
+            <section id="projectorSection">
+              <h2>projector</h2>
+              <label class="settings-row">resolution
+                <select id="projectorResSelect" title="the size the projector window opens at - the resolution of the screen or the beamer it is going on">
+                  <option value="1280x720">1280 × 720</option>
+                  <option value="1920x1080">1920 × 1080</option>
+                  <option value="2560x1440">2560 × 1440</option>
+                  <option value="3840x2160">3840 × 2160</option>
+                  <option value="screen">this screen</option>
+                </select>
+              </label>
+              <label class="settings-row settings-check"
+                title="every line break and run of spaces in the code becomes one space, so a patch reads as a paragraph of language rather than a page of code">
+                <input id="projectorCollapseToggle" type="checkbox" checked />
+                run the code together
+              </label>
+              <div class="settings-actions">
+                <button id="projectorOpenBtn" class="small"
+                  title="the code of every deck that is playing, white on black, as large as it fits - with the same box around the atom that is sounding (F1)">open projector…</button>
+              </div>
+              <label id="projectorFeedRow" class="settings-row settings-check"
+                title="serve the same frame the projector draws - the shaped code, and which atoms are sounding - to another program on this machine, so it can draw the code into its own picture instead of filming the window. Any program on this machine can read it while it is on">
+                <input id="projectorFeedToggle" type="checkbox" />
+                share the feed <span id="projectorFeedNote" class="settings-aside"></span>
+              </label>
+              <div id="projectorFeedActions" class="settings-actions">
+                <code id="projectorFeedUrl" class="settings-note hidden"></code>
+                <button id="projectorFeedCopy" class="small hidden" title="copy the address to the clipboard">copy</button>
+              </div>
+            </section>
             <section id="editorSection">
               <h2>editor</h2>
               <label class="settings-row settings-check"
@@ -1170,6 +1200,7 @@
     <script src="pattern-meta.js"></script>
     <script src="theme-file.js"></script>
     <script src="snippet-code.js"></script>
+    <script src="projector-frame.js"></script>
     <script src="client.js"></script>
   </body>
 </html>

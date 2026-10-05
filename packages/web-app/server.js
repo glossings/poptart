@@ -29,6 +29,10 @@ const PORT = process.env.PORT ? Number(process.env.PORT) : 4000;
 const HOST = process.env.POPTART_HOST || '127.0.0.1';
 const LOOPBACK_ONLY = isLoopbackHostname(HOST);
 const PUBLIC_DIR = path.join(__dirname, 'public');
+// The projector feed flattens a frame per subscriber, with the editor's own shaping code rather
+// than a second copy of it - the window and the feed must never disagree about what the code
+// says. Loaded from public/ like pattern-meta.js, for the same reason: both sides run it.
+const { flattenProjectorFrame } = require('./public/projector-frame.js');
 
 const MIME_TYPES = {
   '.html': 'text/html; charset=utf-8',
@@ -1804,6 +1808,91 @@ function serveLinkEvents(res) {
   res.write(`data: ${JSON.stringify(linkBody())}\n\n`); // the current state, immediately
   linkEventClients.add(res);
   res.on('close', () => linkEventClients.delete(res));
+}
+
+// --- the projector feed (POST /api/projector, SSE GET /api/projector/events) ---
+//
+// What the projector window shows, for anything else that wants it: a visuals environment that
+// can draw the code as part of its own scene, a second screen, a browser source. The editor
+// computes the frame once and posts it here only when it changes (see client.js's projectorTick,
+// which runs off the same 33ms ticker as the playback highlighter); this is pure fan-out.
+//
+// The frame is SHAPED - the editor's own data already taken out of the text and the spans already
+// mapped onto what is left (projector-frame.js). A consumer gets a string it can draw and offsets
+// into that string, never a buffer plus the rules for cutting one down.
+//
+// What a subscriber reads is FLAT - `{ text, ranges }`, one string and one list of offsets into
+// it - however many decks are playing. Which decks exist, which of them is playing, and how to
+// rebase the second one's offsets past the first are all facts about poptart; a reader being
+// asked to draw a string should not have to hold any of them. `?deck=a` (or `b`) takes one deck
+// instead of all of them joined, and `?collapse=0` / `=1` overrides poptart's own setting - both
+// per subscriber, which is why the decks are held apart and flattened on the way out.
+//
+// Held, not just forwarded, so a consumer that connects mid-set sees the set rather than waiting
+// for the next edit - the same promise /api/mix/events makes.
+const projectorClients = new Set(); // res -> read res.poptartFeed for that subscriber's options
+let projectorDecks = [];
+let projectorCollapse = true;
+
+// Readable from any origin. This is the one endpoint that is: the feed exists to be read by
+// another program on this machine, which is a different document and therefore a different
+// origin, and a page cannot read a cross-origin response without this. What it exposes is what
+// is already on a wall in front of an audience, and nothing is writable from here - the POST
+// that fills it carries no CORS header, so only poptart's own page can push.
+function projectorFeedHead() {
+  return {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    Connection: 'keep-alive',
+    'Access-Control-Allow-Origin': '*',
+  };
+}
+
+/** What one subscriber asked for: which deck, and whether to run the code together. */
+function projectorFeedOptions(query) {
+  const deck = query?.deck === 'a' || query?.deck === 'b' ? query.deck : null;
+  const collapse = query?.collapse == null ? null : !/^(0|false|no)$/i.test(String(query.collapse));
+  return { deck, collapse };
+}
+
+/** The flat frame one subscriber gets, from the decks held above. */
+function projectorFeedBody({ deck, collapse }) {
+  const decks = deck ? projectorDecks.filter((d) => d.deck === deck) : projectorDecks;
+  return flattenProjectorFrame(decks, collapse == null ? projectorCollapse : collapse);
+}
+
+function serveProjectorEvents(res, query) {
+  res.poptartFeed = projectorFeedOptions(query);
+  res.writeHead(200, projectorFeedHead());
+  res.write(`data: ${JSON.stringify(projectorFeedBody(res.poptartFeed))}\n\n`); // the set, at once
+  projectorClients.add(res);
+  res.on('close', () => projectorClients.delete(res));
+}
+
+/** Hold the frame and push it on. Returns how many are listening, which the editor reports. */
+function setProjectorFrame(frame) {
+  projectorCollapse = !!frame?.collapse;
+  projectorDecks = (Array.isArray(frame?.decks) ? frame.decks : []).map((d) => ({
+    deck: String(d?.deck ?? ''),
+    text: String(d?.text ?? ''),
+    // Pairs of finite numbers and nothing else, and inside the text they point into. This goes
+    // out to other people's programs, where a malformed range is a crash in a renderer that had
+    // no part in making it.
+    spans: (Array.isArray(d?.spans) ? d.spans : [])
+      .filter((s) => Array.isArray(s) && Number.isFinite(s[0]) && Number.isFinite(s[1]))
+      .map((s) => [s[0], s[1]]),
+  }));
+  // One flatten per distinct set of options, not per client: a room full of subscribers asking
+  // the same thing is the ordinary case.
+  const byOptions = new Map();
+  for (const res of projectorClients) {
+    const key = `${res.poptartFeed?.deck ?? ''}|${res.poptartFeed?.collapse ?? ''}`;
+    if (!byOptions.has(key)) {
+      byOptions.set(key, `data: ${JSON.stringify(projectorFeedBody(res.poptartFeed ?? {}))}\n\n`);
+    }
+    res.write(byOptions.get(key));
+  }
+  return projectorClients.size;
 }
 
 /** Join or leave the session, and reflect it in linkState. Safe to call with it already there. */
@@ -4321,6 +4410,13 @@ function cachedWalk(dir, run) {
 }
 
 const routes = {
+  // The editor pushing what the projector shows. `listeners` comes back so the editor can say
+  // in the settings panel whether anything is actually reading the feed.
+  'POST /api/projector': async (body) => ({
+    status: 200,
+    body: { listeners: setProjectorFrame(body) },
+  }),
+
   'GET /api/status': async () => ({
     status: 200,
     // `scale` is whatever setscale() last set (the prebake may have, before any eval), so a fresh
@@ -7105,6 +7201,11 @@ const server = http.createServer(async (req, res) => {
   // The Link push channel: peers and the session's play state, held open while Link is on.
   if (req.method === 'GET' && url.pathname === '/api/link/events') {
     return serveLinkEvents(res);
+  }
+
+  // The projector feed, for whatever is drawing the code elsewhere - same deal.
+  if (req.method === 'GET' && url.pathname === '/api/projector/events') {
+    return serveProjectorEvents(res, Object.fromEntries(url.searchParams));
   }
 
   const handler = routes[`${req.method} ${url.pathname}`];

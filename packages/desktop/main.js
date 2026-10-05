@@ -171,6 +171,38 @@ function syncFullScreenClass() {
     .catch(() => {});
 }
 
+/** Is this window.open the projector page (public/projector.html) rather than a link out? */
+function isProjectorUrl(url) {
+  try {
+    return new URL(String(url)).pathname === '/projector.html';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The projector's own window: black from the first frame (it is a black page, and a white flash
+ * on the wall between the open and the first paint is exactly what it must not do), and the size
+ * the settings asked for - which rides in as window.open's features, in CSS pixels.
+ */
+function projectorWindowOptions(features) {
+  const size = {};
+  for (const part of String(features ?? '').split(',')) {
+    const [key, value] = part.split('=').map((s) => s.trim());
+    if ((key === 'width' || key === 'height') && Number(value) > 0) size[key] = Math.round(Number(value));
+  }
+  return {
+    ...size,
+    title: 'poptart projector',
+    backgroundColor: '#000000',
+    autoHideMenuBar: true,
+    webPreferences: {
+      nodeIntegration: false, contextIsolation: true, spellcheck: false,
+      backgroundThrottling: false, // see createWindow - a wall is watched, not focused
+    },
+  };
+}
+
 function createWindow() {
   win = new BrowserWindow({
     width: 1400,
@@ -187,15 +219,24 @@ function createWindow() {
       nodeIntegration: false,
       contextIsolation: true,
       spellcheck: false,
+      // Chromium clamps a background window's timers to once a second, and this page's 33ms
+      // ticker is not housekeeping: it drives the playback highlighter, the projector and its
+      // feed. During a set the focused window is the projector, the visuals, or another app
+      // entirely - which is exactly when the editor would stop keeping time. Measured at 1
+      // frame a second backgrounded against 10 in front, on the same playing set.
+      backgroundThrottling: false,
     },
   });
   win.loadFile(LOADING_PAGE);
   // Links to documentation and plugin vendors belong in the user's browser, not in a window
-  // with no address bar.
-  win.webContents.setWindowOpenHandler(({ url }) => {
+  // with no address bar. The projector is the one window.open that is not a link out: it is a
+  // second window of our own page, for the screen behind the set, so it opens here.
+  win.webContents.setWindowOpenHandler(({ url, features }) => {
     const action = actionFor(url);
     if (action) runAction[action]();
-    else if (/^https?:/.test(url)) shell.openExternal(url);
+    else if (isProjectorUrl(url)) {
+      return { action: 'allow', overrideBrowserWindowOptions: projectorWindowOptions(features) };
+    } else if (/^https?:/.test(url)) shell.openExternal(url);
     return { action: 'deny' };
   });
   if (MAC_TITLE_BAR) {
@@ -207,7 +248,10 @@ function createWindow() {
     win.on('enter-full-screen', syncFullScreenClass);
     win.on('leave-full-screen', syncFullScreenClass);
   }
+  // The projector is a window of its own, so without this, closing poptart would leave it
+  // standing on the wall - and window-all-closed would never fire, so the app would never quit.
   win.on('closed', () => {
+    for (const other of BrowserWindow.getAllWindows()) if (!other.isDestroyed()) other.destroy();
     win = null;
   });
   return win;
@@ -377,6 +421,14 @@ app.on('before-quit', (event) => {
     app.quit();
   });
 });
+
+// The windows' own backgroundThrottling (see createWindow) covers a window that merely does not
+// have focus. A window that is fully COVERED is a second case - Chromium treats an occluded
+// window as backgrounded and clamps it anyway - and that is the ordinary setup here: the
+// projector, or the visuals, laid over the editor on one screen. These two switches are the only
+// way to reach that path, and they are safe for a program whose timers are keeping musical time.
+app.commandLine.appendSwitch('disable-background-timer-throttling');
+app.commandLine.appendSwitch('disable-backgrounding-occluded-windows');
 
 // A second copy would fight the first for the audio device and the engine's ports.
 if (!app.requestSingleInstanceLock()) {
