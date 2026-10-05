@@ -232,6 +232,9 @@ const songSync = require('./song-sync');
 const { browseSongDir, statSongPaths, walkSongFiles, defaultSongDir } = require('./song-files');
 const SONG_KEYS = { a: '#song', b: 'b:#song' };
 const SONG_START_LEAD_SEC = 0.15; // enough for the timestamped start bundle to arrive early
+// How near the end counts AS the end when deciding whether a press should rewind. The end timer
+// fires a release early, so a spent deck's playhead can land a hair short of the duration.
+const SONG_END_EPS_SEC = 0.1;
 const songDecks = { a: null, b: null };
 // each: { path, title, duration, sampleRate, channels, frames, decoded, rate,
 //         playing, posSec ("the playhead as of startSec" while playing; the resting playhead
@@ -763,9 +766,14 @@ function songPlayDeck(deck, { pos, rate, now: startNow } = {}) {
   const r = Number(rate);
   if (Number.isFinite(r) && r > 0.01 && r <= 4) s.manualRate = r;
   const at = Number(pos);
+  // Play from the top when the playhead is sitting at the end. The pane sends the position it is
+  // showing for a paused deck (see the client's play call), so after a track has run out every
+  // press would otherwise start AT the end and end again on the spot - the model's own resume
+  // rule below had this right, and the pane's word was bypassing it (reported 2026-10-04).
+  const spent = (v) => v >= s.duration - SONG_END_EPS_SEC;
   const from = Number.isFinite(at)
-    ? Math.min(Math.max(0, at), s.duration)
-    : (s.posSec >= s.duration ? 0 : s.posSec);
+    ? (spent(at) ? 0 : Math.min(Math.max(0, at), s.duration))
+    : (spent(s.posSec) ? 0 : s.posSec);
   const nowSec = engine.getTime();
   let startSec = nowSec + SONG_START_LEAD_SEC;
   const others = othersPlaying(deck);
@@ -4311,13 +4319,17 @@ const IMPORT_MAX = 5000;
 //
 //   The LIVE PATH COMES FIRST. One analysis worker serves the decks' own beatgrid fits and
 //   waveforms, and a queue of several hundred library tracks posted ahead of a deck load would
-//   put the picture minutes behind the music. So the queue only dispatches while neither deck
-//   holds a song, and it stops dead the moment one does, picking up where it left off after.
+//   put the picture minutes behind the music. So the pass waits while a deck is actually PLAYING
+//   a song, or while one is being loaded, and picks up where it left off afterwards.
 //
-//   Livecoding is deliberately NOT a reason to pause: the detection itself is on the worker, and
-//   the only main-thread cost is one library.json write per track, measured at 0.3ms for a
-//   900-track document against a 150ms lookahead. Waiting for silence instead would mean the
-//   pass never ran at all for someone who always has something playing.
+//   A deck merely HOLDING a paused song is not a reason to wait - that is the resting state of
+//   DJ mode, and treating it as busy meant the pass sat at 0 forever with nothing to say for
+//   itself (reported 2026-10-04). Livecoding is not a reason either: the detection is on the
+//   worker, and the only main-thread cost is one library.json write per track, measured at 0.3ms
+//   for a 900-track document against a 150ms lookahead.
+//
+//   Whenever it IS waiting it says so, because a pass that is holding back is indistinguishable
+//   from a broken one otherwise.
 // ---------------------------------------------------------------------------------------------
 
 const libAnalyze = {
@@ -4327,17 +4339,34 @@ const libAnalyze = {
   now: null, // the path being measured
   running: false,
   stopped: false,
+  waiting: null, // why it is holding back, when it is
 };
 
 /** What the browser shows while a pass is on, or null when nothing is being measured. */
 function libAnalyzeState() {
   if (!libAnalyze.running && !libAnalyze.queue.length) return null;
-  return { done: libAnalyze.done, total: libAnalyze.total, now: libAnalyze.now };
+  return {
+    done: libAnalyze.done,
+    total: libAnalyze.total,
+    now: libAnalyze.now,
+    waiting: libAnalyze.waiting,
+  };
 }
 
-// A deck holding a song is a set in progress (or about to be): the worker is wanted for its
-// grid fit and its waveform, not for the library.
-const libAnalyzeBlocked = () => !!(songDecks.a || songDecks.b);
+// Decks being LOADED. A deck's entry in songDecks only appears once its buffer is in, so the
+// expensive part of a load - the decode and the waveform - would otherwise look idle to the pass.
+const songLoading = new Set();
+
+/**
+ * Why the pass should hold back right now, or null to go ahead. A playing song deck wants the
+ * worker for its own grid fit; a loading one wants it for its waveform. A paused deck does not.
+ */
+function libAnalyzeWhyWait() {
+  if (songLoading.size) return 'a deck is loading';
+  const live = ['a', 'b'].filter((d) => songDecks[d]?.playing);
+  if (live.length) return `deck ${live.map((d) => d.toUpperCase()).join(' and ')} is playing`;
+  return null;
+}
 
 function libAnalyzeQueue(paths) {
   const waiting = new Set(libAnalyze.queue);
@@ -4368,19 +4397,28 @@ async function libAnalyzeRun() {
   libAnalyze.running = true;
   try {
     while (libAnalyze.queue.length && !libAnalyze.stopped) {
-      if (libAnalyzeBlocked()) {
+      const why = libAnalyzeWhyWait();
+      if (why) {
         // Give the decks the worker and come back. The queue is kept, so a pass interrupted by a
-        // set resumes once both decks are empty rather than losing its place.
-        await new Promise((r) => { setTimeout(r, 4000); });
+        // set resumes afterwards rather than losing its place - and it says what it is waiting
+        // for, so a deliberate hold never reads as a stall.
+        libAnalyze.waiting = why;
+        await new Promise((r) => { setTimeout(r, 3000); });
         continue;
       }
+      libAnalyze.waiting = null;
       const srcPath = libAnalyze.queue.shift();
       libAnalyze.now = srcPath;
       try {
+        // Detection wants a plain WAV, so anything else is decoded into the song cache first.
+        // That cache is FLOAT32 and roughly twice the source: measured at 69MB for a 35MB aiff,
+        // which over a whole library would be tens of gigabytes written for facts worth a few
+        // bytes each. So a file this pass decoded is thrown away again once measured - the decks
+        // keep their own cache entries for the tracks actually played.
         const resolved = await resolveSongFile(srcPath, { wav: true });
         const facts = await analysis.songDetect(resolved.path);
-        if (facts) setTrackFacts(srcPath, { bpm: facts.bpm, key: facts.key });
-        else setTrackFacts(srcPath, {}); // unreadable: marked analyzed so it is not retried forever
+        setTrackFacts(srcPath, facts ? { bpm: facts.bpm, key: facts.key } : {});
+        if (resolved.decoded && !resolved.cached) libAnalyzeDropCache(resolved.path);
       } catch {
         // A file that cannot be decoded is not a failure of the pass - mark it and move on.
         try { setTrackFacts(srcPath, {}); } catch { /* the record went away mid-pass */ }
@@ -4390,11 +4428,23 @@ async function libAnalyzeRun() {
   } finally {
     libAnalyze.running = false;
     libAnalyze.now = null;
+    libAnalyze.waiting = null;
     if (!libAnalyze.queue.length) {
       libAnalyze.done = 0;
       libAnalyze.total = 0;
     }
   }
+}
+
+/**
+ * A cache file this pass decoded, removed again. Never one a deck is standing on: a deck holds
+ * the decoded path open, and its own load is what put that entry there to be reused.
+ */
+function libAnalyzeDropCache(wavPath) {
+  for (const d of ['a', 'b']) {
+    if (songDecks[d]?.decoded && songDecks[d]?.wavPath === wavPath) return;
+  }
+  try { fs.rmSync(wavPath, { force: true }); } catch { /* it can stay if it will not go */ }
 }
 
 /** The paths in a collection still worth measuring: no tempo or no key, and not already tried. */
@@ -7810,11 +7860,20 @@ const routes = {
     const deck = body.deck === 'b' ? 'b' : 'a';
     const key = SONG_KEYS[deck];
     const srcPath = String(body.path ?? '');
-    const resolved = await resolveSongFile(srcPath);
-    if (songDecks[deck]) songMarkPaused(deck); // stop the old song's timers before its buffer goes
-    const tid = claimEngineTrack(key);
-    mappedEngine.createTrack(tid, mixBirthFor(key)); // idempotent - a reload keeps the track warm
-    const meta = await mappedEngine.songLoad(tid, resolved.path);
+    // Held across the decode and the buffer read, so the library's measuring pass stands aside
+    // for the whole load rather than only once the deck's entry exists (libAnalyzeWhyWait).
+    songLoading.add(deck);
+    let resolved;
+    let meta;
+    try {
+      resolved = await resolveSongFile(srcPath);
+      if (songDecks[deck]) songMarkPaused(deck); // stop the old song's timers before its buffer goes
+      const tid = claimEngineTrack(key);
+      mappedEngine.createTrack(tid, mixBirthFor(key)); // idempotent - a reload keeps the track warm
+      meta = await mappedEngine.songLoad(tid, resolved.path);
+    } finally {
+      songLoading.delete(deck);
+    }
     const duration = meta.sampleRate > 0 ? meta.frames / meta.sampleRate : 0;
     const tags = readSongTags(srcPath);
     const bodyBpm = Number(body.bpm);
@@ -7827,6 +7886,7 @@ const routes = {
       channels: meta.channels,
       frames: meta.frames,
       decoded: resolved.decoded,
+      wavPath: resolved.path, // the decoded file this deck is standing on, if it was decoded
       rate: 1,
       playing: false,
       posSec: 0,

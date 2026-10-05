@@ -31416,6 +31416,14 @@ const ORG_COLUMNS = {
   bpm: { label: 'bpm', cls: 'org-c-bpm', num: true, text: (r) => orgBpmText(r.bpm), key: (r) => r.bpm ?? null },
   key: { label: 'key', cls: 'org-c-key', text: (r) => r.musKey ?? '', key: (r) => (r.musKey ?? '').toLowerCase() },
   rating: { label: 'rating', cls: 'org-c-rating', num: true, stars: true, text: (r) => (r.rating ? `${r.rating}` : ''), key: (r) => r.rating ?? null },
+  // Where the file actually is. Shows the folder rather than the whole path - the file's own name
+  // is already the name column, and repeating it costs the width that made this worth adding.
+  path: {
+    label: 'folder',
+    cls: 'org-c-path',
+    text: (r) => (r.path ? r.path.slice(0, r.path.lastIndexOf('/') + 1).replace(/\/$/, '') : ''),
+    key: (r) => (r.path ?? '').toLowerCase(),
+  },
   tags: { label: 'tags', cls: 'org-c-tags', chips: true, text: (r) => (r.tags ?? []).join(' '), key: (r) => (r.tags ?? []).join(' ') },
   saved: { label: 'saved', cls: 'org-c-when', num: true, text: (r) => orgWhenText(r.when), key: (r) => r.when ?? 0 },
   added: { label: 'added', cls: 'org-c-when', num: true, text: (r) => orgWhenText(r.when), key: (r) => r.when ?? 0 },
@@ -31423,12 +31431,87 @@ const ORG_COLUMNS = {
 
 // Per source: which columns, and what it is sorted by until someone clicks a header. A set opens
 // in ITS OWN order (that is what a set is); everything else opens newest first.
+// Per source: the columns shown until someone says otherwise, what it is sorted by until someone
+// clicks a header, and `offer` - everything this source COULD show, which is what the header's
+// right-click menu lists. A column is only offerable where its rows can actually fill it: a
+// livecode save has no artist and no record to carry a rating, so neither is on the menu there.
 const ORG_VIEWS = {
-  livecode: { cols: ['name', 'folder', 'bpm', 'tags', 'saved'], sort: 'saved', dir: -1 },
-  tracks: { cols: ['name', 'artist', 'album', 'bpm', 'key', 'rating', 'added'], sort: 'added', dir: -1 },
-  playlist: { cols: ['n', 'name', 'artist', 'bpm', 'key', 'rating'], sort: 'n', dir: 1 },
-  disk: { cols: ['name', 'artist', 'bpm', 'key'], sort: 'name', dir: 1 },
+  livecode: {
+    cols: ['name', 'folder', 'bpm', 'tags', 'saved'],
+    offer: ['name', 'folder', 'bpm', 'tags', 'saved'],
+    sort: 'saved',
+    dir: -1,
+  },
+  tracks: {
+    cols: ['name', 'artist', 'album', 'bpm', 'key', 'rating', 'added'],
+    offer: ['name', 'artist', 'album', 'bpm', 'key', 'rating', 'added', 'path'],
+    sort: 'added',
+    dir: -1,
+  },
+  playlist: {
+    cols: ['n', 'name', 'artist', 'bpm', 'key', 'rating'],
+    offer: ['n', 'name', 'artist', 'album', 'bpm', 'key', 'rating', 'path'],
+    sort: 'n',
+    dir: 1,
+  },
+  disk: {
+    cols: ['name', 'artist', 'bpm', 'key'],
+    offer: ['name', 'artist', 'album', 'bpm', 'key', 'rating', 'path'],
+    sort: 'name',
+    dir: 1,
+  },
 };
+
+// The name column is what every row is identified by, so it is the one that cannot be turned off.
+const ORG_COL_FIXED = 'name';
+
+// --- which columns are shown, and how wide ----------------------------------------------------
+//
+// Per source, because the useful columns differ: a set is read by position and a crate by artist.
+// Kept in localStorage rather than in the library, like the region widths - it is how this
+// machine's window is arranged, not something a collection should carry between machines.
+
+const ORG_COLCONF_KEY = 'poptart.orgColConf';
+let orgColConf = {}; // { [source kind]: { show?: [names], w?: { [name]: px } } }
+try {
+  const saved = JSON.parse(localStorage.getItem(ORG_COLCONF_KEY) ?? 'null');
+  if (saved && typeof saved === 'object') orgColConf = saved;
+} catch { /* a damaged entry is the defaults */ }
+
+function orgSaveColConf() {
+  try { localStorage.setItem(ORG_COLCONF_KEY, JSON.stringify(orgColConf)); } catch { /* fine */ }
+}
+
+const orgConf = () => (orgColConf[orgSrc.kind] ??= {});
+
+/**
+ * The columns this source is showing, in the view's own order - a stored list is filtered back
+ * through `offer` so a column that stopped being offerable (or a damaged entry) cannot put a
+ * header on screen that no row can fill.
+ */
+function orgShownCols() {
+  const view = orgView();
+  const stored = orgColConf[orgSrc.kind]?.show;
+  if (!Array.isArray(stored)) return view.cols;
+  const show = view.offer.filter((n) => stored.includes(n));
+  return show.includes(ORG_COL_FIXED) ? show : [ORG_COL_FIXED, ...show];
+}
+
+function orgToggleCol(name) {
+  if (name === ORG_COL_FIXED) return;
+  const shown = orgShownCols();
+  const next = shown.includes(name) ? shown.filter((n) => n !== name) : [...shown, name];
+  orgConf().show = orgView().offer.filter((n) => next.includes(n));
+  orgSaveColConf();
+  orgRenderMain();
+}
+
+/** Back to this source's own columns and widths. */
+function orgResetCols() {
+  delete orgColConf[orgSrc.kind];
+  orgSaveColConf();
+  orgRenderMain();
+}
 
 /** A tempo as its own provenance: 128 came from a tag or a hand, 127.98 was measured. */
 function orgBpmText(bpm) {
@@ -31879,25 +31962,119 @@ function orgGoto(src) {
 
 function orgRenderHead() {
   const tr = orgEl.querySelector('#orgHead');
+  const group = orgEl.querySelector('#orgColGroup');
   tr.innerHTML = '';
+  group.innerHTML = '';
   const { col, dir } = orgSort();
-  for (const name of orgView().cols) {
+  const shown = orgShownCols();
+  const widths = orgColConf[orgSrc.kind]?.w ?? {};
+  for (const name of shown) {
     const spec = ORG_COLUMNS[name];
+    // The table is laid out fixed, so the col element's width IS the column's width - which is
+    // what lets a drag set it without measuring anything else.
+    const colEl = document.createElement('col');
+    colEl.className = spec.cls;
+    if (widths[name]) colEl.style.width = `${widths[name]}px`;
+    group.appendChild(colEl);
+
     const th = document.createElement('th');
     th.className = `${spec.cls}${col === name ? ' sorted' : ''}`;
-    th.textContent = spec.label;
-    th.title = col === name
-      ? `sorted by ${spec.label} - click to reverse`
-      : `sort by ${spec.label}`;
+    th.dataset.col = name;
+    const label = document.createElement('span');
+    label.className = 'org-th-label';
+    label.textContent = spec.label;
+    th.appendChild(label);
+    th.title = `${col === name ? `sorted by ${spec.label} - click to reverse` : `sort by ${spec.label}`}\ndrag the edge to resize · right-click for which columns to show`;
     if (col === name) {
       const caret = document.createElement('i');
       caret.className = 'org-caret';
       caret.textContent = dir > 0 ? '▴' : '▾';
       th.appendChild(caret);
     }
-    th.addEventListener('click', () => orgSetSort(name));
+    // A press that became a drag is a resize, not a sort - the grip sets this and the click
+    // handler below reads it, because a click fires after the pointer is released either way.
+    th.addEventListener('click', () => {
+      if (orgResized) return;
+      orgSetSort(name);
+    });
+    if (name !== shown[shown.length - 1]) th.appendChild(orgColGrip(name, th));
     tr.appendChild(th);
   }
+}
+
+// Dragging a header's right edge sets that column's width. The last column has no grip: it takes
+// whatever is left over, so there is nothing on its right to push into.
+let orgResized = false;
+const ORG_COL_MIN_W = 36;
+
+function orgColGrip(name, th) {
+  const grip = document.createElement('span');
+  grip.className = 'org-th-grip';
+  grip.title = `resize ${ORG_COLUMNS[name].label} (double-click to fit)`;
+  grip.addEventListener('click', (e) => e.stopPropagation()); // never a sort
+  grip.addEventListener('dblclick', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const conf = orgConf();
+    if (conf.w) delete conf.w[name];
+    orgSaveColConf();
+    orgRenderMain();
+  });
+  grip.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const startX = e.clientX;
+    const startW = th.getBoundingClientRect().width;
+    orgResized = false;
+    grip.classList.add('dragging');
+    grip.setPointerCapture(e.pointerId);
+    const onMove = (ev) => {
+      if (Math.abs(ev.clientX - startX) > 2) orgResized = true;
+      if (!orgResized) return;
+      const want = Math.max(ORG_COL_MIN_W, Math.round(startW + (ev.clientX - startX)));
+      const conf = orgConf();
+      conf.w ??= {};
+      conf.w[name] = want;
+      const colEl = orgEl.querySelector(`#orgColGroup col.${ORG_COLUMNS[name].cls}`);
+      if (colEl) colEl.style.width = `${want}px`;
+    };
+    const onUp = (ev) => {
+      grip.classList.remove('dragging');
+      if (grip.hasPointerCapture?.(ev.pointerId)) grip.releasePointerCapture(ev.pointerId);
+      grip.removeEventListener('pointermove', onMove);
+      grip.removeEventListener('pointerup', onUp);
+      grip.removeEventListener('pointercancel', onUp);
+      if (orgResized) orgSaveColConf();
+      // Cleared on the next frame, so the click this release produces still sees it and does
+      // not sort the column that was just resized.
+      setTimeout(() => { orgResized = false; }, 0);
+    };
+    grip.addEventListener('pointermove', onMove);
+    grip.addEventListener('pointerup', onUp);
+    grip.addEventListener('pointercancel', onUp);
+  });
+  return grip;
+}
+
+/** Right-click on the header: which columns this source shows. */
+function orgHeadMenu(x, y) {
+  const shown = orgShownCols();
+  const items = orgView().offer.map((name) => {
+    const spec = ORG_COLUMNS[name];
+    const on = shown.includes(name);
+    if (name === ORG_COL_FIXED) {
+      return [`✓ ${spec.label}`, () => {}, 'every row is named by this one, so it always shows'];
+    }
+    return [`${on ? '✓' : '  '} ${spec.label}`, () => orgToggleCol(name), on ? 'hide it' : 'show it'];
+  });
+  items.push('-');
+  items.push(['reset columns', () => orgResetCols(), 'back to the usual columns and widths here']);
+  openCtxMenu(orgMenu, x, y, {
+    head: 'columns',
+    items,
+    after: () => orgEl.querySelector('#orgBody').focus({ preventScroll: true }),
+  });
 }
 
 function orgRenderMain() {
@@ -31916,7 +32093,7 @@ function orgRenderMain() {
     const tr = document.createElement('tr');
     const td = document.createElement('td');
     td.className = 'org-empty';
-    td.colSpan = orgView().cols.length;
+    td.colSpan = orgShownCols().length;
     td.textContent = orgEmptyText();
     tr.appendChild(td);
     body.appendChild(tr);
@@ -31924,7 +32101,7 @@ function orgRenderMain() {
     return;
   }
 
-  const cols = orgView().cols;
+  const cols = orgShownCols();
   const sorted = orgSort();
   for (const row of rows) {
     const tr = document.createElement('tr');
@@ -32225,9 +32402,16 @@ function orgRenderBar() {
   if (onTracks) {
     const picked = orgSelectedRows().filter((r) => r.trackId);
     if (libAnalyzing) {
-      measure.textContent = `stop · ${libAnalyzing.done}/${libAnalyzing.total}`;
-      measure.title = `measuring tempo and key${libAnalyzing.now ? `: ${pathBasename(libAnalyzing.now)}` : ''} — click to stop`;
+      // A pass that is standing aside for the decks says so: the same "0 of 757" forever reads
+      // as broken otherwise, which is exactly how it was reported.
+      const held = libAnalyzing.waiting;
+      measure.textContent = `${held ? 'waiting' : 'stop'} · ${libAnalyzing.done}/${libAnalyzing.total}`;
+      measure.title = held
+        ? `holding back while ${held} — it picks up again on its own. click to stop`
+        : `measuring tempo and key${libAnalyzing.now ? `: ${pathBasename(libAnalyzing.now)}` : ''} — click to stop`;
+      measure.classList.toggle('org-waiting', !!held);
     } else {
+      measure.classList.remove('org-waiting');
       measure.textContent = picked.length ? `measure ${picked.length > 1 ? picked.length : ''}`.trimEnd() : 'measure';
       measure.title = picked.length
         ? 'measure tempo and key for the selection'
@@ -32832,6 +33016,7 @@ function buildOrganize() {
           </div>
           <div id="orgTableWrap">
             <table id="orgTable">
+              <colgroup id="orgColGroup"></colgroup>
               <thead><tr id="orgHead"></tr></thead>
               <tbody id="orgBody" tabindex="-1"></tbody>
             </table>
@@ -32904,6 +33089,10 @@ function buildOrganize() {
   });
   orgEl.querySelector('#orgClean').addEventListener('click', () => orgForgetMissing());
   orgEl.querySelector('#orgBody').addEventListener('keydown', orgBodyKeys);
+  orgEl.querySelector('#orgHead').addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    orgHeadMenu(e.clientX, e.clientY);
+  });
   orgEl.addEventListener('dragend', () => { orgHeld = null; });
 
   orgEl.querySelector('#orgPlayBtn').addEventListener('click', () => orgPlayerToggle());

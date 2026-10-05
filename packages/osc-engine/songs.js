@@ -18,6 +18,11 @@ const path = require('node:path');
 const { poptartHome } = require('./home');
 const { execFile } = require('node:child_process');
 
+// Decodes in progress, keyed by the cache path they are producing: cache path -> promise. Two
+// callers wanting the same file wait on one afconvert rather than racing each other (see
+// resolveSongFile). Entries are removed as they settle, so this only ever holds live work.
+const inFlight = new Map();
+
 // What scsynth reads natively vs what needs an afconvert pass first. Anything else is a clear
 // error - better than handing scsynth a file it will fail on with a cryptic read error.
 const NATIVE_EXTS = new Set(['.wav', '.aif', '.aiff', '.flac', '.mp3']);
@@ -80,17 +85,40 @@ async function resolveSongFile(filePath, { exec = execFile, cacheDir, wav = fals
   const out = songCachePath(src, stat, dir);
   if (fs.existsSync(out)) return { path: out, decoded: true, cached: true };
 
+  // One decode per file at a time, however many callers ask for it. Two are now ordinary - a deck
+  // loading a track while the library measures it - and two afconverts writing one temporary file
+  // made each other fail (-54) or left a short WAV behind, which read back as a song of almost no
+  // duration. Later callers wait on the first one's promise and then take the finished cache
+  // entry, so they report `cached` as any other hit would.
+  const held = inFlight.get(out);
+  if (held) {
+    await held;
+    return { path: out, decoded: true, cached: true };
+  }
+
   // Float WAV keeps whatever headroom the source had; afconvert preserves sample rate and
-  // channel count unless told otherwise, which is exactly what a deck wants.
-  const part = `${out}.part.wav`;
-  await new Promise((resolve, reject) => {
-    exec('afconvert', ['-f', 'WAVE', '-d', 'LEF32', src, part], (err, stdout, stderr) => {
-      if (err) {
-        reject(new Error(`decoding ${path.basename(src)} failed: ${String(stderr || err.message).trim()}`));
-      } else resolve();
-    });
-  });
-  fs.renameSync(part, out);
+  // channel count unless told otherwise, which is exactly what a deck wants. The temporary name
+  // is unique per attempt, so even across processes two decodes cannot share a part file.
+  const part = `${out}.${process.pid}.${Math.random().toString(36).slice(2, 8)}.part.wav`;
+  const work = (async () => {
+    try {
+      await new Promise((resolve, reject) => {
+        exec('afconvert', ['-f', 'WAVE', '-d', 'LEF32', src, part], (err, stdout, stderr) => {
+          if (err) {
+            reject(new Error(`decoding ${path.basename(src)} failed: ${String(stderr || err.message).trim()}`));
+          } else resolve();
+        });
+      });
+      fs.renameSync(part, out); // atomic, so a reader never sees a half-written cache entry
+    } catch (err) {
+      try { fs.rmSync(part, { force: true }); } catch { /* nothing to clean up */ }
+      throw err;
+    } finally {
+      inFlight.delete(out);
+    }
+  })();
+  inFlight.set(out, work);
+  await work;
   return { path: out, decoded: true, cached: false };
 }
 

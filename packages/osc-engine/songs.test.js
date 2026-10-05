@@ -151,3 +151,61 @@ test('resolveSongFile: a failed decode surfaces stderr and leaves no cache entry
   );
   assert.deepEqual(fs.readdirSync(cache), [], 'no half-written cache entry');
 });
+
+// Two callers wanting the same file at once became ordinary when the library started measuring
+// tempo and key in the background: a deck loading a track while the pass decodes it. Sharing one
+// temporary file made the two afconverts collide - one failed outright, and the survivor could
+// rename a short WAV into place, which read back as a song of almost no duration (so a press of
+// play ran straight off the end). One decode now serves every caller.
+test('resolveSongFile: concurrent callers share one decode', async () => {
+  const dir = tmpdir();
+  const cache = path.join(dir, 'cache');
+  const src = path.join(dir, 'song.m4a');
+  fs.writeFileSync(src, 'not-really-audio');
+  const calls = [];
+  // A decode slow enough that all three callers are certainly in flight together.
+  const slowExec = (cmd, args, cb) => {
+    calls.push({ cmd, args });
+    setTimeout(() => {
+      fs.writeFileSync(args[args.length - 1], 'decoded-audio');
+      cb(null, '', '');
+    }, 40);
+  };
+  const [a, b, c] = await Promise.all([
+    resolveSongFile(src, { exec: slowExec, cacheDir: cache }),
+    resolveSongFile(src, { exec: slowExec, cacheDir: cache }),
+    resolveSongFile(src, { exec: slowExec, cacheDir: cache }),
+  ]);
+  assert.equal(calls.length, 1, 'afconvert ran once for three callers');
+  assert.equal(a.path, b.path);
+  assert.equal(b.path, c.path);
+  assert.equal(fs.readFileSync(a.path, 'utf8'), 'decoded-audio', 'the cache entry is whole');
+  // Exactly one call did the work; the others took the finished entry.
+  assert.deepEqual([a, b, c].filter((r) => !r.cached).length, 1);
+  assert.deepEqual(
+    fs.readdirSync(cache).filter((f) => f.includes('.part.')),
+    [],
+    'no temporary file is left behind',
+  );
+});
+
+test('resolveSongFile: a failed shared decode rejects every caller and caches nothing', async () => {
+  const dir = tmpdir();
+  const cache = path.join(dir, 'cache');
+  const src = path.join(dir, 'song.m4a');
+  fs.writeFileSync(src, 'not-really-audio');
+  const slowFail = (cmd, args, cb) => {
+    setTimeout(() => cb(new Error('exit 1'), '', 'Error: boom'), 20);
+  };
+  const results = await Promise.allSettled([
+    resolveSongFile(src, { exec: slowFail, cacheDir: cache }),
+    resolveSongFile(src, { exec: slowFail, cacheDir: cache }),
+  ]);
+  assert.deepEqual(results.map((r) => r.status), ['rejected', 'rejected']);
+  assert.deepEqual(fs.readdirSync(cache), [], 'nothing half-written survives');
+  // And the failure is not remembered: a later, working decode still gets its chance.
+  const calls = [];
+  const ok = await resolveSongFile(src, { exec: fakeExec(calls), cacheDir: cache });
+  assert.equal(ok.cached, false);
+  assert.equal(calls.length, 1);
+});

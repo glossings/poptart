@@ -6076,14 +6076,24 @@ input.org-edit {
   width: 140px;
 }
 /* The stars. Five glyphs always, so rating a row never changes its width (and the hollow ones
-   are the click target for raising it). */
+   are the click target for raising it).
+
+   Wide enough for all five, with room to spare: the star glyph usually comes from a fallback font
+   whose advance width this stylesheet cannot know, and at 72px the cell was ellipsizing after
+   three. The cell also refuses to ellipsize at all - a clipped star is bad, but "★★★…" is a
+   rating you cannot read or click. */
 .org-c-rating {
-  width: 72px;
+  width: 104px;
+}
+#orgBody td.org-c-rating {
+  text-overflow: clip;
 }
 .org-stars {
+  display: inline-block;
+  white-space: nowrap;
   cursor: pointer;
-  letter-spacing: 1px;
-  font-size: 11px;
+  letter-spacing: 1.5px;
+  font-size: 12px;
   color: var(--text-dim);
   user-select: none;
 }
@@ -6094,6 +6104,11 @@ input.org-edit {
   color: var(--accent);
 }
 /* A tempo or key we MEASURED rather than read off the file - an estimate, and marked as one. */
+/* A measuring pass that is standing aside for the decks, rather than working. */
+.org-waiting {
+  opacity: 0.7;
+  font-style: italic;
+}
 .org-guess {
   opacity: 0.62;
   font-style: italic;
@@ -6118,6 +6133,40 @@ input.org-edit {
 }
 .org-c-tags {
   width: 140px;
+}
+.org-c-path {
+  width: 180px;
+  color: var(--text-dim);
+  direction: rtl; /* a long path keeps its tail - the folder the file is actually in */
+  text-align: left;
+}
+/* The resize grip on a header's right edge. Sits over the boundary rather than beside it, so the
+   pointer finds it without hunting, and it is the one part of a header that is not a sort. */
+#orgTable thead th {
+  position: relative;
+}
+.org-th-grip {
+  position: absolute;
+  top: 0;
+  right: -3px;
+  width: 7px;
+  height: 100%;
+  cursor: col-resize;
+  touch-action: none;
+}
+.org-th-grip:hover::after,
+.org-th-grip.dragging::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  bottom: 2px;
+  left: 3px;
+  width: 1px;
+  background: var(--accent);
+}
+.org-th-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .org-c-tags i {
   font-style: normal;
