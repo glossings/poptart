@@ -1472,7 +1472,7 @@ function neutralizeMix(key) {
 // The "trackId|..."-keyed lease/capture maps, re-keyed or dropped together when a track changes
 // name (promotion) or dies (eject / complete-mix). A function, not a const list: several are
 // declared further down the file.
-const PIPED_MAPS = () => [presetHolds, channelHolds, uncaptured, autoPinDirty, autoPinReady, lastCapturedState];
+const PIPED_MAPS = () => [presetHolds, channelHolds, uncaptured, autoPinDirty, autoPinReady, lastCapturedState, capturedPresetOf];
 
 // Forget a track completely: its engine side is destroyed (plugins closed - see destroyTrack in
 // sc/poptart.scd), its registry ids freed, and every server-side trace of the key dropped. Used
@@ -3798,14 +3798,15 @@ function handleParamAutomated(trackId, slot, name, index, normValue) {
 // the full state and hand it to the editor to write into the call as `{ state }`. No pin button:
 // the code always describes what you're hearing.
 //
-// The state itself goes in, gzipped and base64'd, megabytes and all - not a reference to it. A
-// patch is then the whole sound: what you save, paste or send needs nothing else to exist, and
-// commenting one line out and another in swaps presets, because both are right there. It was
-// briefly a short id into a side store instead; that made buffers small but made a patch a pointer,
-// and pointers dangle. What made big buffers expensive was never the bytes - it was the label
-// splitter re-lexing a block per line (fixed in labels.mjs: 2MB went 225ms -> 11ms). An 8.5MB
-// buffer with three pinned Serums now costs ~55ms an eval, and that is worth paying for a patch
-// that can't lose its own sound.
+// The program goes into a content-addressed side store and the buffer carries a short handle to
+// it (see blobs.js) - a dozen bytes where the program is megabytes, so the buffer never holds the
+// bytes even once. An earlier design inlined the whole state instead, on the grounds that a patch
+// should be the whole sound and a pointer can dangle. That still holds; what settles it is
+// hydrating on the way OUT rather than inlining on the way in. Anything written where this store
+// might not be - a save, an export, a share link - has its handles replaced by the programs
+// themselves first, so what leaves here needs nothing else to exist. What made big buffers
+// expensive was never the bytes anyway: it was the label splitter re-lexing a block per line
+// (fixed in labels.mjs: 2MB went 225ms -> 11ms).
 //
 // WHEN we capture is an audio decision, not a bookkeeping one, and it has two settings. A capture
 // is VSTPlugin's `writeProgram`, and its docs are explicit about the cost: with `async: true` (the
@@ -3820,11 +3821,22 @@ function handleParamAutomated(trackId, slot, name, index, normValue) {
 // `deferred` (the default) spends it only where it costs least:
 //
 //   - clock frozen -> capture as soon as the gesture settles. Nothing is playing to interrupt.
+//
 //   - clock running -> hold the slot dirty, and capture at the next moment the code has to be
-//     true about the sound: an eval, a stop, a save, an export, a share link (the callers of
-//     flushPluginCaptures). Those are moments you are already changing or leaving the sound, and
-//     all of them are far rarer than knob moves. It also keeps a megabyte-scale rewrite of the
-//     buffer out of the middle of a performance.
+//     true about the sound: a stop, or a save/export/share link (the callers of
+//     flushPluginCaptures). Those are moments you are already leaving the sound, and all of them
+//     are far rarer than knob moves. The last three settle even mid-set, suspension and all -
+//     they write an artifact once, and a file or a link carrying the sound from before your last
+//     tweak is wrong for good, where a stumble is over in a moment.
+//
+//     An eval is deliberately NOT one of them. It used to be, on the reasoning that an eval is a
+//     moment you are already changing the sound - but the pianoroll evaluates on its own as you
+//     draw, so that spent a plugin suspension in the middle of a bar for an eval nobody asked
+//     for, heard as the beat stumbling. What the eval wanted a fresh capture for - a plugin it
+//     reopens being handed the program from before your tweak - is covered instead by parking
+//     the captured program server-side (see the scheduler's noteCapturedPreset). The one eval
+//     that still captures is one replacing a plugin outright, because that CLOSES the plugin and
+//     an uncaptured edit would go with it (see replacedHeldSlots).
 //
 // `immediate` (POPTART_AUTOPIN=immediate) spends one as soon as each gesture settles, whatever the
 // clock is doing: one brief suspension per tweak, and a buffer that always matches what you hear.
@@ -4093,6 +4105,16 @@ function commitCapture(at) {
   const key = `${String(at?.trackId ?? '')}|${Number(at?.slot ?? 0)}`;
   // A knob turned while the last capture was being written left a NEWER one uncaptured, and the
   // report of the old one must not release it - that edit is still only in the plugin.
+  // Filed: the definition in the code now holds this program, so the scheduler goes back to
+  // reading it rather than the copy parked at capture time (see capturedPresetOf). Checked
+  // BEFORE the freeze below, and against the capture's own seq, because the two come apart: a
+  // chain edit thaws the slot while its capture is still on its way to the buffer, and the
+  // parked program has to outlive the freeze or it would shadow the definition for good.
+  const filed = capturedPresetOf.get(key);
+  if (filed && filed.seq === Number(at?.seq)) {
+    capturedPresetOf.delete(key);
+    schedulers.get(key.slice(0, key.lastIndexOf('|')))?.forgetCapturedPreset(filed.plugin, filed.preset);
+  }
   if (uncaptured.get(key)?.seq !== Number(at?.seq)) return;
   uncaptured.delete(key);
   syncStateHold(key);
@@ -4102,21 +4124,37 @@ function commitCapture(at) {
  * Thaws every frozen slot of one track that the chain about to be set puts a DIFFERENT plugin in.
  * Reordering the .fx(...) calls (or retyping one) between a knob turn and the eval - deferred mode
  * leaves a whole performance for that - reopens both plugins fresh, so there is nothing left in
- * the slot to protect: the edited plugin was captured on the way into the eval (the route flushes
- * before it builds) and is written wherever its call is now, and the plugin arriving here needs
- * its program pushed like any other. Left frozen, it sounded init until the old capture's commit,
+ * the slot to protect: the plugin arriving here needs its program pushed like any other, and the
+ * edited plugin's own tweak is not lost by thawing, because the eval captures a slot it is about
+ * to replace before letting it go (see replacedHeldSlots) and the program is then parked until
+ * the editor has written it wherever that plugin's call now sits (see noteCapturedPreset). Left frozen, it sounded init until the old capture's commit,
  * or the timeout, thawed it - and the window that was open on the slot belonged to the plugin that
  * just closed. Called before setPattern, while the engine's chain is still the old one.
  */
 function thawReplacedSlots(label, chain) {
-  for (const slot of stateHeldSlotsFor(label)) {
-    const now = pluginInSlot(label, slot);
-    if (now == null || (chain[slot] ?? null) === now) continue;
+  for (const slot of replacedHeldSlots(label, chain)) {
     const key = `${label}|${slot}`;
     handTaken.delete(key);
     uncaptured.delete(key);
     syncStateHold(key);
   }
+}
+
+/**
+ * The frozen slots of one track that the chain about to be set puts a DIFFERENT plugin in - the
+ * ones thawReplacedSlots is about to let go, and the only ones an eval still has to capture for.
+ * Their plugins are about to be CLOSED, taking any hand edit that was never captured with them,
+ * and an eval no longer flushes on its own (see the eval route). Everywhere else the parked
+ * program covers the gap; here there would be nothing to park.
+ */
+function replacedHeldSlots(label, chain) {
+  const out = [];
+  for (const slot of stateHeldSlotsFor(label)) {
+    const now = pluginInSlot(label, slot);
+    if (now == null || (chain[slot] ?? null) === now) continue;
+    out.push(slot);
+  }
+  return out;
 }
 
 /** Drops captures that never made it into the code. Windows are not in here: one is closed, never
@@ -4145,6 +4183,12 @@ const autoPinReady = new Map(); // same key -> { trackId, slot, plugin, preset, 
 // write into the code, no freeze on the slot, no line in the log. Handles, not programs, so this
 // costs a dozen bytes a slot. Content addressing is what makes the comparison exact (see blobs.js).
 const lastCapturedState = new Map();
+
+// "trackId|slot" -> { plugin, preset } for a capture taken but not yet written into the code. The
+// program itself is parked on the track's Scheduler (noteCapturedPreset), so an eval in the gap
+// pushes the captured sound rather than the definition's older one; this is what commitCapture
+// needs to know WHICH preset to stop speaking for once the editor has filed it.
+const capturedPresetOf = new Map();
 
 /**
  * One state as a blob handle, whichever form it arrived in. States reach the scheduler as handles
@@ -4218,11 +4262,15 @@ function markSlotDirty(trackId, slot, speculative) {
  * say - so the other end asks instead, at the moment a person's attention comes back to the code:
  * the browser regaining focus, and the click in the buffer that hands a held slot back.
  *
- * Asking is only free because the answer is comparable: the program comes back content-addressed,
+ * Asking is only cheap because the answer is comparable: the program comes back content-addressed,
  * and one identical to the last capture of that slot stops right there (see captureDirtyPlugins).
- * So a speculative capture of an untouched plugin costs one writeProgram and changes nothing -
- * no write into the buffer, no freeze, no log line - while one of a plugin that WAS touched is
- * indistinguishable from a reported edit from that point on.
+ * So a speculative capture of an untouched plugin changes nothing - no write into the buffer, no
+ * freeze, no log line - while one of a plugin that WAS touched is indistinguishable from a
+ * reported edit from that point on.
+ *
+ * Cheap is not free, and the bookkeeping is the cheap part: the writeProgram still happens, and it
+ * still suspends the plugin while it serializes. That is why marking a slot only SCHEDULES a
+ * capture while the clock is frozen (see markSlotDirty) - asked while you are playing, it waits.
  *
  * Only slots held by hand are asked, which is to say only plugins whose window poptart opened and
  * that you have not clicked away from yet. That is the one window where the slot's sound is
@@ -4326,6 +4374,15 @@ async function captureDirtyPlugins() {
       const held = uncaptured.get(key);
       if (held) held.at = Date.now();
       autoPinReady.set(key, { trackId, slot, plugin, preset, state: handle, seq: held?.seq ?? 0 });
+      // The buffer will not carry this for another poll or two, and an eval in that gap would push
+      // the preset's definition - the program as it was BEFORE this tweak - into the plugin. A
+      // chain edit makes that certain, since reopening a plugin means something must be pushed. So
+      // the scheduler is told what the plugin really holds, keyed by the preset the tweak belongs
+      // to: the slot is only where the plugin sits today, and a reorder moves it.
+      if (preset) {
+        capturedPresetOf.set(key, { plugin, preset, seq: held?.seq ?? 0 });
+        schedulers.get(trackId)?.noteCapturedPreset(plugin, preset, handle);
+      }
       // The state came *from* the plugin, so the next eval must not push it straight back:
       // tell the track's scheduler it's already applied. Without this, every eval would have
       // the plugin re-chew a state it already has (a reload, and an audible one on some).
@@ -4790,10 +4847,13 @@ const routes = {
     const deck = body.deck === 'b' ? 'b' : 'a';
     const keyOfBlock = (label) => (deck === 'a' ? label : `b:${label}`);
 
-    // Whatever you last moved in a plugin's own window is captured here, before anything else:
-    // this eval may reload the very plugin holding the only copy of that tweak, and it is the
-    // moment the code has to describe the sound anyway (see the auto-pin section).
-    await flushPluginCaptures();
+    // No capture here, deliberately. An eval used to flush every held plugin edit first, but a
+    // capture suspends the plugin while it serializes (megabytes, for a Serum program) and the
+    // pianoroll evaluates on its own as you draw - so the cost landed on evals nobody asked for,
+    // heard as a stumble in the middle of a bar. Captures wait for a stop or a save now. What this
+    // flush was really protecting - a plugin this eval reopens being handed the pre-tweak program,
+    // because the capture has not reached the buffer yet - is covered instead by the server keeping
+    // that program itself (see the scheduler's noteCapturedPreset).
 
     const blocks = patternCore.splitLabeledBlocks(body.code ?? '');
     if (blocks.length === 0) throw new Error('nothing to evaluate');
@@ -5218,7 +5278,12 @@ const routes = {
       // the hand-editing section). Re-asserted here because a Scheduler is rebuilt whenever its
       // label comes back, and unlike a preset hold this sends nothing - it only holds things off.
       // A slot this eval puts a different plugin in is let go first (see thawReplacedSlots).
-      thawReplacedSlots(key, [b.sig.instrument ?? null, ...b.sig.fxChain]);
+      // Its plugin is about to be closed, so a hand edit nobody captured dies with it - and evals
+      // no longer capture on their own. This is the one case that still has to, and it costs
+      // nothing on an ordinary re-eval: no chain change, no replaced slot, no flush.
+      const nextChain = [b.sig.instrument ?? null, ...b.sig.fxChain];
+      if (replacedHeldSlots(key, nextChain).length) await flushPluginCaptures();
+      thawReplacedSlots(key, nextChain);
       for (const slot of stateHeldSlotsFor(key)) sch.holdPluginState(slot, true);
       sch.setSongClock(b.trackClock ?? arrangeClocks[deck]); // before setPattern, whose note gate reads it
       sch.setPattern(b.sig);
@@ -5701,6 +5766,12 @@ const routes = {
     // `flush: true` means the editor is about to write the buffer out somewhere it matters -
     // saving, exporting, copying a share link - so a plugin edit still held back gets captured
     // now rather than writing out a stale state. The 500ms poll never asks for this.
+    // A save, an export and a share link settle whatever the clock is doing. Each capture
+    // suspends the plugin serializing it, so one taken mid-set costs a brief stumble - and it is
+    // worth paying, because these write an artifact ONCE. Skipping the capture does not make the
+    // file stale until the next stop; it makes that file, or that link, carry the sound from
+    // before your last tweak permanently, and a link cannot even be rewritten. A stumble is over
+    // in a moment. Evals are the opposite case and capture nothing (see the eval route).
     if (body?.flush) await flushPluginCaptures();
     // The preset panel's lease rides along on this poll rather than on a timer of its own - one
     // request either way, and a browser that stops polling releases what it was holding.

@@ -880,3 +880,63 @@ test('the swap for an onset is sent before the notes at it', () => {
   assert.ok(order.length >= 2, `expected a swap and a note, got ${order.join(', ') || 'nothing'}`);
   assert.equal(order[0], 'setPluginState', 'the swap is announced before the note it lands under');
 });
+
+// ---------------------------------------------------------------------------------------------
+// A capture the buffer has not caught up with
+//
+// Auto-pin reads a program OUT of a plugin and the editor writes it into the preset definition a
+// poll or two later. In between, the definition describes the sound as it was BEFORE the tweak,
+// and anything that pushes it undoes the tweak. The server parks the captured program here until
+// the editor reports it filed (see the scheduler's noteCapturedPreset, and capturedPresetOf in
+// the server's auto-pin section).
+// ---------------------------------------------------------------------------------------------
+
+// Just who/where/what: the exact swap time has its own tests above, and is noise here.
+const pushed = (argsTo) => argsTo('setPluginState').map(([t, slot, state]) => [t, slot, state]);
+
+test('a capture that has not reached the code yet outranks the definition', () => {
+  clearRolls('buffer');
+  _preset('a', 'Serum 2', 'H4sIold');
+  const { engine, argsTo } = mockEngine();
+  const sch = new Scheduler(engine, { trackId: 'lead' });
+  sch.noteCapturedPreset('Serum 2', 'a', '@tweaked'); // taken off the plugin, not yet in the buffer
+  sch.setPattern(track('a'));
+  sch._schedulePresetSwaps(0, 1);
+
+  assert.deepEqual(pushed(argsTo), [['lead', 0, '@tweaked']]);
+});
+
+test('once the editor has filed it, the definition speaks for the preset again', () => {
+  clearRolls('buffer');
+  _preset('a', 'Serum 2', 'H4sIold');
+  const { engine, argsTo } = mockEngine();
+  const sch = new Scheduler(engine, { trackId: 'lead' });
+  sch.noteCapturedPreset('Serum 2', 'a', '@tweaked');
+  sch.forgetCapturedPreset('Serum 2', 'a'); // the editor reports it written
+  sch.setPattern(track('a'));
+  sch._schedulePresetSwaps(0, 1);
+
+  assert.deepEqual(pushed(argsTo), [['lead', 0, 'H4sIold']]);
+});
+
+test('a parked capture follows its preset when a chain edit moves the plugin to another slot', () => {
+  // The bug this exists for: deleting an .fx() shifts every plugin after it down a slot, and a
+  // slot changing hands reopens the plugin - which is then handed a program. Were the capture
+  // held against the slot it was taken from, nothing would find it at the new one and the plugin
+  // would come back sounding like the take before the tweak. Reported as "I drop one effect and
+  // it resets all of them to default".
+  clearRolls('buffer');
+  _preset('a', 'Pro-C 2', 'H4sIold');
+  const { engine, argsTo } = mockEngine();
+  const sch = new Scheduler(engine, { trackId: 'lead' });
+  sch.noteCapturedPreset('Pro-C 2', 'a', '@tweaked');
+
+  sch.setPattern(note('c').synth('Serum 2').fx('Pro-Q 3').fx('Pro-C 2').preset('a'));
+  sch._schedulePresetSwaps(0, 1);
+  assert.deepEqual(pushed(argsTo), [['lead', 2, '@tweaked']], 'slot 2 while the Pro-Q 3 is there');
+
+  sch.setPattern(note('c').synth('Serum 2').fx('Pro-C 2').preset('a')); // the Pro-Q 3 is deleted
+  sch._schedulePresetSwaps(0, 1);
+  assert.deepEqual(pushed(argsTo).at(-1), ['lead', 1, '@tweaked'],
+    'the tweak follows the plugin down, instead of the stale definition being pushed over it');
+});

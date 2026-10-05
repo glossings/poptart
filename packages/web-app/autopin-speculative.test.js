@@ -59,6 +59,11 @@ function harness({ program = 'PROGRAM-A', applied, mode = 'deferred' } = {}) {
     livePreset: () => null,
     appliedState: (slot, plugin) => scheduler.applied.get(`${slot}:${plugin}`),
     markStateApplied: (slot, plugin, s) => scheduler.marked.push([slot, plugin, s]),
+    // Where a capture waits out the gap between being taken and reaching the buffer (see
+    // noteCapturedPreset in scheduler.mjs). Recorded, not acted on: these tests are about the
+    // capture pass, and what the scheduler then does with the program is the scheduler's own.
+    parked: [],
+    noteCapturedPreset: (plugin, preset, s) => scheduler.parked.push([plugin, preset, s]),
   };
   const deps = {
     engine: { getPluginState: async () => state.program },
@@ -67,6 +72,7 @@ function harness({ program = 'PROGRAM-A', applied, mode = 'deferred' } = {}) {
     schedulers: new Map([['pad', scheduler]]),
     autoPinDirty: new Map(),
     autoPinReady: new Map(),
+    capturedPresetOf: new Map(),
     uncaptured: new Map(),
     lastCapturedState: new Map(),
     handTaken: new Set(),

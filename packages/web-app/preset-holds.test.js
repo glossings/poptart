@@ -108,6 +108,10 @@ function loadHoldFns() {
   const handTaken = new Set();
   const uncaptured = new Map();
   const autoPinDirty = new Map(); // slots whose capture hasn't been taken yet (deferred mode holds them)
+  // Captures taken but not yet written into the code, by the preset each belongs to. commitCapture
+  // releases the parked program from here (see capturedPresetOf in server.js); these tests are
+  // about the freeze, so nothing here needs to park anything - it just has to exist to be cleared.
+  const capturedPresetOf = new Map();
   const ttl = num('PRESET_HOLD_TTL_MS');
   const uncapTtl = num('UNCAPTURED_TTL_MS');
   // Releasing a slot also asks its plugin for its program on the way out (see captureOpenEditors,
@@ -120,13 +124,14 @@ function loadHoldFns() {
   const pluginInSlot = (label, slot) => chains.get(label)?.[slot] ?? null;
   const names = ['stateHeld', 'syncStateHold', 'stateHeldSlotsFor', 'noteHandEdit', 'takeSlotByHand',
     'releaseSlotsHeldByHand', 'commitCapture', 'currentHolds', 'expireStateHolds', 'setPresetHold',
-    'expirePresetHolds', 'thawReplacedSlots'];
+    'expirePresetHolds', 'thawReplacedSlots', 'replacedHeldSlots'];
   // eslint-disable-next-line no-new-func
   const make = new Function('presetHolds', 'schedulers', 'handTaken', 'uncaptured', 'autoPinDirty',
-    'captureOpenEditors', 'pluginInSlot', 'PRESET_HOLD_TTL_MS', 'UNCAPTURED_TTL_MS',
+    'capturedPresetOf', 'captureOpenEditors', 'pluginInSlot', 'PRESET_HOLD_TTL_MS', 'UNCAPTURED_TTL_MS',
     `let editSeq = 0;\n${names.map(take).join('\n')}\nreturn { ${names.join(', ')} };`);
-  const fns = make(presetHolds, schedulers, handTaken, uncaptured, autoPinDirty, captureOpenEditors, pluginInSlot, ttl, uncapTtl);
-  return { presetHolds, schedulers, handTaken, uncaptured, autoPinDirty, chains, asked, ttl, uncapTtl, ...fns };
+  const fns = make(presetHolds, schedulers, handTaken, uncaptured, autoPinDirty, capturedPresetOf,
+    captureOpenEditors, pluginInSlot, ttl, uncapTtl);
+  return { presetHolds, schedulers, handTaken, uncaptured, autoPinDirty, capturedPresetOf, chains, asked, ttl, uncapTtl, ...fns };
 }
 
 // Records every hold/release the Scheduler is actually asked to perform. holdPreset() LOADS a

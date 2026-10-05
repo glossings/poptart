@@ -521,6 +521,14 @@ export class Scheduler {
     this._sentBusSends = null; // bus sends as last resolved and pushed, for diffing (see _syncBusSends)
     this._appliedStates = new Map(); // "slot:pluginId" -> state string already sent (see setPattern)
     this._statePending = new Map(); // same key -> the push the engine has not answered for yet (see holdPluginState)
+    // "pluginId\0presetName" -> a program auto-pin captured OUT of that plugin which the code does
+    // not carry yet. A capture reaches the buffer through the editor's poll, a few hundred ms after
+    // it was taken, and in that gap the preset's definition still describes the sound as it was
+    // BEFORE the tweak. Pushing that is what made a chain edit "reset everything": dropping or
+    // reordering an .fx() reopens every plugin from there on, each one then has to be given a
+    // program, and the only one on offer was the stale one. Keyed by the preset the tweak belongs
+    // to rather than by slot - the slot is only where the plugin sits today (see noteCapturedPreset).
+    this._capturedPresets = new Map();
     this._livePresets = new Map(); // slot -> preset name currently sounding (auto-pin writes into it)
     this._presetWarned = new Set(); // "slot name" already complained about, so a bad name says it once
     this._earlyShiftWarned = false; // an over-early nudge says so once, not once per event
@@ -721,6 +729,20 @@ export class Scheduler {
     if (pluginId == null) return;
     this._appliedStates.set(`${slot}:${pluginId}`, state);
     this._statePending.delete(`${slot}:${pluginId}`); // read OUT of the plugin: nothing in flight to doubt
+  }
+
+  // What auto-pin captured out of a plugin, parked here until the editor has written it into the
+  // preset definition it belongs to. Until then this is the truth about that preset and the code
+  // is not (see _capturedPresets). The server calls this as each capture completes.
+  noteCapturedPreset(pluginId, preset, state) {
+    if (pluginId == null || !preset) return;
+    this._capturedPresets.set(`${pluginId}\0${preset}`, state);
+  }
+
+  // The editor has filed that capture, so the definition speaks for the preset again.
+  forgetCapturedPreset(pluginId, preset) {
+    if (pluginId == null || !preset) return;
+    this._capturedPresets.delete(`${pluginId}\0${preset}`);
   }
 
   // The program this slot's plugin was last given or last handed over - what it should still be
@@ -1584,7 +1606,11 @@ export class Scheduler {
   _applyPreset(slot, name, atSec) {
     if (typeof this.engine.setPluginState !== 'function') return null;
     const plugin = [this.pattern?.instrument, ...(this.pattern?.fxChain ?? [])][slot] ?? null;
-    const { state, why } = resolvePreset(name, plugin);
+    const { state: inCode, why } = resolvePreset(name, plugin);
+    // A capture that has not reached the buffer yet outranks the definition: it came out of this
+    // very plugin, and the definition is still a poll or two behind (see _capturedPresets). Without
+    // this, the eval after a chain edit hands the plugin it just reopened the pre-tweak program.
+    const state = this._capturedPresets.get(`${plugin}\0${name}`) ?? inCode;
     if (!state) return why;
     const key = `${slot}:${plugin}`;
     if (this._appliedStates.get(key) === state) return null;
