@@ -20574,7 +20574,7 @@ function activateTab(name) {
   settingsTab.classList.toggle('hidden', name !== 'settings');
   if (name === 'sounds') loadSamples();
   if (name === 'files') refreshPatternFiles();
-  if (name === 'settings') { refreshAudioDevices(); refreshAudioInputs(); refreshSamplesDir().then(refreshMapSources); refreshPreferVst3(); refreshWipRetention(); refreshMidiClock(); refreshMixFeedback(); refreshLink(); if (window.__poptartHostReady) refreshDownloads(); }
+  if (name === 'settings') { refreshAudioDevices(); refreshAudioInputs(); refreshSamplesDir().then(refreshMapSources); refreshPreferVst3(); refreshWipRetention(); refreshDjRegions(); refreshMidiClock(); refreshMixFeedback(); refreshLink(); if (window.__poptartHostReady) refreshDownloads(); }
 }
 
 for (const btn of document.querySelectorAll('.side-tab')) {
@@ -21327,6 +21327,7 @@ if (window.__poptartHostReady) {
   // The headphone cue is the DJ desk's, and both are the desktop's alone: a row here that can
   // only ever be disabled is a promise the page cannot keep.
   document.getElementById('audioCueSelect')?.closest('label')?.classList.add('hidden');
+  document.getElementById('djSection')?.classList.add('hidden'); // the desk is the desktop's too
   storeSection.classList.remove('hidden');
   const fileShareBtn = document.getElementById('fileShareBtn');
   fileShareBtn.classList.remove('hidden');
@@ -21635,6 +21636,31 @@ wipRetentionSelect.addEventListener('change', async () => {
 
 // Prefer-VST3 toggle. The filter lives on the server's plugin-list endpoints, so applying a
 // change is just re-fetching the list - no rescan.
+// What DJ mode opens its decks' arrangement loop regions at - a choice about how you play,
+// made once, rather than a button in each deck head. {app+l} still flips the deck you are on.
+const djRegionsSelect = document.getElementById('djRegionsSelect');
+let djRegionsMode = 'off';
+async function refreshDjRegions() {
+  try {
+    const { mode } = await api('GET', '/api/djRegions');
+    djRegionsMode = mode === 'on' ? 'on' : 'off';
+    djRegionsSelect.value = djRegionsMode;
+  } catch { /* the default stands; the next open uses it */ }
+}
+djRegionsSelect.addEventListener('change', async () => {
+  const want = djRegionsSelect.value === 'on' ? 'on' : 'off';
+  try {
+    const { mode } = await api('POST', '/api/djRegions', { mode: want });
+    djRegionsMode = mode;
+    logLine(mode === 'on'
+      ? "DJ decks will open with each song's loop regions holding"
+      : 'DJ decks will open with loop regions off - songs run start to end');
+  } catch (e) {
+    logLine(e.message ?? String(e), true);
+    refreshDjRegions().catch(() => {});
+  }
+});
+
 const preferVst3Toggle = document.getElementById('preferVst3Toggle');
 
 async function refreshPreferVst3() {
@@ -28303,14 +28329,15 @@ async function openMixMode() {
   // own gain (see server.js's mixBirthFor) rather than the synthdef's wide-open default - which is
   // what a deck B audible through a closed crossfader was.
   sendCrossfader();
-  // DJ decks open with every arrangement loop OFF - a song runs start to end like a record,
-  // and the deck heads' loop buttons arm the regions back mid-set. The server re-arms both on
-  // eject/complete, so normal mode keeps its loop-by-default workflow.
+  // DJ decks open at whatever the "loop regions" setting says (settings -> dj mode), which is
+  // OFF unless it was changed: a song runs start to end like a record and the deck stops there.
+  // The server re-arms both on eject/complete, so normal mode keeps its loop-by-default workflow.
   //
-  // `pin: false` because this is the DEFAULT, not a press of the button: a song nobody has
+  // `pin: false` because this is the DEFAULT, not a press of a button: a song nobody has
   // arranged has no end to run to, and stays looping through it (see server.js's deckLoopsOn).
-  // Which is why the toggles are read back off the desk stream rather than assumed off here.
-  for (const d of ['a', 'b']) api('POST', '/api/arrangeLoops', { deck: d, on: false, pin: false }).catch(() => {});
+  // Which is why the toggles are read back off the desk stream rather than assumed here.
+  const regionsOn = djRegionsMode === 'on';
+  for (const d of ['a', 'b']) api('POST', '/api/arrangeLoops', { deck: d, on: regionsOn, pin: false }).catch(() => {});
   refreshDeckFiles();
   mixRefresh();
   mixPushStart(); // mirrors MIDI-driven desk moves back onto the sliders, pushed live
@@ -28674,10 +28701,13 @@ function deckHeadRender(state) {
           }
         }).catch(() => {});
       }
-      document.getElementById(`deck${U}Loops`).classList.toggle('on', loopsOn);
     }
     deckLoopRender(d, state?.deckLoop?.[d]);
   }
+  // ...and the library browser's row colors, if it happens to be open behind the desk: a deck
+  // starting or stopping is exactly when "what is playing" changes. Costs a string compare per
+  // frame and nothing else (see orgRepaintPlayState).
+  orgRepaintPlayState();
 }
 
 // Fixed-width % readout under each pitch fader: sign always shown, one decimal, so nothing
@@ -29526,7 +29556,7 @@ function djLiveTracePush(frame) {
 const djLiveWaveEls = {};
 for (const deck of ['a', 'b']) {
   const canvas = document.createElement('canvas');
-  canvas.className = 'song-detail dj-live-wave hidden';
+  canvas.className = `song-detail dj-live-wave stack-deck-${deck} hidden`;
   canvas.id = `djLiveWave${deck.toUpperCase()}`;
   canvas.title = `deck ${deck.toUpperCase()}: the deck's level as it played, under the clock's `
     + 'bars and beats. Wheel to zoom (both strips share one scale, which is what lets them be '
@@ -30023,22 +30053,29 @@ function songCueTarget(e) {
   if (!mixModeOn) return null;
   if (e && (!(window.getSelection()?.isCollapsed ?? true)
     || e.target?.closest?.('input, textarea, select, .CodeMirror, [contenteditable="true"]'))) return null;
-  return songActiveDeck() ?? (songPanes.a.song ? 'a' : null);
+  // ...and a deck holding CODE is a cue target too: the gesture means "let me hear this one"
+  // either way, and refusing it on half the decks made the chord feel broken on a livecoded set.
+  return songActiveDeck() ?? (songPanes.a.song ? 'a' : djActiveDeck);
 }
 
+// One hold, two mechanisms: a deck holding a file previews from its cue point (server-side, see
+// songCue), a deck holding code plays while held (deckCuePress). Which one is decided here, once,
+// at the press - so a release can never reach the other half.
 let songCueKeyDeck = null;
 function songCueKeyDown(e) {
   if (songCueKeyDeck) return;
   const deck = songCueTarget(e);
   if (!deck) return;
   songCueKeyDeck = deck;
-  songPanes[deck].cueDown();
+  if (songPanes[deck].song) songPanes[deck].cueDown();
+  else deckCuePress(deck, true);
 }
 function songCueKeyUp() {
   if (!songCueKeyDeck) return;
   const deck = songCueKeyDeck;
   songCueKeyDeck = null;
-  songPanes[deck].cueUp();
+  if (songPanes[deck].song) songPanes[deck].cueUp();
+  else deckCuePress(deck, false);
 }
 // The app modifier by its KeyboardEvent name, for the keyup that has to end the hold: ctrl on
 // macOS, alt elsewhere (see appMod).
@@ -30524,6 +30561,8 @@ function mixPushStart() {
       const { deck, action } = JSON.parse(e.data);
       if (deck !== 'a' && deck !== 'b') return;
       if (action === 'play') deckPlayPress(deck);
+      else if (action === 'cue') deckCuePress(deck, true);
+      else if (action === 'cueoff') deckCuePress(deck, false);
       else if (action === 'next') stepDeckQueue(deck, 1);
       else if (action === 'prev') stepDeckQueue(deck, -1);
     } catch { /* a torn frame; nothing to replay */ }
@@ -30586,7 +30625,6 @@ for (const deck of ['a', 'b']) {
   pct.textContent = '0.0%';
   col.append(fader, rangeBtn, readout, pct);
 
-  const loopBtn = document.getElementById(`deck${U}Loops`);
   let pendFrac = null;
   let flushTimer = null;
   const postFrac = (frac) => {
@@ -30611,13 +30649,8 @@ for (const deck of ['a', 'b']) {
       .then((r) => logLine(`deck ${U} tempo range ${r.range === 100 ? 'wide (±100%)' : `±${r.range}%`}`))
       .catch((e) => logLine(e.message ?? String(e), true));
   });
-  loopBtn.addEventListener('click', () => {
-    if (mixLearnArmed) return;
-    deckLoopsToggle(deck);
-  });
   mixLearnAttach(fader, `${deck}:tempo`);
   mixLearnAttach(rangeBtn, `${deck}:temporange`);
-  mixLearnAttach(loopBtn, `${deck}:regions`);
 
   // ...and the performance loop beside it: the button, and the two that resize it.
   const loopNow = document.getElementById(`deck${U}Loop`);
@@ -30782,24 +30815,45 @@ mixLearnAttach(mixFxAssignEl, 'fxassign');
 mixLearnAttach(mixFxChainEl, 'fxnext', 'fxprev'); // the step pads; shift+click binds backward
 
 // A three-way deck-select SWITCH, which is a different thing from the cycling pad `fxassign`
-// binds: it sends one message per position, so each position is learned on its own and says
-// absolutely where the unit goes. Three bindings need three learn gestures and the button has
-// one click, so they come off its context menu - the desk's growth point, as in the editor.
+// binds: it sends one message per position, so each position says absolutely where the unit goes.
+//
+// Learned in ONE gesture, because a switch's positions are in a row: you cannot reach the far one
+// without passing through the middle one, so arming a learn for "deck A" and then flipping there
+// binds whatever the switch brushed on the way. Sweeping it end to end instead gives the
+// positions in the order they arrive, and the pass-through is the middle entry rather than a trap.
+const FX_SWITCH_TARGETS = ['fxassigna', 'fxassignb', 'fxassignab'];
+
+async function mixFxSwitchLearn() {
+  logLine('sweep the FX deck-select switch all the way from its 1 position through to 1 & 2, '
+    + 'pausing at each one. Every position it sends is named below as it arrives');
+  try {
+    const { learned, why } = await api('POST', '/api/mix/midiswitch', { targets: FX_SWITCH_TARGETS });
+    if (!learned) {
+      logLine(`the switch was not learned: ${why}`, true);
+      return;
+    }
+    const label = (t) => (t === 'fxassignab' ? 'A+B' : `deck ${t.slice(-1).toUpperCase()}`);
+    const said = learned.map((b) => `${label(b.target)} \u2190 ${b.kind} ${b.num} (ch ${b.channel})`).join(', ');
+    logLine(`FX deck-select switch learned: ${said}`);
+  } catch (e) {
+    logLine(e.message ?? String(e), true);
+  }
+}
+
 // Outside learn mode the button has no menu: there would be nothing in it.
 mixFxAssignEl.addEventListener('contextmenu', (e) => {
   if (!mixLearnArmed) return;
   e.preventDefault();
   const menu = document.getElementById('mixMenu');
   openCtxMenu(menu, e.clientX, e.clientY, {
-    head: 'bind a switch position',
+    head: 'fx deck select',
     items: [
-      ['deck A', () => mixLearnDo('fxassigna'), 'flip the switch to its deck-1 position'],
-      ['deck B', () => mixLearnDo('fxassignb'), 'flip the switch to its deck-2 position'],
-      ['A + B', () => mixLearnDo('fxassignab'), 'flip the switch to its both-decks position'],
+      ['learn a 3-way switch\u2026', () => mixFxSwitchLearn(),
+        'sweep the switch from end to end - its positions are taken in the order they arrive'],
       '-',
-      ['unbind all three', async () => {
-        for (const t of ['fxassigna', 'fxassignb', 'fxassignab']) await mixLearnDo(t, true);
-      }, 'leave the switch unmapped'],
+      ['unbind the switch', async () => {
+        for (const t of FX_SWITCH_TARGETS) await mixLearnDo(t, true);
+      }, 'leave the switch unmapped (a plain click still binds a pad that cycles)'],
     ],
   });
 });
@@ -31181,13 +31235,64 @@ for (const deck of ['a', 'b']) {
 
 // The 🎧 buttons: deck-wide cue on/off (a broadcast `cue` value, like every desk control - new
 // stems of that deck are born wearing it via the birth args).
+const mixCueBtn = (deck) => document.getElementById(deck === 'a' ? 'mixCueA' : 'mixCueB');
+const mixCueOn = (deck) => mixCueBtn(deck).classList.contains('on');
+function mixSetCue(deck, on) {
+  mixCueBtn(deck).classList.toggle('on', on);
+  mixPost(`cue-${deck}`, { deck, name: 'cue', value: on ? 1 : 0 });
+}
+
+/**
+ * The cue gesture on a deck playing CODE - the `cue` pad, forwarded here because starting the
+ * deck means evaluating a buffer only this side has (see mixMidiButton).
+ *
+ * A pattern has no cue POINT to drop onto, so the press is the other half of what it means on a
+ * record: hold to hear this deck in the headphones without committing it to the room, release and
+ * it is quiet again. Whatever the deck was doing before the press is what it goes back to, so
+ * cueing a deck that is already playing (or already cued) leaves it alone on release.
+ */
+const djCueHeld = { a: null, b: null };
+function deckCuePress(deck, down) {
+  if (!mixModeOn || songPanes[deck].song) return; // a deck holding a file cues server-side
+  if (down) {
+    if (djCueHeld[deck]) return; // a pad restating itself is not a second press
+    const was = { playing: !!deckPlayingNow[deck], cued: mixCueOn(deck), started: null };
+    djCueHeld[deck] = was;
+    if (!was.cued) mixSetCue(deck, true);
+    // The start is held onto, because it is slower than the gesture: evaluating a buffer is a
+    // round trip, and a release that arrived while it was in flight used to post its stop FIRST
+    // and have the deck start right after it - a cue that plays on and on with nothing held.
+    if (!was.playing) was.started = Promise.resolve(deckPlayPress(deck)).catch(() => {});
+  } else {
+    const was = djCueHeld[deck];
+    if (!was) return;
+    djCueHeld[deck] = null;
+    // Out of the headphones at once - that half needs nothing from the server.
+    if (!was.cued) mixSetCue(deck, false);
+    if (!was.playing) {
+      // Unconditional, and NOT guarded on deckPlayingNow: that mirror is fed by the desk's SSE
+      // frame, so on a quick press it still says "not playing" when the finger comes up and the
+      // stop was being skipped - which is the other half of the same bug. What the press found is
+      // what the release undoes.
+      (was.started ?? Promise.resolve()).then(() => djCueStop(deck));
+    }
+  }
+}
+
+/** The stop a cue release wants: this deck only, and its voices with it rather than ringing on. */
+async function djCueStop(deck) {
+  try {
+    stopLanded(await api('POST', '/api/stop', { deck, hush: true }), deck);
+  } catch (e) {
+    logLine(e.message ?? String(e), true);
+  }
+}
+
 for (const deck of ['a', 'b']) {
-  const btn = document.getElementById(deck === 'a' ? 'mixCueA' : 'mixCueB');
+  const btn = mixCueBtn(deck);
   btn.addEventListener('click', () => {
     if (mixLearnArmed) return; // the learn handler (registered after this one) takes the click
-    const on = !btn.classList.contains('on');
-    btn.classList.toggle('on', on);
-    mixPost(`cue-${deck}`, { deck, name: 'cue', value: on ? 1 : 0 });
+    mixSetCue(deck, !mixCueOn(deck));
   });
   // `phones`, not `cue`: the deck's headphone send and the deck's cue POINT are two different
   // buttons on a controller, and the target names have to say which is which.
@@ -31322,10 +31427,62 @@ async function loadLibraryDoc() {
  * a background pass is writing tempos into records while this window is open, so the client
  * converges on what came back rather than on what it last believed.
  */
+// --- which rows are tonight's ---------------------------------------------------------------
+//
+// Two facts a crate cannot carry, because both are about THIS set: what is on a deck right now,
+// and what has already gone out. An hour into a gig every row looks equally unplayed otherwise,
+// which is the moment you drop something the room heard forty minutes ago.
+//
+// `orgPlayedSession` comes from the server (it is the server that knows a deck pressed play, and
+// it survives the window closing and the page reloading). What is on a deck is read from the
+// desk's own live mirror first, since that updates as decks start and stop, and from the last
+// library answer otherwise - organize opens outside DJ mode too, where the mirror says nothing.
+let orgPlayedSession = new Set();
+let orgOnDeckSaid = {};
+
+function orgDeckOf(abs) {
+  if (!abs) return null;
+  for (const d of ['a', 'b']) {
+    if (songPanes[d]?.song?.path === abs) return { deck: d, playing: !!deckPlayingNow[d] };
+  }
+  for (const d of ['a', 'b']) {
+    if (orgOnDeckSaid[d]?.path === abs) return { deck: d, playing: !!orgOnDeckSaid[d].playing };
+  }
+  return null;
+}
+
+/** The row's state class, as one of the two colors or neither. */
+function orgPlayStateClass(abs) {
+  const on = orgDeckOf(abs);
+  if (on?.playing) return 'org-on-deck';
+  return abs && orgPlayedSession.has(abs) ? 'org-played' : null;
+}
+
+/**
+ * Recolor the drawn rows without rebuilding the table. Called from the desk's frame, which runs
+ * about thirty times a second - so it does nothing at all unless a deck actually started or
+ * stopped, and it never touches a cell's contents.
+ */
+let orgPlaySig = '';
+function orgRepaintPlayState() {
+  if (!orgEl || orgEl.classList.contains('hidden')) return;
+  const sig = ['a', 'b'].map((d) => `${songPanes[d]?.song?.path ?? ''}:${deckPlayingNow[d] ? 1 : 0}`).join('|');
+  if (sig === orgPlaySig) return;
+  orgPlaySig = sig;
+  for (const tr of orgEl.querySelectorAll('#orgBody tr[data-abs]')) {
+    const want = orgPlayStateClass(tr.dataset.abs);
+    tr.classList.toggle('org-on-deck', want === 'org-on-deck');
+    tr.classList.toggle('org-played', want === 'org-played');
+  }
+}
+
 function orgTookLibrary(library) {
   if (!library) return;
   libDoc = library;
   libAnalyzing = library.analyzing ?? null;
+  orgPlayedSession = new Set(library.playedSession ?? []);
+  orgOnDeckSaid = library.onDeck ?? {};
+  orgPlaySig = ''; // a fresh answer: let the next repaint through whatever the decks are doing
   refreshSongFileStat(libDoc).then(() => {
     if (orgEl && !orgEl.classList.contains('hidden')) orgRender();
   }).catch(() => {});
@@ -31547,6 +31704,15 @@ const ORG_VIEWS = {
     sort: 'added',
     dir: -1,
   },
+  // The collection, narrowed to what will beatmatch with the record that is playing. Sorted by
+  // tempo rather than by when it was added: the question being asked is "what goes next", and
+  // the answer is read off the bpm column.
+  related: {
+    cols: ['name', 'artist', 'bpm', 'key', 'rating'],
+    offer: ['name', 'artist', 'album', 'bpm', 'key', 'rating', 'added', 'path'],
+    sort: 'bpm',
+    dir: 1,
+  },
   playlist: {
     cols: ['n', 'name', 'artist', 'bpm', 'key', 'rating'],
     offer: ['n', 'name', 'artist', 'album', 'bpm', 'key', 'rating', 'path'],
@@ -31746,8 +31912,64 @@ function orgItemRow(item, at) {
  * (which the server hands over one directory at a time), with anything already imported wearing
  * its record's facts - that is what tells you, at a glance, what you have already got.
  */
+// --- related: the crate, narrowed to what will beatmatch ---------------------------------------
+//
+// A tempo you can reach is the first thing that decides whether a record can follow this one, and
+// it is the one thing a long list of filenames will not tell you. So this is the collection with
+// the un-mixable rows taken out: everything within the deck's own pitch range of what is playing,
+// at half and double time as well - a 70 and a 140 are the same tempo to a DJ, and a list that
+// left those out would feel broken rather than selective.
+
+// What "wide" (the ±100% switch) falls back to. At ±100% everything in the crate is reachable,
+// which is not a selection - so the window stays the one a hand would actually use.
+const ORG_RELATED_WIDE_TOL = 6;
+
+/**
+ * Can `bpm` be pitched into line with `ref`, within `tol` (a fraction)? True at the same tempo,
+ * at half it and at double it.
+ */
+function orgBpmRelated(bpm, ref, tol) {
+  if (!(bpm > 0) || !(ref > 0)) return false;
+  return [0.5, 1, 2].some((m) => Math.abs(bpm / (ref * m) - 1) <= tol);
+}
+
+/**
+ * The record everything else is related TO: whichever deck is playing (that is the one in the
+ * room), else the deck being looked at, else either deck holding a file. Null when no deck has a
+ * tempo to compare against - and then the list says so rather than showing the whole crate.
+ */
+function orgRelatedRef() {
+  const known = orgTrackByPath();
+  const order = [...['a', 'b'].filter((d) => deckPlayingNow[d]), djActiveDeck, 'a', 'b'];
+  for (const d of order) {
+    const song = songPanes[d]?.song;
+    if (!song?.path) continue;
+    // The pane's own tempo first - it is what the deck is actually playing - then the
+    // collection's, which is where an analysis that landed later is written.
+    const bpm = Number(song.bpm) || Number(known.get(song.path)?.bpm) || 0;
+    if (bpm > 0) return { bpm, path: song.path, title: song.title };
+  }
+  return null;
+}
+
+/** How far the deck in hand can be pitched, as a percentage. */
+function orgRelatedTol() {
+  const range = deckTempoNow[djActiveDeck]?.range ?? 6;
+  return range === 100 ? ORG_RELATED_WIDE_TOL : range;
+}
+
+function orgRelatedRows() {
+  const ref = orgRelatedRef();
+  if (!ref) return [];
+  const tol = orgRelatedTol() / 100;
+  return libDoc.tracks
+    .map(orgTrackRow)
+    .filter((r) => r.path !== ref.path && orgBpmRelated(r.bpm, ref.bpm, tol));
+}
+
 function orgSourceRows() {
   if (orgSrc.kind === 'tracks') return libDoc.tracks.map(orgTrackRow);
+  if (orgSrc.kind === 'related') return orgRelatedRows();
   if (orgSrc.kind === 'playlist') {
     const p = orgPlaylist();
     return (p?.items ?? []).map(orgItemRow);
@@ -31932,6 +32154,23 @@ function orgRenderSide() {
   // not drawn there either, and nothing it offers can be reached (style.css, web-host.test.mjs).
   tracksRow.id = 'orgTracksSource';
   ul.appendChild(tracksRow);
+
+  // ...and the same collection narrowed to what will mix with what is playing. Directly under
+  // `tracks` because it IS tracks, with the un-reachable tempos taken out.
+  const ref = orgRelatedRef();
+  const relatedRow = orgSideRow({
+    label: 'related',
+    depth: 0,
+    cls: 'org-side-group',
+    on: orgSrc.kind === 'related',
+    count: ref ? orgRelatedRows().length : null,
+    onClick: () => orgGoto({ kind: 'related' }),
+  });
+  relatedRow.title = ref
+    ? `within ${orgRelatedTol()}% of "${ref.title || 'the deck'}" (and of half and double its tempo)`
+    : 'what will beatmatch with the record on a deck - load one to fill this';
+  relatedRow.id = 'orgRelatedSource'; // the collection is the disk's, and so is this (style.css)
+  ul.appendChild(relatedRow);
 
   // --- the disk: the intake. Its tree is lazy - the server lists one directory at a time - so
   // the sidebar shows where the browser is standing and the way back up it.
@@ -32242,6 +32481,8 @@ function orgRenderMain() {
     if (row.missing) tr.classList.add('org-missing');
     if (row.imported) tr.classList.add('org-added');
     if (row.path && row.path === orgPlayer.abs) tr.classList.add('playing');
+    const playState = orgPlayStateClass(row.path);
+    if (playState) tr.classList.add(playState);
     tr.draggable = row.kind !== 'dir';
     tr.title = orgRowTitle(row);
     const editing = orgEditing && row.trackId === orgEditing;
@@ -32302,6 +32543,11 @@ function orgRenderMain() {
 function orgEmptyText() {
   if (orgQuery) return 'nothing here matches that';
   if (orgSrc.kind === 'tracks') return 'no tracks yet — open disk and import some';
+  if (orgSrc.kind === 'related') {
+    return orgRelatedRef()
+      ? `nothing in the collection is within ${orgRelatedTol()}% of it (or half or double)`
+      : 'load a track with a tempo onto a deck — related is what will mix with it';
+  }
   if (orgSrc.kind === 'playlist') return 'empty — drag songs in, or right-click them to add';
   if (orgSrc.kind === 'disk') {
     return orgDiskFindActive() && orgDiskFind.running ? 'searching…' : 'nothing playable in here';

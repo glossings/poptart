@@ -342,3 +342,62 @@ test('the organize headers are sticky, and nothing later takes it back', () => {
     'the header cells take exactly one position, and it is sticky - a second rule under the same '
     + 'selector wins by order, which is how they came to scroll away with the rows');
 });
+
+// --- related: what will beatmatch --------------------------------------------------------------
+//
+// The window is the deck's own pitch range, and it has to include half and double time: a 70 and a
+// 140 are the same tempo to a DJ, and a "related" list that left those out would read as broken
+// rather than as selective. The arithmetic is the whole feature - everything else is a filter.
+
+const { orgBpmRelated } = (() => {
+  const src = fs.readFileSync(path.join(__dirname, 'public', 'client.js'), 'utf8');
+  const at = src.indexOf('function orgBpmRelated(');
+  assert.ok(at > 0, 'orgBpmRelated not found in client.js - this test needs updating');
+  // eslint-disable-next-line no-new-func
+  return new Function(`${src.slice(at, src.indexOf('\n}', at) + 2)}\nreturn { orgBpmRelated };`)();
+})();
+
+test('a tempo inside the fader\'s range is related; outside it is not', () => {
+  const tol = 0.06; // the ±6% the deck opens at
+  assert.equal(orgBpmRelated(128, 128, tol), true);
+  assert.equal(orgBpmRelated(132, 128, tol), true, '+3% is a nudge of the fader');
+  assert.equal(orgBpmRelated(124, 128, tol), true);
+  assert.equal(orgBpmRelated(140, 128, tol), false, '+9% is past the throw');
+  assert.equal(orgBpmRelated(100, 128, tol), false);
+});
+
+test('half and double time count, because they are the same tempo', () => {
+  const tol = 0.06;
+  assert.equal(orgBpmRelated(70, 140, tol), true, 'a 70 under a 140 is half-time');
+  assert.equal(orgBpmRelated(140, 70, tol), true, '...and the other way round');
+  assert.equal(orgBpmRelated(172, 86, tol), true);
+  // Still bounded at those tempos: a third of it is not a tempo you can reach.
+  assert.equal(orgBpmRelated(47, 140, tol), false);
+});
+
+test('a wider range really is wider', () => {
+  assert.equal(orgBpmRelated(140, 128, 0.06), false);
+  assert.equal(orgBpmRelated(140, 128, 0.16), true, 'the ±16 switch reaches it');
+});
+
+test('a track with no tempo is related to nothing, and neither is a deck without one', () => {
+  assert.equal(orgBpmRelated(null, 128, 0.06), false);
+  assert.equal(orgBpmRelated(0, 128, 0.06), false);
+  assert.equal(orgBpmRelated(128, null, 0.06), false);
+  assert.equal(orgBpmRelated(128, 0, 0.06), false);
+});
+
+test('related offers the columns you pick a next record by', () => {
+  const { ORG_COLUMNS } = org('');
+  const view = (() => {
+    const src = fs.readFileSync(path.join(__dirname, 'public', 'client.js'), 'utf8');
+    const at = src.indexOf('  related: {');
+    assert.ok(at > 0, 'the related view is not in ORG_VIEWS - this test needs updating');
+    return src.slice(at, src.indexOf('\n  },', at));
+  })();
+  for (const col of ['bpm', 'key']) {
+    assert.ok(view.includes(`'${col}'`), `related has to show ${col}`);
+    assert.ok(ORG_COLUMNS[col], `${col} is not a column`);
+  }
+  assert.match(view, /sort: 'bpm'/, 'the list is read off the tempo column, so that is what it sorts by');
+});

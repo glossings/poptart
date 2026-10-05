@@ -75,6 +75,9 @@ const EMPTY_ANSWERS = {
   // below, where the reason belongs.
   'GET /api/samplesDir': { dir: '/packs', envOverride: false },
   'GET /api/preferVst3': { enabled: false },
+  // What the DJ decks would open their loop regions at. The row is hidden here (there is no
+  // desk), but the settings tab asks for it as the panel opens, so it answers.
+  'GET /api/djRegions': { mode: 'off' },
 
   'POST /api/captureEditors': { ok: true },
 };
@@ -93,6 +96,7 @@ const REFUSALS = {
   'GET /api/pasteboardFiles': ['reading the clipboard for files', 'a page cannot see your disk'],
   'POST /api/samplesDir': ['choosing a sample folder', 'a page cannot see your disk'],
   'POST /api/preferVst3': ['choosing between plugin formats', 'there are no plugins to host'],
+  'POST /api/djRegions': ['the DJ decks', 'they stay on the desktop'],
   'POST /api/patterns/wip/retention': ['expiring old sessions', 'nothing here is deleted on its own'],
   // The DJ desk is two decks, a crossfader and a song player, none of which is here. Every one
   // of its routes says so rather than half-answering, which would be a desk that never updates.
@@ -106,6 +110,7 @@ const REFUSALS = {
   'POST /api/mix/eject': ['the DJ desk', 'it stays on the desktop'],
   'POST /api/mix/complete': ['the DJ desk', 'it stays on the desktop'],
   'POST /api/mix/midilearn': ['the DJ desk', 'it stays on the desktop'],
+  'POST /api/mix/midiswitch': ['the DJ desk', 'it stays on the desktop'],
 };
 
 export function createHost({

@@ -260,11 +260,15 @@ test('search is the same platter in a much coarser gear', () => {
 
 // --- the pitch fader and the platter's bend mode ---
 
-test('the tempo fader is mounted the player way: hardware top is minus', () => {
+test('the tempo fader is mounted the player way: a rising cc is a rising tempo', () => {
+  // PLUS is at the bottom of a pitch fader's throw, and that end is where it sends its HIGHEST
+  // value - so the cc counts up as the tempo does. The on-screen fader's own 0..1 counts the
+  // other way (upward from the bottom, see tempoFracOf), and reading the hardware with the
+  // screen's sign is what put every learned fader in upside down.
   const m = rig();
-  m.mixMidiApply('a:tempo', 1); // fader pushed to its top
+  m.mixMidiApply('a:tempo', 0); // the minus end, at the top of the throw
   m.mixMidiApply('a:tempo', 0.5);
-  m.mixMidiApply('a:tempo', 0); // pulled to the bottom
+  m.mixMidiApply('a:tempo', 1); // the plus end, at the bottom
   assert.deepEqual(m.log, [
     ['tempo', 'a', { frac: -1 }],
     ['tempo', 'a', { frac: 0 }],
@@ -397,9 +401,14 @@ test('the switch positions the desk offers are the ones the server knows, and th
   const { MIX_MIDI_FX_POS, FX_ASSIGNS } = new Function(
     `${grabConst('MIX_MIDI_FX_POS')}\n${grabConst('FX_ASSIGNS')}\nreturn { MIX_MIDI_FX_POS, FX_ASSIGNS };`,
   )();
-  const offered = [...CLIENT.matchAll(/mixLearnDo\('(fxassign[a-z]+)'/g)].map((m) => m[1]);
+  const list = CLIENT.match(/const FX_SWITCH_TARGETS = \[([^\]]*)\]/);
+  assert.ok(list, 'FX_SWITCH_TARGETS not found in client.js - this test needs updating');
+  const offered = [...list[1].matchAll(/'([a-z]+)'/g)].map((m) => m[1]);
   assert.deepEqual([...offered].sort(), Object.keys(MIX_MIDI_FX_POS).sort(),
     'the desk offers a switch position the server has no target for, or the other way round');
+  // ...and in the switch's own printed order, which is what the sweep maps arrival order onto.
+  assert.deepEqual(offered, ['fxassigna', 'fxassignb', 'fxassignab'],
+    'the order IS the mapping: the first position swept becomes the first target here');
   for (const [target, assign] of Object.entries(MIX_MIDI_FX_POS)) {
     assert.ok(FX_ASSIGNS.includes(assign), `${target} sets "${assign}", which is not an fx assign`);
   }
@@ -474,25 +483,32 @@ test('the tempo ratio cycles the same way by pad and by click', () => {
 // learn is armed mostly speak notes. Before the note feed existed, five of one deck's buttons
 // bound to the same jog cc and none of them worked (2026-09-09).
 
-const LEARN_NAMES = ['mixMidiLearnable', 'handleMixMidi'];
+const LEARN_NAMES = ['mixMidiLearnable', 'midi14Partner', 'mixSwitchState', 'mixMidiSwitchSaw',
+  'mixMidiSwitchFinish', 'handleMixMidi'];
 const LEARN_CONSTS = ['MIX_MIDI_HOLD', 'MIX_MIDI_PRESS', 'MIX_MIDI_GLOBAL_PRESS',
   'MIX_MIDI_GLOBAL_HOLD', 'MIX_MIDI_FX_POS', 'MIX_MIDI_GLOBAL', 'MIX_MIDI_BUTTONS',
-  'midiKind', 'midiNum', 'midiSame', 'midiSay'];
+  'midiKind', 'midiNum', 'midiSame', 'midiSay',
+  'MIDI_14_WINDOW_MS', 'MIDI_14_LSB', 'midi14', 'midi14Warned', 'midi14Key', 'midi14IsCoarse', 'midi14IsFine',
+  'MIX_SWITCH_SETTLE_MS', 'MIX_SWITCH_TIMEOUT_MS'];
 const LEARN_DEPS = ['mixMidiMonitor', 'mixMidiSaid', 'mixMidiLearn', 'settings', 'saveSettings',
-  'eventLogQueue', 'mixMidiDrive'];
+  'eventLogQueue', 'mixMidiDrive', 'mixMidiDown'];
 // eslint-disable-next-line no-new-func
 const makeLearn = new Function(...LEARN_DEPS, `
+  let mixMidiSwitch = null;
   ${LEARN_CONSTS.map(grabConst).join('\n')}
   ${LEARN_NAMES.map(grabFn).join('\n')}
   return { ${LEARN_NAMES.join(', ')}, learn: (t, finish) => { mixMidiLearn = { target: t, finish, timer: null }; },
-           armed: () => !!mixMidiLearn };
+           armed: () => !!mixMidiLearn, midi14, MIDI_14_WINDOW_MS,
+           sweep: (targets, finish) => { mixMidiSwitch = { targets, seen: [], finish, settle: null, timer: null }; },
+           sweeping: () => !!mixMidiSwitch };
 `);
 
 function learnRig(mixMidi = {}) {
   const settings = { mixMidi };
   const log = [];
   const driven = [];
-  const api = makeLearn(false, new Map(), null, settings, () => {}, log, (t, v) => driven.push([t, v]));
+  const api = makeLearn(false, new Map(), null, settings, () => {}, log,
+    (t, v) => driven.push([t, v]), new Map());
   api.settings = settings;
   api.log = log;
   api.driven = driven;
@@ -563,4 +579,224 @@ test('a mapping learned before the note feed existed still drives', () => {
   const r = learnRig({ 'a:eqlo': { device: DEV, channel: 1, cc: 15 } });
   assert.equal(r.handleMixMidi(DEV, 1, 15, 0.5, 'cc'), true);
   assert.deepEqual(r.driven, [['a:eqlo', 0.5]]);
+});
+
+// --- high-resolution (14-bit) faders ---------------------------------------------------------
+//
+// A pitch fader sends its position as a PAIR of ccs, coarse first and the fine half 32 numbers
+// up. Both failures this guards were real, on one controller, at once: deck A's tempo fader was
+// learned onto the coarse half and read the right way; deck B's was learned onto cc 32 - the fine
+// half of cc 0 - and swept its whole range over and over across an inch of travel.
+
+test('a fine half refines its coarse half rather than being a control of its own', () => {
+  const r = learnRig({ 'a:tempo': { device: DEV, channel: 1, kind: 'cc', num: 0 } });
+  // The coarse half alone drives, so a 7-bit-only surface still works.
+  assert.equal(r.handleMixMidi(DEV, 1, 0, 64 / 127, 'cc'), true);
+  // ...and the fine half arriving behind it lands on the same target, finer.
+  assert.equal(r.handleMixMidi(DEV, 1, 32, 64 / 127, 'cc'), true);
+  assert.deepEqual(r.driven.map((d) => d[0]), ['a:tempo', 'a:tempo'],
+    'the fine half reached a different target - it IS the fader, 32 numbers up');
+  const [coarse, fine] = r.driven.map((d) => d[1]);
+  assert.ok(Math.abs(coarse - 64 / 127) < 1e-9);
+  assert.ok(Math.abs(fine - (64 * 128 + 64) / 16383) < 1e-9, 'the two halves make one 14-bit value');
+});
+
+test('both ends of the throw still reach both ends of the range', () => {
+  const r = learnRig({ 'a:tempo': { device: DEV, channel: 1, kind: 'cc', num: 0 } });
+  r.handleMixMidi(DEV, 1, 0, 0, 'cc');
+  r.handleMixMidi(DEV, 1, 32, 0, 'cc');
+  r.handleMixMidi(DEV, 1, 0, 1, 'cc');
+  r.handleMixMidi(DEV, 1, 32, 1, 'cc');
+  const vals = r.driven.map((d) => d[1]);
+  assert.equal(vals[1], 0, 'the bottom of the throw has to be exactly 0');
+  assert.equal(vals[3], 1, 'the top of the throw has to be exactly 1');
+});
+
+test('a learn cannot bind the fine half while its coarse half is live', () => {
+  // This is the actual bug. Sweeping the fader sends both halves; the learn has to take the one
+  // that means something, not whichever arrived when the hand was moving.
+  const r = learnRig();
+  let got = null;
+  r.learn('b:tempo', (l) => { got = l; });
+  r.handleMixMidi(DEV, 2, 0, 0.4, 'cc'); // coarse - this is the one worth binding
+  assert.deepEqual(got, { device: DEV, channel: 2, kind: 'cc', num: 0 });
+
+  const r2 = learnRig();
+  let got2 = null;
+  r2.learn('b:tempo', (l) => { got2 = l; });
+  r2.handleMixMidi(DEV, 2, 0, 0.4, 'cc'); // ...and when the coarse half lands first anyway,
+  r2.handleMixMidi(DEV, 2, 32, 0.9, 'cc'); // the fine half that follows must not rebind it
+  assert.equal(got2.num, 0, 'the learn took the fine half - the fader will jump everywhere');
+});
+
+test('cc 32..63 is left alone when the desk has no reason to want it', () => {
+  // Plenty of surfaces use those numbers as ordinary knobs, and a midicc() in a song has to go
+  // on seeing them. With nothing bound to the coarse half and no learn armed, there is no pair.
+  const r = learnRig({ 'a:trim': { device: DEV, channel: 1, kind: 'cc', num: 40 } });
+  r.handleMixMidi(DEV, 1, 8, 0.5, 'cc'); // would be the coarse half of 40, but nothing wants it
+  assert.equal(r.handleMixMidi(DEV, 1, 40, 0.25, 'cc'), true);
+  assert.deepEqual(r.driven, [['a:trim', 0.25]], 'cc 40 was folded into cc 8 and lost its own meaning');
+});
+
+test('a stale coarse half is not a pair', () => {
+  const r = learnRig({ 'a:tempo': { device: DEV, channel: 1, kind: 'cc', num: 0 } });
+  r.handleMixMidi(DEV, 1, 0, 0.5, 'cc');
+  // Far later: two separate gestures, not two halves of one. cc 32 is its own control again.
+  r.midi14.get(`${DEV}|1|0`).at -= r.MIDI_14_WINDOW_MS + 1;
+  assert.equal(r.handleMixMidi(DEV, 1, 32, 0.9, 'cc'), false);
+});
+
+test('a control left bound to a fine half says so, once, and names the fix', () => {
+  // Her deck B tempo fader, exactly: bound to cc 32 when the fader's real address is cc 0. The
+  // binding cannot be repaired from here (the halves are not interchangeable), so the console
+  // has to turn "it jumps around" into something actionable.
+  const r = learnRig({ 'b:tempo': { device: DEV, channel: 2, kind: 'cc', num: 32 } });
+  r.handleMixMidi(DEV, 2, 0, 0.4, 'cc'); // the coarse half this surface also sends
+  r.handleMixMidi(DEV, 2, 32, 0.9, 'cc');
+  const said = r.log.filter((l) => /FINE half/.test(l));
+  assert.equal(said.length, 1);
+  assert.match(said[0], /b:tempo/);
+  assert.match(said[0], /cc 0/, 'the message has to name the address it should be on');
+  assert.match(said[0], /alt\+click/, 'and how to get there');
+  // Said once. A fader being swept sends this pair twenty times a second.
+  r.handleMixMidi(DEV, 2, 0, 0.5, 'cc');
+  r.handleMixMidi(DEV, 2, 32, 0.1, 'cc');
+  assert.equal(r.log.filter((l) => /FINE half/.test(l)).length, 1);
+});
+
+// --- the cue pad on a deck playing code --------------------------------------------------------
+//
+// A pattern has no cue POINT - it is not a recording with a place in it - but the gesture still
+// means the same thing as on a record: hold to hear this deck without committing it to the room.
+// Starting a code deck means evaluating a buffer only the editor has, so the press leaves here
+// the way `play` does rather than being refused.
+
+test('a code deck\'s cue press goes to the browser; a file deck\'s is served here', () => {
+  const m = rig({ songs: ['a'] }); // deck a holds a file, deck b holds code
+  m.mixMidiButton('a', 'cue', true);
+  m.mixMidiButton('b', 'cue', true);
+  m.mixMidiButton('b', 'cue', false);
+  assert.deepEqual(m.log, [
+    ['cue', 'a', true],
+    ['toClient', 'b', 'cue'],
+    ['toClient', 'b', 'cueoff'],
+  ]);
+});
+
+test('both edges of a code deck\'s cue are forwarded, because the hold IS the gesture', () => {
+  // A press-only forward would start the deck and never stop it - the pad would latch.
+  const m = rig({ songs: [] });
+  m.mixMidiApply('a:cue', 1);
+  m.mixMidiApply('a:cue', 0);
+  assert.deepEqual(m.log, [['toClient', 'a', 'cue'], ['toClient', 'a', 'cueoff']]);
+});
+
+test('the browser side runs both halves of it', () => {
+  // Source-shape, since this half is a DOM gesture: what matters is that the release is wired at
+  // all and that it restores what the press found rather than assuming the deck was idle.
+  assert.match(CLIENT, /action === 'cue'\) deckCuePress\(deck, true\)/);
+  assert.match(CLIENT, /action === 'cueoff'\) deckCuePress\(deck, false\)/);
+  assert.match(CLIENT, /const was = \{ playing: !!deckPlayingNow\[deck\], cued: mixCueOn\(deck\), started: null \}/,
+    'the press has to remember what it found, or the release leaves the deck wrong');
+  // The release must not re-check the live mirror: it arrives on an SSE frame, so on a quick
+  // press it still reads "not playing" when the finger comes up and the stop gets skipped.
+  assert.doesNotMatch(CLIENT, /!was\.playing && deckPlayingNow\[deck\]/,
+    'the cue release consults the live mirror again - a quick press will not stop');
+  // ...and it waits for the start it fired, or the stop lands first and the deck starts after it.
+  assert.match(CLIENT, /\(was\.started \?\? Promise\.resolve\(\)\)\.then\(\(\) => djCueStop\(deck\)\)/);
+  assert.match(CLIENT, /'\/api\/stop', \{ deck, hush: true \}/,
+    'an audition that rings on after the finger is up is not an audition');
+});
+
+// --- learning a multi-position switch in one sweep --------------------------------------------
+//
+// Learning the three positions one at a time does not work, and the reason is physical: the
+// positions are in a row, so you cannot reach the far one without passing THROUGH the middle one.
+// Arming "deck A" and flipping there binds whatever the switch brushed on the way, every time.
+//
+// Sweeping it end to end instead makes that pass-through the point: the positions arrive in their
+// own order, and that order is the mapping.
+
+const SWITCH = ['fxassigna', 'fxassignb', 'fxassignab'];
+
+/** A rig with a sweep armed, and the answer it eventually gives. */
+function sweepRig(mixMidi = {}) {
+  const r = learnRig(mixMidi);
+  let answer = null;
+  r.sweep(SWITCH, (a) => { answer = a; });
+  return { ...r, answer: () => answer };
+}
+
+test('a sweep maps the positions to the targets in the order they arrive', () => {
+  const r = sweepRig();
+  // One continuous movement across a switch that sends a note per position, with the note-offs
+  // for the position being left interleaved the way hardware sends them.
+  r.handleMixMidi(DEV, 5, 16, 1, 'note');
+  r.handleMixMidi(DEV, 5, 16, 0, 'note');
+  r.handleMixMidi(DEV, 5, 17, 1, 'note');
+  r.handleMixMidi(DEV, 5, 17, 0, 'note');
+  r.handleMixMidi(DEV, 5, 18, 1, 'note');
+  r.mixMidiSwitchFinish();
+  assert.deepEqual(r.answer().learned.map((b) => [b.target, b.num]), [
+    ['fxassigna', 16], ['fxassignb', 17], ['fxassignab', 18],
+  ]);
+  // ...and they are really written, so the dispatch finds them.
+  assert.equal(r.settings.mixMidi.fxassignab.num, 18);
+  assert.equal(r.settings.mixMidi.fxassigna.kind, 'note');
+});
+
+test('a note-off is the position being LEFT, and is not a position of its own', () => {
+  // Counting them would fill the sweep with duplicates of where the switch has just been, and
+  // the third "position" would be the first one again.
+  const r = sweepRig();
+  assert.equal(r.mixSwitchState(5, 16, 0, 'note'), null);
+  assert.ok(r.mixSwitchState(5, 16, 1, 'note'));
+});
+
+test('passing through the middle position is the middle entry, not a misbinding', () => {
+  // The whole point. Sweeping from the 1&2 end backwards gives the reverse order, which is what
+  // the console line asks you not to do - but nothing is bound to the position it merely crossed.
+  const r = sweepRig();
+  for (const num of [18, 17, 16]) r.handleMixMidi(DEV, 5, num, 1, 'note');
+  r.mixMidiSwitchFinish();
+  assert.deepEqual(r.answer().learned.map((b) => b.num), [18, 17, 16],
+    'the order swept is the order mapped - there is nothing else it could mean');
+});
+
+test('a sweep that did not reach every position binds nothing and says so', () => {
+  const r = sweepRig();
+  r.handleMixMidi(DEV, 5, 16, 1, 'note');
+  r.handleMixMidi(DEV, 5, 17, 1, 'note');
+  r.mixMidiSwitchFinish();
+  assert.equal(r.answer().learned, null);
+  assert.match(r.answer().why, /only 2 of 3/);
+  assert.deepEqual(r.settings.mixMidi, {}, 'a half-learned switch must leave the old mapping alone');
+});
+
+test('a switch that is one cc at three values is refused rather than bound wrong', () => {
+  // A binding records an address, not a value - so all three targets would match every message
+  // and the unit would land on whichever one the map happened to list first.
+  const r = sweepRig();
+  for (const raw of [0, 64, 127]) r.handleMixMidi(DEV, 5, 11, raw / 127, 'cc');
+  r.mixMidiSwitchFinish();
+  assert.equal(r.answer().learned, null);
+  assert.match(r.answer().why, /one control.*per position/s);
+  assert.match(r.answer().why, /cycling pad/, 'and it names what to do instead');
+});
+
+test('a sweep takes over the positions from whatever was on them', () => {
+  // The cycling `fxassign` was almost certainly learned onto one of these very positions, and a
+  // stale binding would win the dispatch (first match takes the message). So it goes, out loud.
+  const r = sweepRig({ fxassign: { device: DEV, channel: 5, kind: 'note', num: 16 } });
+  for (const num of [16, 17, 18]) r.handleMixMidi(DEV, 5, num, 1, 'note');
+  r.mixMidiSwitchFinish();
+  assert.ok(!('fxassign' in r.settings.mixMidi), 'the old cycling binding is still on position 1');
+  assert.match(r.log.join('\n'), /fxassign was on one of those positions - unbound/);
+  assert.equal(r.settings.mixMidi.fxassigna.num, 16);
+});
+
+test('a switch mid-sweep drives nothing', () => {
+  const r = sweepRig();
+  r.handleMixMidi(DEV, 5, 16, 1, 'note');
+  assert.deepEqual(r.driven, [], 'a position learned while sweeping must not also act');
 });

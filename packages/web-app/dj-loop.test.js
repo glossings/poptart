@@ -37,7 +37,7 @@ function grabConst(name) {
 
 const DEPS = ['mixState', 'songDecks', 'arrangeClocks', 'transport', 'engine', 'songSync',
   'songGridBpm', 'songPlayheadSec', 'songArmTimers', 'mixNotify'];
-const NAMES = ['deckLoopRung', 'deckLoopWindow', 'deckLoopApply', 'deckLoopBeatLen',
+const NAMES = ['deckLoopRung', 'deckLoopWindow', 'deckLoopFit', 'deckLoopApply', 'deckLoopBeatLen',
   'deckLoopLive', 'deckLoopSet', 'deckLoopState'];
 // eslint-disable-next-line no-new-func
 const makeLoop = new Function(...DEPS, `
@@ -58,7 +58,7 @@ const NOW = 1000;
  * A desk with one deck set up. `song` makes it a deck holding a FILE (bpm, where the playhead is,
  * whether it quantizes); without it the deck plays CODE and gets a real ArrangeClock at `cycle`.
  */
-function rig({ song = null, cycle = 0, regions = [], loopsOn = false, beats } = {}) {
+function rig({ song = null, cycle = 0, regions = [], loopsOn = false, beats, end = 64 } = {}) {
   const armed = [];
   const mixState = { deckLoop: { a: { beats: beats ?? 16 }, b: { beats: 16 } } };
   const songDecks = { a: null, b: null };
@@ -73,7 +73,7 @@ function rig({ song = null, cycle = 0, regions = [], loopsOn = false, beats } = 
     };
   }
   const arrangeClocks = {
-    a: song ? null : new ArrangeClock({ end: 64, regions, loopsOn }),
+    a: song ? null : new ArrangeClock({ end, regions, loopsOn }),
     b: null,
   };
   const api = makeLoop(
@@ -245,4 +245,56 @@ test('a length reads as the bars or beats a musician would count', () => {
   assert.equal(deckLoopLabel(0.5), '1/2 beat');
   assert.equal(deckLoopLabel(0.25), '1/4 beat');
   assert.equal(deckLoopLabel(0), '', 'nothing to say about no length at all');
+});
+
+// --- a loop cannot be longer than the music ----------------------------------------------------
+//
+// A clock hold holds the song inside its window whatever is written there, including nothing. The
+// rig above gives the deck a 64-cycle arrangement, which is why every test so far could ask for
+// four bars and get them - on the one-bar pattern somebody actually livecodes, the four-bar
+// default put three bars of silence inside the loop.
+
+test('a four-bar loop on a one-bar pattern loops the bar', () => {
+  const m = rig({ cycle: 0, end: 1 });
+  const got = m.deckLoopApply('a', { on: true });
+  assert.deepEqual([got.from, got.to], [0, 1], 'the window ran past the end of the arrangement');
+  assert.deepEqual(m.arrangeClocks.a.hold, { start: 0, end: 1 });
+  // ...and the music really does come round every bar rather than once every four.
+  assert.equal(m.arrangeClocks.a.posAt(1), 0);
+  assert.equal(m.arrangeClocks.a.posAt(2.5), 0.5);
+});
+
+test('a window that would hang off the end is slid back inside the music', () => {
+  // Pressing loop near the end of a two-bar arrangement: a two-bar loop is still available, it
+  // just cannot start where the playhead is.
+  const m = rig({ cycle: 1.5, end: 2, beats: 8 }); // 8 beats = 2 cycles
+  const got = m.deckLoopApply('a', { on: true });
+  assert.deepEqual([got.from, got.to], [0, 2]);
+});
+
+test('a loop shorter than the arrangement still starts where the playhead is', () => {
+  const m = rig({ cycle: 5.25, end: 64, beats: 4 }); // one bar, in a long arrangement
+  const got = m.deckLoopApply('a', { on: true });
+  assert.deepEqual([got.from, got.to], [5.25, 6.25], 'a loop that fits must not be moved');
+});
+
+test('doubling a livecoded loop stops at the arrangement rather than off the end of it', () => {
+  const m = rig({ cycle: 0, end: 2, beats: 4 });
+  m.deckLoopApply('a', { on: true });
+  const got = m.deckLoopApply('a', { scale: 2 }); // 1 bar -> 2 bars, which is all there is
+  assert.deepEqual([got.from, got.to], [0, 2]);
+  const again = m.deckLoopApply('a', { scale: 2 }); // ...and asking for 4 still gives 2
+  assert.deepEqual([again.from, again.to], [0, 2]);
+});
+
+test('a deck with no arrangement length is left alone', () => {
+  // Nothing to measure against: the window is whatever was asked for, as before.
+  const m = rig({ cycle: 0, end: 0 });
+  assert.deepEqual(m.deckLoopFit('a', 2, 4), { from: 2, to: 6 });
+});
+
+test('a song deck is unaffected - its loop is in seconds of the record', () => {
+  const m = rig({ song: { bpm: 120, pos: 10 }, beats: 16 });
+  const got = m.deckLoopApply('a', { on: true });
+  assert.equal(got.to - got.from, 8, 'four bars at 120bpm is eight seconds, whatever an arrangement does');
 });

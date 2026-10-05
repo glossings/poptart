@@ -101,7 +101,6 @@
             <button id="deckAPlay" class="small deck-only" data-chord-title="{mod+enter}">&#9654; play</button>
             <button id="deckAUpdate" class="small deck-only" title="evaluate without changing play state">&#8635;</button>
             <button id="deckAKeep" class="small deck-only" title="leave DJ mode keeping THIS pane as the song (deck B is dropped)">&#9167; keep</button>
-            <button id="deckALoops" class="small deck-only deck-loop" title="arrangement loop regions: lit, the regions painted into this song hold playback until released (and this button re-arms them); off, the song runs start to end and the deck stops there. DJ mode opens with them off on both decks, and {app+l} is this button for whichever deck you are on">regions</button>
             <span class="deck-head-gap"></span>
             <button id="deckALoop" class="small deck-only deck-loop" title="loop the next stretch of this deck from where it is playing, like a player’s loop button - the length is beside it, and it holds until you press again. Works on a deck playing code and on one playing a file; nothing is written into the song">loop</button>
             <button id="deckALoopHalve" class="small deck-only deck-loop-len-btn" title="halve the loop length (the loop you are hearing keeps its start and gets shorter)">&divide;2</button>
@@ -126,7 +125,7 @@
               <span id="songRateA" class="song-rate" title="playing rate vs native (sync / nudge / clamp)"></span>
               <span id="songTimeA" class="song-time"></span>
             </div>
-            <canvas id="songDetailA" class="song-detail"></canvas>
+            <canvas id="songDetailA" class="song-detail stack-deck-a"></canvas>
             <canvas id="songOverviewA" class="song-overview"></canvas>
             <div class="song-ctl-row">
               <button id="songCueA" class="small song-cue" data-chord-title="cue - hold to preview from the cue point ({app+c}), release to drop back on it, paused. Pressing while paused sets the cue point exactly at the playhead and makes it the beatgrid's downbeat (the waveform pulls onto transients as you scrub); pressing while playing takes the deck back to it">cue</button>
@@ -159,7 +158,6 @@
             <button id="deckBPlay" class="small" data-chord-title="{mod+enter} in this pane">▶ play</button>
             <button id="deckBUpdate" class="small" title="evaluate without changing play state">↻</button>
             <button id="deckBKeep" class="small" data-chord-title="leave DJ mode keeping THIS pane as the song - it is promoted with zero engine churn ({mod+shift+enter})">&#9167; keep</button>
-            <button id="deckBLoops" class="small deck-loop" title="arrangement loop regions: lit, the regions painted into this song hold playback until released (and this button re-arms them); off, the song runs start to end and the deck stops there. DJ mode opens with them off on both decks, and {app+l} is this button for whichever deck you are on">regions</button>
             <span class="deck-head-gap"></span>
             <button id="deckBLoop" class="small deck-loop" title="loop the next stretch of this deck from where it is playing, like a player’s loop button - the length is beside it, and it holds until you press again. Works on a deck playing code and on one playing a file; nothing is written into the song">loop</button>
             <button id="deckBLoopHalve" class="small deck-loop-len-btn" title="halve the loop length (the loop you are hearing keeps its start and gets shorter)">&divide;2</button>
@@ -176,7 +174,7 @@
               <span id="songRateB" class="song-rate" title="playing rate vs native (sync / nudge / clamp)"></span>
               <span id="songTimeB" class="song-time"></span>
             </div>
-            <canvas id="songDetailB" class="song-detail"></canvas>
+            <canvas id="songDetailB" class="song-detail stack-deck-b"></canvas>
             <canvas id="songOverviewB" class="song-overview"></canvas>
             <div class="song-ctl-row">
               <button id="songCueB" class="small song-cue" data-chord-title="cue - hold to preview from the cue point ({app+c}), release to drop back on it, paused. Pressing while paused sets the cue point exactly at the playhead and makes it the beatgrid's downbeat (the waveform pulls onto transients as you scrub); pressing while playing takes the deck back to it">cue</button>
@@ -488,6 +486,15 @@
               </div>
               <div id="mapSourceNote" class="settings-note map-source-note"></div>
             </section>
+            <section id="djSection">
+              <h2>dj mode</h2>
+              <label class="settings-row">loop regions
+                <select id="djRegionsSelect" title="what the decks open at. Off, a song runs start to end like a record and the deck stops there; on, the loop regions painted into it hold playback the way they do outside a mix. A song nobody has arranged loops either way - it has no ending to run to - and {app+l} flips whichever deck you are on for the rest of the set">
+                  <option value="off">off - songs run start to end</option>
+                  <option value="on">on - the song's regions hold</option>
+                </select>
+              </label>
+            </section>
             <section id="syncSection">
               <h2>sync</h2>
               <label class="settings-row">midi clock out
@@ -570,7 +577,7 @@
             <div class="mix-fx-row">
               <button id="mixFxOn" class="small mix-fx-on" title="the FX pad (latched): switches the chain in as an insert on the assigned decks - a learned fxhold pad switches it in only while held">on</button>
               <span id="mixFxKnobWrap" class="mix-fx-knob"></span>
-              <button id="mixFxAssign" class="small mix-fx-assign" title="which decks the unit is inserted on - click to cycle deck A, both, deck B. Under MIDI learn, a click binds a pad that cycles it the same way; right-click instead to bind one position of a three-way switch, so the unit goes where the switch says">A+B</button>
+              <button id="mixFxAssign" class="small mix-fx-assign" title="which decks the unit is inserted on - click to cycle deck A, both, deck B. Under MIDI learn, a click binds a pad that cycles it the same way; right-click instead to learn a three-way switch in one sweep, so the unit goes where the switch says">A+B</button>
             </div>
           </div>
           <!-- The desk's own context menu: the FX assign button uses it under MIDI learn to bind

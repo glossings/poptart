@@ -151,10 +151,23 @@ test('the arrangement pass asks for the default, and the deck-clear route lets g
     'and the route should carry the difference between a press and a default');
 });
 
-test('DJ mode opens the decks off as a DEFAULT, not as a press', () => {
-  // Sending this as a press would pin both decks off the moment the mix opens, and no song would
+test('DJ mode opens the decks at the SETTING, and as a default rather than a press', () => {
+  // Sending this as a press would pin both decks the moment the mix opens, and no song would
   // ever get to say it has no ending.
-  assert.match(CLIENT, /\/api\/arrangeLoops', \{ deck: d, on: false, pin: false \}/);
-  // The deck head's own button is the press, and says nothing about pinning.
+  assert.match(CLIENT, /\/api\/arrangeLoops', \{ deck: d, on: regionsOn, pin: false \}/);
+  // ...and `regionsOn` is the settings choice, not a constant: the deck heads used to carry a
+  // button each, and what replaced them is one answer about how you play (settings -> dj mode).
+  assert.match(CLIENT, /const regionsOn = djRegionsMode === 'on';/);
+  assert.match(CLIENT, /api\('GET', '\/api\/djRegions'\)/, 'the setting has to be read somewhere');
+  assert.match(SRC, /'POST \/api\/djRegions'/, 'and the server has to keep it');
+  // The live toggle is the press, and says nothing about pinning. It is {app+l} now rather than
+  // a button, but it is the same call.
   assert.match(CLIENT, /\/api\/arrangeLoops', \{ deck, on: !deckLoopsNow\[deck\] \}/);
+});
+
+test('the regions choice is off unless it was changed, and anything else reads as off', () => {
+  // A hand-edited settings file, or an older one with no such key: the opening position that has
+  // always been right for a mix is the one a record plays at.
+  assert.match(SRC, /settings\.djRegions === 'on' \? 'on' : 'off'/);
+  assert.match(SRC, /body\?\.mode === 'on' \? 'on' : 'off'/);
 });

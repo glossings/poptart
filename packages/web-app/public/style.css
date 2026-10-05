@@ -2052,7 +2052,8 @@ li.CodeMirror-hint-active {
 .web-build #viewDjBtn,
 .web-build #sampleMapBtn,
 .web-build #orgDiskSource,
-.web-build #orgTracksSource {
+.web-build #orgTracksSource,
+.web-build #orgRelatedSource {
   display: none;
 }
 
@@ -4553,8 +4554,17 @@ body.mix-on.mix-stacked #djDecksRail {
 body.mix-on.mix-stacked #songStack {
   grid-row: 1;
   grid-column: 1 / -1;
-  display: flex;
-  flex-direction: column;
+  /* Two rows, one per DECK, each half the region whether or not that deck has anything to draw.
+     As a flex column the single lane of a one-deck session stretched over the whole region, which
+     reads as "the playing deck is the top deck" and moves the other deck's lane the moment it
+     loads - so a stacked pair never sat still. A deck's lane is now always in that deck's half,
+     and an idle deck leaves its half empty. */
+  display: grid;
+  /* minmax(0, ...), not a bare 1fr: a grid track's automatic minimum is its content's, and a
+     canvas has an intrinsic height - so bare 1fr rows refuse to shrink past it, the region
+     overflows and the lower lane is pushed out of view. That is the same failure the flex
+     version had, by a different route. */
+  grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
   gap: 4px;
   padding: 8px 8px 0;
   min-height: 0;
@@ -4563,16 +4573,28 @@ body.mix-on.mix-stacked #songStack {
   overflow: hidden;
   /* no border of its own: the drag handle right below is the seam */
 }
-/* Basis 0 with NO floor: the two waveforms give up height together, all the way down. A
-   min-height here (60px until 2026-08-26) stops both of them shrinking at the same moment, and
-   since the region goes on getting shorter the lower one is simply pushed out of it - which
-   read as "the bottom one squashes while the top keeps its size". */
+/* No floor, so the two waveforms give up height together all the way down. A min-height here
+   (60px until 2026-08-26) stopped both of them shrinking at the same moment, and since the
+   region goes on getting shorter the lower one was simply pushed out of it - which read as
+   "the bottom one squashes while the top keeps its size". */
 #songStack .song-detail {
-  flex: 1 1 0;
   min-height: 0;
+  /* Explicit, not left to the grid item's default stretch: a canvas carries an aspect ratio from
+     its width/height attributes, and with a definite width that ratio decides its height - so a
+     full-width lane came out 490px tall inside a 150px row and drew most of the waveform under
+     the clip. The flex version set the height outright (flex-basis), which is what hid this. */
+  height: 100%;
+}
+/* Which half a lane lives in. Both of a deck's lanes claim the same row - only one of the pair
+   is ever visible (a deck holds a file or it holds code), so they never collide. */
+#songStack .stack-deck-a {
+  grid-row: 1;
+}
+#songStack .stack-deck-b {
+  grid-row: 2;
 }
 #songStack .song-detail.hidden {
-  display: none; /* that deck holds no song - the other's waveform takes the whole stack */
+  display: none; /* this deck has nothing to draw - its half of the stack stays empty */
 }
 #songStack .song-detail.active {
   border-color: var(--accent);
@@ -6000,6 +6022,33 @@ body.mix-on #deckAHead .deck-song {
   color: var(--accent);
   border-top: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
   border-bottom: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+}
+/* Tonight's rows. Two states, two washes, both weaker than the selection's so a selected row
+   still reads as the selected one on top of either: a track ON a playing deck, and a track that
+   has already gone out this session. Backgrounds rather than text colors, because the point is
+   to be seen while scanning a long crate rather than read. */
+#orgBody tr.org-on-deck td {
+  background: color-mix(in srgb, var(--ok) 16%, transparent);
+}
+#orgBody tr.org-on-deck:hover td {
+  background: color-mix(in srgb, var(--ok) 24%, transparent);
+}
+#orgBody tr.org-played td {
+  background: color-mix(in srgb, var(--warn) 10%, transparent);
+  color: var(--text-dim);
+}
+#orgBody tr.org-played:hover td {
+  background: color-mix(in srgb, var(--warn) 18%, transparent);
+}
+/* The selection outranks both - it is where the keyboard is. Only the two-class combinations are
+   stated here: restating the plain `.selected` rule from above would be a second rule under a
+   selector that already exists, which is the trick that silently un-stuck the table headers. */
+#orgBody tr.org-on-deck.selected td,
+#orgBody tr.org-on-deck.selected:hover td,
+#orgBody tr.org-played.selected td,
+#orgBody tr.org-played.selected:hover td {
+  background: var(--accent-soft);
+  color: var(--accent);
 }
 #orgBody tr.playing td.org-c-name {
   color: var(--accent);

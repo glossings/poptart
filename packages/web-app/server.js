@@ -703,7 +703,12 @@ function songCue(deck, hold) {
   if (hold) {
     const wasPlaying = s.playing;
     const before = songPlayheadSec(deck);
-    if (!s.playing) {
+    // A deck that has run out is PARKED at the end, not parked somewhere new. Taking the
+    // playhead as the cue there would move the cue point to the end of the record, so the one
+    // press that should take you back to the top instead threw away where the top was. Same rule
+    // the play press already follows (see `spent` in songPlayDeck): at the end, go home.
+    const spent = before >= s.duration - SONG_END_EPS_SEC;
+    if (!s.playing && !spent) {
       // Parked somewhere new: the cue is here now - and it IS the downbeat. A cue point is
       // where the hand says "one" is, so it anchors the beatgrid too: the two used to be
       // separate gestures, and a cue snapped to a grid whose downbeat was wrong went to the
@@ -731,7 +736,7 @@ function songCue(deck, hold) {
     s.cueHeld = true;
     songArmTimers(deck);
     // eslint-disable-next-line no-console
-    console.log(`[song] deck ${deck} cue press: ${wasPlaying ? 'playing -> back to cue' : 'paused -> cue set'} at ${s.cueSec.toFixed(3)}s (playhead was ${before.toFixed(3)}s, anchor ${s.anchorSec.toFixed(3)}s, bpm ${s.bpm})`);
+    console.log(`[song] deck ${deck} cue press: ${wasPlaying ? 'playing -> back to cue' : (spent ? 'spent -> back to cue' : 'paused -> cue set')} at ${s.cueSec.toFixed(3)}s (playhead was ${before.toFixed(3)}s, anchor ${s.anchorSec.toFixed(3)}s, bpm ${s.bpm})`);
   } else if (s.cueHeld) {
     s.cueHeld = false;
     songPause(deck);
@@ -759,10 +764,19 @@ function songCue(deck, hold) {
  * on this record's downbeats. With something already playing, the start waits for the clock
  * position that puts this song's cue on a bar line.
  */
+// Which tracks have gone out tonight, by absolute path and in the order they first played. The
+// one fact about a record that no amount of metadata can carry, because it is about THIS set: a
+// crate you have been digging through for an hour all looks equally unplayed otherwise. Held in
+// memory deliberately - a session is not a history, and it empties when poptart restarts.
+const songPlayedSession = new Map(); // abs path -> { at, deck }
+
 function songPlayDeck(deck, { pos, rate, now: startNow } = {}) {
   if (!engine || !transport) throw new Error(engineError ?? 'engine not loaded');
   const s = songDecks[deck];
   if (!s) throw new Error(`deck ${deck} has no song loaded`);
+  // A play press, not a cue preview (songCue is its own path) - auditioning a track in the
+  // headphones is not playing it to the room.
+  if (s.path && !songPlayedSession.has(s.path)) songPlayedSession.set(s.path, { at: Date.now(), deck });
   const r = Number(rate);
   if (Number.isFinite(r) && r > 0.01 && r <= 4) s.manualRate = r;
   const at = Number(pos);
@@ -1150,8 +1164,29 @@ function deckLoopWindow(deck, beats) {
   if (!clock || !transport || !engine) return null;
   const beatCyc = 1 / songSync.BEATS_PER_CYCLE;
   const pos = clock.posAt(transport.cycleAt(engine.getTime()));
-  const from = Math.max(0, Math.floor(pos / beatCyc) * beatCyc);
-  return { from, to: from + beats * beatCyc };
+  return deckLoopFit(deck, Math.max(0, Math.floor(pos / beatCyc) * beatCyc), beats * beatCyc);
+}
+
+/**
+ * A livecoded deck's loop window, trimmed to the music that actually exists.
+ *
+ * A clock hold holds the song inside [start, end) whatever is written there - including nothing.
+ * So a four-bar loop asked for on a one-bar pattern set a four-bar window: the bar played, and
+ * then the clock sat in the three bars of silence past the arrangement's end before wrapping.
+ * That reads as a broken loop ("a tiny bit of audio and then a big silent gap") and it is really
+ * a window asking for music the deck does not have.
+ *
+ * So the span is capped at the arrangement's own length, and a window that would hang off the
+ * end is slid back inside it. Nothing is invented: looping a one-bar pattern gives you the bar,
+ * which is what the button is for, and the length buttons are right there to ask for more of a
+ * longer arrangement.
+ */
+function deckLoopFit(deck, from, span) {
+  const end = arrangeClocks[deck]?.end ?? 0;
+  if (!(end > 0)) return { from, to: from + span }; // no arrangement length to measure against
+  const len = Math.min(span, end);
+  const at = Math.min(from, Math.max(0, end - len));
+  return { from: at, to: at + len };
 }
 
 /**
@@ -1176,8 +1211,13 @@ function deckLoopApply(deck, { on, beats, scale } = {}) {
   if (!arm) {
     deckLoopSet(deck, null);
   } else if (live && (beats !== undefined || scale !== undefined)) {
-    // Resizing the loop under the hand: the start stays where it was put.
-    deckLoopSet(deck, { from: live.from, to: live.from + want.beats * deckLoopBeatLen(deck) });
+    // Resizing the loop under the hand: the start stays where it was put, and on a livecoded
+    // deck the result is trimmed to the arrangement just as arming one is - doubling a loop
+    // off the end of the music is the same silence by another route.
+    const span = want.beats * deckLoopBeatLen(deck);
+    deckLoopSet(deck, songDecks[deck]
+      ? { from: live.from, to: live.from + span }
+      : deckLoopFit(deck, live.from, span));
   } else {
     const window = deckLoopWindow(deck, want.beats);
     if (!window) {
@@ -1419,6 +1459,149 @@ const midiSame = (m, device, channel, num, kind) => !!m
   && m.device === device && m.channel === channel && midiNum(m) === num && midiKind(m) === kind;
 const midiSay = (channel, num, kind) => `${kind} ${num} (ch ${channel})`;
 
+// --- high-resolution (14-bit) ccs -------------------------------------------------------------
+//
+// A pitch fader worth beatmatching on does not send 128 steps. The MIDI convention for a
+// high-resolution control is a PAIR of ccs sent together, coarse first: the coarse half on a
+// number below 32 and the fine half on that number plus 32. Ignoring the pair goes wrong twice.
+//
+// The fine half looks exactly like a control of its own, and it is the half that moves MOST - so
+// a learn that takes the next message it likes can bind it, and the "fader" then sweeps 0..127
+// over and over across an inch of travel. That is not a hypothetical: a deck's tempo slider was
+// learned onto cc 32, which is the fine half of cc 0, and it jumped all over the place.
+//
+// And 7 bits is not enough for the control anyway. Over +-6%, 128 steps is 0.09% apiece - about
+// 0.11 bpm at 120, which is an audible step when you are matching beats by ear.
+//
+// So a coarse message is remembered; a fine message arriving just behind its own coarse half
+// REFINES that target instead of being a target. Only when the desk has a reason to care, mind:
+// plenty of surfaces use cc 32..63 as ordinary controls, and those still have to reach midicc().
+// The reason is either a binding already on the coarse address or a learn waiting to make one.
+// The two halves of one move. A hand cannot reach two separate knobs this close together, and
+// the pair is sent back-to-back by definition.
+const MIDI_14_WINDOW_MS = 60;
+const MIDI_14_LSB = 32;
+// "device|channel|coarse num" -> { raw, at }: the coarse half, waiting for its fine half.
+const midi14 = new Map();
+// Targets already complained about for being bound to a fine half - said once, not per message.
+const midi14Warned = new Set();
+const midi14Key = (device, channel, num) => `${device}|${channel}|${num}`;
+const midi14IsCoarse = (kind, num) => kind === 'cc' && num < MIDI_14_LSB;
+const midi14IsFine = (kind, num) => kind === 'cc' && num >= MIDI_14_LSB && num < MIDI_14_LSB * 2;
+
+/**
+ * The coarse half this fine message belongs to, or null to leave the message alone. Null is the
+ * answer whenever the desk has nothing to gain: an unbound coarse address with no learn armed
+ * means cc 32..63 is somebody's ordinary knob and stays one.
+ */
+function midi14Partner(device, channel, num, now) {
+  const coarse = num - MIDI_14_LSB;
+  const seen = midi14.get(midi14Key(device, channel, coarse));
+  if (!seen || now - seen.at > MIDI_14_WINDOW_MS) return null;
+  const wanted = mixMidiLearn
+    || Object.values(settings.mixMidi ?? {}).some((m) => midiSame(m, device, channel, coarse, 'cc'));
+  return wanted ? { coarse, raw: seen.raw } : null;
+}
+
+// --- learning a multi-position SWITCH, in one gesture -----------------------------------------
+//
+// A switch is not three buttons, and learning it as three was a mistake worth writing down: its
+// positions are in a row, so you cannot reach the far one without passing THROUGH the middle one.
+// Arming a learn for "deck A" and then flipping to the deck-A position therefore binds whatever
+// the switch brushed past on the way, every time, and the only way out of it is to approach each
+// position from the right side - which is not something anybody should have to know.
+//
+// So the whole switch is learned at once: sweep it from one end to the other and poptart keeps
+// the positions in the ORDER THEY ARRIVED. A sweep is one continuous movement, so that order IS
+// the physical order of the positions, and passing through the middle is no longer a hazard - it
+// is the middle entry. The one thing the gesture has to be told is which end to start at, which
+// is what the console line says.
+// A hand that has stopped moving: the sweep is over once no new position has arrived for this
+// long, rather than the moment the count is reached - a switch flicked past the far position and
+// back would otherwise be learned from the overshoot.
+const MIX_SWITCH_SETTLE_MS = 700;
+const MIX_SWITCH_TIMEOUT_MS = 20000;
+// { targets, seen, finish, timer, settle } while a sweep is armed.
+let mixMidiSwitch = null;
+
+/** The state this message represents, or null for one that is not a position being ENTERED. */
+function mixSwitchState(channel, num, value, kind) {
+  if (kind === 'note') {
+    // Note-offs are the position being LEFT - the same position, said backwards. Counting them
+    // would fill the sweep with duplicates of where the switch has just been.
+    return value >= 0.004 ? { key: `note:${channel}:${num}`, kind: 'note', num } : null;
+  }
+  // A cc switch sends one number at a different value per position, so the VALUE is the state.
+  const raw = Math.round(value * 127);
+  return { key: `cc:${channel}:${num}:${raw}`, kind: 'cc', num, raw };
+}
+
+/** A message while a sweep is armed. Always consumed: a switch mid-learn must not drive a desk. */
+function mixMidiSwitchSaw(device, channel, num, value, kind) {
+  const sw = mixMidiSwitch;
+  const state = mixSwitchState(channel, num, value, kind);
+  if (!state) return true;
+  // Every position seen once, in the order the sweep reached them.
+  if (!sw.seen.some((x) => x.key === state.key)) {
+    sw.seen.push({ ...state, device, channel });
+    eventLogQueue.push(`[midi] switch position ${sw.seen.length}: ${midiSay(channel, num, kind)}`
+      + (state.kind === 'cc' ? ` = ${state.raw}` : ''));
+  }
+  // The sweep ends when the hand stops, not when the count is reached: a switch flicked past the
+  // far position and back would otherwise be learned from the overshoot.
+  clearTimeout(sw.settle);
+  if (sw.seen.length >= sw.targets.length) {
+    sw.settle = setTimeout(() => mixMidiSwitchFinish(), MIX_SWITCH_SETTLE_MS);
+  }
+  return true;
+}
+
+/** Write what the sweep saw, or say why it cannot be written. */
+function mixMidiSwitchFinish(reason = null) {
+  const sw = mixMidiSwitch;
+  if (!sw) return;
+  mixMidiSwitch = null;
+  clearTimeout(sw.timer);
+  clearTimeout(sw.settle);
+  const { targets, seen } = sw;
+  if (reason || seen.length < targets.length) {
+    sw.finish({
+      learned: null,
+      why: reason ?? `only ${seen.length} of ${targets.length} positions came through - `
+        + 'sweep the switch the whole way from one end to the other',
+    });
+    return;
+  }
+  // One cc number at three values cannot be told apart by a binding, which records an address and
+  // not a value. Said plainly rather than bound wrong - all three targets would fire at once.
+  if (seen.every((x) => x.kind === 'cc' && x.num === seen[0].num)) {
+    sw.finish({
+      learned: null,
+      why: `this switch sends one control (${midiSay(seen[0].channel, seen[0].num, 'cc')}) at a `
+        + 'different value per position, which poptart cannot map yet - bind it as the cycling pad instead',
+    });
+    return;
+  }
+  // A stale binding on one of these addresses would win the dispatch (first match takes the
+  // message), so the old mapping of these very positions goes - including the cycling `fxassign`
+  // that was probably learned onto one of them.
+  for (const [target, m] of Object.entries(settings.mixMidi ?? {})) {
+    if (targets.includes(target)) continue;
+    if (!seen.some((x) => midiSame(m, x.device, x.channel, x.num, x.kind))) continue;
+    delete settings.mixMidi[target];
+    eventLogQueue.push(`[midi] ${target} was on one of those positions - unbound`);
+  }
+  const learned = targets.map((target, i) => {
+    const at = seen[i];
+    const m = { device: at.device, channel: at.channel, kind: at.kind, num: at.num };
+    settings.mixMidi = { ...(settings.mixMidi ?? {}), [target]: m };
+    mixMidiDown.delete(target);
+    return { target, ...m };
+  });
+  saveSettings();
+  sw.finish({ learned, why: null });
+}
+
 // Which target names are BUTTONS - the set the learn rule below needs, and the same lists
 // the dispatch reads.
 const MIX_MIDI_BUTTONS = new Set([...MIX_MIDI_HOLD, ...MIX_MIDI_PRESS, ...MIX_MIDI_GLOBAL_PRESS,
@@ -1486,18 +1669,60 @@ function handleMixMidi(device, channel, num, value, kind) {
         + ` = ${Math.round(value * 127)}/127 (${value.toFixed(3)})`);
     }
   }
+  // The high-resolution pair (see above), resolved before anything else looks at the message, so
+  // neither the learn nor the dispatch can see a fine half as a control. The monitor above still
+  // prints what actually arrived - that is the whole point of the monitor.
+  const now = Date.now();
+  if (midi14IsCoarse(kind, num)) midi14.set(midi14Key(device, channel, num), { raw: Math.round(value * 127), at: now });
+  else if (midi14IsFine(kind, num)) {
+    const pair = midi14Partner(device, channel, num, now);
+    if (pair) {
+      num = pair.coarse;
+      value = (pair.raw * 128 + Math.round(value * 127)) / 16383;
+    } else if (midi14.has(midi14Key(device, channel, num - MIDI_14_LSB))) {
+      // A binding ON the fine half, of a control whose coarse half this surface also sends: a
+      // mapping made before the pair was understood, and the reason that control appears to jump
+      // all over its range. Nothing can be done about it from here - the two halves are not
+      // interchangeable - so it is said once, naming the fix.
+      const stuck = Object.entries(settings.mixMidi ?? {})
+        .find(([, m]) => midiSame(m, device, channel, num, 'cc'));
+      if (stuck && !midi14Warned.has(stuck[0])) {
+        midi14Warned.add(stuck[0]);
+        eventLogQueue.push(`[midi] ${stuck[0]} is bound to ${midiSay(channel, num, 'cc')}, which is the FINE `
+          + `half of cc ${num - MIDI_14_LSB} on this control - that is why it jumps. Re-learn it: arm midi, `
+          + `alt+click ${stuck[0]}'s control to unbind, then click it and move the hardware again`);
+      }
+    }
+  }
+  // A switch being swept owns every message until it settles (see the sweep section above).
+  if (mixMidiSwitch) return mixMidiSwitchSaw(device, channel, num, value, kind);
   if (mixMidiLearn) {
     const { target, finish, timer } = mixMidiLearn;
     // Not what this target is waiting for: consumed (a control being learned must not also play
     // a midicc() in the song) but the arm stands, so the hand can go on to the real control.
     if (!mixMidiLearnable(target, kind, value)) return true;
     const taken = Object.entries(settings.mixMidi ?? {})
-      .find(([other, m]) => other !== target && midiSame(m, device, channel, num, kind));
-    if (taken) {
+      .filter(([other, m]) => other !== target && midiSame(m, device, channel, num, kind))
+      .map(([other]) => other);
+    if (taken.length) {
       // Two targets on one control is never what was meant, and it fails SILENTLY at play time
       // (the first match in the map wins and the rest never fire). Say so and keep listening.
-      eventLogQueue.push(`[midi] ${midiSay(channel, num, kind)} already drives ${taken[0]} - `
-        + `alt+click that control to unbind it, or use another one for ${target}`);
+      //
+      // EVERY target on the address, not just the first: unbinding one and finding the control
+      // still refused, with the same sentence naming a different target, is a loop with no end
+      // in sight. (Which is exactly what blocked one deck's tempo fader - its coarse half had
+      // two stale bindings sitting on it from an earlier session.)
+      //
+      // And said once per control: a fader being swept sends this fifty times, and fifty copies
+      // of the reason bury everything else in the console - including the reason.
+      const id = `taken:${kind} ${num} ${channel} ${target}`;
+      const now = Date.now();
+      if (now - (mixMidiSaid.get(id) ?? 0) > 3000) {
+        mixMidiSaid.set(id, now);
+        eventLogQueue.push(`[midi] ${midiSay(channel, num, kind)} already drives `
+          + `${taken.join(' and ')} - alt+click ${taken.length > 1 ? 'those controls' : 'that control'} `
+          + `to unbind ${taken.length > 1 ? 'them' : 'it'}, or use another control for ${target}`);
+      }
       return true;
     }
     mixMidiLearn = null;
@@ -1579,9 +1804,13 @@ function mixMidiApply(target, value) {
     return;
   }
   if (name === 'tempo') {
-    // The deck's pitch fader, mounted the player way: hardware TOP is minus (slower), BOTTOM
-    // plus - so a fader at its top edge reads frac -1.
-    deckTempoApply(deck, { frac: (0.5 - value) * 2 });
+    // The deck's pitch fader, mounted the player way: PLUS is at the bottom of the throw, on
+    // hardware and on the screen alike. The two disagree about which end counts up, though - a
+    // pitch fader sends its HIGHEST value at that plus end, while the on-screen fader's own 0..1
+    // counts upward from the bottom (see tempoFracOf, which is this with the sign the other
+    // way). So a rising cc is a rising tempo, and reading it the other way put every hardware
+    // fader in upside down.
+    deckTempoApply(deck, { frac: (value - 0.5) * 2 });
     return;
   }
   const hold = MIX_MIDI_HOLD.includes(name);
@@ -1606,7 +1835,14 @@ function mixMidiButton(deck, name, down) {
     case 'nudgeup': songNudge(deck, { hold: down ? 1 : 0 }); return;
     case 'jogdn': songNudge(deck, { jog: -1 }); return;
     case 'jogup': songNudge(deck, { jog: 1 }); return;
-    case 'cue': songCue(deck, down); return;
+    case 'cue':
+      // A deck holding a FILE previews from its cue point right here. A deck holding CODE has no
+      // cue POINT - a pattern is not a recording with a place in it - but the gesture still means
+      // the same thing: hold to hear this deck, release and it is quiet again. Starting it means
+      // evaluating a buffer only the editor has, so like `play` the press goes to the browser.
+      if (s) songCue(deck, down);
+      else mixActionNotify(deck, down ? 'cue' : 'cueoff');
+      return;
     case 'play':
       // A deck holding a FILE has its transport right here. A deck holding CODE is played by
       // evaluating a buffer that only the editor has, so that press goes to the browser.
@@ -3845,7 +4081,7 @@ setInterval(arrangeEndWatch, ARRANGE_END_POLL_MS).unref();
  * exactly like a normal stop. Returns the /api/stop body: `transport` is null when the clock ran
  * on for the other deck.
  */
-function stopPlayback(deck = null) {
+function stopPlayback(deck = null, { hush = false } = {}) {
   // A deck's song pauses where it stands (a stop is not an unload - play resumes from here).
   const pauseSong = (d) => {
     if (!songDecks[d]) return;
@@ -3854,6 +4090,17 @@ function stopPlayback(deck = null) {
   };
   if (deck) {
     for (const [key, sch] of schedulers) if (deckOfKey(key) === deck) sch.stop();
+    // A plain stop lets everything ring out, and that is deliberate - a show's last notes, a long
+    // tail, a top loop running on. An AUDITION is the one case where it is wrong: a preview you
+    // have let go of and can still hear is not a preview, and on a livecoded deck the lookahead
+    // alone keeps it sounding for a beat or two after the finger is up. So the cue release asks
+    // for the voices as well (see the livecode cue in client.js).
+    if (hush) {
+      for (const key of schedulers.keys()) {
+        if (deckOfKey(key) !== deck) continue;
+        try { mappedEngine.hush(engineTrack(key)); } catch { /* engine between restarts */ }
+      }
+    }
     pauseSong(deck);
     for (const id of [...kbHeld.keys()]) if (deckOfKey(id) === deck) releaseKbNotes(id);
     const otherPlaying = [...schedulers].some(([key, sch]) => deckOfKey(key) !== deck && sch.running)
@@ -6052,6 +6299,23 @@ const routes = {
 
   // Prefer-VST3 toggle (settings tab). Default on; body: { enabled }. Applied on the next
   // plugin-list fetch - no rescan needed, the filter sits on the endpoints above.
+  // What DJ mode opens its decks' arrangement loop REGIONS at. Off (the default), a song runs
+  // start to end like a record and the deck stops there; on, the regions painted into it hold
+  // playback as they do outside a mix. Either way an unarranged song still loops - it has no
+  // ending to run to (see deckLoopsDefault) - and either way {app+l} flips the deck you are on
+  // for the rest of the set. A setting rather than a button in the deck head: it is the kind of
+  // choice made once about how you play, not mid-mix.
+  'GET /api/djRegions': async () => ({
+    status: 200,
+    body: { mode: settings.djRegions === 'on' ? 'on' : 'off' },
+  }),
+  'POST /api/djRegions': async (body) => {
+    const mode = body?.mode === 'on' ? 'on' : 'off';
+    settings.djRegions = mode;
+    saveSettings();
+    return { status: 200, body: { mode } };
+  },
+
   'GET /api/preferVst3': async () => ({
     status: 200,
     body: { enabled: settings.preferVst3 !== false },
@@ -6921,9 +7185,14 @@ const routes = {
   },
 
   // Body: { deck? } - see stopPlayback.
+  // Body: { deck?, hush? }. `hush` takes the deck's voices too rather than letting them ring -
+  // only the cue release asks for it, because an audition has to end when the finger comes up.
   'POST /api/stop': async (body) => ({
     status: 200,
-    body: stopPlayback(body?.deck === 'a' || body?.deck === 'b' ? body.deck : null),
+    body: stopPlayback(
+      body?.deck === 'a' || body?.deck === 'b' ? body.deck : null,
+      { hush: !!body?.hush },
+    ),
   }),
 
   // The editor's song clock says this deck has reached the end of its arrangement. Its twin of
@@ -7367,7 +7636,20 @@ const routes = {
   // the client's copy converges on the normalized truth.
   // `analyzing` rides along so the window that is open can show a pass running without a second
   // poll of its own; it is not part of the document and writeLibrary ignores it coming back.
-  'GET /api/library': async () => ({ status: 200, body: { ...readLibrary(), analyzing: libAnalyzeState() } }),
+  'GET /api/library': async () => ({
+    status: 200,
+    body: {
+      ...readLibrary(),
+      analyzing: libAnalyzeState(),
+      // What has already been played tonight, and what is on a deck right now - the browser
+      // colors its rows by both. Sent with the library rather than polled: the window re-reads
+      // it on open and after every deck load, which is exactly when either can have changed.
+      playedSession: [...songPlayedSession.keys()],
+      onDeck: Object.fromEntries(['a', 'b']
+        .filter((d) => songDecks[d]?.path)
+        .map((d) => [d, { path: songDecks[d].path, playing: deckPlaying(d) }])),
+    },
+  }),
   'POST /api/library': async (body) => ({ status: 200, body: { ...writeLibrary(body), analyzing: libAnalyzeState() } }),
 
   // --- work in progress (the editor autosaves the live buffer here; see wipFilePath) ---
@@ -7543,6 +7825,39 @@ const routes = {
       tracks: query?.desk ? undefined : mixDeskTracks(),
     },
   }),
+
+  // Learn a multi-position SWITCH in one gesture. Body: { targets } - the controls its positions
+  // map to, IN ORDER. Long-polls while the switch is swept from one end to the other and answers
+  // { learned: [{ target, device, channel, kind, num }, ...] }, or { learned: null, why } when the
+  // sweep did not say enough. See the sweep section for why this is not three separate learns.
+  'POST /api/mix/midiswitch': async (body) => {
+    const targets = Array.isArray(body?.targets) ? body.targets.map(String) : [];
+    if (targets.length < 2) throw new Error('midiswitch needs the targets its positions map to, in order');
+    for (const t of targets) {
+      if (!MIX_MIDI_TARGETS.has(t)) throw new Error(`"${t}" is not a learnable mix control`);
+    }
+    if (!engine) throw new Error(engineError ?? 'engine not loaded');
+    engine.enableMidi();
+    mixMidiSwitchFinish('superseded by another learn'); // a second arm replaces a stale one
+    if (mixMidiLearn) {
+      clearTimeout(mixMidiLearn.timer);
+      mixMidiLearn.finish(null);
+      mixMidiLearn = null;
+    }
+    const out = await new Promise((resolve) => {
+      mixMidiSwitch = {
+        targets,
+        seen: [],
+        finish: resolve,
+        settle: null,
+        timer: setTimeout(
+          () => mixMidiSwitchFinish('nothing came through - is the switch sending on this port?'),
+          MIX_SWITCH_TIMEOUT_MS,
+        ),
+      };
+    });
+    return { status: 200, body: out };
+  },
 
   // MIDI-learn for a desk control. Body: { target } arms a learn and waits (long-poll) for the
   // next CC anywhere -> { learned: { device, channel, cc } }, or { learned: null } after 10s.

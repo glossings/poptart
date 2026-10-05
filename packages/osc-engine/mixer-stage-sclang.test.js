@@ -211,3 +211,49 @@ test('the track SynthDef builds with the DJ stage, and its neutrals are really n
     assert.strictEqual(m[1].trim(), expected, `channelDefault("${name}")`);
   }
 });
+
+// Where the deck meter and the headphone cue TAP the channel, which is the difference between a
+// meter you can gain-stage with and a meter that lies.
+//
+// Both sit post trim/EQ/filter and PRE fader x crossfader, on purpose: the question a channel
+// meter answers is "what is this deck making", the way a hardware desk's does, so that trim is
+// set against it and a faded-out deck still shows what it will be when the fader comes up. What
+// must never happen is the meter drifting ahead of TRIM - a meter that ignores the one control
+// it exists to help you set is worse than none, and nothing about it would look wrong on screen.
+//
+// Source-shape rather than a render: the tap is one Out.ar in a 300-line graph with VSTPlugin and
+// a dozen buses in it, and the thing that can break is an edit moving a line, not the arithmetic.
+test('the deck meter and the cue tap read the channel AFTER trim', () => {
+  const def = extractTrackDef();
+  const at = (needle, what) => {
+    const i = def.indexOf(needle);
+    assert.ok(i > 0, `${what} not found in the track def - this test needs updating`);
+    return i;
+  };
+  const trim = at('live = sig * trim', 'the trim stage');
+  const meter = at('deckMeterBus.index', 'the deck meter send');
+  const cue = at('Out.ar(cueOffset', 'the headphone cue send');
+  assert.ok(trim < meter, 'the deck meter is read BEFORE trim - it will show level on a dead channel');
+  assert.ok(trim < cue, 'the headphone cue is taken before trim');
+
+  // ...and the EQ in between has to be built from the trimmed signal, not from the input again.
+  // Re-deriving a band from `sig` would reinstate the full-level signal downstream of trim and
+  // feed it straight to both taps, which is this same failure with no line out of order.
+  for (const band of ['djLow = ', 'djHigh = ', 'djMid = ']) {
+    const line = def.slice(def.indexOf(band), def.indexOf('\n', def.indexOf(band)));
+    assert.ok(!/\bsig\b/.test(line), `${band.trim()} is built from the untrimmed input: ${line.trim()}`);
+  }
+});
+
+test('...and both of them are read BEFORE the fader', () => {
+  // The other half of the same decision, and the one that is deliberate rather than a bug: a
+  // deck faded out still meters, and still feeds the headphones, which is what makes it possible
+  // to line the next record up at all.
+  const def = extractTrackDef();
+  const meter = def.indexOf('deckMeterBus.index');
+  // Where the fader is APPLIED to the direct path, not where its arg is read into a var - that
+  // happens near the top, because the named-bus sends are post-fader too.
+  const applied = def.indexOf('live = live * (1 - fxAmt) * faderAmt');
+  assert.ok(applied > 0, 'the fader stage moved - this test needs updating');
+  assert.ok(meter < applied, 'the meter now follows the fader, so a cued deck reads as silent');
+});
