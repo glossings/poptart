@@ -19448,11 +19448,52 @@ function applyScanState(scan) {
   loadKnownPlugins().catch(() => {});
 }
 
+/**
+ * How full the audio server is, as a pill message - or null while there is room.
+ *
+ * This is the one status in poptart that has to be seen BEFORE it matters. Past a full server
+ * scsynth cannot create anything: notes stop playing, plugins stop opening, and nothing recovers
+ * it but an engine restart. The console says so too, but nobody on stage is reading a console -
+ * so past the warning line it takes the header over, the way a running plugin scan does.
+ *
+ * Silent below the line on purpose. A number that is always on screen is a number nobody reads,
+ * and this one means nothing at all until it is close.
+ */
+const LOAD_PILL_AT = 0.6;
+function loadPillText(load) {
+  if (!load?.limit) return null;
+  const used = load.nodes / load.limit;
+  if (used < LOAD_PILL_AT) return null;
+  return `server ${Math.round(used * 100)}% full`;
+}
+
+/**
+ * The console half of the gauge: a line when it crosses the line, and a line when it comes back.
+ * The pill is what you see at a glance; this is what is still there afterwards to read.
+ *
+ * Hysteresis, so a reading resting on the threshold does not say it over and over.
+ */
+let serverLoadHigh = false;
+function applyServerLoad(load) {
+  if (!load?.limit) return;
+  const used = load.nodes / load.limit;
+  if (used >= LOAD_PILL_AT && !serverLoadHigh) {
+    serverLoadHigh = true;
+    logLine(`the audio server is ${Math.round(used * 100)}% full - ${load.nodes} of ${load.limit} nodes, `
+      + `${load.voices} sample voices sounding. Past full it stops being able to create anything and `
+      + 'only an engine restart brings it back, so thin out what is playing while there is time', true);
+  } else if (used < LOAD_PILL_AT * 0.7 && serverLoadHigh) {
+    serverLoadHigh = false;
+    logLine(`the audio server has room again (${Math.round(used * 100)}% full)`);
+  }
+}
+
 async function refreshStatus() {
-  const { loaded, error, scale, groove, scan } = await api('GET', '/api/status');
+  const { loaded, error, scale, groove, scan, load } = await api('GET', '/api/status');
   setPatchScale(scale); // the prebake may have called setscale() before anything was evaluated
   setPatchGroove(groove); // ...and setgroove(), which it may also have called
   applyScanState(scan);
+  applyServerLoad(load);
   // Two words, because this is a status indicator in the header and it has room for two words.
   // A boot failure's error is a diagnosis plus a tail of sclang's output - paragraphs of it - and
   // putting that in here turned the indicator into a wall of text and shoved the header around.
@@ -19461,13 +19502,20 @@ async function refreshStatus() {
   // is most likely to try first won't work yet, and "engine ready" said flatly is what made that
   // confusing. Neutral colour (no ok/error class), because it is neither.
   const scanning = loaded ? scanPillText(scan) : null;
-  engineStatus.textContent = scanning ?? (loaded ? 'engine ready' : 'engine down');
-  engineStatus.className = `status ${scanning ? '' : loaded ? 'ok' : 'error'}`;
-  engineStatus.title = scanning
-    ? 'poptart is probing your plugins one by one — everything except plugin names works meanwhile'
-    : loaded
-      ? ''
-      : 'engine down — see the console';
+  // A filling server outranks the scan: one of them is a wait, the other is the set ending.
+  const full = loaded ? loadPillText(load) : null;
+  engineStatus.textContent = full ?? scanning ?? (loaded ? 'engine ready' : 'engine down');
+  engineStatus.className = `status ${full ? 'error' : scanning ? '' : loaded ? 'ok' : 'error'}`;
+  engineStatus.title = full
+    ? `${load.nodes} of ${load.limit} audio nodes in use, ${load.voices} sample voices sounding, `
+      + `peak CPU ${Math.round(load.cpu)}%. Past full, the engine cannot create anything - notes `
+      + 'stop playing and plugins stop opening - and only an engine restart brings it back. '
+      + 'Stop a track, or thin out what is playing.'
+    : scanning
+      ? 'poptart is probing your plugins one by one — everything except plugin names works meanwhile'
+      : loaded
+        ? ''
+        : 'engine down — see the console';
   if (!loaded && error && error !== lastEngineError) logLine(`engine down: ${error}`, true);
   lastEngineError = loaded ? null : error;
   return loaded;
@@ -20331,11 +20379,18 @@ const auditionNorm = (t) => String(t).toLowerCase().replace(/[^a-z0-9]+/g, '');
  */
 async function syncPreviewRouting() {
   try {
-    // `cuePreviewDevice`, not the cue device itself: a cue on a channel PAIR of the output
-    // device is not something a browser audition can be pointed at (setSinkId names a device,
-    // and that device's first pair is the master out), so there it answers null and auditions
-    // stay where they were.
-    ({ cuePreviewDevice: previewCue } = await api('GET', '/api/audioDevices'));
+    // `?cue=1`, and `cuePreviewDevice` out of it. Two things ride on that query:
+    //
+    // A cue on a channel PAIR is not something a browser audition can be pointed at (setSinkId
+    // names a device, and a device's first pair is the master out), so it answers null there and
+    // auditions stay where they were.
+    //
+    // And it answers WITHOUT listing the audio devices, which is the expensive half of that
+    // endpoint - ~95ms of synchronous work per helper spawn, twice. This runs whenever a window
+    // that auditions opens and on every DJ-mode transition, and the note scheduler lives in the
+    // same process behind a 150ms lookahead: asking the full question here stalled every playing
+    // deck for long enough to hear it.
+    ({ cuePreviewDevice: previewCue } = await api('GET', '/api/audioDevices?cue=1'));
   } catch {
     previewCue = null; // no answer is no cue: the guard below then refuses, which is the safe way
   }
@@ -27770,6 +27825,12 @@ playBtn.addEventListener('click', togglePlay);
 updateBtn.addEventListener('click', () => evaluate(false, { byHand: true }));
 scanBtn.addEventListener('click', doScan);
 
+// The status is otherwise only asked for when something happens (a device change, a scan). The
+// server's fullness is the one thing on it that changes while you are PLAYING and nothing else is
+// happening, and it is no use to anybody arriving late - so it is asked for on its own slow timer.
+// Cheap: this endpoint reads memory and nothing else (no device listing - see ?cue=1 there).
+setInterval(() => refreshStatus().catch(() => {}), 5000);
+
 refreshStatus().then((loaded) => {
   if (loaded) loadKnownPlugins();
 });
@@ -28937,6 +28998,17 @@ function makeSongPane(deck) {
       sync: !!sb.sync,
       keylock: !!sb.keylock,
       nudge: sb.nudge ?? 0,
+      // The rate WITHOUT the momentary gestures - what the strip is SCALED by (see
+      // scaleRateNow). Sent on every frame and read on every draw, and missing from this list
+      // until 2026-10-05: the scale fell back to the live rate, so holding a platter button
+      // zoomed the whole view by 4% and let it back on release. Exactly the failure the
+      // syncMult note below describes, which is why both are called out.
+      baseRate: sb.baseRate ?? sb.rate,
+      // ...and two more the same check turned up, missing the same way. `quantize` is what the Q
+      // button toggles AGAINST, so without it every press posted "off" whatever the deck was on;
+      // `loop` is the held window the strip shades, so the performance loop was never drawn.
+      quantize: sb.quantize !== false,
+      loop: sb.loop ?? null,
       bpmDetected: sb.bpmDetected ?? null,
       keyDetected: sb.keyDetected ?? null,
       gridDetected: sb.gridDetected ?? null,

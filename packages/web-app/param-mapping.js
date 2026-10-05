@@ -124,6 +124,14 @@ class MappedEngine {
   _spec(trackId, slot, name) {
     const params = this.mappings.get(this.chains.get(trackId)?.[slot])?.params;
     if (!params) return undefined;
+    // A parameter addressed by INDEX - `.param(12, 0.5)`, which the engine resolves directly - has
+    // no name to look up here, and the mappings are keyed by name. Returning undefined is the same
+    // answer as a name nothing maps: send the value through untouched.
+    //
+    // Guarded rather than assumed, because the cost of assuming was the whole evaluation: this
+    // runs only for a plugin that HAS a mapping file, so `.param(12, ...)` worked everywhere until
+    // it was pointed at one of those and then threw a 500 on every evaluate (2026-10-05, live).
+    if (typeof name !== 'string') return undefined;
     // Accept a "Name#index" disambiguator (see the resolver in poptart.scd): a mapping may key
     // the exact "Name#index" if two same-named params need different units, otherwise the units
     // for the base "Name" apply to whichever one is addressed.

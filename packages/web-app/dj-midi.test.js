@@ -35,7 +35,7 @@ const CONSTS = ['MIX_MIDI_KNOBS', 'MIX_MIDI_HOLD', 'MIX_MIDI_PRESS', 'MIX_MIDI_D
 const DEPS = ['mixState', 'songDecks', 'songMasterDeck', 'mixMidiDown', 'applyMixTargets',
   'songScrub', 'songNudge', 'songCue', 'songTogglePlay', 'songSetMeta', 'songMultNext',
   'mixActionNotify', 'songBend', 'deckTempoApply', 'mixFxSet', 'mixFxStep',
-  'setDeckLoops', 'deckLoopsOn', 'deckLoopApply', 'deckLoopLive'];
+  'setDeckLoops', 'deckLoopsOn', 'deckLoopApply', 'deckLoopLive', 'deckRunning'];
 
 function grabFn(name) {
   const at = SRC.indexOf(`function ${name}(`);
@@ -64,7 +64,7 @@ const makeMidi = new Function(...DEPS, `
  * A desk with `songs` loaded (deck letters), and a log of everything the dispatch reached for.
  * `master` is the deck holding the grid, `override` the tempo migration's held bpm.
  */
-function rig({ songs = ['a', 'b'], master = null, override = null, playing = true, phones = {}, fx = {}, loops = {} } = {}) {
+function rig({ songs = ['a', 'b'], master = null, override = null, playing = true, phones = {}, fx = {}, loops = {}, running = [] } = {}) {
   const log = [];
   const mixState = {
     tempoOverride: override,
@@ -102,6 +102,7 @@ function rig({ songs = ['a', 'b'], master = null, override = null, playing = tru
     deckLoopsOn,
     (deck, patch) => log.push(['loop', deck, patch]),
     (deck) => looping[deck],
+    (deck) => running.includes(deck), // which decks have patterns playing to the clock
   );
   api.log = log;
   api.state = mixState;
@@ -799,4 +800,53 @@ test('a switch mid-sweep drives nothing', () => {
   const r = sweepRig();
   r.handleMixMidi(DEV, 5, 16, 1, 'note');
   assert.deepEqual(r.driven, [], 'a position learned while sweeping must not also act');
+});
+
+// --- who owns the tempo ------------------------------------------------------------------------
+//
+// A grid-master SONG deck has always held the clock against an eval's setbpm, for an obvious
+// reason: the room is dancing to that record's bars. A livecoded deck was not protected, and its
+// patterns are generated FROM the clock - so starting a second track on deck A snapped the one
+// already playing to the newcomer's tempo (reported 2026-10-05, confirmed on a live server with
+// deck B playing at 137, songMasterDeck null and tempoOverride null - nothing holding it).
+
+test('a livecode deck playing holds the clock against the OTHER deck\'s setbpm', () => {
+  const m = rig({ songs: [], running: ['b'] });
+  assert.equal(m.clockHeldByDesk('a'), true, 'deck a could re-tempo the music deck b is playing');
+});
+
+test('...but a deck already playing may still change the tempo, which is livecoding', () => {
+  // Re-evaluating the deck you are playing, with a different setbpm, is how a tempo change is
+  // made. Blocking that would be a worse bug than the one above.
+  const m = rig({ songs: [], running: ['a'] });
+  assert.equal(m.clockHeldByDesk('a'), false);
+});
+
+test('one deck playing alone outside a mix is unaffected', () => {
+  assert.equal(rig({ songs: [], running: [] }).clockHeldByDesk('a'), false, 'nothing is playing');
+  // ...and the single-deck case, which is every evaluation outside DJ mode.
+  assert.equal(rig({ songs: [], running: ['a'] }).clockHeldByDesk('a'), false);
+});
+
+test('a caller with no deck in hand gets the answer it always got', () => {
+  // Link's adopt asks whether the DESK holds the clock, and knows nothing about decks. Teaching
+  // it about livecoded decks would change when a session's tempo is adopted, which is not this
+  // bug and not this change.
+  assert.equal(rig({ songs: [], running: ['a', 'b'] }).clockHeldByDesk(), false);
+  assert.equal(rig({ songs: [], running: ['a'], override: 132 }).clockHeldByDesk(), true);
+});
+
+test('the migration and the grid master still outrank everything', () => {
+  assert.equal(rig({ songs: [], running: ['a'], override: 132 }).clockHeldByDesk('a'), true,
+    'a tempo migration holds the clock even against the deck that is playing');
+  assert.equal(rig({ master: 'b', running: ['a'] }).clockHeldByDesk('a'), true);
+});
+
+test('only deck A can drive the clock at all, and only when nothing holds it', () => {
+  // The second half of the guard, in the evaluator rather than here: deck B's setbpm has never
+  // driven the shared clock, so the newcomer rule is what protects the other direction.
+  const src = fs.readFileSync(path.join(__dirname, 'server.js'), 'utf8');
+  assert.match(src, /deck === 'a' && !clockHeldByDesk\(deck\) \? declareTempo\(value, v\) : TEMPO_BLOCK/);
+  assert.match(src, /if \(deck === 'a' && !clockHeldByDesk\(deck\)\) declareTempo\(DEFAULT_CPS/,
+    'a buffer with no setbpm returns the clock to 120 - that has to be held off too');
 });

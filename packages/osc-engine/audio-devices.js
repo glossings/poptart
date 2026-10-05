@@ -82,9 +82,38 @@ function listDevicesViaSystemProfiler() {
 }
 
 // --- public API -------------------------------------------------------------------------------
+//
+// Every listing here SPAWNS the helper and waits for it, which costs about 95ms. That is fine for
+// what these are for (a settings tab, an engine boot) and not fine as a side effect: the note
+// scheduler shares this process and looks 150ms ahead, so one stray listing is a gap in the music
+// on every playing deck. Two were enough to make opening the library browser mid-set audible.
+//
+// So the answers are memoized for a moment. The window is short on purpose - it is not a cache of
+// what is plugged in, it is a way for the several questions ONE request asks (the device list, the
+// aggregate's layout, which of the selected inputs are present) to cost one spawn between them.
+// Anything that CHANGES the device configuration clears it, and `{ fresh: true }` forces a read.
+const DEVICE_MEMO_MS = 750;
+const deviceMemo = new Map(); // key -> { at, value }
+
+function memoized(key, { fresh = false } = {}, read) {
+  const hit = deviceMemo.get(key);
+  if (!fresh && hit && Date.now() - hit.at <= DEVICE_MEMO_MS) return hit.value;
+  const value = read();
+  deviceMemo.set(key, { at: Date.now(), value });
+  return value;
+}
+
+/** Forget what was read - after anything that changes which devices exist, or their channels. */
+function forgetDevices() {
+  deviceMemo.clear();
+}
 
 /** Every audio device, with input/output channel counts and (helper only) UIDs. */
-function listDevices() {
+function listDevices(opts) {
+  return memoized('list', opts, listDevicesUncached);
+}
+
+function listDevicesUncached() {
   if (!helperAvailable()) {
     if (!helperWarned && process.platform === 'darwin') {
       helperWarned = true;
@@ -104,13 +133,13 @@ function listDevices() {
 }
 
 /** Output-capable devices only - what the settings tab offers as the device to play through. */
-function listOutputDevices() {
-  return listDevices().filter((d) => d.outChannels > 0);
+function listOutputDevices(opts) {
+  return listDevices(opts).filter((d) => d.outChannels > 0);
 }
 
 /** Input-capable devices only - what the settings tab offers as aggregate members. */
-function listInputDevices() {
-  return listDevices().filter((d) => d.inChannels > 0);
+function listInputDevices(opts) {
+  return listDevices(opts).filter((d) => d.inChannels > 0);
 }
 
 /**
@@ -122,15 +151,17 @@ function listInputDevices() {
  * Returns null when there's no helper (the caller falls back to a one-entry layout it builds from
  * the device's own channel count).
  */
-function deviceLayout(uid) {
+function deviceLayout(uid, opts) {
   if (!helperAvailable() || !uid) return null;
-  try {
-    return runHelper(['layout', '--uid', uid]);
-  } catch (err) {
-    // eslint-disable-next-line no-console
-    console.warn(`[poptart] could not read the layout of ${uid}: ${helperError(err).message}`);
-    return null;
-  }
+  return memoized(`layout:${uid}`, opts, () => {
+    try {
+      return runHelper(['layout', '--uid', uid]);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn(`[poptart] could not read the layout of ${uid}: ${helperError(err).message}`);
+      return null;
+    }
+  });
 }
 
 /**
@@ -146,6 +177,7 @@ function rebuildAggregate(uids, mainUid = null) {
   if (!Array.isArray(uids) || uids.length === 0) throw new Error('an aggregate needs at least one device');
   const args = ['create', '--name', AGGREGATE_NAME, '--uid', AGGREGATE_UID, '--main', mainUid ?? uids[0]];
   for (const uid of uids) args.push('--sub', uid);
+  forgetDevices(); // the device list and the layouts are about to be wrong
   try {
     return runHelper(args, { timeout: 20000 });
   } catch (err) {
@@ -156,6 +188,7 @@ function rebuildAggregate(uids, mainUid = null) {
 /** Removes poptart's aggregate device. No-op if it doesn't exist. */
 function destroyAggregate() {
   if (!helperAvailable()) return { destroyed: false };
+  forgetDevices();
   try {
     return runHelper(['destroy', '--uid', AGGREGATE_UID]);
   } catch (err) {
@@ -164,14 +197,15 @@ function destroyAggregate() {
 }
 
 /** poptart's own aggregate, if it currently exists. */
-function findAggregate() {
-  return listDevices().find((d) => d.uid === AGGREGATE_UID) ?? null;
+function findAggregate(opts) {
+  return listDevices(opts).find((d) => d.uid === AGGREGATE_UID) ?? null;
 }
 
 module.exports = {
   AGGREGATE_UID,
   AGGREGATE_NAME,
   helperAvailable,
+  forgetDevices,
   listDevices,
   listOutputDevices,
   listInputDevices,

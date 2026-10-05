@@ -259,6 +259,12 @@ var bundleNow;
 var modFreeDelay = 0.3, freeModulatorLater;
 // The ramp behind every polled control - see poptartSetParam.
 var rampTo, dropRamp, dropSlotRamps;
+// ...and what happens when the server says that ramp's node is not there - see nodeGone.
+var nodeGone, nodeGoneSaid, nodeFailId, nodeMissing, nodeOwners, nodeOwns, deadNodes;
+var outOfRoom, outOfRoomSaid, outOfRoomPhrases;
+// The sampler's voice ceiling and the server's pressure gauge - see their definitions.
+var maxVoices = 1024, liveVoices, voiceBorn, voiceDone, voiceCapSaidAt = 0;
+var statusWatch, statusNodesHigh = false;
 // Set outright, never ramped. The first three are selectors, not levels. The grain controls are
 // levels, but their reader is a grain, which takes one value as it starts and keeps it: a ramp has
 // nothing to smooth there, and it would turn a polled rand() - a fresh draw per poll - into a
@@ -983,7 +989,13 @@ slotKey = { |key, slot| (key ++ "_" ++ slot).asSymbol };
 // has no plugin, the failed load has already said what is wrong, once, and the notes are
 // dropped quietly. Asked at send time, not at arrival: a note queued behind a load (see
 // waitForLoad) is judged by how the load turned out.
-slotLive = { |track, slot| track[\loaded][slot].notNil };
+// ...and not on a synth the server has told us it does not have (see deadNodes). A plugin lives
+// INSIDE the track synth, so a write to it is a /u_cmd at that synth's node - and when the node is
+// gone, every event still in flight for it fails on arrival, one printed line each. The first
+// failure is the only one worth having: from there this drops the rest instead of sending them.
+slotLive = { |track, slot|
+    track[\loaded][slot].notNil and: { deadNodes.includes(track[\synth].nodeID).not };
+};
 
 // A note due at or after the start of a program load WAITS for that load instead of being bundled
 // through it. Loading suspends the plugin and resets its voices, so a note timestamped inside that
@@ -1242,12 +1254,23 @@ server.options.numOutputBusChannels = max(2, outChannels);
 // s("...")). The table itself is only a few hundred bytes per slot (the audio lives in separate
 // allocations made at read time), so size it for a whole library rather than one pack.
 server.options.numBuffers = 16384;
-// The pool behind every RTAlloc on the server - grain windows, per-voice envelopes, delay
-// lines. The scsynth default is 8MB, and a session's worth of loaded songs walks into it:
-// sampler voices degrade first (their window allocations fail quietly, which plays as
-// downsampled hash), then /s_new refuses outright and the server goes silent. The pool is
-// lookaside - unallocated headroom costs nothing - so size it for a long session.
-server.options.memSize = 262144; // KB: 256MB
+// Real-time memory, in kilobytes. scsynth's default is 8192 - EIGHT MEGABYTES - which is sized
+// for a handful of SinOscs, and poptart is not that: every VSTPlugin instance takes a share, every
+// per-event sampler voice allocates an OffsetOut buffer (see the voice defs), and the DJ stage adds
+// filters and a three-band split per deck on top. Run out and scsynth stops being able to create
+// ANYTHING: `/s_new out of real time memory`, notes silently stop playing, and - worse - the node
+// ids those failed creations consumed are handed back to poptart, which then writes to nodes that
+// never existed for the rest of the session (one such node took 8576 failed writes before anyone
+// noticed; see the /fail listener). Found on a real set 2026-10-05, with `OffsetOut_Ctor: alloc
+// failed` beside it. 256MB is not generous for a plugin host, it is the floor at which a long set
+// does not fall over; it is virtual until touched, so an idle engine does not pay for it.
+server.options.memSize = 262144;
+// ...and the node table, whose default 1024 is the same kind of number. A track is several nodes
+// before it plays a sound (its group, its voice group, the track synth, a ramp per polled control,
+// a synth per modulator) and every sampler event is one more while it sounds. Precautionary rather
+// than observed: the symptom would be `/s_new too many nodes`, which has not been seen - but it is
+// the same silent class as the memory above, and the table costs a few hundred KB.
+server.options.maxNodes = 8192;
 // Private SuperCollider only. This becomes scsynth's -U, which REPLACES the default plugin
 // search rather than adding to it, so the list has to carry the SC build's own plugins folder
 // as well as poptart's Extensions - without the former there would be no SinOsc, let alone
@@ -1261,10 +1284,14 @@ if (ugenPlugins.notNil and: { ugenPlugins.isEmpty.not }) {
 // boot config into the log, so a failure report carries it and the README's IDE-replay
 // procedure can copy the values straight out.
 // audible: what .o(n) wraps at, which is the whole device unless it's the aggregate (see playChannels).
-"poptart: booting scsynth (device: %, sr: %, block: %, out: %ch, audible: %ch, in: %ch)".format(
+// The allocations are in here too, and deliberately: an engine that has quietly come up on the
+// stock 8MB of real-time memory is one that will stop making sound partway through a set (see
+// memSize above), and this line is the only place that can be checked before it matters.
+"poptart: booting scsynth (device: %, sr: %, block: %, out: %ch, audible: %ch, in: %ch, rt mem: %MB, max nodes: %)".format(
     if (outDevice.notNil and: { outDevice.isEmpty.not }) { outDevice } { "system default" },
     sampleRate, blockSize, server.options.numOutputBusChannels,
-    max(2, min(playChannels, server.options.numOutputBusChannels)), inChannels
+    max(2, min(playChannels, server.options.numOutputBusChannels)), inChannels,
+    (server.options.memSize / 1024).round, server.options.maxNodes
 ).postln;
 
 server.waitForBoot {
@@ -1872,6 +1899,39 @@ server.waitForBoot {
     // Depth 0 - every track starts here; deeper groups are made before recGroup as routes need them.
     levelGroups = [Group.new(server, \addToHead)];
     server.sync;
+    // --- the server's pressure gauge ----------------------------------------------------------
+    //
+    // scsynth will say what it is holding if asked (/status), and nothing ever asked. So the only
+    // sign of a server filling up was it failing - at which point it is already too late, because
+    // nothing hands real-time memory back (see outOfRoom). Asked every few seconds now, and said
+    // when it crosses the line, so there is warning while there is still time to stop a track.
+    //
+    // The node table is the readable proxy: real-time memory is not reported at all, but the
+    // things that consume it are nodes, and the two ceilings sit at comparable heights. Hysteresis
+    // so a figure resting on the threshold does not repeat, and the line carries the voice count
+    // and the CPU because they are the two numbers that say WHY.
+    OSCdef(\poptartStatusReply, { |msg|
+        var numSynths = msg[3].asInteger, numGroups = msg[4].asInteger;
+        var peakCPU = msg[7].asFloat;
+        var nodes = numSynths + numGroups;
+        var limit = server.options.maxNodes;
+        // ...and up to Node on every reading, whether it is high or not: the console is no use to
+        // somebody on stage, and the only place this can be ACTED on is the app's own status.
+        nodeAddr.sendMsg("/poptart/serverLoad", nodes, limit, liveVoices.size, peakCPU);
+        if (nodes > (limit * 0.6)) {
+            if (statusNodesHigh.not) {
+                statusNodesHigh = true;
+                ("poptart: the audio server is getting full - " ++ nodes ++ " of " ++ limit
+                    ++ " nodes in use (" ++ liveVoices.size ++ " sample voices sounding, peak CPU "
+                    ++ peakCPU.round(0.1) ++ "%). Past this it stops being able to create anything, "
+                    ++ "and it cannot recover without an engine restart - stop a track if you can").warn;
+            };
+        } {
+            if (nodes < (limit * 0.4)) { statusNodesHigh = false }; // room again: re-arm the warning
+        };
+    }, '/status.reply', server.addr);
+    statusWatch = Routine({ loop { server.sendMsg("/status"); 3.wait } }).play(SystemClock);
+
     "poptart: server booted, ready".postln;
     // scsynth's pid rides along with the ready: node spawned US, not scsynth, so this is its only
     // handle on the process that actually holds the audio device and scsynth's UDP port. It uses
@@ -1950,6 +2010,11 @@ buildTrack = { |key, birth|
             // SendReply names its sender by node id and nothing else, so the bend messages
             // coming back from this synth need a way home (see the bendOut OSCFunc).
             bendTracks[synth.nodeID] = key;
+            // Who these two belong to, for the failure reports (see nodeOwns). The GROUP matters
+            // most: a synth created into a freed group fails naming the GROUP, and by then this
+            // track may be gone - which is exactly when you want to know whose it was.
+            nodeOwns.(group.nodeID, key ++ "'s group");
+            nodeOwns.(synth.nodeID, key ++ "'s track synth, which its plugins live in");
             tracks[key] = (
                 def: def,
                 group: group,
@@ -2631,6 +2696,7 @@ rampTo = { |track, rampKey, slot, paramName, index, value|
     if (r.isNil) {
         var bus = Bus.control(server, 1);
         var syn = Synth(\poptart_ramp, [\out, bus, \target, value], target: track[\group], addAction: \addToHead);
+        nodeOwns.(syn.nodeID, "a polled control (" ++ rampKey ++ ")");
         if (slot == -1) { track[\synth].map(paramName.asSymbol, bus) } { track[\controllers][slot].map(index, bus) };
         track[\ramps][rampKey] = (synth: syn, bus: bus, index: index, slot: slot);
     } {
@@ -2655,6 +2721,189 @@ dropRamp = { |key, track, rampKey|
 dropSlotRamps = { |key, track, slot|
     track[\ramps].keys.copy.do { |k| if (track[\ramps][k][\slot] == slot) { dropRamp.(key, track, k) } };
 };
+
+// --- a node the server does not have ----------------------------------------------------------
+//
+// scsynth ANSWERS a command it could not carry out, with /fail - the same message it prints as
+// "FAILURE IN SERVER". Nothing listened, and for most commands that is fine: a note aimed at a
+// track that has just gone is a one-off, and the message is the diagnosis.
+//
+// One of them repeats forever. A polled control re-sends its value every poll interval and
+// `rampTo` moves the SAME ramp synth each time (creating one only when it has none), so a ramp
+// node that is not on the server turns into ~33 failed writes a second, for as long as the track
+// lives, with the parameter frozen wherever the bus was left - and in silence. One session had
+// 8576 of them on one node across 4.4 minutes, ending with the failed /n_free at teardown that
+// is the only sign anything was ever wrong (found 2026-10-05, from the desktop log).
+//
+// So the server is taken at its word. The entry that pointed at that node is dropped, which is
+// all the repair needed: the next poll finds the key empty and builds a fresh ramp and bus, and
+// re-maps the parameter onto it (see rampTo). One control bus is orphaned per incident - the
+// parameter is still mapped to it until the new map lands, so freeing it here could hand its
+// index to somebody else mid-write, and a leaked bus is the cheaper of the two.
+nodeGoneSaid = IdentitySet.new;
+
+// What poptart made a node FOR, by node id - so a failure can say which track it belonged to even
+// after that track is gone, which is the case that matters: the interesting failures happen around
+// a teardown, and by the time one is reported the entry that would explain it has been removed.
+// Without this a failure is a bare number that appears nowhere else in the log (`Node 7961` did
+// not, across 747KB), and there is nothing to go on at all.
+// --- the sampler's voice ceiling --------------------------------------------------------------
+//
+// Every sample event is a NEW synth (see poptartPlaySample), and nothing bounded how many could be
+// alive at once. That makes it the one thing in poptart that allocates without limit, and what it
+// spends is the server's real-time memory - which, run out, stops scsynth creating ANYTHING at all
+// for the rest of the session (see memSize, and the out-of-room report below). A dense enough
+// moment could therefore take the engine down and keep it down.
+//
+// So there is a ceiling, and past it the OLDEST voice is released early to make room - which is
+// what a hardware sampler does when you run it out of polyphony. The failure becomes "a moment
+// that was too dense lost its tail" instead of "the drums stopped for the rest of the night".
+//
+// Set far above any musical number on purpose. At a few KB of real-time memory apiece this is
+// single-digit megabytes of the 256 the server is given, so it is a guard on the server and never
+// the thing that shapes a pattern: a set that hits it is one that was going to fall over.
+liveVoices = List.new;
+voiceBorn = { |synth|
+    if (liveVoices.size >= maxVoices) {
+        liveVoices.removeAt(0) !? { |oldest| oldest.set(\gate, 0) };
+        // Worth saying - it means a pattern is denser than the engine can hold - but not once per
+        // voice: at the ceiling this happens as often as notes do.
+        if (Main.elapsedTime - voiceCapSaidAt > 10) {
+            voiceCapSaidAt = Main.elapsedTime;
+            ("poptart: " ++ maxVoices ++ " sample voices are already sounding - releasing the oldest "
+                ++ "to make room. The pattern is denser than the engine can hold; this protects the "
+                ++ "server, which cannot recover if it runs out of room").warn;
+        };
+    };
+    liveVoices.add(synth);
+};
+// A voice that ended on its own. Its node outlives this by its release tail, so the count runs a
+// little low - which is the safe direction for a ceiling.
+voiceDone = { |synth| liveVoices.remove(synth) };
+
+nodeOwners = IdentityDictionary.new; // nodeID -> what it was made for
+nodeOwns = { |nodeID, what|
+    if (nodeOwners.size > 4000) { nodeOwners = IdentityDictionary.new }; // bounded over a long set
+    nodeOwners[nodeID] = what;
+};
+// Node ids the server has said it does not have. Read by slotLive, so the SECOND doomed write to
+// a dead plugin is never sent.
+deadNodes = IdentitySet.new;
+
+/**
+ * A command that failed on a node, for the commands that do NOT repeat - a plugin write (/u_cmd,
+ * which is a UGen command and in poptart always VSTPlugin) and a synth created into a group that
+ * had already gone (/s_new). Neither can be repaired: the event it carried is already late, and
+ * the group it wanted no longer exists.
+ *
+ * What they CAN do is say whose they were, once. A bounded burst of these is expected and
+ * documented - the scheduler sends up to a lookahead ahead in timestamped bundles, so a track or
+ * a slot going away leaves everything already queued for it to arrive and fail - but expected or
+ * not, N bare node numbers is noise, and noise is what let 8576 real failures pass unnoticed.
+ */
+/**
+ * A command that failed because the SERVER RAN OUT OF SOMETHING, rather than because one node was
+ * missing. This is the only failure in this family that stops poptart making sound at all, and it
+ * is the one that was hardest to see: the reason carries no node number, so everything above this
+ * ignored it.
+ *
+ * Out of real-time memory, every /s_new fails - so no note plays, no plugin opens, no voice
+ * sounds - and it does not recover, because nothing gives the memory back. Worse, each failed
+ * creation still CONSUMED a node id, and poptart goes on writing to those ids for the life of
+ * whatever holds them. That is where 8576 failed writes to one node came from.
+ *
+ * So it is said once per reason and said plainly, because the only answer is a restart.
+ */
+outOfRoomPhrases = ["out of real time memory", "too many nodes", "exceeded number of interconnect buffers",
+    "alloc failed", "too many buffers"];
+outOfRoomSaid = IdentitySet.new;
+outOfRoom = { |cmd, reason|
+    var key = reason.asSymbol;
+    if (outOfRoomSaid.includes(key).not) {
+        outOfRoomSaid.add(key);
+        ("poptart: THE AUDIO SERVER IS OUT OF ROOM - " ++ reason ++ " (" ++ cmd ++ " failed). "
+            ++ "Nothing new can be created from here: notes stop playing and plugins stop opening, "
+            ++ "and it does not recover on its own. Restart the engine. If this happens again, the "
+            ++ "server's allocation needs raising (see server.options.memSize / maxNodes).").warn;
+    };
+};
+
+nodeMissing = { |cmd, nodeID|
+    if (nodeID.notNil and: { nodeGoneSaid.includes(nodeID).not }) {
+        nodeGoneSaid.add(nodeID);
+        deadNodes.add(nodeID);
+        if (deadNodes.size > 4000) { deadNodes = IdentitySet.new };
+        ("poptart: the server has no node " ++ nodeID ++ " ("
+            ++ (nodeOwners[nodeID] ? "nothing poptart has a record of") ++ ") - "
+            ++ cmd ++ " could not be delivered; anything else already in flight for it is dropped").warn;
+    };
+};
+
+nodeGone = { |nodeID|
+    var fixed = false;
+    if (nodeID.notNil) {
+        tracks.keysValuesDo { |key, track|
+            if (track.isKindOf(Event)) {
+                track[\ramps].keys.copy.do { |k|
+                    var r = track[\ramps][k];
+                    if (r.notNil and: { r[\synth].notNil } and: { r[\synth].nodeID == nodeID }) {
+                        track[\ramps].removeAt(k);
+                        fixed = true;
+                        ("poptart: " ++ key ++ "'s polled control " ++ k ++ " was writing to node "
+                            ++ nodeID ++ ", which the server does not have - rebuilding it").warn;
+                    };
+                };
+            };
+        };
+        // Anything else: said ONCE per node, because the point is that this stopped being
+        // invisible, and a storm of identical lines is its own kind of invisible.
+        if (fixed.not and: { nodeGoneSaid.includes(nodeID).not }) {
+            nodeGoneSaid.add(nodeID);
+            ("poptart: the server has no node " ++ nodeID ++ " - something is writing to a node "
+                ++ "that is gone (this is said once per node)").warn;
+        };
+    };
+};
+
+// The node id out of a `/fail <command> <reason> [...]` reply, or nil. It is in the reason text
+// ("Node 7961 not found") on every scsynth that reports one, and may also arrive as an argument
+// of its own - both are read, so this does not depend on which.
+nodeFailId = { |msg|
+    var id = nil;
+    msg.copyRange(2, msg.size - 1).do { |a|
+        if (id.isNil) {
+            if (a.isNumber) { id = a.asInteger } {
+                a.asString.findRegexp("[0-9]+").do { |found|
+                    if (id.isNil) { id = found[1].asInteger };
+                };
+            };
+        };
+    };
+    id;
+};
+
+// The /n_set family REPEATS - a polled control's writer is back in 30ms - so those are REPAIRED.
+// A plugin write (/u_cmd) and a synth creation (/s_new) happen once and cannot be: the event is
+// already late and the group it wanted is already gone. Those are ATTRIBUTED instead, and the node
+// is remembered so nothing else still in flight for it is sent. A failed /n_free needs neither -
+// it is the teardown saying the node had gone already, which is the whole message.
+OSCdef(\poptartServerFail, { |msg|
+    var cmd = msg[1].asString;
+    var reason = msg[2].asString;
+    // Running out of room is checked FIRST and on every command: it is the one failure that is
+    // about the server rather than about a node, it carries no node number to go looking for, and
+    // it makes every other failure in the log a consequence rather than a cause.
+    var room = outOfRoomPhrases.detect { |phrase| reason.containsi(phrase) };
+    if (room.notNil) {
+        outOfRoom.(cmd, reason);
+    } {
+        if (#["/n_set", "/n_setn", "/n_map", "/n_mapn"].includes(cmd)) {
+            nodeGone.(nodeFailId.(msg));
+        } {
+            if (#["/u_cmd", "/s_new"].includes(cmd)) { nodeMissing.(cmd, nodeFailId.(msg)) };
+        };
+    };
+}, '/fail', server.addr);
 
 OSCdef(\poptartSetParam, { |msg|
     var key = msg[1].asSymbol, slot = msg[2].asInteger;
@@ -3118,6 +3367,15 @@ OSCdef(\poptartClearParamEnv, { |msg|
 // bus to its replacement, so waiting there would leave two synths summing into it - those free the
 // old node immediately and wear the occasional stale-node warning instead.
 freeModulatorLater = { |key, group, synth, bus|
+    // Expected, and already explained above: notes in flight were gated from a timestamped
+    // bundle and will write to this node after it goes. nodeGone would otherwise report each one
+    // as a node nothing holds, which is true and is not news - so it is accounted for here, where
+    // the reason is known, and the report is kept for the failures nobody expected.
+    // Bounded: a long set drops a lot of modulators, and this is bookkeeping rather than state.
+    // Clearing it can cost one extra warning line for a node already accounted for, which is a
+    // better trade than a set that grows all night.
+    if (nodeGoneSaid.size > 2000) { nodeGoneSaid.clear };
+    synth !? { |sy| nodeGoneSaid.add(sy.nodeID) };
     SystemClock.sched(modFreeDelay, {
         // A track destroyed (or rebuilt) inside the window already took the node down with its
         // group, so there is nothing left to free there - but the bus is a client-side allocation
@@ -3879,6 +4137,7 @@ OSCdef(\poptartPlaySample, { |msg|
                 if (posLive == 1) { track[\synth].set(\grainpos, begin) };
             };
             synth = Synth(defName, args, target: track[\voices] ? track[\group], addAction: \addToHead);
+            voiceBorn.(synth); // ...and the oldest one goes if the engine is already full
             track[\envs].do { |e| e[\synth].set(\gate, 1) };
             track[\lfos].do { |e|
                 if ((e[\mode] == \retrigger) or: { e[\mode] == \envelope }) { e[\synth].set(\t_trig, 1) };
@@ -3888,6 +4147,7 @@ OSCdef(\poptartPlaySample, { |msg|
             bundleNow.(stopLatency, { synth.set(\gate, 0) });
         };
         SystemClock.sched(if (gated) { stopLatency } { latency + dur }, {
+            voiceDone.(synth);
             track[\held] = max(0, track[\held] - 1);
             if (track[\held] == 0) { track[\envs].do { |e| e[\synth].set(\gate, 0) } };
             nil

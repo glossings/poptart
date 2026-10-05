@@ -69,3 +69,62 @@ test('the managed aggregate has a fixed UID, so rebuilding replaces rather than 
   assert.equal(typeof devices.AGGREGATE_UID, 'string');
   assert.ok(devices.AGGREGATE_UID.length > 0);
 });
+
+// --- the memo -----------------------------------------------------------------------------------
+//
+// Listing devices spawns the helper and waits for it - about 95ms. That is fine for a settings tab
+// and not fine as a side effect: the note scheduler shares this process behind a 150ms lookahead,
+// so a stray listing is a gap in the music on every playing deck. Two of them in one request made
+// opening the library browser mid-set audible, which is what this memo exists to stop.
+//
+// It is NOT a cache of what is plugged in. The window is short, so that the several questions one
+// request asks cost one spawn between them, and anything that changes the configuration clears it.
+
+test('a repeated listing inside the window costs nothing and says the same thing', (t) => {
+  if (!devices.helperAvailable()) return t.skip('needs the helper to have something to memoize');
+  devices.forgetDevices();
+  const cold = process.hrtime.bigint();
+  const first = devices.listDevices();
+  const coldMs = Number(process.hrtime.bigint() - cold) / 1e6;
+  const warm = process.hrtime.bigint();
+  const second = devices.listDevices();
+  const warmMs = Number(process.hrtime.bigint() - warm) / 1e6;
+  assert.deepEqual(second, first, 'the memo must answer exactly what the helper did');
+  // Generous, because this is about orders of magnitude: the point is that the second answer did
+  // not spawn anything. A real spawn cannot come back in a millisecond.
+  assert.ok(warmMs < 5, `the second listing took ${warmMs.toFixed(1)}ms - it spawned the helper again`);
+  assert.ok(coldMs >= warmMs, 'the cold listing should be the expensive one');
+});
+
+test('{ fresh: true } reads past the memo', (t) => {
+  if (!devices.helperAvailable()) return t.skip('needs the helper');
+  devices.listDevices(); // warm it
+  const at = process.hrtime.bigint();
+  devices.listDevices({ fresh: true });
+  const ms = Number(process.hrtime.bigint() - at) / 1e6;
+  assert.ok(ms > 5, `a forced read came back in ${ms.toFixed(1)}ms - it was answered from the memo`);
+});
+
+test('the filtered listings are filters of the memoized one, not extra spawns', (t) => {
+  if (!devices.helperAvailable()) return t.skip('needs the helper');
+  const all = devices.listDevices();
+  const at = process.hrtime.bigint();
+  const outs = devices.listOutputDevices();
+  const ins = devices.listInputDevices();
+  const ms = Number(process.hrtime.bigint() - at) / 1e6;
+  assert.ok(ms < 5, `the filters took ${ms.toFixed(1)}ms - each one listed again`);
+  assert.deepEqual(outs, all.filter((d) => d.outChannels > 0));
+  assert.deepEqual(ins, all.filter((d) => d.inChannels > 0));
+});
+
+test('forgetDevices() is what anything changing the configuration owes the memo', () => {
+  // Asserted on the source: the two functions that mutate the machine's audio setup have to clear
+  // it, or a listing straight after a rebuild describes the device that was just replaced.
+  const src = fs.readFileSync(path.join(__dirname, 'audio-devices.js'), 'utf8');
+  for (const fn of ['rebuildAggregate', 'destroyAggregate']) {
+    const at = src.indexOf(`function ${fn}(`);
+    assert.ok(at > 0, `${fn} not found - this test needs updating`);
+    const body = src.slice(at, src.indexOf('\n}', at));
+    assert.match(body, /forgetDevices\(\)/, `${fn} changes the devices without clearing the memo`);
+  }
+});

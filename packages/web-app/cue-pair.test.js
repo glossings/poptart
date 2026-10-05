@@ -186,3 +186,49 @@ test('playback is capped so an orbit cannot be sent into the cue pair', () => {
   assert.ok(at > 0, 'the playback channel count is no longer capped - an orbit can reach the cue pair');
   assert.match(SRC.slice(at, at + 420), /activeCue && cueOnOut \? activeCue\.offset : Infinity/);
 });
+
+// --- what it costs to ask where an audition goes ------------------------------------------------
+//
+// Listing the audio devices spawns a helper and waits ~95ms for it. The note scheduler shares this
+// process and looks 150ms ahead, so a listing on a path taken DURING a set is a gap in the music
+// on every playing deck - and then a rush as the scheduler catches up.
+//
+// That is not hypothetical. "Where should an audition come out" was answered by the full device
+// endpoint, which lists twice (the devices, then the aggregate's layout), and it is asked every
+// time a window that auditions opens - including the library browser, which is what you open to
+// line up the next track. Opening it stalled the deck that was playing.
+//
+// So the answer comes from settings alone. These are source-shape assertions because the cost is
+// in which functions get called, which is exactly what a unit test cannot see.
+
+const CLIENT = fs.readFileSync(path.join(__dirname, 'public', 'client.js'), 'utf8');
+
+test('the cue routing answer never reaches for the audio devices', () => {
+  const at = SRC.indexOf('function cueRoutingBody(');
+  assert.ok(at > 0, 'cueRoutingBody not found in server.js - this test needs updating');
+  const body = SRC.slice(at, SRC.indexOf('\n}', at));
+  for (const costly of ['audioOutputDevices', 'audioDevices.', 'plainOutputDevice', 'cuePairChoices', 'cueOnOutputDevice']) {
+    assert.ok(!body.includes(costly),
+      `cueRoutingBody calls ${costly} - that spawns the audio helper, mid-set, on every panel that auditions`);
+  }
+  // It is allowed exactly what is already in hand.
+  assert.match(body, /settings\.audioCueDevice/);
+  assert.match(body, /activeCue/);
+});
+
+test('...and the endpoint answers that alone when that is all that was asked for', () => {
+  const at = SRC.indexOf("'GET /api/audioDevices'");
+  const handler = SRC.slice(at, SRC.indexOf('\n  },', at));
+  const cheap = handler.indexOf('if (query?.cue)');
+  const listing = handler.indexOf('audioOutputDevices()');
+  assert.ok(cheap > 0, 'the endpoint no longer has a cue-only answer');
+  assert.ok(listing > cheap, 'the devices are listed before the cue-only answer returns');
+});
+
+test('the preview routing asks the cheap question', () => {
+  const at = CLIENT.indexOf('async function syncPreviewRouting(');
+  assert.ok(at > 0, 'syncPreviewRouting not found in client.js - this test needs updating');
+  const body = CLIENT.slice(at, CLIENT.indexOf('\n}', at));
+  assert.match(body, /'\/api\/audioDevices\?cue=1'/,
+    'the audition routing is back on the full device endpoint - that stalls every playing deck');
+});

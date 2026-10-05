@@ -384,13 +384,29 @@ function envelopeSeconds(cfg) {
   return { attack: secs(cfg.attack), decay: secs(cfg.decay), release: secs(cfg.release ?? DEFAULT_RELEASE_SEC) };
 }
 
-function toOscArgs(values) {
-  return values.map((v) => {
+function toOscArgs(values, address = null) {
+  return values.map((v, i) => {
     if (typeof v === 'string') return { type: 's', value: v };
     if (Number.isInteger(v)) return { type: 'i', value: v };
     if (typeof v === 'number') return { type: 'f', value: v };
-    throw new TypeError(`cannot encode OSC argument: ${v}`);
+    // Named, because the bare version of this ("cannot encode OSC argument: [object Object]") says
+    // nothing at all: not which message, not which argument, not what the thing was. It surfaces
+    // as a 500 on /api/evaluate with nothing playing, and the one clue is the word "Object".
+    throw new TypeError(`cannot encode OSC argument ${i}${address ? ` of ${address}` : ''}: `
+      + `${typeof v} ${describeOscArg(v)}`);
   });
+}
+
+/** As much of a thing as is worth putting in an error - a shape, not a dump. */
+function describeOscArg(v) {
+  if (v === null || v === undefined) return String(v);
+  try {
+    const json = JSON.stringify(v);
+    if (json && json.length <= 120) return json;
+    return `${v.constructor?.name ?? 'object'} with keys ${Object.keys(v).slice(0, 8).join(', ')}`;
+  } catch {
+    return v.constructor?.name ?? 'object';
+  }
 }
 
 class OscEngine {
@@ -2027,7 +2043,7 @@ class OscEngine {
 
   _send(address, args) {
     if (!this._port) throw new Error('OscEngine not started - call start() first');
-    this._port.send({ address, args: toOscArgs(args) });
+    this._port.send({ address, args: toOscArgs(args, address) });
   }
 
   _request(address, args, timeoutMs = REPLY_TIMEOUT_MS) {
@@ -2237,6 +2253,18 @@ class OscEngine {
       // A program restore finished: [trackId, slot, seq, ok] (see setPluginState).
       const [track, slot, seq, ok] = (msg.args ?? []).map((a) => a?.value ?? a);
       this._settleState(`${track}|${Number(slot)}`, Number(ok) > 0, Number(seq));
+      return;
+    }
+    if (msg.address === '/poptart/serverLoad') {
+      // How full the audio server is, every few seconds: [nodes, limit, voices, peakCPU]. The
+      // server cannot be asked how much REAL-TIME memory is left (scsynth does not report it), so
+      // the node table is the proxy - what consumes that memory is nodes. Run out and scsynth
+      // stops being able to create anything at all, and only a restart fixes it, so this exists to
+      // be seen BEFORE that: on stage nobody is reading a log.
+      const [nodes, limit, voices, cpu] = (msg.args ?? []).map((a) => a?.value ?? a);
+      if (typeof this.onServerLoad === 'function') {
+        this.onServerLoad({ nodes: Number(nodes), limit: Number(limit), voices: Number(voices), cpu: Number(cpu) });
+      }
       return;
     }
     if (msg.address === '/poptart/pluginEdited') {

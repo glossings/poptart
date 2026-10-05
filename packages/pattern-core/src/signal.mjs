@@ -58,6 +58,15 @@ export function setPatternWarn(fn) {
   warnSink = typeof fn === 'function' ? fn : (line) => console.warn(line);
 }
 
+/** What was passed where a parameter name belongs, in as many words as are useful. */
+function paramNameSaid(name) {
+  if (name === null || name === undefined) return String(name);
+  if (name instanceof Sig) return 'a pattern or signal (did you mean to pass it as the VALUE?)';
+  if (Array.isArray(name)) return `a list (${name.length} long)`;
+  if (typeof name === 'object') return `an object with keys ${Object.keys(name).slice(0, 6).join(', ') || '(none)'}`;
+  return `a ${typeof name}`;
+}
+
 function warnUser(message) {
   warnSink(message);
 }
@@ -1245,12 +1254,16 @@ export class Sig {
   }
 
   _paramAt(slot, name, value) {
-    // A parameter is addressed by its plain string name, and nothing downstream can use anything
-    // else - the engine encodes the name into OSC, and a non-string there failed AFTER the eval
-    // had half-applied, leaving modulator state no later evaluation could clear (found
-    // 2026-10-03). Thrown here instead, it is a build error the evaluate route rolls back whole.
-    if (typeof name !== 'string') {
-      throw new Error('[signal] .param() takes the parameter name as a plain string - .param("Cutoff", 0.4), or .param("Serum 2", "Cutoff", 0.4) with a device named first');
+    // A parameter is addressed by NAME or by index, and nothing else can reach a plugin. Anything
+    // else is a slip in the buffer - a device handle where the name should go, a signal, an
+    // options object - and it used to travel all the way to the OSC encoder before failing, which
+    // took the WHOLE evaluation down with it: a 500 from /api/evaluate, nothing playing at all,
+    // and "cannot encode OSC argument: [object Object]" as the only clue (hit live, 2026-10-05).
+    // Warned and ignored instead, like every other userland mistake: the rest of the buffer plays.
+    if (typeof name !== 'string' && !Number.isFinite(name)) {
+      warnUser(`[signal] .param() takes a parameter name or index first - got ${paramNameSaid(name)}. `
+        + 'That .param() is ignored; everything else on this track still plays.');
+      return this;
     }
     const key = `${slot}:${name}`;
     // An audio handle in value position is a CONNECTION: wire that track or bus onto the

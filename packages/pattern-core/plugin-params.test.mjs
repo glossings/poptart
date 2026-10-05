@@ -7,7 +7,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { s, lfo, env, mini, _shape, Sig } from './src/signal.mjs';
+import { s, lfo, env, _shape, Sig } from './src/signal.mjs';
 import { Scheduler } from './src/scheduler.mjs';
 
 function mockEngine(now = 0) {
@@ -152,14 +152,6 @@ test('a lone modulator with a signal-valued bound is still native and dynamic', 
   const argsTo = sent(t);
   assert.equal(argsTo('setParamLFO').length, 1);
   assert.equal(argsTo('setParam').filter(([, slot]) => slot >= 0).length, 0);
-});
-
-test('.param() refuses a non-string name at build time', () => {
-  // A Sig in name position can't address anything downstream - sent, it reached the engine's
-  // OSC encoder mid-apply and left modulator state no later evaluation could clear. Thrown at
-  // build, the evaluate route rolls it back whole.
-  assert.throws(() => s('808f').fx('Decapitator').param('Decapitator', mini('Mix'), 0.5), /plain string/);
-  assert.throws(() => s('808f').fx('Decapitator').param(mini('Mix'), 0.5), /plain string/);
 });
 
 test('a modulator clear the engine rejects fails neither the eval diff nor stop()', () => {

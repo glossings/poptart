@@ -220,3 +220,46 @@ test('a word on a plugin parameter is reported on the console once per evaluatio
   mapped.setParam('#1', 0, 'Filter Type', 'lowpass', 0.3);
   assert.equal(lines.length, 2, 'still wrong after a re-evaluation, so said again');
 });
+
+// --- a parameter addressed by index ------------------------------------------------------------
+//
+// `.param(12, 0.5)` is a legal spelling: the engine resolves an index directly, without a name.
+// The mappings are keyed by NAME, so there is nothing here for it - but the lookup called
+// name.replace() unguarded, and only for a plugin that HAS a mapping file. So an index worked
+// everywhere until it was pointed at a mapped plugin, and then threw on EVERY evaluate: a 500
+// from /api/evaluate and nothing playing at all (hit live, 2026-10-05).
+
+/** A MappedEngine over a Serum 2 mapping, with everything it sends recorded. */
+function indexRig() {
+  const calls = [];
+  const engine = {};
+  for (const name of schedulerEngineCalls()) engine[name] = (...a) => { calls.push([name, ...a]); };
+  const mapped = new MappedEngine(engine);
+  mapped.mappings = new Map([['Serum 2', { plugin: 'Serum 2', params: { 'Filter 1 Freq': { min: 20, max: 20000, curve: 'log' } } }]]);
+  mapped.setChain('#1', ['Serum 2']);
+  return { mapped, calls };
+}
+
+test('a numeric parameter index is passed through rather than looked up', () => {
+  const { mapped, calls } = indexRig();
+  mapped.setParam('#1', 0, 12, 0.5, 0);
+  assert.deepEqual(calls.pop(), ['setParam', '#1', 0, 12, 0.5, 0],
+    'an index must reach the engine untouched - there is nothing to convert it against');
+});
+
+test('...and it does not throw where the plugin has a mapping file', () => {
+  // The whole bug: the lookup returns early for an UNMAPPED plugin, so this only ever appeared on
+  // the plugins that have real units - which are the ones worth automating in the first place.
+  const { mapped } = indexRig();
+  assert.doesNotThrow(() => mapped.setParam('#1', 0, 12, 0.5, 0));
+  assert.doesNotThrow(() => mapped.setParamLFO('#1', 0, 7, { min: 0, max: 1 }));
+  assert.equal(mapped.specFor('#1', 0, 12), undefined, 'an index has no spec to find');
+});
+
+test('a named parameter on the same plugin still converts its units', () => {
+  // ...and the guard must not have turned the mapping off for everything else.
+  const { mapped, calls } = indexRig();
+  mapped.setParam('#1', 0, 'Filter 1 Freq', 2000, 0);
+  const [, , , , value] = calls.pop();
+  assert.ok(value > 0 && value < 1, `a mapped name in Hz has to be normalized, got ${value}`);
+});

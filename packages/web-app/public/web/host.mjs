@@ -535,6 +535,10 @@ export function createHost({
         ? { shape: patternCore.globalGroove().text, depth: patternCore.globalGroove().depth }
         : null,
       scan: null,
+      // The desktop's audio server can fill up and stop being able to create anything; a page's
+      // WebAudio graph has no such table to exhaust, so there is nothing to gauge and the editor
+      // reads null as "no reading" rather than as a number.
+      load: null,
       build: 'web',
       version,
     }),

@@ -1284,10 +1284,23 @@ function deckLoopState(deck) {
  * Both are ephemeral, both end the same way - the migration on eject/complete, the master when
  * its song stops (handing the grid to the other deck if that one is still playing to it - see
  * songHandGridOver) - and after either the buffer's own tempo drives again on the next eval.
+ *
+ * And a third, with `forDeck`: the OTHER deck playing CODE. Its patterns are generated from this
+ * clock, so a setbpm that moved the clock would re-tempo the music already in the room - the same
+ * harm a grid-master song is protected from, which a livecoded deck was not. Starting a second
+ * track therefore snapped the first one to the newcomer's tempo (reported 2026-10-05).
+ *
+ * Only against a NEWCOMER, though, which is why this one needs to know who is asking. A deck
+ * that is already playing to the clock may still change it - livecoding a tempo change is
+ * re-evaluating the deck you are playing, and that has to go on working. So the rule is: held
+ * when somebody ELSE is playing to the clock and the deck asking is not. Callers with no deck in
+ * hand (Link's adopt) get the first two answers only, as they always did.
  */
-function clockHeldByDesk() {
-  return mixState.tempoOverride != null
-    || (songMasterDeck != null && !!songDecks[songMasterDeck]?.playing);
+function clockHeldByDesk(forDeck = null) {
+  if (mixState.tempoOverride != null) return true;
+  if (songMasterDeck != null && !!songDecks[songMasterDeck]?.playing) return true;
+  if (!forDeck || deckRunning(forDeck)) return false;
+  return ['a', 'b'].some((d) => d !== forDeck && deckRunning(d));
 }
 
 // The tempo-ratio button's cycle, ½x -> 1x -> 2x -> auto, shared by the pane's click and the
@@ -2309,6 +2322,9 @@ function mixLampNotify() {
   }, 30);
 }
 
+// The audio server's own fullness, as of its last reading (see engine.onServerLoad).
+let serverLoad = null;
+
 // The merged desk view for one track (deck-broadcast under its own values), as a plain object:
 // what a NEW track must be BORN wearing (engine.createTrack's birth args) - by the time a plain
 // setParam could land, the first samples have already played.
@@ -3283,6 +3299,24 @@ function cueOffsetIn({ activeUid, aggregateUid, layout, cueUid, pair = 0 }) {
   return activeUid === cueUid && pair > 0 ? pair * 2 : null;
 }
 
+/**
+ * Where the headphone cue is, as far as anything outside the settings tab needs to know - and
+ * READ FROM SETTINGS ONLY, so that asking costs nothing. See the ?cue=1 note on the endpoint.
+ */
+function cueRoutingBody() {
+  const pair = settings.audioCueDevice ? cuePair() : null;
+  return {
+    cueSelected: settings.audioCueDevice?.name ?? null,
+    cuePair: pair,
+    // The device a BROWSER audition may be pointed at. A cue on a channel PAIR is not one:
+    // setSinkId names a device, and a device's FIRST pair is the master out - so pointing an
+    // audition at it would play the next record over the mix the room is hearing. Which pair it
+    // is settles that on its own, without having to work out which device the pair belongs to.
+    cuePreviewDevice: pair ? null : (settings.audioCueDevice?.name ?? null),
+    cueActive: activeCue?.name ?? null, // what the RUNNING engine actually has (null = no cue this boot)
+  };
+}
+
 /** Is the cue a spare pair of the device we play through, rather than a device of its own? */
 function cueOnOutputDevice(devices = null) {
   const cue = cueDevice();
@@ -3712,6 +3746,9 @@ function wireEngine() {
   engine.onParamAutomated = (trackId, slot, name, index, value) => handleParamAutomated(trackLabel(trackId), slot, name, index, value);
   // Any edit inside a plugin's own window - what auto-pin captures back into the code.
   engine.onPluginEdited = (trackId, slot) => handlePluginEdited(trackLabel(trackId), slot);
+  // How full the audio server is, every few seconds (see the status gauge in poptart.scd). Held
+  // rather than queued: only the latest reading means anything, and the editor polls for it.
+  engine.onServerLoad = (load) => { serverLoad = { ...load, at: Date.now() }; };
   // ⌘↵ / ⌘. typed into a plugin's own window - the browser never sees those keys, so the page is
   // told to run them (see broadcastHotkey).
   engine.onHotkey = broadcastHotkey;
@@ -6014,6 +6051,11 @@ const routes = {
       scale: patternCore ? patternCore.globalScale() : null,
       groove: patternCore ? grooveReport(patternCore.globalGroove()) : null,
       scan: engine?.scanStatus ? engine.scanStatus() : null,
+      // How full the audio server is. Here for the same reason the scan is: the editor already
+      // polls this, and when it matters it is the status - past a full server scsynth stops being
+      // able to create anything and only a restart recovers it. Stale (an engine that stopped
+      // answering) reads as null rather than as the last good number.
+      load: serverLoad && Date.now() - serverLoad.at < 15000 ? serverLoad : null,
     },
   }),
 
@@ -6468,7 +6510,7 @@ const routes = {
         decks[deck].bpm = v;
         // While the desk holds the clock - a tempo migration, or a song deck playing as grid
         // master - even the main deck's setbpm only RECORDS. See clockHeldByDesk.
-        return deck === 'a' && !clockHeldByDesk() ? declareTempo(value, v) : TEMPO_BLOCK;
+        return deck === 'a' && !clockHeldByDesk(deck) ? declareTempo(value, v) : TEMPO_BLOCK;
       },
     };
     const evalBlock = makeBlockEvaluator(new Map(prebakeDefs), hostBuilders, { miniOff: patternCore.miniOffRanges(body.code ?? '') });
@@ -6623,7 +6665,7 @@ const routes = {
     // song had been loaded outside dj mode.
     if (!sawSetbpm) {
       decks[deck].bpm = null;
-      if (deck === 'a' && !clockHeldByDesk()) declareTempo(DEFAULT_CPS * 240, DEFAULT_CPS * 240);
+      if (deck === 'a' && !clockHeldByDesk(deck)) declareTempo(DEFAULT_CPS * 240, DEFAULT_CPS * 240);
     }
     noteProtoOwnership(deck);
 
@@ -8702,7 +8744,18 @@ const routes = {
   // Output devices with channel counts, plus the saved selection (null = system default) and the
   // output-channel picture for the device that would be opened: `channels` is what .o(n) wraps at
   // right now, `choices` the counts the tab may offer, `audible` how wide the device really is.
-  'GET /api/audioDevices': async () => {
+  'GET /api/audioDevices': async (query) => {
+    // `?cue=1` answers only where an AUDITION should come out, and answers it from settings -
+    // no device enumeration at all. That matters more than it looks: listing the devices means
+    // spawning the audio helper, which is ~95ms of SYNCHRONOUS work, and this answer is wanted
+    // every time a window that auditions opens (the library browser, the pack panel, the slice
+    // and envelope editors) and on every DJ-mode transition. The note scheduler shares this
+    // process and looks 150ms ahead, so two of those spawns in one request is a gap in the music
+    // on every deck - which is exactly what it was: opening the browser to line up the next
+    // track stalled the deck that was playing, and it then rushed to catch up.
+    if (query?.cue) {
+      return { status: 200, body: cueRoutingBody() };
+    }
     const devices = audioOutputDevices();
     const { channels, choices, audible } = outputChannelState(devices);
     return {
@@ -8714,17 +8767,10 @@ const routes = {
         outputChannelChoices: choices,
         audibleChannels: audible,
         cueAvailable: audioDevices.helperAvailable(),
-        cueSelected: settings.audioCueDevice?.name ?? null,
-        cuePair: settings.audioCueDevice ? cuePair() : null,
         // The spare pairs of the output device, so the tab can offer "this controller's own
         // headphone jack" where the hardware has one.
         cuePairs: cuePairChoices(devices),
-        // The device a BROWSER audition may be pointed at. A pair is not addressable from the
-        // browser (setSinkId picks a device, not a pair), and pointing an audition at the device
-        // would send it to channels 1/2 - the master out, over the top of the mix. So a cue on a
-        // pair offers nothing here, and auditions stay on the default output.
-        cuePreviewDevice: cueOnOutputDevice(devices) ? null : (settings.audioCueDevice?.name ?? null),
-        cueActive: activeCue?.name ?? null, // what the RUNNING engine actually has (null = no cue this boot)
+        ...cueRoutingBody()
       },
     };
   },
