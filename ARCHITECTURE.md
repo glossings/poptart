@@ -125,6 +125,29 @@ The concrete engine implementation the scheduler drives. Bridges Node and audio.
   universal, like the pitch shifter and the audio helper; `devices.json` beside it is the catalog
   the Node half resolves names against. Both are written by
   `packages/web-engine/build/devices/native.mjs`.
+- `native/devices/own/` — the half of that catalog whose DSP poptart WROTE: the wavetable, FM and
+  granular synths and the effects. These are the one place in the port with two implementations of
+  the same device rather than one source compiled twice, because their DSP was written in
+  JavaScript for an AudioWorklet and a server cannot run a worklet. What holds the two together
+  is a test rather than a promise: `native-device-parity.test.mjs` plays the browser's processor
+  and the compiled device the same input with the same controls and compares the output sample
+  for sample, device by device, so a change to either side that is not a change to both fails.
+  Each `.cc` is a line-for-line translation of its `.mjs` and says so at the top, and the
+  shared parts (`own/dsp/`) are translations of `web-engine/src/dsp/`. One thing differs by
+  design: a control carries one value per block here and is read per sample there.
+
+  `own/convolver.cc` is the exception, and the only device here with nothing to translate: in the
+  browser it is a `ConvolverNode` and two `BiquadFilterNode`s, which is Chromium's code. So what
+  it agrees with is Chromium, read from Blink's source and cited where each piece is used - the
+  gain a normalized impulse response is given, the delay's interpolation, and the fact that Web
+  Audio takes a lowpass's Q in decibels. Its convolution (`own/dsp/convolve.h`) is a direct head
+  of 128 taps with FFT partitions of growing size behind it, which is how Blink's own is
+  arranged: zero latency, and a few hundred multiplies a sample for a response of any length.
+- A device may also be handed a FILE - a granulator's sample, a convolver's impulse response.
+  The frames come out of a buffer sclang has already read for the sample pack, are copied and
+  summed to one channel on the non-realtime thread, and the audio thread only swaps the pointer
+  in (`/sample` in `PoptartDevice.cpp`). The slot a file lands in is the browser's own rule, so
+  an index means the same file on both engines.
 - `native-devices.js` — that catalog, and what a `.param()` argument means on one of these
   controls. The browser's rule, ported: an enum takes a label or an index, a toggle takes on and
   off, everything else takes the 0..1 position it already is.

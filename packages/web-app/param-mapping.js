@@ -23,6 +23,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const { nativeDevice } = require('@poptart/osc-engine/native-devices');
 
 
 const MAPPINGS_DIR = path.join(__dirname, '..', '..', 'mappings');
@@ -153,7 +154,10 @@ class MappedEngine {
     // which is a number, so it would sail past the engine's own type guard and be sent to sclang.
     // A plugin parameter is a number, so a word can only be a mistake here - the engine drops
     // it, and this says so on the console instead of the track quietly ignoring the line.
-    if (typeof value === 'string') {
+    // A WORD is a mistake on a plugin parameter and an ordinary argument on one of poptart's own
+    // devices, which take an enum's label ("Chord") and the name of a file to play
+    // ("break:2") - so what is in the slot decides whether this is worth saying.
+    if (typeof value === 'string' && !nativeDevice(this.chains.get(trackId)?.[slot])) {
       const key = `${trackId}|${slot}|${name}`;
       if (!this._warnedWords.has(key)) {
         this._warnedWords.add(key);
@@ -253,6 +257,7 @@ class MappedEngine {
   loadEffect(...a) { return this.engine.loadEffect(...a); }
   unloadEffect(...a) { return this.engine.unloadEffect(...a); }
   getParams(...a) { return this.engine.getParams(...a); }
+  deviceSlot(...a) { return this.engine.deviceSlot(...a); }
   getPluginState(...a) { return this.engine.getPluginState(...a); }
   setPluginStateFile(...a) { return this.engine.setPluginStateFile(...a); }
 

@@ -28,7 +28,24 @@ One list for both, because the sources, the include paths, the upstream switches
 headers are the same answers either way — and a device that was compiled differently for one
 engine is a device that sounds different there, with nothing to point at.
 
-The one thing that differs is where a device keeps its state. The generated wrapper holds it in
+`native.mjs` also builds the devices whose DSP poptart wrote - the wavetable, FM and granular
+synths and the effects - which have no recipe and no upstream: their C++ is hand-written beside the UGen in
+`packages/osc-engine/native/devices/own/`, and all this build does for them is generate the
+header of control indexes they index their parameter block with (from the same descriptors the
+browser registers, so a reordered control list cannot silently move a control) and compile them
+in. They are translations of the browser's own `src/dsp` and `src/devices` rather than the same
+source twice, and `osc-engine/native-device-parity.test.mjs` is what keeps the two honest: both
+are played the same input and the output is compared sample for sample.
+
+The convolver is in that list with an asterisk: in the browser it is a `ConvolverNode`, so there
+is no JavaScript of ours to translate and none to compare against. Its C++ is written to
+Chromium's behavior instead, with Blink's own files cited where each piece came from, and the
+test holds it to definitions rather than to a second implementation - the convolution against a
+direct sum over its taps, and the gain a normalized response is given against the closed form of
+Blink's formula. The five synthesized spaces are poptart's JavaScript, and those ARE compared
+sample for sample against the browser's own function.
+
+The one thing that differs is where a PORTED device keeps its state. The generated wrapper holds it in
 file-scope globals, which is right for a worklet (one module instance per node) and allows one
 instance per process, which is wrong for a server where every track may want a Plaits. The native
 target lifts that state into a struct — `structify`, which moves no DSP: every `g_params` in the

@@ -32,17 +32,36 @@
 
 #include <atomic>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 
 static InterfaceTable* ft;
 
 namespace {
 
-/** The most controls any device has. Cloud Seed, with the most, has well under this. */
-const int kMaxParams = 96;
+/**
+ * The most controls any device has.
+ *
+ * The FM synth has 148 of them - eight operators of ten, plus a sixty-four-cell modulation
+ * matrix - which is what sets this number; Cloud Seed's 45 was what set the old one. A device
+ * with more than this has its extra controls IGNORED rather than overflowing anything (see
+ * install), and the build says how many each device has, so a device that outgrew this would be
+ * noticed; the array costs four bytes a control a slot either way.
+ */
+const int kMaxParams = 192;
 
 /** How many frames an instrument is given between bend updates while a bend is moving. */
 const int kBendPiece = 32;
+
+/**
+ * How many loaded files one device may hold at once.
+ *
+ * A granulator's sample and a convolver's impulse response are kept so that a pattern switching
+ * between two of them by index is a switch rather than two reloads, which is the browser's rule
+ * for the same controls (its _spareOption keeps a slot per loaded reference). Eight is a few
+ * more than any song has used and a few less than a megabyte of pointers.
+ */
+const int kMaxSamples = 8;
 
 /** Input offsets. Everything before the main signal count is fixed. */
 enum { kBendInput = 0, kNumMainInput = 1, kFirstMainInput = 2 };
@@ -97,6 +116,31 @@ struct DeviceJob {
     const PdDeviceInfo* info = nullptr;
     PdAny* made = nullptr;      // what stage 2 built, until stage 3 installs it
     PdAny* retired = nullptr;   // what stage 3 swapped out, for stage 4 to free
+    /** The files the device it replaced was playing, which are nothing to the new one. */
+    float* retiredSamples[kMaxSamples] = { nullptr };
+};
+
+/**
+ * ONE file handed to a device, owned by the asynchronous command carrying it.
+ *
+ * A sample crosses the same three threads an open does, and for the same reason: the frames have
+ * to be read out of the server's buffer and summed to one channel, which is a megabyte of work
+ * that cannot happen on the audio thread. The audio thread only swaps the pointer in, and the
+ * frames it swapped out are freed back on the non-realtime thread.
+ *
+ * The buffer it reads from belongs to the sample pack sclang already loaded (its samplePacks),
+ * so there is no file read here and no lifetime to negotiate: this is queued on the same
+ * non-realtime queue the pack's own reads went through, and what it leaves with is its own copy.
+ */
+struct SampleJob {
+    DeviceSlot* slot = nullptr;
+    int param = 0;
+    int index = 0;
+    int bufnum = -1;
+    float* frames = nullptr;    // what stage 2 read out, until stage 3 installs it
+    int count = 0;
+    double sampleRate = 0.0;
+    float* retired = nullptr;   // what stage 3 replaced, for stage 4 to free
 };
 
 struct PoptartDevice : public SCUnit {
@@ -112,6 +156,7 @@ struct PoptartDevice : public SCUnit {
             mPosition[i] = 0.f;
             mBus[i] = -1;
         }
+        for (int i = 0; i < kMaxSamples; ++i) { mSamples[i] = LoadedSample(); mRetiringSamples[i] = nullptr; }
 
         // Shared with every open this unit ever asks for, and outliving the unit if one is
         // still in flight when it goes.
@@ -135,6 +180,11 @@ struct PoptartDevice : public SCUnit {
         // untouched - no DSP, no page faults - and this is the same choice
         // native/rubberband/PoptartPitchShift.cpp makes for its shifter.
         delete mDevice;
+        // The files the device was playing, for the same reason and on the same terms.
+        for (int i = 0; i < kMaxSamples; ++i) {
+            free(mSamples[i].frames);
+            free(mRetiringSamples[i]);
+        }
     }
 
     /**
@@ -150,6 +200,21 @@ struct PoptartDevice : public SCUnit {
      */
     void install(const PdDeviceInfo* info, PdAny* device) {
         mRetiring = mDevice;
+        // The files go with the device that was playing them UNLESS the slot is being refilled
+        // with the same device, which is what every evaluation does to every chain: control 3 of
+        // one device is not control 3 of another, so a sample left in the table would be handed
+        // to a control that never asked for one - but a granulator reopened with its own sample
+        // still named must not have to read it again. The frames are the host's to free, so they
+        // are retired the way the device is: dropped here on the audio thread, freed on the
+        // other one (and the engine's own record of what is loaded follows the same rule - see
+        // _rememberDevice in osc-engine's index.js).
+        const bool sameDevice = info && info == mInfo;
+        if (!sameDevice) {
+            for (int i = 0; i < kMaxSamples; ++i) {
+                mRetiringSamples[i] = mSamples[i].frames;
+                mSamples[i] = LoadedSample();
+            }
+        }
         mDevice = device;
         mInfo = info;
         // The device's own count AND the table's, whichever is smaller. They agree today, and
@@ -167,11 +232,66 @@ struct PoptartDevice : public SCUnit {
         }
     }
 
+    /**
+     * Gives a device a file to play, and says what it replaced. Audio thread.
+     *
+     * Keyed by the control and the option slot together, which is how the browser keys a loaded
+     * file as well: a device with two sample controls (an impulse response and a sample) holds
+     * one for each, and a pattern that loaded two samples switches between them by index.
+     */
+    float* installSample(int param, int index, float* frames, int count, double rate) {
+        LoadedSample* at = nullptr;
+        for (int i = 0; i < kMaxSamples; ++i) {
+            if (mSamples[i].frames && mSamples[i].param == param && mSamples[i].index == index) { at = &mSamples[i]; break; }
+        }
+        // Not loaded yet: the first empty entry, or - with every entry taken - the oldest, which
+        // is the same answer the browser's option list gives when it is full.
+        if (!at) {
+            for (int i = 0; i < kMaxSamples; ++i) if (!mSamples[i].frames) { at = &mSamples[i]; break; }
+        }
+        if (!at) {
+            at = &mSamples[0];
+            for (int i = 1; i < kMaxSamples; ++i) if (mSamples[i].age < at->age) at = &mSamples[i];
+        }
+        float* old = at->frames;
+        at->param = param;
+        at->index = index;
+        at->frames = frames;
+        at->count = count;
+        at->sampleRate = rate;
+        at->age = ++mSampleAge;
+        if (mDevice) mDevice->sample(param, index, frames, count, rate);
+        return old;
+    }
+
+    /**
+     * Hands the device every file it already holds. Audio thread.
+     *
+     * A device opened AFTER its sample arrived - a chain rebuilt by an evaluation, which reopens
+     * every slot - would otherwise be the one device in the song playing nothing, until the
+     * pattern's poll happened to name the sample again.
+     */
+    void resendSamples() {
+        if (!mDevice) return;
+        for (int i = 0; i < kMaxSamples; ++i) {
+            const LoadedSample& one = mSamples[i];
+            if (one.frames) mDevice->sample(one.param, one.index, one.frames, one.count, one.sampleRate);
+        }
+    }
+
     /** The device the audio thread swapped out, for the caller's thread to free. */
     PdAny* takeRetiring() {
         PdAny* old = mRetiring;
         mRetiring = nullptr;
         return old;
+    }
+
+    /** And the files it was playing, into the caller's array. */
+    void takeRetiringSamples(float** into) {
+        for (int i = 0; i < kMaxSamples; ++i) {
+            into[i] = mRetiringSamples[i];
+            mRetiringSamples[i] = nullptr;
+        }
     }
 
     void setParam(int index, float position) {
@@ -190,12 +310,30 @@ struct PoptartDevice : public SCUnit {
         mBus[index] = -1;
     }
 
+    /**
+     * Notes reach an instrument, and the one effect that is played by them: the ducker, whose
+     * dip starts on the notes of whatever track is routed into it.
+     */
     void noteOn(float note, float velocity) {
-        if (mDevice && mInfo && mInfo->isSynth) mDevice->noteOn(note, velocity);
+        if (mDevice && mInfo && mInfo->takesNotes) mDevice->noteOn(note, velocity);
     }
 
     void noteOff(float note) {
-        if (mDevice && mInfo && mInfo->isSynth) mDevice->noteOff(note);
+        if (mDevice && mInfo && mInfo->takesNotes) mDevice->noteOff(note);
+    }
+
+    void setKeyPatched(bool on) { mKeyPatched = on; }
+    void setNoteRoute(bool on) { mNoteRoute = on; }
+
+    /**
+     * The tempo, and the beat the transport is at. Turned into seconds here because that is
+     * what a device is given, and anchored to the block it arrived in so the position goes on
+     * advancing between messages instead of standing still until the next one.
+     */
+    void setTransport(float bpm, float beats) {
+        mBpm = bpm > 1.f ? bpm : 1.f;
+        mTransportSec = (double)beats * 60.0 / mBpm;
+        mTransportAtBlock = mWorld->mBufCounter;
     }
 
     DeviceSlot* slot() { return mSlot; }
@@ -205,6 +343,19 @@ private:
     void silence(int frames) {
         const int outs = numOutputs();
         for (int ch = 0; ch < outs; ++ch) memset(out(ch), 0, sizeof(float) * (size_t)frames);
+    }
+
+    /**
+     * The transport, in seconds, at a sample offset into this block.
+     *
+     * Counted from the server's own block counter rather than from a wall clock, so it advances
+     * at exactly the rate the audio does and a grid laid out on it cannot drift from the audio
+     * it is cutting up.
+     */
+    double transportAt(int offset) const {
+        const double blockSec = (double)mWorld->mBufLength / (double)mWorld->mSampleRate;
+        const double since = (double)(mWorld->mBufCounter - mTransportAtBlock) * blockSec;
+        return mTransportSec + since + (double)offset / (double)mWorld->mSampleRate;
     }
 
     /** This block's position for one control: whatever is driving it, or what it was set to. */
@@ -252,8 +403,16 @@ private:
             if (bendMoving && n > kBendPiece) n = kBendPiece;
 
             if (isSynth) device->bend(bendMoving ? bendIn[at] : bendIn[0]);
+            // What is routed into this slot. Said every block rather than on the change: the
+            // device that asks is one device, the call is a virtual one per block, and a flag
+            // that arrives while a device is being swapped would otherwise be lost.
+            device->keyPatched(mKeyPatched);
+            device->noteRoute(mNoteRoute);
+            // Where the transport is at the start of this piece: the position we were last told,
+            // plus the time since. A device that is not synced to anything ignores it.
+            device->transport(mBpm, transportAt(at));
 
-            fillInput(devIn, stride, at, n, sidechained);
+            fillInput(devIn, stride, at, n, sidechained, device->inChannels());
             device->process(n);
             for (int ch = 0; ch < outs; ++ch) {
                 const float* from = devOut + (size_t)(ch < 2 ? ch : 1) * stride;
@@ -271,12 +430,41 @@ private:
      * device takes the chain's own stereo pair. Both match what the browser's host feeds, because
      * a device that hears a different signal on the two engines is a different device.
      */
-    void fillInput(float* devIn, int stride, int at, int n, bool sidechained) {
+    void fillInput(float* devIn, int stride, int at, int n, bool sidechained, int channels) {
         float* left = devIn;
         float* right = devIn + stride;
         const float* mainL = mNumMain > 0 ? in(kFirstMainInput) + at : nullptr;
         const float* mainR = mNumMain > 1 ? in(kFirstMainInput + 1) + at : mainL;
         const float* scL = mNumSidechain > 0 ? in(mFirstSidechain) + at : nullptr;
+        const float* scR = mNumSidechain > 1 ? in(mFirstSidechain + 1) + at : scL;
+
+        // A device that takes four channels keeps its own signal in stereo and the key beside
+        // it: this track on the first pair, whatever `.audio("kick")` named on the second. A
+        // compressor's image must not lean, which summing to mono would do.
+        if (channels >= 4) {
+            if (mainL) {
+                memcpy(left, mainL, sizeof(float) * (size_t)n);
+                memcpy(right, mainR, sizeof(float) * (size_t)n);
+            } else {
+                memset(left, 0, sizeof(float) * (size_t)n);
+                memset(right, 0, sizeof(float) * (size_t)n);
+            }
+            float* keyL = devIn + 2 * stride;
+            float* keyR = devIn + 3 * stride;
+            // No key patched means the device listens to itself, which is what an effect with
+            // nothing on its sidechain does on the web too (the browser's host passes null and
+            // the processor falls back to its own input).
+            const float* fromL = (mKeyPatched && scL) ? scL : (mainL ? mainL : nullptr);
+            const float* fromR = (mKeyPatched && scL) ? scR : (mainL ? mainR : nullptr);
+            if (fromL) {
+                memcpy(keyL, fromL, sizeof(float) * (size_t)n);
+                memcpy(keyR, fromR, sizeof(float) * (size_t)n);
+            } else {
+                memset(keyL, 0, sizeof(float) * (size_t)n);
+                memset(keyR, 0, sizeof(float) * (size_t)n);
+            }
+            return;
+        }
 
         if (sidechained) {
             if (mainL) {
@@ -306,8 +494,37 @@ private:
     int mNumMain = 0;
     int mNumSidechain = 0;
     int mFirstSidechain = 0;
+    /**
+     * Whether anything is actually feeding this slot's key input.
+     *
+     * The aux bus is there whether or not a route is (poptart.scd parks it on a silent bus), so
+     * silence on it means nothing on its own - and the difference matters: a compressor with no
+     * key listens to ITSELF, which is what a compressor does, while one with a silent key would
+     * never compress at all. sclang knows which it is, because it is the half that wires the
+     * route, so it says so.
+     */
+    bool mKeyPatched = false;
+    /** Whether a track's notes are routed to this slot (.midi(...)), for the ducker. */
+    bool mNoteRoute = false;
+    /** The tempo and the transport, for the devices that are synced to it. */
+    double mBpm = 120.0;
+    double mTransportSec = 0.0;
+    /** The block this track's transport position was last told to us at. */
+    int64 mTransportAtBlock = 0;
     float mPosition[kMaxParams];
     int mBus[kMaxParams];
+    /** One file this device holds: which control it is on, and the frames themselves. */
+    struct LoadedSample {
+        int param = -1;
+        int index = -1;
+        float* frames = nullptr;   // malloc'd by the non-realtime thread, mono, the file's own rate
+        int count = 0;
+        double sampleRate = 0.0;
+        int age = 0;               // which entry to take when they are all full
+    };
+    LoadedSample mSamples[kMaxSamples];
+    float* mRetiringSamples[kMaxSamples] = { nullptr };
+    int mSampleAge = 0;
 };
 
 // ---- the open, across the threads it has to cross --------------------------------------------
@@ -355,6 +572,10 @@ bool openStage3(World* world, void* data) {
         slot->unit->install(job->info, job->made);
         job->made = nullptr;
         job->retired = slot->unit->takeRetiring();
+        slot->unit->takeRetiringSamples(job->retiredSamples);
+        // An evaluation reopens every slot in the chain, so a device arriving to find a file
+        // already loaded for it is the ordinary path, not an edge case.
+        slot->unit->resendSamples();
     }
     const float ok = slot->unit->info() ? 1.f : 0.f;
     Unit* unit = (Unit*)slot->unit;
@@ -370,6 +591,10 @@ bool deviceStage4(World* world, void* data) {
     delete job->retired;     // replaced by the one that was, or closed outright
     job->made = nullptr;
     job->retired = nullptr;
+    for (int i = 0; i < kMaxSamples; ++i) {
+        free(job->retiredSamples[i]);   // the files that device was playing
+        job->retiredSamples[i] = nullptr;
+    }
     return true;
 }
 
@@ -422,6 +647,7 @@ void cmdClose(Unit* unit, sc_msg_iter* args) {
     DeviceJob* job = claim(self);
     self->install(nullptr, nullptr);
     job->retired = self->takeRetiring();
+    self->takeRetiringSamples(job->retiredSamples);
     ft->fDoAsynchronousCommand(unit->mWorld, nullptr, "PoptartDeviceClose", (void*)job,
                                closeNoop, closeNoop, deviceStage4, deviceCleanup, 0, nullptr);
 }
@@ -447,6 +673,126 @@ void cmdMap(Unit* unit, sc_msg_iter* args) {
 void cmdUnmap(Unit* unit, sc_msg_iter* args) {
     PoptartDevice* self = (PoptartDevice*)unit;
     while (args->remain() >= 1) self->unmapParam(args->geti(-1));
+}
+
+/**
+ * "a key is (not) patched into this slot", from whoever wired the route.
+ */
+void cmdSidechain(Unit* unit, sc_msg_iter* args) {
+    ((PoptartDevice*)unit)->setKeyPatched(args->geti(0) != 0);
+}
+
+/** "a track's notes are (no longer) routed into this slot", from whoever wired that route. */
+void cmdNoteRoute(Unit* unit, sc_msg_iter* args) {
+    ((PoptartDevice*)unit)->setNoteRoute(args->geti(0) != 0);
+}
+
+/**
+ * The tempo, and where the transport is: the beat position at this moment, in beats.
+ *
+ * Sent as the tempo changes and as the transport moves, exactly as it is sent to a plugin
+ * (VSTPluginController's setTempo/setTransportPos, which poptart.scd already calls for every
+ * controller). The device is given it in seconds since beat zero, because that is what the
+ * browser's host hands its devices and a synced delay has to work out the same length on both.
+ */
+void cmdTransport(Unit* unit, sc_msg_iter* args) {
+    PoptartDevice* self = (PoptartDevice*)unit;
+    const float bpm = args->getf(120.f);
+    const float beats = args->getf(0.f);
+    self->setTransport(bpm, beats);
+}
+
+/**
+ * Non-realtime: read the file out of the server's buffer, summed to one channel.
+ *
+ * Summed the way the browser sums it (granular.mjs's loadSample: each channel divided by the
+ * count and added in order), because the two have to agree sample for sample - that is what the
+ * parity test holds them to.
+ */
+bool sampleStage2(World* world, void* data) {
+    SampleJob* job = (SampleJob*)data;
+    if (!job->slot->alive.load()) return true;
+    if (job->bufnum < 0 || (uint32)job->bufnum >= world->mNumSndBufs) {
+        Print("PoptartDevice: there is no buffer %d to read a sample from\n", job->bufnum);
+        return true;
+    }
+    // The non-realtime mirror, which is what an asynchronous command is allowed to read.
+    const SndBuf* buf = World_GetNRTBuf(world, (uint32)job->bufnum);
+    if (!buf || !buf->data || buf->frames <= 0 || buf->channels <= 0) return true;
+    float* frames = (float*)malloc(sizeof(float) * (size_t)buf->frames);
+    if (!frames) {
+        Print("PoptartDevice: could not hold %d frames of sample\n", buf->frames);
+        return true;
+    }
+    const int channels = buf->channels;
+    if (channels == 1) {
+        memcpy(frames, buf->data, sizeof(float) * (size_t)buf->frames);
+    } else {
+        // Accumulated the way the browser accumulates it: each channel DIVIDED by the count (not
+        // multiplied by a reciprocal), added in channel order, and rounded to a float on every
+        // add - which is what `data[i] += c[i] / chans.length` on a Float32Array does. The
+        // arithmetic is the parity test's business, so it is copied rather than improved.
+        for (int i = 0; i < buf->frames; ++i) {
+            float sum = 0.f;
+            for (int c = 0; c < channels; ++c) {
+                sum = (float)((double)sum + (double)buf->data[i * channels + c] / (double)channels);
+            }
+            frames[i] = sum;
+        }
+    }
+    job->frames = frames;
+    job->count = buf->frames;
+    job->sampleRate = buf->samplerate > 0.0 ? buf->samplerate : job->slot->sampleRate;
+    return true;
+}
+
+/** Audio thread: the device starts playing it, and says what it was playing before. */
+bool sampleStage3(World* world, void* data) {
+    (void)world;
+    SampleJob* job = (SampleJob*)data;
+    DeviceSlot* slot = job->slot;
+    if (!slot->alive.load() || !slot->unit || !job->frames) return true;
+    job->retired = slot->unit->installSample(job->param, job->index, job->frames, job->count, job->sampleRate);
+    job->frames = nullptr;
+    return true;
+}
+
+/** Non-realtime: free whatever is left over, whichever way it went. */
+bool sampleStage4(World* world, void* data) {
+    (void)world;
+    SampleJob* job = (SampleJob*)data;
+    free(job->frames);    // read and never installed
+    free(job->retired);   // what the device was playing until stage 3
+    job->frames = nullptr;
+    job->retired = nullptr;
+    return true;
+}
+
+void sampleCleanup(World* world, void* data) {
+    (void)world;
+    SampleJob* job = (SampleJob*)data;
+    job->slot->release();
+    delete job;
+}
+
+/**
+ * /sample <control> <optionSlot> <bufnum> - audio thread.
+ *
+ * The buffer is one sclang already read for a sample pack, so this never touches a file. The
+ * generation an open claims is deliberately NOT bumped: a sample arriving must not cancel a
+ * device that is still being built, and a device that arrives after its sample is handed it on
+ * the way in (see openStage3).
+ */
+void cmdSample(Unit* unit, sc_msg_iter* args) {
+    PoptartDevice* self = (PoptartDevice*)unit;
+    SampleJob* job = new SampleJob();
+    job->slot = self->slot();
+    job->slot->retain();
+    job->param = args->geti(-1);
+    job->index = args->geti(0);
+    job->bufnum = args->geti(-1);
+    ft->fDoAsynchronousCommand(unit->mWorld, nullptr, "PoptartDeviceSample", (void*)job,
+                               sampleStage2, sampleStage3, sampleStage4, sampleCleanup, 0, nullptr);
 }
 
 void cmdNoteOn(Unit* unit, sc_msg_iter* args) {
@@ -480,4 +826,8 @@ PluginLoad(PoptartDeviceUGens) {
     DefineUnitCmd("PoptartDevice", "/noteOn", cmdNoteOn);
     DefineUnitCmd("PoptartDevice", "/noteOff", cmdNoteOff);
     DefineUnitCmd("PoptartDevice", "/allNotesOff", cmdAllNotesOff);
+    DefineUnitCmd("PoptartDevice", "/sidechain", cmdSidechain);
+    DefineUnitCmd("PoptartDevice", "/noteRoute", cmdNoteRoute);
+    DefineUnitCmd("PoptartDevice", "/transport", cmdTransport);
+    DefineUnitCmd("PoptartDevice", "/sample", cmdSample);
 }

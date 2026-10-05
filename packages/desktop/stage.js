@@ -43,6 +43,12 @@ const LAYOUT = [
   { from: 'packages/web-app', to: 'packages/web-app', workspace: true },
   { from: 'packages/osc-engine', to: 'node_modules/@poptart/osc-engine', workspace: true, byName: true },
   { from: 'packages/pattern-core', to: 'node_modules/@poptart/pattern-core', workspace: true, byName: true },
+  // The browser engine, for its device-window generator alone: web-app draws the window of one
+  // of poptart's own devices from the same module the web build draws it from (see server.js's
+  // device-window section), rather than keeping a second copy of what a panel looks like. Its
+  // sources only - the worklets, the wasm binaries and the rendered sample packs belong to the
+  // web build, and this app plays none of them.
+  { from: 'packages/web-engine', to: 'packages/web-engine', include: /^(package\.json|src\/)/ },
   { from: 'mappings', to: 'mappings' },
   { from: 'LICENSE', to: 'LICENSE' },
 ];
@@ -57,6 +63,7 @@ const MODULE_JUNK = new Set(['node_modules', '.vscode', '.github', '.idea']);
 /** Does a tracked file belong in the app? `rel` is relative to its LAYOUT entry, with `/`. */
 function ships(rel, entry) {
   if (entry.only) return entry.only.includes(rel);
+  if (entry.include && !entry.include.test(rel)) return false;
   if (/\.test\.(js|mjs)$/.test(rel)) return false;
   if (rel.startsWith('native/') && NATIVE_SOURCE.test(rel)) return false;
   return true;

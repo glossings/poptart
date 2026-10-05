@@ -23,7 +23,7 @@ const { samplesRoot, listPackFiles, resolveSampleFile, expandPackEntries, sliceE
 const { recordingsRoot, resolveRecording } = require('./recordings');
 const { analyzeSlices } = require('./analysis');
 const { ensurePoptartExtension, ensureDeviceExtension, userExtensionsDir, sclangStartupFile } = require('./extensions');
-const { nativeDevice, deviceParam, deviceParamArgs, paramPosition } = require('./native-devices');
+const { nativeDevice, deviceParam, deviceParamArgs, devicePositions, paramPosition } = require('./native-devices');
 const {
   privateScInstalled,
   privateSclangPath,
@@ -476,6 +476,19 @@ class OscEngine {
     // argument is resolved against (see setParam). Only this half knows: the scheduler sends a
     // name and a value and does not care what is hosting them, exactly as on the web.
     this._slotDevices = new Map();
+    // Where each of those devices' controls is sitting, as "trackId:slot" -> { paramId: 0..1 },
+    // and what is driving any of them -> { paramId: 'lfo' | 'env' | 'cc' | 'osc' | 'pattern' }.
+    //
+    // A device has no window to ask, the way a plugin does: the UGen is handed a position and
+    // there is nothing in scsynth that will read one back. So the half that sends them remembers
+    // them, which is what lets a device window open on the settings the song is actually playing
+    // rather than on the defaults (see deviceSlot, and web-app's device panel).
+    this._devicePositions = new Map();
+    this._deviceDriven = new Map();
+    // Which file is in which of a device control's option slots, as "trackId:slot|controlId" ->
+    // { byRef, loaded } - the browser's own bookkeeping for the same controls (see
+    // _loadDeviceSample), so an index means the same file on both engines.
+    this._deviceFiles = new Map();
     this._stateSeq = new Map(); // "trackId|slot" -> latest restore, so a slow inflate can't win
     this._stateAcks = new Map(); // same key -> { seq, resolve }: the one restore still unanswered
     this._stateWork = new Set(); // restores still inflating/writing, so "all sent" is awaitable (see _stateIdle)
@@ -1067,7 +1080,7 @@ class OscEngine {
     // The track's slots go with it, or a track rebuilt under the same name would resolve its
     // controls against whatever the last one had in its chain.
     for (const key of this._slotDevices.keys()) {
-      if (key.startsWith(`${trackId}:`)) this._slotDevices.delete(key);
+      if (key.startsWith(`${trackId}:`)) this._forgetDevice(key);
     }
     this._send('/poptart/destroyTrack', [trackId]);
   }
@@ -1079,11 +1092,11 @@ class OscEngine {
           `[poptart] ${device.id} is an effect, not an instrument - use .fx("${device.id}")`);
         return;
       }
-      this._slotDevices.set(`${trackId}:0`, device);
+      this._rememberDevice(`${trackId}:0`, device);
       this._send('/poptart/loadDevice', [trackId, 0, device.id, ...deviceParamArgs(device)]);
       return;
     }
-    this._slotDevices.delete(`${trackId}:0`);
+    this._forgetDevice(`${trackId}:0`);
     this._send('/poptart/loadInstrument', [trackId, pluginId]);
   }
   loadEffect(trackId, pluginId, position = -1) {
@@ -1097,18 +1110,92 @@ class OscEngine {
       // A position of -1 is "the next free slot", which only sclang knows: the scheduler names
       // the slot for every effect in a chain, so this is the hand-written case, and a control on
       // one of those resolves its argument as a plugin's would.
-      if (position >= 0) this._slotDevices.set(`${trackId}:${position}`, device);
+      if (position >= 0) this._rememberDevice(`${trackId}:${position}`, device);
       this._send('/poptart/loadDevice', [trackId, position, device.id, ...deviceParamArgs(device)]);
       return;
     }
-    if (position >= 0) this._slotDevices.delete(`${trackId}:${position}`);
+    if (position >= 0) this._forgetDevice(`${trackId}:${position}`);
     this._send('/poptart/loadEffect', [trackId, pluginId, position]);
   }
   // Empties an effect slot: re-bypasses it and closes the plugin (freeing its memory).
   // Engine-side no-op if the slot is already empty.
   unloadEffect(trackId, slot) {
-    this._slotDevices.delete(`${trackId}:${slot}`);
+    this._forgetDevice(`${trackId}:${slot}`);
     this._send('/poptart/unloadEffect', [trackId, slot]);
+  }
+
+  /** A slot is filled by one of poptart's own devices: its controls start where it says they do. */
+  _rememberDevice(key, device) {
+    const was = this._slotDevices.get(key);
+    this._slotDevices.set(key, device);
+    // Reloading the same device in the same slot leaves its controls where they are: an
+    // evaluation reloads every chain, and resetting to the defaults here would undo the
+    // `.param()` calls of the very evaluation doing the reloading.
+    if (was?.id === device.id) return;
+    this._devicePositions.set(key, devicePositions(device));
+    this._deviceDriven.delete(key);
+    // A different device in the slot is a different set of controls, so whatever was loaded onto
+    // the old one's is gone - which is the same rule the UGen follows (PoptartDevice.cpp's
+    // install), and the two have to agree or a control would be pointed at a slot holding
+    // nothing.
+    for (const held of [...this._deviceFiles.keys()]) {
+      if (held.startsWith(`${key}|`)) this._deviceFiles.delete(held);
+    }
+  }
+
+  /** The slot is empty, or holds a plugin: nothing of the device it held is still true. */
+  _forgetDevice(key) {
+    this._slotDevices.delete(key);
+    this._devicePositions.delete(key);
+    this._deviceDriven.delete(key);
+    for (const held of this._deviceFiles.keys()) {
+      if (held.startsWith(`${key}|`)) this._deviceFiles.delete(held);
+    }
+  }
+
+  /**
+   * What is in a slot and where its controls are, for a host that has to draw it - or null where
+   * the slot holds a plugin, which has its own window and its own way of being asked.
+   *
+   * `positions` is every control of the device, by id, 0..1; `driven` names what is moving any
+   * of them, so a window can draw that control as something it does not own.
+   */
+  deviceSlot(trackId, slot) {
+    const key = `${trackId}:${slot}`;
+    const device = this._slotDevices.get(key);
+    if (!device) return null;
+    // What has been loaded onto the controls that play a file, by the option slot it went into:
+    // the name a window prints on that control, and what a `.param()` written from it says.
+    const files = {};
+    for (const [held, one] of this._deviceFiles) {
+      if (!held.startsWith(`${key}|`)) continue;
+      const control = held.slice(key.length + 1);
+      files[control] = {};
+      for (const [ref, index] of one.byRef) files[control][index] = ref;
+    }
+    return {
+      id: device.id,
+      name: device.name ?? device.id,
+      kind: device.kind,
+      positions: { ...(this._devicePositions.get(key) ?? devicePositions(device)) },
+      driven: Object.fromEntries(this._deviceDriven.get(key) ?? []),
+      files,
+    };
+  }
+
+  /** Something other than a `.param()` value is moving this control - or has stopped. */
+  _noteDriver(trackId, slotIndex, paramName, by) {
+    const key = `${trackId}:${slotIndex}`;
+    const device = this._slotDevices.get(key);
+    if (!device) return;
+    const control = deviceParam(device, paramName);
+    if (!control) return;
+    if (by === null) {
+      this._deviceDriven.get(key)?.delete(control.id);
+      return;
+    }
+    if (!this._deviceDriven.has(key)) this._deviceDriven.set(key, new Map());
+    this._deviceDriven.get(key).set(control.id, by);
   }
   getParams(trackId, slotIndex) {
     return this._request('/poptart/getParams', [trackId, slotIndex]);
@@ -1510,8 +1597,21 @@ class OscEngine {
           // packs are never sliced at all.
         }));
         entry.status = 'ready';
+        // Whoever asked for one of these files before the pack was in. A device sample is the
+        // one caller that cannot just be dropped and retried on the next event: `.param("sample",
+        // "break:2")` is a setting rather than a stream of notes, and a dropped one would leave
+        // the device silent until something touched that line again.
+        const waiting = entry.waiting ?? [];
+        entry.waiting = null;
         // eslint-disable-next-line no-console
         console.log(`[poptart] ${what}: ${entry.files.length} file(s) loaded`);
+        for (const fn of waiting) {
+          try {
+            fn();
+          } catch (err) {
+            this._warnOnce(`pack-waiter:${ref}`, `[poptart] ${what}: ${err.message}`);
+          }
+        }
       })
       .catch((err) => {
         entry.status = 'error';
@@ -1784,6 +1884,14 @@ class OscEngine {
     // and silently does nothing on the desktop.
     const device = this._slotDevices.get(`${trackId}:${slotIndex}`);
     if (device) {
+      // A control that plays a FILE, named rather than numbered: `.param("sample", "break:2")`.
+      // The file has to be found, read and handed over before the control can be pointed at it,
+      // so this is its own path - see _loadDeviceSample.
+      const takesFile = deviceParam(device, paramName);
+      if (typeof value === 'string' && takesFile?.takes === 'sample') {
+        this._loadDeviceSample(trackId, slotIndex, device, takesFile, value, targetTime);
+        return;
+      }
       const position = paramPosition(device, paramName, value);
       if (position === null) {
         const control = deviceParam(device, paramName);
@@ -1791,6 +1899,13 @@ class OscEngine {
           ? `[poptart] ${JSON.stringify(value)} is not a value ${device.id}'s "${control.name}" can take`
           : `[poptart] ${device.id} has no control called "${paramName}"`);
         return;
+      }
+      // Remembered, because nothing can read it back: this is the only record of where the
+      // device's controls are, and a window opened later is drawn from it.
+      const control = deviceParam(device, paramName);
+      if (control) {
+        const held = this._devicePositions.get(`${trackId}:${slotIndex}`);
+        if (held) held[control.id] = position;
       }
       this._send('/poptart/setParam', [trackId, slotIndex, paramName, position, this._latency(targetTime)]);
       return;
@@ -1802,13 +1917,95 @@ class OscEngine {
     if (typeof value !== 'number' || !Number.isFinite(value)) return;
     this._send('/poptart/setParam', [trackId, slotIndex, paramName, value, this._latency(targetTime)]);
   }
+  /**
+   * `.param("sample", "break:2")`: a file loaded onto a device's control, and the control pointed
+   * at it.
+   *
+   * THE SLOT IT LANDS IN IS THE BROWSER'S RULE, not a convenience: a loaded file takes the next
+   * spare entry on the control's own option list, past the entries the descriptor ships with, and
+   * when they are all taken the oldest goes (web-audio-engine.mjs's _spareOption). That is what
+   * makes `.param("sample", "<a b>")` switch between two loaded files rather than reload one, and
+   * `.param("sample", 1)` mean the same file on both engines.
+   *
+   * The frames themselves never pass through here. sclang has already read the pack into
+   * buffers for the sampler, so what goes over is the pack and the file's place in it, and the
+   * UGen copies the samples out of that buffer on its own non-realtime thread.
+   */
+  _loadDeviceSample(trackId, slotIndex, device, control, ref, targetTime) {
+    const key = `${trackId}:${slotIndex}|${control.id}`;
+    let held = this._deviceFiles.get(key);
+    if (!held) {
+      held = { byRef: new Map(), loaded: 0 };
+      this._deviceFiles.set(key, held);
+    }
+    const already = held.byRef.get(ref);
+    if (already !== undefined) {
+      // Loaded on this control already: this is the ordinary case, because a pattern re-sends
+      // the same string every time it is polled.
+      this.setParam(trackId, slotIndex, control.id, already, targetTime);
+      return;
+    }
+    const at = String(ref).indexOf(':');
+    const pack = at > 0 ? String(ref).slice(0, at).trim().replace(/^sp:/, '') : '';
+    const want = at > 0 ? String(ref).slice(at + 1).trim() : '';
+    if (!pack || !want) {
+      this._warnOnce(`device-sample:${ref}`,
+        `[poptart] ${JSON.stringify(ref)} is not a sample - write "pack:index" or "pack:file"`);
+      return;
+    }
+    const entry = this._ensurePack(pack);
+    if (entry.status === 'loading') {
+      // Applied when the pack is in, rather than dropped: see _ensurePack.
+      (entry.waiting ??= []).push(() => this._loadDeviceSample(trackId, slotIndex, device, control, ref, targetTime));
+      return;
+    }
+    if (entry.status !== 'ready') return;    // _ensurePack has already said what went wrong
+    const file = this._fileInPack(entry, want);
+    if (file === null) {
+      this._warnOnce(`device-sample:${ref}`,
+        `[poptart] there is no sample called ${JSON.stringify(ref)} - "${pack}" has ${entry.files.length} file(s)`);
+      return;
+    }
+    // The slot it goes in, and the control pointed at it: the control carries a value from here
+    // on, so the pattern's next poll is a lookup rather than another load.
+    const first = control.options ? control.options.length : 0;
+    const capacity = control.capacity ?? first + 1;
+    let index = -1;
+    for (let i = first; i < capacity; i++) {
+      if (![...held.byRef.values()].includes(i)) { index = i; break; }
+    }
+    if (index < 0) {
+      index = first + (held.loaded % Math.max(1, capacity - first));
+      for (const [other, took] of held.byRef) if (took === index) held.byRef.delete(other);
+    }
+    held.loaded += 1;
+    held.byRef.set(ref, index);
+    const paramIndex = device.params.findIndex((p) => p.id === control.id);
+    this._send('/poptart/deviceSample', [trackId, slotIndex, paramIndex, index, pack, file]);
+    this.setParam(trackId, slotIndex, control.id, index, targetTime);
+  }
+
+  /** A file's place in a pack, by index or by name, or null. */
+  _fileInPack(entry, want) {
+    const n = Number(want);
+    if (Number.isInteger(n) && n >= 0) return entry.files.length ? n % entry.files.length : null;
+    const lower = want.toLowerCase();
+    const found = entry.files.findIndex((f) => {
+      const base = String(f.path).split('/').pop().toLowerCase();
+      return base === lower || base.replace(/\.[^.]+$/, '') === lower;
+    });
+    return found >= 0 ? found : null;
+  }
+
   // The pattern is about to drive this parameter by poll: sclang reads what it is now and keeps
   // it, and releaseParam puts it back - so a `.param()` that stops speaking for a parameter (the
   // off side of a .when(), a call deleted in an eval) leaves the plugin as if it had never been.
   holdParam(trackId, slotIndex, paramName) {
+    this._noteDriver(trackId, slotIndex, paramName, 'pattern');
     this._send('/poptart/holdParam', [trackId, slotIndex, paramName]);
   }
   releaseParam(trackId, slotIndex, paramName, targetTime) {
+    this._noteDriver(trackId, slotIndex, paramName, null);
     this._send('/poptart/releaseParam', [trackId, slotIndex, paramName, this._latency(targetTime)]);
   }
   // ir: { shape: 'sine'|'saw'|'isaw'|'tri'|'square'|'rand', rateHz, phaseCycles, min, max } for
@@ -1819,6 +2016,7 @@ class OscEngine {
   // zero further OSC traffic after this call. Custom shapes go through a separate handler that
   // compiles a small SynthDef from the breakpoints (IEnvGen driven by a Sweep phase).
   setParamLFO(trackId, slotIndex, paramName, ir) {
+    this._noteDriver(trackId, slotIndex, paramName, 'lfo');
     if (ir.shape === 'custom') {
       this._send('/poptart/setParamShapeLFO', [
         trackId,
@@ -1856,6 +2054,7 @@ class OscEngine {
     this._send('/poptart/setParamShape', [trackId, slotIndex, paramName, index, this._latency(targetTime)]);
   }
   clearParamLFO(trackId, slotIndex, paramName) {
+    this._noteDriver(trackId, slotIndex, paramName, null);
     this._send('/poptart/clearParamLFO', [trackId, slotIndex, paramName]);
   }
   // Re-pins a free-running LFO's phase (0..1) to the scheduler's clock at targetTime - the
@@ -1867,6 +2066,7 @@ class OscEngine {
   // ADSR envelope retriggered by the track's note on/offs - same set-once Tier-2 contract as
   // setParamLFO (see the poptart_env SynthDef + gate wiring in sc/poptart.scd).
   setParamEnv(trackId, slotIndex, paramName, ir) {
+    this._noteDriver(trackId, slotIndex, paramName, 'env');
     this._send('/poptart/setParamEnv', [
       trackId,
       slotIndex,
@@ -1881,6 +2081,7 @@ class OscEngine {
     ]);
   }
   clearParamEnv(trackId, slotIndex, paramName) {
+    this._noteDriver(trackId, slotIndex, paramName, null);
     this._send('/poptart/clearParamEnv', [trackId, slotIndex, paramName]);
   }
 
@@ -1987,9 +2188,11 @@ class OscEngine {
   // the scaled value to a control bus mapped onto the parameter - the CC sibling of
   // setParamLFO's mechanism, zero per-event traffic from Node and no poll latency.
   setParamCC(trackId, slotIndex, paramName, ir) {
+    this._noteDriver(trackId, slotIndex, paramName, 'cc');
     this._send('/poptart/setParamCC', [trackId, slotIndex, paramName, ir.device, ir.cc, ir.channel ?? 0, ir.min, ir.max]);
   }
   clearParamCC(trackId, slotIndex, paramName) {
+    this._noteDriver(trackId, slotIndex, paramName, null);
     this._send('/poptart/clearParamCC', [trackId, slotIndex, paramName]);
   }
 
@@ -2007,9 +2210,11 @@ class OscEngine {
   // writes the scaled argument to a control bus mapped onto the parameter - setParamCC's
   // mechanism with an OSC address in place of a device/cc/channel binding.
   setParamOSC(trackId, slotIndex, paramName, ir) {
+    this._noteDriver(trackId, slotIndex, paramName, 'osc');
     this._send('/poptart/setParamOSC', [trackId, slotIndex, paramName, ir.osc, ir.index ?? 0, ir.min, ir.max]);
   }
   clearParamOSC(trackId, slotIndex, paramName) {
+    this._noteDriver(trackId, slotIndex, paramName, null);
     this._send('/poptart/clearParamOSC', [trackId, slotIndex, paramName]);
   }
 
@@ -2101,6 +2306,7 @@ class OscEngine {
   // (no `{ note }` in the call) means the source's own pitch, and DEFAULT_ROUTE_NOTE for a
   // source that has none - a drum pattern, which is what a ducker is usually keyed off.
   injectMidi(trackId, slot, name, note = null) {
+    this._tellNoteRoute(trackId, slot, true);
     if (this._isDevice(name)) {
       this._send('/poptart/injectMidiDevice', [trackId, slot, this._deviceName(name), note ?? DEFAULT_ROUTE_NOTE]);
       return;
@@ -2108,8 +2314,22 @@ class OscEngine {
     this._addMidiRoute(name, trackId, slot, note);
   }
   clearMidiInject(trackId, slot) {
+    this._tellNoteRoute(trackId, slot, false);
     this._removeMidiRoute(trackId, slot);
     this._send('/poptart/clearMidiInject', [trackId, slot]); // frees any device MIDIdefs for this sink
+  }
+
+  /**
+   * "notes are (no longer) routed to this slot", for one of poptart's own devices.
+   *
+   * The ducker is the device that asks: with a route set its dip fires on those notes and not on
+   * the clock, and the one thing it cannot work out for itself is the route being taken AWAY -
+   * no notes arriving is also what a quiet bar sounds like. A plugin needs no telling, so a slot
+   * holding one sends nothing.
+   */
+  _tellNoteRoute(trackId, slot, routed) {
+    if (!this._slotDevices.get(`${trackId}:${slot}`)) return;
+    this._send('/poptart/deviceNoteRoute', [trackId, slot, routed ? 1 : 0]);
   }
 
   // --- internals ---

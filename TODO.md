@@ -78,6 +78,45 @@ no completion notes.
     tweaks, all named in song-sync.js.
 
 ---
+[ ] What a device on the desktop still cannot be handed. A device can now be given a FILE -
+    `.param("sample", "break:2")` resolves the name against the sample packs sclang has already
+    read, hands the device the buffer by number, and the UGen copies the frames out of it on the
+    non-realtime thread (`/sample` in PoptartDevice.cpp, `loadSample` on the controller,
+    `_loadDeviceSample` in osc-engine). Three things that path does not carry, and one it cannot
+    ask for:
+
+    (1) A WAVETABLE built from a file - `.param("Table", "mysample")`. The frames have to be cut
+        into a mip pyramid before they are of any use to the oscillator, which the browser does
+        on the main thread before it posts them; here that is another stage of the same
+        asynchronous command, between the copy and the hand-over. Until then the table control
+        reads the nine shipped tables and a slot past them plays the first, which is what the
+        browser plays before a table has arrived.
+
+    (2) A DRAWN curve or window - Distort's shaper, Granular's grain window, and any other
+        control whose descriptor says `takes: 'shape'`. These are a few hundred floats rather
+        than a file, so they do not want the sample path at all: they want a `/shape` unit
+        command carrying the points outright, which is small enough for one message and needs no
+        buffer, no pack and no file. Today a drawn mode behaves as it does in the browser before
+        its table has arrived - a straight clip for Distort, the first window for Granular - and
+        every named curve and window works fully.
+
+    (3) A STEREO file. The host sums a file to one channel on the way in, which is what a
+        granulator wants and what the browser's granulator does for itself; the browser's
+        CONVOLVER instead convolves each side with that side of the response, so a stereo impulse
+        response is mono here. The five synthesized spaces are true stereo on both engines. The
+        fix is a channel count on the sample hook and an interleaved hand-over, which only the
+        convolver would read.
+
+    (4) WORK OFF THE AUDIO THREAD. A convolver lays its response out when the space changes,
+        which is a knob turn, which is the audio thread - a millisecond or two of one block's
+        deadline (the expensive partitions are built a few per block afterwards; see
+        `Convolver::prepare`). Every device that builds something from a setting has the same
+        problem waiting for it. The ABI has no hook for "do this where it is allowed to take
+        time", and the UGen's own open/close already crosses exactly those threads, so the shape
+        of the answer is there to copy.
+
+    The rest of the device port - what runs, what holds it together, and what is missing around
+    it - is the entry further down ("The web engine's devices on the desktop").
 
 [ ] Patternable LFO rate. A modulator's rate is the one argument that still refuses a pattern:
     parseRate() takes a number of cycles or an "0.5hz" string and throws on anything else, and
@@ -784,63 +823,127 @@ no completion notes.
     what the build does now, and it costs a repository to maintain in exchange for a pin nobody
     else can move.
 
-[ ] The web engine's devices on the desktop - what is left of it. The ported C++ devices now run
-    in scsynth: `synth("Plaits")`, `synth("Rings")`, `synth("Elements")`, `synth("Braids")`,
-    `fx("Clouds")`, `fx("Galactic")`, `fx("CloudSeed")` and `fx("Shift")` open the same device
-    the browser build plays, with the same control names and the same 0..1 positions, through one
-    generic `PoptartDevice` UGen that loads a device at runtime the way `VSTPlugin` loads a
-    plugin (packages/osc-engine/native/devices/, built by web-engine's
-    build/devices/native.mjs from the same recipes as the .wasm). A fresh install therefore makes
-    a sound without a third-party plugin, which was the point.
+[ ] The web engine's devices on the desktop - what is left of it. The WHOLE catalog now runs in
+    scsynth, through one generic `PoptartDevice` UGen that loads a device at runtime the way
+    `VSTPlugin` loads a plugin: the ported C++ modules (Plaits, Rings, Elements, Braids, Clouds,
+    Galactic, CloudSeed, Shift) and poptart's own (Wavetable, FM, Granular, Filter, EQ, Distort,
+    Crush, Overdrive, Compressor, Multiband, Limiter, Ducker, Delay, GrainEcho, Stutter, Chorus,
+    Flanger, Phaser, Reverb, Convolver). Same names, same control names, same 0..1 positions on
+    both engines; the names are in the plugin browser and in `synth("`/`fx("` completion,
+    `.param("` completes from the catalog as soon as a name is typed, and double-clicking a
+    device's name opens a window generated from its descriptor by the same web-engine module the
+    browser build generates one with.
 
-    (1) The hand-written devices - FM, Wavetable, Granular and our own effects - are still
-        browser-only. They are thin wrappers over the shared core in web-engine's `src/dsp/`:
-        about 2,000 lines of `Float32Array` loops that allocate nothing in the hot path, which is
-        already C++ shaped. Either SynthDef mirrors built from SC's own UGens - fast per effect,
-        parity by ear; `VOsc` and `GrainBuf` come close for Wavetable and Granular, but FM does
-        not survive it, since operator feedback through `LocalIn`/`LocalOut` is delayed by a
-        block - or the JS DSP rewritten in C++ once, behind the same `pd_` shim, so it compiles
-        to both wasm and a UGen and both engines run the same DSP bit for bit. The existing tests
-        (`fmsynth.test.mjs`, `wavetable.test.mjs`, `filters.test.mjs`, ...) can then be pointed at
-        the wasm build for parity. ~1.5 weeks for the shared core and the three synths, ~1 more
-        for the effects. The effects can also be left: the desktop has plugin effects, and the
-        sampler's grain mode covers most of what Granular does.
+    The ported modules are one source compiled twice, so they cannot drift. poptart's own devices
+    ARE written twice - their DSP was written in JavaScript for an AudioWorklet, which a server
+    cannot run - and what holds the two together is osc-engine's native-device-parity.test.mjs:
+    the browser's processor and the compiled device are played the same input with the same
+    controls and compared sample for sample, every device, at its defaults and at four settings
+    across its range. A change to one side that is not a change to the other fails there.
 
-        That route changes the web build too, mostly for the better. For tight float loops wasm
-        is 1.2-2x V8's best JIT output, not more; the larger gain is consistency - no JIT
-        warm-up, deoptimization or GC pauses, and dropouts come from spikes, not the average.
-        Wasm has 128-bit SIMD in every current browser and JS has none, so filters, oversampling
-        and the FM matrix have a later 2-3x available. Each block crosses the JS-to-wasm boundary
-        once, which the `pd_` shim already pays the right way (params in a shared buffer, one
-        `pd_process` per block).
+    The Convolver is the exception to both halves of that: in the browser it is a ConvolverNode,
+    so there is no JavaScript to port and none to compare against. What it is held to instead is
+    CHROMIUM - Blink's reverb.cc, reverb_convolver.cc and biquad.cc, cited where each is used -
+    and the test checks the parts that can be checked against a definition rather than against a
+    second opinion: the convolution against a direct sum over its taps (which is what catches a
+    partitioned stage a sample out of alignment), the gain a normalized response is given against
+    the closed form of Blink's own formula, and the five synthesized spaces against the browser's
+    own synthesizeImpulse, which is poptart's JavaScript and runs here as it is.
 
-    (2) A device window on the desktop. The panel is already descriptor-driven in the shared
-        client.js, and `getParams` answers for a native slot, so the list of controls is there;
-        what is missing is the window itself and everything that hangs off editing in one - the
-        auto-pin capture (`/api/pluginEdits`), conf mode, and `.preset()` on a device. The
-        controller writes and reads a program already (the positions as JSON, which is the whole
-        of a ported device's state), so `synth("Plaits", { state })` has a path; it has never
-        been round-tripped through Node's gz64 framing. A native device has no editor to open and
-        no `parameterAutomated` to hear, so until the window exists, conf is deaf to one.
+    (1) What a device can be handed, and what it still cannot.
 
-    (3) The device names are not in the editor's plugin browser or its autocomplete, which read
-        the plugin scan. The catalog to add is native/devices/devices.json.
+        A FILE now reaches a device: `.param("sample", "break:2")` resolves the name against the
+        sample packs sclang has already read for the sampler, hands the device the buffer by
+        number, and the UGen copies the frames out of it on the non-realtime thread and swaps the
+        pointer in on the audio thread (`/sample` in PoptartDevice.cpp, `loadSample` on the
+        controller, `_loadDeviceSample` in osc-engine). The slot a file lands in is the browser's
+        own rule, so `.param("sample", 1)` means the same file on both engines.
 
-    (4) Off macOS. The .scx is committed as a universal macOS build; Windows and Linux need it
+        What it does NOT carry - a wavetable cut from a file, a drawn curve or window, a stereo
+        impulse response - and the one thing a device cannot ask for at all, which is work off
+        the audio thread, are the entry at the top of this file.
+
+    (2) What hangs off the device window, now that there is one. Double-clicking a device's
+        name opens the panel generated from its descriptor (web-engine's panel.mjs, which the
+        browser build uses too - web-app's server stages that package for its sources alone), and
+        a finished gesture in one is filed the way a gesture in a plugin's window is: a
+        `.param()` while conf is armed for the track, and otherwise a capture of the whole device
+        into `{ state }`, which works because a device's program IS its control positions
+        (PoptartDevice.sc's writeProgram). What is missing:
+          - a modulated control is drawn where the modulator was POINTED rather than where it has
+            got to. The browser follows one from the processor's own reports; scsynth has nothing
+            to report with - a modulator is a control bus mapped onto the UGen's input, read by
+            nobody - so `/api/deviceLive` answers with nothing rather than a guess. This is the
+            cheapest thing on this list and needs no C++ at all: the controller already keeps a
+            `positions` array of everything that was `/set`, and a MAPPED control's value is a
+            control bus sclang can `Bus.get`, so one OSCdef, one Node method and a real answer
+            from that endpoint would do it. The better version is a `/report` unit command
+            answering through `SendNodeReply` - the path `/poptart/deviceOpened` already uses -
+            because that reports what the DEVICE saw rather than what sclang sent, and it is the
+            channel the grains below need anyway.
+          - the live figures that go with it, which are two different jobs. An equalizer's curve
+            drawn over what an analyzer hears rides machinery that already exists (the mixer runs
+            analyzers, capped at eight and on playing tracks only), so it is wiring plus a
+            decision about that budget. A granulator's grains moving through the file are the
+            device reporting its own internal state, which is new ABI - a `pd_report` hook beside
+            the others in pd-device.h - plus the reply channel from the point above, so that one
+            comes first.
+          - `.preset()` on a device is probably already working and has simply never been
+            tested: sclang's getPluginState asks for `ctl.info` and `ctl.writeProgram`, both of
+            which the device controller implements, and Node gzips whatever bytes the file holds
+            without caring that they are JSON rather than a plugin's chunk. A capture-and-restore
+            in the sclang render test is what would settle it.
+
+    (3) Off macOS. The .scx is committed as a universal macOS build; Windows and Linux need it
         built there, as the pitch shifter does (the private SC build covers the Windows side).
         The x86_64 slice is compiled but has never been run - nothing here has an Intel Mac.
 
-    (5) Notes land on a block boundary (5.3ms at the default block size), because a note is a
+    (4) Notes land on a block boundary (5.3ms at the default block size), because a note is a
         unit command and those are performed between blocks. Plugin slots have always been the
         same, so this is parity rather than a regression, but the sampler is sample-accurate and
-        these could be: the command would carry an offset into the block and the UGen would split
-        its render at it, which is what it already does for a moving bend. The track's bend
-        reaches a native device as a control-rate signal for the same reason it is cheap - one
-        value per block, which its own pitch smoothing follows - and the UGen will track an
-        audio-rate one in 32-frame pieces if the def is ever wired to give it one.
+        these could be - and probably cheaply. `World` carries `mSampleOffset`, "offset in the
+        buffer of current event time", which is what OffsetOut reads to start a voice mid-block;
+        if it is populated while a unit command is performed (the first thing to test, and a
+        twenty-line experiment), a note needs no protocol change at all: the command reads the
+        offset itself, and the UGen splits its render at it exactly as it already splits for a
+        moving bend. The devices would take an offset on their note calls, which the browser's
+        already do (queueNoteOn's third argument). It is also why the ducker's note-triggered dip
+        starts at a block edge where the browser's starts at the note's own onset.
+
+    (5) A control is read once per block rather than per sample. The browser reads every
+        continuous control per sample while a signal is moving it, which is what makes an `lfo()`
+        on a filter cutoff a sweep rather than a staircase (filter.mjs re-tunes per sample the
+        moment its cutoff is moving, and has a still-cutoff fast path beside it). A device here is
+        handed one value for the whole of scsynth's block - 256 frames, 5.3ms - because that is
+        how often a control bus changes. The ported modules behave that way on both engines.
+
+        Two things make it less bad than it sounds. Six of poptart's own devices already walk
+        their coefficients across the block rather than stepping them (the biquad's `glideTo`,
+        used by Filter, EQ, Distort, Crush, Delay, Overdrive and Multiband), so those do not
+        zipper today whatever the control rate is; and the real bottleneck is not the device but
+        the MODULATOR - a control bus changes once per block, so nothing downstream of a
+        `SinOsc.kr` can be finer than 5.3ms however often it is read.
+
+        There are two tiers to fixing it. The cheap one touches no device and does not change the
+        ABI: the UGen ALREADY follows a moving bend in 32-frame pieces (kBendPiece), so giving it
+        a few audio-rate control inputs, an `.ar` variant of the modulator defs writing to an
+        audio bus, and a re-fill of the parameter block per piece puts every control at 0.67ms -
+        eight times finer - for the price of one C++ file, the track def builder and a mapping
+        message. True per-sample parity is the other tier: the parameter block becomes a block per
+        a-rate control and each device reads it the way its own .mjs does, which is mechanical but
+        touches all of them (the parity test would catch each mistake, and the harness would then
+        be feeding moving controls, which it never has).
 
     (6) Live verification. Everything above is unit-tested and rendered offline through a real
-        scsynth (native-device-sclang.test.js renders Plaits, a control change and Galactic's
-        tail; native-devices.test.js checks every argument against the browser's own rules), and
-        none of it has been played through a running engine: a device opening on a live track,
-        swapping kinds mid-set, surviving a re-eval, metering in the ctrl+G mixer.
+        scsynth (native-device-sclang.test.js renders Plaits, a control change, Galactic's tail,
+        the Wavetable synth playing a note, the Filter's cutoff opening and shutting, the FM
+        synth's last control, the granulator playing a file read into one of the server's own
+        buffers, and the convolution reverb's tail), and none of it has been played through a
+        running engine: a device opening on a live track, swapping kinds mid-set, surviving a
+        re-eval, metering in the ctrl+G mixer, a synced delay following setbpm(), a ducker keyed
+        off another track, a window opened on a device while the pattern is driving it.
+
+    In value for effort, if this is picked up again: the note offset (4) is the only one anybody
+    can HEAR and is probably a day; the modulated-knob follow (2) is half a day and immediately
+    visible; the `.preset()` round trip may cost nothing but a test; then the cheap tier of (5),
+    then the live figures, then per-sample controls.

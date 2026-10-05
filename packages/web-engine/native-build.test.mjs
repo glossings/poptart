@@ -56,7 +56,7 @@ void pd_process(int frames) {
 `;
 
 test('structify lifts a wrapper into a struct without touching its DSP', () => {
-  const out = structify(WRAPPER, { id: 'Thing', synth: true });
+  const out = structify(WRAPPER, { id: 'Thing' });
 
   // The includes stay at the top, outside everything.
   assert.ok(out.indexOf('#include "thing/dsp/thing.h"') < out.indexOf('struct Device'));
@@ -89,20 +89,22 @@ test('structify lifts a wrapper into a struct without touching its DSP', () => {
   assert.ok(out.includes('delete g_thing;'));
 
   // And the one line that makes it reachable: a factory the registry can call.
-  assert.ok(out.includes('extern "C" PdAny* pd_make_Thing() { return new PdAdapter<pd_Thing::Device, true>(); }'));
+  assert.ok(out.includes('extern "C" PdAny* pd_make_Thing() { return new PdAdapter<pd_Thing::Device>(); }'));
 });
 
-test('structify marks an effect as one, so its missing note calls are never compiled', () => {
-  const fx = structify(WRAPPER, { id: 'Thing', synth: false });
-  assert.ok(fx.includes('PdAdapter<pd_Thing::Device, false>'));
+test('a wrapper says nothing about its kind: the adapter works it out from the device', () => {
+  // Which of the note calls a device takes is detected from the struct (PdTakesNotes in
+  // pd-device.h) rather than passed in here, because an effect's wrapper has no note functions
+  // and the ducker is an effect that does - one flag could not say both.
+  assert.ok(structify(WRAPPER, { id: 'Thing' }).includes('PdAdapter<pd_Thing::Device>'));
 });
 
 test('structify refuses a wrapper it does not recognise rather than compiling something else', () => {
-  assert.throws(() => structify('#include "x.h"\nint main() {}\n', { id: 'X', synth: false }),
+  assert.throws(() => structify('#include "x.h"\nint main() {}\n', { id: 'X' }),
     /not shaped the way the native build expects/);
-  assert.throws(() => structify(WRAPPER.replace('Thing* g_thing = nullptr;', 'Thing* g_thing;'), { id: 'Thing', synth: false }),
+  assert.throws(() => structify(WRAPPER.replace('Thing* g_thing = nullptr;', 'Thing* g_thing;'), { id: 'Thing' }),
     /not initialised to nullptr/);
-  assert.throws(() => structify(WRAPPER.replace('new Thing()', 'new float[64]'), { id: 'Thing', synth: false }),
+  assert.throws(() => structify(WRAPPER.replace('new Thing()', 'new float[64]'), { id: 'Thing' }),
     /allocates an array/);
 });
 
@@ -122,15 +124,27 @@ const DEVICES = [
     sidechain: true,
     params: [{ id: 'mix', name: 'Mix', min: 0, max: 1, default: 1, step: 0, curve: 'lin', curveExp: 1, ui: 'knob', group: '', rate: 'a' }],
   },
+  {
+    id: 'Dipper',
+    kind: 'fx',
+    sidechain: true,
+    notes: true,
+    params: [{ id: 'amount', name: 'Amount', min: 0, max: 1, default: 1, step: 0, curve: 'lin', curveExp: 1, ui: 'knob', group: '', rate: 'a' }],
+  },
 ];
 
 test('the registry carries each control as the position it rests at, and the device flags', () => {
   const src = registrySource(DEVICES);
   assert.ok(src.includes('extern "C" PdAny* pd_make_Thing();'));
-  assert.ok(src.includes('extern "C" int pd_device_count() { return 2; }'));
-  // An instrument, no sidechain, two controls; and an effect that takes one.
-  assert.ok(src.includes('{ "Thing", 1, 0, 2, kThingParams, &pd_make_Thing },'));
-  assert.ok(src.includes('{ "Crosser", 0, 1, 1, kCrosserParams, &pd_make_Crosser },'));
+  assert.ok(src.includes('extern "C" int pd_device_count() { return 3; }'));
+  // An effect the descriptor says takes notes is marked as taking them, so the UGen passes a
+  // routed track's notes on to it instead of dropping them for not being an instrument.
+  assert.ok(src.includes('{ "Dipper", 0, 1, 1, 1, kDipperParams, &pd_make_Dipper },'));
+  // An instrument (played by notes, no sidechain, two controls); and an effect that takes a
+  // sidechain and no notes. The third column is whether notes reach it, which for an instrument
+  // is always yes and for an effect is yes only where the descriptor says so (the ducker).
+  assert.ok(src.includes('{ "Thing", 1, 1, 0, 2, kThingParams, &pd_make_Thing },'));
+  assert.ok(src.includes('{ "Crosser", 0, 0, 1, 1, kCrosserParams, &pd_make_Crosser },'));
   // The default is written as a POSITION, because that is what the UGen holds a control at
   // until a pattern moves it: engine 8 of 0..23, and an exponential cutoff's 2000 Hz of
   // 20..20000, which is not at 10% of its travel.
@@ -145,7 +159,7 @@ test('the registry carries each control as the position it rests at, and the dev
 test('the catalog is what the desktop engine resolves a name against', () => {
   const doc = JSON.parse(catalogJson(DEVICES));
   // Sorted, so a rebuild that changed nothing changes no bytes.
-  assert.deepEqual(doc.devices.map((d) => d.id), ['Crosser', 'Thing']);
+  assert.deepEqual(doc.devices.map((d) => d.id), ['Crosser', 'Dipper', 'Thing']);
   const thing = doc.devices.find((d) => d.id === 'Thing');
   assert.equal(thing.kind, 'synth');
   assert.equal(thing.sidechain, false);

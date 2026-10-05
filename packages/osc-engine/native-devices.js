@@ -74,6 +74,64 @@ function deviceParamArgs(device) {
   return out;
 }
 
+/**
+ * The devices in the shape the editor reads a PLUGIN row in: the list the plugin browser draws
+ * and the list `synth("`/`fx("` completes against.
+ *
+ * Devices are offered beside the plugins rather than in a list of their own because to whoever is
+ * typing they are the same decision - what goes in this slot - and because a device that is not
+ * in that list is a feature nobody can find. The browser build hands over exactly this shape
+ * (web-app/public/web/host.mjs, devicesAsPlugins), down to the "built in" format, so a row reads
+ * the same on either engine.
+ */
+function deviceRows(opts) {
+  return nativeDevices(opts).map((d) => ({
+    name: d.name ?? d.id,
+    format: 'built in',
+    isInstrument: d.kind === 'synth',
+  }));
+}
+
+/**
+ * A device's controls as the params endpoints answer: what `.param("…` completes against, and
+ * what the params panel draws.
+ *
+ * Answered from the catalog rather than by asking the engine, which is the difference between a
+ * control list that is there as soon as the name is typed and one that waits for the device to
+ * open. The index is the position in this list, which is the index every other path on the
+ * desktop addresses a control by (see PoptartDeviceDesc.findParamIndex).
+ */
+function deviceParamRows(device) {
+  if (!device) return [];
+  return device.params.map((p, index) => ({
+    name: p.name ?? p.id,
+    label: p.unit ?? '',
+    index,
+    id: p.id,
+    min: p.min,
+    max: p.max,
+    default: p.default,
+    ui: p.ui ?? null,
+    options: p.options ? [...p.options] : null,
+    rate: p.rate ?? null,
+  }));
+}
+
+/**
+ * Where every control of a freshly loaded device rests, by control id, as positions.
+ *
+ * The UGen holds a control at its default until something moves it, so this is what the engine
+ * knows about a slot the moment it is filled - and what a device window opened before any
+ * `.param()` has run has to draw. Positions rather than values because a position is what the
+ * engine sends, what a modulator speaks in, and what every other half of this already carries.
+ */
+function devicePositions(device) {
+  const out = {};
+  if (!device) return out;
+  for (const p of device.params) out[p.id] = normalize(p, p.default);
+  return out;
+}
+
 /** One of a device's controls, by the id or the display name `.param()` was given. */
 function deviceParam(device, name) {
   if (!device || typeof name !== 'string') return null;
@@ -166,6 +224,9 @@ module.exports = {
   nativeDevice,
   deviceParam,
   deviceParamArgs,
+  deviceParamRows,
+  devicePositions,
+  deviceRows,
   paramPosition,
   forgetNativeDevices,
 };

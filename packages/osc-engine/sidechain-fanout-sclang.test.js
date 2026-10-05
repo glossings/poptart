@@ -53,6 +53,10 @@ var sourceFeeds = IdentityDictionary.new;
 var namedBuses = IdentityDictionary.new;
 var silentBus = Bus.audio(srv, 2), trashBus = Bus.audio(srv, 2);
 var acquireSourceFeed, releaseSourceFeed, wireAudio, unwireAudio, scKey;
+// Wiring a route tells whatever is in that slot whether it now has a key (tellKeyPatched, for
+// poptart's own compressor and ducker). The real one is lifted in below; here the slots hold no
+// controllers at all, so it has nothing to tell and the routing is what is under test.
+var tellKeyPatched;
 var awaitTrack, acquireBus, releaseBus;
 var recGroup = Group.basicNew(srv), levelGroups = [Group.basicNew(srv)], trackLevels, reorderTracks;
 // Real (never-created) nodes for the track's synth and group: .set/.moveAfter just put an OSC
@@ -70,6 +74,7 @@ releaseBus = { |name| };
 awaitTrack = { |key, timeoutSec = 5| tracks[key] };
 
 ${extract('scKey')}
+${extract('tellKeyPatched')}
 ${extract('acquireSourceFeed')}
 ${extract('releaseSourceFeed')}
 ${extract('wireAudio')}

@@ -133,6 +133,8 @@ PoptartDeviceController {
     var <>parameterAutomated;
     var positions;      // the last position written to each control, by index
     var <>deviceName;
+    // The tempo and the beat the transport was last at, so either can be sent on its own.
+    var tempo = 120, beatPos = 0;
 
     *new { |synth, id, synthDef|
         var def = synthDef ?? { SynthDescLib.global.at(synth.defName).def };
@@ -149,7 +151,9 @@ PoptartDeviceController {
         synth = argSynth;
         id = argId;
         synthIndex = index;
-        positions = Array.fill(128, 0);
+        // One entry per control, with room for the widest device (the FM synth's 148) and the
+        // UGen's own limit (kMaxParams in PoptartDevice.cpp) above that.
+        positions = Array.fill(192, 0);
         midi = PoptartDeviceMIDIProxy(this);
     }
 
@@ -276,12 +280,55 @@ PoptartDeviceController {
         ^"{ \"device\": \"%\", \"params\": { % } }".format(deviceName ? "", parts.join(", "))
     }
 
-    // A ported device has no host transport to mirror and no editor window of its own: its panel
-    // is drawn by poptart from the descriptor (the shared client.js already draws it for the web
-    // build). These exist so the plugin paths can call them without a kind check.
+    // The tempo and the transport, which the devices that are synced to a division of the beat
+    // read - a delay, a chorus, the stutter, the ducker. Sent as one message because the device
+    // is given the position in seconds and needs the tempo to work that out (see cmdTransport in
+    // PoptartDevice.cpp), and remembered here so either call can be made on its own: poptart
+    // sends a tempo on a setbpm() and a position when the transport relocates.
+    //
+    // `setPlaying` has nothing to mirror: a device has no host transport to start, and the only
+    // thing that stops it sounding is the chain going quiet. It stays so the plugin paths can
+    // call it without a kind check, as `editor` does.
     setPlaying { |playing| }
-    setTempo { |bpm| }
-    setTransportPos { |beats| }
+
+    setTempo { |bpm|
+        tempo = bpm ? tempo;
+        this.sendMsg('/transport', tempo.asFloat, beatPos.asFloat);
+    }
+
+    setTransportPos { |beats|
+        beatPos = beats ? beatPos;
+        this.sendMsg('/transport', tempo.asFloat, beatPos.asFloat);
+    }
+
+    /**
+     * Whether anything is routed into this slot's key input, and whether a track's notes are.
+     *
+     * The compressor and the ducker behave differently with a key and without one, and the aux
+     * bus is there whether a route is or not (it reads a silent bus until one is wired), so
+     * silence on it says nothing - this is how the device is told. Called by whoever wires or
+     * unwires the route; see wireAudioRoute and the MIDI injector in poptart.scd.
+     */
+    /**
+     * A file for the control that plays one: a granulator's sample, a convolver's response.
+     *
+     * The buffer is handed over by NUMBER rather than by content - the UGen reads the frames out
+     * of it itself, on the non-realtime thread - so this is one small message however long the
+     * file is, and the buffer goes on belonging to whoever allocated it.
+     */
+    loadSample { |param, index, buffer|
+        buffer.notNil.if {
+            this.sendMsg('/sample', param.asInteger, index.asInteger, buffer.bufnum.asInteger);
+        };
+    }
+
+    sidechain { |patched = false|
+        this.sendMsg('/sidechain', if (patched) { 1 } { 0 });
+    }
+
+    noteRoute { |routed = false|
+        this.sendMsg('/noteRoute', if (routed) { 1 } { 0 });
+    }
     editor { "poptart: % has no plugin editor - its panel is poptart's own".format(deviceName ? "this device").postln }
 
     sendMsg { |cmd ... args|

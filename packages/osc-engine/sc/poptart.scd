@@ -206,7 +206,7 @@ var clockTicker, clockTickerStart, clockTickerStop, clockNextTick, midiClockSet,
 // read). scArgsFor builds the per-track defaults. sidechainByTarget/BySource track live routes
 // both ways for teardown, and sourceFeeds holds the per-source bus that lets ONE source feed
 // several sinks (see acquireSourceFeed).
-var silentBus, trashBus, scArgsFor, scKey, wireAudio, unwireAudio;
+var silentBus, trashBus, scArgsFor, scKey, wireAudio, unwireAudio, tellKeyPatched;
 var sidechainByTarget, sidechainBySource, sourceFeeds, acquireSourceFeed, releaseSourceFeed;
 // Named audio buses (Sig#bus / '/poptart/setBusOut'): a track can divert its output to a bus,
 // where any number of tracks sum, and another track reads the sum via the audio("name") head
@@ -801,6 +801,25 @@ releaseSourceFeed = { |nameKey|
 // `inA`/`inB` are the hardware channels a device source reads, absolute and 0-indexed (inB -1 =
 // mono, duplicated to both sides); ignored for a track/bus source. pattern-core resolves them from
 // input()'s 1-indexed, optionally device-relative form before they get here.
+// "a key is (not) patched into this slot", for one of poptart's own devices in it.
+//
+// The compressor listens to itself with nothing routed in and to the key with something, and the
+// ducker dips on the clock with nothing and on the key's transients with something - and the aux
+// bus is there either way (it reads silentBus until a route is wired), so silence on it says
+// nothing at all. A plugin needs no telling: its aux input is a bus like any other.
+//
+// Called with no third argument it looks the answer up, which is what a device opening into a
+// slot that was already wired needs.
+tellKeyPatched = { |target, slot, patched, targetKey|
+    var ctl = if (target.isKindOf(Event)) { target[\controllers] !? { |all| all[slot] } };
+    if (ctl.notNil and: { ctl.respondsTo(\sidechain) }) {
+        var on = patched ?? {
+            targetKey.notNil and: { sidechainByTarget[scKey.(targetKey, slot)].notNil }
+        };
+        ctl.sidechain(on);
+    };
+};
+
 wireAudio = { |targetKey, slot, rawName, gain, inA = 0, inB = 1|
     fork {
         var target = awaitTrack.(targetKey);
@@ -823,6 +842,7 @@ wireAudio = { |targetKey, slot, rawName, gain, inA = 0, inB = 1|
                 destBus = Bus.audio(server, 2);
                 ownsBus = true;
                 target[\synth].set(("scBus" ++ slot).asSymbol, destBus.index);
+                tellKeyPatched.(target, slot, true);
             } {
                 destBus = target[\inBus]; // chain input: the track already mixes inBus into slot 0
                 ownsBus = false;
@@ -916,7 +936,10 @@ unwireAudio = { |targetKey, slot|
     var entry = sidechainByTarget[key];
     entry !? {
         var target = tracks[targetKey];
-        if ((slot >= 1) and: { target.isKindOf(Event) }) { target[\synth].set(("scBus" ++ slot).asSymbol, silentBus.index) };
+        if ((slot >= 1) and: { target.isKindOf(Event) }) {
+            target[\synth].set(("scBus" ++ slot).asSymbol, silentBus.index);
+            tellKeyPatched.(target, slot, false);
+        };
         entry[\source] !? { |src|
             // One route off a source that may still feed others: drop this sink from its list and
             // let the refcount decide whether the source's send goes back to the trash bus.
@@ -2472,6 +2495,14 @@ OSCdef(\poptartLoadDevice, { |msg|
                             if (slot >= 1) { track[\synth].set(("active" ++ slot).asSymbol, 1) };
                             dropSlotRamps.(key, track, slot);
                             watchPluginEdits.(track, key, slot, self);
+                            // What the device has to be told rather than hear for itself: the
+                            // tempo and where the transport is (a synced delay needs both before
+                            // its first block), and whether anything is routed into its key
+                            // input. The route may have been wired before the device opened, so
+                            // this asks rather than waiting to be told.
+                            self.setTempo(currentTempo);
+                            self.setTransportPos((hostClock !? { |c| c.beats }) ? 0);
+                            tellKeyPatched.(track, slot, nil, key);
                             ("poptart: loaded device " ++ name ++ " in slot " ++ slot).postln;
                         } {
                             if (ok.not) {
@@ -4158,6 +4189,40 @@ OSCdef(\poptartInjectMidiDevice, { |msg|
         };
     };
 }, '/poptart/injectMidiDevice');
+
+// "a track's notes are (no longer) routed into this slot", for one of poptart's own devices.
+// Only the ducker reads it (its dip fires on those notes rather than on the clock), and only
+// Node knows when a route is taken away - see _tellNoteRoute in the osc-engine.
+OSCdef(\poptartDeviceNoteRoute, { |msg|
+    var key = msg[1].asSymbol, slot = msg[2].asInteger, routed = msg[3].asInteger > 0;
+    var track = tracks[key];
+    var ctl = if (track.isKindOf(Event)) { track[\controllers][slot] };
+    if (ctl.notNil and: { ctl.respondsTo(\noteRoute) }) { ctl.noteRoute(routed) };
+}, '/poptart/deviceNoteRoute');
+
+// "play this file on that control", for one of poptart's own devices: a granulator's sample, a
+// convolver's impulse response.
+//
+// The buffer is one a sample pack already holds (see loadSamplePack), so nothing is read from
+// disk here and nothing has to be freed - which is the whole reason the message carries a pack
+// and an index rather than a path. The UGen copies the frames out of it on the non-realtime
+// thread (PoptartDevice.cpp's sample stages), queued behind the pack's own read, and what the
+// device plays from then on is its own copy.
+OSCdef(\poptartDeviceSample, { |msg|
+    var key = msg[1].asSymbol, slot = msg[2].asInteger, param = msg[3].asInteger;
+    var index = msg[4].asInteger, pack = msg[5].asSymbol, file = msg[6].asInteger;
+    var track = tracks[key];
+    var ctl = if (track.isKindOf(Event)) { track[\controllers] !? { |all| all[slot] } };
+    var buf = (samplePacks[pack] ? [])[file];
+    case
+    { ctl.isNil or: { ctl.respondsTo(\loadSample).not } } {
+        ("poptart: there is no device in slot " ++ slot ++ " of '" ++ key ++ "' to give a sample to").warn;
+    }
+    { buf.isNil } {
+        ("poptart: '" ++ pack ++ "' has no file " ++ file ++ " to play on " ++ key ++ " slot " ++ slot).warn;
+    }
+    { ctl.loadSample(param, index, buf) };
+}, '/poptart/deviceSample');
 
 OSCdef(\poptartClearMidiInject, { |msg|
     var targetKey = msg[1].asSymbol, slot = msg[2].asInteger;

@@ -6,12 +6,14 @@
 
 const http = require('node:http');
 const path = require('node:path');
+const { pathToFileURL } = require('node:url');
 const { poptartHome, describeHome } = require('@poptart/osc-engine/home');
 const fs = require('node:fs');
 const os = require('node:os');
 const { MappedEngine, toRealWorld } = require('./param-mapping');
 const { blockReason, isLoopbackHostname } = require('./request-guard');
 const { preferVst3 } = require('./plugin-filter');
+const { deviceRows, deviceParamRows, nativeDevice } = require('@poptart/osc-engine/native-devices');
 const { SNAPSHOT_DIR, putSnapshot, getSnapshot, pruneSnapshots } = require('./snapshots');
 const blobs = require('./blobs');
 const pinnedDefs = require('./pinned-defs');
@@ -6503,6 +6505,223 @@ function pluginInSlot(trackId, slot) {
   return mappedEngine?.chains.get(engineTrack(trackId))?.[slot] ?? null;
 }
 
+// ---------------------------------------------------------------------------------------------
+// poptart's own devices: the window poptart draws for them.
+//
+// A plugin brings its own editor and this server only asks for it to be opened. One of poptart's
+// own devices has none: its DSP is a scsynth UGen, and there is no GUI in a UGen. What it has
+// instead is a descriptor, and a descriptor is enough to GENERATE a window - which is exactly
+// what the browser build does, with the same editor code drawing the result (client.js's
+// showDevicePanel is shared by both builds). So the generator is web-engine's panel.mjs here
+// too: one implementation of what a device's window looks like, rather than two copies of the
+// idea drifting apart on two engines.
+//
+// The state the window is drawn from comes from the engine's own record of where it has put each
+// control (osc-engine's deviceSlot). There is nothing in scsynth that reads a UGen's controls
+// back, so the half that sends them is the only half that knows.
+// ---------------------------------------------------------------------------------------------
+
+/** Where web-engine's panel generator lives, relative to this server in both layouts. */
+const WEB_ENGINE_SRC = path.join(__dirname, '..', 'web-engine', 'src');
+
+/** The rate a response curve is computed at: the rate the engine is booted at. */
+const DEVICE_FIGURE_RATE = 48000;
+
+let devicePanelKit = null;
+
+/**
+ * web-engine's panel modules, loaded on demand.
+ *
+ * ESM, imported the way pattern-core is, and only when a device window is first opened: a
+ * session that never opens one should not pay to parse the figure maths for every device poptart
+ * ships. A failed load is not cached, because the usual reason for one is a checkout whose
+ * web-engine is not there yet and which will be a moment later.
+ */
+function deviceKit() {
+  if (!devicePanelKit) {
+    const load = (file) => import(pathToFileURL(path.join(WEB_ENGINE_SRC, file)).href);
+    devicePanelKit = Promise.all([
+      load('panel.mjs'), load('figures.mjs'), load('descriptor.mjs'), load('catalog.mjs'), load('dsp/tables.mjs'),
+    ])
+      .then(([panel, figures, descriptor, catalog, tables]) => ({ panel, figures, descriptor, catalog, tables }))
+      .catch((err) => {
+        devicePanelKit = null;
+        throw new Error(`poptart's own device windows are drawn by web-engine, which could not be loaded - ${err?.message ?? err}`);
+      });
+  }
+  return devicePanelKit;
+}
+
+/**
+ * The device in a slot as everything a window needs, or null where the slot holds a plugin (or
+ * nothing). Values in real units, because that is what the panel and the figures read; the
+ * engine keeps positions, which is what it sends.
+ */
+async function deviceInSlot(trackLabel, slot) {
+  const at = engine?.deviceSlot?.(engineTrack(trackLabel), Number(slot));
+  if (!at) return null;
+  const kit = await deviceKit();
+  const descriptor = kit.catalog.DEVICES.find((d) => d.id === at.id);
+  // The catalog the UGen was built from and the descriptors here are generated from one source
+  // (web-engine/build/devices/native.mjs), so this is a mismatched checkout rather than a
+  // missing feature - and saying which device went missing is the whole diagnostic.
+  if (!descriptor) throw new Error(`${at.id} is in that slot, but this build of the editor has no descriptor for it`);
+  const values = {};
+  for (const p of descriptor.params) {
+    const position = at.positions[p.id];
+    if (position !== undefined) values[p.id] = kit.descriptor.denormalize(p, position);
+  }
+  return {
+    kit, descriptor, values,
+    driven: new Map(Object.entries(at.driven ?? {})),
+    // The names of whatever has been loaded onto a control that plays a file, by the option slot
+    // it went into: what the control prints, and what a `.param()` written from the window says.
+    extras: at.files ?? {},
+  };
+}
+
+/** What a figure needs and a knob does not: the tables it draws, and the rate it is drawn at. */
+function deviceFigureOpts(state) {
+  return {
+    // The shipped set, built by the same code the C++ tables were translated from - a picture of
+    // a different copy would be a picture of a different sound.
+    tables: state.kit.tables.sharedBuiltInTables(),
+    extras: state.extras,
+    sampleRate: DEVICE_FIGURE_RATE,
+  };
+}
+
+/** The panel model for a slot's device, as the editor draws it. */
+function deviceWindow(state) {
+  const built = state.kit.panel.buildPanel(state.descriptor, state.values, state.driven, deviceFigureOpts(state));
+  // Which library a control that plays a file picks from: the wavetable folder for a table, the
+  // samples for anything that is played (client.js's filePickEntries reads this).
+  for (const section of built.sections) {
+    for (const widget of section.widgets) {
+      if (widget.takes === 'sample') widget.pack = widget.sampleAs === 'wavetable' ? 'wt' : 'files';
+    }
+  }
+  return built;
+}
+
+/** Every widget on a panel, whichever section it is in. */
+function widgetsOf(panel) {
+  return panel.sections.flatMap((s) => s.widgets);
+}
+
+/**
+ * What a finished gesture in a device window MEANS, which is the same question a gesture in a
+ * plugin's own window answers: a `.param()` call while conf is armed for that track, and
+ * otherwise a capture of the whole device.
+ *
+ * A device's program is its control positions and nothing else (PoptartDevice.sc's
+ * writeProgram), so the second half is the plugin path unchanged - auto-pin writes the positions
+ * into the call as `{ state }`, and `.preset()` restores them.
+ */
+function noteDeviceEdit(trackLabel, slot, param, arg) {
+  if (conf && conf.trackId === trackLabel) {
+    if (!conf.seen.has(param.name)) {
+      conf.seen.add(param.name);
+      console.log(`[conf] capturing "${param.name}" (track "${trackLabel}" slot ${slot})`);
+    }
+    conf.touched.set(`${slot}|${param.name}`, { slot, name: param.name, value: arg });
+    return;
+  }
+  handlePluginEdited(trackLabel, slot);
+}
+
+/** The window closed: read the sound out of the device, then hand the slot back to its pattern. */
+function releaseDeviceSlot(trackLabel, slot) {
+  const key = `${trackLabel}|${slot}`;
+  if (!handTaken.has(key)) return false;
+  handTaken.delete(key);
+  // Queued before the hold is lifted, exactly as releaseSlotsHeldByHand does it, so the capture
+  // reads what you made rather than whatever the pattern puts there next.
+  captureOpenEditors([key]);
+  syncStateHold(key);
+  return true;
+}
+
+/**
+ * One control of an open device window, set from the panel.
+ *
+ * The gesture sends a 0..1 position and this turns it into a real value on the control's own
+ * curve, because the units and the curve belong to the descriptor and the panel should not carry
+ * a second copy of them. What comes back is what to print under the knob, the pictures the
+ * control appears in, and what to write in the code - so a value set live and a value written
+ * down can never disagree about how the same number is spelled.
+ */
+async function setDeviceParam(body) {
+  const trackLabel = String(body?.trackId ?? '');
+  const slot = Number(body?.slot ?? 0);
+  const state = await deviceInSlot(trackLabel, slot);
+  if (!state) throw new Error(`there is no device in slot ${slot} of "${trackLabel}" - evaluate the buffer and try again`);
+  const { kit, descriptor } = state;
+  // A gesture that moves TWO controls at once - an equalizer vertex, which is a frequency and a
+  // gain and has no business picking one of them per frame. Each is set the way a single one
+  // would be, and the answer carries the pictures of all of them once.
+  if (Array.isArray(body?.params)) {
+    const done = [];
+    for (const one of body.params) done.push(await setDeviceParam({ ...one, trackId: trackLabel, slot, commit: false }));
+    if (body.commit) {
+      const after = await deviceInSlot(trackLabel, slot);
+      for (const one of body.params) {
+        const p = kit.descriptor.findParam(descriptor, String(one.id ?? ''));
+        if (p) noteDeviceEdit(trackLabel, slot, p, kit.panel.paramArgFor(descriptor, p.id, after.values[p.id], after.extras));
+      }
+    }
+    const seen = new Set();
+    return { batch: done, figures: done.flatMap((r) => r.figures ?? []).filter((f) => (seen.has(f.id) ? false : seen.add(f.id))) };
+  }
+  const id = String(body?.id ?? '');
+  const found = kit.descriptor.findParam(descriptor, id);
+  if (!found) throw new Error(`"${descriptor.id}" has no control called ${JSON.stringify(id)}`);
+  // A FILE, named for a control that plays one: a granulator's sample, a convolver's impulse
+  // response. It goes to the engine as written - the engine finds it, has it read into the
+  // device and points the control at the slot it landed in - and the answer is read back out of
+  // the engine, because WHICH slot that was is the engine's answer and not this one's.
+  if (typeof body.sample === 'string' && found.takes === 'sample') {
+    mappedEngine?.setParam(engineTrack(trackLabel), slot, found.id, body.sample, engine.getTime());
+    const after = (await deviceInSlot(trackLabel, slot)) ?? state;
+    const value = after.values[found.id] ?? 0;
+    if (body?.commit) noteDeviceEdit(trackLabel, slot, found, kit.panel.paramArgFor(descriptor, found.id, value, after.extras));
+    return {
+      id: found.id,
+      name: found.name,
+      value,
+      position: kit.descriptor.normalize(found, value),
+      text: kit.descriptor.formatValue(found, value, after.extras?.[found.id] ?? null),
+      arg: kit.panel.paramArgFor(descriptor, found.id, value, after.extras),
+      // The option list, which has grown by one: the file's own name is on it now.
+      options: widgetsOf(deviceWindow(after)).find((w) => w.id === found.id)?.options ?? null,
+      figures: kit.figures.figuresFor(descriptor, found.id, after.values, deviceFigureOpts(after)),
+    };
+  }
+  const value = body.position === undefined
+    ? kit.descriptor.clampParam(found, Number(body.value))
+    : kit.panel.valueFromPosition(descriptor, found.id, body.position);
+  // The engine takes what `.param()` takes: a position for a sweep, an index for a choice.
+  const arg = found.options
+    ? Math.round(value)
+    : found.ui === 'toggle' ? (value >= 0.5 ? 1 : 0) : kit.descriptor.normalize(found, value);
+  mappedEngine?.setParam(engineTrack(trackLabel), slot, found.id, arg, engine.getTime());
+  if (body?.commit) noteDeviceEdit(trackLabel, slot, found, kit.panel.paramArgFor(descriptor, found.id, value, state.extras));
+  return {
+    id: found.id,
+    name: found.name,
+    value,
+    position: kit.descriptor.normalize(found, value),
+    text: kit.descriptor.formatValue(found, value, state.extras?.[found.id] ?? null),
+    // The argument, not the whole call: the editor overwrites the argument of a `.param()` that
+    // is already there rather than appending a second one.
+    arg: kit.panel.paramArgFor(descriptor, found.id, value, state.extras),
+    // The pictures this control appears in, redrawn - a wavetable's waveform, a filter's
+    // response, an envelope's curve. Only the ones that name it: a drag sends a control per
+    // frame, and answering with all of them would rebuild a table stack to move a cutoff.
+    figures: kit.figures.figuresFor(descriptor, found.id, { ...state.values, [found.id]: value }, deviceFigureOpts(state)),
+  };
+}
+
 /**
  * Capture every slot edited since the last flush. Safe to call at any time and from anywhere:
  * concurrent callers share the one pass (captures are serialized - each is a disk write in sclang,
@@ -6713,17 +6932,24 @@ const routes = {
   // a VST2 entry is hidden when a VST3 with the same name exists. The scan itself still probes
   // everything, and an exact `.synth("Name.vst")` id still loads - this only shapes the list
   // the browser and autocomplete see.
+  //
+  // poptart's OWN devices lead both lists (osc-engine/native-devices.js), because a name that
+  // `.synth()` and `.fx()` accept and the editor never offers is a feature nobody finds - and
+  // because they are the half of the list that is there on a machine with no plugins installed
+  // at all. They are not filtered: a device is neither a VST2 nor a VST3 and shadows nothing.
   'POST /api/scanPlugins': async (body) => {
     if (!engine) throw new Error(engineError ?? 'engine not loaded');
     const result = await engine.scanPlugins(body.extraPaths ?? []);
     if (settings.preferVst3 !== false) result.plugins = preferVst3(result.plugins);
+    result.plugins = [...deviceRows(), ...result.plugins];
     return { status: 200, body: result };
   },
 
   'GET /api/knownPlugins': async () => {
     if (!engine) throw new Error(engineError ?? 'engine not loaded');
     const plugins = await engine.getKnownPlugins();
-    return { status: 200, body: settings.preferVst3 !== false ? preferVst3(plugins) : plugins };
+    const found = settings.preferVst3 !== false ? preferVst3(plugins) : plugins;
+    return { status: 200, body: [...deviceRows(), ...found] };
   },
 
   'GET /api/midiDevices': async () => {
@@ -8062,6 +8288,15 @@ const routes = {
       for (let slot = 0; slot < Math.min(chain.length, patternCore.MAX_FX_SLOTS + 1); slot++) {
         const plugin = chain[slot];
         if (!plugin) continue;
+        // One of poptart's own devices is answered from the catalog: Node already knows every
+        // control's name, so `.param("` completes the moment the name is typed rather than after
+        // the device has opened (and without the retry loop below, which exists for plugins that
+        // take seconds to load).
+        const device = nativeDevice(plugin);
+        if (device) {
+          slots.push({ track: trackLabel(trackId), slot, plugin, params: deviceParamRows(device) });
+          continue;
+        }
         if (!paramsByPlugin.has(plugin)) {
           try {
             paramsByPlugin.set(plugin, await getParamsWhenLoaded(trackId, slot));
@@ -8158,17 +8393,52 @@ const routes = {
 
   // Pop open the native editor window of the plugin in a chain slot (design your supersaw in
   // Serum's own UI, then livecode the modulation). Body: { trackId, slot }.
+  //
+  // One of poptart's own devices has no window to pop, so the ANSWER is the window: the panel
+  // generated from its descriptor, which the editor draws (see the device-window section above,
+  // and client.js's showDevicePanel). That is the only thing distinguishing the two cases here -
+  // not which build this is, but whether what is in the slot had a window of its own to open.
   'POST /api/showEditor': async (body) => {
     if (!engine) throw new Error(engineError ?? 'engine not loaded');
     const trackId = body.trackId ?? 'default';
     const slot = body.slot ?? 0;
-    engine.showPluginEditor(engineTrack(trackId), slot);
+    const device = await deviceInSlot(trackId, slot);
     // The window is up, so the slot's program is yours to change from here: take it now rather than
     // on the editor's next poll, or a swap in between would change the preset out from under the
-    // window you just opened - and a knob turned after that would land in the wrong preset.
+    // window you just opened - and a knob turned after that would land in the wrong preset. True
+    // of a device as well as a plugin: a device's program is its control positions, and a
+    // `.preset()` pattern swaps those just the same.
     takeSlotByHand(trackId, slot);
+    if (device) return { status: 200, body: { panel: deviceWindow(device), trackId, slot } };
+    engine.showPluginEditor(engineTrack(trackId), slot);
     return { status: 200, body: {} };
   },
+
+  // A control moved in a device window. Body: { trackId, slot, id, position | value, commit }, or
+  // { params: [...] } for a gesture that moves several at once.
+  'POST /api/deviceParam': async (body) => {
+    if (!engine) throw new Error(engineError ?? 'engine not loaded');
+    return { status: 200, body: await setDeviceParam(body) };
+  },
+
+  // A device window opened or closed. Only the closing matters here: the browser build also uses
+  // this to start and stop the processor reporting where its driven controls are, and scsynth has
+  // nothing to report with (see deviceLive).
+  'POST /api/deviceWatch': async (body) => {
+    const trackId = String(body?.trackId ?? '');
+    const slot = Number(body?.slot ?? 0);
+    if (!body?.on) releaseDeviceSlot(trackId, slot);
+    return { status: 200, body: { ok: true } };
+  },
+
+  // Where the driven controls of an open window are right now.
+  //
+  // The browser answers this from the processor's own reports, and there is no equivalent in
+  // scsynth: a modulator is a control bus mapped onto the UGen's input, read by nobody. So a
+  // knob under an LFO is drawn where the modulator was pointed rather than where it has got to,
+  // and this answers with nothing rather than with a guess. The editor polls it only while
+  // something in the window is driven, and treats a null as "not following".
+  'POST /api/deviceLive': async () => ({ status: 200, body: { values: null, figures: [] } }),
 
   // "I'm back in the code" - the editor sends this on a click in the buffer, and every slot being
   // held by hand goes back to its pattern (see the hand-editing section). No body: a click is not
