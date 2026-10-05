@@ -425,59 +425,84 @@ function mutableSources(euro, stmlib, module, { files = null } = {}) {
   ];
 }
 
-/** One Mutable module whose wrapper and descriptor are already in hand. */
-async function buildMutableModule({
-  euro, stmlib, planOnly, problems, id, module, descriptor, wrapper,
-  exports = EXPORTS, memory = null, files = null, includes = [],
+/**
+ * A device's RECIPE: its descriptor, the C that gives it the ABI, and how to compile it.
+ *
+ * One list, two targets. The browser needs each device as its own WebAssembly module and the
+ * desktop needs all of them in one scsynth extension, and the two builds disagree about almost
+ * nothing else - the sources, the include paths, the upstream switches and which devices are
+ * played rather than fed are the same answers either way. Writing them down once is what keeps
+ * the two engines playing the same device: a shim the desktop build did not know about is a
+ * device that sounds different there, and nobody would be able to tell why.
+ *
+ * So each `build*` function below resolves its pins, reads its descriptor and returns this,
+ * compiling nothing. `build()` turns recipes into .wasm; build/devices/native.mjs turns the same
+ * recipes into a .scx.
+ */
+function recipe({
+  id, descriptor, wrapper, workDir, wrapperName, sources,
+  includes = [], defines = [], prelude = [], exports = EXPORTS, memory = undefined,
 }) {
-  log(`${id.padEnd(16)} ${descriptor.params.length} controls`);
-  if (planOnly) return descriptor;
-  const file = path.join(euro, `poptart-${module}.cc`);
-  fs.writeFileSync(file, wrapper, 'utf8');
-  const outFile = path.join(WASM_OUT, `${id}.wasm`);
-  try {
-    compile({
-      sources: [file, ...mutableSources(euro, stmlib, module, { files })],
-      includes: [...includes, euro, stmlib],
-      defines: ['TEST'],
-      exports,
-      memory: memory ?? memoryFor(id),
-      outFile,
-    });
-    log(`${' '.repeat(16)} -> ${path.relative(engineRoot, outFile)} (${(fs.statSync(outFile).size / 1024).toFixed(0)} kB)`);
-  } catch (err) {
-    problems.push(`${id}: ${(err.stderr?.toString() ?? err.message).split('\n').slice(0, 10).join('\n')}`);
-  }
-  return descriptor;
+  return {
+    id,
+    descriptor,
+    wrapper,
+    workDir,
+    wrapperName,
+    sources,
+    includes,
+    defines,
+    prelude,
+    exports,
+    memory: memory ?? 2 * MB,
+    /** Played by notes rather than fed a signal - which is the ABI it exports. */
+    synth: exports === SYNTH_EXPORTS,
+  };
 }
 
 /** Rings: a resonator, played rather than patched into. */
-async function buildRings({ euro, stmlib, planOnly, problems }) {
+function ringsRecipe({ euro, stmlib }) {
   const descriptor = ringsDescriptor(`https://github.com/${EURORACK_REPO} (rings)`);
   log(`${'Rings'.padEnd(16)} ${descriptor.params.length} controls, ${RINGS_MODELS.length} models`);
-  if (planOnly) return descriptor;
-
-  const wrapper = path.join(euro, 'poptart-rings.cc');
-  fs.writeFileSync(wrapper, ringsWrapper(MAX_BLOCK), 'utf8');
-  const outFile = path.join(WASM_OUT, 'Rings.wasm');
-  try {
-    compile({
-      sources: [wrapper, ...mutableSources(euro, stmlib, 'rings')],
-      includes: [euro, stmlib],
-      defines: ['TEST'],
-      exports: SYNTH_EXPORTS,
-      memory: memoryFor('Rings'),
-      outFile,
-    });
-    log(`${' '.repeat(16)} -> ${path.relative(engineRoot, outFile)} (${(fs.statSync(outFile).size / 1024).toFixed(0)} kB)`);
-  } catch (err) {
-    problems.push(`Rings: ${(err.stderr?.toString() ?? err.message).split('\n').slice(0, 10).join('\n')}`);
-  }
-  return descriptor;
+  return recipe({
+    id: 'Rings',
+    descriptor,
+    wrapper: ringsWrapper(MAX_BLOCK),
+    workDir: euro,
+    wrapperName: 'poptart-rings.cc',
+    sources: mutableSources(euro, stmlib, 'rings'),
+    includes: [euro, stmlib],
+    defines: ['TEST'],
+    exports: SYNTH_EXPORTS,
+    memory: memoryFor('Rings'),
+  });
 }
 
-/** Plaits: the module's DSP, its resource tables, and the three stmlib units it needs. */
-async function buildPlaits({ lock, planOnly, problems, repin }) {
+/** One Mutable module whose wrapper and descriptor are already in hand. */
+function mutableRecipe({
+  euro, stmlib, id, module, descriptor, wrapper,
+  exports = EXPORTS, memory = null, files = null, includes = [],
+}) {
+  log(`${id.padEnd(16)} ${descriptor.params.length} controls`);
+  return recipe({
+    id,
+    descriptor,
+    wrapper,
+    workDir: euro,
+    wrapperName: `poptart-${module}.cc`,
+    sources: mutableSources(euro, stmlib, module, { files }),
+    includes: [...includes, euro, stmlib],
+    // Upstream's own switch for building off the target chip: stmlib's inner loops are ARM
+    // inline assembly, and `TEST` selects the portable C beside them. It is how Mutable build
+    // their own unit tests, so it is a supported path rather than a hack.
+    defines: ['TEST'],
+    exports,
+    memory: memory ?? memoryFor(id),
+  });
+}
+
+/** Plaits and the modules built from the same checkout: the Mutable family. */
+async function mutableRecipes({ lock, repin }) {
   for (const [key, repo] of [['eurorack', EURORACK_REPO], ['stmlib', STMLIB_REPO]]) {
     if (repin || !lock[key]) {
       lock[key] = await headSha(repo);
@@ -486,9 +511,6 @@ async function buildPlaits({ lock, planOnly, problems, repin }) {
   }
   const euro = await repoAt(EURORACK_REPO, lock.eurorack);
   const stmlib = await repoAt(STMLIB_REPO, lock.stmlib);
-  const descriptor = plaitsDescriptor(`https://github.com/${EURORACK_REPO} (plaits)`);
-  log(`${'Plaits'.padEnd(16)} ${descriptor.params.length} controls, ${PLAITS_ENGINES.length} engines`);
-  if (planOnly) return descriptor;
 
   // The module's own build lays stmlib beside it as a submodule, and every include says
   // "stmlib/…", so it is linked into place rather than the include path being bent around it.
@@ -500,59 +522,55 @@ async function buildPlaits({ lock, planOnly, problems, repin }) {
     fs.symlinkSync(stmlib, linked, 'dir');
   }
 
-  const wrapper = path.join(euro, 'poptart-plaits.cc');
-  fs.writeFileSync(wrapper, plaitsWrapper(MAX_BLOCK), 'utf8');
-  const outFile = path.join(WASM_OUT, 'Plaits.wasm');
-  try {
-    compile({
-      sources: [wrapper, ...mutableSources(euro, stmlib, 'plaits')],
+  const plaits = plaitsDescriptor(`https://github.com/${EURORACK_REPO} (plaits)`);
+  log(`${'Plaits'.padEnd(16)} ${plaits.params.length} controls, ${PLAITS_ENGINES.length} engines`);
+  return [
+    recipe({
+      id: 'Plaits',
+      descriptor: plaits,
+      wrapper: plaitsWrapper(MAX_BLOCK),
+      workDir: euro,
+      wrapperName: 'poptart-plaits.cc',
+      sources: mutableSources(euro, stmlib, 'plaits'),
       includes: [euro, stmlib],
-      // Upstream's own switch for building off the target chip: stmlib's inner loops are ARM
-      // inline assembly, and `TEST` selects the portable C beside them. It is how Mutable build
-      // their own unit tests, so it is a supported path rather than a hack.
       defines: ['TEST'],
       exports: SYNTH_EXPORTS,
       // The engines allocate out of one sixteen-kilobyte block, but the resource tables are
       // large and static, so the module needs room beyond its own heap.
       memory: memoryFor('Plaits'),
-      outFile,
-    });
-    log(`${' '.repeat(16)} -> ${path.relative(engineRoot, outFile)} (${(fs.statSync(outFile).size / 1024).toFixed(0)} kB)`);
-  } catch (err) {
-    problems.push(`Plaits: ${(err.stderr?.toString() ?? err.message).split('\n').slice(0, 10).join('\n')}`);
-  }
-  const rings = await buildRings({ euro, stmlib, planOnly, problems });
-  const warps = await buildMutableModule({
-    euro, stmlib, planOnly, problems,
-    id: 'Warps', module: 'warps', descriptor: warpsDescriptor(`https://github.com/${EURORACK_REPO} (warps)`),
-    wrapper: warpsWrapper(MAX_BLOCK), exports: EXPORTS,
-  });
-  const elements = await buildMutableModule({
-    euro, stmlib, planOnly, problems,
-    id: 'Elements', module: 'elements', descriptor: elementsDescriptor(`https://github.com/${EURORACK_REPO} (elements)`),
-    wrapper: elementsWrapper(MAX_BLOCK), exports: SYNTH_EXPORTS,
-  });
-  const braids = await buildMutableModule({
-    euro, stmlib, planOnly, problems,
-    id: 'Braids', module: 'braids', descriptor: braidsDescriptor(`https://github.com/${EURORACK_REPO} (braids)`),
-    wrapper: braidsWrapper(MAX_BLOCK), exports: SYNTH_EXPORTS,
-    files: ['analog_oscillator.cc', 'digital_oscillator.cc', 'macro_oscillator.cc', 'resources.cc'],
-  });
-  const clouds = await buildMutableModule({
-    euro, stmlib, planOnly, problems,
-    id: 'Clouds', module: 'clouds', descriptor: cloudsDescriptor(`https://github.com/${EURORACK_REPO} (clouds)`),
-    wrapper: cloudsWrapper(MAX_BLOCK), exports: EXPORTS,
-    // The buffers ARE the effect: a hundred and eighty kilobytes of them, plus room to work.
-    memory: memoryFor('Clouds'),
-    // The shim folder first, so its copy of clouds/dsp/window.h shadows the pinned one: see the
-    // note in that file for the upstream regression it puts right.
-    includes: [SHIM],
-  });
-  return [descriptor, rings, elements, braids, warps, clouds];
+    }),
+    ringsRecipe({ euro, stmlib }),
+    mutableRecipe({
+      euro, stmlib, id: 'Warps', module: 'warps',
+      descriptor: warpsDescriptor(`https://github.com/${EURORACK_REPO} (warps)`),
+      wrapper: warpsWrapper(MAX_BLOCK), exports: EXPORTS,
+    }),
+    mutableRecipe({
+      euro, stmlib, id: 'Elements', module: 'elements',
+      descriptor: elementsDescriptor(`https://github.com/${EURORACK_REPO} (elements)`),
+      wrapper: elementsWrapper(MAX_BLOCK), exports: SYNTH_EXPORTS,
+    }),
+    mutableRecipe({
+      euro, stmlib, id: 'Braids', module: 'braids',
+      descriptor: braidsDescriptor(`https://github.com/${EURORACK_REPO} (braids)`),
+      wrapper: braidsWrapper(MAX_BLOCK), exports: SYNTH_EXPORTS,
+      files: ['analog_oscillator.cc', 'digital_oscillator.cc', 'macro_oscillator.cc', 'resources.cc'],
+    }),
+    mutableRecipe({
+      euro, stmlib, id: 'Clouds', module: 'clouds',
+      descriptor: cloudsDescriptor(`https://github.com/${EURORACK_REPO} (clouds)`),
+      wrapper: cloudsWrapper(MAX_BLOCK), exports: EXPORTS,
+      // The buffers ARE the effect: a hundred and eighty kilobytes of them, plus room to work.
+      memory: memoryFor('Clouds'),
+      // The shim folder first, so its copy of clouds/dsp/window.h shadows the pinned one: see the
+      // note in that file for the upstream regression it puts right.
+      includes: [SHIM],
+    }),
+  ];
 }
 
 /** Signalsmith Stretch: header-only, plus the linear-algebra headers it includes. */
-async function buildStretch({ lock, planOnly, problems, repin }) {
+async function stretchRecipe({ lock, repin }) {
   for (const [key, repo] of [['stretch', STRETCH_REPO], ['linear', LINEAR_REPO]]) {
     if (repin || !lock[key]) {
       lock[key] = await headSha(repo);
@@ -563,29 +581,22 @@ async function buildStretch({ lock, planOnly, problems, repin }) {
   const linearRoot = await repoAt(LINEAR_REPO, lock.linear);
   const descriptor = stretchDescriptor(`https://github.com/${STRETCH_REPO}`);
   log(`${'Shift'.padEnd(16)} ${descriptor.params.length} controls`);
-  if (planOnly) return descriptor;
-
-  const wrapper = path.join(stretchRoot, 'poptart-wrapper.cc');
-  fs.writeFileSync(wrapper, STRETCH_WRAPPER, 'utf8');
-  const outFile = path.join(WASM_OUT, 'Shift.wasm');
-  try {
-    compile({
-      sources: [wrapper],
-      // The stretch header includes "signalsmith-linear/stft.h", which lives in the other
-      // repository - published separately rather than vendored, so it is pinned separately too.
-      includes: [stretchRoot, path.join(linearRoot, 'include'), linearRoot],
-      memory: memoryFor('Shift'),
-      outFile,
-    });
-    log(`${' '.repeat(16)} -> ${path.relative(engineRoot, outFile)} (${(fs.statSync(outFile).size / 1024).toFixed(0)} kB)`);
-  } catch (err) {
-    problems.push(`Shift: ${(err.stderr?.toString() ?? err.message).split('\n').slice(0, 8).join('\n')}`);
-  }
-  return descriptor;
+  return recipe({
+    id: 'Shift',
+    descriptor,
+    wrapper: STRETCH_WRAPPER,
+    workDir: stretchRoot,
+    wrapperName: 'poptart-wrapper.cc',
+    sources: [],
+    // The stretch header includes "signalsmith-linear/stft.h", which lives in the other
+    // repository - published separately rather than vendored, so it is pinned separately too.
+    includes: [stretchRoot, path.join(linearRoot, 'include'), linearRoot],
+    memory: memoryFor('Shift'),
+  });
 }
 
 /** Cloud Seed: one module, from the repository the algorithm moved to. */
-async function buildCloudSeed({ lock, planOnly, problems, repin }) {
+async function cloudSeedRecipe({ lock, repin }) {
   if (repin || !lock.cloudseed) {
     lock.cloudseed = await headSha(CLOUDSEED_REPO);
     log(`pinned ${CLOUDSEED_REPO} at ${lock.cloudseed}`);
@@ -594,135 +605,181 @@ async function buildCloudSeed({ lock, planOnly, problems, repin }) {
   const programs = fs.readFileSync(path.join(root, 'Programs.h'), 'utf8');
   const descriptor = cloudSeedDescriptor(programs, `https://github.com/${CLOUDSEED_REPO}`);
   log(`${'CloudSeed'.padEnd(16)} ${descriptor.params.length} controls`);
-  if (planOnly) return descriptor;
-
-  fs.writeFileSync(path.join(root, 'poptart-wrapper.cc'), CLOUDSEED_WRAPPER, 'utf8');
-  const outFile = path.join(WASM_OUT, 'CloudSeed.wasm');
-  try {
-    compile({
-      sources: [
-        path.join(root, 'poptart-wrapper.cc'),
-        path.join(root, 'Parameters.cpp'),
-        path.join(root, 'DSP', 'Biquad.cpp'),
-        path.join(root, 'DSP', 'RandomBuffer.cpp'),
-      ],
-      includes: [root],
-      // Upstream takes both of these from the build rather than from a header: BUFFER_SIZE is
-      // the largest block it will be handed, and its scratch buffers are that size on the stack.
-      defines: [`BUFFER_SIZE=${MAX_BLOCK}`, 'MAX_STR_SIZE=32'],
-      prelude: [path.join(SHIM, 'cloudseed-compat.h')],
-      // Far more than the effects need, and it is the delay lines: this is a reverb whose late
-      // section holds several seconds across a dozen lines per channel, allocated up front from
-      // the sample rate. Two megabytes traps on the first init.
-      memory: memoryFor('CloudSeed'),
-      outFile,
-    });
-    log(`${' '.repeat(16)} -> ${path.relative(engineRoot, outFile)} (${(fs.statSync(outFile).size / 1024).toFixed(0)} kB)`);
-  } catch (err) {
-    problems.push(`CloudSeed: ${(err.stderr?.toString() ?? err.message).split('\n').slice(0, 8).join('\n')}`);
-  }
-  return descriptor;
+  return recipe({
+    id: 'CloudSeed',
+    descriptor,
+    wrapper: CLOUDSEED_WRAPPER,
+    workDir: root,
+    wrapperName: 'poptart-wrapper.cc',
+    sources: [
+      path.join(root, 'Parameters.cpp'),
+      path.join(root, 'DSP', 'Biquad.cpp'),
+      path.join(root, 'DSP', 'RandomBuffer.cpp'),
+    ],
+    includes: [root],
+    // Upstream takes both of these from the build rather than from a header: BUFFER_SIZE is
+    // the largest block it will be handed, and its scratch buffers are that size on the stack.
+    defines: [`BUFFER_SIZE=${MAX_BLOCK}`, 'MAX_STR_SIZE=32'],
+    prelude: [path.join(SHIM, 'cloudseed-compat.h')],
+    // Far more than the effects need, and it is the delay lines: this is a reverb whose late
+    // section holds several seconds across a dozen lines per channel, allocated up front from
+    // the sample rate. Two megabytes traps on the first init.
+    memory: memoryFor('CloudSeed'),
+  });
 }
 
-export async function build({ only = null, planOnly = false, repin = false } = {}) {
-  const lock = readLock();
+/** One Airwindows effect, read out of its own source. */
+async function airwindowsRecipe({ entry, sha }) {
+  const workDir = path.join(CACHE, 'work', entry.id);
+  fs.mkdirSync(workDir, { recursive: true });
+
+  const sources = {};
+  for (const file of filesFor(entry.upstream)) {
+    sources[file] = await sourceFile(AIRWINDOWS_REPO, sha, upstreamPath(entry.upstream, file));
+    fs.writeFileSync(path.join(workDir, file), sources[file], 'utf8');
+  }
+
+  const descriptor = descriptorFrom(entry, sources[`${entry.upstream}.h`], sources[`${entry.upstream}.cpp`]);
+  log(`${entry.id.padEnd(16)} ${descriptor.params.length} controls: ${descriptor.params.map((p) => p.name).join(', ')}`);
+  return recipe({
+    id: entry.id,
+    descriptor,
+    wrapper: wrapperFor(entry),
+    workDir,
+    wrapperName: 'wrapper.cc',
+    sources: [
+      path.join(workDir, `${entry.upstream}.cpp`),
+      path.join(workDir, `${entry.upstream}Proc.cpp`),
+    ],
+    includes: [workDir, SHIM],
+  });
+}
+
+/**
+ * Every device, resolved and read but not compiled.
+ *
+ * `only` narrows it the way the command line does. The lock is written by the caller, since it
+ * is the caller that knows whether the build it ran succeeded.
+ */
+export async function deviceRecipes({ lock, only = null, repin = false } = {}) {
   if (repin || !lock.airwindows) {
     lock.airwindows = await headSha(AIRWINDOWS_REPO);
     log(`pinned ${AIRWINDOWS_REPO} at ${lock.airwindows}`);
   }
-  const sha = lock.airwindows;
-
   const chosen = AIRWINDOWS.filter((e) => !only || e.id === only);
   const wantCloudSeed = !only || only === 'CloudSeed';
   const wantShift = !only || only === 'Shift';
-  const wantPlaits = !only || only === 'Plaits' || only === 'Rings';
-  if (chosen.length === 0 && !wantCloudSeed && !wantShift && !wantPlaits) throw new Error(`no device called "${only}"`);
+  const wantMutable = !only || MUTABLE_IDS.includes(only);
+  if (chosen.length === 0 && !wantCloudSeed && !wantShift && !wantMutable) {
+    throw new Error(`no device called "${only}"`);
+  }
+
+  const out = [];
+  for (const entry of chosen) out.push(await airwindowsRecipe({ entry, sha: lock.airwindows }));
+  if (wantCloudSeed) out.push(await cloudSeedRecipe({ lock, repin }));
+  if (wantShift) out.push(await stretchRecipe({ lock, repin }));
+  if (wantMutable) {
+    const family = await mutableRecipes({ lock, repin });
+    for (const one of family) if (!only || one.id === only) out.push(one);
+  }
+  return out;
+}
+
+/** The devices built from the Mutable checkout, for `--only` to name one of. */
+const MUTABLE_IDS = Object.freeze(['Plaits', 'Rings', 'Warps', 'Elements', 'Braids', 'Clouds']);
+
+/** Which generated descriptor module each family is written to, and what it says about itself. */
+const DESCRIPTOR_FILES = [
+  {
+    out: DESCRIPTOR_OUT,
+    ids: AIRWINDOWS.map((e) => e.id),
+    listName: 'AIRWINDOWS_DEVICES',
+    title: 'The Airwindows effects, as device descriptors.',
+    notes: [
+      'The names, the defaults and the count are read out of each plugin\'s own source, so what',
+      'poptart shows beside a control is what the plugin calls it.',
+      '',
+      'Every one is MIT, copyright Chris Johnson (airwindows.com), and says so in its descriptor;',
+      'the About screen prints those lines from the catalog rather than from a list kept by hand.',
+    ],
+  },
+  {
+    out: CLOUDSEED_OUT,
+    ids: ['CloudSeed'],
+    listName: 'CLOUDSEED_DEVICES',
+    title: 'Cloud Seed, as a device descriptor.',
+    notes: [
+      'The control names are written out in build/devices/cloudseed.mjs and the reason is there',
+      'too; the defaults below are upstream\'s own factory program, read from its source.',
+      '',
+      'MIT, copyright Ghost Note Engineering Ltd.',
+    ],
+  },
+  {
+    out: STRETCH_OUT,
+    ids: ['Shift'],
+    listName: 'STRETCH_DEVICES',
+    title: 'Signalsmith Stretch, as a device descriptor.',
+    notes: [
+      'Only the pitch half of the library is exposed; the reason is in build/devices/stretch.mjs.',
+      '',
+      'MIT, copyright Signalsmith Audio Ltd.',
+    ],
+  },
+  {
+    out: MUTABLE_OUT,
+    // The order the module has always been written in, which is the order it is read in too:
+    // the catalog shows devices in the order the lists carry them.
+    ids: ['Plaits', 'Rings', 'Elements', 'Braids', 'Warps', 'Clouds'],
+    listName: 'MUTABLE_DEVICES',
+    title: 'The Mutable Instruments modules, as device descriptors.',
+    notes: [
+      'Which modules can be ported at all - and which are analog hardware with no DSP to port -',
+      'is written down in build/devices/mutable.mjs, along with why.',
+      '',
+      'MIT, copyright Emilie Gillet, taken from each file\'s own header: the repository itself',
+      'declares no license.',
+    ],
+  },
+];
+
+export async function build({ only = null, planOnly = false, repin = false } = {}) {
+  const lock = readLock();
+  const all = await deviceRecipes({ lock, only, repin });
 
   fs.mkdirSync(WASM_OUT, { recursive: true });
-  const descriptors = [];
   const problems = [];
 
-  for (const entry of chosen) {
-    const workDir = path.join(CACHE, 'work', entry.id);
-    fs.mkdirSync(workDir, { recursive: true });
-
-    const sources = {};
-    for (const file of filesFor(entry.upstream)) {
-      sources[file] = await sourceFile(AIRWINDOWS_REPO, sha, upstreamPath(entry.upstream, file));
-      fs.writeFileSync(path.join(workDir, file), sources[file], 'utf8');
-    }
-
-    const descriptor = descriptorFrom(entry, sources[`${entry.upstream}.h`], sources[`${entry.upstream}.cpp`]);
-    descriptors.push(descriptor);
-    log(`${entry.id.padEnd(16)} ${descriptor.params.length} controls: ${descriptor.params.map((p) => p.name).join(', ')}`);
-
-    if (planOnly) continue;
-
-    fs.writeFileSync(path.join(workDir, 'wrapper.cc'), wrapperFor(entry), 'utf8');
-    const outFile = path.join(WASM_OUT, `${entry.id}.wasm`);
-    try {
-      compile({
-        sources: [
-          path.join(workDir, 'wrapper.cc'),
-          path.join(workDir, `${entry.upstream}.cpp`),
-          path.join(workDir, `${entry.upstream}Proc.cpp`),
-        ],
-        includes: [workDir, SHIM],
-        outFile,
-      });
-      log(`${' '.repeat(16)} -> ${path.relative(engineRoot, outFile)} (${(fs.statSync(outFile).size / 1024).toFixed(0)} kB)`);
-    } catch (err) {
-      const detail = (err.stderr?.toString() ?? err.message).split('\n').slice(0, 6).join('\n');
-      problems.push(`${entry.id}: ${detail}`);
+  if (!planOnly) {
+    for (const one of all) {
+      const wrapperPath = path.join(one.workDir, one.wrapperName);
+      fs.writeFileSync(wrapperPath, one.wrapper, 'utf8');
+      const outFile = path.join(WASM_OUT, `${one.id}.wasm`);
+      try {
+        compile({
+          sources: [wrapperPath, ...one.sources],
+          includes: one.includes,
+          defines: one.defines,
+          prelude: one.prelude,
+          exports: one.exports,
+          memory: one.memory,
+          outFile,
+        });
+        log(`${one.id.padEnd(16)} -> ${path.relative(engineRoot, outFile)} (${(fs.statSync(outFile).size / 1024).toFixed(0)} kB)`);
+      } catch (err) {
+        const detail = (err.stderr?.toString() ?? err.message).split('\n').slice(0, 10).join('\n');
+        problems.push(`${one.id}: ${detail}`);
+      }
     }
   }
 
-  const cloudSeed = wantCloudSeed ? await buildCloudSeed({ lock, planOnly, problems, repin }) : null;
-  const shift = wantShift ? await buildStretch({ lock, planOnly, problems, repin }) : null;
-  const mutable = wantPlaits ? await buildPlaits({ lock, planOnly, problems, repin }) : [];
-
   if (!planOnly && problems.length === 0 && !only) {
-    fs.writeFileSync(DESCRIPTOR_OUT, descriptorModule(descriptors, {
-      title: 'The Airwindows effects, as device descriptors.',
-      listName: 'AIRWINDOWS_DEVICES',
-      notes: [
-        'The names, the defaults and the count are read out of each plugin\'s own source, so what',
-        'poptart shows beside a control is what the plugin calls it.',
-        '',
-        'Every one is MIT, copyright Chris Johnson (airwindows.com), and says so in its descriptor;',
-        'the About screen prints those lines from the catalog rather than from a list kept by hand.',
-      ],
-    }), 'utf8');
-    fs.writeFileSync(CLOUDSEED_OUT, descriptorModule([cloudSeed], {
-      title: 'Cloud Seed, as a device descriptor.',
-      listName: 'CLOUDSEED_DEVICES',
-      notes: [
-        'The control names are written out in build/devices/cloudseed.mjs and the reason is there',
-        'too; the defaults below are upstream\'s own factory program, read from its source.',
-        '',
-        'MIT, copyright Ghost Note Engineering Ltd.',
-      ],
-    }), 'utf8');
-    fs.writeFileSync(STRETCH_OUT, descriptorModule([shift], {
-      title: 'Signalsmith Stretch, as a device descriptor.',
-      listName: 'STRETCH_DEVICES',
-      notes: [
-        'Only the pitch half of the library is exposed; the reason is in build/devices/stretch.mjs.',
-        '',
-        'MIT, copyright Signalsmith Audio Ltd.',
-      ],
-    }), 'utf8');
-    fs.writeFileSync(MUTABLE_OUT, descriptorModule(mutable, {
-      title: 'The Mutable Instruments modules, as device descriptors.',
-      listName: 'MUTABLE_DEVICES',
-      notes: [
-        'Which modules can be ported at all - and which are analog hardware with no DSP to port -',
-        'is written down in build/devices/mutable.mjs, along with why.',
-        '',
-        'MIT, copyright Emilie Gillet, taken from each file\'s own header: the repository itself',
-        'declares no license.',
-      ],
-    }), 'utf8');
+    for (const file of DESCRIPTOR_FILES) {
+      const descriptors = file.ids
+        .map((id) => all.find((one) => one.id === id)?.descriptor)
+        .filter(Boolean);
+      fs.writeFileSync(file.out, descriptorModule(descriptors, file), 'utf8');
+    }
     log(`\nwrote the generated descriptors under ${path.relative(engineRoot, path.dirname(DESCRIPTOR_OUT))}`);
   }
   writeLock(lock);
@@ -732,7 +789,7 @@ export async function build({ only = null, planOnly = false, repin = false } = {
     for (const p of problems) log(`  ${p}`);
     throw new Error(`${problems.length} device(s) did not build`);
   }
-  return { descriptors };
+  return { descriptors: all.map((one) => one.descriptor) };
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url))) {

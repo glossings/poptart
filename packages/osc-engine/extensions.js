@@ -1,9 +1,12 @@
 'use strict';
 
-// Keeps poptart's own SuperCollider extension (the PoptartPitchShift UGen behind the decks'
-// keylock - native/rubberband/) installed in the user's SC Extensions folder, which is the one
-// place BOTH halves of the engine look: sclang compiles the class file from there and scsynth
-// loads the .scx from there. Run before sclang is spawned (sclang compiles its class library at
+// Keeps poptart's own SuperCollider extensions installed in the user's SC Extensions folder,
+// which is the one place BOTH halves of the engine look: sclang compiles the class files from
+// there and scsynth loads the .scx files from there. There are two, independent of each other:
+// the PoptartPitchShift UGen behind the decks' keylock (native/rubberband/), and PoptartDevice,
+// which hosts poptart's own synths and effects (native/devices/ - the same devices the browser
+// build plays). Either can be present without the other: each is a prebuilt binary, and a
+// platform nobody has built one on simply does without that half. Run before sclang is spawned (sclang compiles its class library at
 // startup, so a file that lands later is invisible until the next boot).
 //
 // The files are copied, not symlinked: a symlink into a checkout that later moves or is deleted
@@ -23,6 +26,15 @@ const SOURCES = {
   'PoptartPitchShift.scx': path.join(SOURCE_DIR, 'bin', 'PoptartPitchShift.scx'),
   'PoptartPitchShift.sc': path.join(SOURCE_DIR, 'PoptartPitchShift.sc'),
 };
+
+const DEVICES_DIR = path.join(__dirname, 'native', 'devices');
+const DEVICE_FILES = ['PoptartDevices.scx', 'PoptartDevice.sc'];
+const DEVICE_SOURCES = {
+  'PoptartDevices.scx': path.join(DEVICES_DIR, 'bin', 'PoptartDevices.scx'),
+  'PoptartDevice.sc': path.join(DEVICES_DIR, 'PoptartDevice.sc'),
+};
+/** The device catalog, read by the engine's Node half rather than installed anywhere. */
+const DEVICE_CATALOG = path.join(DEVICES_DIR, 'devices.json');
 
 /** The user-level SuperCollider Extensions directory for this platform. */
 function userExtensionsDir() {
@@ -85,21 +97,28 @@ function sameContent(a, b) {
 }
 
 /**
- * Install or refresh the extension. Returns what happened, for the boot log:
+ * Install or refresh one extension. Returns what happened, for the boot log:
  *   { installed: [names copied], upToDate: [names already current], skipped: reason|null }
- * Never throws - a failure here must not stop the engine booting (it just loses keylock's
- * pitch shifter), so problems come back in `skipped` for the caller to log.
+ * Never throws - a failure here must not stop the engine booting (it costs keylock's pitch
+ * shifter, or poptart's own devices, and nothing else), so problems come back in `skipped` for
+ * the caller to log.
  *
  * @param {object} [opts]
  * @param {string} [opts.extensionsDir] - override the destination (tests).
  * @param {Record<string,string>} [opts.sources] - override the source files (tests).
  * @param {string} [opts.platform] - override process.platform (tests).
+ * @param {string[]} [opts.files] - which names to install (defaults to the pitch shifter's).
+ * @param {string} [opts.binary] - the name among them whose platform decides the whole group.
+ * @param {string} [opts.from] - where they come from, for the message when they are missing.
  */
-function ensurePoptartExtension({ extensionsDir = userExtensionsDir(), sources = SOURCES, platform = process.platform } = {}) {
+function ensurePoptartExtension({
+  extensionsDir = userExtensionsDir(), sources = SOURCES, platform = process.platform,
+  files = FILES, binary = 'PoptartPitchShift.scx', from = 'native/rubberband',
+} = {}) {
   const result = { installed: [], upToDate: [], skipped: null };
-  const missing = FILES.filter((f) => !fs.existsSync(sources[f]));
+  const missing = files.filter((f) => !fs.existsSync(sources[f]));
   if (missing.length) {
-    result.skipped = `no prebuilt extension for this platform (${missing.join(', ')} not in native/rubberband)`;
+    result.skipped = `no prebuilt extension for this platform (${missing.join(', ')} not in ${from})`;
     return result;
   }
   const dest = path.join(extensionsDir, 'poptart');
@@ -108,21 +127,21 @@ function ensurePoptartExtension({ extensionsDir = userExtensionsDir(), sources =
   // fine, so poptart.scd would see the class, skip the SOLA fallback, and build the keylock
   // around a UGen the server does not have. Both files go, including a copy an earlier version
   // installed before this check existed.
-  const builtFor = binaryPlatform(sources['PoptartPitchShift.scx']);
+  const builtFor = binaryPlatform(sources[binary]);
   if (builtFor && builtFor !== platform) {
-    for (const f of FILES) {
+    for (const f of files) {
       try {
         fs.rmSync(path.join(dest, f), { force: true });
       } catch {
         // Left in place it fails the way it always did; nothing here is worth stopping a boot for.
       }
     }
-    result.skipped = `no prebuilt extension for this platform (the PoptartPitchShift.scx in native/rubberband is a ${builtFor} build)`;
+    result.skipped = `no prebuilt extension for this platform (the ${binary} in ${from} is a ${builtFor} build)`;
     return result;
   }
   try {
     fs.mkdirSync(dest, { recursive: true });
-    for (const f of FILES) {
+    for (const f of files) {
       const target = path.join(dest, f);
       if (sameContent(sources[f], target)) {
         result.upToDate.push(f);
@@ -141,5 +160,32 @@ function ensurePoptartExtension({ extensionsDir = userExtensionsDir(), sources =
   return result;
 }
 
+/**
+ * The same, for the device extension (native/devices/): poptart's own synths and effects.
+ *
+ * Separate from the pitch shifter rather than one list of four files, because the two are built
+ * by different scripts and one can be present where the other is not - and a missing or
+ * wrong-platform binary takes down only its own half. Which is what the whole-group platform
+ * check is for: a class file that compiles beside an .scx scsynth cannot load would leave
+ * sclang building track slots around a UGen the server does not have.
+ */
+function ensureDeviceExtension({ extensionsDir = userExtensionsDir(), sources = DEVICE_SOURCES, platform = process.platform } = {}) {
+  return ensurePoptartExtension({
+    extensionsDir,
+    sources,
+    platform,
+    files: DEVICE_FILES,
+    binary: 'PoptartDevices.scx',
+    from: 'native/devices',
+  });
+}
+
 module.exports = {
-  sclangStartupFile, ensurePoptartExtension, userExtensionsDir, EXTENSION_FILES: FILES };
+  sclangStartupFile,
+  ensurePoptartExtension,
+  ensureDeviceExtension,
+  userExtensionsDir,
+  EXTENSION_FILES: FILES,
+  DEVICE_EXTENSION_FILES: DEVICE_FILES,
+  DEVICE_CATALOG,
+};

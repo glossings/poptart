@@ -1,0 +1,332 @@
+// Class side of the PoptartDevice UGen (native/devices/PoptartDevice.cpp) - poptart's own
+// synths and effects, the ones the browser build plays as compiled modules, running in scsynth.
+// The engine copies this file and the built .scx into the user's SuperCollider Extensions folder
+// before sclang starts (see extensions.js), so both halves find them.
+//
+//   PoptartDevice.ar(input, numChannels, bend, sidechain, id)
+//     input        the chain signal, an array of channels ([] for an instrument, which has none)
+//     numChannels  how many channels come out (2 everywhere in poptart)
+//     bend         the track's pitch bend in semitones, for an instrument (a control or a signal)
+//     sidechain    another signal, for a device that cross-modulates (see PdDeviceInfo.sidechain)
+//     id           a symbol naming this slot, exactly as VSTPlugin's `id` does
+//
+// WHY THIS LOOKS LIKE VSTPlugin. A track is one SynthDef with a fixed chain of slots, and which
+// device sits in a slot is decided long after that def was built - so the UGen has to be generic
+// and load its DSP at runtime, which is the problem VSTPlugin already solved. Following it down
+// to the controller's method names is what lets sc/poptart.scd drive a native device through the
+// code that drives plugins: one setParam, one resolveParamIndex, one ramp, one LFO, one MIDI
+// control. The duck is the point.
+PoptartDevice : MultiOutUGen {
+    var <>id, <>desc;
+
+    *ar { |input, numChannels = 2, bend = 0, sidechain, id|
+        var ins = input.asArray;
+        var scs = sidechain.asArray;
+        ins.do { |item, i|
+            (item.rate != \audio).if {
+                MethodError("PoptartDevice input % (%) is not audio rate".format(i, item), this).throw;
+            };
+        };
+        scs.do { |item, i|
+            (item.rate != \audio).if {
+                MethodError("PoptartDevice sidechain % (%) is not audio rate".format(i, item), this).throw;
+            };
+        };
+        ^this.multiNewList([\audio, id, numChannels, bend, ins.size] ++ ins ++ [scs.size] ++ scs)
+    }
+
+    *kr { ^this.shouldNotImplement(thisMethod) }
+
+    init { |argId, numChannels, bend, numIn ... rest|
+        id = argId !? { argId.asSymbol };
+        // The order the UGen reads them in: bend, the main signal count, the main signals, the
+        // sidechain count, the sidechain signals. The counts are there because a UGen's inputs
+        // are a flat list and it has to know where one group ends.
+        inputs = [bend, numIn] ++ rest;
+        ^this.initOutputs(numChannels, rate)
+    }
+
+    // Called once while the SynthDef is being built. A controller finds its slot by asking the
+    // def which index carries which id, the same way VSTPluginController does.
+    optimizeGraph {
+        var metadata;
+        this.synthDef.metadata ?? { this.synthDef.metadata = () };
+        metadata = this.synthDef.metadata[\poptartDevices];
+        metadata ?? {
+            metadata = ();
+            this.synthDef.metadata[\poptartDevices] = metadata;
+        };
+        id ?? {
+            Error("SynthDef '%' has a PoptartDevice without an id - every slot needs one"
+                .format(this.synthDef.name)).throw;
+        };
+        metadata.at(id).notNil.if {
+            Error("SynthDef '%' has two PoptartDevices with the id '%'"
+                .format(this.synthDef.name, id)).throw;
+        };
+        desc = ();
+        metadata.put(id, desc);
+    }
+
+    synthIndex_ { |index|
+        super.synthIndex_(index);
+        desc.notNil.if { desc.index = index };
+    }
+}
+
+// What a device says about itself, in the shape VSTPluginDesc says it.
+//
+// A plugin is asked at scan time what its parameters are called; a poptart device ships a
+// descriptor instead (packages/web-engine/src/descriptor.mjs), and the engine hands the relevant
+// part of it over when it opens the slot. Same two questions either way - what are the controls
+// called, and which index is this name - so poptart.scd's resolveParamIndex works on both
+// without knowing which it has.
+PoptartDeviceDesc {
+    var <name, <parameters, <indices;
+
+    // `params` is an array of (id:, name:) events, in the device's own parameter order.
+    *new { |name, params|
+        ^super.new.prInit(name, params)
+    }
+
+    prInit { |argName, params|
+        name = argName.asString;
+        parameters = params.collect { |p, i| (name: (p[\name] ? p[\id]).asString, label: "", index: i) };
+        // Both spellings resolve, as they do in the browser: `.param("LPG Color", ...)` and
+        // `.param("lpgcolor", ...)` are the same control, and case never matters.
+        indices = IdentityDictionary.new;
+        params.do { |p, i|
+            p[\id] !? { |x| indices.put(x.asString.toLower.asSymbol, i) };
+            p[\name] !? { |x| indices.put(x.asString.toLower.asSymbol, i) };
+        };
+    }
+
+    numParameters { ^parameters.size }
+
+    /**
+     * What a VSTPluginDesc calls the plugin API it found - nil here, since there is no plugin.
+     *
+     * Asked rather than guessed, by the paths that send a slot every note off it is holding and
+     * then an all-notes-off for good measure: VST 3 answers an all-notes-off by doing nothing,
+     * so it is only sent where it means something. A native device is not a VST 3, and nil says
+     * so in the one way those lines read ("VST 3" is not in it), so it gets the message - which
+     * its wrapper handles as the negative note that ends everything.
+     */
+    sdkVersion { ^nil }
+
+    findParamIndex { |name| ^indices[name.asString.toLower.asSymbol] }
+}
+
+// The handle on one open device, with the surface of a VSTPluginController.
+//
+// Everything poptart.scd does to a plugin it does through a controller: set a parameter, map a
+// control bus onto one, play a note, ask what the parameters are called, capture and restore a
+// program. A native device answers all of it - mostly by sending the UGen a unit command, and in
+// two cases (a parameter's current value, a program) out of what it has been told, because it IS
+// the authority on those: nothing else writes a native device's controls.
+PoptartDeviceController {
+    // How long to wait for the server to say a device is in before giving up on it. An open is
+    // one allocation on the server's helper thread, so this is a failsafe and not a budget.
+    classvar <>openTimeout = 10;
+
+    var <synth, <id, <synthIndex, <info, <midi;
+    var <>parameterAutomated;
+    var positions;      // the last position written to each control, by index
+    var <>deviceName;
+
+    *new { |synth, id, synthDef|
+        var def = synthDef ?? { SynthDescLib.global.at(synth.defName).def };
+        var metadata = def.notNil.if { def.metadata !? { |m| m[\poptartDevices] } };
+        var entry = metadata !? { |m| m[id.asSymbol] };
+        entry ?? {
+            MethodError("SynthDef '%' has no PoptartDevice with the id '%'"
+                .format(synth.defName, id), this).throw;
+        };
+        ^super.new.prInit(synth, id.asSymbol, entry[\index]);
+    }
+
+    prInit { |argSynth, argId, index|
+        synth = argSynth;
+        id = argId;
+        synthIndex = index;
+        positions = Array.fill(128, 0);
+        midi = PoptartDeviceMIDIProxy(this);
+    }
+
+    /**
+     * Opens a device by name - "Plaits", "Galactic" - with the controls it is described as having.
+     *
+     * The action fires when the device is actually IN, not when the message went out: the open
+     * allocates (Cloud Seed's delay lines are tens of megabytes) and so happens off the audio
+     * thread, and the UGen replies from the block that installs it. The engine holds a track's
+     * notes until this says yes, which is what makes `synth("Plaits", { state })` land in order
+     * on a cold start.
+     */
+    open { |name, params, action|
+        var resp, answered = false;
+        deviceName = name.asString;
+        info = PoptartDeviceDesc(name, params ? []);
+        resp = OSCFunc({ |msg|
+            if (answered.not) {
+                answered = true;
+                action.value(this, msg[3] > 0);
+            };
+        }, '/poptart/deviceOpened', synth.server.addr,
+            argTemplate: [synth.nodeID, synthIndex]).oneShot;
+        // A device that never reports back must not leave a track's notes held for ever (see
+        // waitForLoad in poptart.scd): one answer is given either way, and whichever comes first
+        // is the one the caller hears.
+        SystemClock.sched(openTimeout, {
+            if (answered.not) {
+                answered = true;
+                resp.free;
+                action.value(this, false);
+            };
+            nil
+        });
+        this.sendMsg('/open', deviceName);
+    }
+
+    close {
+        info = nil;
+        deviceName = nil;
+        this.sendMsg('/close');
+    }
+
+    /** A control, by index, as a 0..1 position - what the descriptor turns into real units. */
+    set { |... pairs|
+        pairs.pairsDo { |index, value|
+            (index.isNumber and: { index >= 0 } and: { index < positions.size }).if {
+                positions[index] = value;
+            };
+        };
+        // The index as an integer and the value as a float: the UGen reads them as what they
+        // are, and a message that says what it means is one less thing to work out from a trace.
+        this.sendMsg('/set', *pairs.collect { |v, i| if (i.even) { v.asInteger } { v.asFloat } });
+    }
+
+    /**
+     * What a control is sitting at.
+     *
+     * Answered from here rather than from the server, and that is not a shortcut: a native
+     * device's controls are only ever written through this object, so this IS the value, and
+     * .hold()/.release() around a patterned parameter (poptart.scd's holdParam) needs it
+     * synchronously to have something to put back.
+     */
+    get { |index, action|
+        action.value(positions[index] ? 0);
+    }
+
+    /** A control bus onto a control: how every modulator in poptart reaches a parameter. */
+    map { |index, bus|
+        this.sendMsg('/map', index.asInteger, bus.asBus.index.asInteger);
+    }
+
+    unmap { |... indices|
+        indices.isEmpty.if {
+            this.sendMsg('/unmap', *(0..(info !? { |i| i.numParameters - 1 } ? 0)));
+        } {
+            this.sendMsg('/unmap', *indices.collect(_.asInteger));
+        };
+    }
+
+    /**
+     * The device's program, written where a plugin writes its own.
+     *
+     * A ported device has no state but its controls - no samples loaded into it, no sub-presets -
+     * so the positions ARE the program, and they are written as the same JSON the browser's
+     * capture carries. The file is what `synth("Plaits", { state })` round-trips through, so the
+     * two engines' presets stay one format.
+     */
+    writeProgram { |path, action|
+        var ok = false;
+        var file;
+        try {
+            file = File(path.standardizePath, "w");
+            file.notNil.if {
+                file.write(this.prProgramString);
+                file.close;
+                ok = true;
+            };
+        } { |err|
+            ("poptart: could not write a device program to " ++ path ++ ": " ++ err.errorString).warn;
+        };
+        action.value(this, ok);
+    }
+
+    readProgram { |path, action|
+        var ok = false;
+        var text = try { File.readAllString(path.standardizePath) };
+        var doc = text !? { try { text.parseJSON } };
+        var values = doc !? { doc["params"] };
+        (values.isKindOf(Dictionary) and: { info.notNil }).if {
+            values.keysValuesDo { |key, value|
+                var index = info.findParamIndex(key);
+                index !? { this.set(index, value.asFloat) };
+            };
+            ok = true;
+        };
+        action.value(this, ok);
+    }
+
+    prProgramString {
+        var parts = (info !? { info.parameters } ? []).collect { |p, i|
+            "\"%\": %".format(p.name, positions[i] ? 0)
+        };
+        ^"{ \"device\": \"%\", \"params\": { % } }".format(deviceName ? "", parts.join(", "))
+    }
+
+    // A ported device has no host transport to mirror and no editor window of its own: its panel
+    // is drawn by poptart from the descriptor (the shared client.js already draws it for the web
+    // build). These exist so the plugin paths can call them without a kind check.
+    setPlaying { |playing| }
+    setTempo { |bpm| }
+    setTransportPos { |beats| }
+    editor { "poptart: % has no plugin editor - its panel is poptart's own".format(deviceName ? "this device").postln }
+
+    sendMsg { |cmd ... args|
+        synth.server.sendMsg('/u_cmd', synth.nodeID, synthIndex, cmd, *args);
+    }
+
+    sendBundle { |time ... msgs|
+        synth.server.sendBundle(time, *msgs);
+    }
+
+    /** The message form, for a caller that is building a bundle of its own. */
+    msgFor { |cmd ... args|
+        ^['/u_cmd', synth.nodeID, synthIndex, cmd] ++ args
+    }
+}
+
+// Notes, in the shape a plugin takes them.
+//
+// The engine plays an instrument slot by sending MIDI (`ctl.midi.noteOn(chan, note, velocity)`),
+// because until now every instrument slot was a plugin. A native device is played with its own
+// unit commands, so this translates: the channel is dropped (a device is one instrument, not
+// sixteen), and the velocity comes back off MIDI's 0..127 to the 0..1 a device reads.
+PoptartDeviceMIDIProxy {
+    var owner;
+
+    *new { |owner| ^super.newCopyArgs(owner) }
+
+    noteOn { |chan, note, veloc = 64|
+        owner.sendMsg('/noteOn', note.asFloat, (veloc / 127).asFloat);
+    }
+
+    noteOff { |chan, note, veloc = 64|
+        owner.sendMsg('/noteOff', note.asFloat);
+    }
+
+    allNotesOff { |chan|
+        owner.sendMsg('/allNotesOff');
+    }
+
+    // The track's bend reaches a native device as a signal on the UGen's own bend input (see
+    // buildTrackDef), not as a message - so these are deliberately quiet rather than missing:
+    // the MIDI paths in poptart.scd call them without asking what kind of device they have.
+    bend { |chan, value| }
+    control { |chan, num, value| }
+    polyTouch { |chan, note, value| }
+    touch { |chan, value| }
+    program { |chan, number| }
+}

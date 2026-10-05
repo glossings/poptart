@@ -183,7 +183,7 @@ var trackTempo = IdentityDictionary.new;
 var jsonEscape, toJson, replyOk, replyErr, pluginList, runScan, trackDefName, buildTrackDef, channelDefault;
 var sharedTrackDef, trackDef, trackDefState; // the one track SynthDef this engine builds (see sharedTrackDef)
 var awaitTrack, awaitLoaded, reclaimStuckTrack, resolvePlugin, resolveParamIndex, watchPluginEdits;
-var pluginOpenLock, openQueued;
+var pluginOpenLock, openQueued, slotKindGuard;
 var destroyTrack, buildTrack;
 var slotKey, slotLive, waitForLoad, flushNotes, clearPending;
 var hushTrack, clearMidiRoute, markSounding;
@@ -443,6 +443,15 @@ buildTrackDef = { |key|
         fxOut, fxSend = 0,
         recOut, recSend = 0, mixOut, mixSend = 0|
         var sig = Silent.ar(2);
+        // Whether poptart's own devices are available (the PoptartDevice extension -
+        // native/devices/, installed into the user's SC Extensions folder by extensions.js
+        // before sclang starts). False on a platform nobody has built it for, and on the very
+        // first boot of a fresh clone: the def then carries plugin slots only, and
+        // `synth("Plaits")` warns instead of sounding. Asked once per def rather than once per
+        // slot - the answer cannot change while sclang runs, since its class library is compiled
+        // at startup - and asked HERE, inside the def, so the def is a thing that can be lifted
+        // out and built on its own (which is how most of this file is tested).
+        var hasNativeDevices = \PoptartDevice.asClass.notNil;
         var scBuses = (1..maxSlots - 1).collect { |i| ("scBus" ++ i).asSymbol.kr(0) };
         var mid, side; // the channel strip's mid/side pair (see the width control below)
         var live, djLow, djMid, djHigh, djLpf, djHpf, djWet, djv, djq; // the DJ stage (see below)
@@ -499,7 +508,17 @@ buildTrackDef = { |key|
                 // to the private input bus this block (sample synths sit at the group's head,
                 // this synth at its tail, so In.ar sees them) - samples run through the same
                 // fx chain a VST instrument would.
-                sig = VSTPlugin.ar(nil, 2, id: \slot0) + In.ar(inBus, 2);
+                // Two kinds of device sit in every slot and exactly one of them is ever
+                // loaded: a plugin (VSTPlugin) and one of poptart's own (PoptartDevice, see
+                // native/devices/ - the same synths and effects the browser build plays). An
+                // empty UGen of either kind outputs silence, not its input, so summing them is
+                // how a slot carries both without a def per combination - which matters because
+                // a track's def is built once, at birth, long before a pattern says what goes
+                // in its slots. The native device takes the track's bend as a SIGNAL rather
+                // than as MIDI, since it has no MIDI to take.
+                sig = VSTPlugin.ar(nil, 2, id: \slot0)
+                    + if (hasNativeDevices) { \PoptartDevice.asClass.ar([], 2, bendV, nil, \nslot0) } { Silent.ar(2) }
+                    + In.ar(inBus, 2);
                 // Input gain (Sig#gain, pseudo-slot -1 like the strip controls below): the level
                 // going INTO the fx chain, which is where a channel strip's gain knob sits and
                 // what it is for - turn a track down and it drives its own compressor, saturator
@@ -513,7 +532,13 @@ buildTrackDef = { |key|
                 // ignores the extra bus (VSTPlugin tolerates a surplus bus). The `Ref([...])`
                 // wrapping is how VSTPlugin.ar takes multi-bus input.
                 var scIn = In.ar(scBuses[i - 1], 2);
-                var wet = VSTPlugin.ar(Ref([[sig[0], sig[1]], [scIn[0], scIn[1]]]), 2, id: ("slot" ++ i).asSymbol);
+                // The plugin and the native device in this slot, one of which is loaded (see the
+                // instrument slot above). A native device reads the sidechain as a second signal
+                // rather than a second bus, and only the ones that cross-modulate read it at all.
+                var wet = VSTPlugin.ar(Ref([[sig[0], sig[1]], [scIn[0], scIn[1]]]), 2, id: ("slot" ++ i).asSymbol)
+                    + if (hasNativeDevices) {
+                        \PoptartDevice.asClass.ar([sig[0], sig[1]], 2, 0, [scIn[0], scIn[1]], ("nslot" ++ i).asSymbol)
+                    } { Silent.ar(2) };
                 // How much of this slot reaches the rest of the chain. Two things multiplied:
                 // `active`, the bypass flipped on only once a plugin actually loads (an empty
                 // VSTPlugin slot outputs silence, not pass-through, so an unloaded slot must read
@@ -2284,6 +2309,7 @@ OSCdef(\poptartLoadInstrument, { |msg|
         if (track.isNil) { ("poptart: loadInstrument: no track " ++ key).warn } {
             // Livecoding re-eval sends the same chain again - don't reload an already-open plugin,
             // nor one whose open is still queued (see `wanted` in loadEffect).
+            slotKindGuard.(key, track, 0, true);
             if ((track[\loaded][0] != pluginId) and: { track[\wanted][0] != pluginId }) {
                 var ctl = track[\controllers][0] ?? {
                     VSTPluginController(track[\synth], id: \slot0, synthDef: track[\def])
@@ -2335,41 +2361,132 @@ OSCdef(\poptartLoadEffect, { |msg|
             { (slot < 1) or: { slot >= maxSlots } } {
                 ("poptart: no free effect slot on track " ++ key ++ " (max " ++ (maxSlots - 1) ++ ")").warn;
             }
-            { (track[\loaded][slot] != pluginId) and: { track[\wanted][slot] != pluginId } } {
-                var ctl = track[\controllers][slot] ?? {
-                    VSTPluginController(track[\synth], id: ("slot" ++ slot).asSymbol, synthDef: track[\def])
-                };
-                track[\controllers][slot] = ctl;
-                track[\loaded][slot] = nil;
-                // `wanted` marks the open in flight: the action only commits (and un-bypasses)
-                // if the slot still wants this plugin when the open completes - an unloadEffect
-                // or a different loadEffect racing the async open must win. A failed open
-                // clears it so the next eval retries.
-                track[\wanted][slot] = pluginId;
-                openQueued.(ctl, resolvePlugin.(pluginId), { |self, ok|
-                    if (ok) {
-                        if (track[\wanted][slot] == pluginId) {
-                            track[\loaded][slot] = pluginId;
-                            self.setPlaying(true); // see loadInstrument
-                            self.setTempo(trackTempo[key] ? currentTempo);
-                            track[\synth].set(("active" ++ slot).asSymbol, 1); // un-bypass the slot
-                            dropSlotRamps.(key, track, slot); // the open cleared their mappings (see dropRamp)
-                            watchPluginEdits.(track, key, slot, self);
-                            ("poptart: loaded effect " ++ pluginId ++ " in slot " ++ slot).postln;
-                        };
-                    } {
-                        track[\wanted][slot] = nil;
-                        ("poptart: FAILED to load effect '" ++ pluginId ++ "'"
-                            ++ if (scanning) {
-                                " - the plugin scan is still running, so it may simply not have "
-                                ++ "been probed yet; try again when the scan finishes"
-                            } { "" }).warn;
+            { true } {
+                // A slot that is changing kind - a plugin where one of poptart's own devices
+                // was - has to be emptied before the plugin goes in (see slotKindGuard).
+                slotKindGuard.(key, track, slot, true);
+                if ((track[\loaded][slot] != pluginId) and: { track[\wanted][slot] != pluginId }) {
+                    var ctl = track[\controllers][slot] ?? {
+                        VSTPluginController(track[\synth], id: ("slot" ++ slot).asSymbol, synthDef: track[\def])
                     };
-                });
+                    track[\controllers][slot] = ctl;
+                    track[\loaded][slot] = nil;
+                    // `wanted` marks the open in flight: the action only commits (and un-bypasses)
+                    // if the slot still wants this plugin when the open completes - an unloadEffect
+                    // or a different loadEffect racing the async open must win. A failed open
+                    // clears it so the next eval retries.
+                    track[\wanted][slot] = pluginId;
+                    openQueued.(ctl, resolvePlugin.(pluginId), { |self, ok|
+                        if (ok) {
+                            if (track[\wanted][slot] == pluginId) {
+                                track[\loaded][slot] = pluginId;
+                                self.setPlaying(true); // see loadInstrument
+                                self.setTempo(trackTempo[key] ? currentTempo);
+                                track[\synth].set(("active" ++ slot).asSymbol, 1); // un-bypass the slot
+                                dropSlotRamps.(key, track, slot); // the open cleared their mappings (see dropRamp)
+                                watchPluginEdits.(track, key, slot, self);
+                                ("poptart: loaded effect " ++ pluginId ++ " in slot " ++ slot).postln;
+                            };
+                        } {
+                            track[\wanted][slot] = nil;
+                            ("poptart: FAILED to load effect '" ++ pluginId ++ "'"
+                                ++ if (scanning) {
+                                    " - the plugin scan is still running, so it may simply not have "
+                                    ++ "been probed yet; try again when the scan finishes"
+                                } { "" }).warn;
+                        };
+                    });
+                };
             };
         };
     };
 }, '/poptart/loadEffect');
+
+// --- poptart's own devices (native/devices/, and the same ones the browser build plays) ---
+//
+// A slot carries two kinds of device and exactly one of them at a time (see buildTrackDef). When
+// a pattern changes `synth("Serum 2")` to `synth("Plaits")` the slot changes kind, and whatever
+// was there has to go - both because two loaded devices in one slot would both sound, and
+// because a controller is only good for the kind of UGen it was made against. Answers "is this
+// slot already the kind we want", and empties it when it is not.
+slotKindGuard = { |key, track, slot, wantPlugin|
+    var ctl = track[\controllers][slot];
+    if (ctl.notNil and: { ctl.isKindOf(VSTPluginController) != wantPlugin }) {
+        if (slot >= 1) { track[\synth].set(("active" ++ slot).asSymbol, 0) }; // bypass before the close
+        ctl.close;
+        track[\controllers][slot] = nil;
+        track[\loaded][slot] = nil;
+        track[\wanted][slot] = nil;
+        dropSlotRamps.(key, track, slot);
+        track[\editWatch][slot] !? { |funcs| funcs.do { |f| f.free } };
+        track[\editWatch][slot] = nil;
+    };
+};
+
+// Load one of poptart's own devices into a slot. Node resolves the name - it holds the catalog
+// (native/devices/devices.json, generated beside the extension) and knows a device name from a
+// plugin name - and sends the device's controls along with it, as id/name pairs: that list is
+// everything sclang needs to turn `.param("LPG Color", 0.3)` into a parameter index, and it is
+// the same two spellings the browser resolves (see PoptartDeviceDesc).
+//
+// `position` is 0 for the instrument slot and 1.. for an effect, or -1 for the next free one -
+// the same argument loadEffect takes. Unlike a plugin open this is not serialized: the heavy
+// part happens on the server's own helper thread, one allocation, with no editor to build and
+// no out-of-process probe (which is what openQueued's lock exists for).
+OSCdef(\poptartLoadDevice, { |msg|
+    var key = msg[1].asSymbol;
+    var position = msg[2].asInteger;
+    var name = msg[3].asString;
+    var params = msg[4..].clump(2).collect { |pair| (id: pair[0].asString, name: pair[1].asString) };
+    fork {
+        var track = awaitTrack.(key);
+        var slot, ctl;
+        case
+        { track.isNil } { ("poptart: loadDevice: no track " ++ key).warn }
+        { \PoptartDevice.asClass.isNil } {
+            ("poptart: '" ++ name ++ "' is one of poptart's own devices, and this engine has no "
+                ++ "PoptartDevice extension installed - nothing will sound in that slot. The "
+                ++ "extension ships prebuilt for macOS; on another platform it has to be built "
+                ++ "there (packages/web-engine/build/devices/native.mjs)").warn;
+        }
+        {
+            slot = if (position >= 0) { position } {
+                (1..maxSlots - 1).detect { |i| track[\loaded][i].isNil } ? -1
+            };
+            if ((slot < 0) or: { slot >= maxSlots }) {
+                ("poptart: no free slot on track " ++ key ++ " for device " ++ name).warn;
+            } {
+                slotKindGuard.(key, track, slot, false);
+                // Re-eval sends the same chain again: an already-open device stays open, and so
+                // does one whose open is still in flight.
+                if ((track[\loaded][slot] != name) and: { track[\wanted][slot] != name }) {
+                    ctl = track[\controllers][slot] ?? {
+                        \PoptartDeviceController.asClass.new(track[\synth], ("nslot" ++ slot).asSymbol, track[\def])
+                    };
+                    track[\controllers][slot] = ctl;
+                    track[\loaded][slot] = nil;
+                    track[\wanted][slot] = name;
+                    ctl.open(name, params, { |self, ok|
+                        if (ok and: { track[\wanted][slot] == name }) {
+                            track[\loaded][slot] = name;
+                            if (slot >= 1) { track[\synth].set(("active" ++ slot).asSymbol, 1) };
+                            dropSlotRamps.(key, track, slot);
+                            watchPluginEdits.(track, key, slot, self);
+                            ("poptart: loaded device " ++ name ++ " in slot " ++ slot).postln;
+                        } {
+                            if (ok.not) {
+                                track[\wanted][slot] = nil;
+                                ("poptart: FAILED to load device '" ++ name ++ "' - the engine's "
+                                    ++ "PoptartDevice extension does not have it (it is built from "
+                                    ++ "the same list the browser build ships)").warn;
+                            };
+                        };
+                    });
+                };
+            };
+        };
+    };
+}, '/poptart/loadDevice');
 
 // Commenting a .fx(...) out of a chain must actually silence it: re-bypass the slot, then
 // close the plugin (close is what frees the plugin instance and its memory). The controller

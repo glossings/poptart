@@ -784,55 +784,63 @@ no completion notes.
     what the build does now, and it costs a repository to maintain in exchange for a pin nobody
     else can move.
 
-[ ] The web engine's devices on the desktop. The desktop's default pattern needs a third-party
-    plugin before it makes a sound; native devices would give a fresh install instruments out of
-    the box, and a song written on the web build (`synth("Plaits")`, `.param("Cutoff", 0.5)`)
-    would open on the desktop as the same song - same names, same 0..1 positions, same saved
-    format. The descriptor contract was written with this in mind (`descriptor.mjs`: "a later
-    SuperCollider mirror of a web device would match these names and units"), so names, units
-    and curves are settled; what is missing is a device kind on the desktop and DSP that runs in
-    scsynth.
+[ ] The web engine's devices on the desktop - what is left of it. The ported C++ devices now run
+    in scsynth: `synth("Plaits")`, `synth("Rings")`, `synth("Elements")`, `synth("Braids")`,
+    `fx("Clouds")`, `fx("Galactic")`, `fx("CloudSeed")` and `fx("Shift")` open the same device
+    the browser build plays, with the same control names and the same 0..1 positions, through one
+    generic `PoptartDevice` UGen that loads a device at runtime the way `VSTPlugin` loads a
+    plugin (packages/osc-engine/native/devices/, built by web-engine's
+    build/devices/native.mjs from the same recipes as the .wasm). A fresh install therefore makes
+    a sound without a third-party plugin, which was the point.
 
-    Two kinds of web device, and they port differently. The ported C++ devices (Plaits, Braids,
-    Rings, Elements, Clouds, Shift, CloudSeed, Galactic, all MIT) are compiled to wasm by
-    `build/devices/build-devices.mjs` and all go through one generated C ABI: `pd_init(sr)`,
-    `pd_process(frames)`, `pd_params()`, `pd_in()`, `pd_out()`, `pd_param_count()`,
-    `pd_max_block()`. The hand-written worklet devices - FM, Wavetable, Granular and the effects -
-    are thin wrappers over the shared core in `src/dsp/`: about 2,000 lines of code, `Float32Array`
-    loops that allocate nothing in the hot path, which is already C++ shaped.
-
-    (1) A native device kind on the desktop, ~1 week. Desktop tracks know two kinds today: a
-        `VSTPlugin.ar` slot and the sampler. Needed: `synth(name)` resolving to a descriptor when
-        the name is a native device; a slot variant in the track SynthDef that instantiates a UGen
-        with param inputs; params written by descriptor through `n_set`. The panel is already
-        descriptor-driven in the shared `client.js` via `/api/showEditor`. The work is every place
-        that assumes a device is a plugin and needs a kind gate: auto-pin, preset capture and
-        restore, patterned presets, the plugin filter, the MappedEngine forwarding layer. NRT
-        bounce works natively.
-    (2) The ported devices, ~3 days after (1). One generic SC UGen template calling the `pd_`
-        ABI, and a second target in `build-devices.mjs` beside wasm. The UGen build recipe and
-        the Extensions install path already exist from the keylock pitch shifter, and the private
-        SC build covers Windows. First: the generated shim holds its state in globals
-        (`g_params`, `g_bend`, ...), which allows one instance per process; it has to become a
-        struct before a UGen can have several instances, and that change lives in the generator.
-    (3) The hand-written devices. Either SynthDef mirrors built from SC's own UGens - fast per
-        effect, parity by ear; Wavetable via `VOsc` and Granular via `GrainBuf` come close, but
-        FM does not survive it, since operator feedback through `LocalIn`/`LocalOut` is delayed by
-        a block - or the JS DSP rewritten in C++ once, behind the same `pd_` shim, so it compiles
+    (1) The hand-written devices - FM, Wavetable, Granular and our own effects - are still
+        browser-only. They are thin wrappers over the shared core in web-engine's `src/dsp/`:
+        about 2,000 lines of `Float32Array` loops that allocate nothing in the hot path, which is
+        already C++ shaped. Either SynthDef mirrors built from SC's own UGens - fast per effect,
+        parity by ear; `VOsc` and `GrainBuf` come close for Wavetable and Granular, but FM does
+        not survive it, since operator feedback through `LocalIn`/`LocalOut` is delayed by a
+        block - or the JS DSP rewritten in C++ once, behind the same `pd_` shim, so it compiles
         to both wasm and a UGen and both engines run the same DSP bit for bit. The existing tests
-        (`fmsynth.test.mjs`, `wavetable.test.mjs`, `filters.test.mjs`, ...) can then be pointed
-        at the wasm build for parity. ~1.5 weeks for the shared core and the three synths, ~1 more
-        for the effects.
+        (`fmsynth.test.mjs`, `wavetable.test.mjs`, `filters.test.mjs`, ...) can then be pointed at
+        the wasm build for parity. ~1.5 weeks for the shared core and the three synths, ~1 more
+        for the effects. The effects can also be left: the desktop has plugin effects, and the
+        sampler's grain mode covers most of what Granular does.
 
-    Order: (1) and (2) first, about two weeks, which puts the Mutable ports, Shift, CloudSeed and
-    Galactic on the desktop; then the C++ route for FM, Wavetable and Granular. The effects can
-    follow as SynthDef mirrors or be left - the desktop has plugin effects, and the sampler's grain
-    mode covers most of what Granular does. The unknowns: the shim's move to per-instance state,
-    the generator emitting two targets, and emsdk and the SC cmake build in one pipeline.
+        That route changes the web build too, mostly for the better. For tight float loops wasm
+        is 1.2-2x V8's best JIT output, not more; the larger gain is consistency - no JIT
+        warm-up, deoptimization or GC pauses, and dropouts come from spikes, not the average.
+        Wasm has 128-bit SIMD in every current browser and JS has none, so filters, oversampling
+        and the FM matrix have a later 2-3x available. Each block crosses the JS-to-wasm boundary
+        once, which the `pd_` shim already pays the right way (params in a shared buffer, one
+        `pd_process` per block).
 
-    The C++ route also changes the web build, mostly for the better. For tight float loops wasm
-    is 1.2-2x V8's best JIT output, not more; the larger gain is consistency - no JIT warm-up,
-    deoptimization or GC pauses, and dropouts come from spikes, not the average. Wasm has 128-bit
-    SIMD in every current browser and JS has none, so filters, oversampling and the FM matrix
-    have a later 2-3x available. Each block crosses the JS-to-wasm boundary once, which the `pd_`
-    shim already pays the right way (params in a shared buffer, one `pd_process` per block).
+    (2) A device window on the desktop. The panel is already descriptor-driven in the shared
+        client.js, and `getParams` answers for a native slot, so the list of controls is there;
+        what is missing is the window itself and everything that hangs off editing in one - the
+        auto-pin capture (`/api/pluginEdits`), conf mode, and `.preset()` on a device. The
+        controller writes and reads a program already (the positions as JSON, which is the whole
+        of a ported device's state), so `synth("Plaits", { state })` has a path; it has never
+        been round-tripped through Node's gz64 framing. A native device has no editor to open and
+        no `parameterAutomated` to hear, so until the window exists, conf is deaf to one.
+
+    (3) The device names are not in the editor's plugin browser or its autocomplete, which read
+        the plugin scan. The catalog to add is native/devices/devices.json.
+
+    (4) Off macOS. The .scx is committed as a universal macOS build; Windows and Linux need it
+        built there, as the pitch shifter does (the private SC build covers the Windows side).
+        The x86_64 slice is compiled but has never been run - nothing here has an Intel Mac.
+
+    (5) Notes land on a block boundary (5.3ms at the default block size), because a note is a
+        unit command and those are performed between blocks. Plugin slots have always been the
+        same, so this is parity rather than a regression, but the sampler is sample-accurate and
+        these could be: the command would carry an offset into the block and the UGen would split
+        its render at it, which is what it already does for a moving bend. The track's bend
+        reaches a native device as a control-rate signal for the same reason it is cheap - one
+        value per block, which its own pitch smoothing follows - and the UGen will track an
+        audio-rate one in 32-frame pieces if the def is ever wired to give it one.
+
+    (6) Live verification. Everything above is unit-tested and rendered offline through a real
+        scsynth (native-device-sclang.test.js renders Plaits, a control change and Galactic's
+        tail; native-devices.test.js checks every argument against the browser's own rules), and
+        none of it has been played through a running engine: a device opening on a live track,
+        swapping kinds mid-set, surviving a re-eval, metering in the ctrl+G mixer.

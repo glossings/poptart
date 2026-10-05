@@ -32,6 +32,9 @@ packages/osc-engine/native/rubberband/.deps/
 # Ableton Link SDK + asio fetched by native/link/build.sh
 packages/osc-engine/native/link/.deps/
 
+# SC headers fetched by web-engine's build/devices/native.mjs to compile the device extension
+packages/osc-engine/native/devices/.deps/
+
 # The scratch area build/fetch-packs.mjs downloads upstream sample archives into. Hundreds of
 # megabytes of other people's audio, kept only long enough to take one file out of each.
 packages/web-engine/.pack-cache/

@@ -4,9 +4,36 @@ The devices in `src/devices` are poptart's own, written in JavaScript and bundle
 `build/bundle-worklets.mjs`. This folder is for the other half of the catalog: DSP from other
 projects, compiled to WebAssembly and wrapped as worklets.
 
-Nothing here is built yet. `sources.json` is the list, with each entry's license and what still
-has to be checked about it, and it is the file to edit when that changes — the build script, the
-credits and the planning all read it rather than keeping their own copies.
+`sources.json` is the list, with each entry's license and what still has to be checked about it,
+and it is the file to edit when that changes — the build script, the credits and the planning all
+read it rather than keeping their own copies.
+
+What is built: Galactic, Cloud Seed, Shift, and the Mutable modules Plaits, Rings, Elements,
+Braids and Clouds. Their binaries are committed under `public/devices`, their descriptors under
+`src/devices`. Warps is built by the script and deliberately absent from the catalog — the reason
+is in `src/devices/mutable.mjs`.
+
+## Two targets, one list of recipes
+
+`build-devices.mjs` resolves the pins, reads each device's descriptor out of its own source and
+describes how to compile it. What to do with that is the target's business:
+
+- **`build-devices.mjs`** compiles each device to its own `.wasm` for the browser.
+- **`native.mjs`** compiles all of them into one scsynth extension for the desktop
+  (`packages/osc-engine/native/devices/bin/PoptartDevices.scx`, universal, committed), plus the
+  catalog `devices.json` the desktop engine resolves a name against. Needs a C++ compiler, not
+  emscripten.
+
+One list for both, because the sources, the include paths, the upstream switches and the shimmed
+headers are the same answers either way — and a device that was compiled differently for one
+engine is a device that sounds different there, with nothing to point at.
+
+The one thing that differs is where a device keeps its state. The generated wrapper holds it in
+file-scope globals, which is right for a worklet (one module instance per node) and allows one
+instance per process, which is wrong for a server where every track may want a Plaits. The native
+target lifts that state into a struct — `structify`, which moves no DSP: every `g_params` in the
+bodies becomes the member of the same name. The WebAssembly target compiles the wrapper exactly
+as it always did, so the committed `.wasm` binaries stay reproducible from the same templates.
 
 ## The rules
 
@@ -48,9 +75,16 @@ Each compiled device is a small C++ shim plus a descriptor:
   gives every one a name and a 0..1 range, Faust emits a JSON description with units and widget
   kinds — the descriptor should be generated from that rather than transcribed.
 
-## Building, when there is something to build
+## Building
 
-Emscripten for the C++ sources, and `@grame/faustwasm` from npm for the Faust ones, which runs in
-Node and needs no native toolchain at all. Both need network access to fetch the upstream sources
-the first time. The Faust half is the one to start with: it is the least work per device and its
-UI JSON gives the descriptor away for free.
+    EMSDK=/path/to/emsdk node build/devices/build-devices.mjs    # the .wasm for the browser
+    node build/devices/native.mjs                                # the .scx for the desktop
+
+Emscripten for the first, a C++ compiler for the second; both fetch the pinned upstream sources
+the first time and cache them under `.pack-cache/devices`. `--only <Device>` narrows either one
+to a single device while working on it (the native build then leaves the catalog alone, since a
+catalog naming one device would take the rest off the desktop), and `--plan-only` / `--emit-only`
+resolve and read without compiling.
+
+For the Faust sources still on the list, `@grame/faustwasm` from npm runs in Node and needs no
+native toolchain at all; its UI JSON gives the descriptor away for free.

@@ -22,7 +22,8 @@ const { pidfilePath, reapOrphanedEngine, recordEnginePids, clearEnginePids, kill
 const { samplesRoot, listPackFiles, resolveSampleFile, expandPackEntries, sliceEntryFor } = require('./samples');
 const { recordingsRoot, resolveRecording } = require('./recordings');
 const { analyzeSlices } = require('./analysis');
-const { ensurePoptartExtension, userExtensionsDir, sclangStartupFile } = require('./extensions');
+const { ensurePoptartExtension, ensureDeviceExtension, userExtensionsDir, sclangStartupFile } = require('./extensions');
+const { nativeDevice, deviceParam, deviceParamArgs, paramPosition } = require('./native-devices');
 const {
   privateScInstalled,
   privateSclangPath,
@@ -471,6 +472,10 @@ class OscEngine {
     // a scan, so a host can show "47 of 312" while nothing else works yet.
     this.onScanState = null;
     this._warned = new Set(); // one-shot warning keys, so per-event problems don't spam the log
+    // Which of poptart's own devices is in which slot, as "trackId:slot" - what a `.param()`
+    // argument is resolved against (see setParam). Only this half knows: the scheduler sends a
+    // name and a value and does not care what is hosting them, exactly as on the web.
+    this._slotDevices = new Map();
     this._stateSeq = new Map(); // "trackId|slot" -> latest restore, so a slow inflate can't win
     this._stateAcks = new Map(); // same key -> { seq, resolve }: the one restore still unanswered
     this._stateWork = new Set(); // restores still inflating/writing, so "all sent" is awaitable (see _stateIdle)
@@ -770,6 +775,19 @@ class OscEngine {
           // eslint-disable-next-line no-console
           console.log(`[poptart] installed SC extension: ${ext.installed.join(', ')}`);
         }
+        // poptart's own synths and effects (native/devices/). Independent of the pitch shifter:
+        // without it, `synth("Plaits")` warns in the engine log and that slot stays silent,
+        // while everything else about the engine is unaffected.
+        const devices = ensureDeviceExtension({
+          extensionsDir: isPrivateSclang(this.sclangPath) ? privateExtensionsDir() : userExtensionsDir(),
+        });
+        if (devices.skipped) {
+          // eslint-disable-next-line no-console
+          console.warn(`[poptart] poptart's own devices not installed (${devices.skipped}); synth("Plaits") and the other built-in devices will not sound`);
+        } else if (devices.installed.length) {
+          // eslint-disable-next-line no-console
+          console.log(`[poptart] installed SC extension: ${devices.installed.join(', ')}`);
+        }
         // With the private copy, sclang is handed a generated class-library config (-l) that
         // excludes the default paths, so it compiles our class library and our Extensions and
         // nothing of the machine's. Written here rather than at install time so it always
@@ -1046,17 +1064,50 @@ class OscEngine {
    * label's track warm for its return.
    */
   destroyTrack(trackId) {
+    // The track's slots go with it, or a track rebuilt under the same name would resolve its
+    // controls against whatever the last one had in its chain.
+    for (const key of this._slotDevices.keys()) {
+      if (key.startsWith(`${trackId}:`)) this._slotDevices.delete(key);
+    }
     this._send('/poptart/destroyTrack', [trackId]);
   }
   loadInstrument(trackId, pluginId) {
+    const device = nativeDevice(pluginId);
+    if (device) {
+      if (device.kind !== 'synth') {
+        this._warnOnce(`device-kind:${device.id}`,
+          `[poptart] ${device.id} is an effect, not an instrument - use .fx("${device.id}")`);
+        return;
+      }
+      this._slotDevices.set(`${trackId}:0`, device);
+      this._send('/poptart/loadDevice', [trackId, 0, device.id, ...deviceParamArgs(device)]);
+      return;
+    }
+    this._slotDevices.delete(`${trackId}:0`);
     this._send('/poptart/loadInstrument', [trackId, pluginId]);
   }
   loadEffect(trackId, pluginId, position = -1) {
+    const device = nativeDevice(pluginId);
+    if (device) {
+      if (device.kind !== 'fx') {
+        this._warnOnce(`device-kind:${device.id}`,
+          `[poptart] ${device.id} is an instrument, not an effect - use .synth("${device.id}")`);
+        return;
+      }
+      // A position of -1 is "the next free slot", which only sclang knows: the scheduler names
+      // the slot for every effect in a chain, so this is the hand-written case, and a control on
+      // one of those resolves its argument as a plugin's would.
+      if (position >= 0) this._slotDevices.set(`${trackId}:${position}`, device);
+      this._send('/poptart/loadDevice', [trackId, position, device.id, ...deviceParamArgs(device)]);
+      return;
+    }
+    if (position >= 0) this._slotDevices.delete(`${trackId}:${position}`);
     this._send('/poptart/loadEffect', [trackId, pluginId, position]);
   }
   // Empties an effect slot: re-bypasses it and closes the plugin (freeing its memory).
   // Engine-side no-op if the slot is already empty.
   unloadEffect(trackId, slot) {
+    this._slotDevices.delete(`${trackId}:${slot}`);
     this._send('/poptart/unloadEffect', [trackId, slot]);
   }
   getParams(trackId, slotIndex) {
@@ -1726,6 +1777,24 @@ class OscEngine {
     this._fanoutMidi(trackId, key, 0, targetTime, false);
   }
   setParam(trackId, slotIndex, paramName, value, targetTime) {
+    // One of poptart's own devices resolves the argument the way the browser does: an enum takes
+    // a label or an index, a toggle takes on and off, and everything else takes the 0..1 position
+    // it already is. Done HERE because this is the half that knows which device is in the slot,
+    // and skipping it would make `.param("Engine", "Chord")` a line that works on the web build
+    // and silently does nothing on the desktop.
+    const device = this._slotDevices.get(`${trackId}:${slotIndex}`);
+    if (device) {
+      const position = paramPosition(device, paramName, value);
+      if (position === null) {
+        const control = deviceParam(device, paramName);
+        this._warnOnce(`device-param:${device.id}:${paramName}:${value}`, control
+          ? `[poptart] ${JSON.stringify(value)} is not a value ${device.id}'s "${control.name}" can take`
+          : `[poptart] ${device.id} has no control called "${paramName}"`);
+        return;
+      }
+      this._send('/poptart/setParam', [trackId, slotIndex, paramName, position, this._latency(targetTime)]);
+      return;
+    }
     // A plugin parameter is a number. A word - an enum label the browser build's devices take -
     // means nothing to a VST and is dropped rather than sent to sclang as the wrong type. NaN is
     // dropped with it: it is typeof number, and it is what a unit conversion returns when it is

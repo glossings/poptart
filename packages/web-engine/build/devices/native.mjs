@@ -1,0 +1,422 @@
+// The ported devices, compiled for scsynth instead of for the browser.
+//
+//   SC_SRC=/path/to/supercollider node build/devices/native.mjs
+//   node build/devices/native.mjs --only Plaits      (one device, for a quick compile)
+//   node build/devices/native.mjs --emit-only        (write the generated C++, compile nothing)
+//
+// Run by hand, like the WebAssembly build beside it, and for the same reason: the output is
+// COMMITTED (packages/osc-engine/native/devices/bin/PoptartDevices.scx), so a clone, a test run
+// and a release need the devices and none of them needs a compiler. Everything about which
+// sources a device is built from, which upstream switches it needs and which shimmed headers
+// shadow which pinned ones is in build-devices.mjs's recipes - this file only says what to do
+// with a recipe to get a server plugin rather than a module.
+//
+// WHY THE SAME DSP TWICE AND NOT TWO PORTS. A song is code, and `synth("Plaits")` has to mean the
+// same instrument whichever engine opens it. Two hand-written implementations of a Mutable module
+// would drift the first time either was touched, and the drift would show up as a song that
+// sounds wrong on the desktop with nothing to point at. One source, two compilers, is the only
+// version of this that stays true.
+//
+// WHAT CHANGES FOR THE NATIVE BUILD, and it is one thing: where a device keeps its state. The
+// generated wrapper holds it in file-scope globals, which is exactly right for an
+// AudioWorkletProcessor - one module instance per node - and allows one instance per PROCESS,
+// which is wrong for a server where every track may want a Plaits. `structify` below lifts that
+// state into a struct without touching a line of the DSP around it, and the result is what
+// pd-device.h's adapter drives. The WebAssembly build still compiles the wrapper exactly as it
+// always did, so the committed .wasm binaries stay reproducible from the same templates.
+
+import fs from 'node:fs';
+import path from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+
+import { deviceRecipes } from './build-devices.mjs';
+import { AIRWINDOWS_DEVICES } from '../../src/devices/airwindows.mjs';
+import { CLOUDSEED_DEVICES } from '../../src/devices/cloudseed.mjs';
+import { STRETCH_DEVICES } from '../../src/devices/stretch.mjs';
+import { MUTABLE_DEVICES } from '../../src/devices/mutable.mjs';
+import { normalize } from '../../src/descriptor.mjs';
+
+const here = path.dirname(fileURLToPath(import.meta.url));
+const engineRoot = path.resolve(here, '..', '..');
+const repoRoot = path.resolve(engineRoot, '..', '..');
+const LOCK_PATH = path.join(here, 'devices.lock.json');
+/** Where the UGen, the ABI header and the built bundle live: the desktop engine's own folder. */
+const NATIVE_DIR = path.join(repoRoot, 'packages', 'osc-engine', 'native', 'devices');
+const WORK = path.join(engineRoot, '.pack-cache', 'devices', 'native');
+const OUT_NAME = 'PoptartDevices.scx';
+
+/** The SuperCollider the installed app ships, which is what the plugin must match. */
+const SC_VERSION = process.env.SC_VERSION ?? '3.14.1';
+
+/** Both Macs: the committed bundle has to load on an Intel machine as well as this one. */
+const ARCHES = (process.env.ARCHES ?? 'arm64,x86_64').split(',').filter(Boolean);
+
+const log = (...a) => console.log(...a);                  // eslint-disable-line no-console
+
+/**
+ * Every device that actually ships, by id.
+ *
+ * The recipes know how to build more than the catalog offers - Warps is compiled by the build and
+ * deliberately absent from the device list, because after two rounds of wrapper fixes it still
+ * produced noise across most of its range (see src/devices/mutable.mjs). The desktop ships what
+ * the browser ships and not one device more: a `synth()` name that works on one engine and not
+ * the other is the whole thing this port exists to prevent.
+ */
+const SHIPPED = new Map(
+  [...AIRWINDOWS_DEVICES, ...CLOUDSEED_DEVICES, ...STRETCH_DEVICES, ...MUTABLE_DEVICES]
+    .map((d) => [d.id, d]),
+);
+
+// ---- the wrapper, with its state lifted into a struct ----------------------------------------
+
+/**
+ * One generated wrapper, as a struct that can be instantiated more than once.
+ *
+ * The wrappers are all written to one skeleton, because one file generates all of them:
+ *
+ *   <includes>
+ *   namespace {  <state and helpers>  }
+ *   extern "C" {  <the ABI>  }
+ *
+ * and this moves the second and third parts inside a struct, where the state becomes members and
+ * the ABI becomes methods. NOT A LINE OF THE DSP MOVES: every `g_params`, `g_fifo` and `g_voice`
+ * in the bodies resolves to the member of the same name, which is the point of keeping the
+ * names. What does change is spelled out below, and the build fails loudly if a wrapper ever
+ * stops matching the skeleton rather than quietly compiling something else.
+ */
+export function structify(wrapper, { id, synth }) {
+  const NS = 'namespace {\n';
+  const EXTERN = 'extern "C" {\n';
+  const nsAt = wrapper.indexOf(NS);
+  const externAt = wrapper.indexOf(EXTERN);
+  if (nsAt < 0 || externAt < 0 || externAt < nsAt) {
+    throw new Error(`${id}: the wrapper is not shaped the way the native build expects `
+      + '(includes, then `namespace {`, then `extern "C" {`) - see structify in build/devices/native.mjs');
+  }
+  if (/\bnew\s+\w[\w:<>]*\s*\[/.test(wrapper)) {
+    throw new Error(`${id}: the wrapper allocates an array, which the generated destructor would `
+      + 'free with the wrong delete - give it a destructor by hand');
+  }
+
+  const head = wrapper.slice(0, nsAt);
+  // The namespace's own closing brace, which is the last line of that section.
+  const state = wrapper
+    .slice(nsAt + NS.length, externAt)
+    .replace(/\n\}[ \t]*(\/\/[^\n]*)?\s*$/, '\n')
+    // An array member's size has to be a constant expression, and a `const int` at struct scope
+    // is not one - it would be a member of its own, sized by itself.
+    .replace(/^const (int|float|double|size_t) k/gm, 'static constexpr $1 k');
+  const body = wrapper
+    .slice(externAt + EXTERN.length)
+    .replace(/\}\s*$/, '')
+    // `static` at file scope means internal linkage; at struct scope it means one copy for every
+    // instance, which is the opposite of what this build is for.
+    .replace(/^static /gm, '');
+
+  // What the wrapper owns. Each is allocated once in pd_init, behind an `if (!p)` guard, and
+  // never anywhere else - so a destructor that deletes each one is both necessary (eight tracks
+  // opening and closing devices would otherwise leak a reverb at a time) and sufficient.
+  const owned = [...state.matchAll(/^[A-Za-z_][\w:<>, ]*\*\s*(g_\w+)\s*=\s*nullptr\s*;/gm)].map((m) => m[1]);
+  const unowned = [...state.matchAll(/^[A-Za-z_][\w:<>, ]*\*\s*(g_\w+)\s*;/gm)].map((m) => m[1]);
+  if (unowned.length) {
+    throw new Error(`${id}: pointer state ${unowned.join(', ')} is not initialised to nullptr, `
+      + 'so the native build cannot tell whether the wrapper owns it');
+  }
+
+  const ns = `pd_${id}`;
+  const destructor = owned.length
+    ? `
+  // What pd_init allocated. A device instance is created and destroyed as a slot is filled and
+  // emptied, which on a desktop engine happens all evening.
+  ~Device() {
+${owned.map((name) => `    delete ${name};`).join('\n')}
+  }
+`
+    : '';
+
+  return `${head}#include "pd-device.h"
+
+// GENERATED by build/devices/native.mjs from the wrapper build/devices/build-devices.mjs writes
+// for the browser - the same DSP, with its state lifted into a struct so a server can hold more
+// than one. Do not edit; edit the wrapper.
+namespace ${ns} {
+
+struct Device {
+${state}${destructor}${body}};
+
+}  // namespace ${ns}
+
+extern "C" PdAny* pd_make_${id}() { return new PdAdapter<${ns}::Device, ${synth ? 'true' : 'false'}>(); }
+`;
+}
+
+// ---- the registry ----------------------------------------------------------------------------
+
+/** C's spelling of a float that has to parse back to the same number. */
+const cFloat = (v) => {
+  if (!Number.isFinite(v)) return '0.f';
+  const s = Number(v).toPrecision(9).replace(/0+$/, '').replace(/\.$/, '.0');
+  return `${s}f`;
+};
+
+const cString = (s) => JSON.stringify(String(s));
+
+const CURVES = { lin: 0, exp: 1, pow: 2 };
+
+/**
+ * One device's control table: the descriptor, as data the audio thread can read.
+ *
+ * Positions come in and real values go out, through pd_denormalize - so min, max, the curve and
+ * the step are the whole of what the DSP needs to know about a control, and the default comes
+ * along as the POSITION it sits at, which is where a control rests until a pattern moves it.
+ */
+function paramTable(device) {
+  const rows = device.params.map((p) => {
+    const curve = CURVES[p.curve] ?? 0;
+    return `    { ${cString(p.id)}, ${cString(p.name)}, ${cFloat(p.min)}, ${cFloat(p.max)}, `
+      + `${cFloat(normalize(p, p.default))}, ${cFloat(p.step ?? 0)}, ${cFloat(p.curveExp ?? 1)}, ${curve} },`;
+    // (min, max, the default as a POSITION, the step, the pow exponent, the curve)
+  });
+  return `static const PdParamSpec k${device.id}Params[] = {\n${rows.join('\n')}\n};`;
+}
+
+/** The table the UGen looks a device up in. */
+export function registrySource(devices) {
+  const tables = devices.map((d) => paramTable(d)).join('\n\n');
+  const externs = devices.map((d) => `extern "C" PdAny* pd_make_${d.id}();`).join('\n');
+  const rows = devices.map((d) => `    { ${cString(d.id)}, ${d.kind === 'synth' ? 1 : 0}, `
+    + `${d.sidechain ? 1 : 0}, ${d.params.length}, k${d.id}Params, &pd_make_${d.id} },`).join('\n');
+  return `// GENERATED by build/devices/native.mjs - do not edit.
+//
+// Every ported device this extension was built with, and what each one's controls mean. Read off
+// the same descriptors the browser's panel and autocomplete are generated from, so a control's
+// name, its range and its curve are one answer on both engines.
+
+#include "pd-device.h"
+
+${externs}
+
+namespace {
+
+${tables}
+
+const PdDeviceInfo kDevices[] = {
+${rows}
+};
+
+} // namespace
+
+extern "C" const PdDeviceInfo* pd_device_table() { return kDevices; }
+extern "C" int pd_device_count() { return ${devices.length}; }
+`;
+}
+
+// ---- compiling -------------------------------------------------------------------------------
+
+/** The SuperCollider plugin headers, fetched once into the native folder's own .deps. */
+async function scHeaders() {
+  if (process.env.SC_SRC) return process.env.SC_SRC;
+  const deps = path.join(NATIVE_DIR, '.deps');
+  const root = path.join(deps, `supercollider-Version-${SC_VERSION}`);
+  if (fs.existsSync(path.join(root, 'include', 'plugin_interface'))) return root;
+  // The sibling extension keeps its own copy; use it rather than fetching a second one.
+  const sibling = path.join(repoRoot, 'packages', 'osc-engine', 'native', 'rubberband', '.deps',
+    `supercollider-Version-${SC_VERSION}`);
+  if (fs.existsSync(path.join(sibling, 'include', 'plugin_interface'))) return sibling;
+
+  log(`fetching SuperCollider ${SC_VERSION} headers`);
+  fs.mkdirSync(deps, { recursive: true });
+  const url = `https://github.com/supercollider/supercollider/archive/refs/tags/Version-${SC_VERSION}.tar.gz`;
+  const res = await fetch(url, { headers: { 'user-agent': 'poptart-devices' } });
+  if (!res.ok) throw new Error(`could not fetch the SC headers: ${res.status} ${res.statusText}`);
+  const archive = path.join(deps, 'sc.tgz');
+  fs.writeFileSync(archive, Buffer.from(await res.arrayBuffer()));
+  execFileSync('tar', ['xzf', archive, '-C', deps, '--include=*/include/*']);
+  fs.rmSync(archive, { force: true });
+  return root;
+}
+
+/** Compiler flags every translation unit here is built with, whatever device it belongs to. */
+function baseFlags({ sc, arch }) {
+  return [
+    '-c', '-O3', '-std=c++17', '-ffast-math', '-fno-rtti',
+    '-fPIC', '-arch', arch, '-mmacosx-version-min=11', '-DSC_DARWIN',
+    '-I', path.join(sc, 'include', 'plugin_interface'),
+    '-I', path.join(sc, 'include', 'common'),
+    '-I', path.join(sc, 'include', 'server'),
+    '-I', NATIVE_DIR,
+  ];
+}
+
+/**
+ * Compiles one translation unit, skipping the work when the object is already newer than its
+ * source and was built with the same flags.
+ *
+ * The Mutable modules are thirty files each and there are five of them, twice over for the two
+ * architectures; a rebuild after one edit to one wrapper should not be four minutes.
+ */
+function compileOne({ source, objDir, flags, stamps }) {
+  const key = path.resolve(source);
+  const obj = path.join(objDir, `${path.basename(source).replace(/\W/g, '_')}-${hash(key + flags.join(' '))}.o`);
+  const stampKey = `${obj}`;
+  if (stamps.has(stampKey)) return obj;
+  stamps.add(stampKey);
+  if (fs.existsSync(obj) && fs.statSync(obj).mtimeMs > fs.statSync(source).mtimeMs) return obj;
+  execFileSync('clang++', [...flags, source, '-o', obj], { stdio: ['ignore', 'pipe', 'pipe'] });
+  return obj;
+}
+
+/** A short, stable name for a set of flags. */
+function hash(text) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    h ^= text.charCodeAt(i);
+    h = (h * 0x01000193) >>> 0;
+  }
+  return h.toString(16);
+}
+
+/**
+ * The catalog, as the desktop engine's Node half reads it.
+ *
+ * A trimmed descriptor: what a name resolves to, and what a control is called and means. Not the
+ * descriptions or the figures - those are the browser panel's business, and the device window on
+ * the desktop is drawn from the same shared descriptor the web build serves. Sorted by name so a
+ * rebuild that changed nothing produces no diff.
+ */
+export function catalogJson(devices) {
+  const entry = (d) => ({
+    id: d.id,
+    name: d.name ?? d.id,
+    kind: d.kind,
+    version: d.version ?? 1,
+    sidechain: !!d.sidechain,
+    params: d.params.map((p) => ({
+      id: p.id,
+      name: p.name,
+      min: p.min,
+      max: p.max,
+      default: p.default,
+      step: p.step ?? 0,
+      curve: p.curve,
+      curveExp: p.curveExp ?? 1,
+      unit: p.unit ?? '',
+      ui: p.ui,
+      group: p.group ?? '',
+      rate: p.rate,
+      ...(p.options ? { options: [...p.options] } : {}),
+    })),
+  });
+  const sorted = [...devices].sort((a, b) => a.id.localeCompare(b.id));
+  return `${JSON.stringify({
+    generatedBy: 'packages/web-engine/build/devices/native.mjs',
+    devices: sorted.map(entry),
+  }, null, 2)}\n`;
+}
+
+export async function buildNative({ only = null, emitOnly = false, repin = false } = {}) {
+  const lock = JSON.parse(fs.readFileSync(LOCK_PATH, 'utf8'));
+  const all = await deviceRecipes({ lock, only, repin });
+  const recipes = all.filter((r) => SHIPPED.has(r.id));
+  const skipped = all.filter((r) => !SHIPPED.has(r.id)).map((r) => r.id);
+  if (skipped.length) log(`not in the catalog, so not built: ${skipped.join(', ')}`);
+  if (recipes.length === 0) throw new Error('no devices to build');
+
+  fs.mkdirSync(WORK, { recursive: true });
+  const genDir = path.join(WORK, 'gen');
+  fs.mkdirSync(genDir, { recursive: true });
+
+  // The generated C++: a struct per device, and the table the UGen looks them up in.
+  const generated = [];
+  for (const one of recipes) {
+    const device = SHIPPED.get(one.id);
+    const file = path.join(one.workDir, `poptart-${one.id}.native.cc`);
+    fs.writeFileSync(file, structify(one.wrapper, { id: one.id, synth: device.kind === 'synth' }), 'utf8');
+    generated.push({ recipe: one, device, file });
+    log(`${one.id.padEnd(16)} ${device.params.length} controls, ${device.kind}`);
+  }
+  const registry = path.join(genDir, 'pd-registry.cc');
+  fs.writeFileSync(registry, registrySource(generated.map((g) => g.device)), 'utf8');
+  // The same list as data, for the engine's Node half: it is what decides that `synth("Plaits")`
+  // is one of poptart's own devices rather than a plugin name to look up in the scan, and what
+  // it sends sclang so a control resolves by name. Written only by a whole build - a catalog
+  // naming one device because the build was narrowed to one would take the rest off the desktop.
+  if (!only) {
+    fs.writeFileSync(path.join(NATIVE_DIR, 'devices.json'), catalogJson(generated.map((g) => g.device)), 'utf8');
+  }
+  if (emitOnly) {
+    log(`\nwrote the generated C++ under ${genDir} and beside each device's sources`);
+    return { generated: generated.map((g) => g.file), registry };
+  }
+
+  const sc = await scHeaders();
+  const thin = [];
+  for (const arch of ARCHES) {
+    const objDir = path.join(WORK, 'obj', arch);
+    fs.mkdirSync(objDir, { recursive: true });
+    const base = baseFlags({ sc, arch });
+    const stamps = new Set();
+    const objects = [];
+    const compiledFrom = new Map();
+
+    for (const { recipe, file } of generated) {
+      const flags = [
+        ...base,
+        ...recipe.includes.flatMap((dir) => ['-I', dir]),
+        ...recipe.defines.map((d) => `-D${d}`),
+        ...recipe.prelude.flatMap((f) => ['-include', f]),
+      ];
+      for (const source of [file, ...recipe.sources]) {
+        // stmlib's three units belong to every Mutable module and are one object for all of
+        // them: compiled per module they would be five definitions of the same symbols.
+        const already = compiledFrom.get(path.resolve(source));
+        if (already) {
+          if (already.device !== recipe.id && already.flags !== flags.join(' ')) {
+            log(`  note: ${path.basename(source)} is shared with ${already.device} and is built `
+              + 'once, with that device\'s flags');
+          }
+          continue;
+        }
+        compiledFrom.set(path.resolve(source), { device: recipe.id, flags: flags.join(' ') });
+        objects.push(compileOne({ source, objDir, flags, stamps }));
+      }
+    }
+
+    // The UGen and the parts of the ABI that are not generated.
+    for (const source of [path.join(NATIVE_DIR, 'PoptartDevice.cpp'), path.join(NATIVE_DIR, 'pd-device.cc'), registry]) {
+      objects.push(compileOne({ source, objDir, flags: base, stamps }));
+    }
+
+    const out = path.join(WORK, `${arch}.scx`);
+    log(`linking ${objects.length} objects for ${arch}`);
+    execFileSync('clang++', [
+      '-bundle', '-undefined', 'dynamic_lookup',
+      '-arch', arch, '-mmacosx-version-min=11',
+      ...objects, '-o', out,
+    ], { stdio: ['ignore', 'pipe', 'pipe'] });
+    thin.push(out);
+  }
+
+  const binDir = path.join(NATIVE_DIR, 'bin');
+  fs.mkdirSync(binDir, { recursive: true });
+  const outFile = path.join(binDir, OUT_NAME);
+  if (thin.length === 1) fs.copyFileSync(thin[0], outFile);
+  else execFileSync('lipo', ['-create', ...thin, '-output', outFile]);
+  log(`\nbuilt ${path.relative(repoRoot, outFile)} (${(fs.statSync(outFile).size / 1024).toFixed(0)} kB)`);
+  log(execFileSync('lipo', ['-info', outFile]).toString().trim());
+  return { outFile, devices: generated.map((g) => g.device.id) };
+}
+
+if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url))) {
+  const argv = process.argv.slice(2);
+  const at = argv.indexOf('--only');
+  buildNative({
+    only: at >= 0 ? argv[at + 1] : null,
+    emitOnly: argv.includes('--emit-only'),
+    repin: argv.includes('--repin'),
+  }).catch((err) => {
+    console.error(err.stderr?.toString() || err.message);  // eslint-disable-line no-console
+    process.exit(1);
+  });
+}

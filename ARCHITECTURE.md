@@ -109,8 +109,25 @@ The concrete engine implementation the scheduler drives. Bridges Node and audio.
 - `analysis.js` + `analysis-worker.js` — the above two functions, off the event loop (see the
   nothing-blocks-the-music decision below).
 - `sc/poptart.scd` — the SuperCollider class/def code: hosts plugins via the `VSTPlugin~` server
-  extension, builds one `SynthDef` per track (fixed 8-slot chain: 1 instrument + 7 effects), and
-  runs the native LFOs/envelopes sample-accurately inside the audio graph.
+  extension, builds one `SynthDef` per track (a fixed chain of 21 slots: 1 instrument + 20
+  effects), and runs the native LFOs/envelopes sample-accurately inside the audio graph.
+- `native/devices/` — **poptart's own devices on the desktop**: the same synths and effects the
+  browser build plays, compiled for scsynth instead of for WebAssembly, so `synth("Plaits")` and
+  `fx("Galactic")` open the same device on either engine with the same control names and the same
+  0..1 positions. `PoptartDevice` is one generic UGen that loads a device at runtime, exactly as
+  `VSTPlugin` loads a plugin at runtime and for the same reason: a track's def is built at birth,
+  long before a pattern says what goes in its slots, so a UGen per device would mean rebuilding
+  the def and respawning the track to change an effect. Every slot in the track def therefore
+  carries one of each kind, and exactly one of them is ever loaded. Its sclang side
+  (`PoptartDevice.sc`) deliberately has a `VSTPluginController`'s method names, which is what
+  lets `setParam`, the ramps, the LFOs, the envelopes, MIDI and OSC control and the note paths
+  drive a native device through the code that already drives plugins. The .scx is COMMITTED and
+  universal, like the pitch shifter and the audio helper; `devices.json` beside it is the catalog
+  the Node half resolves names against. Both are written by
+  `packages/web-engine/build/devices/native.mjs`.
+- `native-devices.js` — that catalog, and what a `.param()` argument means on one of these
+  controls. The browser's rule, ported: an enum takes a label or an index, a toggle takes on and
+  off, everything else takes the 0..1 position it already is.
 - `audio-devices.js` + `native/` — device enumeration and the aggregate device that lets `input()`
   reach several interfaces. scsynth opens exactly **one** audio device, so combining a mic and an
   interface means building a real CoreAudio aggregate: `native/poptart-audio.swift` (committed
@@ -156,7 +173,10 @@ devices in place of plugin hosting. Browser-only; the desktop build does not loa
   The binaries are COMMITTED, under `public/devices`, and so are the descriptors generated
   beside them: a clone, a test run and a deploy all need the devices, and none of them should
   need emscripten. Only `build/devices/build-devices.mjs` does, and only when a device is added
-  or an upstream pin moves. Each module is pinned to a commit for the reason the sample packs
+  or an upstream pin moves. The same recipes build a **second target**: `build/devices/native.mjs`
+  compiles them for scsynth instead, which is how they reach the desktop (see
+  `osc-engine/native/devices/`). One list of sources, includes and upstream switches for both, so
+  a shim the other build did not know about cannot make a device sound different on one engine. Each module is pinned to a commit for the reason the sample packs
   are: a device whose DSP changed underneath a song is a song that no longer sounds the way it
   was written. `build/devices/sources.json` records every source, its license as read from the
   source rather than the repository page, and — for Mutable — which modules cannot be ported at
