@@ -243,6 +243,11 @@ const SONG_START_LEAD_SEC = 0.15; // enough for the timestamped start bundle to 
 // fires a release early, so a spent deck's playhead can land a hair short of the duration.
 const SONG_END_EPS_SEC = 0.1;
 const songDecks = { a: null, b: null };
+// What the hand last set quantize/sync to on each deck, applied to the NEXT song it loads: a
+// player's Q and sync are desk settings in practice, not per-record facts, and resetting them
+// on every load meant re-pressing Q after each track of a set (reported 2026-10-06). In-memory
+// on purpose - a fresh server starts from the defaults.
+const deckSongPrefs = { a: {}, b: {} };
 // each: { path, title, duration, sampleRate, channels, frames, decoded, rate,
 //         playing, posSec ("the playhead as of startSec" while playing; the resting playhead
 //         while paused), startSec (engine-clock moment posSec was current), endTimer }
@@ -716,17 +721,18 @@ function songCue(deck, hold) {
     // the play press already follows (see `spent` in songPlayDeck): at the end, go home.
     const spent = before >= s.duration - SONG_END_EPS_SEC;
     if (!s.playing && !spent) {
-      // Parked somewhere new: the cue is here now - and it IS the downbeat. A cue point is
-      // where the hand says "one" is, so it anchors the beatgrid too: the two used to be
-      // separate gestures, and a cue snapped to a grid whose downbeat was wrong went to the
-      // wrong place. Taken EXACTLY where the pane shows the playhead - never moved at press
-      // time (a jump under the finger is jarring); the pane's scrub magnet is what pulls the
-      // playhead onto a transient beforehand, and a hand that wants to be between hits can be.
-      const at = songPlayheadSec(deck);
-      s.cueSec = at;
-      s.anchorSec = at;
-      s.anchorByHand = true;
-      s.gridDetected = null;
+      // Parked somewhere new: the cue is here now. Taken EXACTLY where the pane shows the
+      // playhead - never moved at press time (a jump under the finger is jarring); the pane's
+      // scrub magnet is what pulls the playhead onto a transient beforehand, and a hand that
+      // wants to be between hits can be.
+      //
+      // The cue used to move the beatgrid ANCHOR too, on the theory that the cue point is where
+      // the hand says "one" is. Decoupled 2026-10-06, deliberately: a cue is where play starts
+      // from, pressed dozens of times a set, and every press was silently rewriting the grid -
+      // so a grid carefully anchored once was gone by the second cue. The anchor is its own
+      // gesture now (the pane's anchor button / song/meta's anchorSec), and quantized starts
+      // read the grid the song actually has.
+      s.cueSec = songPlayheadSec(deck);
     }
     // A playing deck comes home the same way a paused one previews - one songStart, which the
     // engine already handles as a swap (the old player releases exactly at the new one's start,
@@ -1004,6 +1010,7 @@ function songSetMeta(deck, patch) {
   if ('sync' in patch) {
     if (patch.sync && s.bpm == null) throw new Error('sync needs a bpm - set one first (the tags had none)');
     s.sync = !!patch.sync;
+    deckSongPrefs[deck].sync = s.sync; // the hand said so: the next load starts here too
   }
   if ('syncMult' in patch) {
     const m = patch.syncMult === 'auto' ? 'auto' : Number(patch.syncMult);
@@ -1024,7 +1031,10 @@ function songSetMeta(deck, patch) {
       songArmTimers(deck);
     }
   }
-  if ('quantize' in patch) s.quantize = !!patch.quantize; // see songPlayDeck's `quant`
+  if ('quantize' in patch) {
+    s.quantize = !!patch.quantize; // see songPlayDeck's `quant`
+    deckSongPrefs[deck].quantize = s.quantize; // ...and the next load keeps it
+  }
   songApplyRate(deck); // bpm/sync edits change the effective rate; paused songs settle too
   mixNotify();
   return {
@@ -1056,6 +1066,7 @@ const deckTempoMult = (deck) => {
 
 function deckTempoApply(deck, { frac, range } = {}) {
   const t = mixState.deckTempo[deck];
+  const prev = deckTempoMult(deck); // before frac moves: what the current clock already includes
   if (range !== undefined) {
     const r = Number(range);
     if (!DECK_TEMPO_RANGES.includes(r)) throw new Error(`decktempo: range must be one of ±${DECK_TEMPO_RANGES.join('/±')}%`);
@@ -1067,6 +1078,7 @@ function deckTempoApply(deck, { frac, range } = {}) {
     t.frac = Math.abs(f) < 0.004 ? 0 : f; // a center detent, so zero is reachable from a jittery fader
   }
   const mult = deckTempoMult(deck);
+  const prevMult = prev; // what the clock already includes from this fader, before this move
   const s = songDecks[deck];
   if (s) {
     s.manualRate = Math.min(songSync.RATE_MAX, Math.max(songSync.RATE_MIN, mult));
@@ -1078,9 +1090,19 @@ function deckTempoApply(deck, { frac, range } = {}) {
       songApplyRate(deck); // unsynced decks hear it now; a locked follower just remembers it
     }
   } else if (transport) {
-    const native = deckNativeBpm(deck);
-    if (native == null) throw new Error(`deck ${deck}'s tempo is signal-driven - no single native bpm to scale`);
-    const bpm = Math.min(400, Math.max(20, native * mult));
+    const declared = decks[deck].bpm;
+    if (declared != null && typeof declared !== 'number') {
+      throw new Error(`deck ${deck}'s tempo is signal-driven - no single native bpm to scale`);
+    }
+    // A deck that DECLARED a tempo scales its own number. One that never did is playing the
+    // shared clock at whatever the room is at - so its fader scales THAT, un-scaled by whatever
+    // this same fader already applied (prevMult), never the 120 default. Scaling the default
+    // was the trap: with the room at 174 off the other deck, the first touch of an undeclared
+    // deck's fader yanked the whole clock to ~120 - or, from the hand's point of view, the
+    // fader "did nothing" except derail the tempo (reported 2026-10-06, intermittent because it
+    // only bites on a buffer with no setbpm).
+    const base = typeof declared === 'number' ? declared : (transport.cps * 240) / Math.max(0.01, prevMult);
+    const bpm = Math.min(400, Math.max(20, base * mult));
     mixState.tempoOverride = bpm; // the desk holds the clock now, like the migration slider
     transport.rampBpm(bpm, 0);
   }
@@ -8515,10 +8537,12 @@ const routes = {
       anchorByHand: false, // an anchor pressed by hand outlives the analysis' guess
       gridDetected: null, // confidence of the fitted beatgrid (null until analyzed / when it failed)
       onsets: null, // transient times (seconds) the anchor and cue gestures snap to
-      sync: bpm != null,
+      // Sync and quantize open where the hand last put them on this deck (deckSongPrefs) -
+      // sync still only when there is a bpm to sync to.
+      sync: bpm != null && (deckSongPrefs[deck].sync ?? true),
       syncMult: 'auto', // tempo octave for sync: 'auto' | 0.5 | 1 | 2 (see songSync.syncOctave)
       keylock: false,
-      quantize: true, // the Q button: starts wait for the grid until this is turned off
+      quantize: deckSongPrefs[deck].quantize ?? true, // the Q button (see deckSongPrefs)
       manualRate: deckTempoMult(deck), // the deck's tempo slider has a position; a loaded track wears it
       nudge: 0,
       bend: 0,

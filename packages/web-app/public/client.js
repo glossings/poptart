@@ -28750,7 +28750,7 @@ function deckHeadRender(state) {
     // desk control (a learned fader moves the on-screen one).
     const dt = state?.deckTempo?.[d];
     if (dt) {
-      deckTempoNow[d] = { frac: dt.frac, range: dt.range };
+      deckTempoNow[d] = { frac: dt.frac, range: dt.range, bpm: dt.bpm ?? null };
       const fader = document.getElementById(`mixTempo${U}`);
       if (!fader.classList.contains('dragging')) fader.value = tempoValOf(dt.frac);
       fader.classList.toggle('locked', !!dt.locked);
@@ -29693,6 +29693,23 @@ function djLiveWaveOn(deck) {
     && patternRegions.some((r) => r.deck === deck);
 }
 
+/**
+ * Where this deck's own bars sit relative to the clock's integer cycles: the transport cycle of
+ * the deck's arrangement position zero, mod nothing - the caller subtracts it, draws integer
+ * bars, and adds it back. Between anchors the clip runs at slope one, so the anchor in force is
+ * the whole mapping; with no clock twin the deck started on its own time and the shift is zero.
+ */
+function djLiveGridShift(twin, cycNow) {
+  const anchors = twin?.anchors;
+  if (!anchors?.length) return 0;
+  let at = anchors[0];
+  for (const a of anchors) {
+    if (a.cycle <= cycNow) at = a;
+    else break;
+  }
+  return at.cycle - at.pos;
+}
+
 function djLiveWaveDraw(deck) {
   const canvas = djLiveWaveEls[deck];
   songSizeCanvas(canvas);
@@ -29725,13 +29742,20 @@ function djLiveWaveDraw(deck) {
   // whole grid shimmering rather than moving. Fractional fills antialias their edges and slide.
   const vline = (x, y0, y1) => ctx.fillRect(x - 0.5, y0, 1, y1 - y0);
 
-  // The bar/beat grid, straight off the clock - a cycle IS a bar here (bpm is cps x 240, so four
-  // beats to the cycle). Same marks as a song deck's own beatgrid: downbeats full height, beats
-  // as ticks off the top and bottom, so a strip drawn from the clock and one drawn from a file's
-  // detected tempo can be lined up by eye.
-  for (let c = Math.floor(cyc0); c <= cyc1; c++) {
+  // The bar/beat grid, in THIS DECK's own time - a cycle IS a bar (bpm is cps x 240, so four
+  // beats to the cycle), but bar ONE is where this deck's arrangement puts it, not the clock's
+  // integer cycles. The two agree for a deck started on its own, which is why drawing bare
+  // clock cycles looked right for months - and disagree for a deck that JOINED a playing set,
+  // which starts its song at the next clock position: its own downbeats then live at a
+  // fractional global cycle, and the grid it wore was the OTHER record's, even after that
+  // record stopped (reported 2026-10-06). The clock twin's anchors carry the mapping
+  // (transport cycle <-> arrangement position), so the shift is read off the one in force.
+  // Same marks as a song deck's own beatgrid: downbeats full height, beats as ticks off the
+  // top and bottom, so the two strips can be lined up by eye - which is the whole point.
+  const gridShift = djLiveGridShift(songEndClocks[deck], cycNow);
+  for (let c = Math.floor(cyc0 - gridShift); c <= Math.ceil(cyc1 - gridShift); c++) {
     for (let b = 0; b < 4; b++) {
-      const x = xOf(c + b / 4);
+      const x = xOf(gridShift + c + b / 4);
       if (x < -1 || x > w + 1) continue;
       ctx.fillStyle = b === 0 ? rgbaFrom(ctx, accent, 0.4) : rgbaFrom(ctx, text, 0.35);
       if (b === 0) vline(x, 2, h - 2);
@@ -32190,11 +32214,23 @@ function orgFiltRef() {
   const order = [...['a', 'b'].filter((d) => deckPlayingNow[d]), djActiveDeck, 'a', 'b'];
   for (const d of order) {
     const song = songPanes[d]?.song;
-    if (!song?.path) continue;
-    const rec = known.get(song.path);
-    const bpm = Number(song.bpm) || Number(rec?.bpm) || 0;
-    const key = songPanes[d].mirror?.musicalKey || rec?.key || '';
-    if (bpm > 0 || key) return { bpm, key, path: song.path, title: song.title };
+    if (song?.path) {
+      const rec = known.get(song.path);
+      const bpm = Number(song.bpm) || Number(rec?.bpm) || 0;
+      const key = songPanes[d].mirror?.musicalKey || rec?.key || '';
+      if (bpm > 0 || key) return { bpm, key, path: song.path, title: song.title };
+      continue;
+    }
+    // A LIVECODE deck is still a record on a deck: its tempo is the deck's own clock, mirrored
+    // off every desk frame. Without this the filter told a desk that was audibly playing a
+    // pattern to "load a track" (reported 2026-10-06). No key - a buffer does not declare one -
+    // so a key filter keeps saying what it needs, but the tempo filter works.
+    if (deckPlayingNow[d]) {
+      const bpm = Number(deckTempoNow[d]?.bpm) || 0;
+      if (bpm > 0) {
+        return { bpm, key: '', path: '', title: d === 'a' ? (currentSavedName || 'deck A') : (deckBFileName || 'deck B') };
+      }
+    }
   }
   return null;
 }

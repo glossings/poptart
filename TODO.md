@@ -5,6 +5,72 @@ no completion notes.
 
 ---
 
+[ ] Gain staging, the full version. A -15 dB code-deck pad was built, tried and taken out the
+    same night (preferred without; it lives in this file's history if wanted). If a stopgap
+    comes back it must be mode-independent - padding only inside dj mode makes toggling the
+    desk jump a playing code deck 15 dB (and complete-mix's neutralizeMix pushes deck:1, which
+    strips any pad from a promoted track) - and the cue tap sits before the `deck` gain, so a
+    deck-gain pad never reaches the headphones. The real stack, in order:
+
+    1. Master clip at 0 dBFS with an over flag. A hard clip (never a limiter: lookahead delay
+       would flam the master against the cue bus) on the summed hardware bus, in a group after
+       recGroup so it stays last in node order; SendPeakRMS from the same synth gives a master
+       peak feed. Today nothing anywhere clips and the DAC is the first clipper in the chain,
+       invisibly - while composing, dense songs were being clamped at the interface and the
+       mixes were made INTO that clipper. Sound-wise a clip at 0 is bit-identical to what the
+       DAC already does; the point is the flag and the determinism.
+
+    2. Master peak readout + clip light. The ctrl+g mixer meters every track but never the sum;
+       the desk meters neither. Surface the master peak (the new feed, or the existing "*"
+       analysis tap) at the top of the mixer and tint the desk meters on an over. This turns
+       "is this song too hot" into a glance, per song, empirically.
+
+    3. setgain() - a song-level master gain, one line beside setbpm (HOST_BUILDERS). Applied
+       once per audible path at the DJ-stage input (the `live =` line, BEFORE the cue tap, so
+       headphones hear it too; never on sends, or bus paths get it squared - the same
+       exactly-once rule the crossfader's `deck` gain follows). Scalar 0..4, linear like
+       postgain. A song that declares setgain supersedes MIX_CODE_DECK_PAD - they must never
+       stack - and when every song declares one, the pad constant goes.
+
+    4. setgain(0.178) written into the saved songs and the sketches folder (never wip/),
+       idempotent, inserted at the top by the leading-comment block; then each song
+       micro-adjusted by ear against the clip light. Peak-normalizing by measurement was
+       considered and rejected: rendering plugin-heavy songs headless is where NI licensing
+       segfaults scsynth, and matched peaks don't match loudness anyway (crest factor).
+       Target sits ~1 dB under full scale - true inter-sample peaks overshoot sample peaks in
+       reconstruction.
+
+    5. A note in the sketches folder's working doc: the clip exists, and songs converted from
+       Strudel land hot and want ~-15 dB of setgain from the start.
+
+    A whole-song master bus was considered and rejected (tracks pick their own output pairs via
+    .o(n); the desk is an overlay that re-routes nothing). For per-song master processing the
+    userland answer is a top-level group() - a hand-built master bus - which composes with
+    setgain: members' direct paths are silent, so the gain still lands once.
+
+---
+
+[ ] Beatgrid anchor outlives the session. The cue press no longer moves the anchor (decoupled
+    2026-10-06 - every cue was silently rewriting the grid), so the anchor is now worth keeping:
+    persist a by-hand anchorSec on the library's track record at song/meta time, restore it on
+    load ahead of the analyzer's guess (same precedence bpmByHand already has), and give the
+    pane's anchor button a right-click with "re-analyze this track" (the measure route already
+    takes ids + force) for when the grid itself is wrong.
+
+[ ] Remember the small UI state across desktop launches: console open/closed, the settings
+    pane's tab, and friends. localStorage is trustworthy now that the desktop port is fixed -
+    sweep the toggles that still reset and give each a stored twin. (Quantize and sync already
+    survive deck loads server-side, per deck, in-memory - deckSongPrefs.)
+
+[ ] Calibrate platter bend by hand against a reference player. The model already has the
+    standard shape - bend proportional to rim speed (bendStep: tick-rate x BEND_SENS toward a
+    BEND_MAX cap, exponential release) and the hold-nudge is the classic +-4% (NUDGE_PCT) -
+    but nobody publishes a curve, so the feel match is an A/B on hardware: same track both
+    sides, nudge to align, adjust BEND_SENS/BEND_MAX until the hand can't tell. One-number
+    tweaks, all named in song-sync.js.
+
+---
+
 [ ] Patternable LFO rate. A modulator's rate is the one argument that still refuses a pattern:
     parseRate() takes a number of cycles or an "0.5hz" string and throws on anything else, and
     .fast()/.phase() on an LFO rebuild the IR with plain numbers at build time. That breaks the

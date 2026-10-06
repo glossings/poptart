@@ -94,12 +94,15 @@ function rig({ pos = 0, playing = false, cueSec = 12, anchorSec = 12 } = {}) {
   return { ...api, deck: songDecks.a, started, paused };
 }
 
-test('a press on a paused deck parked somewhere new sets the cue there', () => {
-  const m = rig({ pos: 40, cueSec: 12 });
+test('a press on a paused deck parked somewhere new sets the cue there - and ONLY the cue', () => {
+  const m = rig({ pos: 40, cueSec: 12, anchorSec: 8 });
   m.songCue('a', true);
-  assert.equal(m.deck.cueSec, 40, 'the hand said one is here');
-  assert.equal(m.deck.anchorSec, 40, 'and that is the beatgrid downbeat too');
-  assert.equal(m.deck.anchorByHand, true);
+  assert.equal(m.deck.cueSec, 40, 'the hand said play from here');
+  // Decoupled 2026-10-06: the cue used to drag the beatgrid anchor with it, so a grid anchored
+  // once with care was silently rewritten by the second cue press of the night. The anchor is
+  // its own gesture; a cue is where play starts from, nothing more.
+  assert.equal(m.deck.anchorSec, 8, 'the beatgrid stays where the anchor gesture put it');
+  assert.ok(!m.deck.anchorByHand, 'and the cue is not pretending to be that gesture');
 });
 
 test('a press on a deck that has run out goes HOME, keeping the cue point', () => {

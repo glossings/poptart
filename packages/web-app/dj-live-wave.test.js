@@ -253,3 +253,40 @@ test('both decks\' pairs go into the stack, in a fixed order', () => {
   ], 'deck A\'s pair then deck B\'s - the visual order either way round, so no path that changes '
     + 'what a deck holds has to reorder the stack');
 });
+
+// --- the grid is the DECK's, not the clock's -----------------------------------------------------
+//
+// A livecode deck that joins a playing set starts its arrangement at the next clock position, so
+// its own bar one lives at a fractional transport cycle. The grid used to draw bare integer
+// cycles - the OTHER record's bars - and kept doing so after that record stopped, which made the
+// strip impossible to beatmatch by eye. The clock twin's anchors carry the real mapping.
+
+const { djLiveGridShift } = (() => {
+  const src = fs.readFileSync(path.join(__dirname, 'public', 'client.js'), 'utf8');
+  const at = src.indexOf('function djLiveGridShift(');
+  assert.ok(at > 0, 'djLiveGridShift not found in client.js - this test needs updating');
+  // eslint-disable-next-line no-new-func
+  return new Function(`${src.slice(at, src.indexOf('\n}', at) + 2)}\nreturn { djLiveGridShift };`)();
+})();
+
+test('a deck that joined mid-set wears its own bars, shifted off the clock\'s', () => {
+  // Joined at transport cycle 16.25 with its arrangement at zero: bar one is at 16.25, so the
+  // grid shifts by a quarter cycle - exactly the offset that was being drawn as "on the grid".
+  const twin = { anchors: [{ cycle: 16.25, pos: 0 }] };
+  assert.equal(djLiveGridShift(twin, 20), 0.25 + 16);
+});
+
+test('a deck started on its own keeps the clock\'s grid - the two have always agreed there', () => {
+  assert.equal(djLiveGridShift({ anchors: [{ cycle: 0, pos: 0 }] }, 5), 0);
+  assert.equal(djLiveGridShift(null, 5), 0, 'no twin at all is a deck on its own time');
+  assert.equal(djLiveGridShift({ anchors: [] }, 5), 0);
+});
+
+test('a loop jump moves the mapping, and the anchor in force is the one the window is in', () => {
+  // Playing from cycle 10 (pos 0), a region looped back at cycle 18 to pos 4: past 18 the
+  // deck's bars sit where the SECOND anchor says, not where the first did.
+  const twin = { anchors: [{ cycle: 10, pos: 0 }, { cycle: 18, pos: 4 }] };
+  assert.equal(djLiveGridShift(twin, 12), 10);
+  assert.equal(djLiveGridShift(twin, 20), 14);
+  assert.equal(djLiveGridShift(twin, 9), 10, 'before every anchor, the first is the mapping');
+});
