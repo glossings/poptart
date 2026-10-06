@@ -563,3 +563,75 @@ test('with no deck to measure against, the filter shows nothing rather than ever
   // The alternative - quietly showing the whole crate - would read as the filter being off.
   assert.equal(passes({ bpm: true, key: 'off' }, { bpm: 128, path: '/m/a.mp3' }, null), false);
 });
+
+// --- editing a selection ------------------------------------------------------------------------
+//
+// One edit, typed into one row's cells, lands on every selected track. What makes that safe is
+// that an UNCHANGED field is not an instruction: fixing the artist on twelve files that all came
+// in wrong writes the artist twelve times and leaves each record's own title alone. Writing every
+// field instead would stamp the edited row's title over the other eleven, which is the failure
+// this is shaped to prevent.
+
+const { orgEditChanges } = (() => {
+  const src = fs.readFileSync(path.join(__dirname, 'public', 'client.js'), 'utf8');
+  const at = src.indexOf('function orgEditChanges(');
+  assert.ok(at > 0, 'orgEditChanges not found in client.js - this test needs updating');
+  let depth = 0;
+  let end = src.indexOf('{', at);
+  for (let i = end; i < src.length; i++) {
+    if (src[i] === '{') depth++;
+    else if (src[i] === '}' && --depth === 0) { end = i + 1; break; }
+  }
+  // eslint-disable-next-line no-new-func
+  return new Function(`${src.slice(at, end)}\nreturn { orgEditChanges };`)();
+})();
+
+const WAS = { title: 'Bleep Test', artist: 'Someone', album: 'An Album', bpm: '128', key: 'Am' };
+const typedAs = (over) => Object.entries({ ...WAS, ...over }).map(([field, text]) => ({ field, text }));
+
+test('only the field that was changed is written', () => {
+  const { fields, refused } = orgEditChanges(typedAs({ artist: 'Karenn' }), WAS);
+  assert.deepEqual(fields, { artist: 'Karenn' },
+    'the title, album, tempo and key were not touched, so they are not instructions');
+  assert.equal(refused, '');
+});
+
+test('a commit that changed nothing asks for nothing', () => {
+  assert.deepEqual(orgEditChanges(typedAs({}), WAS).fields, {});
+});
+
+test('several changed fields all travel', () => {
+  const { fields } = orgEditChanges(typedAs({ artist: 'Karenn', album: 'Grapefruit', key: 'Cm' }), WAS);
+  assert.deepEqual(fields, { artist: 'Karenn', album: 'Grapefruit', key: 'Cm' });
+});
+
+test('clearing a field is a change, and says so as null', () => {
+  assert.deepEqual(orgEditChanges(typedAs({ album: '' }), WAS).fields, { album: null });
+  // The title cleared is not nothing: the server falls it back to the file's own name.
+  assert.deepEqual(orgEditChanges(typedAs({ title: '' }), WAS).fields, { title: null });
+});
+
+test('a retyped title IS written - the guard is "unchanged", not "never the title"', () => {
+  // Deliberately renaming a selection has to work; it is only the untouched title that stays put.
+  assert.deepEqual(orgEditChanges(typedAs({ title: 'Bleep Test 2' }), WAS).fields,
+    { title: 'Bleep Test 2' });
+});
+
+test('a tempo is taken as a number, and a bad one is refused without losing the rest', () => {
+  const ok = orgEditChanges(typedAs({ bpm: '140' }), WAS);
+  assert.deepEqual(ok.fields, { bpm: 140 }, 'a number, not the typed string');
+  const bad = orgEditChanges(typedAs({ bpm: '900', artist: 'Karenn' }), WAS);
+  assert.deepEqual(bad.fields, { artist: 'Karenn' }, 'the corrected artist still lands');
+  assert.match(bad.refused, /20 to 400/);
+  assert.deepEqual(orgEditChanges(typedAs({ bpm: 'fast' }), WAS).fields, {});
+  // ...and a blank tempo is a clear, not a refusal.
+  assert.deepEqual(orgEditChanges(typedAs({ bpm: '' }), WAS).fields, { bpm: null });
+});
+
+test('a field with nothing to start from counts as changed once something is typed', () => {
+  // An untagged import: artist was blank, so `was` has no entry for it at all.
+  assert.deepEqual(orgEditChanges([{ field: 'artist', text: 'Karenn' }], {}), 
+    { fields: { artist: 'Karenn' }, refused: '' });
+  assert.deepEqual(orgEditChanges([{ field: 'artist', text: '' }], {}).fields, {},
+    'blank over blank is still untouched');
+});

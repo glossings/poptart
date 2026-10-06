@@ -31301,8 +31301,11 @@ document.addEventListener('keydown', (e) => {
  * gives up (ten seconds) or when another arm supersedes this one. The binding itself is the
  * server's - this only asks for it, which is why the guided session can share it.
  */
-async function mixLearnOnce(target) {
-  const { learned } = await api('POST', '/api/mix/midilearn', { target });
+async function mixLearnOnce(target, { settle = false } = {}) {
+  // `settle` binds the LAST message of a short window instead of the first, which is what lets a
+  // COMBINATION be learned: holding shift sends shift's own note before the pad's (see the
+  // mixMidiLearn note in server.js). A single press settles to itself, so it costs only the wait.
+  const { learned } = await api('POST', '/api/mix/midilearn', { target, settle });
   return learned ?? null;
 }
 
@@ -31704,7 +31707,7 @@ async function openOrganize(forDeck = null) {
     else if (libDoc.tracks.length) orgSrc = { kind: 'tracks' };
   }
   orgNormalizeSrc();
-  orgMidiOnSources = false; // a learned knob starts on the songs, not wherever it was left
+  orgMidiFocus = 'songs'; // a learned knob starts on the songs, not wherever it was left
   orgEl.classList.remove('hidden');
   window.addEventListener('keydown', orgOnKey);
   orgSel.clear();
@@ -32418,9 +32421,12 @@ function orgFolderTree(paths) {
   return out(root);
 }
 
-function orgSideRow({ label, depth, on, twisty, count, onClick, cls = '' }) {
+function orgSideRow({ label, depth, on, twisty, count, onClick, cls = '', src = null }) {
   const li = document.createElement('li');
   li.className = `org-side-row ${cls}${on ? ' on' : ''}`;
+  // Which source the row goes to, for the controller's sidebar cursor (orgMidiPaintCursor). Only
+  // the rows that NAVIGATE carry it - a group head that merely folds is not a destination.
+  if (src) li.dataset.src = orgSrcKey(src);
   li.style.paddingLeft = `${6 + depth * 12}px`;
   if (twisty) {
     const t = document.createElement('button');
@@ -32476,6 +32482,7 @@ function orgRenderSide() {
     on: orgSrc.kind === 'livecode' && !orgSrc.folder,
     twisty: { open: liveOpen, toggle: () => orgToggleGroup('livecode') },
     count: orgSongs.length,
+    src: { kind: 'livecode', folder: '' },
     onClick: () => orgGoto({ kind: 'livecode', folder: '' }),
   }));
   if (liveOpen) {
@@ -32489,6 +32496,7 @@ function orgRenderSide() {
           on: orgSrc.kind === 'livecode' && orgSrc.folder === node.path,
           twisty: node.kids.length ? { open, toggle: () => orgToggleFolder(key) } : null,
           count: orgSongs.filter((s) => s.name.startsWith(`${node.path}/`)).length,
+          src: { kind: 'livecode', folder: node.path },
           onClick: () => orgGoto({ kind: 'livecode', folder: node.path }),
         }));
         if (open) walk(node.kids, depth + 1);
@@ -32504,6 +32512,7 @@ function orgRenderSide() {
     cls: 'org-side-group',
     on: orgSrc.kind === 'tracks',
     count: libDoc.tracks.length,
+    src: { kind: 'tracks' },
     onClick: () => orgGoto({ kind: 'tracks' }),
   });
   // The collection is the disk's, and the browser build has no disk to fill it from - so it is
@@ -32520,6 +32529,7 @@ function orgRenderSide() {
     cls: 'org-side-group',
     on: orgSrc.kind === 'disk',
     twisty: { open: diskOpen, toggle: () => orgToggleGroup('disk') },
+    src: { kind: 'disk' },
     onClick: () => orgGoto({ kind: 'disk' }),
   });
   diskRow.id = 'orgDiskSource'; // the browser build has no disk to browse, and hides this (style.css)
@@ -32599,6 +32609,7 @@ function orgPlaylistRow(p, depth) {
     cls: 'org-side-list',
     on: orgSrc.kind === 'playlist' && orgSrc.id === p.id,
     count: p.items.length,
+    src: { kind: 'playlist', id: p.id },
     onClick: () => orgGoto({ kind: 'playlist', id: p.id }),
   });
   // The ACTIVE set is the one both decks' pickers list and ⏭ steps deck B through - a DJ-mode
@@ -32824,7 +32835,7 @@ function orgRenderMain() {
     if (playState) tr.classList.add(playState);
     tr.draggable = row.kind !== 'dir';
     tr.title = orgRowTitle(row);
-    const editing = orgEditing && row.trackId === orgEditing;
+    const editing = orgEditing?.key === row.key;
     for (const name of cols) {
       const spec = ORG_COLUMNS[name];
       const td = document.createElement('td');
@@ -32969,14 +32980,24 @@ function orgFillNameCell(td, row) {
 // Which columns are editable, and which field of the record each one writes.
 const ORG_EDIT_FIELDS = { name: 'title', artist: 'artist', album: 'album', bpm: 'bpm', key: 'key' };
 
-let orgEditing = null; // the trackId being edited, or null
+// The edit in progress, or null: { key, ids, was }. `key` is the ROW holding the fields - a row
+// key rather than a track id, because a set may hold the same track twice and only one of those
+// rows is the one being typed in. `ids` is every record the edit lands on, which is the whole
+// selection. `was` is what each field started as, so the commit can tell what was actually
+// CHANGED from what was merely sitting there.
+let orgEditing = null;
+
+/** What a cell's field starts out holding. The one place it is worked out, so `was` cannot drift. */
+function orgEditInitial(row, col) {
+  return String(col === 'bpm' ? (row.bpm ?? '') : (ORG_COLUMNS[col].text(row) ?? ''));
+}
 
 function orgFillEditCell(td, row, col) {
   const input = document.createElement('input');
   input.type = 'text';
   input.className = 'org-edit';
   input.dataset.field = ORG_EDIT_FIELDS[col];
-  input.value = col === 'bpm' ? (row.bpm ?? '') : (ORG_COLUMNS[col].text(row) ?? '');
+  input.value = orgEditInitial(row, col);
   input.spellcheck = false;
   input.title = col === 'bpm' ? 'native tempo, 20 to 400 (blank for unknown)' : '';
   input.addEventListener('keydown', (e) => {
@@ -32995,17 +33016,37 @@ function orgFillEditCell(td, row, col) {
   td.appendChild(input);
 }
 
-/** Turns the row's editable cells into fields. Only an imported track HAS a record to edit. */
-function orgEditTrack(row) {
+/**
+ * Turns one row's editable cells into fields. Only an imported track HAS a record to edit.
+ *
+ * With a SELECTION, the fields are typed on `row` and whatever is changed in them is written to
+ * every selected track - which is how a crate of twelve files that all came in with the wrong
+ * artist gets fixed in one go. Only the fields actually changed travel: the title stays each
+ * track's own unless the title itself was retyped, so fixing an artist across a selection cannot
+ * silently stamp one record's name over the other eleven.
+ */
+function orgEditTrack(row, rows = [row]) {
   if (!row.trackId) {
     return orgSay('import it first - a track\'s facts live on its record, not on the row', true);
   }
-  orgEditing = row.trackId;
+  // A mixed selection (a livecode save, a folder, a file not imported yet) edits the records that
+  // exist and says how many it left alone, rather than refusing the whole gesture.
+  const ids = [...new Set(rows.map((r) => r.trackId).filter(Boolean))];
+  // Counted as rows with no record rather than as (rows - ids): a set holding the same track
+  // twice dedupes to one id, and nothing about that was skipped.
+  const skipped = rows.filter((r) => !r.trackId).length;
+  // Every editable field, not only the shown ones - so a column unhidden mid-edit arrives with a
+  // starting value and does not read as something that was typed.
+  const was = {};
+  for (const col of Object.keys(ORG_EDIT_FIELDS)) was[ORG_EDIT_FIELDS[col]] = orgEditInitial(row, col);
+  orgEditing = { key: row.key, ids, was };
   orgRenderMain();
   const first = orgEl.querySelector('#orgBody input.org-edit');
   first?.focus();
   first?.select();
-  orgSay('tab moves across, enter keeps it, esc backs out');
+  const many = ids.length > 1 ? ` — what you change lands on all ${ids.length}` : '';
+  const left = skipped ? ` (${skipped} with no record, left alone)` : '';
+  orgSay(`tab moves across, enter keeps it, esc backs out${many}${left}`);
 }
 
 function orgCancelEdit() {
@@ -33016,19 +33057,18 @@ function orgCancelEdit() {
 }
 
 /**
- * Keeps what was typed. A tempo outside the range every other tempo here is held to is refused
- * rather than stored, and the rest of the edit still lands - one bad field should not throw away
- * a corrected artist.
+ * What a committed edit actually asks for: `{ fields, refused }` from the typed cells and what
+ * they started as. Pure, because this is the whole decision - everything around it is DOM.
+ *
+ * A field whose text is unchanged is not an instruction. That is what lets one edit cover a
+ * selection safely: retyping the artist writes the artist to all of them and leaves each record's
+ * own title alone, where writing every field would stamp one title over the lot.
  */
-async function orgCommitEdit() {
-  const id = orgEditing;
-  const track = libDoc.tracks.find((t) => t.id === id);
-  if (!track) return orgCancelEdit();
+function orgEditChanges(typed, was) {
   const fields = {};
   let refused = '';
-  for (const input of orgEl.querySelectorAll('#orgBody input.org-edit')) {
-    const field = input.dataset.field;
-    const text = input.value.trim();
+  for (const { field, text } of typed) {
+    if (text === (was[field] ?? '')) continue; // untouched
     if (field === 'bpm' && text) {
       const bpm = Number(text);
       if (Number.isFinite(bpm) && bpm >= 20 && bpm <= 400) fields.bpm = bpm;
@@ -33039,14 +33079,48 @@ async function orgCommitEdit() {
     // falls back to the file's own name, the way an untagged import does (see editTrack).
     fields[field] = text || null;
   }
+  return { fields, refused };
+}
+
+/**
+ * Keeps what was typed. A tempo outside the range every other tempo here is held to is refused
+ * rather than stored, and the rest of the edit still lands - one bad field should not throw away
+ * a corrected artist.
+ *
+ * Only the fields whose text CHANGED are written, which is what makes this safe over a selection:
+ * an untouched field is not an instruction, so the eleven other records keep their own titles
+ * while the artist you retyped lands on all twelve. It also means a commit that changed nothing
+ * asks the server for nothing.
+ */
+async function orgCommitEdit() {
+  const edit = orgEditing;
+  if (!edit) return;
+  const ids = edit.ids.filter((id) => libDoc.tracks.some((t) => t.id === id));
+  if (!ids.length) return orgCancelEdit();
+  const typed = [...orgEl.querySelectorAll('#orgBody input.org-edit')]
+    .map((input) => ({ field: input.dataset.field, text: input.value.trim() }));
+  const { fields, refused } = orgEditChanges(typed, edit.was);
+  const changed = Object.keys(fields);
   orgEditing = null;
+  if (!changed.length) {
+    orgRenderMain();
+    orgEl.querySelector('#orgBody').focus({ preventScroll: true });
+    orgSay(refused || '', !!refused);
+    return;
+  }
   try {
     await flushLibraryDoc();
     // Through the track call, not by posting the document: that is what marks these as typed by
-    // hand, so a later rescan or a background measurement leaves them alone.
-    const { library } = await api('POST', '/api/library/track', { id, fields });
+    // hand, so a later rescan or a background measurement leaves them alone. It takes a LIST, so
+    // a selection is one request and one write of the document.
+    const { library } = await api('POST', '/api/library/track', { ids, fields });
     orgTookLibrary(library);
-    orgSay(refused || `saved ${library.tracks.find((t) => t.id === id)?.title ?? track.title}`, !!refused);
+    // Named by what moved rather than by the record, because over a selection "saved <title>"
+    // would name one of twelve and say nothing about the other eleven.
+    const what = changed.map((f) => (f === 'title' ? 'name' : f)).join(', ');
+    orgSay(refused || (ids.length > 1
+      ? `saved ${what} on ${ids.length} tracks`
+      : `saved ${what} on ${library.tracks.find((t) => t.id === ids[0])?.title ?? 'it'}`), !!refused);
   } catch (e) {
     orgSay(e.message ?? String(e), true);
   }
@@ -33177,6 +33251,7 @@ function orgRender() {
   orgRenderSide();
   orgRenderMain();
   orgRenderTransport();
+  orgMidiPaintCursor(); // the sidebar was just rebuilt; put the knob's highlight back on it
 }
 
 // --- selection, and what a row does ----------------------------------------------------------
@@ -33281,25 +33356,36 @@ function orgSelectedRows() {
 
 // --- working the browser from a controller ----------------------------------------------------
 //
-// Five learned controls and no keyboard: a knob that walks the list, a pad that loads what it
-// lands on, a pad that hands the knob to the sidebar, a pad for the tempo filter, and a pad that
-// opens and closes the window. The bindings live server-side like every other desk mapping, but
-// the server cannot ACT on any of them - the window, the sources, the sets and the selection are
-// all this side's - so they arrive as `action` frames (see the mix-strip MIDI section of
-// server.js, and mixEvents' action listener above).
+// Five learned controls and no keyboard, worked like a column browser: the knob scrolls whatever
+// has FOCUS, and two buttons move the focus in and out.
 //
-// Handing the knob to the sidebar is what "up a level" is on a controller. There is no folder
-// pad: one knob that walks either list goes everywhere two pads would, and costs one binding.
+//   the knob      one entry per tick, through the focused list
+//   enter         one layer IN - on the sidebar, open the highlighted source and show its songs;
+//                 on the songs, load the highlighted one onto the active deck
+//   out           one layer OUT - back to the sidebar, LATCHED there until an enter goes in
+//   filter        the tempo filter on and off
+//   open          the window itself
+//
+// The bindings live server-side like every other desk mapping, but the server cannot ACT on any
+// of them - the window, the sources, the sets and the selection are all this side's - so they
+// arrive as `action` frames (see the mix-strip MIDI section of server.js, and mixEvents' action
+// listener above).
 
-const ORG_MIDI_ACTIONS = new Set(['browse', 'browseload', 'browsefilter', 'browsesource', 'browseopen']);
+const ORG_MIDI_ACTIONS = new Set(['browse', 'browseout', 'browseload', 'browsefilter', 'browseopen']);
 
 // A spin arrives as a tick count, and a fast one carries a long way - far enough to throw the
 // highlight off the end of a big crate in one message. Capped at about a screenful.
 const ORG_MIDI_MAX_TICKS = 24;
 
-// Which list the knob is walking. Reset when the window opens, so a controller never starts out
-// pointed at something the last session left it on.
-let orgMidiOnSources = false;
+// Which list the knob is walking: the songs, or the sidebar's sources. The sidebar is a LATCH -
+// `out` puts the focus there and it stays until an enter goes back in, so a hand can hunt through
+// the sources without holding anything down. Reset whenever the window opens.
+let orgMidiFocus = 'songs'; // 'songs' | 'sources'
+
+// Where the knob is standing in the sidebar while it has the focus. The HIGHLIGHT only - moving
+// it does not open anything, because then every source on the way past would load its listing and
+// the knob would be navigating rather than browsing. Enter is what opens one.
+let orgMidiSrcAt = 0;
 
 const orgIsOpen = () => !!orgEl && !orgEl.classList.contains('hidden');
 
@@ -33312,11 +33398,6 @@ function orgMidiAction(action, value) {
     return;
   }
   if (!orgIsOpen()) return; // nothing to browse; the pads are not a way to act on a hidden window
-  if (action === 'browsesource') {
-    orgMidiOnSources = !orgMidiOnSources;
-    orgSay(orgMidiOnSources ? 'the knob is walking the sources' : 'the knob is walking the songs');
-    return;
-  }
   if (action === 'browsefilter') {
     orgFiltSet({ bpm: !orgFilt.bpm });
     orgSay(orgFilt.bpm
@@ -33324,13 +33405,39 @@ function orgMidiAction(action, value) {
       : 'showing everything again');
     return;
   }
-  if (action === 'browseload') return orgMidiLoad();
-  // browse: the knob itself.
+  if (action === 'browseout') return orgMidiOut();
+  if (action === 'browseload') return orgMidiEnter();
+  // The knob. The tick count is the server's (mixMidiBrowseTicks); what a tick moves is ours.
   const ticks = Math.round(Number(value) || 0);
   const by = Math.max(-ORG_MIDI_MAX_TICKS, Math.min(ORG_MIDI_MAX_TICKS, ticks));
   if (!by) return;
-  if (orgMidiOnSources) orgMidiStepSource(by);
+  if (orgMidiFocus === 'sources') orgMidiStepSource(by);
   else orgStep(by, false);
+}
+
+/** One layer out: the sidebar, standing on whatever source is open, and latched there. */
+function orgMidiOut() {
+  const list = orgMidiSources();
+  if (!list.length) return;
+  const at = list.findIndex((x) => orgSameSrc(x, orgSrc));
+  orgMidiSrcAt = at < 0 ? 0 : at;
+  orgMidiFocus = 'sources';
+  orgMidiPaintCursor();
+  orgSay('the knob is walking the sources — enter opens one');
+}
+
+/**
+ * One layer in. From the sidebar that means opening the highlighted source, which hands the knob
+ * back to the songs; from the songs it means the highlighted song onto the active deck.
+ */
+function orgMidiEnter() {
+  if (orgMidiFocus !== 'sources') return orgMidiLoad();
+  const list = orgMidiSources();
+  const src = list[Math.max(0, Math.min(list.length - 1, orgMidiSrcAt))];
+  if (!src) return;
+  orgMidiFocus = 'songs';
+  orgGoto(src); // re-renders, which is what clears the cursor
+  orgSay(orgEl.querySelector('#orgWhere').textContent);
 }
 
 /** The highlighted row onto the active deck. A folder opens instead, as a double-click would. */
@@ -33366,14 +33473,70 @@ const orgSameSrc = (a, b) => a.kind === b.kind
   && (a.folder ?? '') === (b.folder ?? '')
   && (a.id ?? null) === (b.id ?? null);
 
+/** One source as a string, so a sidebar row can carry which one it is (see orgMidiPaintCursor). */
+const orgSrcKey = (src) => `${src.kind}|${src.folder ?? ''}|${src.id ?? ''}`;
+
+/** Moves the sidebar's highlight. Nothing is opened - that is enter's job (see orgMidiEnter). */
 function orgMidiStepSource(by) {
   const list = orgMidiSources();
   if (!list.length) return;
-  const at = list.findIndex((x) => orgSameSrc(x, orgSrc));
-  const to = Math.max(0, Math.min(list.length - 1, (at < 0 ? 0 : at) + by));
-  if (at === to) return;
-  orgGoto(list[to]);
-  orgSay(orgEl.querySelector('#orgWhere').textContent);
+  const to = Math.max(0, Math.min(list.length - 1, orgMidiSrcAt + by));
+  if (to === orgMidiSrcAt) return;
+  orgMidiSrcAt = to;
+  orgMidiPaintCursor();
+}
+
+/**
+ * Marks the sidebar row the knob is standing on, and scrolls it into view. Painted onto the rows
+ * already drawn rather than by re-rendering the sidebar: a knob turn must not rebuild the tree it
+ * is walking, and the row's own `on` state means something else (the source that is OPEN).
+ */
+function orgMidiPaintCursor() {
+  if (!orgIsOpen()) return;
+  let ul = orgEl.querySelector('#orgSide');
+  for (const el of ul.querySelectorAll('.org-cursor')) el.classList.remove('org-cursor');
+  if (orgMidiFocus !== 'sources') return;
+  const list = orgMidiSources();
+  const src = list[Math.max(0, Math.min(list.length - 1, orgMidiSrcAt))];
+  if (!src) return;
+  const find = () => ul.querySelector(`[data-src="${CSS.escape(orgSrcKey(src))}"]`);
+  let row = find();
+  if (!row && orgMidiRevealSrc(src)) {
+    // The knob walks every source there is, folded or not - so landing in a folded group has to
+    // open it, or the cursor would vanish and the knob would feel stuck.
+    orgRenderSide();
+    ul = orgEl.querySelector('#orgSide');
+    row = find();
+  }
+  if (!row) return;
+  row.classList.add('org-cursor');
+  row.scrollIntoView({ block: 'nearest' });
+}
+
+/**
+ * Unfolds whatever has to be open for `src` to have a row at all, and says whether that changed
+ * anything. The sidebar's own fold state is the one the hand set, so this only ever ADDS.
+ */
+function orgMidiRevealSrc(src) {
+  const before = orgOpenGroups.size + orgOpenFolders.size;
+  const ancestors = (path, prefix) => {
+    const parts = String(path).split('/').filter(Boolean);
+    // Every ancestor, not the row itself: a row is drawn when its PARENT is unfolded.
+    for (let i = 1; i < parts.length; i += 1) orgOpenFolders.add(`${prefix}:${parts.slice(0, i).join('/')}`);
+  };
+  if (src.kind === 'livecode') {
+    orgOpenGroups.add('livecode');
+    if (src.folder) ancestors(src.folder, 'livecode');
+  } else if (src.kind === 'playlist') {
+    orgOpenGroups.add('playlists');
+    const folder = libDoc.playlists.find((p) => p.id === src.id)?.folder ?? '';
+    // A set inside a folder needs that folder open too, which its own path does not imply.
+    if (folder) {
+      ancestors(`${folder}/x`, 'lists');
+      orgOpenFolders.add(`lists:${folder}`);
+    }
+  }
+  return orgOpenGroups.size + orgOpenFolders.size !== before;
 }
 
 // --- the guided mapping session ---------------------------------------------------------------
@@ -33389,11 +33552,16 @@ function orgMidiStepSource(by) {
 // onto a different control.
 
 const ORG_MIDI_GUIDE = [
-  { target: 'browse', say: 'Turn the knob you want to scroll through songs with.',
-    note: 'a rotary encoder - one song per click of it' },
-  { target: 'browseload', say: 'Press the button that should load the highlighted song onto the active deck.' },
-  { target: 'browsesource', say: 'Press the button that should hand the knob over to the sidebar - and take it back.',
-    note: 'this is how you leave the list you are in' },
+  { target: 'browse', say: 'Turn the knob you want to scroll with.',
+    note: 'a rotary encoder - one entry per click of it' },
+  { target: 'browseload', say: 'Press the button for ENTER - one layer in.',
+    note: 'on the sidebar that opens a source; on the songs it loads one onto the active deck' },
+  // Settled, so this step takes whichever gesture is made: a dedicated button binds on its own
+  // press, and shift+enter binds the combination rather than the bare shift note that arrives
+  // ahead of it (which is what it used to bind - 2026-10-05).
+  { target: 'browseout', say: 'Press the button for OUT - back to the sidebar.',
+    note: 'a button of its own, or hold shift and press the enter button again',
+    settle: true },
   { target: 'browsefilter', say: 'Press the button that should switch the tempo filter on and off.',
     note: 'only what will beatmatch with the deck' },
   { target: 'browseopen', say: 'Press the button that should open and close this window.' },
@@ -33450,7 +33618,7 @@ async function orgMidiGuide() {
       while (!ui.gone && !skipped && !got) {
         // Re-armed on every timeout: the poll's ten seconds are the server's business, not a
         // deadline for the hand reaching across a controller.
-        const r = await Promise.race([mixLearnOnce(step.target), skip, gone]);
+        const r = await Promise.race([mixLearnOnce(step.target, { settle: step.settle }), skip, gone]);
         if (r === 'skip' || r === 'gone') break;
         got = r;
       }
@@ -33523,7 +33691,10 @@ function orgBodyKeys(e) {
   } else if (e.key === 'F2') {
     e.preventDefault();
     const picked = orgSelectedRows();
-    if (picked.length === 1) orgEditTrack(picked[0]);
+    // The fields open on the row the keyboard is standing on; the edit lands on the whole
+    // selection (see orgEditTrack).
+    const on = picked.find((r) => r.key === orgAnchor) ?? picked[0];
+    if (on) orgEditTrack(on, picked);
   } else if (/^[0-5]$/.test(e.key) && !meta && !e.altKey) {
     // Stars straight onto the selection - 0 clears. The fastest way through a crate.
     e.preventDefault();
@@ -33684,7 +33855,10 @@ function orgRowMenu(row, x, y) {
     }
     if (row.trackId) {
       items.push('-');
-      items.push(['edit…', () => orgEditTrack(row), 'its title, artist, tempo and key, in the cells (F2)']);
+      items.push([many ? `edit ${rows.length}…` : 'edit…', () => orgEditTrack(row, rows),
+        many
+          ? `title, artist, tempo and key, in the cells - whatever you change lands on all ${rows.length} (F2)`
+          : 'its title, artist, tempo and key, in the cells (F2)']);
     }
     if (row.trackId) {
       items.push([many ? `measure ${rows.length}` : 'measure tempo & key',

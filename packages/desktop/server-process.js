@@ -40,6 +40,34 @@ function findFreePort({ host = '127.0.0.1' } = {}) {
   });
 }
 
+// The port the desktop app asks for first. It matters that this is the SAME number every launch:
+// the window is pointed at http://127.0.0.1:<port>, and a browser keys localStorage by ORIGIN -
+// port included - so a fresh port each time is a fresh, empty store. Everything the editor keeps
+// per-machine lives there (the theme, the organize column widths and filter, the pane sizes), and
+// with findFreePort driving the window they were all silently forgotten between launches: pick a
+// theme, quit, reopen, default theme again (reported 2026-10-05).
+//
+// Not 4000: that is `npm run dev`'s, and the whole reason the port was free-chosen in the first
+// place was so the app could run alongside a dev server. This is its own number, and it still
+// falls back to any free port when something already holds it - a launch that has to fall back
+// opens on a different origin and does start from the default theme, which is the old behavior
+// for that one case rather than a new failure.
+const DESKTOP_PORT = 4010;
+
+/**
+ * `preferred` if it can be bound right now, else any free port. The check binds and releases, so
+ * it carries the same handover race as findFreePort and is no worse than what it replaces.
+ */
+function stablePort({ preferred = DESKTOP_PORT, host = '127.0.0.1' } = {}) {
+  return new Promise((resolve) => {
+    const srv = net.createServer();
+    srv.on('error', () => resolve(findFreePort({ host })));
+    srv.listen(preferred, host, () => {
+      srv.close((err) => (err ? resolve(findFreePort({ host })) : resolve(preferred)));
+    });
+  });
+}
+
 /** Resolves once the server answers on `port`, rejecting if it never does. */
 function waitForServer(port, { host = '127.0.0.1', timeoutMs = 120000, intervalMs = 150, signal } = {}) {
   const deadline = Date.now() + timeoutMs;
@@ -250,6 +278,8 @@ module.exports = {
   SERVER_ENTRY,
   createBootNarrator,
   findFreePort,
+  stablePort,
+  DESKTOP_PORT,
   waitForServer,
   fetchEngineStatus,
   startServer,

@@ -28,15 +28,18 @@ const CLIENT = fs.readFileSync(path.join(__dirname, 'public', 'client.js'), 'utf
 
 // server.js spawns an engine on require, so the dispatch is read out of the source and given its
 // own dependencies - the same trick mix-gate-all.test.js and highlight-grid.test.js use.
-const NAMES = ['mixMidiValue', 'mixMidiScrubDelta', 'mixMidiApply', 'mixMidiButton', 'clockHeldByDesk'];
+const NAMES = ['mixMidiValue', 'mixMidiScrubDelta', 'mixMidiBrowseTicks', 'mixMidiApply',
+  'mixMidiDrive', 'mixMidiButton', 'clockHeldByDesk'];
 const CONSTS = ['MIX_MIDI_KNOBS', 'MIX_MIDI_HOLD', 'MIX_MIDI_PRESS', 'MIX_MIDI_DECK_CTLS',
-  'MIX_MIDI_BROWSE_PRESS', 'MIX_MIDI_GLOBAL_PRESS', 'MIX_MIDI_GLOBAL_HOLD', 'MIX_MIDI_FX_POS',
-  'MIX_MIDI_GLOBAL', 'SONG_SCRUB_TICK_SEC', 'SONG_SEARCH_TICK_SEC', 'FX_ASSIGNS',
-  'DECK_TEMPO_RANGES'];
+  'MIX_MIDI_BROWSE_PRESS', 'MIX_MIDI_BROWSE_KNOBS', 'MIX_MIDI_GLOBAL_PRESS',
+  'MIX_MIDI_GLOBAL_HOLD', 'MIX_MIDI_FX_POS',
+  'MIX_MIDI_GLOBAL', 'MIX_MIDI_TARGETS', 'SONG_SCRUB_TICK_SEC', 'SONG_SEARCH_TICK_SEC',
+  'FX_ASSIGNS', 'DECK_TEMPO_RANGES'];
 const DEPS = ['mixState', 'songDecks', 'songMasterDeck', 'mixMidiDown', 'applyMixTargets',
   'songScrub', 'songNudge', 'songCue', 'songTogglePlay', 'songSetMeta', 'songMultNext',
   'mixActionNotify', 'songBend', 'deckTempoApply', 'mixFxSet', 'mixFxStep',
-  'setDeckLoops', 'deckLoopsOn', 'deckLoopApply', 'deckLoopLive', 'deckRunning'];
+  'setDeckLoops', 'deckLoopsOn', 'deckLoopApply', 'deckLoopLive', 'deckRunning',
+  'eventLogQueue', 'mixMidiLastErr'];
 
 function grabFn(name) {
   const at = SRC.indexOf(`function ${name}(`);
@@ -58,7 +61,7 @@ function grabConst(name) {
 const makeMidi = new Function(...DEPS, `
   ${CONSTS.map(grabConst).join('\n')}
   ${NAMES.map(grabFn).join('\n')}
-  return { ${NAMES.join(', ')} };
+  return { ${NAMES.join(', ')}, MIX_MIDI_TARGETS };
 `);
 
 /**
@@ -76,6 +79,7 @@ function rig({ songs = ['a', 'b'], master = null, override = null, playing = tru
     deckTempo: { a: { frac: 0, range: 6 }, b: { frac: 0, range: 6 } },
     fx: { plugin: null, on: false, held: false, depth: 0.5, assign: 'ab', ...fx },
   };
+  const said = [];
   const songDecks = { a: null, b: null };
   for (const d of songs) songDecks[d] = { playing, sync: false, keylock: false, syncMult: 'auto' };
   const deckLoopsOn = { a: true, b: true };
@@ -92,7 +96,11 @@ function rig({ songs = ['a', 'b'], master = null, override = null, playing = tru
     (deck) => log.push(['play', deck]),
     (deck, patch) => log.push(['meta', deck, patch]),
     (deck) => (deck === 'a' ? 0.5 : 2),
-    (deck, action) => log.push(['toClient', deck, action]),
+    // The value rides along only when there IS one (a knob tick), so the press-edge assertions
+    // elsewhere go on comparing a three-element entry.
+    (deck, action, value) => log.push(value == null
+      ? ['toClient', deck, action]
+      : ['toClient', deck, action, value]),
     (deck, ticks) => log.push(['bend', deck, ticks]),
     (deck, patch) => log.push(['tempo', deck, patch]),
     (patch) => log.push(['fx', patch]),
@@ -104,7 +112,10 @@ function rig({ songs = ['a', 'b'], master = null, override = null, playing = tru
     (deck, patch) => log.push(['loop', deck, patch]),
     (deck) => looping[deck],
     (deck) => running.includes(deck), // which decks have patterns playing to the clock
+    said, // eventLogQueue - what the console would have been told
+    new Map(), // mixMidiLastErr - "say it once" state, fresh per rig
   );
+  api.said = said;
   api.log = log;
   api.state = mixState;
   api.deckLoopsOn = deckLoopsOn;
@@ -488,7 +499,7 @@ test('the tempo ratio cycles the same way by pad and by click', () => {
 const LEARN_NAMES = ['mixMidiLearnable', 'midi14Partner', 'mixSwitchState', 'mixMidiSwitchSaw',
   'mixMidiSwitchFinish', 'handleMixMidi'];
 const LEARN_CONSTS = ['MIX_MIDI_HOLD', 'MIX_MIDI_PRESS', 'MIX_MIDI_BROWSE_PRESS',
-  'MIX_MIDI_GLOBAL_PRESS',
+  'MIX_MIDI_BROWSE_KNOBS', 'MIX_MIDI_GLOBAL_PRESS',
   'MIX_MIDI_GLOBAL_HOLD', 'MIX_MIDI_FX_POS', 'MIX_MIDI_GLOBAL', 'MIX_MIDI_BUTTONS',
   'midiKind', 'midiNum', 'midiSame', 'midiSay',
   'MIDI_14_WINDOW_MS', 'MIDI_14_LSB', 'midi14', 'midi14Warned', 'midi14Key', 'midi14IsCoarse', 'midi14IsFine',
@@ -500,7 +511,7 @@ const makeLearn = new Function(...LEARN_DEPS, `
   let mixMidiSwitch = null;
   ${LEARN_CONSTS.map(grabConst).join('\n')}
   ${LEARN_NAMES.map(grabFn).join('\n')}
-  return { ${LEARN_NAMES.join(', ')}, learn: (t, finish) => { mixMidiLearn = { target: t, finish, timer: null }; },
+  return { ${LEARN_NAMES.join(', ')}, learn: (t, finish, settle = 0) => { mixMidiLearn = { target: t, finish, timer: null, settle }; },
            armed: () => !!mixMidiLearn, midi14, MIDI_14_WINDOW_MS,
            sweep: (targets, finish) => { mixMidiSwitch = { targets, seen: [], finish, settle: null, timer: null }; },
            sweeping: () => !!mixMidiSwitch };
@@ -851,4 +862,198 @@ test('only deck A can drive the clock at all, and only when nothing holds it', (
   assert.match(src, /deck === 'a' && !clockHeldByDesk\(deck\) \? declareTempo\(value, v\) : TEMPO_BLOCK/);
   assert.match(src, /if \(deck === 'a' && !clockHeldByDesk\(deck\)\) declareTempo\(DEFAULT_CPS/,
     'a buffer with no setbpm returns the clock to 120 - that has to be held off too');
+});
+
+// --- the browse knob's two conventions -----------------------------------------------------------
+//
+// A relative encoder reports how far it just turned, and hardware spells that in one of two
+// incompatible ways. Reading everything as 64-centered is what made one controller's browse knob scroll
+// BACKWARDS in jumps of 24: its "one tick right" of 1 came out as 1 - 64 = -63, which then
+// saturated at the browser's step clamp (reported 2026-10-05, "turning it right subtracts 24").
+// Both conventions are read now, told apart by distance from center, since a tick is a small
+// number either way.
+
+const ticks = (raw) => rig().mixMidiBrowseTicks(raw / 127);
+
+test('a two\'s-complement encoder counts up to the right and down to the left', () => {
+  assert.equal(ticks(1), 1, 'one tick right - the case that used to come out as -63');
+  assert.equal(ticks(2), 2);
+  assert.equal(ticks(5), 5, 'a quick flick right carries further, still forward');
+  assert.equal(ticks(127), -1, 'one tick left');
+  assert.equal(ticks(126), -2);
+  assert.equal(ticks(123), -5);
+});
+
+test('a 64-centered encoder still reads the way the platter does', () => {
+  assert.equal(ticks(65), 1);
+  assert.equal(ticks(63), -1);
+  assert.equal(ticks(70), 6);
+  assert.equal(ticks(58), -6);
+});
+
+test('a knob that is not moving asks for nothing, whichever convention it speaks', () => {
+  assert.equal(ticks(64), 0, 'centered at rest');
+  assert.equal(ticks(0), 0, 'and zero is no change in two\'s complement too');
+});
+
+test('right is always forward and left always back - the sign never flips', () => {
+  // The whole failure was a sign, so both conventions are checked for it directly.
+  for (const raw of [1, 2, 5, 20, 65, 70, 80]) {
+    assert.ok(ticks(raw) > 0, `${raw} should be a forward tick, got ${ticks(raw)}`);
+  }
+  for (const raw of [127, 126, 123, 110, 63, 58, 40]) {
+    assert.ok(ticks(raw) < 0, `${raw} should be a backward tick, got ${ticks(raw)}`);
+  }
+});
+
+test('a tick is never the saturating jump the clamp was hiding', () => {
+  // Every ordinary message decodes to something a hand would recognize as a few entries, so the
+  // browser's ±24 clamp is a backstop rather than the value it usually sees.
+  for (const raw of [1, 2, 5, 63, 65, 70, 123, 126, 127]) {
+    assert.ok(Math.abs(ticks(raw)) <= 8, `${raw} decoded to ${ticks(raw)}, which is a lurch`);
+  }
+});
+
+// --- the browser's targets ---
+//
+// The sidebar is the browse knob's SHIFT layer, not a pad that toggles what the knob does: a
+// surface sends a different cc while shift is held, so it is simply a second continuous target -
+// the shape `search` already has beside `scrub`. As a pad it could not be learned at all, because
+// the learn bound the bare shift press the instant it arrived.
+
+test('the browse knob is continuous, and cannot be bound by a button press', () => {
+  const { mixMidiLearnable } = learnRig();
+  assert.equal(mixMidiLearnable('browse', 'cc', 0.5), true);
+  assert.equal(mixMidiLearnable('browse', 'note', 1), false,
+    'a note must not bind the knob - that is how a shift PRESS used to steal a step');
+});
+
+test('the browser\'s four pads are buttons, and want a press', () => {
+  const { mixMidiLearnable } = learnRig();
+  for (const target of ['browseload', 'browseout', 'browsefilter', 'browseopen']) {
+    assert.equal(mixMidiLearnable(target, 'note', 0.5), true);
+    assert.equal(mixMidiLearnable(target, 'cc', 0.2), false, 'a cc drifting past is not a press');
+  }
+});
+
+test('a browse knob tick is forwarded to the browser, deck-less, with its count', () => {
+  const r = rig();
+  r.mixMidiApply('browse', 1 / 127);
+  r.mixMidiApply('browse', 127 / 127);
+  assert.deepEqual(r.log.filter((l) => l[0] === 'toClient'),
+    [['toClient', null, 'browse', 1], ['toClient', null, 'browse', -1]],
+    'the page owns the lists, so the server only says how far the knob turned');
+});
+
+test('the in and out pads are forwarded as presses, with no value of their own', () => {
+  const r = rig();
+  for (const t of ['browseload', 'browseout']) {
+    r.mixMidiApply(t, 1); // press
+    r.mixMidiApply(t, 0); // release - a press pad acts on one edge only
+  }
+  assert.deepEqual(r.log.filter((l) => l[0] === 'toClient'),
+    [['toClient', null, 'browseload'], ['toClient', null, 'browseout']]);
+});
+
+test('a knob sitting still sends the browser nothing at all', () => {
+  const r = rig();
+  r.mixMidiApply('browse', 64 / 127);
+  assert.deepEqual(r.log.filter((l) => l[0] === 'toClient'), []);
+});
+
+// --- learning a COMBINATION (the settle window) --------------------------------------------------
+//
+// Holding shift and pressing a pad sends two messages: shift's own note, then the pad's. A learn
+// that binds the first one bound SHIFT - which is exactly what happened to the browser wizard's
+// "out" step, and the step moved on as soon as shift was touched (2026-10-05). With a settle
+// window the arm keeps the LAST learnable message and binds that once the window passes quietly.
+// A single press settles to itself, so a dedicated button is learned by the same step.
+
+test('a settled learn binds the pad, not the shift that was held first', async () => {
+  const r = learnRig();
+  const done = new Promise((resolve) => r.learn('browseout', resolve, 25));
+  r.handleMixMidi('surface', 1, 63, 1, 'note'); // SHIFT goes down first
+  r.handleMixMidi('surface', 1, 70, 1, 'note'); // ...then the pad under it
+  const bound = await done;
+  assert.equal(bound.num, 70, 'the combination is the pad, which arrived last');
+  assert.equal(bound.kind, 'note');
+});
+
+test('a settled learn still binds a button pressed on its own', async () => {
+  const r = learnRig();
+  const done = new Promise((resolve) => r.learn('browseout', resolve, 25));
+  r.handleMixMidi('surface', 1, 42, 1, 'note');
+  const bound = await done;
+  assert.equal(bound.num, 42, 'one press settles to itself - a dedicated button needs no choice');
+});
+
+test('nothing is written until the window closes', async () => {
+  const r = learnRig();
+  const done = new Promise((resolve) => r.learn('browseout', resolve, 40));
+  r.handleMixMidi('surface', 1, 63, 1, 'note');
+  assert.equal(r.settings.mixMidi.browseout, undefined,
+    'binding on the first message is the bug this window exists to stop');
+  r.handleMixMidi('surface', 1, 70, 1, 'note');
+  await done;
+  assert.equal(r.settings.mixMidi.browseout.num, 70, '...and the last one is what lands');
+});
+
+test('without a settle the first message still wins, as every other control expects', async () => {
+  const r = learnRig();
+  const done = new Promise((resolve) => r.learn('browsefilter', resolve));
+  r.handleMixMidi('surface', 1, 63, 1, 'note');
+  const bound = await done;
+  assert.equal(bound.num, 63, 'an ordinary learn is unchanged - no new wait anywhere else');
+});
+
+test('a message the target would never take does not open the window', async () => {
+  const r = learnRig();
+  const done = new Promise((resolve) => r.learn('browseout', resolve, 25));
+  // A pad is a note or a cc at the top; a platter drifting past its center is neither.
+  r.handleMixMidi('surface', 1, 20, 0.5, 'cc');
+  r.handleMixMidi('surface', 1, 70, 1, 'note');
+  const bound = await done;
+  assert.equal(bound.num, 70);
+  assert.equal(bound.kind, 'note');
+});
+
+// --- a binding this build no longer has ----------------------------------------------------------
+//
+// settings.json outlives the build that wrote it, so it can name a control that has since been
+// renamed or dropped. Dispatched anyway, such a name fell through to the deck-prefixed branch and
+// was read as a control with its first two characters sliced off: a stale `browsesource` pad
+// pushed a param called "owsesource" at deck b on every press (found 2026-10-05 in a real
+// settings.json). An unknown target is ignored, and said once so it is not a silent nothing.
+
+test('a binding for a target this version dropped drives nothing', () => {
+  const r = rig();
+  r.mixMidiDrive('browsesource', 1); // what the earlier wizard wrote, before the rename
+  assert.deepEqual(r.log, [], 'nothing reached the mixer, the decks or the browser');
+  assert.equal(r.said.length, 1, 'and it is reported');
+  assert.match(r.said[0], /browsesource/);
+  assert.match(r.said[0], /not a control this version has/);
+});
+
+test('...and it is said once, not on every press', () => {
+  const r = rig();
+  for (let i = 0; i < 5; i += 1) r.mixMidiDrive('browsesource', 1);
+  assert.equal(r.said.length, 1, 'a pad held through a track must not fill the console');
+});
+
+test('a target this version DOES have still drives, unchanged', () => {
+  const r = rig();
+  r.mixMidiDrive('a:trim', 0.5);
+  assert.deepEqual(r.log, [['mix', ['a', 'trim', 1]]], 'the guard is not in the way of real ones');
+});
+
+test('every browse target the wizard writes is one the dispatch will accept', () => {
+  // The rename that caused this is exactly the kind of drift a census catches: the guide's
+  // targets and the server's list have to agree, or a learned control silently does nothing.
+  const guide = [...CLIENT.matchAll(/\{ target: '([a-z]+)'/g)].map((m) => m[1]);
+  assert.ok(guide.length >= 5, `expected the wizard's steps in client.js, found ${guide.length}`);
+  const known = rig().MIX_MIDI_TARGETS;
+  assert.ok(known instanceof Set && known.size > 0, 'MIX_MIDI_TARGETS did not come through');
+  for (const target of guide) {
+    assert.ok(known.has(target), `the wizard asks for "${target}", which the dispatch would ignore`);
+  }
 });

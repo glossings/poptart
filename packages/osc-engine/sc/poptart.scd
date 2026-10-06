@@ -1156,6 +1156,14 @@ midiEnable = {
             nodeAddr.sendMsg("/poptart/midiIn", midiNameForUid.(src), chan + 1, num, 0.0, "note");
         });
         ("poptart: MIDI input enabled (" ++ MIDIClient.sources.size ++ " source(s))").postln;
+    } {
+        // Already on: this is a second ask, so re-read the sources. CoreMIDI's list here is a
+        // SNAPSHOT - MIDIIn.connectAll above connected what was plugged in at the time and
+        // nothing since - so a controller plugged in mid-session sent its messages to a client
+        // that was not listening to it, and the desk's learn heard silence from it (reported
+        // 2026-10-05, a controller plugged in after launch). Every ask for MIDI is now also a rescan;
+        // connecting is per NEW source only, so asking twice cannot double anyone's events.
+        midiRefreshSources.();
     };
 };
 // The source list is a snapshot taken when MIDI was enabled, so a controller switched on or
@@ -3429,9 +3437,9 @@ OSCdef(\poptartMidiInit, { midiEnable.() }, '/poptart/midiInit');
 
 // Connected sources as the "device name" strings midicc()/midikeys() match against, for the
 // editor's device autocomplete. Enables MIDI input as a side effect: the only caller is someone
-// typing a MIDI builder, so it's about to be on anyway (and midiEnable is idempotent). Devices
-// plugged in after this first init won't appear until a restart - CoreMIDI's source list here
-// is a snapshot taken by MIDIClient.init.
+// typing a MIDI builder, so it's about to be on anyway (and midiEnable is idempotent) - and
+// because enabling an already-enabled client rescans, this list is what is plugged in NOW rather
+// than what was there at the first init. The destinations list has always worked this way.
 OSCdef(\poptartGetMidiDevices, { |msg|
     var requestId = msg[1];
     midiEnable.();

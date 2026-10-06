@@ -29,7 +29,7 @@ const { openDesktopLog, desktopLogPath, reportFileName, writeDiagnosticReport, a
 
 const {
   createBootNarrator,
-  findFreePort,
+  stablePort,
   waitForServer,
   fetchEngineStatus,
   startServer,
@@ -334,7 +334,10 @@ async function boot() {
   setStatus('Starting the poptart server');
   let port;
   try {
-    port = await findFreePort();
+    // The SAME port each launch, so the window keeps its origin: localStorage survives (the
+    // theme, the organize columns and filter, the pane sizes) and the projector feed's address
+    // stays put, which is what lets a VJ file point at it once. POPTART_PORT pins it outright.
+    port = await stablePort({ preferred: Number(process.env.POPTART_PORT) || undefined });
   } catch (err) {
     return showFailure('Could not open a local port', err.message);
   }

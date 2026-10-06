@@ -5831,6 +5831,14 @@ body.mix-on #deckAHead .deck-song {
   background: var(--accent-soft);
   color: var(--accent);
 }
+/* Where a learned browse knob is standing (orgMidiPaintCursor). Distinct from `.on`, which is
+   the source that is OPEN: the knob can be hunting three rows away from it, and until enter is
+   pressed nothing has been opened. An inset ring rather than a fill, so it reads ON TOP of the
+   open row when they are the same one. */
+.org-side-row.org-cursor {
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
 /* The four source headings read as headings; the folders and sets under them read as contents. */
 .org-side-group > .org-side-label {
   font-size: 11px;

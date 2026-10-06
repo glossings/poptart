@@ -1468,15 +1468,23 @@ const MIX_MIDI_DECK_CTLS = [...MIX_MIDI_KNOBS, ...MIX_MIDI_HOLD, ...MIX_MIDI_PRE
 // control and forwarded as `action` frames (see mixActionNotify) - the road `next`/`prev` and a
 // code deck's play button already take.
 //
-// Four buttons and one knob, which is what it takes to work the browser with no keyboard:
-//   browse        the knob - one row per tick, and the SIDEBAR's sources when browsesource
-//                 has handed it over
-//   browseload    the highlighted row onto the active deck
+// Four buttons and one knob - what it takes to work the browser with no keyboard at all. The
+// knob scrolls whatever has FOCUS, and two buttons move the focus in and out, the way a column
+// browser works:
+//   browse        the knob - one entry per tick, through whatever is focused
+//   browseload    ENTER: one layer in. On the sidebar that is "open this source and show me its
+//                 songs"; on the songs it is "load this one onto the active deck"
+//   browseout     one layer OUT: back to the sidebar, and it LATCHES there until an enter goes
+//                 back in. Learned from shift+enter on hardware that has a shift layer, which
+//                 is why the learn for it settles (see the `settle` option of /api/mix/midilearn:
+//                 holding shift sends a note of its own, and the first-message-wins learn bound
+//                 that instead of the combination, 2026-10-05)
 //   browsefilter  the tempo filter on and off
-//   browsesource  hands the knob to the sidebar, and takes it back. This is what "up a level"
-//                 is on a controller: there is no folder button, deliberately
 //   browseopen    opens and closes the window itself
-const MIX_MIDI_BROWSE_PRESS = ['browseload', 'browsefilter', 'browsesource', 'browseopen'];
+const MIX_MIDI_BROWSE_PRESS = ['browseload', 'browseout', 'browsefilter', 'browseopen'];
+
+// The knob. Relative, and read in either convention hardware sends; see mixMidiBrowseTicks.
+const MIX_MIDI_BROWSE_KNOBS = ['browse'];
 
 const MIX_MIDI_GLOBAL_PRESS = ['fxon', 'fxnext', 'fxprev', 'fxassign', ...MIX_MIDI_BROWSE_PRESS];
 const MIX_MIDI_GLOBAL_HOLD = ['fxhold'];
@@ -1486,11 +1494,22 @@ const MIX_MIDI_GLOBAL_HOLD = ['fxhold'];
 // the switch cycled the unit onto whatever came next instead of the deck printed on the switch.
 // These are that switch - one target per position, each saying absolutely where the unit goes.
 const MIX_MIDI_FX_POS = { fxassigna: 'a', fxassignb: 'b', fxassignab: 'ab' };
-const MIX_MIDI_GLOBAL = new Set(['xf', 'fxknob', 'browse', ...MIX_MIDI_GLOBAL_PRESS,
+const MIX_MIDI_GLOBAL = new Set(['xf', 'fxknob', ...MIX_MIDI_BROWSE_KNOBS, ...MIX_MIDI_GLOBAL_PRESS,
   ...MIX_MIDI_GLOBAL_HOLD, ...Object.keys(MIX_MIDI_FX_POS)]);
 const MIX_MIDI_TARGETS = new Set([...MIX_MIDI_GLOBAL,
   ...['a', 'b'].flatMap((d) => MIX_MIDI_DECK_CTLS.map((c) => `${d}:${c}`))]);
-let mixMidiLearn = null; // { target, finish, timer } while a learn long-poll is armed
+// { target, finish, timer, settle?, candidate?, settleTimer? } while a learn long-poll is armed.
+//
+// `settle` is for learning a COMBINATION. Holding shift and pressing a pad sends two messages -
+// shift's own note first, then the pad's - and a learn that takes the first one bound shift
+// instead of the combination (2026-10-05, the browser wizard's "out" step). With a settle window
+// the arm keeps the LAST learnable message it saw and binds that once the window has passed
+// quietly, which is the same shape the switch sweep above uses. A single press settles to itself,
+// so the only cost is the window.
+let mixMidiLearn = null;
+
+// Long enough for a hand holding shift to reach a pad, short enough not to feel like a pause.
+const MIX_LEARN_SETTLE_MS = 450;
 let mixMidiMonitor = false; // while the desk's `midi` mode is on: say what the hardware sends
 const mixMidiSaid = new Map(); // "kind num ch" -> when the monitor last printed it (throttle)
 const mixMidiDown = new Map(); // target -> was the pad down last message: what makes an EDGE
@@ -1700,6 +1719,29 @@ function mixMidiScrubDelta(v01, tickSec = SONG_SCRUB_TICK_SEC) {
   return (Math.round(v01 * 127) - 64) * tickSec;
 }
 
+/**
+ * A browse encoder's tick count: how many entries it just asked to move, signed, with + meaning
+ * further down the list. Relative, because a browse knob has no ends - the list has those.
+ *
+ * Hardware sends this in one of two incompatible conventions, and poptart reads both:
+ *
+ *   64-centered   65 is one tick on, 63 one back - the platter convention above.
+ *   two's complement   1 is one tick on, 127 one back - the other convention relative encoders commonly ship with.
+ *
+ * Reading everything as 64-centered is what made one controller's browse knob scroll backwards in jumps of 24:
+ * its "one tick right" of 1 came out as 1 - 64 = -63, which then saturated at the step clamp
+ * (reported 2026-10-05 - "turning it right subtracts 24"). Which convention a message is in is
+ * read off how far it sits from center, since a tick is a SMALL number in both: near 64 is
+ * centered, near either end is two's complement. A spin fast enough to send ~32 ticks in one
+ * message would be read the wrong way round, which a browse knob does not do - and the caller
+ * clamps the step regardless.
+ */
+function mixMidiBrowseTicks(v01) {
+  const raw = Math.round(v01 * 127);
+  if (raw >= 32 && raw <= 96) return raw - 64;
+  return raw < 32 ? raw : raw - 128;
+}
+
 function handleMixMidi(device, channel, num, value, kind) {
   // While the desk's `midi` mode is on, say what the hardware is sending - throttled per
   // control, since a platter says it eighty times a second. This is the thing that turns "the
@@ -1771,11 +1813,27 @@ function handleMixMidi(device, channel, num, value, kind) {
       }
       return true;
     }
+    const m = { device, channel, kind, num };
+    if (mixMidiLearn.settle) {
+      // Hold it and wait: a later message inside the window replaces it, so shift+pad binds the
+      // pad and a lone press binds itself.
+      mixMidiLearn.candidate = m;
+      clearTimeout(mixMidiLearn.settleTimer);
+      mixMidiLearn.settleTimer = setTimeout(() => {
+        if (mixMidiLearn?.finish !== finish) return; // superseded by another arm
+        mixMidiLearn = null;
+        clearTimeout(timer);
+        settings.mixMidi = { ...(settings.mixMidi ?? {}), [target]: m };
+        saveSettings();
+        finish(m);
+      }, mixMidiLearn.settle);
+      return true;
+    }
     mixMidiLearn = null;
     clearTimeout(timer);
-    settings.mixMidi = { ...(settings.mixMidi ?? {}), [target]: { device, channel, kind, num } };
+    settings.mixMidi = { ...(settings.mixMidi ?? {}), [target]: m };
     saveSettings();
-    finish({ device, channel, kind, num });
+    finish(m);
     return true;
   }
   for (const [target, m] of Object.entries(settings.mixMidi ?? {})) {
@@ -1790,6 +1848,20 @@ function handleMixMidi(device, channel, num, value, kind) {
 // throw: a pad aimed at a deck with no song, or pressed while the engine is between restarts,
 // has to do nothing rather than take the MIDI listener down with it.
 function mixMidiDrive(target, value) {
+  // A binding for a target this build no longer has - a control that was renamed or dropped
+  // between sessions - is ignored rather than dispatched. Without this it fell through to the
+  // deck-prefixed branch of mixMidiApply and was read as a CONTROL NAME with its first two
+  // characters sliced off: a stale `browsesource` pad pushed a param called "owsesource" at deck
+  // b on every press (found 2026-10-05 in a settings.json written by an earlier build). Said
+  // once, because a mapping that silently does nothing is the thing worth being told about.
+  if (!MIX_MIDI_TARGETS.has(target)) {
+    if (!mixMidiLastErr.has(target)) {
+      mixMidiLastErr.set(target, 'unknown target');
+      eventLogQueue.push(`[midi] "${target}" is not a control this version has - that binding is `
+        + 'being ignored. Re-learn it, or clear it from settings.json');
+    }
+    return;
+  }
   try {
     mixMidiApply(target, value);
     mixMidiLastErr.delete(target); // it works again: the next failure is news
@@ -1812,13 +1884,12 @@ function mixMidiApply(target, value) {
       mixFxSet({ knob: value });
       return;
     }
-    // The browse knob: a rotary encoder, read with the platter's own 64-centered convention (65
-    // is one tick on, 63 one back, and a fast spin carries further). Relative because a browse
-    // encoder has no ends - the list does, and where you are in it is the page's business, not
-    // this knob's. Forwarded raw as a tick count; the browser decides what a tick moves.
-    if (target === 'browse') {
-      const ticks = Math.round(value * 127) - 64;
-      if (ticks) mixActionNotify(null, 'browse', ticks);
+    // The browse knobs - the songs, and the sidebar under shift. Forwarded as a signed tick
+    // count (see mixMidiBrowseTicks); what a tick MOVES is the browser's business, not this
+    // knob's, so nothing here knows how long any list is.
+    if (MIX_MIDI_BROWSE_KNOBS.includes(target)) {
+      const ticks = mixMidiBrowseTicks(value);
+      if (ticks) mixActionNotify(null, target, ticks);
       return;
     }
     // A switch POSITION, which is a state and not a press: the message says where the switch is,
@@ -7934,6 +8005,7 @@ const routes = {
     mixMidiSwitchFinish('superseded by another learn'); // a second arm replaces a stale one
     if (mixMidiLearn) {
       clearTimeout(mixMidiLearn.timer);
+      clearTimeout(mixMidiLearn.settleTimer);
       mixMidiLearn.finish(null);
       mixMidiLearn = null;
     }
@@ -8003,14 +8075,21 @@ const routes = {
     engine.enableMidi();
     if (mixMidiLearn) {
       clearTimeout(mixMidiLearn.timer);
+      clearTimeout(mixMidiLearn.settleTimer);
       mixMidiLearn.finish(null); // a new arm supersedes a stale one
     }
+    // `settle` (a boolean from the caller) learns a COMBINATION - see the mixMidiLearn note.
+    const settle = body.settle ? MIX_LEARN_SETTLE_MS : 0;
     const learned = await new Promise((resolve) => {
       mixMidiLearn = {
         target,
+        settle,
         finish: resolve,
         timer: setTimeout(() => {
-          if (mixMidiLearn?.finish === resolve) mixMidiLearn = null;
+          if (mixMidiLearn?.finish === resolve) {
+            clearTimeout(mixMidiLearn.settleTimer);
+            mixMidiLearn = null;
+          }
           resolve(null);
         }, 10000),
       };
@@ -8025,6 +8104,12 @@ const routes = {
   // the one the room is dancing to, and deck a's next eval drives it again as it always does.
   'POST /api/mix/dj': async (body) => {
     mixState.dj = !!body.on;
+    // Opening the desk is the moment a controller is about to be used, so it is also the moment
+    // to re-read CoreMIDI: enabling an already-enabled client rescans its sources, which is what
+    // picks up a surface plugged in after the engine came up (see midiEnable in poptart.scd).
+    if (mixState.dj && engine) {
+      try { engine.enableMidi(); } catch { /* no engine yet; arming `midi` rescans too */ }
+    }
     mixNotify();
     return { status: 200, body: { dj: mixState.dj } };
   },

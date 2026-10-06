@@ -17,6 +17,8 @@ const path = require('node:path');
 const {
   createBootNarrator,
   findFreePort,
+  stablePort,
+  DESKTOP_PORT,
   waitForServer,
   fetchEngineStatus,
   startServer,
@@ -301,4 +303,56 @@ test('the loading screen is told the phase, not the output', () => {
     'Loading the session',
     'Starting the audio engine again',
   ]);
+});
+
+// --- a stable port, so the window keeps its origin -----------------------------------------------
+//
+// The window is pointed at http://127.0.0.1:<port> and localStorage is keyed by origin, port and
+// all. A free port per launch therefore threw away the theme, the organize column widths and
+// filter, and the pane sizes every time the app opened. stablePort asks for one fixed number and
+// only falls back when something else holds it.
+
+test('stablePort hands out the same port twice, unlike findFreePort', async () => {
+  const a = await stablePort();
+  const b = await stablePort();
+  assert.equal(a, b, 'the origin has to be identical between launches or localStorage is lost');
+  assert.equal(a, DESKTOP_PORT);
+});
+
+test('stablePort is not the dev server\'s port', () => {
+  // 4000 is `npm run dev`'s. Sharing it would make the app fall back to a random port exactly
+  // when a dev server is up, which is the normal case while working on poptart.
+  assert.notEqual(DESKTOP_PORT, 4000);
+});
+
+test('stablePort falls back to a free port when its own is taken', async () => {
+  const held = net.createServer();
+  await new Promise((done) => held.listen(DESKTOP_PORT, '127.0.0.1', done));
+  try {
+    const port = await stablePort();
+    assert.notEqual(port, DESKTOP_PORT, 'it cannot have been handed the port something else holds');
+    // ...and what it gave back is genuinely bindable.
+    const probe = net.createServer();
+    await new Promise((done, fail) => { probe.once('error', fail); probe.listen(port, '127.0.0.1', done); });
+    await new Promise((done) => probe.close(done));
+  } finally {
+    await new Promise((done) => held.close(done));
+  }
+});
+
+test('the preferred port is overridable, and an unbindable one still yields a usable port', async () => {
+  const free = await findFreePort();
+  assert.equal(await stablePort({ preferred: free }), free);
+  // Port 1 needs privileges this process does not have, so it exercises the error path.
+  const fallback = await stablePort({ preferred: 1 });
+  assert.ok(fallback > 1024, `expected a usable high port, got ${fallback}`);
+});
+
+test('an explicit preferred port is honoured, which is how POPTART_PORT pins it', async () => {
+  // A VJ file points at the projector feed once, and the feed lives on this port - so there has
+  // to be a way to say which port, not just to hope 4010 is free.
+  const free = await findFreePort();
+  assert.equal(await stablePort({ preferred: free }), free);
+  // ...and an unset override falls back to the default rather than to port 0 or NaN.
+  assert.equal(await stablePort({ preferred: undefined }), DESKTOP_PORT);
 });
