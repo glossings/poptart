@@ -22,105 +22,91 @@
 // The buffer shadows prebake on a shared name, which is the rule the evaluator already uses for
 // prebake's `const` bindings.
 
-/** One two-layer store. `what` names the kind in the "defined twice" warning. */
-function makeStore(what) {
-  const layers = { buffer: new Map(), prebake: new Map() };
-  let current = 'buffer'; // which layer register writes to (the host sets this around prebake)
-  let owner = 'a'; // which deck's evaluation buffer definitions belong to (see setOwner)
-  const owners = new Map(); // buffer id -> the deck that defined it
-  const pick = (layer) => layers[layer === 'prebake' ? 'prebake' : 'buffer'];
+// EACH DECK HAS ITS OWN BUFFER LAYER. Two songs on the desk are two buffers, and songs name
+// their definitions the same way - nearly every one has a Serum preset called `bass` - so one
+// shared namespace meant evaluating the incoming song re-filed the playing song's `bass` with the
+// incoming one's program, and the playing deck's next cycle pushed that program into its live
+// plugin: a state reload mid-set, voices killed and the plugin suspended while it chewed the blob
+// (heard as the whole deck freezing on every load; 2026-10-06), and same-named piano rolls
+// trading notes between decks.
+//
+// A deck's buffer definitions live under its SCOPE: an opaque token, replaced wholesale at the top
+// of each evaluation (clearRolls) and put back if the evaluation fails (restoreRolls). Anything
+// built during an evaluation that looks a name up LATER - a pianoroll() selector, clips(), auto(),
+// .slices() - captures the scope it was built under (defScope) and reads only that. A scheduler
+// reads by its deck (defScopeOf). Complete-mix hands the incoming deck's scope to the main deck
+// whole (adoptDefs), so every Sig it promotes keeps reading exactly what it was built against.
+let scopes = { a: {}, b: {} };
+let owner = 'a'; // which deck's evaluation buffer definitions belong to (see setDefOwner)
+let layerNow = 'buffer'; // which layer register writes to (the host sets this around prebake)
+let lookupDeck = null; // the deck a running scheduler is building for (see withDefDeck)
+const deckOf = (d) => (d === 'b' ? 'b' : 'a');
+const otherDeck = (d) => (d === 'a' ? 'b' : 'a');
 
+/**
+ * Which buffers an uncaptured lookup reads. Inside a scheduler's own work it is that deck's alone.
+ * Elsewhere (host listings, an evaluation's own pass) it is the deck being evaluated, then the
+ * other - a name only one deck defines is still found by a caller with no deck in hand.
+ */
+function scopesFor(scope) {
+  if (scope) return [scope];
+  if (lookupDeck) return [scopes[lookupDeck]];
+  if (scope === null) return [scopes[owner]]; // built during prebake: whoever is asking now
+  return [scopes[owner], scopes[otherDeck(owner)]];
+}
+
+/** One store: a buffer map per scope, plus the shared prebake layer. */
+function makeStore(what) {
+  const buffers = new WeakMap(); // scope -> Map; a scope nothing holds any more is collected
+  let prebake = new Map();
+  const bufferOf = (scope, make = false) => {
+    let m = buffers.get(scope);
+    if (!m && make) {
+      m = new Map();
+      buffers.set(scope, m);
+    }
+    return m ?? null;
+  };
   return {
-    /** Where subsequent definitions land. The host wraps its prebake run in this. */
-    setLayer(layer) {
-      current = layer === 'prebake' ? 'prebake' : 'buffer';
-    },
-    /**
-     * Which performance deck subsequent buffer definitions belong to (see the host's decks).
-     * Two decks share one registry - lookups don't care who defined a name - but each deck's
-     * eval clears and refills only ITS OWN definitions, so evaluating one song can't silence
-     * the rolls the other song is playing.
-     */
-    setOwner(deck) {
-      owner = deck;
-    },
-    /** Re-attribute every buffer definition `from` owns to `to` (complete-mix - see adoptDefs). */
-    adopt(from, to) {
-      for (const [id, o] of owners) if (o === from) owners.set(id, to);
-    },
-    /**
-     * Drops every name in one layer and hands back what was in it, so a host that clears the
-     * buffer to rebuild it can put the old definitions back if the rebuild never finishes (see
-     * restoreRolls).
-     */
-    clear(layer = 'buffer', only = null) {
-      const store = pick(layer);
-      if (only != null && layer !== 'prebake') {
-        // Owner-scoped: drop only what `only`'s evaluations defined; the other deck's stand.
-        const had = new Map();
-        for (const [id, value] of store) if ((owners.get(id) ?? 'a') === only) had.set(id, value);
-        for (const id of had.keys()) {
-          store.delete(id);
-          owners.delete(id);
-        }
-        return had;
-      }
-      const had = new Map(store);
-      store.clear();
-      if (layer !== 'prebake') owners.clear();
+    clearPrebake() {
+      const had = prebake;
+      prebake = new Map();
       return had;
     },
-    /** Puts a layer back exactly as `had` (from clear) left it. */
-    restore(had, layer = 'buffer', only = null) {
-      const store = pick(layer);
-      if (only != null && layer !== 'prebake') {
-        // Undo an owner-scoped clear: drop whatever that owner registered since, put back its own.
-        for (const [id, o] of [...owners]) {
-          if (o === only) {
-            store.delete(id);
-            owners.delete(id);
-          }
-        }
-        for (const [id, value] of had ?? []) {
-          store.set(id, value);
-          owners.set(id, only);
-        }
-        return;
-      }
-      store.clear();
-      if (layer !== 'prebake') owners.clear();
-      for (const [id, value] of had ?? []) store.set(id, value);
+    restorePrebake(had) {
+      prebake = new Map(had ?? []);
     },
     /**
-     * Files `sig` under `id` in the current layer. Returns a warning string when the id was
-     * already taken IN THIS LAYER and is being replaced - two definitions of one name in a buffer
-     * means one of them silently never plays, which is worth a line on the console rather than a
-     * throw.
+     * Files `value` under `id` in the current layer - the prebake library, or the evaluating
+     * deck's scope. Returns a warning string when the id was already taken THERE - two
+     * definitions of one name in a buffer means one of them silently never plays, which is worth
+     * a line on the console rather than a throw. The other deck defining the same name is not a
+     * clash: it is the other song's.
      */
-    register(id, sig) {
-      const store = layers[current];
+    register(id, value) {
+      const store = layerNow === 'prebake' ? prebake : bufferOf(scopes[owner], true);
       const replaced = store.has(id);
-      const prevOwner = current === 'prebake' ? null : owners.get(id);
-      store.set(id, sig);
-      if (current !== 'prebake') owners.set(id, owner);
-      if (!replaced) return null;
-      if (prevOwner != null && prevOwner !== owner) {
-        return `[signal] ${what} ${JSON.stringify(id)} is defined by both decks - the later definition wins for both`;
-      }
-      return `[signal] ${what} ${JSON.stringify(id)} is defined twice - the later definition wins`;
+      store.set(id, value);
+      return replaced ? `[signal] ${what} ${JSON.stringify(id)} is defined twice - the later definition wins` : null;
     },
     /**
-     * What a name means, buffer first, or null if nothing defines it. `layer` asks one layer alone -
-     * 'prebake' is how a host reads the LIBRARY's copy of a name some buffer also defines.
+     * What a name means, buffer first, or null if nothing defines it. `layer` asks one layer
+     * alone - 'prebake' is how a host reads the LIBRARY's copy of a name some buffer also
+     * defines. `scope` is the deck scope a caller captured (see scopesFor for the rest).
      */
-    lookup(id, layer = null) {
-      if (layer != null) return pick(layer).get(id) ?? null;
-      return layers.buffer.get(id) ?? layers.prebake.get(id) ?? null;
+    lookup(id, layer = null, scope = undefined) {
+      if (layer === 'prebake') return prebake.get(id) ?? null;
+      for (const sc of scopesFor(scope)) {
+        const m = bufferOf(sc);
+        if (m?.has(id)) return m.get(id);
+      }
+      return layer === 'buffer' ? null : (prebake.get(id) ?? null);
     },
     /**
-     * Every name currently defined, buffer first then prebake, each with the layer it came from.
-     * This is what the editor's pickers list - it names what is actually playable right now, which
-     * the code text alone can't say (prebake isn't in the buffer).
+     * Every name currently defined, buffer first then prebake, each with the layer it came from -
+     * both decks' buffers, each name once. This is what the editor's pickers list - it names
+     * what is actually playable right now, which the code text alone can't say (prebake isn't in
+     * the buffer).
      *
      * `layer` is where the name resolves; `library` is whether prebake defines it AT ALL, which is
      * a different question the moment a buffer carries its own copy of a library name. The editor
@@ -129,8 +115,10 @@ function makeStore(what) {
      * song shadowed it had the editor writing an empty definition over it (2026-09-20).
      */
     ids() {
-      const out = [...layers.buffer.keys()].map((id) => ({ id, layer: 'buffer', library: layers.prebake.has(id) }));
-      for (const id of layers.prebake.keys()) if (!layers.buffer.has(id)) out.push({ id, layer: 'prebake', library: true });
+      const inBuffer = new Set();
+      for (const d of [owner, otherDeck(owner)]) for (const id of bufferOf(scopes[d])?.keys() ?? []) inBuffer.add(id);
+      const out = [...inBuffer].map((id) => ({ id, layer: 'buffer', library: prebake.has(id) }));
+      for (const id of prebake.keys()) if (!inBuffer.has(id)) out.push({ id, layer: 'prebake', library: true });
       return out;
     },
   };
@@ -146,57 +134,95 @@ const stores = {
   groove: makeStore('groove'),
 };
 
-/** Both stores, for the host passes that treat them alike (clearing per eval, listing). */
+/** Every kind, for the host passes that treat them alike (clearing per eval, listing). */
 export const DEF_KINDS = Object.keys(stores);
 
 export function setRollLayer(layer) {
-  for (const store of Object.values(stores)) store.setLayer(layer);
+  layerNow = layer === 'prebake' ? 'prebake' : 'buffer';
 }
 
-/** Which deck's evaluations subsequent buffer definitions belong to ('a' at rest - see makeStore). */
+/** Which deck's evaluations subsequent buffer definitions belong to ('a' at rest). */
 export function setDefOwner(deck) {
-  for (const store of Object.values(stores)) store.setOwner(deck);
+  owner = deckOf(deck);
 }
 
 /**
- * Re-attribute one deck's buffer definitions to another - the complete-mix promotion: the
- * incoming song's definitions become the main deck's, so its next eval AS the main deck clears
- * and refills them like its own (which they now are).
+ * The scope a definition made right now would be filed under - what a lazily-resolving Sig
+ * captures when it is built, so it reads its own deck's names however late it asks. Null during
+ * prebake, whose patterns belong to no deck.
+ */
+export function defScope() {
+  return layerNow === 'prebake' ? null : scopes[owner];
+}
+
+/** A deck's current scope - for a reader that knows its deck but captured nothing (a scheduler). */
+export function defScopeOf(deck) {
+  return scopes[deckOf(deck)];
+}
+
+/** Runs `fn` with uncaptured lookups reading `deck`'s definitions alone (a scheduler's own work). */
+export function withDefDeck(deck, fn) {
+  const prev = lookupDeck;
+  lookupDeck = deck == null ? null : deckOf(deck);
+  try {
+    return fn();
+  } finally {
+    lookupDeck = prev;
+  }
+}
+
+/**
+ * The incoming deck's definitions become the main deck's - the complete-mix promotion. The scope
+ * itself moves, so the promoted Sigs, which captured it, keep reading their own definitions, and
+ * the main deck's next eval clears and refills them like its own (which they now are). The
+ * incoming deck starts empty.
  */
 export function adoptDefs(from, to) {
-  for (const store of Object.values(stores)) store.adopt(from, to);
+  scopes = { ...scopes, [deckOf(to)]: scopes[deckOf(from)], [deckOf(from)]: {} };
 }
 
 /**
- * Empties one layer of every store, and returns what was in them - hand that back to restoreRolls
- * to undo the clear.
+ * Empties one layer, and returns what was in it - hand that back to restoreRolls to undo the
+ * clear. For 'buffer', `only` names the deck (both when null); the deck gets a fresh scope.
  *
- * The host clears 'buffer' at the top of each evaluation and fills it from the buffer again, which
- * is what makes a definition you just deleted stop playing. But an evaluation that THROWS applies
- * nothing else - the tracks that were playing go on playing, out of the Sigs they were built with -
- * and those Sigs resolve their definitions BY NAME, lazily, every cycle (see rollPattern). So a
- * cleared registry the evaluation never got round to refilling is silence on every track that names
- * a roll: one typo below the last definition and the whole part drops out. Clearing is therefore a
- * transaction - the host restores what it took out when the evaluation building the replacement
- * doesn't reach the end.
+ * The host clears a deck's buffer at the top of each evaluation and fills it from the buffer
+ * again, which is what makes a definition you just deleted stop playing. But an evaluation that
+ * THROWS applies nothing else - the tracks that were playing go on playing, out of the Sigs they
+ * were built with - and those Sigs resolve their definitions BY NAME, lazily, every cycle (see
+ * rollPattern). So the clear is a transaction - the host restores what it took out when the
+ * evaluation building the replacement doesn't reach the end. (Those playing Sigs read their own
+ * captured scope, which a clear never empties - the restore is for the scheduler-side readers.)
  */
 export function clearRolls(layer = 'buffer', only = null) {
-  const had = {};
-  for (const [kind, store] of Object.entries(stores)) had[kind] = store.clear(layer, only);
+  if (layer === 'prebake') {
+    const had = {};
+    for (const [kind, store] of Object.entries(stores)) had[kind] = store.clearPrebake();
+    return { prebake: had };
+  }
+  const decks = only != null ? [deckOf(only)] : ['a', 'b'];
+  const had = { scopes: {} };
+  for (const d of decks) had.scopes[d] = scopes[d];
+  const fresh = { ...scopes };
+  for (const d of decks) fresh[d] = {};
+  scopes = fresh;
   return had;
 }
 
 /** Puts back what a clearRolls(layer, only) took out, definition for definition. */
-export function restoreRolls(had, layer = 'buffer', only = null) {
-  for (const [kind, store] of Object.entries(stores)) store.restore(had?.[kind], layer, only);
+export function restoreRolls(had, layer = 'buffer') {
+  if (layer === 'prebake') {
+    for (const [kind, store] of Object.entries(stores)) store.restorePrebake(had?.prebake?.[kind]);
+    return;
+  }
+  if (had?.scopes) scopes = { ...scopes, ...had.scopes };
 }
 
 export const registerRoll = (id, sig) => stores.roll.register(id, sig);
-export const lookupRoll = (id) => stores.roll.lookup(id);
+export const lookupRoll = (id, scope) => stores.roll.lookup(id, null, scope);
 export const rollIds = () => stores.roll.ids();
 
 export const registerShape = (id, points) => stores.shape.register(id, points);
-export const lookupShape = (id) => stores.shape.lookup(id);
+export const lookupShape = (id, scope) => stores.shape.lookup(id, null, scope);
 export const shapeIds = () => stores.shape.ids();
 
 // A preset's value is { plugin, state }, not a Sig: `state` is the plugin's own program (gzip +
@@ -231,10 +257,11 @@ export function registerPreset(id, entry) {
  * preset of that name will do. Refusing there would break patches that worked before presets were
  * keyed this way, and the caller already has no way to tell whether the answer is right.
  */
-export function lookupPreset(id, plugin = null) {
+export function lookupPreset(id, plugin = null, scope = undefined) {
   const scoped = String(plugin ?? '').trim();
-  if (scoped) return stores.preset.lookup(presetKey(scoped, id)) ?? stores.preset.lookup(presetKey('', id));
-  return stores.preset.lookup(presetKey('', id)) ?? presetEntries().find((e) => e.id === id)?.entry ?? null;
+  const at = (key) => stores.preset.lookup(key, null, scope);
+  if (scoped) return at(presetKey(scoped, id)) ?? at(presetKey('', id));
+  return at(presetKey('', id)) ?? presetEntries().find((e) => e.id === id)?.entry ?? null;
 }
 
 /** Every preset, its name and the plugin it was captured from split back out of the key. */
@@ -261,7 +288,7 @@ export const presetPluginsFor = (id) =>
 // buffers (see OscEngine#defineSamplePacks), and `sp("kit")` addresses it by name plus index the
 // way `s("bd")` addresses a folder.
 export const registerPack = (id, entry) => stores.pack.register(id, entry);
-export const lookupPack = (id, layer = null) => stores.pack.lookup(id, layer);
+export const lookupPack = (id, layer = null, scope = undefined) => stores.pack.lookup(id, layer, scope);
 export const packIds = () => stores.pack.ids();
 
 // A named slice set's value is the set itself - normalized (0..1) start points in ascending order,
@@ -270,14 +297,14 @@ export const packIds = () => stores.pack.ids();
 // looks the name up at emit time and puts the set on the event, the engine picks the entry for the
 // file it resolved, and `.slice(n)` indexes into that (see Sig#slices).
 export const registerSlices = (id, set) => stores.slices.register(id, set);
-export const lookupSlices = (id, layer = null) => stores.slices.lookup(id, layer);
+export const lookupSlices = (id, layer = null, scope = undefined) => stores.slices.lookup(id, layer, scope);
 export const sliceSetIds = () => stores.slices.ids();
 
 // A named automation's value is its breakpoint list ({x: bar, y: value, c: curve}, ascending x -
 // see shape.mjs parseAutoPoints). Plain data like a shape's points: `auto("intro")` samples the
 // list by name at read time, so a lane drag re-registering the id is heard without a re-eval.
 export const registerAuto = (id, points) => stores.auto.register(id, points);
-export const lookupAuto = (id, layer = null) => stores.auto.lookup(id, layer);
+export const lookupAuto = (id, layer = null, scope = undefined) => stores.auto.lookup(id, layer, scope);
 export const autoIds = () => stores.auto.ids();
 
 // A named groove's value is its table ({ steps, time, vel } - see groove.mjs), frozen plain data
@@ -285,5 +312,5 @@ export const autoIds = () => stores.auto.ids();
 // drag in the groove lane is heard without a re-eval, and a groove defined here shadows a built-in
 // preset of the same name - the buffer-shadows-library rule, one step further out.
 export const registerGroove = (id, table) => stores.groove.register(id, table);
-export const lookupGroove = (id, layer = null) => stores.groove.lookup(id, layer);
+export const lookupGroove = (id, layer = null, scope = undefined) => stores.groove.lookup(id, layer, scope);
 export const grooveIds = () => stores.groove.ids();

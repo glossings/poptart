@@ -50,13 +50,6 @@ no completion notes.
 
 ---
 
-[ ] Beatgrid anchor outlives the session. The cue press no longer moves the anchor (decoupled
-    2026-10-06 - every cue was silently rewriting the grid), so the anchor is now worth keeping:
-    persist a by-hand anchorSec on the library's track record at song/meta time, restore it on
-    load ahead of the analyzer's guess (same precedence bpmByHand already has), and give the
-    pane's anchor button a right-click with "re-analyze this track" (the measure route already
-    takes ids + force) for when the grid itself is wrong.
-
 [ ] Remember the small UI state across desktop launches: console open/closed, the settings
     pane's tab, and friends. localStorage is trustworthy now that the desktop port is fixed -
     sweep the toggles that still reset and give each a stored twin. (Quantize and sync already

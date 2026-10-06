@@ -313,6 +313,11 @@ function normalizeTrack(t) {
   // here that is nobody's but the listener's, so absent means unrated rather than zero.
   const rating = Math.round(Number(t.rating));
   if (Number.isFinite(rating) && rating >= 1 && rating <= 5) track.rating = rating;
+  // Where the beatgrid's downbeat sits, in seconds. Only the deck's anchor button ever writes
+  // this (see setTrackAnchor), so its presence MEANS "placed by hand" - the analyzer's own
+  // guess is cheap to recompute and is never stored. No tag holds it and no rescan touches it.
+  const anchorSec = Number(t.anchorSec);
+  if (Number.isFinite(anchorSec) && anchorSec >= 0) track.anchorSec = anchorSec;
   // Which fields were typed by hand, and so outlive a rescan that would otherwise take the
   // file's word for them (the same rule the song decks' bpmByHand/anchorByHand follow).
   const byHand = (Array.isArray(t.byHand) ? t.byHand : []).filter((f) => TRACK_TAG_FIELDS.includes(f));
@@ -569,6 +574,26 @@ function setTrackFacts(trackPath, facts = {}) {
   return { library: writeLibrary(doc), changed };
 }
 
+/**
+ * The beatgrid anchor the hand placed on a deck, kept on the track's record so the next load
+ * stands on the same grid (song/meta writes it; the pane's re-analyze clears it with null).
+ * Like a rating, this is nobody's fact but the listener's.
+ */
+function setTrackAnchor(trackPath, sec) {
+  const doc = normalizeLibrary(readLibraryRaw());
+  const track = doc.tracks.find((t) => t.path === trackPath);
+  if (!track) return null;
+  if (sec == null) {
+    if (!('anchorSec' in track)) return null; // nothing stored - don't rewrite the file for a no-op
+    delete track.anchorSec;
+  } else {
+    const a = Number(sec);
+    if (!Number.isFinite(a) || a < 0) return null;
+    track.anchorSec = a;
+  }
+  return { library: writeLibrary(doc) };
+}
+
 /** Records out of the collection, and out of every set that referenced them. */
 function forgetTracks(ids) {
   const want = new Set((Array.isArray(ids) ? ids : []).map(String));
@@ -782,6 +807,7 @@ module.exports = {
   importTracks,
   editTrack,
   setTrackFacts,
+  setTrackAnchor,
   forgetTracks,
   titleFromPath,
 };

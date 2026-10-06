@@ -18,7 +18,7 @@ import { grooveRef, resolveGroove, grooveTimeAt, grooveVelAt, grooveNameLike, lo
 import { parsePianoRoll, normalizePianoRollSteps, noteIndex, noteSlice, noteNudgeChannel, pianoRollNoteGrid, PIANOROLL_DEFAULT_INDEX, PIANOROLL_MAX_NUDGE, PIANOROLL_MODES, looksLikeNoteString } from './pianoroll.mjs';
 import { inSpans, clipShiftNow } from './arrange.mjs';
 import { normalizeSlicePositions, normalizeSliceSet, sliceSetIsEmpty } from './slices.mjs';
-import { lookupRoll, registerRoll, lookupShape, registerShape, lookupPreset, registerPreset, presetPluginsFor, registerPack, lookupSlices, registerSlices, lookupAuto, registerAuto, lookupGroove, registerGroove } from './rolls.mjs';
+import { lookupRoll, registerRoll, lookupShape, registerShape, lookupPreset, registerPreset, presetPluginsFor, registerPack, lookupSlices, registerSlices, lookupAuto, registerAuto, lookupGroove, registerGroove, defScope } from './rolls.mjs';
 import { latestCC, registerMidiDevice } from './midi.mjs';
 import { latestOsc, registerOscAddress, normalizeOscAddress } from './osc.mjs';
 import { macroValue, assertMacroIndex } from './macros.mjs';
@@ -6242,9 +6242,10 @@ function rollPattern(str, opts) {
   }
   const selector = mini(str);
   const warned = new Set(); // one line per unknown id, not one per cycle
+  const scope = defScope(); // this deck's rolls, however late a cycle asks (see rolls.mjs)
   const resolve = (id) => {
     const key = String(id);
-    const found = lookupRoll(key);
+    const found = lookupRoll(key, scope);
     if (!found && !warned.has(key)) {
       warned.add(key);
       // `_roll`, with the underscore: the definition call is the editor's own (see INTERNAL_BUILDERS
@@ -6380,6 +6381,7 @@ const clipShiftKey = (v) => String(Math.round(v * 1e6) / 1e6);
  */
 export function clips() {
   const owner = { ...clipsOwner }; // the row this call belongs to, fixed at evaluation
+  const scope = defScope(); // ...and the deck's rolls its clips name
   const warned = new Set();
   // `${id}|${shift}` -> the roll shifted to that clip's phase, kept so the join sees one child
   // per (roll, phase) and can tell a note ringing on from one a new clip has taken over. Re-made
@@ -6393,7 +6395,7 @@ export function clips() {
     warnUser(msg);
   };
   const childFor = (id, shift) => {
-    const src = lookupRoll(id);
+    const src = lookupRoll(id, scope);
     if (!src) {
       say(`roll:${id}`, `[signal] clips(): no roll called ${JSON.stringify(id)} - that clip plays silence until a _roll(${JSON.stringify(id)}, ...) defines it. Double-click the clip in the arrangement to draw one.`);
       return null;
@@ -6668,8 +6670,9 @@ function defineAuto(id, str, quiet) {
 export function auto(id) {
   const key = String(id).trim();
   let warned = false; // one line per unknown name, not one per poll tick
+  const scope = defScope();
   return new Sig((t, cps, pos) => {
-    const points = lookupAuto(key);
+    const points = lookupAuto(key, null, scope);
     if (!points) {
       if (!warned) {
         warned = true;
@@ -6764,12 +6767,13 @@ function slicesSignal(v) {
   const selector = toSignal(v);
   const warned = new Set(); // one line per unknown name, not one per event
   const cache = new Map(); // a name's normalized set, so a per-event lookup isn't a per-event sort
+  const scope = defScope();
   const resolve = (value) => {
     if (Array.isArray(value)) return normalizeSlicePositions(value); // a Sig that yields lists
     if (value == null) return null;
     const key = String(value).trim();
     if (!key) return null;
-    const found = lookupSlices(key);
+    const found = lookupSlices(key, null, scope);
     if (!found) {
       if (!warned.has(key)) {
         warned.add(key);
@@ -6842,9 +6846,9 @@ function defineSlices(id, set, quiet) {
  * whether it belongs to the plugin in that slot. Warns once per bad name rather than throwing -
  * a mistyped preset should cost you the sound change, not the track.
  */
-export function resolvePreset(name, pluginInSlot) {
+export function resolvePreset(name, pluginInSlot, scope = undefined) {
   const key = String(name).trim();
-  const found = lookupPreset(key, pluginInSlot);
+  const found = lookupPreset(key, pluginInSlot, scope);
   if (!found) {
     // The name exists, but for other plugins - so this is a preset aimed at the wrong slot rather
     // than a typo, and saying WHICH plugins own it is the difference between a dead end and a
@@ -7173,10 +7177,10 @@ const SHAPE_PATTERN_CHARS = /[<>[\]{}|]/;
 // A name is looked for among the shapes this buffer defines first, then the built-in presets, and
 // is otherwise read as breakpoints - the same buffer-shadows-library rule the roll registry uses,
 // so redefining `pluck` in a patch means your pluck rather than the one that ships.
-function shapeNamed(str) {
+function shapeNamed(str, scope = undefined) {
   const name = String(str).trim();
   // Buffer first, then the built-in presets - the same shadowing rule the roll registry uses.
-  const defined = lookupShape(name);
+  const defined = lookupShape(name, scope);
   if (defined) return defined;
   // A comma is what a breakpoint is made of and what a NAME may never contain, so it settles which
   // of the two this is: drawn data, typos and all, gets parsed and reports its own bad breakpoint.
@@ -7238,13 +7242,13 @@ function namesFrom(sig) {
  * Memoised on the IR, which lives exactly one evaluation: the names cannot change under it, and
  * nothing may pay for a map lookup and a parse per sample.
  */
-export function lfoShapes(ir) {
+export function lfoShapes(ir, scope = undefined) {
   if (!ir._shapes) {
     // Non-enumerable so a spread can't carry it: .range()/.fast()/.phase() all rebuild the IR with
     // `{ ...ir, … }` at BUILD time, and a memo riding along in one of those copies would be the
     // early lookup coming back in through the side door. (It is also why this is a function rather
     // than a getter on the IR - an enumerable getter would simply be CALLED by those same spreads.)
-    Object.defineProperty(ir, '_shapes', { value: (ir.shapeNames ?? []).map(shapeNamed), writable: true });
+    Object.defineProperty(ir, '_shapes', { value: (ir.shapeNames ?? []).map((name) => shapeNamed(name, scope)), writable: true });
   }
   return ir._shapes;
 }
@@ -7258,11 +7262,12 @@ export function lfoShapes(ir) {
 function grainShapeSignal(v) {
   if (v === undefined || v === null || v === '') return new Sig(() => null);
   const resolved = new Map(); // name -> points, so an unknown name warns once and not per event
+  const scope = defScope();
   const pointsFor = (value) => {
     if (value == null) return null;
     const name = String(value).trim();
     if (!name) return null;
-    if (!resolved.has(name)) resolved.set(name, shapeNamed(name));
+    if (!resolved.has(name)) resolved.set(name, shapeNamed(name, scope));
     return resolved.get(name);
   };
   if (typeof v === 'string' && !SHAPE_PATTERN_CHARS.test(v)) {

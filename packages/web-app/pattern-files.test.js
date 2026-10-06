@@ -29,6 +29,7 @@ const {
   importTracks,
   editTrack,
   setTrackFacts,
+  setTrackAnchor,
   forgetTracks,
 } = require('./pattern-files');
 
@@ -551,6 +552,47 @@ test('a rescan never empties a field the file has stopped mentioning', () => {
   assert.equal(t.title, 'One v2', 'what the file says is taken');
   assert.equal(t.artist, 'Someone', 'what it no longer says is kept');
   assert.equal(t.album, 'An Album');
+});
+
+test('a hand-placed beatgrid anchor lives on the record, and only a sane one', () => {
+  const kept = writeLibrary({
+    tracks: [
+      { id: 'a', path: '/m/a.mp3', anchorSec: 8.251 },
+      { id: 'b', path: '/m/b.mp3', anchorSec: -2 },
+      { id: 'c', path: '/m/c.mp3', anchorSec: 'start' },
+    ],
+    playlists: [{ id: 'p', name: 'set', items: [{ kind: 'track', id: 'a' }] }],
+  });
+  const by = Object.fromEntries(kept.tracks.map((t) => [t.id, t.anchorSec]));
+  assert.equal(by.a, 8.251);
+  assert.equal(by.b, undefined, 'a negative anchor is junk, not a fact');
+  assert.equal(by.c, undefined);
+  // The hydrated playlist row carries it too - the decks read rows, not records.
+  assert.equal(kept.playlists[0].items[0].anchorSec, 8.251);
+});
+
+test('setTrackAnchor writes, forgets, and refuses what makes no sense', () => {
+  writeLibrary({ tracks: [{ id: 't', path: '/m/one.mp3' }], playlists: [] });
+  assert.ok(setTrackAnchor('/m/one.mp3', 3.5));
+  assert.equal(readLibrary().tracks[0].anchorSec, 3.5);
+  assert.equal(setTrackAnchor('/m/one.mp3', -1), null, 'a bad anchor is refused...');
+  assert.equal(readLibrary().tracks[0].anchorSec, 3.5, '...and the stored one survives the refusal');
+  assert.ok(setTrackAnchor('/m/one.mp3', null), 'null forgets it (the re-analyze gesture)');
+  assert.equal(readLibrary().tracks[0].anchorSec, undefined);
+  assert.equal(setTrackAnchor('/m/one.mp3', null), null, 'forgetting nothing is a no-op, not a file write');
+  assert.equal(setTrackAnchor('/m/missing.mp3', 1), null, 'a file with no record has nowhere to hold one');
+});
+
+test('a rescan leaves the anchor alone - no tag could ever hold one', () => {
+  writeLibrary({ tracks: [{ id: 't', path: '/m/one.mp3', title: 'One' }], playlists: [] });
+  setTrackAnchor('/m/one.mp3', 12.01);
+  const { library } = importTracks(['/m/one.mp3'], {
+    readTags: () => ({ title: 'Retagged', bpm: 130 }),
+    mode: 'rescan',
+  });
+  const t = library.tracks.find((x) => x.path === '/m/one.mp3');
+  assert.equal(t.title, 'Retagged', 'the rescan did run');
+  assert.equal(t.anchorSec, 12.01, 'the hand-placed grid is not the tags\' to replace');
 });
 
 test('analysis fills a tempo the file never stated, and never one it did', () => {

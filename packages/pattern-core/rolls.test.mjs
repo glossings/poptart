@@ -122,11 +122,12 @@ test('clearRolls hands back what it took, so a failed evaluation can put it stra
   const playing = pianoroll('<0>'); // built last evaluation, still being queried each cycle
 
   const had = clearRolls('buffer');
-  assert.deepEqual(capture(() => values(playing, 0)).value, [], 'cleared, it has nothing to play');
+  assert.deepEqual(values(playing, 0), [60], 'a playing pattern reads the definitions it was built against, through the clear');
+  assert.deepEqual(capture(() => values(pianoroll('<0>'), 0)).value, [], 'a pattern built now finds nothing yet');
 
   _roll(0, '67,0,4', { grid: 16 }); // half a rebuild, then the evaluation throws
   restoreRolls(had);
-  assert.deepEqual(values(playing, 0), [60], 'the definitions are the ones it was playing before');
+  assert.deepEqual(values(pianoroll('<0>'), 0), [60], 'the definitions are the ones it was playing before');
 });
 
 test('a buffer definition shadows a prebake one of the same id', () => {

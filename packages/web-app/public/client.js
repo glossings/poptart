@@ -28755,7 +28755,7 @@ function deckHeadRender(state) {
       if (!fader.classList.contains('dragging')) fader.value = tempoValOf(dt.frac);
       fader.classList.toggle('locked', !!dt.locked);
       fader.title = dt.locked
-        ? `deck ${U} is following the other deck's grid - its own tempo rides again with sync off (or when it holds the grid)`
+        ? `deck ${U} is following - the other deck leads the tempo; this fader takes over when that deck stops`
         : `deck ${U} tempo - down speeds it up, up slows it down, over the range below; double-click resets`;
       document.getElementById(`mixTempoRange${U}`).textContent = dt.range === 100 ? 'wide' : `±${dt.range}`;
       // The tempo it works out to. A song deck's is its own playing tempo; a livecode deck's IS
@@ -29173,36 +29173,6 @@ function makeSongPane(deck) {
     ctx.lineTo(w, mid + 0.5);
     ctx.stroke();
 
-    // Beatgrid from the song's own facts (songs phase 4): bpm out of its tags/playlist/edits,
-    // downbeats every 4th beat from the user-settable anchor (the ⚓ button drops it at the
-    // playhead). The k = 0 line IS the anchor - drawn a little stronger.
-    // Only the song's OWN bpm draws a grid. The desk's native slot defaults to 120 for a track
-    // that specifies nothing - fine for the pitch fader to ride around, wrong as a beatgrid.
-    const bpm = P.mirror ? P.mirror.bpm : P.song?.bpm;
-    const anchor = P.mirror?.anchorSec ?? 0;
-    if (Number.isFinite(bpm) && bpm >= 20 && bpm <= 400 && dur) {
-      const beat = 60 / bpm;
-      const kEnd = (Math.min(dur, t0 + span) - anchor) / beat;
-      ctx.lineWidth = 1;
-      for (let k = Math.ceil((Math.max(0, t0) - anchor) / beat); k <= kEnd; k++) {
-        if (anchor + k * beat < 0) continue;
-        const x = Math.round((anchor + k * beat - t0) * pxPerSec) + 0.5;
-        const down = ((k % 4) + 4) % 4 === 0;
-        ctx.strokeStyle = down ? rgbaFrom(ctx, accent, k === 0 ? 0.75 : 0.4) : rgbaFrom(ctx, text, 0.35);
-        ctx.beginPath();
-        if (down) {
-          ctx.moveTo(x, 2);
-          ctx.lineTo(x, h - 2);
-        } else {
-          ctx.moveTo(x, 2);
-          ctx.lineTo(x, 8);
-          ctx.moveTo(x, h - 8);
-          ctx.lineTo(x, h - 2);
-        }
-        ctx.stroke();
-      }
-    }
-
     if (wave) {
       const det = wave.detail;
       wave._norm ??= songNormOf(det);
@@ -29217,6 +29187,33 @@ function makeSongPane(deck) {
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.fillText(waveFailed ? 'no waveform - scrubbing and controls still work' : 'analyzing…', w / 2, mid);
+    }
+
+    // Beatgrid from the song's own facts (songs phase 4): bpm out of its tags/playlist/edits,
+    // downbeats every 4th beat from the user-settable anchor (the ⚓ button drops it at the
+    // playhead). The k = 0 line IS the anchor - drawn a little stronger.
+    // Only the song's OWN bpm draws a grid. The desk's native slot defaults to 120 for a track
+    // that specifies nothing - fine for the pitch fader to ride around, wrong as a beatgrid.
+    // Drawn OVER the waveform, every beat full height: underneath, the solid body hid the grid
+    // exactly where the music is loudest. Downbeats are two pixels wide, set on whole pixels so
+    // they stay crisp; the one-pixel beats sit on half pixels for the same reason.
+    const bpm = P.mirror ? P.mirror.bpm : P.song?.bpm;
+    const anchor = P.mirror?.anchorSec ?? 0;
+    if (Number.isFinite(bpm) && bpm >= 20 && bpm <= 400 && dur) {
+      const beat = 60 / bpm;
+      const kEnd = (Math.min(dur, t0 + span) - anchor) / beat;
+      for (let k = Math.ceil((Math.max(0, t0) - anchor) / beat); k <= kEnd; k++) {
+        if (anchor + k * beat < 0) continue;
+        const down = ((k % 4) + 4) % 4 === 0;
+        const px = Math.round((anchor + k * beat - t0) * pxPerSec);
+        const x = down ? px : px + 0.5;
+        ctx.lineWidth = down ? 2 : 1;
+        ctx.strokeStyle = down ? rgbaFrom(ctx, accent, k === 0 ? 0.75 : 0.4) : rgbaFrom(ctx, text, 0.35);
+        ctx.beginPath();
+        ctx.moveTo(x, 2);
+        ctx.lineTo(x, h - 2);
+        ctx.stroke();
+      }
     }
 
     // Hard edges where the file begins and ends, so blank space beyond isn't read as quiet audio.
@@ -29480,6 +29477,22 @@ function makeSongPane(deck) {
     const at = P.playheadNow();
     metaPost({ anchorSec: at }, (r) => `beatgrid anchored at ${songFmt(r.anchorSec, true)}`
       + (Math.abs(r.anchorSec - at) > 0.002 ? ' (snapped to the transient)' : ''));
+  });
+  // The anchor's other hand: an anchored grid now outlives the session (the track's library
+  // record holds it), so when the GRID is wrong rather than its downbeat, right-click throws
+  // the stored anchor away and refits from the audio.
+  byId('songAnchor').addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    if (!P.song || mixLearnArmed) return;
+    openCtxMenu(document.getElementById('mixMenu'), e.clientX, e.clientY, {
+      items: [
+        ['re-analyze this track', () => {
+          api('POST', '/api/song/reanalyze', { deck })
+            .then(() => logLine(`${D} re-analyzing - hand anchor forgotten, beatgrid refitting from the audio`))
+            .catch((err) => logLine(err.message ?? String(err), true));
+        }, 'forget the hand-placed anchor and refit the beatgrid from the audio (a typed bpm still stands, as the fit\'s hint)'],
+      ],
+    });
   });
   quantEl.addEventListener('click', () => {
     if (!P.song || mixLearnArmed) return;
@@ -29750,21 +29763,9 @@ function djLiveWaveDraw(deck) {
   // fractional global cycle, and the grid it wore was the OTHER record's, even after that
   // record stopped (reported 2026-10-06). The clock twin's anchors carry the mapping
   // (transport cycle <-> arrangement position), so the shift is read off the one in force.
-  // Same marks as a song deck's own beatgrid: downbeats full height, beats as ticks off the
-  // top and bottom, so the two strips can be lined up by eye - which is the whole point.
+  // Same marks as a song deck's own beatgrid, so the two strips can be lined up by eye - which
+  // is the whole point. Drawn after the trace, below.
   const gridShift = djLiveGridShift(songEndClocks[deck], cycNow);
-  for (let c = Math.floor(cyc0 - gridShift); c <= Math.ceil(cyc1 - gridShift); c++) {
-    for (let b = 0; b < 4; b++) {
-      const x = xOf(gridShift + c + b / 4);
-      if (x < -1 || x > w + 1) continue;
-      ctx.fillStyle = b === 0 ? rgbaFrom(ctx, accent, 0.4) : rgbaFrom(ctx, text, 0.35);
-      if (b === 0) vline(x, 2, h - 2);
-      else {
-        vline(x, 2, 8);
-        vline(x, h - 8, h - 2);
-      }
-    }
-  }
 
   // The level trace, mirrored around the center exactly as a song's waveform is: translucent peak
   // with the solid rms body inside it, each column colored by its band balance (the same read and
@@ -29793,6 +29794,17 @@ function djLiveWaveDraw(deck) {
     ctx.fillRect(col.x, mid - peakAmp, col.cw, peakAmp * 2 || 1);
     ctx.fillStyle = `rgba(${r}, ${g}, ${b}, 0.95)`;
     ctx.fillRect(col.x, mid - rmsAmp, col.cw, rmsAmp * 2 || 1);
+  }
+
+  // The grid over the trace: every beat full height, downbeats two pixels wide.
+  for (let c = Math.floor(cyc0 - gridShift); c <= Math.ceil(cyc1 - gridShift); c++) {
+    for (let b = 0; b < 4; b++) {
+      const x = xOf(gridShift + c + b / 4);
+      if (x < -1 || x > w + 1) continue;
+      ctx.fillStyle = b === 0 ? rgbaFrom(ctx, accent, 0.4) : rgbaFrom(ctx, text, 0.35);
+      if (b === 0) ctx.fillRect(x - 1, 2, 2, h - 4);
+      else vline(x, 2, h - 2);
+    }
   }
 
   // The playhead is the one line that does NOT move, so it is the one line worth snapping to

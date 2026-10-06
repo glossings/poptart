@@ -120,6 +120,18 @@ const decks = {
 };
 const deckOfKey = (key) => (key.includes(':') ? key.slice(0, key.indexOf(':')) : 'a');
 
+// A panel's live re-file of a definition (roll, lane, groove, slice set) lands in the deck whose
+// buffer it is editing - each deck has its own names (see pattern-core's rolls.mjs). Body: { deck? },
+// deck A when absent.
+function liveOnDeck(body, fn) {
+  patternCore.setDefOwner(body?.deck === 'b' ? 'b' : 'a');
+  try {
+    return fn();
+  } finally {
+    patternCore.setDefOwner('a');
+  }
+}
+
 // A deck's native tempo as the DESK sees it: what its track declared (setbpm, a song file's
 // tags, the pane's bpm field), or the 120 default an unspecified track gets - the same tempo it
 // would play at loaded outside dj mode. Only a signal-driven setbpm has no single number, and
@@ -721,10 +733,11 @@ function songCue(deck, hold) {
     // the play press already follows (see `spent` in songPlayDeck): at the end, go home.
     const spent = before >= s.duration - SONG_END_EPS_SEC;
     if (!s.playing && !spent) {
-      // Parked somewhere new: the cue is here now. Taken EXACTLY where the pane shows the
-      // playhead - never moved at press time (a jump under the finger is jarring); the pane's
-      // scrub magnet is what pulls the playhead onto a transient beforehand, and a hand that
-      // wants to be between hits can be.
+      // Parked somewhere new: the cue is here now - on the nearest beat of the song's own grid
+      // (any beat, not only a downbeat: every line the pane draws), the way a quantized player
+      // places its cues. With quantize off it is taken exactly where the pane shows the
+      // playhead, which is what that switch means everywhere else (see deckLoopWindow). A song
+      // with no bpm has no grid, and takes the playhead too.
       //
       // The cue used to move the beatgrid ANCHOR too, on the theory that the cue point is where
       // the hand says "one" is. Decoupled 2026-10-06, deliberately: a cue is where play starts
@@ -732,7 +745,10 @@ function songCue(deck, hold) {
       // so a grid carefully anchored once was gone by the second cue. The anchor is its own
       // gesture now (the pane's anchor button / song/meta's anchorSec), and quantized starts
       // read the grid the song actually has.
-      s.cueSec = songPlayheadSec(deck);
+      const at = songPlayheadSec(deck);
+      s.cueSec = s.quantize === false
+        ? at
+        : songSync.snapToGrid(at, s.bpm, s.anchorSec, s.duration - SONG_END_EPS_SEC);
     }
     // A playing deck comes home the same way a paused one previews - one songStart, which the
     // engine already handles as a swap (the old player releases exactly at the new one's start,
@@ -1006,6 +1022,13 @@ function songSetMeta(deck, patch) {
     s.anchorSec = Math.min(Math.max(0, a), s.duration); // as given - the pane's magnet did any snapping
     s.anchorByHand = true;
     s.gridDetected = null;
+    // The grid outlives the session: the anchor goes on the track's library record, where the
+    // next load of this file reads it back (imported first, so a song that came in through the
+    // file browser gains a record the way any used track does).
+    try {
+      importTracks([s.path], { readTags: readSongTags });
+      setTrackAnchor(s.path, s.anchorSec);
+    } catch { /* the collection can be unwritable; the deck still holds the anchor for the session */ }
   }
   if ('sync' in patch) {
     if (patch.sync && s.bpm == null) throw new Error('sync needs a bpm - set one first (the tags had none)');
@@ -1065,6 +1088,7 @@ const deckTempoMult = (deck) => {
 };
 
 function deckTempoApply(deck, { frac, range } = {}) {
+  deckLeader(); // settle any handoff first: the branch below reads who holds the grid
   const t = mixState.deckTempo[deck];
   const prev = deckTempoMult(deck); // before frac moves: what the current clock already includes
   if (range !== undefined) {
@@ -1089,19 +1113,14 @@ function deckTempoApply(deck, { frac, range } = {}) {
     } else {
       songApplyRate(deck); // unsynced decks hear it now; a locked follower just remembers it
     }
-  } else if (transport) {
-    const declared = decks[deck].bpm;
-    if (declared != null && typeof declared !== 'number') {
-      throw new Error(`deck ${deck}'s tempo is signal-driven - no single native bpm to scale`);
-    }
-    // A deck that DECLARED a tempo scales its own number. One that never did is playing the
-    // shared clock at whatever the room is at - so its fader scales THAT, un-scaled by whatever
-    // this same fader already applied (prevMult), never the 120 default. Scaling the default
-    // was the trap: with the room at 174 off the other deck, the first touch of an undeclared
-    // deck's fader yanked the whole clock to ~120 - or, from the hand's point of view, the
-    // fader "did nothing" except derail the tempo (reported 2026-10-06, intermittent because it
-    // only bites on a buffer with no setbpm).
-    const base = typeof declared === 'number' ? declared : (transport.cps * 240) / Math.max(0.01, prevMult);
+  } else if (transport && !deckTempoLocked(deck)) {
+    // The leader scales the room AS IT STANDS, un-scaled by whatever this same fader already
+    // applied (prevMult) - never from a number of its own. Scaling the 120 default was the first
+    // trap: the first touch of an undeclared deck's fader yanked a room at 174 to ~120 (reported
+    // 2026-10-06). Scaling the deck's declared setbpm was the same trap one step on: a deck that
+    // INHERITS the lead has been playing at the room's tempo, not its own, and its first touch
+    // would lurch the room to the setbpm. When the room is at the deck's own tempo the two agree.
+    const base = (transport.cps * 240) / Math.max(0.01, prevMult);
     const bpm = Math.min(400, Math.max(20, base * mult));
     mixState.tempoOverride = bpm; // the desk holds the clock now, like the migration slider
     transport.rampBpm(bpm, 0);
@@ -1110,10 +1129,64 @@ function deckTempoApply(deck, { frac, range } = {}) {
   return { deck, frac: t.frac, range: t.range, pct: Math.round((mult - 1) * 1000) / 10 };
 }
 
-/** Is a deck's slider inert right now - a synced song following someone else's grid? */
+// --- the LEADER: whose tempo the room is ---
+//
+// Every deck that is playing plays at the room's tempo, so exactly one tempo fader can mean
+// anything: the leader's. The leader is the deck that has been playing longest - the first to
+// start takes it, and when it stops (a pause, the end, a cue, a stop, a song loaded over it) it
+// passes to whichever deck is still playing, eldest first. Song decks and livecode decks alike:
+// which kind a deck holds decides HOW its fader moves the room (see deckTempoApply), not whether
+// it may. Every other deck's fader is inert and drawn grayed - which is how the leader shows: the
+// one slider that is not.
+//
+// Derived, not assigned. Decks start and stop in a dozen places (a load clears a deck, an
+// arrangement runs out, complete-mix promotes one), and a handoff written into each of them is how
+// the song decks' grid handoff came to be the only one there was. So each deck's playing state is
+// sampled wherever the leader is asked for - every desk frame, every fader move - and the leader
+// is read off the order the decks STARTED in.
+const deckPlayingSince = { a: null, b: null };
+let deckPlayingSeq = 0;
+let deckLeaderNow = null;
+
+/** Is this deck sounding to the room - its song, or its livecoded tracks (its FX unit aside)? */
+function deckAudible(deck) {
+  if (songDecks[deck]?.playing) return true;
+  return [...schedulers].some(([key, sch]) => key !== FX_KEYS[deck] && deckOfKey(key) === deck && sch.running);
+}
+
+function deckLeader() {
+  for (const d of ['a', 'b']) {
+    if (!deckAudible(d)) deckPlayingSince[d] = null;
+    else if (deckPlayingSince[d] == null) deckPlayingSince[d] = ++deckPlayingSeq;
+  }
+  const playing = ['a', 'b'].filter((d) => deckPlayingSince[d] != null)
+    .sort((x, y) => deckPlayingSince[x] - deckPlayingSince[y]);
+  const leader = playing[0] ?? null;
+  if (leader !== deckLeaderNow) {
+    deckLeaderNow = leader;
+    // A synced song inheriting the lead from a livecoded deck takes the grid with it, at the ratio
+    // it is already playing at - the same silent handover songHandGridOver gives a song taking
+    // over from a song - or its fader would be the leader's and still move nothing.
+    const s = leader && songDecks[leader];
+    if (s?.playing && s.sync && s.bpm && songMasterDeck !== leader) {
+      songMasterOctave = songOctave(leader); // read BEFORE the flag moves, or it reads as pinned
+      songMasterDeck = leader;
+      songApplyRate(leader);
+    }
+  }
+  return leader;
+}
+
+/** Is a deck's slider inert right now - is another deck leading the room's tempo? */
 function deckTempoLocked(deck) {
+  const leader = deckLeader();
   const s = songDecks[deck];
-  return !!(s && s.sync && s.bpm && deck !== songMasterDeck && othersPlaying(deck));
+  // A song deck's own rule: synced to someone else's grid. (Unsynced, it runs at its own rate,
+  // and its fader is that rate - it follows nobody.)
+  if (s) return !!(s.sync && s.bpm && deck !== songMasterDeck && othersPlaying(deck));
+  // A livecoded deck has no rate of its own - its patterns ride the shared clock - so unless it
+  // leads, its fader could only ever drag the leader's tempo around.
+  return leader != null && leader !== deck;
 }
 
 /**
@@ -2671,7 +2744,7 @@ async function fxLoadChain(name) {
     mappedEngine.setChain(tid, [sigs[deck].instrument, ...sigs[deck].fxChain]);
     let sch = fxSchedulers[deck];
     if (!sch) {
-      sch = new patternCore.Scheduler(mappedEngine, { transport, trackId: tid, label: FX_KEYS[deck] });
+      sch = new patternCore.Scheduler(mappedEngine, { transport, trackId: tid, label: FX_KEYS[deck], deck });
       fxSchedulers[deck] = sch;
     }
     sch.setPattern(sigs[deck]);
@@ -2854,6 +2927,7 @@ function rekeyTrack(from, to) {
     schedulers.delete(from);
     schedulers.set(to, sch);
     sch.label = to; // user-facing lines say the new name; the trackId inside never changes
+    sch.deck = deckOfKey(to); // ...and it reads its definitions from the deck it now plays on
   }
   for (const m of [hlTracks, liveHeld, kbHeld, mixState.perTrack]) {
     const v = m.get(from);
@@ -4812,6 +4886,7 @@ const {
   importTracks,
   editTrack,
   setTrackFacts,
+  setTrackAnchor,
   forgetTracks,
 } = require('./pattern-files');
 const { matchesQuery } = require('./public/pattern-meta.js');
@@ -7041,7 +7116,7 @@ const routes = {
       // least a send lead away.
       if (sch && !sch.running && starting) mappedEngine.hush(tid);
       if (!sch) {
-        sch = new patternCore.Scheduler(mappedEngine, { transport, trackId: tid, label: key });
+        sch = new patternCore.Scheduler(mappedEngine, { transport, trackId: tid, label: key, deck: deckOfKey(key) });
         schedulers.set(key, sch);
       }
       // Hand-edit freezes go on BEFORE the pattern does: setPattern pushes any pinned `{ state }`,
@@ -7223,7 +7298,7 @@ const routes = {
   'POST /api/liveRoll': async (body) => {
     const id = body?.id;
     if (typeof id !== 'number' && typeof id !== 'string') throw new Error('liveRoll needs the roll id');
-    patternCore.liveRoll(id, String(body.notes ?? ''), body.opts ?? {});
+    liveOnDeck(body, () => patternCore.liveRoll(id, String(body.notes ?? ''), body.opts ?? {}));
     return { status: 200, body: { ok: true } };
   },
 
@@ -7238,7 +7313,7 @@ const routes = {
   'POST /api/liveAuto': async (body) => {
     const id = body?.id;
     if (typeof id !== 'number' && typeof id !== 'string') throw new Error('liveAuto needs the automation id');
-    patternCore.liveAuto(id, String(body.points ?? ''));
+    liveOnDeck(body, () => patternCore.liveAuto(id, String(body.points ?? '')));
     return { status: 200, body: { ok: true } };
   },
 
@@ -7248,7 +7323,7 @@ const routes = {
   'POST /api/liveGroove': async (body) => {
     const id = body?.id;
     if (typeof id !== 'number' && typeof id !== 'string') throw new Error('liveGroove needs the groove id');
-    patternCore.liveGroove(id, String(body.table ?? ''));
+    liveOnDeck(body, () => patternCore.liveGroove(id, String(body.table ?? '')));
     return { status: 200, body: { ok: true } };
   },
 
@@ -7256,7 +7331,7 @@ const routes = {
     const id = body?.id;
     if (typeof id !== 'number' && typeof id !== 'string') throw new Error('liveSlices needs the slice-set id');
     const set = body?.set;
-    patternCore.liveSlices(id, Array.isArray(set) || (set && typeof set === 'object') ? set : []);
+    liveOnDeck(body, () => patternCore.liveSlices(id, Array.isArray(set) || (set && typeof set === 'object') ? set : []));
     return { status: 200, body: { ok: true } };
   },
 
@@ -8509,6 +8584,16 @@ const routes = {
     const tags = readSongTags(srcPath);
     const bodyBpm = Number(body.bpm);
     const bpm = Number.isFinite(bodyBpm) && bodyBpm >= 20 && bodyBpm <= 400 ? bodyBpm : tags.bpm;
+    // An anchor placed by hand on an earlier load comes back with the track (its library record
+    // holds it - see setTrackAnchor), and it comes back AS by-hand: the same precedence that
+    // keeps a typed bpm ahead of the analyzer's refinement keeps this anchor ahead of its guess.
+    // Out-of-range means the file changed under the path - the analyzer's guess is better then.
+    const heldAnchor = (() => {
+      try {
+        const a = Number(readLibrary().tracks.find((t) => t.path === srcPath)?.anchorSec);
+        return Number.isFinite(a) && a >= 0 && a <= duration ? a : null;
+      } catch { return null; }
+    })();
     songDecks[deck] = {
       path: srcPath,
       title: String(body.title ?? '').trim() || path.basename(srcPath),
@@ -8533,8 +8618,8 @@ const routes = {
       bpm,
       bpmByHand: false, // a tempo typed by hand outlives the analysis' guess, as an anchor does
       musicalKey: String(body.key ?? '').trim() || tags.key,
-      anchorSec: 0,
-      anchorByHand: false, // an anchor pressed by hand outlives the analysis' guess
+      anchorSec: heldAnchor ?? 0,
+      anchorByHand: heldAnchor != null, // a stored anchor IS the hand's - see songSetMeta
       gridDetected: null, // confidence of the fitted beatgrid (null until analyzed / when it failed)
       onsets: null, // transient times (seconds) the anchor and cue gestures snap to
       // Sync and quantize open where the hand last put them on this deck (deckSongPrefs) -
@@ -8653,6 +8738,25 @@ const routes = {
   'POST /api/song/meta': async (body) => {
     const deck = body.deck === 'b' ? 'b' : 'a';
     return { status: 200, body: songSetMeta(deck, body) };
+  },
+
+  // The anchor button's right-click, for when the grid ITSELF is wrong rather than its
+  // downbeat: forget the hand's anchor (deck and library record both), drop this file's cached
+  // analysis and refit the beatgrid from the audio. A bpm typed by hand still stands - it is
+  // the fit's hint, exactly as on a fresh load. Body: { deck }.
+  'POST /api/song/reanalyze': async (body) => {
+    const deck = body.deck === 'b' ? 'b' : 'a';
+    const s = songDecks[deck];
+    if (!s) throw new Error(`deck ${deck} has no song loaded`);
+    s.anchorByHand = false;
+    s.gridDetected = null;
+    try { setTrackAnchor(s.path, null); } catch { /* never stored - nothing to forget */ }
+    for (const k of [...songFactsCache.keys()]) {
+      if (k.startsWith(`${s.path}|`)) songFactsCache.delete(k);
+    }
+    songDetectKick(deck); // fire-and-forget, like a load's - the fresh grid adopts when it lands
+    mixNotify();
+    return { status: 200, body: { deck, reanalyzing: true } };
   },
 
   // The platter (songs phase 4). Body: { deck, hold?: -1|0|1, jog?: -1|1 }. `hold` is the

@@ -24,6 +24,7 @@
 //    Same signal, same shape either way: a note-gated modulator sampled here reads the track's
 //    own note grid (withNoteGate), which is what the engine gates the native one from too.
 
+import { defScopeOf, withDefDeck } from './rolls.mjs';
 import { sampleBound, CHANNEL_DEFAULTS, GRAIN_CHANNELS, MAX_FX_SLOTS,DEFAULT_BEND_RANGE, bendRangeWarning, LOOP_MODES, loopModeAt, channelAt, soundingEnd, timeShift, grooveVelScale, endEdgeStep, warnPattern, lfoRateHz, lfoPhaseCount, lfoShapes, resolvePreset, withNoteGate, withEventSpan, noteGateFromGrid } from './signal.mjs';
 import { scalePitchClasses } from './notes.mjs';
 import { songSteps, stepsUnderShift, withClipShift } from './arrange.mjs';
@@ -484,8 +485,11 @@ export class Transport {
 }
 
 export class Scheduler {
-  constructor(engine, { cps = 0.5, trackId = 'default', label = null, transport = null } = {}) {
+  constructor(engine, { cps = 0.5, trackId = 'default', label = null, transport = null, deck = 'a' } = {}) {
     this.engine = engine;
+    // Which performance deck this track plays on: named definitions (presets, grooves) are read
+    // from that deck's own (see rolls.mjs). Complete-mix moves a promoted track to 'a'.
+    this.deck = deck;
     this.transport = transport ?? new Transport(() => engine.getTime(), { cps });
     this.trackId = trackId;
     this.label = label ?? trackId; // what user-facing lines call this track (trackId may be an opaque engine id)
@@ -1176,7 +1180,7 @@ export class Scheduler {
       // modulator is being sent the whole buffer has evaluated, so a `_shape(...)` written below
       // the pattern that names it is in the registry. `points` is the shape it starts on and
       // `shapes` the set compiled up front, both spelled as the engine has always read them.
-      const shapes = lfoShapes(ir);
+      const shapes = lfoShapes(ir, defScopeOf(this.deck));
       resolved = { ...resolved, points: shapes[0], shapes };
     }
     if (m.kind === 'lfo') {
@@ -1276,6 +1280,10 @@ export class Scheduler {
   }
 
   _tick() {
+    withDefDeck(this.deck, () => this._tickOnDeck());
+  }
+
+  _tickOnDeck() {
     if (!this.pattern) return;
     try {
       const nowSec = this.engine.getTime();
@@ -1606,7 +1614,7 @@ export class Scheduler {
   _applyPreset(slot, name, atSec) {
     if (typeof this.engine.setPluginState !== 'function') return null;
     const plugin = [this.pattern?.instrument, ...(this.pattern?.fxChain ?? [])][slot] ?? null;
-    const { state: inCode, why } = resolvePreset(name, plugin);
+    const { state: inCode, why } = resolvePreset(name, plugin, defScopeOf(this.deck));
     // A capture that has not reached the buffer yet outranks the definition: it came out of this
     // very plugin, and the definition is still a poll or two behind (see _capturedPresets). Without
     // this, the eval after a chain edit hands the plugin it just reopened the pre-tweak program.
