@@ -178,6 +178,32 @@ test('a file item with no title falls back to its file name', () => {
   assert.equal(o.orgItemRow(file('/music/Deep Cut.aiff'), 0).name, 'Deep Cut');
 });
 
+// --- what a save is called ---------------------------------------------------------------------
+//
+// A livecode save is listed under the name it was SAVED AS. Its @title is not the name, because
+// a run of versions declares one title between them: "my song v1", "my song v2" and "my song v3"
+// all say @title "My Song", and a column of three identical words tells you nothing. The title
+// stays searchable, which is the half of it that is easy to drop.
+
+test('a save is listed under the name it was saved as, not its @title', () => {
+  const o = org('');
+  const damson = o.orgSavedRow(SAVED[0]);
+  assert.equal(damson.name, 'damson', 'the saved name, not "Damson Grudge"');
+  assert.equal(damson.savedTitle, 'Damson Grudge', 'the declared title still rides the row');
+  // The folder has a column of its own here, so the name column holds only the leaf.
+  assert.equal(o.orgSavedRow(SAVED[2]).name, 'stomper');
+  assert.equal(o.orgSavedRow(SAVED[2]).folder, 'techno');
+  // ...and a set's own row for the same save says the same thing.
+  assert.equal(o.orgItemRow('damson', 0).name, 'damson');
+  assert.equal(o.orgItemRow('techno/stomper', 1).name, 'stomper');
+});
+
+test('a save is still found by the title it declares, which the name no longer shows', () => {
+  const o = org('grudge');
+  assert.equal(o.orgRowMatches(o.orgSavedRow(SAVED[0])), true);
+  assert.equal(o.orgRowMatches(o.orgItemRow('damson', 0)), true, 'and through a set, too');
+});
+
 // --- the column sort ---------------------------------------------------------------------------
 
 const sortBy = (rows, col, dir) => {
@@ -343,19 +369,53 @@ test('the organize headers are sticky, and nothing later takes it back', () => {
     + 'selector wins by order, which is how they came to scroll away with the rows');
 });
 
-// --- related: what will beatmatch --------------------------------------------------------------
+// --- the filter: what will mix with the record that is playing --------------------------------
 //
-// The window is the deck's own pitch range, and it has to include half and double time: a 70 and a
-// 140 are the same tempo to a DJ, and a "related" list that left those out would read as broken
-// rather than as selective. The arithmetic is the whole feature - everything else is a filter.
+// Two questions, asked on every page of the browser: can the pitch fader pull this tempo into
+// line, and will this key sit under the one in the air. The tempo window has to include half and
+// double time - a 70 and a 140 are the same tempo to a DJ, and a list that left those out would
+// read as broken rather than as selective - and the key rule is Camelot arithmetic, which is the
+// whole reason keys are converted onto the wheel instead of compared as names.
 
-const { orgBpmRelated } = (() => {
+const filt = (() => {
   const src = fs.readFileSync(path.join(__dirname, 'public', 'client.js'), 'utf8');
-  const at = src.indexOf('function orgBpmRelated(');
-  assert.ok(at > 0, 'orgBpmRelated not found in client.js - this test needs updating');
+  const grab = (name) => {
+    const at = src.indexOf(`function ${name}(`);
+    assert.ok(at > 0, `${name} not found in client.js - this test needs updating`);
+    let depth = 0;
+    let end = src.indexOf('{', at);
+    for (let i = end; i < src.length; i++) {
+      if (src[i] === '{') depth++;
+      else if (src[i] === '}' && --depth === 0) { end = i + 1; break; }
+    }
+    return src.slice(at, end);
+  };
+  const line = (name) => {
+    const m = src.match(new RegExp(`^const ${name} = .*?;$`, 'm'));
+    assert.ok(m, `const ${name} not found in client.js - this test needs updating`);
+    return m[0];
+  };
+  const block = (name) => {
+    const at = src.indexOf(`const ${name} = {`);
+    assert.ok(at > 0, `${name} not found in client.js - this test needs updating`);
+    const end = src.indexOf('\n};', at);
+    assert.ok(end > at, `${name} is not shaped as expected - this test needs updating`);
+    return src.slice(at, end + 3);
+  };
   // eslint-disable-next-line no-new-func
-  return new Function(`${src.slice(at, src.indexOf('\n}', at) + 2)}\nreturn { orgBpmRelated };`)();
+  return new Function('orgFilt', 'orgFiltTol', `
+    ${line('ORG_PITCH_CLASS')}
+    ${line('orgCamelotHour')}
+    ${block('ORG_KEY_MOVES')}
+    ${grab('orgCamelot')}
+    ${grab('orgKeyMatches')}
+    ${grab('orgBpmRelated')}
+    ${grab('orgRowPasses')}
+    return { orgCamelot, orgKeyMatches, orgBpmRelated, orgRowPasses };
+  `);
 })();
+
+const { orgBpmRelated, orgCamelot, orgKeyMatches } = filt({ bpm: false, key: 'off' }, () => 6);
 
 test('a tempo inside the fader\'s range is related; outside it is not', () => {
   const tol = 0.06; // the ±6% the deck opens at
@@ -387,17 +447,119 @@ test('a track with no tempo is related to nothing, and neither is a deck without
   assert.equal(orgBpmRelated(128, 0, 0.06), false);
 });
 
-test('related offers the columns you pick a next record by', () => {
-  const { ORG_COLUMNS } = org('');
-  const view = (() => {
-    const src = fs.readFileSync(path.join(__dirname, 'public', 'client.js'), 'utf8');
-    const at = src.indexOf('  related: {');
-    assert.ok(at > 0, 'the related view is not in ORG_VIEWS - this test needs updating');
-    return src.slice(at, src.indexOf('\n  },', at));
-  })();
-  for (const col of ['bpm', 'key']) {
-    assert.ok(view.includes(`'${col}'`), `related has to show ${col}`);
-    assert.ok(ORG_COLUMNS[col], `${col} is not a column`);
+// --- keys onto the Camelot wheel ---------------------------------------------------------------
+//
+// The anchors worth pinning: 8B is C major and 8A its relative minor, A minor - both at hour 8,
+// which is what makes "same number, other letter" mean "relative major/minor". One hour on is a
+// fifth up, so 9B is G and 9A is E minor.
+
+test('the wheel is anchored where every Camelot chart anchors it', () => {
+  assert.deepEqual(orgCamelot('C'), { num: 8, minor: false });
+  assert.deepEqual(orgCamelot('Am'), { num: 8, minor: true }, 'A minor shares C major\'s hour');
+  assert.deepEqual(orgCamelot('G'), { num: 9, minor: false }, 'one hour on is a fifth up');
+  assert.deepEqual(orgCamelot('Em'), { num: 9, minor: true });
+  assert.deepEqual(orgCamelot('F'), { num: 7, minor: false }, 'and one hour back is a fifth down');
+  assert.deepEqual(orgCamelot('Dm'), { num: 7, minor: true });
+});
+
+test('the three spellings a key tag arrives in all read the same', () => {
+  // A plain name, sharp or flat, with or without a mode word.
+  assert.deepEqual(orgCamelot('F#m'), { num: 11, minor: true });
+  assert.deepEqual(orgCamelot('Gbm'), orgCamelot('F#m'), 'the same key spelled flat');
+  assert.deepEqual(orgCamelot('Bbm'), { num: 3, minor: true });
+  assert.deepEqual(orgCamelot('A minor'), orgCamelot('Am'));
+  assert.deepEqual(orgCamelot('Abmaj'), orgCamelot('Ab'));
+  assert.deepEqual(orgCamelot('CM'), orgCamelot('C'), 'an upper-case M is major, where m is minor');
+  // A Camelot code, which is the wheel position outright...
+  assert.deepEqual(orgCamelot('8A'), { num: 8, minor: true });
+  assert.deepEqual(orgCamelot('11B'), { num: 11, minor: false });
+  // ...and Open Key notation, the same twelve hours rotated so 1d is C major.
+  assert.deepEqual(orgCamelot('1d'), orgCamelot('C'));
+  assert.deepEqual(orgCamelot('1m'), orgCamelot('Am'));
+});
+
+test('a tag with no position on the wheel is no position, not a guess', () => {
+  for (const bad of ['', null, undefined, 'H', 'Cdorian', 'Am7', 'instrumental', '13A', '0A']) {
+    assert.equal(orgCamelot(bad), null, `"${bad}" should have no wheel position`);
   }
-  assert.match(view, /sort: 'bpm'/, 'the list is read off the tempo column, so that is what it sorts by');
+});
+
+test('harmonic mixing is the four keys every chart names, and nothing else', () => {
+  const ok = (k) => orgKeyMatches(k, 'Am', 'harmonic');
+  assert.equal(ok('Am'), true, 'the same key');
+  assert.equal(ok('Em'), true, 'one hour on - the fifth');
+  assert.equal(ok('Dm'), true, 'one hour back');
+  assert.equal(ok('C'), true, 'the relative major, at the same hour');
+  assert.equal(ok('Bm'), false, 'two hours is an energy move, not a compatible key');
+  assert.equal(ok('Bbm'), false);
+  assert.equal(ok('G'), false, 'the major a fifth on is not at this hour');
+});
+
+test('the energy moves are the lifts, and they are opt-in', () => {
+  assert.equal(orgKeyMatches('Bbm', 'Am', 'harmonic'), false);
+  assert.equal(orgKeyMatches('Bbm', 'Am', 'energy'), true, 'a semitone up is the energy boost');
+  assert.equal(orgKeyMatches('Abm', 'Am', 'energy'), true, 'and a semitone down');
+  assert.equal(orgKeyMatches('Bm', 'Am', 'energy'), true, 'a whole tone up');
+  // Still a selection: the energy set is wider, not everything.
+  assert.equal(orgKeyMatches('Ebm', 'Am', 'energy'), false);
+});
+
+test('the same-key rule takes only the identical key, and off takes everything', () => {
+  assert.equal(orgKeyMatches('Am', 'Am', 'same'), true);
+  assert.equal(orgKeyMatches('8A', 'Am', 'same'), true, 'the same key, spelled as a code');
+  assert.equal(orgKeyMatches('C', 'Am', 'same'), false, 'not even the relative major');
+  assert.equal(orgKeyMatches('anything', 'Am', 'off'), true);
+  assert.equal(orgKeyMatches('', '', 'off'), true);
+});
+
+test('a key the wheel cannot place matches nothing, either side of the question', () => {
+  assert.equal(orgKeyMatches('', 'Am', 'harmonic'), false, 'an untagged track is not compatible');
+  assert.equal(orgKeyMatches('Am', '', 'harmonic'), false, 'and neither is a deck with no key');
+});
+
+// --- the row filter ----------------------------------------------------------------------------
+//
+// What the two questions do to one row. The cases that are easy to get wrong: a row is judged on
+// the facts it HAS (no key is not "compatible"), a folder is a place rather than an entry and so
+// is never filtered away, and the record the filter is pointed at is not a candidate to follow
+// itself.
+
+const REF = { bpm: 128, key: 'Am', path: '/m/now.mp3', title: 'Now' };
+const passes = (filter, row, ref = REF) =>
+  filt(filter, () => filter.tol ?? 6).orgRowPasses(row, ref);
+
+test('the tempo filter keeps what the fader can reach and drops what it cannot', () => {
+  const on = { bpm: true, key: 'off' };
+  assert.equal(passes(on, { bpm: 130, path: '/m/a.mp3' }), true);
+  assert.equal(passes(on, { bpm: 64, path: '/m/b.mp3' }), true, 'half-time is the same tempo');
+  assert.equal(passes(on, { bpm: 145, path: '/m/c.mp3' }), false);
+  assert.equal(passes(on, { bpm: null, path: '/m/d.mp3' }), false, 'an unknown tempo is not a match');
+});
+
+test('the key filter drops a row that has no key to judge', () => {
+  const on = { bpm: false, key: 'harmonic' };
+  assert.equal(passes(on, { musKey: 'C', path: '/m/a.mp3' }), true);
+  assert.equal(passes(on, { musKey: 'Ebm', path: '/m/b.mp3' }), false);
+  // A livecode save has no key at all - so a key filter is a question it cannot answer.
+  assert.equal(passes(on, { musKey: '', kind: 'saved' }), false);
+});
+
+test('both filters on means both have to pass', () => {
+  const both = { bpm: true, key: 'harmonic' };
+  assert.equal(passes(both, { bpm: 130, musKey: 'Em', path: '/m/a.mp3' }), true);
+  assert.equal(passes(both, { bpm: 130, musKey: 'Ebm', path: '/m/b.mp3' }), false, 'wrong key');
+  assert.equal(passes(both, { bpm: 145, musKey: 'Em', path: '/m/c.mp3' }), false, 'wrong tempo');
+});
+
+test('a folder is never filtered away, and the deck\'s own record never survives', () => {
+  const on = { bpm: true, key: 'harmonic' };
+  assert.equal(passes(on, { kind: 'dir', name: 'techno' }), true,
+    'a folder is a place, not an entry - filtering it away would wall off the tree');
+  assert.equal(passes(on, { bpm: 128, musKey: 'Am', path: REF.path }), false,
+    'the record being mixed out of is not a candidate to follow itself');
+});
+
+test('with no deck to measure against, the filter shows nothing rather than everything', () => {
+  // The alternative - quietly showing the whole crate - would read as the filter being off.
+  assert.equal(passes({ bpm: true, key: 'off' }, { bpm: 128, path: '/m/a.mp3' }, null), false);
 });

@@ -26667,9 +26667,15 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && !prebakeBackdrop.classList.contains('hidden')) closePrebake();
 });
 
-// One row: what the pattern calls itself on the first line, everything else dim underneath, and
-// the actions revealed on hover. `label` is the @title / first block label / file name, worked
-// out server-side (see displayLabel) so the list reads the way the pattern names itself.
+// One row: what the pattern is called on the first line, everything else dim underneath, and the
+// actions revealed on hover.
+//
+// A SAVED pattern reads by the name it was saved AS, with its @title under it. The other way
+// round (the title on top, which is what `label` works out server-side - see displayLabel) made
+// a run of versions unusable: "my song v1", "my song v2" and "my song v3" all declare the same
+// @title, so the list showed the same word three times and the one thing telling them apart was
+// the dim line. A session has no saved name, so it still reads by the label it borrows from its
+// own code.
 function fileRow(entry, buttons) {
   const row = document.createElement('div');
   row.className = 'file-row';
@@ -26678,13 +26684,15 @@ function fileRow(entry, buttons) {
   const main = document.createElement('span');
   main.className = 'file-main';
 
+  const saved = entry.kind === 'saved';
   const label = document.createElement('span');
   label.className = 'file-label';
-  label.textContent = entry.label;
+  label.textContent = saved ? entry.name : entry.label;
   main.appendChild(label);
 
   const bits = [];
-  if (entry.kind === 'saved' && entry.name !== entry.label) bits.push(entry.name);
+  const declared = (entry.title ?? '').trim();
+  if (saved && declared && declared !== entry.name) bits.push(declared);
   if (entry.by) bits.push(`by ${entry.by}`);
   for (const t of entry.tags) bits.push(`#${t}`);
   bits.push(new Date(entry.mtime).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' }));
@@ -28311,6 +28319,16 @@ function askText(message, { label, value = '', confirm = 'ok', problem = null } 
 // (see exitDjMode). Null while not in DJ mode.
 let preMix = null;
 
+// Tell the server which mode the decks are being played in. It cannot infer it - a deck can be
+// loaded and playing in ordinary single-deck livecoding too - and what hangs on it is whether a
+// buffer's setbpm() may move the clock or is just the deck's native tempo (see the server's
+// mixState.dj). Fire-and-forget on purpose: the desk must open and close at the speed of the
+// click, and a failure here only means setbpm keeps its old, non-dj behavior.
+function djTellServer(on) {
+  api('POST', '/api/mix/dj', { on })
+    .catch((e) => logLine(e.message ?? String(e), true));
+}
+
 async function openMixMode() {
   if (desktopOnly('DJ mode')) return;
   // The current song is about to become deck A of a mix. Keep it first: a named song is saved
@@ -28338,6 +28356,7 @@ async function openMixMode() {
   // when it opens (the .arrange-deck-* rules). Deck A's arrange switch reopens it in its new half.
   if (arState) closeArrangeEditor();
   mixModeOn = true;
+  djTellServer(true); // from here the clock is the desk's, and setbpm() is metadata
   syncPreviewRouting(); // auditions move to the headphone cue, or stop being allowed at all
   document.body.classList.add('mix-on');
   arReflectView();
@@ -28486,6 +28505,7 @@ function closeMixMode() {
   // against is changing, exactly as it does on the way in.
   if (arState) closeArrangeEditor();
   mixModeOn = false;
+  djTellServer(false); // ...and deck A's next eval drives the transport again
   mixUnfolded.clear(); // a group is one stem again the next time the desk opens
   syncPreviewRouting(); // back to the default output - off the desk there is nothing to protect
   mixPushStop();
@@ -28769,6 +28789,9 @@ function deckHeadRender(state) {
   // starting or stopping is exactly when "what is playing" changes. Costs a string compare per
   // frame and nothing else (see orgRepaintPlayState).
   orgRepaintPlayState();
+  // The browser's filter is measured against the deck, so the same frame is what tells it that
+  // what it is pointed at has changed (see orgFiltRefresh - it compares before it redraws).
+  orgFiltRefresh();
 }
 
 // Fixed-width % readout under each pitch fader: sign always shown, one decimal, so nothing
@@ -30630,7 +30653,13 @@ function mixPushStart() {
   mixEvents.addEventListener('action', (e) => {
     if (!mixModeOn) return;
     try {
-      const { deck, action } = JSON.parse(e.data);
+      const { deck, action, value } = JSON.parse(e.data);
+      // The library browser's own controls belong to no deck: they act on the window, on what it
+      // has highlighted, and on whichever deck is active there (see orgMidiAction).
+      if (ORG_MIDI_ACTIONS.has(action)) {
+        orgMidiAction(action, value);
+        return;
+      }
       if (deck !== 'a' && deck !== 'b') return;
       if (action === 'play') deckPlayPress(deck);
       else if (action === 'cue') deckCuePress(deck, true);
@@ -31267,6 +31296,19 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && mixLearnArmed) setMixLearn(false);
 });
 
+/**
+ * Arm one target and wait for the hardware message that binds it. Null when the server's poll
+ * gives up (ten seconds) or when another arm supersedes this one. The binding itself is the
+ * server's - this only asks for it, which is why the guided session can share it.
+ */
+async function mixLearnOnce(target) {
+  const { learned } = await api('POST', '/api/mix/midilearn', { target });
+  return learned ?? null;
+}
+
+/** A learned binding as one short phrase, for a log line or a dialog's feedback. */
+const mixLearnSay = (b) => `${b.kind ?? 'cc'} ${b.num ?? b.cc} (ch ${b.channel}, ${b.device})`;
+
 async function mixLearnDo(target, clear) {
   const my = ++mixLearnSeq;
   try {
@@ -31276,11 +31318,8 @@ async function mixLearnDo(target, clear) {
       return;
     }
     logLine(`learning ${target} - move a MIDI knob…`);
-    const { learned } = await api('POST', '/api/mix/midilearn', { target });
-    if (learned) {
-      logLine(`${target} ← ${learned.kind ?? 'cc'} ${learned.num ?? learned.cc}`
-        + ` (ch ${learned.channel}, ${learned.device}) - next control?`);
-    }
+    const learned = await mixLearnOnce(target);
+    if (learned) logLine(`${target} ← ${mixLearnSay(learned)} - next control?`);
     // A null reply is EITHER the 10s timeout or this poll being superseded by the next
     // control's click - only the timeout (still the latest, still armed) is worth a line.
     else if (my === mixLearnSeq && mixLearnArmed) logLine(`no CC seen for ${target} - still armed`, true);
@@ -31665,6 +31704,7 @@ async function openOrganize(forDeck = null) {
     else if (libDoc.tracks.length) orgSrc = { kind: 'tracks' };
   }
   orgNormalizeSrc();
+  orgMidiOnSources = false; // a learned knob starts on the songs, not wherever it was left
   orgEl.classList.remove('hidden');
   window.addEventListener('keydown', orgOnKey);
   orgSel.clear();
@@ -31775,15 +31815,6 @@ const ORG_VIEWS = {
     offer: ['name', 'artist', 'album', 'bpm', 'key', 'rating', 'added', 'path'],
     sort: 'added',
     dir: -1,
-  },
-  // The collection, narrowed to what will beatmatch with the record that is playing. Sorted by
-  // tempo rather than by when it was added: the question being asked is "what goes next", and
-  // the answer is read off the bpm column.
-  related: {
-    cols: ['name', 'artist', 'bpm', 'key', 'rating'],
-    offer: ['name', 'artist', 'album', 'bpm', 'key', 'rating', 'added', 'path'],
-    sort: 'bpm',
-    dir: 1,
   },
   playlist: {
     cols: ['n', 'name', 'artist', 'bpm', 'key', 'rating'],
@@ -31904,19 +31935,25 @@ function orgSetSort(col) {
 // Every source produces the same row shape, so one table renders all of them and the selection,
 // the keys, the drag and the menu are written once:
 //
-//   { key, kind, name, folder?, artist?, album?, bpm?, musKey?, tags?, when?, path?, at?,
-//     item?, missing?, imported? }
+//   { key, kind, name, savedTitle?, folder?, artist?, album?, bpm?, musKey?, tags?, when?,
+//     path?, at?, item?, missing?, imported? }
 //
 // `key` identifies the row within its source. A playlist's rows are keyed by POSITION, not by
 // what they hold: the same song may sit in a set twice, and those are two different rows.
 
 const orgTrackByPath = () => new Map(libDoc.tracks.map((t) => [t.path, t]));
 
+// A save is listed under the name it was SAVED AS, not its @title: a folder of "my song v1",
+// "my song v2" is told apart by the name, where the @title is usually one word repeated down the
+// whole column. The declared title is still searchable and still on the row's tooltip - it is
+// just not what the name column says. (The folder is sliced off because it has a column of its
+// own; the files tab, which has no such column, shows the whole name.)
 function orgSavedRow(s) {
   return {
     key: `s:${s.name}`,
     kind: 'saved',
-    name: s.title || (s.folder ? s.name.slice(s.folder.length + 1) : s.name),
+    name: s.folder ? s.name.slice(s.folder.length + 1) : s.name,
+    savedTitle: (s.title ?? '').trim(),
     folder: s.folder ?? '',
     bpm: s.bpm ?? null,
     tags: s.tags ?? [],
@@ -31969,7 +32006,10 @@ function orgItemRow(item, at) {
     key: `i:${at}`,
     kind: 'saved',
     at,
-    name: s ? (s.title || s.name.slice(cut + 1)) : String(item),
+    // The saved name, like every other row a save gets (see orgSavedRow) - and the name the SET
+    // recorded when the save itself is gone, which is all there is left to say.
+    name: cut > 0 ? String(item).slice(cut + 1) : String(item),
+    savedTitle: (s?.title ?? '').trim(),
     folder: cut > 0 ? String(item).slice(0, cut) : '',
     bpm: s?.bpm ?? null,
     tags: s?.tags ?? [],
@@ -31979,69 +32019,306 @@ function orgItemRow(item, at) {
   };
 }
 
-/**
- * The open source's rows, before the search and the sort. The disk's come from its own listing
- * (which the server hands over one directory at a time), with anything already imported wearing
- * its record's facts - that is what tells you, at a glance, what you have already got.
- */
-// --- related: the crate, narrowed to what will beatmatch ---------------------------------------
+// --- the filter: the crate, narrowed to what will mix with the record that is playing --------
 //
-// A tempo you can reach is the first thing that decides whether a record can follow this one, and
-// it is the one thing a long list of filenames will not tell you. So this is the collection with
-// the un-mixable rows taken out: everything within the deck's own pitch range of what is playing,
-// at half and double time as well - a 70 and a 140 are the same tempo to a DJ, and a list that
-// left those out would feel broken rather than selective.
+// A tempo you can reach and a key that will sit under it are the two things that decide whether
+// a record can follow this one, and they are the two a long list of filenames will not tell you.
+// So the filter rides EVERY page of the browser - a folder of saves, the collection, a set, a
+// folder on disk - and narrows whatever is open against the deck in the room. (It used to be one
+// sidebar source called "related", which could only ever narrow the collection and could only
+// ever ask about tempo.)
+//
+// What it is narrowing against is the one thing the filter cannot infer, so it is named wherever
+// the filter is: on the button, in the menu's head, and in the line an empty table shows.
 
 // What "wide" (the ±100% switch) falls back to. At ±100% everything in the crate is reachable,
 // which is not a selection - so the window stays the one a hand would actually use.
-const ORG_RELATED_WIDE_TOL = 6;
+const ORG_FILT_WIDE_TOL = 6;
+
+// The windows the menu offers, over and above the deck's own fader setting.
+const ORG_FILT_TOLS = [1, 3, 6, 10, 16];
 
 /**
  * Can `bpm` be pitched into line with `ref`, within `tol` (a fraction)? True at the same tempo,
- * at half it and at double it.
+ * at half it and at double it - a 70 and a 140 are the same tempo to a DJ, and a list that left
+ * those out would feel broken rather than selective.
  */
 function orgBpmRelated(bpm, ref, tol) {
   if (!(bpm > 0) || !(ref > 0)) return false;
   return [0.5, 1, 2].some((m) => Math.abs(bpm / (ref * m) - 1) <= tol);
 }
 
+// --- keys, on the Camelot wheel ---------------------------------------------------------------
+//
+// The wheel is 12 hours by two letters - A for minor, B for major - arranged so that the moves a
+// DJ makes are arithmetic: 8A is A minor, 8B its relative major (C), and one hour on is the
+// fifth. That is the whole reason to convert into it rather than compare key names.
+//
+// An hour is a fifth, so the hour of a MAJOR key is reached by stepping its tonic round the
+// circle of fifths from 8B = C; a minor key takes the hour of its relative major (three
+// semitones up), which is what puts Am and C both at 8.
+
+const ORG_PITCH_CLASS = { c: 0, d: 2, e: 4, f: 5, g: 7, a: 9, b: 11 };
+
+const orgCamelotHour = (pc) => (((pc * 7 + 7) % 12) + 1);
+
 /**
- * The record everything else is related TO: whichever deck is playing (that is the one in the
- * room), else the deck being looked at, else either deck holding a file. Null when no deck has a
- * tempo to compare against - and then the list says so rather than showing the whole crate.
+ * A key as { num: 1..12, minor } on the wheel, or null for anything with no position on it.
+ * Three spellings arrive in practice and all three are read: a Camelot code ("8A", "11B"), Open
+ * Key notation ("1d", "6m"), and a plain name - sharp or flat, with or without a mode word
+ * ("F#m", "Bbm", "Am", "Eb", "A minor", "AbMaj"). Anything else - a mode the wheel has no hour
+ * for, an empty tag - is no position at all rather than a guess.
  */
-function orgRelatedRef() {
+function orgCamelot(key) {
+  const raw = String(key ?? '').trim();
+  if (!raw) return null;
+  // A Camelot code: the number IS the hour. There is no hour 0 and no hour 13, so the pattern
+  // spells the range out rather than taking any digits and trusting them.
+  const cam = /^([1-9]|1[0-2])\s*([ABab])$/.exec(raw);
+  if (cam) return { num: Number(cam[1]), minor: cam[2].toLowerCase() === 'a' };
+  // Open Key notation: the same twelve hours, rotated so that 1d is C major (Camelot 8B).
+  const open = /^([1-9]|1[0-2])\s*([MmDd])$/.exec(raw);
+  if (open) return { num: ((Number(open[1]) - 1 + 7) % 12) + 1, minor: open[2].toLowerCase() === 'm' };
+  const name = /^([A-Ga-g])([#b\u266f\u266d]?)(.*)$/.exec(raw);
+  if (!name) return null;
+  const pc = ORG_PITCH_CLASS[name[1].toLowerCase()] + (name[2] === '#' || name[2] === '\u266f' ? 1 : 0)
+    - (name[2] === 'b' || name[2] === '\u266d' ? 1 : 0);
+  const rest = name[3].replace(/[\s_-]/g, '');
+  // 'M' is major and 'm' is minor, which is the one place the case of a tag carries meaning - so
+  // the bare letters are tested before anything is lowercased.
+  let minor;
+  if (rest === '' || rest === 'M') minor = false;
+  else if (/^(maj|major)$/i.test(rest)) minor = false;
+  else if (/^(m|min|minor)$/i.test(rest)) minor = true;
+  else return null; // a mode with no hour on the wheel (dorian, a chord symbol, a sentence)
+  return { num: orgCamelotHour(((minor ? pc + 3 : pc) % 12 + 12) % 12), minor };
+}
+
+// Which moves around the wheel count as a match, as [hours, swap the letter] pairs.
+//
+//   harmonic - the classic set: stay put, one hour either way (the fifth), or the relative
+//              major/minor at the same hour. Four keys from wherever you are, and the four
+//              every harmonic-mixing guide names.
+//   energy   - those, plus the lifts a DJ reaches for deliberately: seven hours (a semitone up
+//              or down - the "energy boost") and two hours (a whole tone). A wider net on
+//              purpose, and its own choice rather than part of "compatible".
+//   same     - the identical key, for when nothing else will do.
+const ORG_KEY_MOVES = {
+  same: [[0, false]],
+  harmonic: [[0, false], [1, false], [-1, false], [0, true]],
+  energy: [[0, false], [1, false], [-1, false], [0, true],
+    [2, false], [-2, false], [7, false], [-7, false]],
+};
+
+/** Will `key` mix with `ref` under `mode`? A key with no position on the wheel matches nothing. */
+function orgKeyMatches(key, ref, mode) {
+  const moves = ORG_KEY_MOVES[mode];
+  if (!moves) return true; // 'off'
+  const a = orgCamelot(key);
+  const b = orgCamelot(ref);
+  if (!a || !b) return false;
+  return moves.some(([hours, flip]) => a.num === ((b.num - 1 + hours + 24) % 12) + 1
+    && a.minor === (flip ? !b.minor : b.minor));
+}
+
+// --- what is switched on right now ------------------------------------------------------------
+//
+// Kept in localStorage, like the column widths: a DJ who works in ±3% wants that window still
+// set tomorrow. Declared here rather than at the top of the section because the stored key mode
+// is checked against ORG_KEY_MOVES as it is read.
+
+const ORG_FILT_KEY = 'poptart.orgFilter';
+
+// `tol` is a percentage, or 'range' for whatever the deck's own pitch fader is set to - the
+// window a hand can actually reach, which is the default the sidebar's "related" was built on.
+// `key` is one of ORG_KEY_MOVES, or 'off'.
+let orgFilt = { bpm: false, tol: 'range', key: 'off' };
+try {
+  const saved = JSON.parse(localStorage.getItem(ORG_FILT_KEY) ?? 'null');
+  if (saved && typeof saved === 'object') {
+    orgFilt = {
+      bpm: !!saved.bpm,
+      tol: saved.tol === 'range' || Number.isFinite(saved.tol) ? saved.tol : 'range',
+      key: Object.hasOwn(ORG_KEY_MOVES, saved.key) ? saved.key : 'off',
+    };
+  }
+} catch { /* a damaged entry is the defaults */ }
+
+function orgSaveFilt() {
+  try { localStorage.setItem(ORG_FILT_KEY, JSON.stringify(orgFilt)); } catch { /* fine */ }
+}
+
+const orgFiltOn = () => orgFilt.bpm || orgFilt.key !== 'off';
+
+// --- what the filter is pointed at ------------------------------------------------------------
+
+/**
+ * The record everything else is judged against: whichever deck is playing (that is the one in
+ * the room), else the deck being looked at, else either deck holding a file. Its tempo and its
+ * key come from the deck itself first - that is what is actually in the air - and from the
+ * collection's record second, which is where an analysis that landed later is written.
+ *
+ * Null when no deck holds anything with either fact, and then the table says so rather than
+ * silently showing everything (or nothing).
+ */
+function orgFiltRef() {
   const known = orgTrackByPath();
   const order = [...['a', 'b'].filter((d) => deckPlayingNow[d]), djActiveDeck, 'a', 'b'];
   for (const d of order) {
     const song = songPanes[d]?.song;
     if (!song?.path) continue;
-    // The pane's own tempo first - it is what the deck is actually playing - then the
-    // collection's, which is where an analysis that landed later is written.
-    const bpm = Number(song.bpm) || Number(known.get(song.path)?.bpm) || 0;
-    if (bpm > 0) return { bpm, path: song.path, title: song.title };
+    const rec = known.get(song.path);
+    const bpm = Number(song.bpm) || Number(rec?.bpm) || 0;
+    const key = songPanes[d].mirror?.musicalKey || rec?.key || '';
+    if (bpm > 0 || key) return { bpm, key, path: song.path, title: song.title };
   }
   return null;
 }
 
-/** How far the deck in hand can be pitched, as a percentage. */
-function orgRelatedTol() {
+/** How wide the tempo window is right now, as a percentage. */
+function orgFiltTol() {
+  if (orgFilt.tol !== 'range') return orgFilt.tol;
   const range = deckTempoNow[djActiveDeck]?.range ?? 6;
-  return range === 100 ? ORG_RELATED_WIDE_TOL : range;
+  return range === 100 ? ORG_FILT_WIDE_TOL : range;
 }
 
-function orgRelatedRows() {
-  const ref = orgRelatedRef();
-  if (!ref) return [];
-  const tol = orgRelatedTol() / 100;
-  return libDoc.tracks
-    .map(orgTrackRow)
-    .filter((r) => r.path !== ref.path && orgBpmRelated(r.bpm, ref.bpm, tol));
+/**
+ * Does this row survive the filter? Each row is judged on the facts it HAS: a save with no key
+ * is not "in a compatible key", so a key filter drops it - the same way the tempo filter has
+ * always dropped a track whose tempo nobody ever worked out. A folder is a place rather than an
+ * entry in the list, so it is never filtered away; neither is the record the filter is pointed
+ * AT excluded for its own sake, because what is being asked is what can follow it.
+ */
+function orgRowPasses(row, ref) {
+  if (row.kind === 'dir') return true;
+  if (!ref) return false;
+  if (ref.path && row.path === ref.path) return false;
+  if (orgFilt.bpm && !orgBpmRelated(row.bpm, ref.bpm, orgFiltTol() / 100)) return false;
+  if (orgFilt.key !== 'off' && !orgKeyMatches(row.musKey, ref.key, orgFilt.key)) return false;
+  return true;
 }
 
+// --- the filter's own control -----------------------------------------------------------------
+//
+// One button in the bar on every page, because the filter is on every page. It sits LEFT of the
+// bar's spacer so that its label changing width pushes into the spacer rather than shifting the
+// buttons on the right, and it is given a width of its own so the label itself cannot jiggle.
+
+const ORG_KEY_LABELS = {
+  off: 'any key',
+  harmonic: 'compatible keys',
+  energy: 'compatible + energy',
+  same: 'the same key',
+};
+
+// The key rule, as the one or two characters the button has room for. The sign is the width of
+// the net: `key` is the compatible four, `key+` widens to the energy moves, `key=` narrows to
+// the one key. Which it is, in words, is on the button's own title.
+const ORG_KEY_SIGNS = { harmonic: 'key', energy: 'key+', same: 'key=' };
+
+/** The button's text: short, because it is read at a glance and not instead of the menu. */
+function orgFiltLabel() {
+  if (!orgFiltOn()) return 'filter';
+  const bits = [];
+  if (orgFilt.bpm) bits.push(`\u00b1${orgFiltTol()}%`);
+  if (orgFilt.key !== 'off') bits.push(ORG_KEY_SIGNS[orgFilt.key]);
+  return bits.join(' ');
+}
+
+/** How the filter reads in a sentence, for the line an emptied-out table shows. */
+function orgFiltSaysWhat() {
+  if (orgFilt.bpm && orgFilt.key !== 'off') return 'will mix with';
+  if (orgFilt.bpm) return `is within \u00b1${orgFiltTol()}% of`;
+  return 'is in a key that will sit under';
+}
+
+function orgFiltTitle() {
+  if (!orgFiltOn()) return 'narrow this page to what will mix with the deck';
+  const ref = orgFiltRef();
+  const what = [
+    orgFilt.bpm && `within \u00b1${orgFiltTol()}% of its tempo (and of half and double it)`,
+    orgFilt.key !== 'off' && ORG_KEY_LABELS[orgFilt.key],
+  ].filter(Boolean).join(', ');
+  return ref
+    ? `showing only what is ${what} \u2014 measured against "${ref.title || 'the deck'}"`
+    : `${what} \u2014 but no deck holds a track to measure against, so nothing shows`;
+}
+
+function orgFiltSet(patch) {
+  Object.assign(orgFilt, patch);
+  orgSaveFilt();
+  orgSel.clear(); // a selection the filter just hid is not the selection any more
+  orgAnchor = null;
+  orgRenderMain();
+}
+
+const ORG_KEY_HINTS = {
+  off: 'ignore keys',
+  harmonic: 'the same key, one step either way round the wheel, or its relative major/minor',
+  energy: 'those, plus the deliberate lifts - a semitone or a whole tone up or down',
+  same: 'only the identical key',
+};
+
+/** The filter dropdown: the tempo window, then the key rule. */
+function orgFiltMenu(x, y) {
+  const ref = orgFiltRef();
+  const tolNow = orgFiltTol();
+  const tick = (on) => (on ? '\u2713' : '\u2007');
+  const items = [
+    [`${tick(orgFilt.bpm)} mixable tempo (\u00b1${tolNow}%)`, () => orgFiltSet({ bpm: !orgFilt.bpm }),
+      'only what the pitch fader can pull into line, at half and double time too'],
+    {
+      sub: 'tempo window',
+      title: 'how far out of line a tempo may be and still count',
+      items: [
+        [`${tick(orgFilt.tol === 'range')} the deck's pitch fader`, () => orgFiltSet({ tol: 'range' }),
+          'follows the range switch, so the window is always what the hand can reach'],
+        '-',
+        ...ORG_FILT_TOLS.map((t) => [`${tick(orgFilt.tol === t)} \u00b1${t}%`, () => orgFiltSet({ tol: t })]),
+      ],
+    },
+    '-',
+    ...Object.entries(ORG_KEY_LABELS).map(([mode, label]) => [
+      `${tick(orgFilt.key === mode)} ${label}`,
+      () => orgFiltSet({ key: mode }),
+      ORG_KEY_HINTS[mode],
+    ]),
+  ];
+  if (orgFiltOn()) {
+    items.push('-');
+    items.push(['show everything', () => orgFiltSet({ bpm: false, key: 'off' }), 'turn the filter off']);
+  }
+  openCtxMenu(orgMenu, x, y, {
+    head: ref ? `filter \u00b7 ${ref.title || 'the deck'}` : 'filter \u00b7 no deck loaded',
+    items,
+    after: () => orgEl.querySelector('#orgBody').focus({ preventScroll: true }),
+  });
+}
+
+
+// The filter is measured against the deck, so it goes stale when the deck changes - a new record
+// loaded, a tempo range flipped, the active deck switched. Called off the desk's own frame
+// (deckHeadRender), and only redraws when what it is pointed at has actually moved.
+let orgFiltRefSeen = null;
+
+function orgFiltRefresh() {
+  if (!orgEl || orgEl.classList.contains('hidden')) return;
+  const ref = orgFiltRef();
+  const sig = ref ? `${ref.path}|${ref.bpm}|${ref.key}|${orgFiltTol()}` : '';
+  if (sig === orgFiltRefSeen) return;
+  orgFiltRefSeen = sig;
+  // The rows only move when the filter is on; the button names the deck either way.
+  if (orgFiltOn()) orgRenderMain();
+  else orgRenderBar();
+}
+
+/**
+ * The open source's rows, before the search, the filter and the sort. The disk's come from its
+ * own listing (which the server hands over one directory at a time), with anything already
+ * imported wearing its record's facts - that is what tells you, at a glance, what you have got.
+ */
 function orgSourceRows() {
   if (orgSrc.kind === 'tracks') return libDoc.tracks.map(orgTrackRow);
-  if (orgSrc.kind === 'related') return orgRelatedRows();
   if (orgSrc.kind === 'playlist') {
     const p = orgPlaylist();
     return (p?.items ?? []).map(orgItemRow);
@@ -32076,7 +32353,9 @@ function orgSourceRows() {
 // `tag:` looks only at tags. One box means one thing wherever you are looking.
 function orgRowMatches(row) {
   if (!orgQuery) return true;
-  const hay = [row.name, row.folder, row.artist, row.album, row.path, row.musKey]
+  // `savedTitle` is in here because the name column no longer shows it: a save you think of by
+  // its @title has to stay findable by typing it.
+  const hay = [row.name, row.savedTitle, row.folder, row.artist, row.album, row.path, row.musKey]
     .filter(Boolean).join(' ').toLowerCase();
   const tags = (row.tags ?? []).map((x) => String(x).toLowerCase());
   return orgQuery.split(/\s+/).every((w) => {
@@ -32104,11 +32383,16 @@ function orgRowCompare(spec, dir) {
   };
 }
 
-/** The rows as drawn: searched, then sorted. */
+/** The rows as drawn: searched, then filtered against the deck, then sorted. */
 function orgRows() {
   const { col, dir } = orgSort();
   const spec = ORG_COLUMNS[col] ?? ORG_COLUMNS.name;
-  return orgSourceRows().filter(orgRowMatches).sort(orgRowCompare(spec, dir));
+  let rows = orgSourceRows().filter(orgRowMatches);
+  if (orgFiltOn()) {
+    const ref = orgFiltRef(); // worked out once, not once per row
+    rows = rows.filter((r) => orgRowPasses(r, ref));
+  }
+  return rows.sort(orgRowCompare(spec, dir));
 }
 
 const orgPlaylist = () => libDoc.playlists.find((p) => p.id === orgSrc.id) ?? null;
@@ -32226,23 +32510,6 @@ function orgRenderSide() {
   // not drawn there either, and nothing it offers can be reached (style.css, web-host.test.mjs).
   tracksRow.id = 'orgTracksSource';
   ul.appendChild(tracksRow);
-
-  // ...and the same collection narrowed to what will mix with what is playing. Directly under
-  // `tracks` because it IS tracks, with the un-reachable tempos taken out.
-  const ref = orgRelatedRef();
-  const relatedRow = orgSideRow({
-    label: 'related',
-    depth: 0,
-    cls: 'org-side-group',
-    on: orgSrc.kind === 'related',
-    count: ref ? orgRelatedRows().length : null,
-    onClick: () => orgGoto({ kind: 'related' }),
-  });
-  relatedRow.title = ref
-    ? `within ${orgRelatedTol()}% of "${ref.title || 'the deck'}" (and of half and double its tempo)`
-    : 'what will beatmatch with the record on a deck - load one to fill this';
-  relatedRow.id = 'orgRelatedSource'; // the collection is the disk's, and so is this (style.css)
-  ul.appendChild(relatedRow);
 
   // --- the disk: the intake. Its tree is lazy - the server lists one directory at a time - so
   // the sidebar shows where the browser is standing and the way back up it.
@@ -32578,6 +32845,15 @@ function orgRenderMain() {
     }
     tr.addEventListener('mousedown', (e) => {
       if (e.button === 2) return; // the right button is the menu's
+      // While the desk's `midi` mode is armed, a click on the NAME is the gesture that maps the
+      // browser onto a controller - the same bargain every other desk control makes while armed
+      // (see mixLearnAttach). The rest of the row still selects, so the list stays usable.
+      if (mixLearnArmed && e.target.closest('.org-c-name')) {
+        e.preventDefault();
+        e.stopPropagation();
+        orgMidiGuide();
+        return;
+      }
       if (e.target.tagName === 'INPUT') return; // a cell being edited is its own gesture
       if (e.target.classList?.contains('org-stars')) return; // so is the rating
       if (e.detail > 1) return; // the double-click's second press belongs to the dblclick handler
@@ -32613,13 +32889,20 @@ function orgRenderMain() {
 }
 
 function orgEmptyText() {
+  // With both a search and a filter on, whichever one actually emptied the table is the one that
+  // gets to explain itself: "nothing will mix with X" is a lie when it was the typed word that
+  // did it. So the search answers first, but only if the search alone is what left nothing.
+  const all = orgSourceRows();
+  if (orgQuery && !all.some(orgRowMatches)) return 'nothing here matches that';
+  // The filter is the likeliest reason a page that HAS rows is showing none, and it names what
+  // it is pointed at - otherwise an emptied-out set reads as a lost set.
+  if (orgFiltOn() && all.length) {
+    const ref = orgFiltRef();
+    if (!ref) return 'load a track onto a deck — the filter narrows this to what will mix with it';
+    return `nothing here ${orgFiltSaysWhat()} "${ref.title || 'the deck'}"`;
+  }
   if (orgQuery) return 'nothing here matches that';
   if (orgSrc.kind === 'tracks') return 'no tracks yet — open disk and import some';
-  if (orgSrc.kind === 'related') {
-    return orgRelatedRef()
-      ? `nothing in the collection is within ${orgRelatedTol()}% of it (or half or double)`
-      : 'load a track with a tempo onto a deck — related is what will mix with it';
-  }
   if (orgSrc.kind === 'playlist') return 'empty — drag songs in, or right-click them to add';
   if (orgSrc.kind === 'disk') {
     return orgDiskFindActive() && orgDiskFind.running ? 'searching…' : 'nothing playable in here';
@@ -32630,7 +32913,8 @@ function orgEmptyText() {
 function orgRenderCount(shown) {
   const total = orgSourceRows().length;
   const where = orgEl.querySelector('#orgCount');
-  where.textContent = orgQuery && shown !== total ? `${shown} of ${total}` : `${total}`;
+  const narrowed = orgQuery || orgFiltOn();
+  where.textContent = narrowed && shown !== total ? `${shown} of ${total}` : `${total}`;
 }
 
 function orgRowTitle(row) {
@@ -32667,7 +32951,11 @@ function orgFillNameCell(td, row) {
     note.textContent = ' (missing)';
     td.appendChild(note);
   }
-  td.title = row.path || row.saveName || row.name;
+  // The declared title, where there is one and it is not just the name again: the column says
+  // what the save is CALLED, and this is where what it calls itself still shows.
+  td.title = [row.path || row.saveName || row.name,
+    row.savedTitle && row.savedTitle !== row.name ? `@title ${row.savedTitle}` : '']
+    .filter(Boolean).join('\n');
 }
 
 // --- editing a track's facts, in place ---------------------------------------------------------
@@ -32828,6 +33116,12 @@ function orgRenderBar() {
   }[orgSrc.kind] ?? '';
   where.textContent = label;
   where.title = label;
+  // The filter rides every page, so it is the one control in this bar that is never hidden.
+  const filtBtn = orgEl.querySelector('#orgFilter');
+  filtBtn.textContent = orgFiltLabel();
+  filtBtn.title = orgFiltTitle();
+  filtBtn.classList.toggle('on', orgFiltOn());
+
   const onDisk = orgSrc.kind === 'disk';
   up.classList.toggle('hidden', !onDisk && !(orgSrc.kind === 'livecode' && orgSrc.folder));
   up.disabled = onDisk ? !orgDisk?.parent : false;
@@ -32985,6 +33279,219 @@ function orgSelectedRows() {
   return orgDrawnRows.filter((r) => orgSel.has(r.key));
 }
 
+// --- working the browser from a controller ----------------------------------------------------
+//
+// Five learned controls and no keyboard: a knob that walks the list, a pad that loads what it
+// lands on, a pad that hands the knob to the sidebar, a pad for the tempo filter, and a pad that
+// opens and closes the window. The bindings live server-side like every other desk mapping, but
+// the server cannot ACT on any of them - the window, the sources, the sets and the selection are
+// all this side's - so they arrive as `action` frames (see the mix-strip MIDI section of
+// server.js, and mixEvents' action listener above).
+//
+// Handing the knob to the sidebar is what "up a level" is on a controller. There is no folder
+// pad: one knob that walks either list goes everywhere two pads would, and costs one binding.
+
+const ORG_MIDI_ACTIONS = new Set(['browse', 'browseload', 'browsefilter', 'browsesource', 'browseopen']);
+
+// A spin arrives as a tick count, and a fast one carries a long way - far enough to throw the
+// highlight off the end of a big crate in one message. Capped at about a screenful.
+const ORG_MIDI_MAX_TICKS = 24;
+
+// Which list the knob is walking. Reset when the window opens, so a controller never starts out
+// pointed at something the last session left it on.
+let orgMidiOnSources = false;
+
+const orgIsOpen = () => !!orgEl && !orgEl.classList.contains('hidden');
+
+function orgMidiAction(action, value) {
+  // The open/close pad is the one that has to work with the window SHUT - that is its whole job.
+  // It opens as the active deck's picker, which is what a controller is browsing for.
+  if (action === 'browseopen') {
+    if (orgIsOpen()) closeOrganize();
+    else openOrganize(djActiveDeck);
+    return;
+  }
+  if (!orgIsOpen()) return; // nothing to browse; the pads are not a way to act on a hidden window
+  if (action === 'browsesource') {
+    orgMidiOnSources = !orgMidiOnSources;
+    orgSay(orgMidiOnSources ? 'the knob is walking the sources' : 'the knob is walking the songs');
+    return;
+  }
+  if (action === 'browsefilter') {
+    orgFiltSet({ bpm: !orgFilt.bpm });
+    orgSay(orgFilt.bpm
+      ? `only what will mix with the deck (±${orgFiltTol()}%)`
+      : 'showing everything again');
+    return;
+  }
+  if (action === 'browseload') return orgMidiLoad();
+  // browse: the knob itself.
+  const ticks = Math.round(Number(value) || 0);
+  const by = Math.max(-ORG_MIDI_MAX_TICKS, Math.min(ORG_MIDI_MAX_TICKS, ticks));
+  if (!by) return;
+  if (orgMidiOnSources) orgMidiStepSource(by);
+  else orgStep(by, false);
+}
+
+/** The highlighted row onto the active deck. A folder opens instead, as a double-click would. */
+function orgMidiLoad() {
+  const row = orgDrawnRows.find((r) => orgSel.has(r.key));
+  if (!row) return orgSay('nothing highlighted to load', true);
+  if (row.kind === 'dir') return orgBrowseTo(row.path);
+  if (row.missing) return orgSay('that file is gone', true);
+  orgLoadRowOnDeck(djActiveDeck, row);
+}
+
+/**
+ * Every place the sidebar can be pointed, in the order it draws them - which is the order the
+ * knob walks. Folders are included whether or not their group is unfolded: a knob cannot open a
+ * twisty, and a destination the hand can reach has to be one the controller can reach too.
+ */
+function orgMidiSources() {
+  const out = [{ kind: 'livecode', folder: '' }];
+  const walk = (nodes) => {
+    for (const node of nodes) {
+      out.push({ kind: 'livecode', folder: node.path });
+      walk(node.kids);
+    }
+  };
+  walk(orgFolderTree(orgSongs.map((x) => x.folder).filter(Boolean)));
+  // The collection and the disk are the desktop app's; the browser build draws neither.
+  if (!window.__poptartHostReady) out.push({ kind: 'tracks' }, { kind: 'disk' });
+  for (const pl of libDoc.playlists) out.push({ kind: 'playlist', id: pl.id });
+  return out;
+}
+
+const orgSameSrc = (a, b) => a.kind === b.kind
+  && (a.folder ?? '') === (b.folder ?? '')
+  && (a.id ?? null) === (b.id ?? null);
+
+function orgMidiStepSource(by) {
+  const list = orgMidiSources();
+  if (!list.length) return;
+  const at = list.findIndex((x) => orgSameSrc(x, orgSrc));
+  const to = Math.max(0, Math.min(list.length - 1, (at < 0 ? 0 : at) + by));
+  if (at === to) return;
+  orgGoto(list[to]);
+  orgSay(orgEl.querySelector('#orgWhere').textContent);
+}
+
+// --- the guided mapping session ---------------------------------------------------------------
+//
+// Clicking a song's NAME while the desk's `midi` mode is armed starts this. It exists because
+// these five controls are the only desk mappings with nothing on screen to click: every other
+// one is learned by clicking the widget it belongs to, and there is no widget that IS "the browse
+// knob". So the window asks for them in words instead, one at a time.
+//
+// The server's learn poll gives up after ten seconds, so each step re-arms until something binds
+// - nobody is being timed. Esc or `stop` abandons it where it stands, and whatever was bound
+// before that stays bound. Running it again re-binds, which is also how one of these is moved
+// onto a different control.
+
+const ORG_MIDI_GUIDE = [
+  { target: 'browse', say: 'Turn the knob you want to scroll through songs with.',
+    note: 'a rotary encoder - one song per click of it' },
+  { target: 'browseload', say: 'Press the button that should load the highlighted song onto the active deck.' },
+  { target: 'browsesource', say: 'Press the button that should hand the knob over to the sidebar - and take it back.',
+    note: 'this is how you leave the list you are in' },
+  { target: 'browsefilter', say: 'Press the button that should switch the tempo filter on and off.',
+    note: 'only what will beatmatch with the deck' },
+  { target: 'browseopen', say: 'Press the button that should open and close this window.' },
+];
+
+let orgGuiding = false;
+
+async function orgMidiGuide() {
+  if (orgGuiding) return;
+  orgGuiding = true;
+  const ui = { gone: false };
+  let count = null;
+  let ask = null;
+  let said = null;
+  let skipBtn = null;
+  let onSkip = null; // resolves the step waiting on `skip this one`
+  // Three lines in the app's own dialog, borrowing its own type: where we are (dim), the
+  // question (the panel's <p>, which is what every other dialog asks with), and what happened
+  // (dim). Nothing here needs a metric of its own.
+  const closed = askShell((panel, finish) => {
+    count = document.createElement('div');
+    count.className = 'ask-field';
+    ask = document.createElement('p');
+    said = document.createElement('div');
+    said.className = 'ask-field';
+    const row = document.createElement('div');
+    row.className = 'ask-row';
+    skipBtn = document.createElement('button');
+    skipBtn.textContent = 'skip this one';
+    skipBtn.addEventListener('click', () => onSkip?.());
+    const stop = document.createElement('button');
+    stop.className = 'primary';
+    stop.textContent = 'stop';
+    stop.title = 'leave it here - whatever has been bound stays bound (esc does the same)';
+    stop.addEventListener('click', () => finish(null));
+    row.append(skipBtn, stop);
+    panel.append(count, ask, said, row);
+    return stop;
+  });
+  closed.then(() => { ui.gone = true; onSkip?.(); });
+  const gone = closed.then(() => 'gone');
+
+  let bound = 0;
+  try {
+    for (const [i, step] of ORG_MIDI_GUIDE.entries()) {
+      if (ui.gone) break;
+      count.textContent = `your controller, onto the browser · ${i + 1} of ${ORG_MIDI_GUIDE.length}`;
+      ask.textContent = step.say;
+      said.className = 'ask-field';
+      said.textContent = step.note ?? '';
+      let got = null;
+      let skipped = false;
+      const skip = new Promise((res) => { onSkip = () => { skipped = true; res('skip'); }; });
+      while (!ui.gone && !skipped && !got) {
+        // Re-armed on every timeout: the poll's ten seconds are the server's business, not a
+        // deadline for the hand reaching across a controller.
+        const r = await Promise.race([mixLearnOnce(step.target), skip, gone]);
+        if (r === 'skip' || r === 'gone') break;
+        got = r;
+      }
+      onSkip = null;
+      if (ui.gone) break;
+      if (got) {
+        bound++;
+        said.className = 'ask-field org-guide-got';
+        said.textContent = `✓ ${mixLearnSay(got)}`;
+        logLine(`${step.target} ← ${mixLearnSay(got)}`);
+        await orgGuidePause();
+      } else {
+        said.textContent = 'skipped';
+      }
+    }
+    if (!ui.gone) {
+      count.textContent = 'your controller, onto the browser · done';
+      ask.textContent = bound
+        ? 'That is the browser on your controller. Turn the knob to try it.'
+        : 'Nothing was bound. Start it again from any song name while midi is armed.';
+      said.textContent = '';
+      skipBtn.remove(); // there is nothing left to skip
+      await closed;
+    }
+  } catch (e) {
+    // Started from a mousedown and never awaited, so a failed learn call would otherwise reject
+    // into nothing at all. It reports where everything else in this window reports.
+    logLine(e.message ?? String(e), true);
+    orgSay(e.message ?? String(e), true);
+  } finally {
+    orgGuiding = false;
+    // Learn mode stays armed across bindings by design, but leaving it armed here would mean the
+    // next click on a song name starts the whole session over instead of selecting the song.
+    if (mixLearnArmed) setMixLearn(false);
+    if (bound) orgSay(`${bound} control${bound === 1 ? '' : 's'} mapped`);
+  }
+}
+
+// Long enough to read the ✓ before the next question replaces it, short enough not to be a wait.
+const orgGuidePause = () => new Promise((res) => setTimeout(res, 600));
+
 function orgOnKey(e) {
   if (e.key === 'Escape') {
     if (!orgMenu.classList.contains('hidden')) return; // the menu's own handler takes it first
@@ -33140,8 +33647,8 @@ function orgPlaylistSubmenu(rows) {
     p.folder ? `in ${p.folder} · ${p.items.length} songs` : `${p.items.length} songs`,
   ]);
   if (items.length) items.push('-');
-  items.push(['new playlist…', () => {
-    const p = orgNewPlaylist();
+  items.push(['new playlist…', async () => {
+    const p = await orgNewPlaylist();
     if (p) orgAddRowsTo(p.id, rows);
   }]);
   return items;
@@ -33217,8 +33724,8 @@ function orgFolderAddSubmenu(row) {
   };
   const items = libDoc.playlists.map((p) => [p.name, () => add(p.id), `${p.items.length} songs`]);
   if (items.length) items.push('-');
-  items.push(['new playlist…', () => {
-    const p = orgNewPlaylist();
+  items.push(['new playlist…', async () => {
+    const p = await orgNewPlaylist();
     if (p) add(p.id);
   }]);
   return items;
@@ -33264,8 +33771,17 @@ function orgPlaylistMenu(p, x, y) {
   });
 }
 
-function orgNewPlaylist() {
-  const name = prompt('playlist name:')?.trim();
+/**
+ * A new, empty set. Asked for through the app's own dialog rather than native prompt(), which is
+ * unstyled where every other question poptart asks is not - and which the desktop shell does not
+ * implement at all. Resolves the playlist, or null if the dialog was cancelled.
+ */
+async function orgNewPlaylist() {
+  const name = await askText('A new playlist.', {
+    label: 'name',
+    confirm: 'create',
+    problem: (v) => (v ? null : 'a playlist needs a name'),
+  });
   if (!name) return null;
   const p = { id: libNewId(), name, items: [] };
   libDoc.playlists.push(p);
@@ -33457,6 +33973,7 @@ function buildOrganize() {
             <button id="orgUp" class="small" title="up one level">↑</button>
             <span id="orgWhere"></span>
             <em id="orgCount"></em>
+            <button id="orgFilter" class="small">filter</button>
             <span class="spacer"></span>
             <button id="orgClean" class="small hidden"></button>
             <button id="orgRescan" class="small hidden">rescan tags</button>
@@ -33523,6 +34040,11 @@ function buildOrganize() {
     }
     const cut = orgSrc.folder.lastIndexOf('/');
     orgGoto({ kind: 'livecode', folder: cut > 0 ? orgSrc.folder.slice(0, cut) : '' });
+  });
+  const filtBtn = orgEl.querySelector('#orgFilter');
+  filtBtn.addEventListener('click', () => {
+    const box = filtBtn.getBoundingClientRect();
+    orgFiltMenu(box.left, box.bottom + 2); // under the button, like a menu bar's
   });
   orgEl.querySelector('#orgImport').addEventListener('click', () => orgImportShown());
   orgEl.querySelector('#orgMeasure').addEventListener('click', () => {

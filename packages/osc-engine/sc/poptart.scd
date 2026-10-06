@@ -1271,6 +1271,16 @@ server.options.memSize = 262144;
 // than observed: the symptom would be `/s_new too many nodes`, which has not been seen - but it is
 // the same silent class as the memory above, and the table costs a few hundred KB.
 server.options.maxNodes = 8192;
+// ...and the wire buffers, scsynth's -w, whose default 64 is the third number of this kind. A
+// wire buffer is what one UGen hands its signal to the next through, and they are counted when a
+// SynthDef is RECEIVED: ask for more than exist and scsynth throws `exception in GraphDef_Recv:
+// exceeded number of interconnect buffers` and does NOT install the def. Nothing else says so -
+// the def is simply missing afterwards, and the first real sign is a Synth of it failing to be
+// created, which is the same silent class as the two numbers above. One of poptart's own library
+// defs has been losing that race at EVERY boot (found 2026-10-05, one line above "server booted,
+// ready" in engine.log), and the per-track defs grow with whatever chain the track is carrying,
+// so this is sized for the big end of both rather than for the def that happens to fail today.
+server.options.numWireBufs = 1024;
 // Private SuperCollider only. This becomes scsynth's -U, which REPLACES the default plugin
 // search rather than adding to it, so the list has to carry the SC build's own plugins folder
 // as well as poptart's Extensions - without the former there would be no SinOsc, let alone
@@ -1287,11 +1297,11 @@ if (ugenPlugins.notNil and: { ugenPlugins.isEmpty.not }) {
 // The allocations are in here too, and deliberately: an engine that has quietly come up on the
 // stock 8MB of real-time memory is one that will stop making sound partway through a set (see
 // memSize above), and this line is the only place that can be checked before it matters.
-"poptart: booting scsynth (device: %, sr: %, block: %, out: %ch, audible: %ch, in: %ch, rt mem: %MB, max nodes: %)".format(
+"poptart: booting scsynth (device: %, sr: %, block: %, out: %ch, audible: %ch, in: %ch, rt mem: %MB, max nodes: %, wire bufs: %)".format(
     if (outDevice.notNil and: { outDevice.isEmpty.not }) { outDevice } { "system default" },
     sampleRate, blockSize, server.options.numOutputBusChannels,
     max(2, min(playChannels, server.options.numOutputBusChannels)), inChannels,
-    (server.options.memSize / 1024).round, server.options.maxNodes
+    (server.options.memSize / 1024).round, server.options.maxNodes, server.options.numWireBufs
 ).postln;
 
 server.waitForBoot {
@@ -2888,7 +2898,15 @@ nodeFailId = { |msg|
 // is remembered so nothing else still in flight for it is sent. A failed /n_free needs neither -
 // it is the teardown saying the node had gone already, which is the whole message.
 OSCdef(\poptartServerFail, { |msg|
-    var cmd = msg[1].asString;
+    // SYMBOLS, not Strings, and that is not cosmetic. A /fail reply arrives as all symbols
+    // ('/fail', '/n_set', 'Node 2422 not found'), and Collection:includes compares by IDENTITY -
+    // so `#["/n_set"].includes("/n_set")` is FALSE, two equal Strings being two different
+    // objects. Spelled with Strings, the dispatch below matched nothing and the entire repair did
+    // nothing, in silence, through 14,222 failures on one set - the storm it was written to stop
+    // (found 2026-10-05, by lifting this OSCdef into a real server: see
+    // server-fail-reply-sclang.test.js, which now holds it to working). Symbols are interned, so
+    // identity IS the right comparison for them; `includesEqual` would be the other way out.
+    var cmd = msg[1].asSymbol;
     var reason = msg[2].asString;
     // Running out of room is checked FIRST and on every command: it is the one failure that is
     // about the server rather than about a node, it carries no node number to go looking for, and
@@ -2897,10 +2915,10 @@ OSCdef(\poptartServerFail, { |msg|
     if (room.notNil) {
         outOfRoom.(cmd, reason);
     } {
-        if (#["/n_set", "/n_setn", "/n_map", "/n_mapn"].includes(cmd)) {
+        if (#['/n_set', '/n_setn', '/n_map', '/n_mapn'].includes(cmd)) {
             nodeGone.(nodeFailId.(msg));
         } {
-            if (#["/u_cmd", "/s_new"].includes(cmd)) { nodeMissing.(cmd, nodeFailId.(msg)) };
+            if (#['/u_cmd', '/s_new'].includes(cmd)) { nodeMissing.(cmd, nodeFailId.(msg)) };
         };
     };
 }, '/fail', server.addr);

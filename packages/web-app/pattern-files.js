@@ -74,12 +74,24 @@ function wipFilePath(id) {
 // buffer is the one an eval leaves in force. Quoted numbers count (setbpm("140") is the same
 // call); a signal tempo ("<120 140>", an lfo) has no single native bpm and reads as null.
 // Derived at list time rather than stored anywhere, so it can never go stale against the file.
+//
+// A buffer that never calls setbpm at all is a different case from one that calls it with a
+// signal, and the two read differently: saying nothing is saying 120, because that is the tempo
+// the transport opens at and what the save would actually play at. The desk has always read it
+// that way (server.js, deckNativeBpm) - so the listing says 120 too rather than leaving the
+// explorer's tempo column blank for most of a livecode folder.
+const DEFAULT_BPM = 120; // the transport's own opening tempo (server.js, DEFAULT_CPS)
+const SETBPM_CALL_RE = /(?<![\w$.])setbpm\s*\(/;
+const SETBPM_NUMBER_RE = /(?<![\w$.])setbpm\s*\(\s*["']?(\d+(?:\.\d+)?)["']?\s*\)/g;
+
 function nativeBpmOf(code) {
+  const src = String(code);
   let bpm = null;
-  for (const m of String(code).matchAll(/(?<![\w$.])setbpm\s*\(\s*["']?(\d+(?:\.\d+)?)["']?\s*\)/g)) {
-    bpm = Number(m[1]);
-  }
-  return bpm;
+  for (const m of src.matchAll(SETBPM_NUMBER_RE)) bpm = Number(m[1]);
+  if (bpm != null) return bpm;
+  // No plain number anywhere: either the buffer declares no tempo (120) or every declaration it
+  // makes is a signal, which has no single number to report.
+  return SETBPM_CALL_RE.test(src) ? null : DEFAULT_BPM;
 }
 
 function readIfSmall(file) {

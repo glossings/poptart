@@ -44,7 +44,7 @@ function grabFn(name) {
 
 // eslint-disable-next-line no-new-func
 const make = new Function('songDecks', 'transport', 'songSync', 'mixState', 'othersPlaying',
-  'songApplyRate', 'master0', 'octave0', `
+  'songApplyRate', 'deckRunning', 'master0', 'octave0', `
     let songMasterDeck = master0;
     let songMasterOctave = octave0;
     ${NAMES.map(grabFn).join('\n')}
@@ -55,17 +55,21 @@ const make = new Function('songDecks', 'transport', 'songSync', 'mixState', 'oth
     };
   `);
 
-/** A desk: `clock` bpm, a song on each deck, and whichever deck currently holds the grid. */
-function desk({ clock = 128, a = null, b = null, master = null, octave = 1 } = {}) {
+/**
+ * A desk: `clock` bpm, a song on each deck, and whichever deck currently holds the grid.
+ * `running` is the decks playing CODE, and `dj` whether the mixer is open (mixState.dj).
+ */
+function desk({ clock = 128, a = null, b = null, master = null, octave = 1, running = [], dj = false } = {}) {
   const songDecks = { a, b };
   const applied = [];
   const api = make(
     songDecks,
     { cps: clock / 240 },
     songSync,
-    { tempoOverride: null },
+    { tempoOverride: null, dj },
     () => true, // something is always sounding in these fixtures
     (d) => applied.push(d),
+    (d) => running.includes(d),
     master,
     octave,
   );
@@ -152,4 +156,46 @@ test('the grid is handed over from every place a deck stops being one that plays
     assert.match(grabFn(fn), /songHandGridOver\(deck\)/,
       `${fn} must hand the grid over - a stopped deck cannot keep holding the clock`);
   }
+});
+
+// --- dj mode: setbpm is metadata there (2026-10-05) -------------------------------------------
+//
+// The newcomer rule above - held when somebody ELSE is playing to the clock and the deck asking
+// is not - left one hole, and it was the hole the report came through. A livecode track loaded
+// onto a deck and STARTED is playing to the clock by the time its setbpm() is read, so it took
+// the exemption written for livecoding a tempo change and re-rated the record on the other deck
+// audibly. In dj mode the clock is the desk's outright: a buffer's setbpm() declares the deck's
+// native tempo - what the migration slider and the detents ride to - and never moves the room.
+//
+// The server cannot infer the mode, so the mixer reports it (POST /api/mix/dj -> mixState.dj):
+// a deck can be loaded and playing in ordinary single-deck livecoding too, and there setbpm has
+// to go on driving the transport exactly as it always has. Both halves are pinned here.
+
+test('in dj mode the desk holds the clock, so a deck that is itself playing may not move it', () => {
+  const held = desk({ dj: true, running: ['a'] });
+  assert.equal(held.clockHeldByDesk('a'), true);
+  // The same desk with the mixer shut is ordinary livecoding: re-evaluating the deck you are
+  // playing, with a new setbpm in it, is a tempo gesture and still drives the clock.
+  const free = desk({ dj: false, running: ['a'] });
+  assert.equal(free.clockHeldByDesk('a'), false);
+});
+
+test('dj mode holds it against a deck with nothing of its own playing, too', () => {
+  // Nothing is running on either deck - no grid master, no migration. Outside dj mode that is
+  // the one state where a buffer is free to say what the tempo is.
+  assert.equal(desk({ dj: true }).clockHeldByDesk('a'), true);
+  assert.equal(desk({ dj: false }).clockHeldByDesk('a'), false);
+});
+
+test('outside dj mode the newcomer rule still stands on its own', () => {
+  const d = desk({ dj: false, running: ['b'] });
+  assert.equal(d.clockHeldByDesk('a'), true, 'deck a is the newcomer: the clock is not its to move');
+  assert.equal(d.clockHeldByDesk('b'), false, 'deck b is the one playing to it, and may still change it');
+});
+
+test('dj mode holds the clock against callers with no deck in hand, Link included', () => {
+  // clockHeldByDesk() with no deck is Link's adopt check. In dj mode it stops adopting: a peer
+  // snapping the tempo mid-set would re-rate the playing record, which is the same harm.
+  assert.equal(desk({ dj: true }).clockHeldByDesk(), true);
+  assert.equal(desk({ dj: false }).clockHeldByDesk(), false);
 });

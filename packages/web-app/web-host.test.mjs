@@ -474,6 +474,9 @@ test('every path the editor asks for is one the host has an answer for', () => {
     // deck heads (hidden outside mix mode), the FX unit in the mix strip
     'POST /api/arrangeLoops', 'POST /api/mix/decktempo', 'POST /api/mix/loop', 'POST /api/mix/fx', 'POST /api/mix/fxchain',
     'POST /api/mix/feedback',
+    // ...and the mode itself, which this build never enters (openMixMode refuses it), so the
+    // tempo rule it switches on - setbpm as metadata - can never come up here either.
+    'POST /api/mix/dj',
     // The library browser's disk source - the intake - is not drawn here and is refused at
     // orgGoto, so there is no way to produce a disk path. That makes the TRACK COLLECTION
     // unreachable too (it is the disk's), so its source row is not drawn either and everything

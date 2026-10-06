@@ -247,10 +247,19 @@ ${SAY('emptySlot', 'slotLive.(tracks[\\kick], 1)')}
 test('the repairable family and the attributable family are kept apart', () => {
   const src = fs.readFileSync(SCD, 'utf8');
   const at = src.indexOf('OSCdef(\\poptartServerFail');
-  const body = src.slice(at, src.indexOf('}, \'/fail\'', at));
-  assert.match(body, /includes\(cmd\)\) \{\s*nodeGone\./s, '/n_set is repaired');
-  assert.match(body, /"\/u_cmd", "\/s_new".*nodeMissing/s, '/u_cmd and /s_new are attributed');
-  assert.ok(!body.includes('"/n_free"'), 'a failed /n_free is the teardown saying so, and needs neither');
+  // Comments stripped first: poptart.scd explains the identity trap below in prose directly above
+  // the code that avoids it, and a bare text search finds the explanation and calls it the bug.
+  const code = src.slice(at, src.indexOf('}, \'/fail\'', at)).replace(/\/\/[^\n]*/g, '');
+  assert.match(code, /includes\(cmd\)\) \{\s*nodeGone\./s, '/n_set is repaired');
+  assert.match(code, /'\/u_cmd', '\/s_new'.*nodeMissing/s, '/u_cmd and /s_new are attributed');
+  assert.ok(!/['"]\/n_free['"]/.test(code), 'a failed /n_free is the teardown saying so, and needs neither');
+  // ...and both families spelled as SYMBOLS. Collection:includes compares by IDENTITY, so a
+  // String literal array matches nothing however equal it looks, and the whole responder becomes
+  // a silent no-op - which is what it was, through 14,222 failures, until 2026-10-05. Pinned here
+  // in the text as well as at runtime (server-fail-reply-sclang.test.js) because the text is
+  // where it is easy to write it back the wrong way round.
+  assert.ok(!/#\["/.test(code), 'a String literal array can never match here: includes is identity');
+  assert.match(code, /msg\[1\]\.asSymbol/, 'the command name arrives as a Symbol and is compared as one');
 });
 
 // --- the server running out of room ------------------------------------------------------------

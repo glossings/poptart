@@ -167,6 +167,13 @@ function noteProtoOwnership(deck) {
 // AMOUNT, deliberately a control of its own - see the DJ stage in sc/poptart.scd.
 const DJ_NEUTRAL = { trim: 1, eqlo: 1, eqmid: 1, eqhi: 1, djf: 0, djres: 0, fader: 1, deck: 1, cue: 0 };
 const mixState = {
+  // Dj mode, as the CLIENT reports it (POST /api/mix/dj): the mixer is open and the decks are
+  // being played as decks. While it is on the clock belongs to the DESK - whichever deck took
+  // the grid, the tempo sliders, the detents - and setbpm() is metadata (see clockHeldByDesk).
+  // The server cannot infer this and must be told: a deck can be loaded and playing in ordinary
+  // single-deck livecoding too, where setbpm() has to go on driving the transport as it always
+  // has. Off at startup, so a server that never hears from a mixer behaves exactly as before.
+  dj: false,
   swap: false, // swap mode: gating a stem in throws the SAME-NAMED stem on the other deck out
   // Solo, per deck: the SET of soloed stems (cmd+click a gate; cmd+shift+click adds another) and
   // the faders as they stood before the first solo, restored when the last soloed stem leaves -
@@ -1295,8 +1302,17 @@ function deckLoopState(deck) {
  * re-evaluating the deck you are playing, and that has to go on working. So the rule is: held
  * when somebody ELSE is playing to the clock and the deck asking is not. Callers with no deck in
  * hand (Link's adopt) get the first two answers only, as they always did.
+ *
+ * ...and in DJ MODE the desk holds it outright, whoever is asking and whatever is playing. A
+ * track's setbpm() there is metadata - the deck's native tempo, which is what it would play at
+ * loaded on its own, and what the migration slider and the detents ride to - never a move on the
+ * room's tempo. The newcomer rule above was not enough on its own: a livecode track loaded onto
+ * a deck and STARTED is playing to the clock by the time its setbpm is read, so it passed the
+ * `deckRunning(forDeck)` test and re-rated the record on the other deck (reported 2026-10-05,
+ * the second time). Mixing is not the moment to let a buffer argue about tempo.
  */
 function clockHeldByDesk(forDeck = null) {
+  if (mixState.dj) return true;
   if (mixState.tempoOverride != null) return true;
   if (songMasterDeck != null && !!songDecks[songMasterDeck]?.playing) return true;
   if (!forDeck || deckRunning(forDeck)) return false;
@@ -1445,7 +1461,24 @@ const MIX_MIDI_DECK_CTLS = [...MIX_MIDI_KNOBS, ...MIX_MIDI_HOLD, ...MIX_MIDI_PRE
 // The FX unit's controls carry no deck prefix - the unit is one shared thing with an assign
 // switch, like the crossfader. fxon latches, fxhold sounds it only while held (the two pad
 // flavors hardware has); fxnext/fxprev step the chain list; fxknob is the unit's knob (`fx1`).
-const MIX_MIDI_GLOBAL_PRESS = ['fxon', 'fxnext', 'fxprev', 'fxassign'];
+// --- the library browser's controls -----------------------------------------------------------
+//
+// Browsing is the BROWSER's: the sources, the sets, the table and its selection all live in the
+// page, so not one of these can be acted on from here. They are learned here like every other
+// control and forwarded as `action` frames (see mixActionNotify) - the road `next`/`prev` and a
+// code deck's play button already take.
+//
+// Four buttons and one knob, which is what it takes to work the browser with no keyboard:
+//   browse        the knob - one row per tick, and the SIDEBAR's sources when browsesource
+//                 has handed it over
+//   browseload    the highlighted row onto the active deck
+//   browsefilter  the tempo filter on and off
+//   browsesource  hands the knob to the sidebar, and takes it back. This is what "up a level"
+//                 is on a controller: there is no folder button, deliberately
+//   browseopen    opens and closes the window itself
+const MIX_MIDI_BROWSE_PRESS = ['browseload', 'browsefilter', 'browsesource', 'browseopen'];
+
+const MIX_MIDI_GLOBAL_PRESS = ['fxon', 'fxnext', 'fxprev', 'fxassign', ...MIX_MIDI_BROWSE_PRESS];
 const MIX_MIDI_GLOBAL_HOLD = ['fxhold'];
 // `fxassign` above is the one-BUTTON form: a press cycles A -> A+B -> B, which is what a surface
 // with a single assign pad can drive. A surface with a three-position SWITCH cannot: it sends a
@@ -1453,8 +1486,8 @@ const MIX_MIDI_GLOBAL_HOLD = ['fxhold'];
 // the switch cycled the unit onto whatever came next instead of the deck printed on the switch.
 // These are that switch - one target per position, each saying absolutely where the unit goes.
 const MIX_MIDI_FX_POS = { fxassigna: 'a', fxassignb: 'b', fxassignab: 'ab' };
-const MIX_MIDI_GLOBAL = new Set(['xf', 'fxknob', ...MIX_MIDI_GLOBAL_PRESS, ...MIX_MIDI_GLOBAL_HOLD,
-  ...Object.keys(MIX_MIDI_FX_POS)]);
+const MIX_MIDI_GLOBAL = new Set(['xf', 'fxknob', 'browse', ...MIX_MIDI_GLOBAL_PRESS,
+  ...MIX_MIDI_GLOBAL_HOLD, ...Object.keys(MIX_MIDI_FX_POS)]);
 const MIX_MIDI_TARGETS = new Set([...MIX_MIDI_GLOBAL,
   ...['a', 'b'].flatMap((d) => MIX_MIDI_DECK_CTLS.map((c) => `${d}:${c}`))]);
 let mixMidiLearn = null; // { target, finish, timer } while a learn long-poll is armed
@@ -1779,6 +1812,15 @@ function mixMidiApply(target, value) {
       mixFxSet({ knob: value });
       return;
     }
+    // The browse knob: a rotary encoder, read with the platter's own 64-centered convention (65
+    // is one tick on, 63 one back, and a fast spin carries further). Relative because a browse
+    // encoder has no ends - the list does, and where you are in it is the page's business, not
+    // this knob's. Forwarded raw as a tick count; the browser decides what a tick moves.
+    if (target === 'browse') {
+      const ticks = Math.round(value * 127) - 64;
+      if (ticks) mixActionNotify(null, 'browse', ticks);
+      return;
+    }
     // A switch POSITION, which is a state and not a press: the message says where the switch is,
     // so it is applied whenever it arrives and never edge-detected. A surface that re-sends the
     // position it is already in (and one that sends no note-off when the switch leaves a
@@ -1792,6 +1834,8 @@ function mixMidiApply(target, value) {
     mixMidiDown.set(target, down);
     if (target === 'fxhold') mixFxSet({ held: down });
     else if (!down) { /* press pads act on the press edge only */ }
+    // The browser's pads: the page owns the window, the selection and the active deck.
+    else if (MIX_MIDI_BROWSE_PRESS.includes(target)) mixActionNotify(null, target);
     else if (target === 'fxon') mixFxSet({ on: !mixState.fx.on });
     else if (target === 'fxassign') mixFxSet({ assign: FX_ASSIGNS[(FX_ASSIGNS.indexOf(mixState.fx.assign) + 1) % FX_ASSIGNS.length] });
     else {
@@ -1896,9 +1940,14 @@ function mixMidiButton(deck, name, down) {
 // The press edges the server can't act on itself (see the note at the top of this section),
 // pushed to the browser on the desk channel as a named frame. Not coalesced the way mixNotify
 // is: these are discrete presses, and dropping one loses a song change.
-function mixActionNotify(deck, action) {
+/**
+ * One press edge (or one knob tick) the server cannot act on itself, handed to the page. `deck`
+ * is null for the controls that belong to no deck - the library browser's, which act on the
+ * window and on whichever deck is active there. `value` rides along for the continuous ones.
+ */
+function mixActionNotify(deck, action, value = null) {
   if (!mixEventClients.size) return;
-  const frame = `event: action\ndata: ${JSON.stringify({ deck, action })}\n\n`;
+  const frame = `event: action\ndata: ${JSON.stringify({ deck, action, value })}\n\n`;
   for (const res of mixEventClients) res.write(frame);
 }
 
@@ -2138,6 +2187,7 @@ function mixDeskBody() {
   // before the frame goes out. The paused branch of songApplyRate never notifies back.
   for (const d of ['a', 'b']) if (songDecks[d] && !songDecks[d].playing) songApplyRate(d);
   return {
+    dj: mixState.dj,
     swap: mixState.swap,
     // A solo whose stem has since gone (re-eval dropped it, the song unloaded) reads as none.
     solo: { a: [...mixState.solo.a].filter(isMixKey), b: [...mixState.solo.b].filter(isMixKey) },
@@ -6508,8 +6558,9 @@ const routes = {
         }
         sawSetbpm = true;
         decks[deck].bpm = v;
-        // While the desk holds the clock - a tempo migration, or a song deck playing as grid
-        // master - even the main deck's setbpm only RECORDS. See clockHeldByDesk.
+        // While the desk holds the clock - dj mode, a tempo migration, a song deck playing as
+        // grid master, the other deck playing code - even the main deck's setbpm only RECORDS,
+        // and the line above is the whole of what it did. See clockHeldByDesk.
         return deck === 'a' && !clockHeldByDesk(deck) ? declareTempo(value, v) : TEMPO_BLOCK;
       },
     };
@@ -7969,6 +8020,15 @@ const routes = {
 
   // A deck's tempo slider / range switch (see deckTempoApply for what it drives per deck kind).
   // Body: { deck, frac? (-1..1, + = faster), range? (6|10|16|100) }.
+  // Dj mode on and off, as the mixer reports it when it opens and closes (see mixState.dj).
+  // Body: { on }. Turning it OFF does not move the clock: the tempo the desk left in force is
+  // the one the room is dancing to, and deck a's next eval drives it again as it always does.
+  'POST /api/mix/dj': async (body) => {
+    mixState.dj = !!body.on;
+    mixNotify();
+    return { status: 200, body: { dj: mixState.dj } };
+  },
+
   'POST /api/mix/decktempo': async (body) => {
     if (!transport) throw new Error(engineError ?? 'engine not loaded');
     const deck = body.deck === 'b' ? 'b' : 'a';

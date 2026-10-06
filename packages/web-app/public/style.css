@@ -2053,7 +2053,7 @@ li.CodeMirror-hint-active {
 .web-build #sampleMapBtn,
 .web-build #orgDiskSource,
 .web-build #orgTracksSource,
-.web-build #orgRelatedSource {
+.web-build #orgFilter {
   display: none;
 }
 
@@ -5935,6 +5935,27 @@ body.mix-on #deckAHead .deck-song {
 #orgClean {
   flex: none;
   white-space: nowrap;
+}
+
+/* The filter button. Its label says what the filter is set to, so it changes width as the filter
+   does - hence a width of its own, and a place LEFT of the bar's spacer: the spacer takes up the
+   slack, and nothing in the bar moves when the filter is switched. */
+#orgFilter {
+  flex: none;
+  width: 92px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#orgFilter.on {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+/* The guided mapping session's feedback line, when a control has just bound (orgMidiGuide). The
+   dialog's own dim line otherwise - this says only that the last question was answered. */
+.org-guide-got {
+  color: var(--ok);
 }
 
 /* --- the table --- */

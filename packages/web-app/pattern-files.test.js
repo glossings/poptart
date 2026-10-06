@@ -243,10 +243,19 @@ test('nativeBpmOf reads the last plain-number setbpm, quoted or not', () => {
   assert.equal(nativeBpmOf('setbpm(120)'), 120);
   assert.equal(nativeBpmOf('setbpm(120)\nsetbpm("140")'), 140, 'the last one is the one an eval leaves in force');
   assert.equal(nativeBpmOf('setbpm(87.5)'), 87.5);
-  assert.equal(nativeBpmOf('kick: s("bd*4")'), null, 'no tempo declared');
+});
+
+// Declaring nothing is declaring 120: that is the tempo the transport opens at, so it is what
+// the save plays at, and it is what the desk has always read a silent buffer as (deckNativeBpm).
+// Only a SIGNAL tempo is unknown - there is no single number to report for it.
+test('a buffer that never says a tempo reads as 120, and a signal tempo as unknown', () => {
+  assert.equal(nativeBpmOf('kick: s("bd*4")'), 120, 'no tempo declared is the default tempo');
+  assert.equal(nativeBpmOf(''), 120);
   assert.equal(nativeBpmOf('setbpm("<120 140>")'), null, 'a signal tempo has no single native bpm');
-  assert.equal(nativeBpmOf('mysetbpm(99)'), null, 'someone else\'s function is not a tempo');
-  assert.equal(nativeBpmOf('x.setbpm(99)'), null, 'a method is not the host builder');
+  assert.equal(nativeBpmOf('setbpm(lfo(0.1).range(120, 140))'), null);
+  // Someone else's function is not a tempo declaration, so these buffers declare nothing at all.
+  assert.equal(nativeBpmOf('mysetbpm(99)'), 120, 'someone else\'s function is not a tempo');
+  assert.equal(nativeBpmOf('x.setbpm(99)'), 120, 'a method is not the host builder');
 });
 
 test('listings carry the native bpm', () => {
