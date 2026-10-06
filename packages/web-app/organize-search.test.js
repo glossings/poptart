@@ -51,7 +51,7 @@ const FNS = ['orgRowMatches', 'orgRowCompare', 'orgSavedRow', 'orgTrackRow', 'or
   'orgBpmText', 'pathBasename'];
 
 // eslint-disable-next-line no-new-func
-const makeOrg = new Function('orgQuery', 'orgSongs', 'songFileExists', `
+const makeOrg = new Function('orgQuery', 'orgSongs', 'songFileExists', 'libDoc', `
   ${grabArrow('stripExt')}
   ${grabArrow('libItemIsFile')}
   ${grabArrow('libFileTitle')}
@@ -68,7 +68,8 @@ const SAVED = [
 ];
 
 // `orgQuery` is already trimmed and lowercased where it is set, so tests pass it that way.
-const org = (q = '', exists = {}) => makeOrg(q, SAVED, exists);
+// `saves` is the library's per-save map, which is where a livecode save's stars live.
+const org = (q = '', exists = {}, saves = {}) => makeOrg(q, SAVED, exists, { saves });
 const file = (p, extra = {}) => ({ kind: 'file', path: p, ...extra });
 
 // --- the search ------------------------------------------------------------------------------
@@ -634,4 +635,77 @@ test('a field with nothing to start from counts as changed once something is typ
     { fields: { artist: 'Karenn' }, refused: '' });
   assert.deepEqual(orgEditChanges([{ field: 'artist', text: '' }], {}).fields, {},
     'blank over blank is still untouched');
+});
+
+// --- a livecode save's stars ---------------------------------------------------------------------
+//
+// A save says almost everything about itself in its own source - @title, @tags, its setbpm - and a
+// rating is the one thing it cannot: writing stars into somebody's code is not on. So they live in
+// the library keyed by the save's name, which is also what makes them show up in a playlist beside
+// an imported track's. Until this existed the star column was simply blank for every save.
+
+test('a save wears the rating the library holds for it, by name', () => {
+  const o = org('', {}, { damson: { rating: 4 }, 'techno/stomper': { rating: 2 } });
+  assert.equal(o.orgSavedRow(SAVED[0]).rating, 4);
+  assert.equal(o.orgSavedRow(SAVED[2]).rating, 2, 'keyed by the FULL name, folder included');
+  assert.equal(o.orgSavedRow(SAVED[1]).rating, null, 'an unrated save is unrated, not zero');
+});
+
+test('...and so does a set\'s own row for that save', () => {
+  const o = org('', {}, { damson: { rating: 5 }, 'techno/stomper': { rating: 1 } });
+  assert.equal(o.orgItemRow('damson', 0).rating, 5);
+  assert.equal(o.orgItemRow('techno/stomper', 1).rating, 1);
+  assert.equal(o.orgItemRow('gone-song', 2).rating, null, 'a save that is missing has no stars');
+});
+
+test('a library with no saves map at all is not an error', () => {
+  // Any library written before this existed, and the very first run.
+  const bare = makeOrg('', SAVED, {}, {});
+  assert.equal(bare.orgSavedRow(SAVED[0]).rating, null);
+  const nothing = makeOrg('', SAVED, {}, null);
+  assert.equal(nothing.orgSavedRow(SAVED[0]).rating, null);
+});
+
+test('the livecode page shows the star column, and offers it', () => {
+  const view = (() => {
+    const src = fs.readFileSync(path.join(__dirname, 'public', 'client.js'), 'utf8');
+    const at = src.indexOf('  livecode: {');
+    assert.ok(at > 0, 'the livecode view is not in ORG_VIEWS - this test needs updating');
+    return src.slice(at, src.indexOf('\n  },', at));
+  })();
+  assert.match(view, /cols: \[[^\]]*'rating'/, 'the column is drawn');
+  assert.match(view, /offer: \[[^\]]*'rating'/, 'and can be turned back on if it is hidden');
+});
+
+// --- what a double-click means, and who can wear stars -------------------------------------------
+
+test('a double-click inside a set does not drop a second copy into it', () => {
+  // The row is already in the set being looked at, so there is nothing to add it to. It used to
+  // call orgAddSelectionToLast and put the same song in the same playlist twice.
+  const open = SRC.indexOf('function orgRowOpen(');
+  const body = SRC.slice(open, SRC.indexOf('\n}', open) + 2);
+  assert.match(body, /if \(orgSrc\.kind === 'playlist'\) return;/,
+    'a playlist row has to bail before the add');
+  assert.ok(body.indexOf("orgSrc.kind === 'playlist'") < body.indexOf('orgAddSelectionToLast'),
+    'the bail has to come BEFORE the add, or the copy still lands');
+});
+
+test('the star cell draws for a save as well as for an imported track', () => {
+  // Guarding on trackId alone gave every livecode save a star column with no stars in it.
+  const at = SRC.indexOf('function orgFillRatingCell(');
+  const body = SRC.slice(at, SRC.indexOf('\n}', at) + 2);
+  assert.match(body, /!row\.trackId && !\(row\.kind === 'saved' && row\.saveName\)/,
+    'the cell still bails on anything without a track record');
+  assert.doesNotMatch(body, /^\s*if \(!row\.trackId\) return;$/m,
+    'the trackId-only guard is what blanked the saves');
+});
+
+test('rating a selection writes a save by name and a track by id', () => {
+  const at = SRC.indexOf('async function orgRate(');
+  const body = SRC.slice(at, SRC.indexOf('\n}', at) + 2);
+  assert.match(body, /r\.kind === 'saved' && r\.saveName/, 'saves are collected by name');
+  assert.match(body, /libDoc\.saves\[name\] = \{ rating \}/, '...and written into the library');
+  assert.match(body, /delete libDoc\.saves\[name\]/, '...and cleared, not set to zero');
+  assert.match(body, /'\/api\/library\/track', \{ ids, fields: \{ rating \} \}/,
+    'a track still goes through the route that marks it hand-typed');
 });

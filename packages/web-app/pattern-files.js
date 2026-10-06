@@ -416,9 +416,22 @@ function normalizeLibrary(doc) {
       return list;
     });
   const active = playlists.some((p) => p.id === src.active) ? src.active : null;
+  // Per-SAVE facts, keyed by the save's own name ("techno/stomper"). A livecode save says almost
+  // everything about itself in its own source - @title, @tags, its setbpm - and that is the rule
+  // this is the one exception to: a rating is not something to write into somebody's code, and a
+  // star you cannot put on a save is a star missing from half the browser. Only ratings live here
+  // today; anything a FILE can say for itself still belongs in the file.
+  const saves = {};
+  const rawSaves = src.saves && typeof src.saves === 'object' ? src.saves : {};
+  for (const [name, held] of Object.entries(rawSaves)) {
+    const rating = Math.round(Number(held?.rating));
+    // An entry that says nothing is not kept, so clearing a rating empties the map rather than
+    // leaving a litter of {} behind.
+    if (Number.isFinite(rating) && rating >= 1 && rating <= 5) saves[String(name)] = { rating };
+  }
   // A collection nobody references is still the collection: imported tracks are kept whether or
   // not a set happens to name them, which is the whole point of importing rather than queueing.
-  return { version: 2, tracks: index.tracks, playlists, active };
+  return { version: 2, tracks: index.tracks, playlists, active, saves };
 }
 
 /**

@@ -707,11 +707,11 @@ test('both edges of a code deck\'s cue are forwarded, because the hold IS the ge
 
 test('the browser side runs both halves of it', () => {
   // Source-shape, since this half is a DOM gesture: what matters is that the release is wired at
-  // all and that it restores what the press found rather than assuming the deck was idle.
+  // all, and that the press remembers the HEADPHONE state it found so the release restores it.
   assert.match(CLIENT, /action === 'cue'\) deckCuePress\(deck, true\)/);
   assert.match(CLIENT, /action === 'cueoff'\) deckCuePress\(deck, false\)/);
-  assert.match(CLIENT, /const was = \{ playing: !!deckPlayingNow\[deck\], cued: mixCueOn\(deck\), started: null \}/,
-    'the press has to remember what it found, or the release leaves the deck wrong');
+  assert.match(CLIENT, /const was = \{ cued: mixCueOn\(deck\), started: null \}/,
+    'the press has to remember the headphone send, or the release leaves it on');
   // The release must not re-check the live mirror: it arrives on an SSE frame, so on a quick
   // press it still reads "not playing" when the finger comes up and the stop gets skipped.
   assert.doesNotMatch(CLIENT, /!was\.playing && deckPlayingNow\[deck\]/,
@@ -720,6 +720,26 @@ test('the browser side runs both halves of it', () => {
   assert.match(CLIENT, /\(was\.started \?\? Promise\.resolve\(\)\)\.then\(\(\) => djCueStop\(deck\)\)/);
   assert.match(CLIENT, /'\/api\/stop', \{ deck, hush: true \}/,
     'an audition that rings on after the finger is up is not an audition');
+});
+
+// A cue press returns a player to its cue point whether or not it was running, and releasing
+// leaves it stopped there - so a quick tap is how a track is ENDED, which is what the gesture is
+// for on a standard player. A code deck used to do nothing at all when it was already playing, so there was
+// no way to end one from the controller (reported 2026-10-05). A song deck has always done this
+// server-side, in songCue.
+test('cue takes a code deck back to the top whether or not it was already playing', () => {
+  // Unconditional: the press no longer branches on what the deck was doing, because the answer
+  // is the same either way - back to zero, playing while held.
+  assert.doesNotMatch(CLIENT, /if \(!was\.playing\) was\.started/,
+    'the press still skips the restart for a playing deck - tapping cue would do nothing');
+  assert.match(CLIENT, /was\.started = djCueRestart\(deck\)/);
+  // ...and "back to the top" for a pattern deck is a stop and THEN an evaluate: re-evaluating a
+  // playing buffer reprograms it in place and deliberately leaves the clock where it is.
+  const restart = CLIENT.slice(CLIENT.indexOf('async function djCueRestart('));
+  const body = restart.slice(0, restart.indexOf('\n}') + 2);
+  assert.match(body, /await djCueStop\(deck\);/, 'nothing resets the clock without the stop');
+  assert.ok(body.indexOf('djCueStop') < body.indexOf('evalDeckB'),
+    'the stop has to come first, or the evaluate is undone by it');
 });
 
 // --- learning a multi-position switch in one sweep --------------------------------------------

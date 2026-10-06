@@ -267,9 +267,10 @@ test('listings carry the native bpm', () => {
 // --- the library (playlists; one library.json beside the pattern files) ---
 
 test('an empty or unreadable library reads as an empty one', () => {
-  assert.deepEqual(readLibrary(), { version: 2, tracks: [], playlists: [], active: null });
+  const empty = { version: 2, tracks: [], playlists: [], active: null, saves: {} };
+  assert.deepEqual(readLibrary(), empty);
   write('library.json', 'not json at all {');
-  assert.deepEqual(readLibrary(), { version: 2, tracks: [], playlists: [], active: null });
+  assert.deepEqual(readLibrary(), empty);
 });
 
 test('writeLibrary normalizes and round-trips', () => {

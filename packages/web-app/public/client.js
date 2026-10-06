@@ -31370,27 +31370,44 @@ function deckCuePress(deck, down) {
   if (!mixModeOn || songPanes[deck].song) return; // a deck holding a file cues server-side
   if (down) {
     if (djCueHeld[deck]) return; // a pad restating itself is not a second press
-    const was = { playing: !!deckPlayingNow[deck], cued: mixCueOn(deck), started: null };
+    const was = { cued: mixCueOn(deck), started: null };
     djCueHeld[deck] = was;
     if (!was.cued) mixSetCue(deck, true);
     // The start is held onto, because it is slower than the gesture: evaluating a buffer is a
     // round trip, and a release that arrived while it was in flight used to post its stop FIRST
     // and have the deck start right after it - a cue that plays on and on with nothing held.
-    if (!was.playing) was.started = Promise.resolve(deckPlayPress(deck)).catch(() => {});
+    was.started = djCueRestart(deck).catch(() => {});
   } else {
     const was = djCueHeld[deck];
     if (!was) return;
     djCueHeld[deck] = null;
     // Out of the headphones at once - that half needs nothing from the server.
     if (!was.cued) mixSetCue(deck, false);
-    if (!was.playing) {
-      // Unconditional, and NOT guarded on deckPlayingNow: that mirror is fed by the desk's SSE
-      // frame, so on a quick press it still says "not playing" when the finger comes up and the
-      // stop was being skipped - which is the other half of the same bug. What the press found is
-      // what the release undoes.
-      (was.started ?? Promise.resolve()).then(() => djCueStop(deck));
-    }
+    // Unconditional, and NOT guarded on deckPlayingNow: that mirror is fed by the desk's SSE
+    // frame, so on a quick press it still says "not playing" when the finger comes up and the
+    // stop was being skipped.
+    (was.started ?? Promise.resolve()).then(() => djCueStop(deck));
   }
+}
+
+/**
+ * A code deck back to the top, playing - the press half of cue.
+ *
+ * A cue press on a player ALWAYS returns to the cue point, whether or not the deck was running,
+ * and releasing leaves it stopped there; a quick tap is therefore how a track is ended, which is
+ * what the gesture is there for on a standard player. A song deck has done this all along (songCue, server-side);
+ * a code deck used to do nothing at all when it was already playing, so there was no way to end
+ * one from the controller.
+ *
+ * For a pattern deck "back to the beginning" is the clock back at zero, which an evaluate alone
+ * will not do: re-evaluating a PLAYING buffer reprograms it in place and deliberately leaves the
+ * clock running, because that is what livecoding is. So it is a stop and then an evaluate. The
+ * stop is unconditional - stopping an already-stopped deck is a no-op, and deckPlayingNow is the
+ * SSE mirror, which on a fast tap still says "not playing" when the press arrives.
+ */
+async function djCueRestart(deck) {
+  await djCueStop(deck);
+  return deck === 'b' ? evalDeckB(true) : evaluate(true, { byHand: true });
 }
 
 /** The stop a cue release wants: this deck only, and its voices with it rather than ringing on. */
@@ -31808,8 +31825,8 @@ const ORG_COLUMNS = {
 // livecode save has no artist and no record to carry a rating, so neither is on the menu there.
 const ORG_VIEWS = {
   livecode: {
-    cols: ['name', 'folder', 'bpm', 'tags', 'saved'],
-    offer: ['name', 'folder', 'bpm', 'tags', 'saved'],
+    cols: ['name', 'folder', 'bpm', 'rating', 'tags', 'saved'],
+    offer: ['name', 'folder', 'bpm', 'rating', 'tags', 'saved'],
     sort: 'saved',
     dir: -1,
   },
@@ -31957,6 +31974,9 @@ function orgSavedRow(s) {
     kind: 'saved',
     name: s.folder ? s.name.slice(s.folder.length + 1) : s.name,
     savedTitle: (s.title ?? '').trim(),
+    // A save's own source says everything else about it; its stars cannot live there, so they
+    // live in the library keyed by the save's name (see normalizeLibrary).
+    rating: libDoc?.saves?.[s.name]?.rating ?? null,
     folder: s.folder ?? '',
     bpm: s.bpm ?? null,
     tags: s.tags ?? [],
@@ -32013,6 +32033,7 @@ function orgItemRow(item, at) {
     // recorded when the save itself is gone, which is all there is left to say.
     name: cut > 0 ? String(item).slice(cut + 1) : String(item),
     savedTitle: (s?.title ?? '').trim(),
+    rating: libDoc?.saves?.[String(item)]?.rating ?? null,
     folder: cut > 0 ? String(item).slice(0, cut) : '',
     bpm: s?.bpm ?? null,
     tags: s?.tags ?? [],
@@ -33136,7 +33157,11 @@ async function orgCommitEdit() {
  * track rated in one playlist is rated in every other and in the collection.
  */
 function orgFillRatingCell(td, row) {
-  if (!row.trackId) return;
+  // Either kind can be rated and orgRate knows where each one's stars go - a track's onto its
+  // record, a save's into the library's per-save map. Anything else (a folder, a file not
+  // imported yet) has nowhere to keep one, so its cell stays empty. Guarding on trackId alone
+  // left every livecode save with a star column and no stars in it.
+  if (!row.trackId && !(row.kind === 'saved' && row.saveName)) return;
   const n = row.rating ?? 0;
   const stars = document.createElement('span');
   stars.className = `org-stars${n ? ' rated' : ''}`;
@@ -33152,17 +33177,38 @@ function orgFillRatingCell(td, row) {
   td.appendChild(stars);
 }
 
-/** Stars onto every selected track at once - the record is what holds them (see editTrack). */
+/**
+ * Stars onto every selected row at once. The two kinds keep them in different places and both
+ * are written here: an imported track's live on its record (editTrack marks them hand-typed), a
+ * livecode save's in the library's per-save map, since a save's own file cannot carry one.
+ */
 async function orgRate(rows, rating) {
   const ids = [...new Set(rows.map((r) => r.trackId).filter(Boolean))];
-  if (!ids.length) return orgSay('only an imported track takes a rating', true);
+  const saves = [...new Set(rows.filter((r) => r.kind === 'saved' && r.saveName).map((r) => r.saveName))];
+  if (!ids.length && !saves.length) return orgSay('nothing here takes a rating', true);
+  if (saves.length && libDoc) {
+    libDoc.saves ??= {};
+    // Cleared means gone, not zero: an entry that says nothing is dropped on the way through
+    // normalizeLibrary anyway, and leaving one behind would litter the file.
+    for (const name of saves) {
+      if (rating) libDoc.saves[name] = { rating };
+      else delete libDoc.saves[name];
+    }
+    saveLibraryDoc();
+  }
+  const n = ids.length + saves.length;
+  const said = rating
+    ? `${rating} star${rating === 1 ? '' : 's'} on ${n === 1 ? rows[0].name : `${n} tracks`}`
+    : `cleared the rating on ${n === 1 ? rows[0].name : `${n} tracks`}`;
   try {
-    await flushLibraryDoc(); // the reply is the whole document; let a pending edit land first
-    const { library } = await api('POST', '/api/library/track', { ids, fields: { rating } });
-    orgTookLibrary(library);
-    orgSay(rating
-      ? `${rating} star${rating === 1 ? '' : 's'} on ${ids.length === 1 ? rows[0].name : `${ids.length} tracks`}`
-      : `cleared the rating on ${ids.length === 1 ? rows[0].name : `${ids.length} tracks`}`);
+    await flushLibraryDoc(); // the reply is the whole document; let the saves above land first
+    if (ids.length) {
+      const { library } = await api('POST', '/api/library/track', { ids, fields: { rating } });
+      orgTookLibrary(library);
+    } else {
+      orgRenderMain(); // nothing to ask the server; the stars still have to repaint
+    }
+    orgSay(said);
   } catch (e) {
     orgSay(e.message ?? String(e), true);
   }
@@ -33333,6 +33379,11 @@ function orgRowOpen(row) {
     return orgLoadRowOnDeck(orgForDeck, row);
   }
   if (row.kind === 'diskfile') return orgImportPaths([row.path]);
+  // A row that is ALREADY in the set being looked at has nowhere to be added to: double-clicking
+  // it used to drop a second copy into the same playlist, which is never what a double-click on
+  // something means. Nothing to open here - the single click has already auditioned it, and the
+  // backspace key is what takes it out.
+  if (orgSrc.kind === 'playlist') return;
   // Everything else is already in the collection; the fast way to put it in a set is ←, which
   // says where it went.
   orgAddSelectionToLast();
