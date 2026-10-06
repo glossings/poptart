@@ -129,7 +129,7 @@ test('deck B honors the painter\'s marker as a start bar, like the main pane', (
   // Sent with every start: only the server knows whether THIS deck is stopped while the other plays.
   assert.match(grab('evalDeckB'),
     /const arrangeFrom = start && arMarkerFor\('b'\) != null/);
-  assert.match(grab('evalDeckB'), /deck: 'b', start, arrangeFrom \}/);
+  assert.match(grab('evalDeckB'), /deck: 'b', start, arrangeFrom\b/);
 });
 
 test('the clock is fetched for the deck being opened, and ctrl+L releases that deck\'s loop', () => {

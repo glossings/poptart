@@ -19667,7 +19667,7 @@ async function evaluate(start, { byHand = false } = {}) {
   const arrangeFrom = start && arMarkerFor('a') != null ? arMarkerFor('a') : undefined;
   // The eval request goes out FIRST and everything else follows it. Nothing about recording this
   // state - the history entry, the autosave - may sit between the keystroke and the sound.
-  const pending = api('POST', '/api/evaluate', { code, start, arrangeFrom, fresh: bufferFreshOpened || undefined });
+  const pending = api('POST', '/api/evaluate', { code, start, arrangeFrom, fresh: bufferFreshOpened || undefined, name: currentSavedName ?? undefined });
   checkpointUrl(); // a state you played is a state worth finding again in browser history
   saveWip();       // ...and worth having on disk right now, not a debounce from now
   if (newPacks.length) openPackById(newPacks[0]); // it has no files - here is where to pick them
@@ -30279,7 +30279,7 @@ async function evalDeckB(start) {
     // Same deal as the main pane's: for a deck that is stopped, deck B's marker - kept while the
     // painter is shut, like deck A's (see arKeptInsert) - says which bar of its song to start from.
     const arrangeFrom = start && arMarkerFor('b') != null ? arMarkerFor('b') : undefined;
-    const result = await api('POST', '/api/evaluate', { code: deckBCM.getValue(), deck: 'b', start, arrangeFrom });
+    const result = await api('POST', '/api/evaluate', { code: deckBCM.getValue(), deck: 'b', start, arrangeFrom, name: deckBFileName ?? undefined });
     if (result.transport) transport = result.transport;
     if (arDeck === 'b') arSetClock(result.arrange ?? null); // deck B's own song clock, for the playhead
     songEndSetClock('b', result.arrange ?? null);

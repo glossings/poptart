@@ -458,6 +458,37 @@ test('importTracks adds a file once and fills only gaps on re-import', () => {
   assert.equal(track.album, 'An Album', 'a field the record lacked is filled from the tags');
 });
 
+test('a re-import recognizes the same file spelled another way - accents, or through a symlink', () => {
+  writeLibrary({ tracks: [], playlists: [] });
+  const music = fs.mkdtempSync(path.join(os.tmpdir(), 'poptart-music-'));
+  const decomposed = path.join(music, 'Cine\u0301ma.wav'); // e + combining acute, as macOS stores it
+  fs.writeFileSync(decomposed, 'x');
+  const link = `${music}-link`;
+  fs.symlinkSync(music, link);
+  try {
+    const first = importTracks([decomposed]);
+    assert.equal(first.added.length, 1);
+    const composed = path.join(music, 'Cin\u00e9ma.wav');
+    const again = importTracks([composed, path.join(link, 'Cine\u0301ma.wav')]);
+    assert.equal(again.added.length, 0, 'the same file under another spelling is not a new track');
+    assert.equal(again.already.length, 2);
+    assert.equal(again.library.tracks.length, 1);
+    assert.equal(again.library.tracks[0].path, decomposed, 'the stored path stays as first given');
+  } finally {
+    fs.rmSync(link, { force: true });
+    fs.rmSync(music, { recursive: true, force: true });
+  }
+});
+
+test('a re-import adds nothing for the measuring pass to redo', () => {
+  writeLibrary({ tracks: [], playlists: [] });
+  importTracks(['/m/one.mp3', '/m/two.mp3']);
+  setTrackFacts('/m/one.mp3', { bpm: 124 });
+  const again = importTracks(['/m/one.mp3', '/m/two.mp3', '/m/three.mp3']);
+  // The import route queues ONLY `added` for analysis (and the pass skips anything analyzed).
+  assert.deepEqual(again.added.map((t) => t.path), ['/m/three.mp3']);
+});
+
 test('importTracks survives a file whose tags cannot be read', () => {
   writeLibrary({ tracks: [], playlists: [] });
   const { library, added } = importTracks(['/music/broken.mp3'], {

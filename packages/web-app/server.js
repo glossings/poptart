@@ -1145,6 +1145,7 @@ function deckTempoApply(deck, { frac, range } = {}) {
 // sampled wherever the leader is asked for - every desk frame, every fader move - and the leader
 // is read off the order the decks STARTED in.
 const deckPlayingSince = { a: null, b: null };
+const deckPlayingAt = { a: 0, b: 0 }; // wall-clock ms each deck's current run began
 let deckPlayingSeq = 0;
 let deckLeaderNow = null;
 
@@ -1155,10 +1156,15 @@ function deckAudible(deck) {
 }
 
 function deckLeader() {
+  const now = Date.now();
   for (const d of ['a', 'b']) {
     if (!deckAudible(d)) deckPlayingSince[d] = null;
-    else if (deckPlayingSince[d] == null) deckPlayingSince[d] = ++deckPlayingSeq;
+    else if (deckPlayingSince[d] == null) {
+      deckPlayingSince[d] = ++deckPlayingSeq;
+      deckPlayingAt[d] = now;
+    }
   }
+  djSetObserve(now);
   const playing = ['a', 'b'].filter((d) => deckPlayingSince[d] != null)
     .sort((x, y) => deckPlayingSince[x] - deckPlayingSince[y]);
   const leader = playing[0] ?? null;
@@ -1175,6 +1181,82 @@ function deckLeader() {
     }
   }
   return leader;
+}
+
+// --- the set's tracklist (see set-log.js) ---
+//
+// A set is a stretch of DJ mode with music in it: it begins with the first track that plays, and
+// ends when the desk closes, the app quits, or nothing has played for DJ_SET_GAP_MS (the next
+// track then starts a new one). A track is a deck's RUN - from the moment it starts sounding to
+// the moment it stops - read off the same per-deck sampling the leader is (deckLeader), so a song
+// and a livecoded deck count alike, by whatever route they started.
+//
+// A run is only written once it has lasted DJ_SET_CONFIRM_MS, stamped with when it began: a cue
+// held to audition, a livecode deck restarted and stopped by its cue, a play pressed by mistake,
+// are not tracks of the set. And a run of the same track again on the same deck - a pause and a
+// resume - is not a new line.
+const DJ_SET_CONFIRM_MS = 8000;
+const DJ_SET_GAP_MS = 30 * 60 * 1000;
+let djSet = null; // { started: Date, entries: [], file, lastActive, logged: { a, b }, lastId: { a, b } }
+let djSetTimer = null;
+
+/** What a deck is playing, as a tracklist line says it. */
+function djSetTrackOf(deck) {
+  const s = songDecks[deck];
+  if (s) {
+    let artist = null;
+    try { artist = readLibrary().tracks.find((t) => t.path === s.path)?.artist ?? null; } catch { /* no library */ }
+    return { id: `song:${s.path}`, kind: 'song', title: artist ? `${artist} – ${s.title}` : s.title, bpm: s.bpm ?? null, key: s.musicalKey ?? null };
+  }
+  const d = decks[deck];
+  const name = d.songName || null;
+  const title = d.songTitle || null;
+  return {
+    id: `code:${name ?? title ?? ''}`,
+    kind: 'livecode',
+    title: name ?? title ?? 'unsaved buffer',
+    subtitle: name && title && title !== name ? title : null,
+    bpm: typeof d.bpm === 'number' ? d.bpm : null,
+    key: typeof d.scale === 'string' ? d.scale : null,
+  };
+}
+
+function djSetWrite(ended = null) {
+  try {
+    setLog.writeSetLog(djSet, ended);
+  } catch (e) {
+    // eslint-disable-next-line no-console
+    console.warn(`[poptart] couldn't write the set's tracklist: ${e.message}`);
+  }
+}
+
+/** Closes the set in progress: end time, length, the final file name. */
+function djSetFinish() {
+  if (!djSet) return;
+  const anyPlaying = ['a', 'b'].some((d) => deckPlayingSince[d] != null);
+  if (djSet.entries.length) djSetWrite(new Date(anyPlaying ? Date.now() : djSet.lastActive));
+  djSet = null;
+}
+
+/** Called with every leader sample: confirms runs into tracklist lines. */
+function djSetObserve(now) {
+  if (!mixState.dj) return;
+  const playing = ['a', 'b'].filter((d) => deckPlayingSince[d] != null);
+  if (djSet && !playing.length && now - djSet.lastActive > DJ_SET_GAP_MS) djSetFinish();
+  if (!djSet && !playing.length) return;
+  if (djSet && playing.length) djSet.lastActive = now;
+  for (const d of playing) {
+    const run = deckPlayingSince[d];
+    if (djSet?.logged[d] === run || now - deckPlayingAt[d] < DJ_SET_CONFIRM_MS) continue;
+    if (!djSet) djSet = { started: new Date(deckPlayingAt[d]), entries: [], file: null, lastActive: now, logged: { a: null, b: null }, lastId: { a: null, b: null } };
+    djSet.logged[d] = run;
+    const track = djSetTrackOf(d);
+    if (track.id === djSet.lastId[d]) continue; // the same track resumed, not a new one
+    djSet.lastId[d] = track.id;
+    if (deckPlayingAt[d] < djSet.started.getTime()) djSet.started = new Date(deckPlayingAt[d]);
+    djSet.entries.push({ at: deckPlayingAt[d], deck: d, ...track });
+    djSetWrite();
+  }
 }
 
 /** Is a deck's slider inert right now - is another deck leading the room's tempo? */
@@ -4889,7 +4971,8 @@ const {
   setTrackAnchor,
   forgetTracks,
 } = require('./pattern-files');
-const { matchesQuery } = require('./public/pattern-meta.js');
+const { matchesQuery, parseMeta } = require('./public/pattern-meta.js');
+const setLog = require('./set-log');
 
 // One import call's ceiling. A folder walk can turn up a whole archive, and the collection is
 // written as one JSON document - past this, the honest answer is "a folder at a time".
@@ -4960,6 +5043,7 @@ function libAnalyzeWhyWait() {
 
 function libAnalyzeQueue(paths) {
   const waiting = new Set(libAnalyze.queue);
+  if (libAnalyze.now) waiting.add(libAnalyze.now); // mid-measure counts as queued
   let added = 0;
   for (const p of paths) {
     if (typeof p !== 'string' || !p || waiting.has(p)) continue;
@@ -6221,6 +6305,8 @@ function expireWipSessions() {
   if (deleted) {
     console.log(`[poptart] expired ${deleted} session(s) older than ${months} month(s), ${(freed / 1048576).toFixed(1)}MB`);
   }
+  const sets = setLog.pruneSetLogs(months); // set tracklists keep the same hours as the sessions
+  if (sets.deleted) console.log(`[poptart] expired ${sets.deleted} set tracklist(s) older than ${months} month(s)`);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -6676,6 +6762,10 @@ const routes = {
     // keyOfBlock, so the two decks' identically-named blocks stay separate tracks.
     const deck = body.deck === 'b' ? 'b' : 'a';
     const keyOfBlock = (label) => (deck === 'a' ? label : `b:${label}`);
+    // What this buffer is called, for the set's tracklist: the save it was loaded from (the
+    // editor says; null for an unnamed buffer) and its own @title.
+    decks[deck].songName = typeof body.name === 'string' && body.name.trim() ? body.name.trim() : null;
+    try { decks[deck].songTitle = parseMeta(String(body.code ?? '')).title || null; } catch { decks[deck].songTitle = null; }
 
     // No capture here, deliberately. An eval used to flush every held plugin edit first, but a
     // capture suspends the plugin while it serializes (megabytes, for a Serum program) and the
@@ -8201,6 +8291,16 @@ const routes = {
   // the one the room is dancing to, and deck a's next eval drives it again as it always does.
   'POST /api/mix/dj': async (body) => {
     mixState.dj = !!body.on;
+    // The leader and the tracklist both read the decks' playing state by sampling it (see
+    // deckLeader); while the desk is open that happens on a timer too, not only on desk frames.
+    if (mixState.dj && !djSetTimer) {
+      djSetTimer = setInterval(deckLeader, 500);
+      djSetTimer.unref?.();
+    } else if (!mixState.dj && djSetTimer) {
+      clearInterval(djSetTimer);
+      djSetTimer = null;
+    }
+    if (!mixState.dj) djSetFinish();
     // Opening the desk is the moment a controller is about to be used, so it is also the moment
     // to re-read CoreMIDI: enabling an already-enabled client rescans its sources, which is what
     // picks up a surface plugged in after the engine came up (see midiEnable in poptart.scd).
@@ -9009,6 +9109,7 @@ const routes = {
     settings.wipRetentionMonths = months;
     saveSettings();
     const { deleted, freed } = months > 0 ? pruneWipSessions(months) : { deleted: 0, freed: 0 };
+    if (months > 0) setLog.pruneSetLogs(months); // set tracklists expire with the sessions
     // The states those sessions were holding alive can go with them, if nothing else names them.
     const swept = await blobs.sweepBlobs({ scanDirs: [WIP_DIR, SNAPSHOT_DIR, PREBAKE_DIR, snippets.SNIPPETS_DIR], alsoKeep: [...liveStateIds.a, ...liveStateIds.b, ...djFxBlobIds()] });
     return { status: 200, body: { months, deleted, freed: freed + swept.freed } };
@@ -9552,6 +9653,7 @@ let shuttingDown = false;
 function shutdown(reason) {
   if (shuttingDown) return;
   shuttingDown = true;
+  djSetFinish(); // the set's tracklist gets its end time - quitting is the end of the set
   // eslint-disable-next-line no-console
   console.log(`[poptart] ${reason} - stopping the engine`);
   setTimeout(() => process.exit(0), 8000).unref();

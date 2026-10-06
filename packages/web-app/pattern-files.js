@@ -606,6 +606,18 @@ function forgetTracks(ids) {
   return { library: writeLibrary(doc), forgot: gone.length };
 }
 
+/** A track path as the file system means it: symlinks resolved, accents composed (NFC). */
+function canonicalTrackPath(p) {
+  let real = p;
+  try { real = fs.realpathSync(p); } catch { /* not on disk (or not yet) - the spelling given */ }
+  return real.normalize('NFC');
+}
+
+/** Nothing left for a fill-only re-import to take from the tags, so they need not be read. */
+function trackHasNoGaps(t) {
+  return ['title', 'artist', 'album', 'bpm', 'key'].every((f) => t[f] != null && t[f] !== '');
+}
+
 /**
  * Import: file paths into the collection, reading each file's own tags for what it can say about
  * itself. Returns { library (hydrated), added, already } so the caller can report what happened
@@ -629,11 +641,18 @@ function importTracks(paths, { readTags = null, now = Date.now, mode = 'fill' } 
   const index = indexTracks(doc.tracks);
   const added = [];
   const already = [];
+  // The same file can arrive spelled another way: macOS hands out names with accents decomposed
+  // or composed depending on where they came from (63 of one 922-track collection were stored
+  // decomposed), and a folder can be reached through a symlink. Matched on the resolved,
+  // composed spelling too, so a re-import is still a re-import - and not a second record for
+  // the library pass to measure all over again. The stored path stays as it was first given.
+  const byCanon = new Map(index.tracks.map((t) => [canonicalTrackPath(t.path), t]));
   for (const raw of Array.isArray(paths) ? paths : []) {
     const p = typeof raw === 'string' ? raw.trim() : '';
     if (!p) continue;
-    const tags = readTags ? safeTags(readTags, p) : {};
-    const seen = index.byPath.get(p);
+    const canon = canonicalTrackPath(p);
+    const seen = index.byPath.get(p) ?? byCanon.get(canon);
+    const tags = readTags && !(seen && mode !== 'rescan' && trackHasNoGaps(seen)) ? safeTags(readTags, p) : {};
     if (seen) {
       already.push(seen);
       if (mode === 'rescan') rescanTrack(seen, tags);
@@ -653,6 +672,7 @@ function importTracks(paths, { readTags = null, now = Date.now, mode = 'fill' } 
     index.tracks.push(track);
     index.byPath.set(track.path, track);
     index.byId.set(track.id, track);
+    byCanon.set(canon, track);
     added.push(track);
   }
   const next = { ...doc, tracks: index.tracks };
