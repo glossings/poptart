@@ -41,7 +41,12 @@ function scdSource() {
 function extractFreeModulatorLater() {
   const m = scdSource().match(/^freeModulatorLater = \{[\s\S]*?^\};$/m);
   assert.ok(m, 'could not find the freeModulatorLater closure in sc/poptart.scd');
-  return m[0];
+  // The engine also notes the freed synth's node id for its failure reports (nodeGoneSaid). The
+  // stand-in synth below is a Bus - the one mock whose free is observable - and has no node id,
+  // so that bookkeeping line is taken out; it is not what this test is about.
+  const line = 'synth !? { |sy| nodeGoneSaid.add(sy.nodeID) };';
+  assert.ok(m[0].includes(line), 'the nodeGoneSaid line moved - this test needs updating');
+  return m[0].replace(line, '');
 }
 
 // And the delay it schedules against, off its declaration.
@@ -60,6 +65,7 @@ function runSclang(delay) {
   const script = `(
 var srv = Server(\\poptartProbe, NetAddr("127.0.0.1", 57999));
 var tracks = IdentityDictionary.new;
+var nodeGoneSaid = IdentitySet.new, nodeOwns = { |nodeID, what| }; // the engine's node bookkeeping (see nodeOwns in sc/poptart.scd) - inert here
 var modFreeDelay = ${delay};
 var freeModulatorLater;
 var groupA = (id: 100), groupB = (id: 200);

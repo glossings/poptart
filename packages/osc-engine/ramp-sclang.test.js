@@ -38,6 +38,7 @@ function runSclang() {
   const script = `(
 var server = Server(\\poptartProbe, NetAddr("127.0.0.1", 57999));
 var tracks = IdentityDictionary.new;
+var nodeGoneSaid = IdentitySet.new, nodeOwns = { |nodeID, what| }; // the engine's node bookkeeping (see nodeOwns in sc/poptart.scd) - inert here
 var modFreeDelay = 0.05;
 var freeModulatorLater, rampTo, dropRamp, dropSlotRamps;
 var maps = List.new;

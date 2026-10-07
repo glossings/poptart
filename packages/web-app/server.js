@@ -633,6 +633,9 @@ function songApplyRate(deck) {
     s.rate = eff;
     songSendRate(deck);
     songArmTimers(deck);
+    // The clock follows a free song's every rate move at once - a pitch-fader ride, a nudge, a
+    // jog bend - so a livecoded deck playing under it moves with it (see clockFollowSong).
+    if (deck === songFollow.deck) clockFollowSong();
   } else {
     s.rate = eff;
     if (s.playing && engine && !s.pendingRateTimer) {
@@ -2199,16 +2202,28 @@ function mixActionNotify(deck, action, value = null) {
   for (const res of mixEventClients) res.write(frame);
 }
 
+// Where a track's own pre-fader taps go: the deck meter side (0 = A, 1 = B), or -1 for none.
+// A group MEMBER taps nothing. Its sound reaches the desk through its group's bus, and the group's
+// own track meters it, cues it and feeds the FX unit - and the deck-wide controls (trim, EQ,
+// filter, cue) are sent to channels, which a member is not (see mixKeys), so a member's own taps
+// carried its signal a second time and UNTRIMMED: a deck with its trim at zero, silent in the
+// room, metered +6 dB from its drum group's members (reported 2026-10-06).
+const mixTapDeck = (key) => (groupMembers.has(key) ? -1 : deckOfKey(key) === 'b' ? 1 : 0);
+
 // Everything the mix session holds for one (possibly just-created) track, applied engine-side.
-// Deck-broadcast values first, then the track's own, so a per-track value wins.
+// Deck-broadcast values first, then the track's own, so a per-track value wins. Run for every
+// track an evaluation builds, so a stem that moved into or out of a group has its taps re-pointed.
 function applyMixTo(key) {
   if (!engine) return;
   const tid = engineTrack(key);
   const per = mixState.perTrack.get(key);
+  const member = groupMembers.has(key);
   for (const [name, value] of mixState.perDeck[deckOfKey(key)] ?? []) {
-    if (!per?.has(name)) engine.setParam(tid, -1, name, value, 0);
+    if (!per?.has(name)) engine.setParam(tid, -1, name, member && name === 'cue' ? 0 : value, 0);
   }
   for (const [name, value] of per ?? []) engine.setParam(tid, -1, name, value, 0);
+  engine.setParam(tid, -1, 'mdeck', mixTapDeck(key), 0);
+  if (member) engine.setParam(tid, -1, 'cue', 0, 0);
   fxApplyTo(key); // the FX unit's send is desk state like the rest - a new stem joins it live
 }
 
@@ -2506,6 +2521,7 @@ function mixDeskBody() {
         musicalKey: s.musicalKey,
         anchorSec: s.anchorSec,
         cueSec: s.cueSec ?? 0, // the CUE gesture's home - the pane draws it on both waveforms
+        cueHeld: !!s.cueHeld, // playing only while cue is held - an audition, not a start
         sync: s.sync,
         syncMult: s.syncMult ?? 'auto',
         syncMultEffective: songOctave(d),
@@ -2639,7 +2655,8 @@ function mixBirthFor(key) {
   if (!('deck' in birth)) birth.deck = deckXfGain(deckOfKey(key)) * mixState.faders[deckOfKey(key)];
   // Which deck meter bus the synth sums its pre-fader signal into (see the scd's deckMeterBus)
   // - a birth arg like the rest, so a stem born mid-set meters from its first sample.
-  birth.mdeck = deckOfKey(key) === 'b' ? 1 : 0;
+  birth.mdeck = mixTapDeck(key);
+  if (birth.mdeck < 0) birth.cue = 0; // a group member's group cues it (see mixTapDeck)
   return birth;
 }
 
@@ -2650,8 +2667,8 @@ function neutralizeMix(key) {
   const tid = engineTrack(key);
   for (const [name, value] of Object.entries(DJ_NEUTRAL)) engine.setParam(tid, -1, name, value, 0);
   // Post-mix every surviving track is the main deck: meter on the A side (a promoted deck-b
-  // track's synth was born with mdeck 1).
-  engine.setParam(tid, -1, 'mdeck', 0, 0);
+  // track's synth was born with mdeck 1) - unless it is a group member, which never meters.
+  engine.setParam(tid, -1, 'mdeck', mixTapDeck(key) < 0 ? -1 : 0, 0);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2726,7 +2743,8 @@ function fxSendLevels() {
 function fxApplyTo(key) {
   const deck = deckOfKey(key);
   if (!engine || !fxTracksLive[deck]) return;
-  engine.setFxSend(engineTrack(key), FX_BUSES[deck], fxSendLevels()[deck]);
+  // A group member feeds the unit through its group, like everything else it makes.
+  engine.setFxSend(engineTrack(key), FX_BUSES[deck], groupMembers.has(key) ? 0 : fxSendLevels()[deck]);
 }
 
 /** Re-point every channel's send - what a pad or an assign flip means engine-side. */
@@ -3195,6 +3213,84 @@ function linkPhaseAt(atSec) {
   return linkSync.sessionPhase(linkSync.sessionBeatsAt(linkState.report, atSec));
 }
 
+// --- the clock follows a free-running song ---
+//
+// A livecoded deck has no rate of its own: it plays the shared clock. When the deck leading the
+// room is a SONG with sync off - matched by ear, ridden on its pitch fader, nudged and jogged by
+// hand - the clock had nothing to do with it, so a livecode track brought in beside it started at
+// whatever tempo the clock last had, on whatever bar line the play press made, with no jog to pull
+// it in. Now the clock follows that song the way it follows a Link session (see applyLinkReport):
+// its tempo is the song's actual one (bpm x the rate it is playing at - fader, nudge and bend
+// included), checked every 50 ms and whenever the song's rate changes, and its bar phase sits on
+// the song's beatgrid. A deck starting under it takes the song's bar before it schedules a note;
+// after that, drift is trimmed silently and a jump the song makes on purpose (a beat jog) is
+// accepted rather than chased, the same rule the Link follower keeps.
+//
+// A song with sync ON is not followed: as the master it already is the clock's grid, and its
+// rate is derived from the clock, so following it would feed the rate back into itself (a held
+// nudge would run away). A Link session with peers owns the clock outright.
+const songFollow = { deck: null, offset: 0, adoptPending: false };
+let songFollowTimer = null;
+let songFollowing = false; // reentrancy guard: setCps re-rates synced decks, which can call back
+
+/** The deck whose song the clock follows right now, or null. */
+function songFollowDeck() {
+  if (!mixState.dj || (linkState.enabled && linkState.peers)) return null;
+  const d = deckLeader();
+  const s = d && songDecks[d];
+  return s?.playing && !s.sync && s.bpm ? d : null;
+}
+
+/** The song as a session report: its tempo now, and its beat count at `atSec`. */
+function songFollowReport(deck, atSec) {
+  const s = songDecks[deck];
+  return {
+    bpm: s.bpm * s.rate,
+    beats: ((songPlayheadSec(deck, atSec) - s.anchorSec) * s.bpm) / 60,
+    atSec,
+  };
+}
+
+/** Where the followed song's bar sits at `atSec`, as a cycle fraction - null when none is followed. */
+function songFollowPhaseAt(atSec) {
+  const d = songFollowDeck();
+  return d ? linkSync.sessionPhase(songFollowReport(d, atSec).beats) : null;
+}
+
+/**
+ * One follow step. `adopt` lands the clock on the song's bar now - what a deck about to start
+ * under it asks for; otherwise a jump is only taken while nothing else rides the clock.
+ */
+function clockFollowSong({ adopt = false } = {}) {
+  if (!engine || !transport || songFollowing) return;
+  const deck = songFollowDeck();
+  if (deck !== songFollow.deck) {
+    songFollow.deck = deck;
+    songFollow.offset = 0;
+    songFollow.adoptPending = deck != null;
+  }
+  if (!deck) return;
+  songFollowing = true;
+  try {
+    const now = engine.getTime();
+    const report = songFollowReport(deck, now);
+    if (!linkSync.sameTempo(report.bpm, transport.cps * 240)) transport.setCps(report.bpm / 240);
+    if (transport.paused) return; // nothing to align: a start lands on the song's bar (transportStart)
+    const ridden = ['a', 'b'].some((d) => d !== deck && (deckRunning(d) || (songDecks[d]?.playing && songDecks[d].sync)));
+    const measured = linkSync.phaseDelta(transport.cycleAt(now), report.beats);
+    const step = linkSync.followStep(measured, songFollow.offset, { mayAdopt: adopt || (songFollow.adoptPending && !ridden) });
+    songFollow.offset = step.offset;
+    if (step.kind === 'adopt' || step.kind === 'accept') songFollow.adoptPending = false;
+    if (step.shift) transport.shiftCycles(step.shift);
+    if (step.kind === 'adopt') {
+      syncEngineClock('rebase'); // the MIDI clock relocates, the plugins' transport jumps with us
+      mixNotify();
+    }
+  } finally {
+    songFollowing = false;
+  }
+}
+
 // How far ahead of "now" play-from-stop puts its start position. The schedulers start with the
 // clock and tick every 30ms with a 150ms lookahead (scheduler.mjs's DEFAULT_LOOKAHEAD_SEC), so a
 // start this far ahead has the downbeat inside their first window, timestamped for the engine;
@@ -3217,6 +3313,14 @@ function transportStart(atSec = engine.getTime() + START_LEAD_SEC) {
   if (!transport || !transport.paused) return null;
   const phase = linkPhaseAt(atSec);
   if (phase == null) {
+    // No session - but a free-running song may be leading, and then its bar is where to start.
+    const songPhase = songFollowPhaseAt(atSec);
+    if (songPhase != null) {
+      songFollow.offset = 0;
+      songFollow.adoptPending = false;
+      transport.startAt(atSec, songPhase);
+      return songPhase;
+    }
     transport.start(atSec);
     return 0;
   }
@@ -7014,6 +7118,10 @@ const routes = {
     // ends where the last of their clips does. A clip naming a block that isn't here is worth a line: the
     // painter offers only the labels it can see, so this is a rename or a deleted block, and the
     // part it stood for is silently gone.
+    // A deck coming in under a free-running song takes the song's tempo and bar line before it
+    // schedules a note (see clockFollowSong) - a stopped clock just takes the tempo here, and
+    // starts on the song's bar in transportStart.
+    if (body.start !== false && !deckRunning(deck)) clockFollowSong({ adopt: true });
     const arrangements = evaluated.map((b) => b.sig).filter((v) => v?.poptartArrangeBlock);
     if (arrangements.length) {
       const clips = arrangements.flatMap((a) => a.clips);
@@ -8296,9 +8404,13 @@ const routes = {
     if (mixState.dj && !djSetTimer) {
       djSetTimer = setInterval(deckLeader, 500);
       djSetTimer.unref?.();
+      songFollowTimer = setInterval(() => clockFollowSong(), 50);
+      songFollowTimer.unref?.();
     } else if (!mixState.dj && djSetTimer) {
       clearInterval(djSetTimer);
       djSetTimer = null;
+      clearInterval(songFollowTimer);
+      songFollowTimer = null;
     }
     if (!mixState.dj) djSetFinish();
     // Opening the desk is the moment a controller is about to be used, so it is also the moment
@@ -8620,6 +8732,15 @@ const routes = {
       songDecks.b = null;
     }
     for (const key of promoted) rekeyTrack(key, key.slice(key.indexOf(':') + 1));
+    // Group membership travels with the stems it describes: the outgoing deck's goes with it, and
+    // the promoted deck's is re-keyed, so a promoted member stays a member - not a channel that
+    // meters itself (see mixTapDeck) - in the moment before the promotion's re-eval rebuilds it.
+    const unprefixed = (k) => k.slice(k.indexOf(':') + 1);
+    for (const key of [...groupMembers.keys()]) if (deckOfKey(key) === 'a') groupMembers.delete(key);
+    for (const [key, parent] of [...groupMembers]) {
+      groupMembers.delete(key);
+      groupMembers.set(unprefixed(key), unprefixed(parent));
+    }
     for (const key of [...trackIds.keys()]) if (deckOfKey(key) === 'b') dropTrack(key); // never-promoted leftovers
     decks.a = { ...decks.b };
     decks.b = { scale: null, bpm: null, groove: null };

@@ -42,7 +42,7 @@ function extractClosure(name) {
 // slotLive is a one-liner, which the closure regex above (it wants the closing brace on its own
 // line) does not match.
 function extractSlotLive() {
-  const m = fs.readFileSync(SCD, 'utf8').match(/^slotLive = \{ \|track, slot\|.*$/m);
+  const m = fs.readFileSync(SCD, 'utf8').match(/^slotLive = \{ \|track, slot\|[\s\S]*?^\};$/m);
   assert.ok(m, 'could not find slotLive in sc/poptart.scd');
   return m[0];
 }
@@ -55,6 +55,7 @@ function runSclang() {
   const script = `(
 var srv = Server(\\poptartProbe, NetAddr("127.0.0.1", 57999));
 var tracks = IdentityDictionary.new, noteQueues = IdentityDictionary.new, maxSlots = 2;
+var nodeGoneSaid = IdentitySet.new, nodeOwns = { |nodeID, what| }, deadNodes = IdentitySet.new; // the engine's node bookkeeping (see nodeOwns in sc/poptart.scd) - inert here
 var slotKey = { |key, slot| (key ++ "_" ++ slot).asSymbol };
 var bundleNow = { |latency, func| func.value };
 var hushTrack, markSounding, slotLive;
@@ -63,6 +64,7 @@ var hushTrack, markSounding, slotLive;
 var mk = { |name, id, sdk = "VST 2.4"| (
     voices: Group.basicNew(srv, id),
     loaded: ["plugin", nil], // slot 0 has its plugin open (see slotLive) - the one a hush releases
+    synth: Synth.basicNew(\\x, srv, id + 1000), // the track synth slotLive checks is still alive
     controllers: [(
         info: (sdkVersion: sdk),
         midi: (

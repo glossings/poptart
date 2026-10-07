@@ -37,7 +37,7 @@ function extractClearMidiRoute() {
 // The teardown only releases through a slot whose plugin is open (slotLive) - a one-liner, lifted
 // on its own.
 function extractSlotLive() {
-  const m = fs.readFileSync(SCD, 'utf8').match(/^slotLive = \{ \|track, slot\|.*$/m);
+  const m = fs.readFileSync(SCD, 'utf8').match(/^slotLive = \{ \|track, slot\|[\s\S]*?^\};$/m);
   assert.ok(m, 'could not find slotLive in sc/poptart.scd');
   return m[0];
 }
@@ -49,10 +49,12 @@ function runSclang() {
   const script = `(
 var srv = Server(\\poptartProbe, NetAddr("127.0.0.1", 57999));
 var tracks = IdentityDictionary.new;
+var nodeGoneSaid = IdentitySet.new, nodeOwns = { |nodeID, what| }, deadNodes = IdentitySet.new; // the engine's node bookkeeping (see nodeOwns in sc/poptart.scd) - inert here
 var clearMidiRoute, slotLive;
 var mk = { |name, sdk, envId| (
     midiRoute: (keys: [], sounding: IdentityDictionary[(0 * 128) + 60 -> 62, (3 * 128) + 64 -> 64]),
     loaded: ["plugin"], // slot 0 has its plugin open (see slotLive) - the one the teardown releases through
+    synth: Synth.basicNew(\\x, srv, envId + 1000), // the track synth slotLive checks is still alive
     controllers: [(
         info: (sdkVersion: sdk),
         midi: (

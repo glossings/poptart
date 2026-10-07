@@ -28643,7 +28643,34 @@ async function stepDeckQueue(deck, dir = 1) {
   const cur = opts.findIndex((o) => o.selected);
   const at = cur < 0 ? (dir > 0 ? -1 : 0) : cur;
   opts[(at + dir + opts.length) % opts.length].selected = true;
-  await (deck === 'a' ? loadDeckAFile : loadDeckBFile)();
+  if (await (deck === 'a' ? loadDeckAFile : loadDeckBFile)()) djFocusAfterLoad(deck);
+}
+
+// A deck that has been loaded AND started hands the focus to the other one: a set alternates, so
+// once the new track is in the room, the next thing the browser (and its controller knob) loads
+// should land on the deck that is about to play out. Not on the load itself - a DJ who changes
+// their mind loads again, and that second load must land on the same deck, not over the song
+// that is playing. A load arms its deck; the deck starting plays the move (see djFocusOnPlay).
+// Only for a load someone asked for - the queue's own suggestion into an empty pane arms nothing.
+const djFocusArmed = { a: false, b: false };
+function djFocusAfterLoad(deck) {
+  if (mixModeOn) djFocusArmed[deck] = true;
+}
+
+// An audition is not a start: a song deck plays while its cue is held, and a code deck's cue
+// restarts it until release - whose stop lands a beat after the hold flag clears, so a second's
+// grace after a release keeps that gap from reading as the deck coming in.
+const djCueReleasedAt = { a: 0, b: 0 };
+function djDeckAuditioning(deck) {
+  return !!djCueHeld[deck] || !!songPanes[deck].mirror?.cueHeld
+    || performance.now() - djCueReleasedAt[deck] < 1000;
+}
+
+/** Called with each desk frame: an armed deck that is now playing for real moves the focus. */
+function djFocusOnPlay(deck, playing) {
+  if (!playing || !djFocusArmed[deck] || djDeckAuditioning(deck)) return;
+  djFocusArmed[deck] = false;
+  if (mixModeOn) djSetActiveDeck(deck === 'a' ? 'b' : 'a');
 }
 function stepDeckBQueue() { return stepDeckQueue('b', 1); } // the ⏭ hotkey's name, hoisted for the callers above
 
@@ -28682,6 +28709,7 @@ async function loadDeckBFile(value = document.getElementById('deckBFile').value)
       logLine(`deck B loaded "${value}" - play it when ready`);
     }
     if (mixModeOn) mixRefresh(); // the old song's stems left the strip; a song track arrived
+    return true;
   } catch (e) {
     logLine(e.message ?? String(e), true);
   }
@@ -28712,6 +28740,7 @@ async function loadDeckAFile(value = document.getElementById('deckAFile').value)
       logLine(`deck A loaded "${value}" - play it when ready`);
     }
     if (mixModeOn) mixRefresh(); // its old stems left the strip; a song track may have arrived
+    return true;
   } catch (e) {
     logLine(e.message ?? String(e), true);
   }
@@ -28726,7 +28755,7 @@ async function loadDeckSong(deck, item) {
   if (libItemIsFile(item)) deckFileItems.set(key, item);
   document.getElementById(deck === 'a' ? 'deckAFile' : 'deckBFile').value = key;
   closeOrganize();
-  await (deck === 'a' ? loadDeckAFile : loadDeckBFile)(key);
+  if (await (deck === 'a' ? loadDeckAFile : loadDeckBFile)(key)) djFocusAfterLoad(deck);
 }
 
 // The deck heads' song buttons say what each deck holds; the play buttons read play/stop for
@@ -28742,6 +28771,7 @@ function deckHeadRender(state) {
     songBtn.classList.toggle('empty', !held);
     const on = !!state?.playing?.[d];
     deckPlayingNow[d] = on;
+    djFocusOnPlay(d, on);
     const playBtnD = document.getElementById(`deck${U}Play`);
     playBtnD.innerHTML = on ? '&#9632; stop' : '&#9654; play';
     playBtnD.classList.toggle('is-playing', on);
@@ -29018,6 +29048,7 @@ function makeSongPane(deck) {
       musicalKey: sb.musicalKey ?? null,
       anchorSec: sb.anchorSec ?? 0,
       cueSec: sb.cueSec ?? 0,
+      cueHeld: !!sb.cueHeld, // an audition, not a start - see djFocusOnPlay
       sync: !!sb.sync,
       keylock: !!sb.keylock,
       nudge: sb.nudge ?? 0,
@@ -31417,6 +31448,7 @@ function deckCuePress(deck, down) {
     const was = djCueHeld[deck];
     if (!was) return;
     djCueHeld[deck] = null;
+    djCueReleasedAt[deck] = performance.now();
     // Out of the headphones at once - that half needs nothing from the server.
     if (!was.cued) mixSetCue(deck, false);
     // Unconditional, and NOT guarded on deckPlayingNow: that mirror is fed by the desk's SSE

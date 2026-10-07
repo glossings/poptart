@@ -178,6 +178,7 @@ var confWant = IdentityDictionary.new; // trackId -> latest requested conf state
 // '/poptart/setTempo' and applied to plugins as they open (see loadInstrument/loadEffect).
 var currentTempo = 120;
 var jsonEscape, toJson, replyOk, replyErr, pluginList, runScan, trackDefName, buildTrackDef, channelDefault;
+var sharedTrackDef, trackDef, trackDefState; // the one track SynthDef this engine builds (see sharedTrackDef)
 var awaitTrack, awaitLoaded, reclaimStuckTrack, resolvePlugin, resolveParamIndex, watchPluginEdits;
 var pluginOpenLock, openQueued;
 var destroyTrack, buildTrack;
@@ -389,6 +390,31 @@ runScan = { |onDone|
 };
 
 trackDefName = { |key| ("poptart_track_" ++ key).asSymbol };
+
+// Every track runs the SAME graph - nothing in buildTrackDef depends on the key but the def's
+// name; its shape is the engine's (output pairs, slot count, the cue pair), fixed for the life of
+// this sclang. So it is built and sent once, by the first track, and every later track reuses it.
+// Building one costs ~25 ms of sclang (10 to build 429 UGens, 3.5 to serialize, 8 to describe)
+// and sclang is single-threaded with every NOTE passing through it: a 12-track song loading onto
+// the other deck spent ~300 ms building identical copies, during which the playing deck's notes
+// queued up and then landed all at once (2026-10-06). Call from a routine - a track that asks
+// while the first one is still sending waits for it.
+sharedTrackDef = {
+    case
+    { trackDefState == \ready } { trackDef }
+    { trackDefState == \adding } {
+        while { trackDefState != \ready } { 0.01.wait };
+        trackDef
+    }
+    {
+        trackDefState = \adding;
+        trackDef = buildTrackDef.(\shared);
+        trackDef.add; // sends to server + global SynthDescLib
+        server.sync;
+        trackDefState = \ready;
+        trackDef
+    };
+};
 
 buildTrackDef = { |key|
     // .o(n)'s wraparound: pair indices past the last pair IN USE fold back onto real outputs.
@@ -1950,6 +1976,32 @@ server.waitForBoot {
     }, '/status.reply', server.addr);
     statusWatch = Routine({ loop { server.sendMsg("/status"); 3.wait } }).play(SystemClock);
 
+    // sclang stall watchdog - the engine's twin of Node's. Every note reaches scsynth through this
+    // single-threaded process, which stamps it "latency from now" as it handles it, so anything
+    // that holds sclang shifts every playing track later and then lands the backlog at once:
+    // heard as the music stopping and a pileup, with no `late` from scsynth and nothing from Node
+    // to say why. A 20 ms tick on the system clock; a gap past 80 ms is reported with how much
+    // arrived meanwhile and the last few addresses, which is the culprit or what queued behind it.
+    {
+        var recent = Array.newClear(6), at = 0, count = 0, seen = 0, last = Main.elapsedTime;
+        thisProcess.addOSCRecvFunc({ |msg|
+            recent[at] = msg[0];
+            at = (at + 1) % recent.size;
+            count = count + 1;
+        });
+        SystemClock.sched(0.02, {
+            var now = Main.elapsedTime, gap = now - last - 0.02;
+            if (gap > 0.08) {
+                ("poptart: sclang stalled ~" ++ (gap * 1000).round ++ "ms - " ++ (count - seen)
+                    ++ " message(s) arrived meanwhile; latest: "
+                    ++ (recent.rotate(at.neg).select(_.notNil).collect(_.asString).join(", "))).warn;
+            };
+            last = now;
+            seen = count;
+            0.02
+        });
+    }.value;
+
     "poptart: server booted, ready".postln;
     // scsynth's pid rides along with the ready: node spawned US, not scsynth, so this is its only
     // handle on the process that actually holds the audio device and scsynth's UDP port. It uses
@@ -2006,16 +2058,15 @@ buildTrack = { |key, birth|
         // ...and the four grain controls, likewise (pos, size, rate, pan - in that order).
         var grainBus = Bus.control(server, 4);
         var synth;
-        var def = buildTrackDef.(key);
+        var def = sharedTrackDef.();
         // Control buses keep whatever the last owner left in them - the server never clears
         // one, on free or on allocation - so a recycled index could hand a new track somebody
         // else's bend for the block before its track synth first writes. Zeroed explicitly,
         // ahead of the sync, so the bus is at centre before anything can read it.
         bendBus.set(0);
         grainBus.setn([0, 0.08, 20, 0]);
-        def.add; // sends to server + global SynthDescLib
-        server.sync;
-        synth = Synth(trackDefName.(key), [\inBus, inBus.index, \bendOut, bendBus.index, \grainOut, grainBus.index] ++ scArgsFor.() ++ birth, target: group, addAction: \addToTail);
+        server.sync; // load-bearing: orders the buses and the def ahead of the synth (see TODO.md)
+        synth = Synth(def.name, [\inBus, inBus.index, \bendOut, bendBus.index, \grainOut, grainBus.index] ++ scArgsFor.() ++ birth, target: group, addAction: \addToTail);
         // Somebody gave up on this build while it was in flight and the key has been built
         // again since (see reclaimStuckTrack). Committing now would overwrite a live track
         // with a synth nothing else can reach, so this one is taken back down instead -

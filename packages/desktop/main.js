@@ -16,7 +16,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
-const { app, BrowserWindow, Menu, dialog, shell } = require('electron');
+const { app, BrowserWindow, Menu, dialog, powerSaveBlocker, shell } = require('electron');
 
 // Before anything else is loaded: a `poptart-data` folder beside the app becomes poptart's home
 // (portable.js). Several modules work their paths out once, as they load, and the server child
@@ -324,6 +324,12 @@ async function boot() {
   const dataFolder = describeHome();
   desktopLog.note(`data folder: ${dataFolder.dir}${PORTABLE.dir ? ' (portable: found beside the app)' : dataFolder.why ? ` (${dataFolder.why})` : ''}`);
   if (PORTABLE.declined) desktopLog.note(PORTABLE.declined);
+  // The machine stays awake for as long as poptart is open. macOS only holds off idle sleep while
+  // audio is actually playing, so a pause between songs - or a long stretch of writing - could
+  // put it to sleep under a running engine, and an audio server does not come back from that
+  // reliably. The display still dims and sleeps on the system's own schedule; this is the machine,
+  // not the screen. Released by the OS when the app quits.
+  powerSaveBlocker.start('prevent-app-suspension');
   createWindow();
 
   if (!(await ensureSuperCollider())) {
