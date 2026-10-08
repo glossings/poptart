@@ -217,5 +217,5 @@ test('the ticks sit where the tempo puts them on the bar axis', () => {
 test('the clock ruler has its own strip: the rows give up its height and the canvas grows by it', () => {
   assert.match(SRC, /- AR_LANES_TOP - arAutoVisible\(\) \* AR_AUTO_H - AR_TIME_H - AR_PAD_BOTTOM;/);
   assert.match(SRC, /arH = arAutoAreaBottom\(\) \+ AR_TIME_H \+ AR_PAD_BOTTOM;/);
-  assert.match(grab('arPlayheadLoop'), /transport\.cps !== arDrawnCps/, 'a tempo change while stopped redraws it');
+  assert.match(grab('arPlayheadLoop'), /deckBaseCps\(arDeck\) !== arDrawnCps/, 'a tempo change while stopped redraws it');
 });

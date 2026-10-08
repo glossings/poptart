@@ -308,11 +308,19 @@ function unpackDmg(dmgPath, destDir, { log = console } = {}) {
   }
 }
 
-// Windows 10+ ships bsdtar as `tar`, which reads zips; macOS/Linux have `unzip`. (Only the
-// Windows asset is a zip today, but keeping both makes the function testable anywhere.)
+// Windows 10+ ships bsdtar, which reads zips, as System32's tar.exe. Named by its full path, not
+// left to PATH: a shell that puts its own tools first (Git Bash and MSYS2 both do) hands over
+// GNU tar instead, which cannot read a zip and takes the `C:` of a Windows path for a remote
+// host - "tar: Cannot connect to C: resolve failed", and no SuperCollider.
+function windowsTar(env = process.env) {
+  return path.win32.join(env.SystemRoot || env.windir || 'C:\\Windows', 'System32', 'tar.exe');
+}
+
+// macOS/Linux have `unzip`. (Only the Windows asset is a zip today, but keeping both makes the
+// function testable anywhere.)
 function unpackZip(zipPath, destDir) {
   fs.mkdirSync(destDir, { recursive: true });
-  if (process.platform === 'win32') execFileSync('tar', ['-xf', zipPath, '-C', destDir]);
+  if (process.platform === 'win32') execFileSync(windowsTar(), ['-xf', zipPath, '-C', destDir]);
   else execFileSync('unzip', ['-q', '-o', zipPath, '-d', destDir]);
 }
 
@@ -595,5 +603,6 @@ module.exports = {
   sha256File,
   yamlQuote,
   unpackZip,
+  windowsTar,
   unpackDmg,
 };

@@ -177,6 +177,9 @@ var confWant = IdentityDictionary.new; // trackId -> latest requested conf state
 // synced LFOs/delays/arps follow setbpm instead of assuming their own default. Updated by
 // '/poptart/setTempo' and applied to plugins as they open (see loadInstrument/loadEffect).
 var currentTempo = 120;
+// ...and the tempo of each track whose deck is on a clock of its own (trackId -> bpm), which is
+// what a plugin opening on such a track starts at. Empty while every deck rides the host clock.
+var trackTempo = IdentityDictionary.new;
 var jsonEscape, toJson, replyOk, replyErr, pluginList, runScan, trackDefName, buildTrackDef, channelDefault;
 var sharedTrackDef, trackDef, trackDefState; // the one track SynthDef this engine builds (see sharedTrackDef)
 var awaitTrack, awaitLoaded, reclaimStuckTrack, resolvePlugin, resolveParamIndex, watchPluginEdits;
@@ -252,6 +255,10 @@ var startMixTap, stopMixTap, stopMixMaster;
 // for gain staging with trim, like a hardware desk's channel meter, not "what is the crossfader
 // letting through".
 var deckMeterBus, deckMeterSynths;
+// The master meter: one synth after everything else, for as long as the engine is up, that
+// reports the peak of all the hardware outputs summed together ('/poptart/masterLevel'). See
+// \poptart_master.
+var masterSynth;
 // makeBundle with a timestamp only when there is real lead - see the definition by the events
 // section.
 var bundleNow;
@@ -1917,6 +1924,21 @@ server.waitForBoot {
         SendPeakRMS.kr(sig, 20, 3, '/poptart/deckLevel', id);
         SendReply.kr(frame, '/poptart/deckBands', energy, id);
     }).add;
+    // The master meter: every hardware output summed to ONE stereo pair (the left of each pair
+    // into the left, the right into the right), and the peak of that. Tracks can go out of
+    // separate pairs (.o(n)), but the question this answers is about the song as a whole: all of
+    // it together, as it will be when it is one stereo mix on a deck, is it over full scale? It
+    // only listens - nothing here touches the sound. The headphone cue pair is left out: it is
+    // a second copy of the mix, not more of it.
+    SynthDef(\poptart_master, {
+        var chans = (0 .. server.options.numOutputBusChannels - 1).reject { |c|
+            cueOffset.notNil and: { (c == cueOffset) or: { c == (cueOffset + 1) } }
+        };
+        var sum = [chans.select(_.even), chans.select(_.odd)].collect { |side|
+            if (side.isEmpty) { DC.ar(0) } { Mix(side.collect { |c| In.ar(c, 1) }) }
+        };
+        SendPeakRMS.kr(sum, 20, 3, '/poptart/masterLevel');
+    }).add;
     // The bounce itself. Nothing but a DiskOut: everything about WHEN it runs is decided by the
     // timestamped bundles that start and free it (see the recordTrack OSCdef), so the file's
     // length is sample-accurate rather than however long the messages took to arrive.
@@ -1943,6 +1965,8 @@ server.waitForBoot {
     // Depth 0 - every track starts here; deeper groups are made before recGroup as routes need them.
     levelGroups = [Group.new(server, \addToHead)];
     server.sync;
+    // After recGroup, so it is the last node there is and reads what everything else wrote.
+    masterSynth = Synth(\poptart_master, target: recGroup, addAction: \addAfter);
     // --- the server's pressure gauge ----------------------------------------------------------
     //
     // scsynth will say what it is holding if asked (/status), and nothing ever asked. So the only
@@ -2276,7 +2300,7 @@ OSCdef(\poptartLoadInstrument, { |msg|
                             // Emulated DAW transport from the first sample on: a rolling transport
                             // at the current tempo (position re-syncs via '/poptart/setTempo').
                             self.setPlaying(true);
-                            self.setTempo(currentTempo);
+                            self.setTempo(trackTempo[key] ? currentTempo);
                             dropSlotRamps.(key, track, 0); // the open cleared their mappings (see dropRamp)
                             watchPluginEdits.(track, key, 0, self);
                             ("poptart: loaded instrument " ++ pluginId).postln;
@@ -2327,7 +2351,7 @@ OSCdef(\poptartLoadEffect, { |msg|
                         if (track[\wanted][slot] == pluginId) {
                             track[\loaded][slot] = pluginId;
                             self.setPlaying(true); // see loadInstrument
-                            self.setTempo(currentTempo);
+                            self.setTempo(trackTempo[key] ? currentTempo);
                             track[\synth].set(("active" ++ slot).asSymbol, 1); // un-bypass the slot
                             dropSlotRamps.(key, track, slot); // the open cleared their mappings (see dropRamp)
                             watchPluginEdits.(track, key, slot, self);
@@ -2571,11 +2595,22 @@ OSCdef(\poptartSetTempo, { |msg|
     var bpm = msg[1].asFloat, beats = msg[2].asFloat, latency = msg[3].asFloat;
     var playing = if (msg.size > 4) { msg[4].asInteger > 0 } { true };
     var event = if (msg.size > 5) { msg[5].asSymbol } { \sync };
-    currentTempo = bpm;
-    hostClockSync.(bpm, beats, latency, playing, event);
+    // A deck on a clock of its own: \except is the host clock with the listed tracks left out,
+    // \only another clock's tempo and place for the listed tracks alone - which is not the host
+    // clock, so the mirror MIDI clock ticks from is not touched by it. Symbols, since that is
+    // what the tracks are keyed by and includes() tests identity.
+    var scope = if (msg.size > 6) { msg[6].asSymbol } { \all };
+    var listed = if (msg.size > 7) { msg.copyToEnd(7).collect(_.asSymbol) } { [] };
+    if (scope == \only) {
+        listed.do { |key| trackTempo[key] = bpm };
+    } {
+        currentTempo = bpm;
+        trackTempo.keys.do { |key| if (listed.includes(key).not) { trackTempo.removeAt(key) } };
+        hostClockSync.(bpm, beats, latency, playing, event);
+    };
     bundleNow.(latency, {
-        tracks.do { |track|
-            if (track.isKindOf(Event)) {
+        tracks.keysValuesDo { |key, track|
+            if (track.isKindOf(Event) and: { (scope == \all) or: { listed.includes(key) == (scope == \only) } }) {
                 track[\loaded].do { |id, i|
                     if (id.notNil) {
                         track[\controllers][i] !? { |ctl|
@@ -4831,6 +4866,13 @@ OSCdef(\poptartDeckMeters, { |msg|
 OSCFunc({ |m|
     nodeAddr.sendMsg('/poptart/deckLevel', m[2].asInteger, m[3], m[4], m[5], m[6]);
 }, '/poptart/deckLevel', server.addr);
+
+// The master meter's feed ([nodeID, replyID, then a peak and an rms for each side of the summed
+// pair]), folded to the louder side.
+OSCFunc({ |m|
+    var pairs = m.copyToEnd(3).clump(2);
+    nodeAddr.sendMsg('/poptart/masterLevel', pairs.collect(_[0]).maxItem, pairs.collect(_[1]).maxItem);
+}, '/poptart/masterLevel', server.addr);
 
 // ...and their band energies, the same way ([nodeID, deck, low, mid, high]): what colors the
 // livecoded decks' waveform strips. A reply of its own because SendPeakRMS writes its own

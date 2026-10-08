@@ -1005,8 +1005,16 @@ class OscEngine {
   // `event` what just happened to it - 'sync' (a tempo change or the periodic re-sync),
   // 'start', 'stop', or 'rebase' (a running clock's phase moved) - which is what MIDI clock's
   // start/stop/locate messages are about.
-  setTempo(bpm, beatsPos, targetTime, playing = true, event = 'sync') {
-    this._send('/poptart/setTempo', [bpm, beatsPos, this._latency(targetTime), playing ? 1 : 0, String(event)]);
+  //
+  // `scope` narrows which tracks' plugins hear it, for a deck running on a clock of its own
+  // (see web-app's deckClocks): `{ except: [trackId...] }` is the host clock as ever, with those
+  // tracks' plugins left alone; `{ only: [trackId...] }` is another clock's tempo and position
+  // for just those tracks' plugins, and leaves sclang's mirror (and so MIDI clock) untouched.
+  setTempo(bpm, beatsPos, targetTime, playing = true, event = 'sync', scope = null) {
+    const args = [bpm, beatsPos, this._latency(targetTime), playing ? 1 : 0, String(event)];
+    if (scope?.only) args.push('only', ...scope.only.map(String));
+    else if (scope?.except?.length) args.push('except', ...scope.except.map(String));
+    this._send('/poptart/setTempo', args);
   }
 
   // --- plugin discovery ---
@@ -2187,6 +2195,14 @@ class OscEngine {
       if (typeof this.onMixLevel === 'function') {
         this.onMixLevel(String(track), Number(peakL), Number(rmsL), Number(peakR), Number(rmsR));
       }
+      return;
+    }
+    if (msg.address === '/poptart/masterLevel') {
+      // The master meter's feed, ~20/sec for as long as the engine is up: [peak, rms] of every
+      // hardware output summed to one stereo pair (the headphone cue pair aside), louder side.
+      // A peak above 1 is an over.
+      const [peak, rms] = (msg.args ?? []).map((a) => a?.value ?? a);
+      if (typeof this.onMasterLevel === 'function') this.onMasterLevel(Number(peak), Number(rms));
       return;
     }
     if (msg.address === '/poptart/deckLevel') {

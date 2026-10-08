@@ -41,6 +41,7 @@ const NAMES = ['deckLoopRung', 'deckLoopWindow', 'deckLoopFit', 'deckLoopApply',
   'deckLoopLive', 'deckLoopSet', 'deckLoopState'];
 // eslint-disable-next-line no-new-func
 const makeLoop = new Function(...DEPS, `
+  const clockOf = () => transport; // every deck on the room's clock (see deck-clock.test.js for the rest)
   ${grabConst('DECK_LOOP_BEATS')}
   ${grabConst('DECK_LOOP_DEFAULT_BEATS')}
   ${NAMES.map(grabFn).join('\n')}

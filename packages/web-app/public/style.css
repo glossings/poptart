@@ -1263,6 +1263,27 @@ footer#console {
   border-color: var(--accent);
 }
 
+/* find bar (cmd+F): the editor addon's own dialog, in the app's colors */
+
+.CodeMirror-dialog {
+  background: var(--bg-panel);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 12px;
+  padding: 4px 10px;
+  z-index: 20;
+}
+
+.CodeMirror-dialog-top {
+  border-bottom: 1px solid var(--border);
+}
+
+.CodeMirror-dialog input {
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
 /* autocomplete popup */
 
 .CodeMirror-hints {
@@ -3350,6 +3371,13 @@ body.arrange-on.arrange-deck-b #deckBPane > .song-pane {
 
 /* Its circles are built by script, so the box holds their space from the first paint instead of
    growing into it: PHRASE_CYCLES (4) circles of 15px with 4px between them. */
+/* On the desk each deck counts its own phrase (see deckPhraseLabel); this one reads deck A's
+   code clock alone, which says nothing about a deck holding a file. Hidden, not removed, so
+   the header keeps its layout. */
+body.mix-on #phraseViz {
+  visibility: hidden;
+}
+
 #phraseViz {
   display: flex;
   align-items: center;
@@ -5344,6 +5372,11 @@ body.mix-on #deckAHead .deck-song {
   color: var(--text-dim);
   white-space: nowrap;
 }
+.song-phrase {
+  min-width: 9ch;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
 .song-rate {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   color: var(--accent);
@@ -5358,7 +5391,8 @@ body.mix-on #deckAHead .deck-song {
 /* The transport glyphs (jog |◀ ▶| and nudge ◀ ▶) are drawn, not typed: as text, the bar and
    the arrow are two characters of a font with no say in how they line up - the bar sat off the
    arrow's point, and at enough zoom wrapped onto its own line. One grid for all four. */
-.song-ctl-row .small:has(.song-ctl-icon) {
+.song-ctl-row .small:has(.song-ctl-icon),
+.deck-live-ctl:has(.song-ctl-icon) {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -5371,14 +5405,22 @@ body.mix-on #deckAHead .deck-song {
   height: 1.2em; /* the text line's height, so these buttons stand as tall as `cue` and `sync` */
   fill: currentColor;
 }
-.song-ctl-row .small.on {
+.song-ctl-row .small.on,
+.deck-live-ctl.on {
   color: var(--accent);
   border-color: var(--accent);
 }
-.song-ctl-row .small.held {
+.song-ctl-row .small.held,
+.deck-live-ctl.held {
   color: var(--bg-panel);
   background: var(--accent);
   border-color: var(--accent);
+}
+/* The platter and sync on the deck head are for a deck playing code; a deck holding a file has
+   them on its own pane, and these step aside. */
+.deck-live-ctl.hidden,
+body.mix-on #deckAHead .deck-live-ctl.hidden {
+  display: none;
 }
 .song-ctl-gap {
   flex: 1;
@@ -5622,6 +5664,25 @@ body.mix-on #deckAHead .deck-song {
   text-align: center;
 }
 .mix-meter-db.over {
+  color: #f85149;
+}
+/* The master's peak and its clip light (the desk's center, and the mixer's header). */
+.master-peak {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+}
+.master-peak-light {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--border);
+}
+.master-peak.over .master-peak-light {
+  background: #f85149;
+}
+.master-peak.over .mix-meter-db {
   color: #f85149;
 }
 
@@ -5891,10 +5952,6 @@ body.mix-on #deckAHead .deck-song {
   width: 20px;
   padding: 1px 0;
   text-align: center;
-}
-.org-side-row .org-star {
-  color: var(--ok);
-  order: -1;
 }
 .org-side-row.org-over {
   background: var(--selection);

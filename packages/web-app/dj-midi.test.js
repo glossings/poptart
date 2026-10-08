@@ -226,13 +226,6 @@ test('play is the server\'s for a deck holding a file, the browser\'s for one ho
   assert.deepEqual(code.log, [['toClient', 'a', 'play']]);
 });
 
-test('the queue steps are always the browser\'s - the playlists live there', () => {
-  const m = rig();
-  m.mixMidiButton('a', 'next', true);
-  m.mixMidiButton('b', 'prev', true);
-  assert.deepEqual(m.log, [['toClient', 'a', 'next'], ['toClient', 'b', 'prev']]);
-});
-
 // --- the platter ---
 
 test('the platter is relative: 64 is standing still, either side of it is a delta', () => {
@@ -463,10 +456,9 @@ test('every learn surface the editor offers is a target the server accepts', () 
   for (const name of attached) {
     assert.ok(known.has(name), `client.js learns "${name}" but server.js has no such target`);
   }
-  // ...and the dynamic one, spelled with a ternary rather than a literal.
-  for (const name of ['next', 'prev']) {
-    assert.ok(known.has(name), `server.js has no "${name}" target`);
-  }
+  // ...and the one a helper attaches for both of a deck's rows (deckJogSizeWire).
+  assert.ok(known.has('jogsize'), 'server.js has no "jogsize" target');
+  assert.ok(!known.has('next') && !known.has('prev'), 'the playlist queue steps are back as learn targets');
 });
 
 // The clock the browser draws by is mirrored from the desk frame, not only from an eval reply:
@@ -477,7 +469,10 @@ test('every learn surface the editor offers is a target the server accepts', () 
 test('the desk frame carries the clock, and the browser adopts it', () => {
   const body = SRC.slice(SRC.indexOf('function mixDeskBody('));
   assert.match(body.slice(0, body.indexOf('\n}')), /transport: transport\?\.snapshot\(\)/);
-  assert.match(CLIENT, /if \(state\.transport\) transport = state\.transport;/);
+  assert.match(body.slice(0, body.indexOf('\n}')), /deckTransport: deckClockBody\(\)/, 'and each deck\'s own');
+  assert.match(CLIENT, /if \(body\?\.transport\) transport = body\.transport;/);
+  assert.match(CLIENT, /if \(body\?\.deckTransport\) deckTransports = body\.deckTransport;/);
+  assert.match(CLIENT, /takeClocks\(state\);/, 'on every desk frame');
 });
 
 // The tempo-ratio cycle exists on both sides (the pane clicks it, the pad presses it) and they

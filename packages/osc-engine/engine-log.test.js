@@ -10,6 +10,7 @@ const os = require('node:os');
 const path = require('node:path');
 
 const { openEngineLog, tailEngineLog, engineLogPath } = require('./engine-log');
+const { poptartHome } = require('./home');
 
 function tmpLog() {
   return path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'poptart-log-')), 'engine.log');
@@ -87,6 +88,8 @@ test('the tail is what doctor attaches, and a missing log tails to nothing', () 
   assert.equal(tailEngineLog({ file: '/nowhere/engine.log' }), '');
 });
 
-test('the default lives in ~/.poptart, beside the rest of the engine state', () => {
-  assert.equal(engineLogPath(), path.join(os.homedir(), '.poptart', 'engine.log'));
+// The data folder, wherever it is: POPTART_HOME moves it (CI points it at the runner's temp
+// folder), and the log moves with it.
+test('the default lives in the data folder, beside the rest of the engine state', () => {
+  assert.equal(engineLogPath(), path.join(poptartHome(), 'engine.log'));
 });

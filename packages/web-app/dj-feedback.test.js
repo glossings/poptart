@@ -150,7 +150,7 @@ test('a control with nothing to show is left alone', () => {
 test('only pads are lit - a knob has no lamp and some surfaces answer their own echo', () => {
   const m = rig({
     midi: {
-      'a:play': { device: 'X', channel: 0, kind: 'note', num: 11 },
+      'a:play': { device: 'X', channel: 1, kind: 'note', num: 11 },
       'a:fader': { device: 'X', channel: 0, kind: 'cc', num: 19 },
     },
     playing: { a: true },
@@ -162,8 +162,8 @@ test('only pads are lit - a knob has no lamp and some surfaces answer their own 
 test('a frame sends only what changed, and a forced one sends the lot', () => {
   const m = rig({
     midi: {
-      'a:play': { device: 'X', channel: 0, kind: 'note', num: 11 },
-      'a:sync': { device: 'X', channel: 0, kind: 'note', num: 12 },
+      'a:play': { device: 'X', channel: 1, kind: 'note', num: 11 },
+      'a:sync': { device: 'X', channel: 1, kind: 'note', num: 12 },
     },
     songs: { a: { sync: true } },
     playing: { a: false },
@@ -182,7 +182,7 @@ test('a frame sends only what changed, and a forced one sends the lot', () => {
 });
 
 test('nothing is written at all with the port off', () => {
-  const m = rig({ port: null, midi: { 'a:play': { device: 'X', channel: 0, kind: 'note', num: 11 } }, playing: { a: true } });
+  const m = rig({ port: null, midi: { 'a:play': { device: 'X', channel: 1, kind: 'note', num: 11 } }, playing: { a: true } });
   m.mixFeedbackLamps();
   m.mixFeedbackLevels();
   assert.deepEqual(m.sent, []);
@@ -191,8 +191,8 @@ test('nothing is written at all with the port off', () => {
 test('leaving the desk puts every lamp out and both meters to zero', () => {
   const m = rig({
     midi: {
-      'a:play': { device: 'X', channel: 0, kind: 'note', num: 11 },
-      'a:jogup': { device: 'X', channel: 0, kind: 'note', num: 13 }, // no state: not a lamp
+      'a:play': { device: 'X', channel: 1, kind: 'note', num: 11 },
+      'a:jogup': { device: 'X', channel: 1, kind: 'note', num: 13 }, // no state: not a lamp
       'a:fader': { device: 'X', channel: 0, kind: 'cc', num: 19 },
     },
     playing: { a: true },
@@ -206,7 +206,7 @@ test('leaving the desk puts every lamp out and both meters to zero', () => {
 test('after blanking, the next frame lights what is on again', () => {
   // The sent-state cache has to be cleared by a blank, or a pad that was lit before leaving the
   // desk comes back to a desk that thinks it already told it.
-  const m = rig({ midi: { 'a:play': { device: 'X', channel: 0, kind: 'note', num: 11 } }, playing: { a: true } });
+  const m = rig({ midi: { 'a:play': { device: 'X', channel: 1, kind: 'note', num: 11 } }, playing: { a: true } });
   m.mixFeedbackLamps();
   m.mixFeedbackBlank();
   m.sent.length = 0;

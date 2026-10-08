@@ -10,29 +10,22 @@ no completion notes.
     comes back it must be mode-independent - padding only inside dj mode makes toggling the
     desk jump a playing code deck 15 dB (and complete-mix's neutralizeMix pushes deck:1, which
     strips any pad from a promoted track) - and the cue tap sits before the `deck` gain, so a
-    deck-gain pad never reaches the headphones. The real stack, in order:
+    deck-gain pad never reaches the headphones. The master peak readout and its over
+    light are in (\poptart_master; the desk's center and the mixer's header). A master clip
+    at 0 dBFS was considered with them and left out: scsynth already clips at +2 dB on macOS
+    (ServerOptions.safetyClipThreshold, default 1.26; nothing on other platforms), and what
+    lies between 0 and that survives wherever the output is not a converter at full volume
+    (another app through a virtual device, a system volume applied in software), so clipping
+    at 0 would take away something that is sometimes there. What is left, in order:
 
-    1. Master clip at 0 dBFS with an over flag. A hard clip (never a limiter: lookahead delay
-       would flam the master against the cue bus) on the summed hardware bus, in a group after
-       recGroup so it stays last in node order; SendPeakRMS from the same synth gives a master
-       peak feed. Today nothing anywhere clips and the DAC is the first clipper in the chain,
-       invisibly - while composing, dense songs were being clamped at the interface and the
-       mixes were made INTO that clipper. Sound-wise a clip at 0 is bit-identical to what the
-       DAC already does; the point is the flag and the determinism.
-
-    2. Master peak readout + clip light. The ctrl+g mixer meters every track but never the sum;
-       the desk meters neither. Surface the master peak (the new feed, or the existing "*"
-       analysis tap) at the top of the mixer and tint the desk meters on an over. This turns
-       "is this song too hot" into a glance, per song, empirically.
-
-    3. setgain() - a song-level master gain, one line beside setbpm (HOST_BUILDERS). Applied
+    1. setgain() - a song-level master gain, one line beside setbpm (HOST_BUILDERS). Applied
        once per audible path at the DJ-stage input (the `live =` line, BEFORE the cue tap, so
        headphones hear it too; never on sends, or bus paths get it squared - the same
        exactly-once rule the crossfader's `deck` gain follows). Scalar 0..4, linear like
        postgain. A song that declares setgain supersedes MIX_CODE_DECK_PAD - they must never
        stack - and when every song declares one, the pad constant goes.
 
-    4. setgain(0.178) written into the saved songs and the sketches folder (never wip/),
+    2. setgain(0.178) written into the saved songs and the sketches folder (never wip/),
        idempotent, inserted at the top by the leading-comment block; then each song
        micro-adjusted by ear against the clip light. Peak-normalizing by measurement was
        considered and rejected: rendering plugin-heavy songs headless is where NI licensing
@@ -40,7 +33,7 @@ no completion notes.
        Target sits ~1 dB under full scale - true inter-sample peaks overshoot sample peaks in
        reconstruction.
 
-    5. A note in the sketches folder's working doc: the clip exists, and songs converted from
+    3. A note in the sketches folder's working doc: the clip exists, and songs converted from
        Strudel land hot and want ~-15 dB of setgain from the start.
 
     A whole-song master bus was considered and rejected (tracks pick their own output pairs via
@@ -49,6 +42,28 @@ no completion notes.
     setgain: members' direct paths are silent, so the gain still lands once.
 
 ---
+
+[ ] Deck B's panels. A double-click on deck B opens a plugin's own window and nothing else: the
+    text panels (arrangement, automation, lfo, piano roll, groove, preset, sample pack, slice,
+    envelope, record) are refused, because they and everything under them read and write the
+    main editor - about 360 direct uses of it across client.js, plus the debounced evals (which
+    evaluate deck A), the definition registries, the fold machinery, the held-preset marks and
+    the playback regions (three places skip any region whose deck is not 'a'). A plugin window
+    opened from deck B is also never captured: markSlotDirty returns null for a `b:` key, and
+    the pin writer (writePluginState, createPresetForSlot, applyBufferEdits) looks blocks up by
+    bare label in the main editor, so stripping the prefix would write into deck A's block of
+    the same name. The shape of the work: one "the editor this panel was opened from" handle
+    (editor + deck + eval function) passed to each panel in place of the global, the writer
+    taught to resolve `b:<label>` to deck B's buffer, and the three region filters keyed by that
+    handle's deck. One panel family at a time, each driven in the headless editor rig before
+    the next.
+
+[ ] Ship the plugin host fix for bundles with several plugins inside. A bundle's plugins are
+    probed side by side, and two copies of one binary starting at once can knock one over; the
+    cache then lists only the survivor, and the other name is unknown to the engine on every
+    boot until that bundle's cache entry is dropped by hand. The fix (probe each failure once
+    more, alone) is written in the fork's vst/PluginFactory.cpp, unbuilt and unreleased; it
+    needs a build per platform, a release, and the new pin in osc-engine/setup.js.
 
 [ ] Remember the small UI state across desktop launches: console open/closed, the settings
     pane's tab, and friends. localStorage is trustworthy now that the desktop port is fixed -
@@ -344,8 +359,9 @@ no completion notes.
     ring, so they cost nothing extra. Loop MOVE off the ring's edge is the one case to rule on:
     clamp at the oldest sample the ring still holds.
 
-    Beat JUMP and play-from-bar-N on a livecode deck are a different job (a per-deck cycle offset
-    in the Scheduler) and should not be bundled into this one.
+    Beat JUMP and play-from-bar-N on a livecode deck are a different job (a longer step of the
+    deck's own clock - DeckClock#jog, which the one-beat jog already makes) and should not be
+    bundled into this one.
 
 [ ] DJ FX units. Every track already carries seven fx slots with a per-slot dry/wet (Sig#wet, the
     linear crossfade in the track def) and loadEffect/setParam are wired, so a performance

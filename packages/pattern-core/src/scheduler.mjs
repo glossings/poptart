@@ -311,6 +311,9 @@ export class Transport {
     // taking the grid, a Link phase adoption). The host mirrors these to the engine's clock
     // outputs: MIDI clock's start/stop and its locate (see server.js's syncEngineClock).
     this.onStateChange = null;
+    // The deck clocks riding this one (see DeckClock): told of every tempo change, phase move,
+    // start and stop at the moment it happens, with the same `now` the move itself was made at.
+    this._followers = new Set();
   }
 
   _announce(kind) {
@@ -336,6 +339,7 @@ export class Transport {
     this._paused = true;
     this._baseCycle = 0;
     this._baseSec = this.getTime();
+    for (const f of this._followers) f._roomStop();
     if (wasRunning) this._announce('stop');
   }
 
@@ -351,6 +355,7 @@ export class Transport {
     if (!this._paused || !Number.isFinite(atSec)) return;
     this._baseSec = atSec;
     this._paused = false;
+    for (const f of this._followers) f._roomStart();
     this._announce('start');
   }
 
@@ -364,9 +369,15 @@ export class Transport {
   startAt(sec, cycle = 0) {
     if (!Number.isFinite(sec) || !Number.isFinite(cycle)) return;
     const wasPaused = this._paused;
+    const now = this.getTime();
+    const before = this.cycleAt(now);
     this._baseSec = sec;
     this._baseCycle = cycle;
     this._paused = false;
+    for (const f of this._followers) {
+      if (wasPaused) f._roomStart();
+      else f._roomShift(this.cycleAt(now) - before, now);
+    }
     this._announce(wasPaused ? 'start' : 'rebase');
   }
 
@@ -383,15 +394,19 @@ export class Transport {
     const now = this.getTime();
     this._baseCycle = this.cycleAt(now) + delta;
     this._baseSec = now;
+    for (const f of this._followers) f._roomShift(delta, now);
   }
 
-  setCps(cps) {
+  // `now` is for a follower re-rating itself at the very moment its room did (see DeckClock):
+  // a rebase made a few microseconds later would run those microseconds at the old tempo, and a
+  // tempo ramp is thirty of these a second.
+  setCps(cps, now = this.getTime()) {
     if (!(cps > 0) || !Number.isFinite(cps)) return; // ignore junk (a tempo signal mid-rest, 0, NaN)
     if (cps === this.cps) return;
-    const now = this.getTime();
     this._baseCycle = this.cycleAt(now);
     this._baseSec = now;
     this.cps = cps;
+    for (const f of this._followers) f._roomTempo(now);
     if (typeof this.onCpsChange === 'function') this.onCpsChange(cps);
   }
 
@@ -481,6 +496,171 @@ export class Transport {
     if (this._tempoTimer) clearInterval(this._tempoTimer);
     this._tempoTimer = null;
     this._clearRamp();
+  }
+}
+
+/**
+ * A deck's own clock. Every Scheduler on the deck reads this in the shared Transport's place, so
+ * the deck has a tempo and a position of its own - which is what lets it be nudged, jogged and
+ * run unsynced, like a deck playing a file.
+ *
+ * It rides a ROOM clock (the shared Transport). Synced, its tempo is the room's and every move
+ * the room makes - a tempo change, a phase trim, a rebase - is made here too, at the same
+ * instant, so the deck keeps whatever place it had against the room. Unsynced, its tempo is its
+ * own (`setFreeBpm`, what the deck's setbpm() declared, times `setFreeMult`, the deck's tempo
+ * fader) and the room's moves pass it by. Either way the momentary bend rides on top
+ * (`setBend`: the nudge and the platter), and `jog` steps the position.
+ *
+ * Running state is the room's: it starts on the room's position when the room starts, and stops
+ * with it. `align()` puts it back on the room's position at any other time - a deck starting to
+ * play under a room that is already running.
+ *
+ * Its tempo is derived, so setCps/setBpm/rampCps are not for the host to call on it.
+ */
+export class DeckClock extends Transport {
+  constructor(room) {
+    super(room.getTime, { cps: room.cps, paused: true });
+    this.room = room;
+    this.synced = true;
+    this.bend = 0;
+    this.freeMult = 1;
+    this._freeCps = room.cps;
+    this._freeSig = null;
+    this._freeTimer = null;
+    room._followers.add(this);
+    this.align();
+  }
+
+  /** The tempo before the momentary bend: the room's when synced, the deck's own otherwise. */
+  get baseCps() {
+    return this.synced ? this.room.cps : this._freeCps * this.freeMult;
+  }
+
+  _retarget(now = this.getTime()) {
+    super.setCps(this.baseCps * (1 + this.bend), now);
+  }
+
+  setSync(on) {
+    this.synced = !!on;
+    this._retarget();
+  }
+
+  /** The momentary rate offset as a fraction (0.04 = 4% fast). Position moved by it stays moved. */
+  setBend(frac) {
+    this.bend = Number.isFinite(frac) ? frac : 0;
+    this._retarget();
+  }
+
+  setFreeMult(mult) {
+    if (!(mult > 0) || !Number.isFinite(mult)) return;
+    this.freeMult = mult;
+    this._retarget();
+  }
+
+  /** The deck's own tempo: a number, or any sampleable Sig (polled, as Transport#setBpm polls). */
+  setFreeBpm(bpm) {
+    if (this._freeTimer) clearInterval(this._freeTimer);
+    this._freeTimer = null;
+    this._freeSig = null;
+    if (typeof bpm === 'number') {
+      if (bpm > 0 && Number.isFinite(bpm)) this._freeCps = bpm / 240;
+      this._retarget();
+      return;
+    }
+    if (typeof bpm?.sample !== 'function' || bpm.envIR) return; // the eval's own setbpm said why
+    this._freeSig = bpm;
+    const apply = () => {
+      const now = this.getTime();
+      const v = this._freeSig.sample(now, this.cps, this.cycleAt(now));
+      if (typeof v === 'number' && v > 0) {
+        this._freeCps = v / 240;
+        this._retarget(now);
+      }
+    };
+    const poll = () => {
+      try {
+        apply();
+      } catch {
+        clearInterval(this._freeTimer); // hold the tempo it had (see Transport#setBpm)
+        this._freeTimer = null;
+      }
+    };
+    poll();
+    if (this._freeSig) this._freeTimer = setInterval(poll, POLL_INTERVAL_MS);
+  }
+
+  /** Step the position by `delta` cycles, now. Announced as a 'rebase': the clock's mirrors relocate. */
+  jog(delta) {
+    if (!Number.isFinite(delta) || delta === 0 || this._paused) return;
+    this.shiftCycles(delta);
+    this._announce('rebase');
+  }
+
+  /** How far ahead of the room this clock sits, in cycles. */
+  get offset() {
+    const now = this.getTime();
+    return this.cycleAt(now) - this.room.cycleAt(now);
+  }
+
+  /** Does anything reading this clock get a different answer than it would from the room? */
+  get deviates() {
+    return !this.synced || this.bend !== 0 || Math.abs(this.offset) > 1e-9;
+  }
+
+  /** Take the room's position and running state, exactly. Tempo and bend are untouched. */
+  align() {
+    const room = this.room;
+    const now = this.getTime();
+    this._paused = room._paused;
+    if (room._paused || this.cps === room.cps || room._baseSec > now) {
+      // The same line through the same point: at one tempo the two clocks read identically from
+      // here on, and a start still ahead of now is met at the instant it happens.
+      this._baseSec = room._baseSec;
+      this._baseCycle = room._baseCycle;
+    } else {
+      this._baseSec = now;
+      this._baseCycle = room.cycleAt(now);
+    }
+  }
+
+  // Quietly: the room announces its own tempo change, and that announcement is for every clock
+  // riding it - a second one from here would have the host mirror each ramp step twice.
+  _roomTempo(now) {
+    if (!this.synced) return;
+    const told = this.onCpsChange;
+    this.onCpsChange = null;
+    try {
+      this._retarget(now);
+    } finally {
+      this.onCpsChange = told;
+    }
+  }
+
+  _roomShift(delta, now) {
+    if (!this.synced || this._paused) return;
+    this._baseCycle = this.cycleAt(now) + delta;
+    this._baseSec = now;
+  }
+
+  _roomStart() {
+    this.align();
+  }
+
+  _roomStop() {
+    this._paused = true;
+    this._baseCycle = 0;
+    this._baseSec = this.getTime();
+  }
+
+  snapshot() {
+    return { ...super.snapshot(), synced: this.synced, bend: this.bend };
+  }
+
+  dispose() {
+    super.dispose();
+    if (this._freeTimer) clearInterval(this._freeTimer);
+    this._freeTimer = null;
+    this.room._followers.delete(this);
   }
 }
 
@@ -1210,6 +1390,19 @@ export class Scheduler {
     this._scheduledUntilCycle = fromCycle ?? this.transport.cycleAt(this.engine.getTime());
     if (this._noteGate) this._noteGate.since = this._scheduledUntilCycle; // nothing before this played
     this._timer = setInterval(() => this._tick(), POLL_INTERVAL_MS);
+  }
+
+  /**
+   * The clock this plays by has just been stepped `delta` cycles on purpose (a deck's jog). What
+   * the window already sent stays sent - it is in the engine - and the window picks up at the
+   * same moment in time, which is `delta` further on in the pattern. Without this a step forward
+   * would send everything it stepped over at once, already late, and a step back would send
+   * nothing until the clock had walked the distance again.
+   */
+  relocate(delta) {
+    if (!this._running || !Number.isFinite(delta)) return;
+    this._scheduledUntilCycle += delta;
+    if (this._noteGate) this._noteGate.since += delta;
   }
 
   /** Whether start() has run without a stop() since - what a per-deck stop checks to know if

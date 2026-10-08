@@ -567,6 +567,8 @@ const cm = CodeMirror.fromTextArea(document.getElementById('editor'), {
     [`${CM_APP}A`]: () => (arState && arDeck === 'a' ? closeArrangeEditor() : openArrangePainter('a')),
     // DJ mode, the header's toggle.
     [`${CM_APP}D`]: () => toggleMixMode(),
+    // The library browser (see toggleOrganize).
+    [`${CM_APP}O`]: () => toggleOrganize(),
     // An effect at the caret (see insertFxCall).
     [`${CM_APP}F`]: (ed) => insertFxCall(ed),
     // Group the selected tracks (see groupSelection). The editing modifier, taking the sublime
@@ -631,9 +633,6 @@ document.addEventListener('keydown', (e) => {
   } else if (edit && e.key === '.' && !e.shiftKey) {
     e.preventDefault();
     transportStop();
-  } else if (edit && (e.key === '>' || e.key === '.') && e.shiftKey) {
-    e.preventDefault();
-    stepDeckBQueue(); // mix mode: load the active set's next song into deck B
   } else if (edit && (e.key === '=' || e.key === '+' || e.key === '-' || e.key === '_') && mixModeOn && songActiveDeck()) {
     // ⌘± zooms the active song pane's waveform (the piano roll's own handler takes these
     // first when it has focus; this is the pane's turn).
@@ -669,6 +668,9 @@ document.addEventListener('keydown', (e) => {
   } else if (app && e.key.toLowerCase() === 'd' && !e.shiftKey && !arKeyInField()) {
     e.preventDefault();
     toggleMixMode(); // the performance mixer's split (see the mix section at the foot of this file)
+  } else if (app && e.key.toLowerCase() === 'o' && !e.shiftKey && !arKeyInField()) {
+    e.preventDefault();
+    toggleOrganize(); // the library browser: open a song (onto the armed deck, on the desk)
   }
 });
 
@@ -6740,7 +6742,7 @@ function lastGateBefore(region, cyclePos) {
   const cycle = Math.floor(cyclePos);
   for (let k = 0; k <= LFO_GATE_LOOKBACK; k++) {
     const cyc = cycle - k;
-    if (cyc < gridFrom) break;
+    if (cyc < gridWin[region.deck]?.from) break;
     const gates = region.gates.get(cyc);
     if (!gates?.length) continue;
     // Sorted ascending, so the last one that has happened is the one this note is playing from.
@@ -16653,6 +16655,27 @@ function initPianorollEditor() {
 // highlighting then drifts until the next eval - known, cosmetic.)
 // Starts paused at cycle 0 - the server's clock only advances while something is playing.
 let transport = { cps: 0.5, baseSec: 0, baseCycle: 0, paused: true };
+// Each deck's own clock, mirrored the same way (see server.js's deckClocks): the one a deck's code
+// is read by. Null where the server has not said - then the deck's clock is the room's above.
+let deckTransports = { a: null, b: null };
+const deckClock = (deck) => deckTransports[deck] ?? transport;
+// A deck's tempo WITHOUT the momentary gestures - what anything drawn to scale is scaled by. A
+// nudge or a platter bend is a phase correction, not a tempo: it has to slide the picture (the
+// playhead moves faster) and must never rescale it, or the view zooms in and out under the finger.
+const deckBaseCps = (deck) => {
+  const t = deckClock(deck);
+  return t.cps / (1 + (t.bend ?? 0));
+};
+/** Take the clocks out of any server reply that carries them. */
+function takeClocks(body) {
+  if (body?.transport) transport = body.transport;
+  if (body?.deckTransport) deckTransports = body.deckTransport;
+}
+/** The server froze its clocks (an engine restart): freeze the mirrors with them. */
+function freezeClocks() {
+  transport = { ...transport, paused: true, baseCycle: 0 };
+  deckTransports = { a: null, b: null };
+}
 let playing = false;
 // Playback highlighting is driven by the step grid the SERVER computes from each active track's
 // real evaluated Sig (see server.js highlightGrid) - the exact grid the scheduler plays, so every
@@ -16664,10 +16687,15 @@ let playing = false;
 // the split pane's (mix mode) - one ticker lights both. `label` is the SERVER key ("b:kick" for
 // deck B), which is how /api/highlight top-ups find their region again.
 let patternRegions = []; // { label, deck, cm, anchor, grid: Map<cycle, steps>, gates: Map<cycle, [pos]>, maxEnd, lastKey, marks: [] }
-let gridFrom = 0; // first cycle covered by every region's grid
-let gridTo = 0; // one past the last covered cycle (extended by /api/highlight top-ups)
+// The window of cycles each deck's regions hold, counted on that deck's own clock - two decks at
+// different tempos are on different cycles. `from`: the first cycle covered by every region's
+// grid; `to`: one past the last (extended by /api/highlight top-ups); `fetching`: a top-up request
+// is in flight - don't stack another.
+const gridWin = {
+  a: { from: 0, to: 0, fetching: false },
+  b: { from: 0, to: 0, fetching: false },
+};
 let gridCount = 32; // window size the server ships (mirrored from the eval response)
-let gridFetching = false; // a top-up request is in flight - don't stack another
 
 function clearPatternRegions(deck = null) {
   const kept = [];
@@ -16688,10 +16716,8 @@ function clearPatternRegions(deck = null) {
 // server already did the real evaluation.
 function setupHighlighting(tracks, from, count, deck = 'a', editor = cm) {
   clearPatternRegions(deck);
-  gridFrom = from;
-  gridTo = from + count;
+  gridWin[deck] = { from, to: from + count, fetching: false };
   gridCount = count;
-  gridFetching = false;
   for (const t of tracks) {
     if (!t.active || !t.grid) continue;
     const anchor = editor.markText(editor.posFromIndex(t.start), editor.posFromIndex(t.end), {});
@@ -16720,29 +16746,31 @@ function ingestGrid(region, grid) {
 // cycle (<…>, r/i, degrade, choice) outrun the initial window. Coarse: one request per window, not
 // per frame. Deterministic on the server, so the extension lines up seamlessly.
 const GRID_PREFETCH = 8; // cycles of headroom before the covered end that triggers a top-up
-function maybePrefetchGrid(cycle) {
-  if (gridFetching || patternRegions.length === 0) return;
-  if (cycle < gridTo - GRID_PREFETCH) return;
-  gridFetching = true;
-  const from = gridTo;
-  api('GET', `/api/highlight?from=${from}&count=${gridCount}`)
+function maybePrefetchGrid(cycle, deck = 'a') {
+  const win = gridWin[deck];
+  if (win.fetching || !patternRegions.some((r) => r.deck === deck)) return;
+  if (cycle < win.to - GRID_PREFETCH) return;
+  win.fetching = true;
+  const from = win.to;
+  api('GET', `/api/highlight?from=${from}&count=${gridCount}&deck=${deck}`)
     .then((res) => {
       const byLabel = new Map(res.tracks.map((t) => [t.label, t.grid]));
       // Drop cycles well behind the play head so a set-and-forget pattern doesn't grow the grid
       // forever; kept margin (2 windows) stays clear of the bounded look-back for ringing tails.
       const pruneBefore = res.gridFrom - gridCount * 2;
       for (const r of patternRegions) {
+        if (r.deck !== deck) continue;
         const grid = byLabel.get(r.label);
         if (grid) ingestGrid(r, grid);
         for (const c of r.grid.keys()) if (c < pruneBefore) r.grid.delete(c);
         for (const c of r.gates.keys()) if (c < pruneBefore) r.gates.delete(c);
       }
-      gridFrom = Math.max(gridFrom, pruneBefore);
-      gridTo = Math.max(gridTo, res.gridFrom + res.gridCount);
+      win.from = Math.max(win.from, pruneBefore);
+      win.to = Math.max(win.to, res.gridFrom + res.gridCount);
     })
     .catch(() => {})
     .finally(() => {
-      gridFetching = false;
+      win.fetching = false;
     });
 }
 
@@ -16750,20 +16778,26 @@ function maybePrefetchGrid(cycle) {
 // A paused transport is frozen at baseCycle (0 after a stop / at page load), and a running one
 // started a little ahead (play-from-stop puts its start a lookahead out - see the server's
 // transportStart) sits at its start position until the clock gets there.
-function currentCyclePos() {
-  if (transport.paused) return transport.baseCycle;
-  return transport.baseCycle + Math.max(0, Date.now() / 1000 - transport.baseSec) * transport.cps;
+//
+// `deck` picks whose clock: a deck's code is read by that deck's own (see deckTransports), which
+// is the room's until the deck is nudged, jogged or taken off sync.
+function currentCyclePos(deck = 'a') {
+  const t = deckClock(deck);
+  if (t.paused) return t.baseCycle;
+  return t.baseCycle + Math.max(0, Date.now() / 1000 - t.baseSec) * t.cps;
 }
 
 function highlightTick() {
   if (!playing || patternRegions.length === 0) return;
-  const cyclePos = currentCyclePos();
-  const cycle = Math.floor(cyclePos);
-  maybePrefetchGrid(cycle);
+  const posOf = { a: currentCyclePos('a'), b: currentCyclePos('b') };
+  for (const d of ['a', 'b']) maybePrefetchGrid(Math.floor(posOf[d]), d);
 
   for (const r of patternRegions) {
     const range = r.anchor.find();
     if (!range) continue; // the block was deleted from the buffer
+    const cyclePos = posOf[r.deck] ?? posOf.a;
+    const cycle = Math.floor(cyclePos);
+    const gridFrom = gridWin[r.deck]?.from ?? 0;
 
     // A step (start/end are cycle fractions) sounds at cyclePos when it falls in [cyc+start,
     // cyc+end). `end` may exceed 1 - a clip-stretched, held, or echoed note rings past its own
@@ -16812,6 +16846,7 @@ setInterval(() => {
   highlightTick();
   songEndTick();
   updatePhraseViz();
+  deckPhraseTick();
   updateRecButton();
   updateRecordButton();
   projectorTick(); // after highlightTick: the projector shows the spans it just worked out
@@ -16894,7 +16929,7 @@ async function startMidiRecord() {
       cycles: Number(recCycles.value),
       grid: recQuantize(),
     });
-    if (recState.transport) transport = recState.transport;
+    takeClocks(recState);
     recPollTimer = setInterval(pollMidiRecord, REC_POLL_MS);
     prRecGhosts();
     logLine(
@@ -16922,7 +16957,7 @@ async function cancelMidiRecord(log = false) {
 async function pollMidiRecord() {
   try {
     const s = await api('GET', '/api/midiRecord/status');
-    if (s.transport) transport = s.transport;
+    takeClocks(s);
     if (s.phase === 'done') {
       clearInterval(recPollTimer);
       recPollTimer = null;
@@ -17489,7 +17524,7 @@ async function startTrackRecord(label, { cycles, name, wrapTail, normalize } = {
       wrapTail: !!wrapTail,
       normalize: normalize !== false,
     });
-    if (trackRecState.transport) transport = trackRecState.transport;
+    takeClocks(trackRecState);
     showLiveMeter(); // watch the signal go in, not the last take
     startRecordPoll();
     logLine(`bounce armed on "${label}": ${trackRecState.cycles} cycle(s) - starts when the phrase ends`);
@@ -17528,7 +17563,7 @@ async function pollTrackRecord() {
   } catch {
     return; // transient fetch error - keep polling
   }
-  if (s.transport) transport = s.transport;
+  takeClocks(s);
   // The meter runs whether or not anything is armed - that's what makes an open panel show the
   // signal coming into it. `levels` covers every tapped track, so an idle panel meters too.
   if (recordState) {
@@ -18246,6 +18281,8 @@ async function mixerPoll() {
     if (mixerState.freeze) accumMixerFreeze(strip.label, strip.bandTarget);
   }
   mixerState.masterTarget = s.spec?.['*'] ?? null;
+  masterPeakFeed(mixerMaster, s.master);
+  masterPeakPaint(mixerMaster);
   if (mixerState.freeze) accumMixerFreeze('*', mixerState.masterTarget);
 
   mixerNoteEl.textContent =
@@ -19675,6 +19712,7 @@ async function evaluate(start, { byHand = false } = {}) {
     const result = await pending;
     bufferFreshOpened = false; // the fresh eval landed; from here edits are livecoding
     transport = result.transport ?? { cps: result.cps ?? transport.cps, baseSec: 0, baseCycle: 0, paused: !start };
+    if (result.deckTransport) deckTransports = result.deckTransport;
     setPatchScale(result.scale); // a setscale() in the buffer re-colors (and re-folds) the roll
     setPatchGroove(result.groove ?? null); // ...and a setgroove() is the feel every quiet track plays by
     // The arrangement's song clock, for the painter's playhead - but only when the painter is on
@@ -19748,7 +19786,7 @@ function stopLanded(result, perDeck) {
     logLine(`deck ${perDeck.toUpperCase()} stopped`);
     return;
   }
-  transport = result.transport; // frozen at cycle 0
+  takeClocks(result); // frozen at cycle 0
   stopHighlighting();
   updateTransportButtons();
   logLine('stopped');
@@ -20761,7 +20799,7 @@ audioCueSelect.addEventListener('change', async () => {
     stopHighlighting();
     playing = false;
     updateTransportButtons();
-    transport = { ...transport, paused: true, baseCycle: 0 }; // server froze its clock too
+    freezeClocks(); // server froze its clocks too
     logLine(res.active
       ? `headphone cue is on "${res.active}" - re-evaluate (${chordLabel('mod+enter')}) to resume playback`
       : device
@@ -20812,7 +20850,7 @@ audioChannelSelect.addEventListener('change', async () => {
     stopHighlighting();
     playing = false;
     updateTransportButtons();
-    transport = { ...transport, paused: true, baseCycle: 0 }; // server froze its clock too
+    freezeClocks(); // server froze its clocks too
     renderChannelChoices(res.outputChannelChoices, res.outputChannels, res.audibleChannels);
     logLine(res.outputChannels === 2
       ? `every .o(n) now plays to channels 1/2 - re-evaluate (${chordLabel('mod+enter')}) to resume playback`
@@ -20875,7 +20913,7 @@ audioDeviceSelect.addEventListener('change', async () => {
     stopHighlighting();
     playing = false;
     updateTransportButtons();
-    transport = { ...transport, paused: true, baseCycle: 0 }; // server froze its clock too
+    freezeClocks(); // server froze its clocks too
     logLine(`audio output is now ${label} - re-evaluate (${chordLabel('mod+enter')}) to resume playback`);
     setAudioDeviceWarning(warning);
     refreshAudioInputs().catch(() => {});
@@ -21063,7 +21101,7 @@ audioInputApply.addEventListener('click', async () => {
     stopHighlighting();
     playing = false;
     updateTransportButtons();
-    transport = { ...transport, paused: true, baseCycle: 0 }; // server froze its clock too
+    freezeClocks(); // server froze its clocks too
     audioInputSaved = [...uids].sort().join(',');
     audioInputNeedsApply = false; // the rebuild and restart just happened
     audioInputs = layout ?? null; // the input(" popup's channel ranges just changed
@@ -25445,7 +25483,7 @@ function sliceSoundingNow(region, cyclePos) {
   const lookback = Math.min(64, Math.ceil(region.maxEnd));
   for (let back = 0; back <= lookback; back++) {
     const cyc = cycle - back;
-    if (cyc < gridFrom) break;
+    if (cyc < gridWin[region.deck]?.from) break;
     for (const s of region.grid.get(cyc) ?? []) {
       if (!s.chop || cyclePos < cyc + s.start || cyclePos >= cyc + s.end) continue;
       // A pattern playing a different file of the pack is playing different markers - the set is
@@ -28387,6 +28425,7 @@ async function openMixMode() {
         // moves into deck B's half rather than taking the page (see openArrangePainter).
         [`${CM_APP}A`]: () => (arState && arDeck === 'b' ? closeArrangeEditor() : openArrangePainter('b')),
         [`${CM_APP}F`]: (ed) => insertFxCall(ed),
+        [`${CM_APP}O`]: () => toggleOrganize(),
         // Grouping works on this pane's own tracks too (its edits land in ITS buffer; there is
         // just no fold gutter here to draw the result - see refoldEditor).
         [`${CM_MOD}G`]: (ed) => groupSelection(ed),
@@ -28546,104 +28585,22 @@ async function refreshSongFileStat(lib) {
   } catch { /* advisory - unverified rows render as present and fail loudly on load */ }
 }
 
-// The song picker: the ACTIVE playlist (the set, in order, with native bpms) leads, everything
-// else files under "all songs". With nothing picked and the pane empty, the set queues itself:
-// the song after the one that is playing (or after what deck B last held) is preselected and
-// loaded - the "next in the set" default. ⏭ / Cmd+Shift+. steps it (see stepDeckQueue).
+// The hidden select behind each deck's picker: every saved pattern, so a load by name has an
+// option to point at. Which song goes on a deck is chosen in the organize window.
 async function refreshDeckFiles() {
   try {
     const [{ patterns }, lib] = await Promise.all([api('GET', '/api/patterns?q='), loadLibraryDoc()]);
     await refreshSongFileStat(lib);
-    const byName = new Map(patterns.map((p) => [p.name, p]));
-    const say = (p, name) => (p ? `${p.title || p.name}${p.bpm ? ` · ${p.bpm}` : ''}` : `${name} (missing)`);
-    const set = lib.playlists.find((p) => p.id === lib.active);
-    deckFileItems = new Map((set?.items ?? []).filter(libItemIsFile).map((it) => [libItemKey(it), it]));
-    const fill = (sel, filesLoadHere) => {
+    for (const id of ['deckAFile', 'deckBFile']) {
+      const sel = document.getElementById(id);
       const had = sel.value;
       sel.innerHTML = '<option value="">— pick a song —</option>';
-      if (set) {
-        const g = document.createElement('optgroup');
-        g.label = `set: ${set.name}`;
-        set.items.forEach((item, i) => {
-          let o;
-          if (libItemIsFile(item)) {
-            const missing = songFileExists[item.path] === false;
-            o = new Option(
-              `${i + 1}. ♪ ${libFileTitle(item)}${item.bpm ? ` · ${item.bpm}` : ''}${missing ? ' (missing)' : ''}`,
-              libItemKey(item),
-            );
-            if (missing || !filesLoadHere) o.disabled = true;
-          } else {
-            const p = byName.get(item);
-            o = new Option(`${i + 1}. ${say(p, item)}`, item);
-            if (!p) o.disabled = true;
-          }
-          o.dataset.setIndex = i;
-          g.appendChild(o);
-        });
-        sel.appendChild(g);
-      }
-      const inSet = new Set(set?.items ?? []);
-      const rest = patterns.filter((p) => !inSet.has(p.name));
-      if (rest.length) {
-        const g = set ? document.createElement('optgroup') : null;
-        if (g) g.label = 'all songs';
-        for (const p of rest) (g ?? sel).appendChild(new Option(say(p, p.name), p.name));
-        if (g) sel.appendChild(g);
-      }
+      for (const p of patterns) sel.appendChild(new Option(p.title || p.name, p.name));
       if (had) sel.value = had;
-    };
-    fill(document.getElementById('deckAFile'), true); // both decks hold files now (song pane per deck)
-    const selB = document.getElementById('deckBFile');
-    fill(selB, true);
-    // Deck B only: with nothing picked and the pane empty, the set queues itself - the song
-    // after the one that is playing. Deck A is playing the current song; it never auto-loads.
-    if (!selB.value && set?.items.length) {
-      const next = nextInSet(set);
-      if (next) {
-        next.selected = true;
-        // an empty pane takes the queue's suggestion as a real load; edits are never clobbered
-        if (deckBCM && !deckBCM.getValue().trim() && !next.disabled) await loadDeckBFile();
-      }
     }
   } catch (e) {
     logLine(e.message ?? String(e), true);
   }
-}
-
-// The set's default queue position: the OPTION after the song deck B holds - or, with the pane
-// fresh, after the song the main deck is playing (a set mid-flight resumes from where you are).
-// Falls back to the top of the set.
-function nextInSet(set) {
-  const sel = document.getElementById('deckBFile');
-  const opts = [...sel.querySelectorAll('option[data-set-index]')];
-  if (!opts.length) return null;
-  const anchor = songPanes.b.song ? `file:${songPanes.b.song.path}` : (deckBFileName ?? currentSavedName);
-  const at = anchor ? set.items.findIndex((it) => libItemKey(it) === anchor) : -1;
-  return opts[(at + 1) % opts.length] ?? opts[0];
-}
-
-// ⏭ / ⏮ (and Cmd/Ctrl+Shift+. for deck B's forward step): walk the active playlist and load
-// what the step lands on. Both directions wrap, and both decks step their own queue - the
-// hidden per-deck select IS the queue position, which is why the pickers keep their place
-// across a load from anywhere else (organize's →A / →B point it at the row they loaded).
-//
-// The MIDI targets `<deck>:next` and `<deck>:prev` are these two, forwarded from the server as
-// an `action` frame: the playlist lives in the browser, so the press has to come here to be
-// acted on (see the mix-strip MIDI section of server.js).
-async function stepDeckQueue(deck, dir = 1) {
-  if (!mixModeOn) return;
-  const sel = document.getElementById(deck === 'a' ? 'deckAFile' : 'deckBFile');
-  const opts = [...sel.querySelectorAll('option[data-set-index]')].filter((o) => !o.disabled);
-  if (!opts.length) {
-    logLine('no active playlist to step - open organize (≡) and mark a set active', true);
-    return;
-  }
-  // Nothing picked yet: a forward step starts at the top of the set, a backward one at its end.
-  const cur = opts.findIndex((o) => o.selected);
-  const at = cur < 0 ? (dir > 0 ? -1 : 0) : cur;
-  opts[(at + dir + opts.length) % opts.length].selected = true;
-  if (await (deck === 'a' ? loadDeckAFile : loadDeckBFile)()) djFocusAfterLoad(deck);
 }
 
 // A deck that has been loaded AND started hands the focus to the other one: a set alternates, so
@@ -28672,7 +28629,6 @@ function djFocusOnPlay(deck, playing) {
   djFocusArmed[deck] = false;
   if (mixModeOn) djSetActiveDeck(deck === 'a' ? 'b' : 'a');
 }
-function stepDeckBQueue() { return stepDeckQueue('b', 1); } // the ⏭ hotkey's name, hoisted for the callers above
 
 async function loadDeckBFile(value = document.getElementById('deckBFile').value) {
   if (!value || !deckBCM) return;
@@ -28747,9 +28703,8 @@ async function loadDeckAFile(value = document.getElementById('deckAFile').value)
 }
 
 // The organize window's →A / →B: load a library item (a saved pattern's name or a playlist's
-// file item) onto a deck. A file from any playlist is made loadable (deckFileItems only holds
-// the active set's), the hidden select is pointed at it so the set's queue keeps its place,
-// and the modal closes - the deck head now says the song.
+// file item) onto a deck. A file is made loadable by its key (deckFileItems), the hidden select
+// is pointed at it, and the modal closes - the deck head now says the song.
 async function loadDeckSong(deck, item) {
   const key = libItemKey(item);
   if (libItemIsFile(item)) deckFileItems.set(key, item);
@@ -28814,7 +28769,9 @@ function deckHeadRender(state) {
       }
     }
     deckLoopRender(d, state?.deckLoop?.[d]);
+    deckLiveRender(d, state);
   }
+  orgPlayedCount(state?.playedN);
   // ...and the library browser's row colors, if it happens to be open behind the desk: a deck
   // starting or stopping is exactly when "what is playing" changes. Costs a string compare per
   // frame and nothing else (see orgRepaintPlayState).
@@ -28936,6 +28893,7 @@ function makeSongPane(deck) {
   const titleEl = byId('songTitle');
   const timeEl = byId('songTime');
   const rateEl = byId('songRate');
+  const phraseEl = byId('songPhrase');
   const bpmEl = byId('songBpm');
   const quantEl = byId('songQuant');
   const syncEl = byId('songSync');
@@ -29171,6 +29129,9 @@ function makeSongPane(deck) {
     drawOverview();
     const dur = wave?.seconds ?? P.mirror?.duration ?? 0;
     timeEl.textContent = dur ? `${songFmt(P.playheadNow(), true)} / ${songFmt(dur)}` : '';
+    const grid = P.mirror?.bpm > 0 ? 60 / P.mirror.bpm : 0;
+    const phrase = grid ? deckPhraseLabel((P.playheadNow() - (P.mirror.anchorSec ?? 0)) / grid) : '';
+    if (phraseEl.textContent !== phrase) phraseEl.textContent = phrase;
     const rate = P.mirror?.rate ?? 1;
     rateEl.textContent = Math.abs(rate - 1) > 0.0005 ? `${rate > 1 ? '+' : ''}${((rate - 1) * 100).toFixed(1)}%` : '';
     raf = requestAnimationFrame(frame);
@@ -29626,6 +29587,7 @@ function makeSongPane(deck) {
   mixLearnAttach(nudgeUpEl, `${deck}:nudgeup`, `${deck}:bend`);
   mixLearnAttach(byId('songJogDn'), `${deck}:jogdn`);
   mixLearnAttach(byId('songJogUp'), `${deck}:jogup`);
+  deckJogSizeWire(byId('songJogSize'), deck);
   mixLearnAttach(cueEl, `${deck}:cue`);
   // BOTH canvases bind the platter, because both are "the waveform" to the hand: the zoomed
   // strip you drag, and the full-track overview you click. In the stacked layout the zoomed one
@@ -29769,8 +29731,8 @@ function djLiveWaveDraw(deck) {
 
   // One scale with the song decks, and the playhead pinned at center exactly as theirs is: the
   // stack exists so the strips can be read against each other, which needs both to be true.
-  const cps = transport.cps || 0.5;
-  const cycNow = currentCyclePos();
+  const cps = deckBaseCps(deck) || 0.5; // never the bent tempo: see deckBaseCps
+  const cycNow = currentCyclePos(deck);
   const { cyc0, cyc1, xOf } = djLiveWindow(cycNow, cps, songPanes[deck].zoomSec(), w);
 
   ctx.strokeStyle = dim;
@@ -30311,7 +30273,7 @@ async function evalDeckB(start) {
     // painter is shut, like deck A's (see arKeptInsert) - says which bar of its song to start from.
     const arrangeFrom = start && arMarkerFor('b') != null ? arMarkerFor('b') : undefined;
     const result = await api('POST', '/api/evaluate', { code: deckBCM.getValue(), deck: 'b', start, arrangeFrom, name: deckBFileName ?? undefined });
-    if (result.transport) transport = result.transport;
+    takeClocks(result);
     if (arDeck === 'b') arSetClock(result.arrange ?? null); // deck B's own song clock, for the playhead
     songEndSetClock('b', result.arrange ?? null);
     // Deck B gets the same live playback highlighting as the main pane: its regions mark the
@@ -30488,6 +30450,33 @@ const mixMeterColor = (db) => (db >= -3 ? '#f85149' : db >= -9 ? '#d29922' : '#3
 // Latest pushed level per deck (the SSE 'level' events) and the drawn state: RMS bar with fast
 // attack / slow release, peak line, and a held numeric peak that decays after a beat.
 const mixMeterFeed = { a: null, b: null };
+
+// The master's readout: the held peak as a number, and a light that stays on for a few seconds
+// after an over so one clipped kick cannot go by unseen. Two of them share this - the desk's (fed
+// by the level stream) and the mixer's (fed by its poll) - and a peak above full scale (1) is an
+// over: the feed is every output summed, so it is the whole song being too loud.
+const MASTER_HOLD_MS = 1200;
+const MASTER_OVER_MS = 3000;
+function masterPeakMake(id) {
+  return { el: document.getElementById(id), db: document.getElementById(`${id}Db`), hold: -90, holdAt: 0, overAt: -Infinity };
+}
+function masterPeakFeed(m, peak, now = performance.now()) {
+  if (!(peak >= 0)) return;
+  const db = mixMeterDb(peak);
+  if (peak > 1) m.overAt = now;
+  if (db >= m.hold || now - m.holdAt > MASTER_HOLD_MS) {
+    m.hold = db;
+    m.holdAt = now;
+  }
+}
+function masterPeakPaint(m, now = performance.now()) {
+  if (now - m.holdAt > MASTER_HOLD_MS * 2) m.hold = -90; // the feed went quiet (engine down, desk closed)
+  const text = m.hold <= -55 ? '-∞' : `${m.hold > 0 ? '+' : ''}${m.hold.toFixed(1)}`;
+  if (m.db.textContent !== text) m.db.textContent = text;
+  m.el.classList.toggle('over', now - m.overAt < MASTER_OVER_MS);
+}
+const mixMaster = masterPeakMake('mixMaster');
+const mixerMaster = masterPeakMake('mixerMaster');
 const mixMeterDraw = {
   a: { rms: -90, peak: -90, hold: -90, holdAt: 0 },
   b: { rms: -90, peak: -90, hold: -90, holdAt: 0 },
@@ -30597,6 +30586,7 @@ function mixMeterLoop(t) {
   mixMeterLastT = t;
   mixMeterPaint('a', dt);
   mixMeterPaint('b', dt);
+  masterPeakPaint(mixMaster);
   mixMeterRaf = requestAnimationFrame(mixMeterLoop);
 }
 function mixMeterStart() {
@@ -30693,7 +30683,7 @@ function mixSyncValues(state) {
   // frame carried the snapshot, everything drawn from currentCyclePos() (playback highlighting,
   // the livecoded decks' bar grid, the arrangement playhead) kept running at whatever cps the
   // last eval's setbpm() had baked in.
-  if (state.transport) transport = state.transport;
+  takeClocks(state);
   mixFxRender(state.fx);
   songPaneSync(state);
   deckHeadRender(state);
@@ -30731,8 +30721,6 @@ function mixPushStart() {
       if (action === 'play') deckPlayPress(deck);
       else if (action === 'cue') deckCuePress(deck, true);
       else if (action === 'cueoff') deckCuePress(deck, false);
-      else if (action === 'next') stepDeckQueue(deck, 1);
-      else if (action === 'prev') stepDeckQueue(deck, -1);
     } catch { /* a torn frame; nothing to replay */ }
   });
   // The channel meter feed rides the same stream as NAMED events, so the desk-state handler
@@ -30740,9 +30728,10 @@ function mixPushStart() {
   mixEvents.addEventListener('level', (e) => {
     if (!mixModeOn) return;
     try {
-      const { a, b } = JSON.parse(e.data);
+      const { a, b, m } = JSON.parse(e.data);
       mixMeterFeed.a = a;
       mixMeterFeed.b = b;
+      if (m) masterPeakFeed(mixMaster, m.p);
       djLiveTracePush({ a, b }); // the same frames, kept as history for the livecoded strips
     } catch { /* a torn frame; the next one corrects */ }
   });
@@ -30838,6 +30827,104 @@ for (const deck of ['a', 'b']) {
   mixLearnAttach(loopNow, `${deck}:loop`);
   mixLearnAttach(halveBtn, `${deck}:loophalve`);
   mixLearnAttach(doubleBtn, `${deck}:loopdouble`);
+
+  // ...and the platter and SYNC of a deck playing CODE - the song pane's own row, for a deck with
+  // no song pane (see server.js's deckClocks). The same routes and the same learn targets, so a
+  // pad bound on one kind of deck works the other.
+  const fail = (e) => logLine(e.message ?? String(e), true);
+  for (const [name, dir] of [['NudgeDn', -1], ['NudgeUp', 1]]) {
+    const btn = document.getElementById(`deck${U}${name}`);
+    let holding = false; // local truth - the SSE echo of the press may not be back by release
+    const send = (hold) => api('POST', '/api/song/nudge', { deck, hold }).catch(fail);
+    btn.addEventListener('pointerdown', (e) => {
+      if (mixLearnArmed) return;
+      btn.setPointerCapture(e.pointerId);
+      holding = true;
+      send(dir);
+    });
+    for (const ev of ['pointerup', 'pointercancel']) {
+      btn.addEventListener(ev, () => {
+        if (!holding) return;
+        holding = false;
+        send(0);
+      });
+    }
+    mixLearnAttach(btn, `${deck}:${name.toLowerCase()}`, `${deck}:bend`);
+  }
+  for (const [name, jog] of [['JogDn', -1], ['JogUp', 1]]) {
+    const btn = document.getElementById(`deck${U}${name}`);
+    btn.addEventListener('click', () => {
+      if (!mixLearnArmed) api('POST', '/api/song/nudge', { deck, jog }).catch(fail);
+    });
+    mixLearnAttach(btn, `${deck}:${name.toLowerCase()}`);
+  }
+  deckJogSizeWire(document.getElementById(`deck${U}JogSize`), deck);
+  const syncBtn = document.getElementById(`deck${U}Sync`);
+  syncBtn.addEventListener('click', () => {
+    if (mixLearnArmed) return;
+    api('POST', '/api/mix/livesync', { deck, sync: !deckLiveNow[deck].sync })
+      .then((r) => logLine(r.sync
+        ? `sync on - deck ${U} rides the master clock`
+        : `sync off - deck ${U} at its own tempo`))
+      .catch(fail);
+  });
+  mixLearnAttach(syncBtn, `${deck}:sync`);
+}
+
+/** The jog-size button of either row: click for the next size, right-click for the one before. */
+function deckJogSizeWire(btn, deck) {
+  const step = (by) => {
+    if (!mixLearnArmed) api('POST', '/api/mix/jogsize', { deck, step: by }).catch((e) => logLine(e.message ?? String(e), true));
+  };
+  btn.addEventListener('click', () => step(1));
+  btn.addEventListener('contextmenu', (e) => { e.preventDefault(); step(-1); });
+  mixLearnAttach(btn, `${deck}:jogsize`);
+}
+
+// --- where a deck is in its music: phrase . bar . beat ----------------------------------------
+//
+// Counted from the deck's first downbeat (a file's beatgrid anchor, the start of a livecoded
+// arrangement), each number from 1, eight bars to a phrase - so the middle number coming back to
+// 1 is a phrase boundary, and two decks showing the same last two numbers are phrased together.
+const PHRASE_BARS = 8;
+function deckPhraseLabel(beats) {
+  if (!Number.isFinite(beats)) return '';
+  const beat = Math.floor(beats + 1e-6);
+  const bar = Math.floor(beat / 4);
+  return `${Math.floor(bar / PHRASE_BARS) + 1}.${(((bar % PHRASE_BARS) + PHRASE_BARS) % PHRASE_BARS) + 1}.${(((beat % 4) + 4) % 4) + 1}`;
+}
+
+/** The counter on a deck playing code, from that deck's own clock (the ticker calls this). */
+function deckPhraseTick() {
+  if (!mixModeOn) return;
+  for (const deck of ['a', 'b']) {
+    const el = document.getElementById(`deck${deck.toUpperCase()}Phrase`);
+    if (el.classList.contains('hidden')) continue;
+    const cyc = currentCyclePos(deck);
+    const text = deckPlayingNow[deck] ? deckPhraseLabel((cyc - djLiveGridShift(songEndClocks[deck], cyc)) * 4) : '';
+    if (el.textContent !== text) el.textContent = text;
+  }
+}
+
+// What the desk says of a deck playing code: its SYNC button and the nudge being held. The row
+// belongs to a deck with no file on it - a deck holding one has the same controls on its pane.
+const deckLiveNow = { a: { sync: true, nudge: 0 }, b: { sync: true, nudge: 0 } };
+function deckLiveRender(deck, state) {
+  const live = state?.live?.[deck];
+  if (!live) return;
+  deckLiveNow[deck] = live;
+  const U = deck.toUpperCase();
+  const el = (name) => document.getElementById(`deck${U}${name}`);
+  const file = !!state.song?.[deck];
+  for (const name of ['JogDn', 'NudgeDn', 'NudgeUp', 'JogUp', 'JogSize', 'Sync', 'Phrase']) el(name).classList.toggle('hidden', file);
+  // The jog size is the deck's, whichever of its two rows is showing.
+  const jog = String(state.deckJog?.[deck] ?? 1);
+  for (const btn of [el('JogSize'), document.getElementById(`songJogSize${U}`)]) {
+    if (btn.textContent !== jog) btn.textContent = jog;
+  }
+  el('Sync').classList.toggle('on', !!live.sync);
+  el('NudgeDn').classList.toggle('held', live.nudge < 0); // a MIDI nudge lights the button too
+  el('NudgeUp').classList.toggle('held', live.nudge > 0);
 }
 
 // --- the deck's performance loop (the deck head's loop button and its two length buttons) -----
@@ -31555,18 +31642,9 @@ function deckPlayPress(deck, unquantized = false) {
   return deck === 'b' ? evalDeckB(true) : evaluate(true, { byHand: true });
 }
 
-// The transport pads: play, and the queue steps either side of it.
+// The transport pad.
 for (const deck of ['a', 'b']) {
-  const U = deck.toUpperCase();
-  mixLearnAttach(document.getElementById(`deck${U}Play`), `${deck}:play`);
-  for (const [id, dir] of [[`deck${U}Prev`, -1], [`deck${U}Next`, 1]]) {
-    const btn = document.getElementById(id);
-    btn.addEventListener('click', () => {
-      if (mixLearnArmed) return;
-      stepDeckQueue(deck, dir);
-    });
-    mixLearnAttach(btn, `${deck}:${dir > 0 ? 'next' : 'prev'}`);
-  }
+  mixLearnAttach(document.getElementById(`deck${deck.toUpperCase()}Play`), `${deck}:play`);
 }
 document.getElementById('deckAUpdate').addEventListener('click', () => {
   if (mixModeOn && songPanes.a.song) {
@@ -31637,24 +31715,53 @@ async function loadLibraryDoc() {
 // desk's own live mirror first, since that updates as decks start and stop, and from the last
 // library answer otherwise - organize opens outside DJ mode too, where the mirror says nothing.
 let orgPlayedSession = new Set();
+let orgPlayedSaves = new Set(); // ...and the saved patterns that have, by name
 let orgOnDeckSaid = {};
 
-function orgDeckOf(abs) {
-  if (!abs) return null;
+/** The saved pattern a deck holds, when it holds code and not a file. */
+function orgDeckSaveName(deck) {
+  if (songPanes[deck]?.song) return null;
+  return (deck === 'b' ? deckBFileName : currentSavedName) ?? null;
+}
+
+/** Which deck holds this row: a file by its path (`abs`), a saved pattern by its name (`save`). */
+function orgDeckOf(abs, save = null) {
+  if (!abs && !save) return null;
   for (const d of ['a', 'b']) {
-    if (songPanes[d]?.song?.path === abs) return { deck: d, playing: !!deckPlayingNow[d] };
+    if (abs && songPanes[d]?.song?.path === abs) return { deck: d, playing: !!deckPlayingNow[d] };
+    if (save && (d === 'a' || mixModeOn) && orgDeckSaveName(d) === save) return { deck: d, playing: !!deckPlayingNow[d] };
   }
   for (const d of ['a', 'b']) {
-    if (orgOnDeckSaid[d]?.path === abs) return { deck: d, playing: !!orgOnDeckSaid[d].playing };
+    if (abs && orgOnDeckSaid[d]?.path === abs) return { deck: d, playing: !!orgOnDeckSaid[d].playing };
   }
   return null;
 }
 
 /** The row's state class, as one of the two colors or neither. */
-function orgPlayStateClass(abs) {
-  const on = orgDeckOf(abs);
+function orgPlayStateClass(abs, save = null) {
+  const on = orgDeckOf(abs, save);
   if (on?.playing) return 'org-on-deck';
-  return abs && orgPlayedSession.has(abs) ? 'org-played' : null;
+  return (abs && orgPlayedSession.has(abs)) || (save && orgPlayedSaves.has(save)) ? 'org-played' : null;
+}
+
+/**
+ * Ask again what has been played. The desk's frame carries only a count (`playedN`), so this
+ * runs when that count moves and when the window opens - never on a timer.
+ */
+let orgPlayedN = -1;
+function orgRefreshPlayed() {
+  api('GET', '/api/library').then((library) => {
+    orgPlayedSession = new Set(library.playedSession ?? []);
+    orgPlayedSaves = new Set(library.playedSaves ?? []);
+    orgOnDeckSaid = library.onDeck ?? {};
+    orgPlaySig = '';
+    orgRepaintPlayState();
+  }).catch(() => {});
+}
+function orgPlayedCount(n) {
+  if (n == null || n === orgPlayedN) return;
+  orgPlayedN = n;
+  orgRefreshPlayed();
 }
 
 /**
@@ -31665,11 +31772,11 @@ function orgPlayStateClass(abs) {
 let orgPlaySig = '';
 function orgRepaintPlayState() {
   if (!orgEl || orgEl.classList.contains('hidden')) return;
-  const sig = ['a', 'b'].map((d) => `${songPanes[d]?.song?.path ?? ''}:${deckPlayingNow[d] ? 1 : 0}`).join('|');
+  const sig = ['a', 'b'].map((d) => `${songPanes[d]?.song?.path ?? orgDeckSaveName(d) ?? ''}:${deckPlayingNow[d] ? 1 : 0}`).join('|');
   if (sig === orgPlaySig) return;
   orgPlaySig = sig;
-  for (const tr of orgEl.querySelectorAll('#orgBody tr[data-abs]')) {
-    const want = orgPlayStateClass(tr.dataset.abs);
+  for (const tr of orgEl.querySelectorAll('#orgBody tr[data-abs], #orgBody tr[data-save]')) {
+    const want = orgPlayStateClass(tr.dataset.abs, tr.dataset.save);
     tr.classList.toggle('org-on-deck', want === 'org-on-deck');
     tr.classList.toggle('org-played', want === 'org-played');
   }
@@ -31680,6 +31787,7 @@ function orgTookLibrary(library) {
   libDoc = library;
   libAnalyzing = library.analyzing ?? null;
   orgPlayedSession = new Set(library.playedSession ?? []);
+  orgPlayedSaves = new Set(library.playedSaves ?? []);
   orgOnDeckSaid = library.onDeck ?? {};
   orgPlaySig = ''; // a fresh answer: let the next repaint through whatever the decks are doing
   refreshSongFileStat(libDoc).then(() => {
@@ -31732,7 +31840,7 @@ async function writeLibraryNow() {
   } catch (e) {
     logLine(e.message ?? String(e), true);
   }
-  if (mixModeOn) refreshDeckFiles(); // the pickers mirror the active set
+  if (mixModeOn) refreshDeckFiles(); // the pickers list the saves by name
 }
 
 /**
@@ -31761,6 +31869,18 @@ let orgLastList = null; // the playlist ← last added to, so a run of adds need
 // Which source the table is showing. `folder` narrows the livecode tree; `id` names a playlist;
 // `dir` is where the disk browser is standing.
 let orgSrc = { kind: 'livecode', folder: '' };
+// ...kept across reloads, so the window comes back to the list it was on (orgNormalizeSrc
+// answers for a list that has since gone).
+const ORG_SRC_KEY = 'poptart.orgSrc';
+try {
+  const kept = JSON.parse(localStorage.getItem(ORG_SRC_KEY) ?? 'null');
+  if (kept && ['livecode', 'playlist', 'tracks'].includes(kept.kind)) orgSrc = kept;
+} catch { /* a first run, or storage refused: the default stands */ }
+function orgKeepSrc() {
+  try {
+    if (orgSrc.kind !== 'disk') localStorage.setItem(ORG_SRC_KEY, JSON.stringify(orgSrc));
+  } catch { /* storage refused: the view is only remembered until the page goes */ }
+}
 
 // Opened from a deck head (`forDeck`), the window is that deck's picker: a row is selected on
 // click and loaded on Enter or a double-click. From the files tab it is the library browser.
@@ -31784,13 +31904,7 @@ async function openOrganize(forDeck = null) {
   }
   if (!orgEl) buildOrganize();
   syncPreviewRouting(); // the window auditions, so settle where that comes out before it can
-  // A deck's picker opens on the set it would be playing from, which is where the next song
-  // almost always is; the browser opens wherever it was left.
-  if (forDeck) {
-    const active = libDoc.playlists.find((p) => p.id === libDoc.active);
-    if (active) orgSrc = { kind: 'playlist', id: active.id };
-    else if (libDoc.tracks.length) orgSrc = { kind: 'tracks' };
-  }
+  // The window opens wherever it was left, from a deck's picker as from anywhere else.
   orgNormalizeSrc();
   orgMidiFocus = 'songs'; // a learned knob starts on the songs, not wherever it was left
   orgEl.classList.remove('hidden');
@@ -31799,7 +31913,31 @@ async function openOrganize(forDeck = null) {
   orgAnchor = null;
   orgSay(''); // the footer reports what happens - it is not a standing instruction
   orgRender();
+  // ...standing on the song that deck holds, when it is in the list being looked at: the next
+  // one is usually near it.
+  const cur = orgRowOfDeck(forDeck ?? (mixModeOn ? djActiveDeck : 'a'));
+  if (cur) {
+    orgSel.add(cur.key);
+    orgAnchor = cur.key;
+    orgRender();
+    orgScrollTo(cur.key);
+  }
+  orgRefreshPlayed();
   orgEl.querySelector('#orgSearch').focus();
+}
+
+/** The drawn row for what a deck holds - a file by its path, a saved pattern by its name. */
+function orgRowOfDeck(deck) {
+  const path = songPanes[deck]?.song?.path ?? null;
+  const save = path ? null : orgDeckSaveName(deck);
+  if (!path && !save) return null;
+  return orgDrawnRows.find((r) => (path ? r.path === path : r.kind === 'saved' && r.saveName === save)) ?? null;
+}
+
+/** The browser's chord: open it (as the armed deck's picker, on the desk), or put it away. */
+function toggleOrganize() {
+  if (orgEl && !orgEl.classList.contains('hidden')) closeOrganize();
+  else openOrganize(mixModeOn ? djActiveDeck : null);
 }
 
 function closeOrganize() {
@@ -32713,23 +32851,6 @@ function orgPlaylistRow(p, depth) {
     src: { kind: 'playlist', id: p.id },
     onClick: () => orgGoto({ kind: 'playlist', id: p.id }),
   });
-  // The ACTIVE set is the one both decks' pickers list and ⏭ steps deck B through - a DJ-mode
-  // idea, so it only appears there.
-  if (mixModeOn) {
-    const star = document.createElement('button');
-    star.className = 'small org-star';
-    star.textContent = p.id === libDoc.active ? '●' : '○';
-    star.title = p.id === libDoc.active
-      ? "the active set - both decks' pickers list it, and ⏭ steps deck B through it. click to clear"
-      : 'make this the active set';
-    star.addEventListener('click', (e) => {
-      e.stopPropagation();
-      libDoc.active = libDoc.active === p.id ? null : p.id;
-      saveLibraryDoc();
-      orgRenderSide();
-    });
-    li.insertBefore(star, li.firstChild);
-  }
   li.addEventListener('contextmenu', (e) => {
     e.preventDefault();
     orgPlaylistMenu(p, e.clientX, e.clientY);
@@ -32756,6 +32877,7 @@ function orgPlaylistRow(p, depth) {
 function orgGoto(src) {
   if (src.kind === 'disk' && desktopOnly('browsing audio files on disk')) return;
   orgSrc = src;
+  orgKeepSrc();
   orgSel.clear();
   orgAnchor = null;
   orgEditing = null; // the row being corrected is not in this list
@@ -32928,11 +33050,12 @@ function orgRenderMain() {
     const tr = document.createElement('tr');
     tr.dataset.key = row.key;
     if (row.path) tr.dataset.abs = row.path;
+    else if (row.kind === 'saved' && row.saveName) tr.dataset.save = row.saveName;
     if (orgSel.has(row.key)) tr.classList.add('selected');
     if (row.missing) tr.classList.add('org-missing');
     if (row.imported) tr.classList.add('org-added');
     if (row.path && row.path === orgPlayer.abs) tr.classList.add('playing');
-    const playState = orgPlayStateClass(row.path);
+    const playState = orgPlayStateClass(row.path, tr.dataset.save);
     if (playState) tr.classList.add(playState);
     tr.draggable = row.kind !== 'dir';
     tr.title = orgRowTitle(row);
@@ -33033,6 +33156,7 @@ function orgRowTitle(row) {
   const bits = [];
   if (row.kind === 'dir') bits.push('double-click to go in');
   else if (orgForDeck) bits.push(`Enter or double-click loads onto deck ${orgForDeck.toUpperCase()}`);
+  else if (!mixModeOn && row.kind === 'saved') bits.push('Enter or double-click opens it in the editor');
   else if (row.kind === 'diskfile') bits.push(row.imported ? 'already imported' : 'double-click imports it');
   if (row.path) bits.push(row.path);
   if (row.missing) bits.push(row.kind === 'saved' ? 'this save is gone' : 'this file has moved or been deleted');
@@ -33459,6 +33583,12 @@ function orgRowOpen(row) {
     return orgLoadRowOnDeck(orgForDeck, row);
   }
   if (row.kind === 'diskfile') return orgImportPaths([row.path]);
+  // Away from the desk there is one place a saved pattern can go: the editor.
+  if (!mixModeOn && row.kind === 'saved') {
+    if (row.missing) return orgSay('that pattern is gone', true);
+    closeOrganize();
+    return loadPatternFile(row.saveName);
+  }
   // A row that is ALREADY in the set being looked at has nowhere to be added to: double-clicking
   // it used to drop a second copy into the same playlist, which is never what a double-click on
   // something means. Nothing to open here - the single click has already auditioned it, and the
@@ -33869,14 +33999,13 @@ function orgAddRowsTo(playlistId, rows) {
 
 /**
  * ← and Enter on a multiple selection: into the playlist last added to, so a run of adds needs
- * no re-aiming. With nothing aimed at yet, the active set is the obvious guess, and failing that
- * the window says where to point it rather than guessing a set to edit.
+ * no re-aiming. With nothing aimed at yet, the window says where to point it rather than
+ * guessing a set to edit.
  */
 function orgAddSelectionToLast() {
   const rows = orgSelectedRows().filter((r) => r.kind !== 'dir');
   if (!rows.length) return;
-  const target = libDoc.playlists.find((p) => p.id === orgLastList)
-    ?? libDoc.playlists.find((p) => p.id === libDoc.active);
+  const target = libDoc.playlists.find((p) => p.id === orgLastList);
   if (!target) return orgSay('right-click to pick a playlist (or + makes one)', true);
   orgAddRowsTo(target.id, rows);
 }
@@ -34066,7 +34195,6 @@ function orgPlaylistMenu(p, x, y) {
       ['delete', () => {
         if (!confirm(`Delete playlist "${p.name}"? The songs themselves stay.`)) return;
         libDoc.playlists = libDoc.playlists.filter((x) => x.id !== p.id);
-        if (libDoc.active === p.id) libDoc.active = null;
         if (orgLastList === p.id) orgLastList = null;
         if (orgSrc.kind === 'playlist' && orgSrc.id === p.id) orgSrc = { kind: 'livecode', folder: '' };
         saveLibraryDoc();
@@ -36558,7 +36686,7 @@ function arPlayheadLoop() {
   if (!arState) { arRaf = null; return; }
   arWatchView();
   // ...and a tempo change while stopped: the clock ruler is drawn at the tempo it was read at
-  if (!transport.paused || arPlayheadOn || transport.cps !== arDrawnCps) drawArrange();
+  if (!transport.paused || arPlayheadOn || deckBaseCps(arDeck) !== arDrawnCps) drawArrange();
   arRaf = requestAnimationFrame(arPlayheadLoop);
 }
 
@@ -38052,8 +38180,8 @@ function drawArrange() {
   ctx.fillRect(0, autoBottom, W, AR_TIME_H);
   ctx.strokeStyle = col('--border');
   ctx.beginPath(); ctx.moveTo(0, autoBottom + 0.5); ctx.lineTo(W, autoBottom + 0.5); ctx.stroke();
-  arDrawnCps = transport.cps;
-  const clock = arTimeTicks(arState.scroll, arVisibleBars(), transport.cps, arState.pxPerCycle);
+  arDrawnCps = deckBaseCps(arDeck);
+  const clock = arTimeTicks(arState.scroll, arVisibleBars(), arDrawnCps, arState.pxPerCycle);
   ctx.fillStyle = col('--text-dim');
   for (const tick of clock.ticks) {
     const x = arXOf(tick.bars);
@@ -38068,7 +38196,7 @@ function drawArrange() {
   // playhead
   arPlayheadOn = false;
   if (!transport.paused) {
-    const pos = clockState ? clockState.pos : currentCyclePos();
+    const pos = clockState ? clockState.pos : currentCyclePos(arDeck);
     const x = arXOf(pos);
     if (x >= AR_GUTTER && x <= W) {
       ctx.strokeStyle = col('--accent');
@@ -40009,7 +40137,7 @@ function arSetClock(snap) {
  *  the ruler has to say so (see drawArrange's loops strip) rather than drawing them all armed. */
 function arClockState() {
   if (!arClockTwin) return null;
-  return { ...arClockTwin.stateAt(currentCyclePos()), loopsOn: arClockTwin.loopsOn !== false };
+  return { ...arClockTwin.stateAt(currentCyclePos(arDeck)), loopsOn: arClockTwin.loopsOn !== false };
 }
 
 // --- the end of the song ---
@@ -40031,7 +40159,7 @@ function songEndTick() {
   if (!playing || transport.paused) return;
   for (const deck of ['a', 'b']) {
     const end = songEndClocks[deck]?.endCycle();
-    if (end == null || currentCyclePos() < end || Date.now() - songEndAsked[deck] < SONG_END_ASK_MS) continue;
+    if (end == null || currentCyclePos(deck) < end || Date.now() - songEndAsked[deck] < SONG_END_ASK_MS) continue;
     songEndAsked[deck] = Date.now();
     api('POST', '/api/arrangeEnd', { deck })
       .then((res) => {
@@ -40064,8 +40192,8 @@ function arrangeUnlock() {
       // it lights the loop's bars while playback runs on. Re-fetch from the current cycle; a
       // top-up overwrites the cycles it covers.
       if (res.released && patternRegions.length) {
-        gridTo = Math.max(gridFrom, Math.floor(currentCyclePos()));
-        maybePrefetchGrid(gridTo);
+        gridWin[deck].to = Math.max(gridWin[deck].from, Math.floor(currentCyclePos(deck)));
+        maybePrefetchGrid(gridWin[deck].to, deck);
       }
     })
     .catch((e) => logLine(`[arrange] ${e.message}`, true));

@@ -43,6 +43,9 @@ const DEPS = ['songDecks', 'schedulers', 'deckOfKey', 'FX_KEYS', 'mixState', 'tr
   'songApplyRate', 'mixNotify', 'othersPlaying', 'decks', 'setLog', 'readLibrary', 'console'];
 // eslint-disable-next-line no-new-func
 const make = new Function(...DEPS, `
+  // Both decks' SYNC lit, which is what every case here is about (deck-clock.test.js has it off).
+  const deckLiveSynced = () => true;
+  const deckClockApply = () => {};
   let songMasterDeck = null;
   let songMasterOctave = 1;
   ${grabConst('deckPlayingSince')}
@@ -52,6 +55,7 @@ const make = new Function(...DEPS, `
   ${grabConst('DJ_SET_CONFIRM_MS')}
   ${grabConst('DJ_SET_GAP_MS')}
   let djSet = null;
+  const codePlayedSession = new Set();
   ${grabFn('djSetTrackOf')}
   ${grabFn('djSetWrite')}
   ${grabFn('djSetFinish')}

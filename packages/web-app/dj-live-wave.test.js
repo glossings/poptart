@@ -290,3 +290,18 @@ test('a loop jump moves the mapping, and the anchor in force is the one the wind
   assert.equal(djLiveGridShift(twin, 20), 14);
   assert.equal(djLiveGridShift(twin, 9), 10, 'before every anchor, the first is the mapping');
 });
+
+// A held nudge is a phase correction, not a tempo. The strip's scale comes from the deck's tempo
+// with the bend taken back out, or the picture zooms in and out by 4% under the finger - the same
+// rule the song strips keep with baseRate.
+test('the livecoded strip is scaled by the deck\'s tempo without the nudge or the bend', () => {
+  const at = CLIENT_SRC.indexOf('const deckBaseCps = ');
+  assert.ok(at > 0, 'deckBaseCps not found in client.js - this test needs updating');
+  // eslint-disable-next-line no-new-func
+  const deckBaseCps = new Function('deckClock', `${CLIENT_SRC.slice(at, CLIENT_SRC.indexOf('\n};', at) + 3)}\nreturn deckBaseCps;`);
+  const held = deckBaseCps(() => ({ cps: 0.5 * 1.04, bend: 0.04 }));
+  assert.ok(Math.abs(held('a') - 0.5) < 1e-12, `scaled by ${held('a')}`);
+  assert.equal(deckBaseCps(() => ({ cps: 0.5 }))('a'), 0.5, 'the room\'s snapshot carries no bend');
+  const draw = CLIENT_SRC.slice(CLIENT_SRC.indexOf('function djLiveWaveDraw('));
+  assert.match(draw.slice(0, draw.indexOf('\n}\n')), /const cps = deckBaseCps\(deck\)/);
+});

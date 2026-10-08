@@ -60,7 +60,13 @@ let engine = null; // raw OscEngine (introspection/record endpoints talk to this
 let mappedEngine = null; // alias + unit-conversion wrapper (see param-mapping.js) - what the scheduler drives
 let engineError = null;
 let engineErrorCode = null; // 'BOOT_TIMEOUT' when the engine simply did not come up in time
-let transport = null; // shared tempo clock (pattern-core Transport) - all schedulers read it
+let transport = null; // the ROOM's tempo clock (pattern-core Transport): songs sync to it, Link and MIDI clock mirror it
+// Each deck's own clock (pattern-core DeckClock), which is what that deck's schedulers read.
+// Synced it rides the room clock exactly; a nudge, a jog or sync off takes it somewhere of its
+// own (see "the deck clocks" below). Anything about ONE deck's code - its position, its tempo,
+// its arrangement playhead - is asked of clockOf(deck); the room's grid is asked of `transport`.
+const deckClocks = { a: null, b: null };
+const clockOf = (deck) => deckClocks[deck] ?? transport;
 const schedulers = new Map(); // pattern label -> Scheduler (one engine track per label)
 // The keys inside a real GROUP (written inside a `group({ ... })` body - see groups.mjs): their
 // audio goes into the group's bus and the group's track is the one the desk shows and gates - so
@@ -226,6 +232,9 @@ const mixState = {
   // that deck's own time. Whether one is RUNNING is not kept here - it is the deck's own truth
   // (a song deck's window, a livecoded deck's clock hold), and deckLoopState reads it from there.
   deckLoop: { a: { beats: 16 }, b: { beats: 16 } },
+  // How far one press of a deck's jog buttons steps it, in beats of that deck's own time
+  // (/api/mix/jogsize): one beat to fix a bar, a phrase at a time to move about in a track.
+  deckJog: { a: { beats: 1 }, b: { beats: 1 } },
   // The DJ FX unit (see the FX section below): one named CHAIN switched in as an insert per
   // deck. `chain` is the loaded chain's name, `assign` which decks it is inserted on
   // ('a' | 'ab' | 'b'), `knob` the 0..1 FX knob (the chain's `fx1`), `on` the latched pad and
@@ -682,18 +691,19 @@ function handleSongPos(trackId, pos) {
 }
 
 // One nudge gesture, shared by /api/song/nudge and the mixMidi nudge/jog buttons. `hold` is
-// the momentary rate offset (press +-1, release 0); `jog` steps the phase one song-beat (the
-// bar-fix after a beat-aligned start), or 100ms when the song has no bpm.
+// the momentary rate offset (press +-1, release 0); `jog` steps the phase by the deck's jog size
+// in song-beats (one beat is the bar-fix after a beat-aligned start; see deckJogApply), or by
+// 100ms when the song has no bpm.
 function songNudge(deck, { hold, jog }) {
   const s = songDecks[deck];
-  if (!s) throw new Error(`deck ${deck} has no song loaded`);
+  if (!s) return liveNudge(deck, { hold, jog }); // a deck playing code has a platter too
   if (hold !== undefined) {
     s.nudge = Math.sign(Number(hold) || 0);
     songApplyRate(deck);
   }
   const dir = Math.sign(Number(jog) || 0);
   if (dir) {
-    const to = Math.min(Math.max(0, songPlayheadSec(deck) + (s.bpm ? 60 / s.bpm : 0.1) * dir), s.duration);
+    const to = Math.min(Math.max(0, songPlayheadSec(deck) + (s.bpm ? (60 / s.bpm) * mixState.deckJog[deck].beats : 0.1) * dir), s.duration);
     if (s.playing && engine) {
       engine.songSeek(engineTrack(SONG_KEYS[deck]), to, 0);
       s.posSec = to;
@@ -801,6 +811,10 @@ function songCue(deck, hold) {
 // crate you have been digging through for an hour all looks equally unplayed otherwise. Held in
 // memory deliberately - a session is not a history, and it empties when poptart restarts.
 const songPlayedSession = new Map(); // abs path -> { at, deck }
+// ...and the saved patterns that have, by name. A deck playing code has no play press of its own
+// to count (an evaluate is also how a pattern is edited), so these are taken from the set log,
+// which only writes down a track that stayed in the room (see djSetObserve).
+const codePlayedSession = new Set();
 
 function songPlayDeck(deck, { pos, rate, now: startNow } = {}) {
   if (!engine || !transport) throw new Error(engineError ?? 'engine not loaded');
@@ -965,12 +979,13 @@ const songBendState = {
 /** One relative platter message's worth of bend (`ticks` signed, 64-centered cc convention). */
 function songBend(deck, ticks) {
   const st = songBendState[deck];
-  if (!songDecks[deck]) return; // an empty deck's platter should feel like nothing
+  if (!songDecks[deck] && !deckRunning(deck)) return; // an empty deck's platter should feel like nothing
   st.ticks += ticks || 0;
   if (st.timer) return;
   st.last = Date.now();
   st.timer = setInterval(() => {
-    const s = songDecks[deck];
+    // A deck playing code bends its own clock (see liveNudge) - the same gesture, the same curve.
+    const s = songDecks[deck] ?? (deckRunning(deck) ? deckLive[deck] : null);
     const now = Date.now();
     const dt = Math.max(0.001, (now - st.last) / 1000);
     st.last = now;
@@ -986,7 +1001,8 @@ function songBend(deck, ticks) {
       clearInterval(st.timer);
       st.timer = null;
     }
-    songApplyRate(deck);
+    if (s === deckLive[deck]) deckClockApply(deck);
+    else songApplyRate(deck);
     mixNotify(); // the pane's rate readout follows the bend (throttled like every desk frame)
   }, SONG_BEND_FLUSH_MS);
 }
@@ -1081,9 +1097,11 @@ function songSetMeta(deck, patch) {
 //   - a synced song deck following someone else's grid: nothing, like a lit SYNC on hardware -
 //     the throw is remembered and takes effect the moment sync goes off (mixDeskBody says
 //     `locked` so the pane can gray it).
-//   - a livecode deck: the shared clock, scaled around the deck's native tempo. Two pattern
-//     decks share one Transport by design, so this is "the clock", not "this deck alone" - held
+//   - a livecode deck that is synced and leads: the room's clock, scaled as it stands - held
 //     via tempoOverride exactly like the migration slider, so a re-eval doesn't snap it back.
+//     Synced and following, nothing, as for a song.
+//   - a livecode deck with sync off: its own clock, at its setbpm times the slider (see
+//     deckClockApply) - the room's tempo is untouched unless this deck leads it (clockFollowSong).
 const DECK_TEMPO_RANGES = [6, 10, 16, 100];
 const deckTempoMult = (deck) => {
   const t = mixState.deckTempo[deck];
@@ -1116,6 +1134,8 @@ function deckTempoApply(deck, { frac, range } = {}) {
     } else {
       songApplyRate(deck); // unsynced decks hear it now; a locked follower just remembers it
     }
+  } else if (!deckLiveSynced(deck)) {
+    deckClockApply(deck);
   } else if (transport && !deckTempoLocked(deck)) {
     // The leader scales the room AS IT STANDS, un-scaled by whatever this same fader already
     // applied (prevMult) - never from a number of its own. Scaling the 120 default was the first
@@ -1258,6 +1278,7 @@ function djSetObserve(now) {
     djSet.lastId[d] = track.id;
     if (deckPlayingAt[d] < djSet.started.getTime()) djSet.started = new Date(deckPlayingAt[d]);
     djSet.entries.push({ at: deckPlayingAt[d], deck: d, ...track });
+    if (track.kind === 'livecode' && decks[d].songName) codePlayedSession.add(decks[d].songName);
     djSetWrite();
   }
 }
@@ -1269,8 +1290,9 @@ function deckTempoLocked(deck) {
   // A song deck's own rule: synced to someone else's grid. (Unsynced, it runs at its own rate,
   // and its fader is that rate - it follows nobody.)
   if (s) return !!(s.sync && s.bpm && deck !== songMasterDeck && othersPlaying(deck));
-  // A livecoded deck has no rate of its own - its patterns ride the shared clock - so unless it
-  // leads, its fader could only ever drag the leader's tempo around.
+  // A synced livecoded deck rides the room's clock, so unless it leads, its fader could only
+  // ever drag the leader's tempo around. With sync off the fader is the deck's own tempo.
+  if (!deckLiveSynced(deck)) return false;
   return leader != null && leader !== deck;
 }
 
@@ -1282,13 +1304,97 @@ function deckTempoLocked(deck) {
  * all included - `rate` is the truth of what is sounding). Null while its tempo is unknown,
  * since a rate against no bpm is not a tempo.
  *
- * A livecode deck: the shared clock. Its patterns have no tempo of their own - they ride the
- * transport - so the clock IS its resultant tempo, slider included (the slider moved the clock).
+ * A livecode deck: its own clock (see deckClocks) - the room's tempo while it is synced, its
+ * setbpm times its slider otherwise, and a nudge or a bend included either way.
  */
 function deckTempoBpm(deck) {
   const s = songDecks[deck];
   if (s) return s.bpm ? s.bpm * s.rate : null;
-  return transport ? transport.cps * 240 : null;
+  const clock = clockOf(deck);
+  return clock ? clock.cps * 240 : null;
+}
+
+// --- the deck clocks: a deck playing CODE has a platter, a sync button and a tempo of its own ---
+//
+// What the hand has asked of each deck's clock. `sync` is the deck's SYNC button (on: the clock
+// rides the room's; off: it runs at the deck's setbpm times its tempo fader); `nudge` is the
+// held push/drag (-1 | 0 | 1) and `bend` the platter's, both momentary rate offsets with the
+// same sizes and curves a song deck's have (song-sync.js). Outside dj mode there is one deck and
+// its clock is the room's, whatever the button was last left at.
+const deckLive = {
+  a: { sync: true, nudge: 0, bend: 0 },
+  b: { sync: true, nudge: 0, bend: 0 },
+};
+const deckLiveSynced = (deck) => !mixState.dj || deckLive[deck].sync;
+
+/** Put a deck's clock where its state says: sync, the fader's share of its own tempo, the bend. */
+function deckClockApply(deck) {
+  const clock = deckClocks[deck];
+  if (!clock) return;
+  const st = deckLive[deck];
+  const file = !!songDecks[deck]; // a deck holding a file keeps its rate on the song; its clock is the room's
+  clock.setFreeMult(deckTempoMult(deck));
+  clock.setSync(file || deckLiveSynced(deck));
+  clock.setBend(file ? 0 : songSync.effectiveRate(1, st.nudge, st.bend) - 1);
+}
+
+/** Let go of the platter: what a deck's stop, a load onto it and leaving dj mode all do. */
+function deckLiveRelease(deck) {
+  deckLive[deck].nudge = 0;
+  deckLive[deck].bend = 0;
+  deckClockApply(deck);
+}
+
+/**
+ * Put a deck's clock back on the room's place - a deck starting to play under a room already
+ * running, a file loaded onto it. Whatever of the deck's is still scheduling (its FX unit, if
+ * nothing else) is carried across the step, as a jog carries it.
+ */
+function deckClockAlign(deck) {
+  const clock = deckClocks[deck];
+  if (!clock || !engine) return;
+  const now = engine.getTime();
+  const before = clock.cycleAt(now);
+  clock.align();
+  const delta = clock.cycleAt(now) - before;
+  if (delta) for (const sch of deckSchedulers(deck)) sch.relocate(delta);
+}
+
+/** The schedulers reading a deck's clock: its tracks and its FX unit. */
+function deckSchedulers(deck) {
+  const out = [...schedulers].filter(([key]) => deckOfKey(key) === deck).map(([, sch]) => sch);
+  if (fxSchedulers[deck]) out.push(fxSchedulers[deck]);
+  return out;
+}
+
+// The platter of a deck playing code - songNudge's other half, reached through it. `hold` bends
+// the deck's clock while held, and the place it gained or lost stays; `jog` steps the deck by
+// its jog size. Both move this deck alone: the room's clock, and everything else riding it, stays put.
+function liveNudge(deck, { hold, jog }) {
+  const clock = deckClocks[deck];
+  if (!clock) throw new Error(engineError ?? 'engine not loaded');
+  const st = deckLive[deck];
+  if (hold !== undefined) {
+    st.nudge = Math.sign(Number(hold) || 0);
+    deckClockApply(deck);
+  }
+  const dir = Math.sign(Number(jog) || 0);
+  if (dir && deckRunning(deck)) {
+    const delta = (dir * mixState.deckJog[deck].beats) / songSync.BEATS_PER_CYCLE;
+    clock.jog(delta);
+    for (const sch of deckSchedulers(deck)) sch.relocate(delta);
+  }
+  mixNotify();
+  return { deck, nudge: st.nudge, offset: clock.offset };
+}
+
+/** The SYNC button of a deck playing code. Nothing jumps either way: only the tempo changes hands. */
+function liveSetSync(deck, on) {
+  deckLive[deck].sync = !!on;
+  deckClockApply(deck);
+  clockFollowSong(); // a leader going free takes the room with it from this moment
+  mixNotify();
+  return { deck, sync: deckLive[deck].sync };
 }
 
 // --- the per-deck performance LOOP (/api/mix/loop and the `loop` / `loophalve` / `loopdouble`
@@ -1318,6 +1424,29 @@ const DECK_LOOP_BEATS = [0.25, 0.5, 1, 2, 4, 8, 16, 32, 64];
 // Four bars: long enough to be a passage of the music rather than a stutter, which is what a
 // loop is for most of the time it is used.
 const DECK_LOOP_DEFAULT_BEATS = 16;
+
+// The sizes a jog step comes in. One beat is the default and the fine end: below it is the
+// platter's job. The rest are the lengths music is phrased in.
+const DECK_JOG_BEATS = [1, 2, 4, 8, 16, 32];
+
+/**
+ * Choose a deck's jog size: `beats` names one outright, `step` (+-1) moves along the ladder and
+ * comes round at either end, which is what a single button or pad needs.
+ */
+function deckJogApply(deck, { beats, step } = {}) {
+  const want = mixState.deckJog[deck];
+  if (beats !== undefined) {
+    if (!DECK_JOG_BEATS.includes(Number(beats))) throw new Error(`mix/jogsize: beats must be one of ${DECK_JOG_BEATS.join(', ')}`);
+    want.beats = Number(beats);
+  }
+  const by = Math.sign(Number(step) || 0);
+  if (by) {
+    const n = DECK_JOG_BEATS.length;
+    want.beats = DECK_JOG_BEATS[(DECK_JOG_BEATS.indexOf(want.beats) + by + n) % n];
+  }
+  mixNotify();
+  return { beats: want.beats };
+}
 
 /** The nearest rung of the ladder to `beats`, so a halved or doubled length lands on one. */
 function deckLoopRung(beats) {
@@ -1350,7 +1479,7 @@ function deckLoopWindow(deck, beats) {
   const clock = arrangeClocks[deck];
   if (!clock || !transport || !engine) return null;
   const beatCyc = 1 / songSync.BEATS_PER_CYCLE;
-  const pos = clock.posAt(transport.cycleAt(engine.getTime()));
+  const pos = clock.posAt(clockOf(deck).cycleAt(engine.getTime()));
   return deckLoopFit(deck, Math.max(0, Math.floor(pos / beatCyc) * beatCyc), beats * beatCyc);
 }
 
@@ -1442,7 +1571,7 @@ function deckLoopSet(deck, window) {
   }
   const clock = arrangeClocks[deck];
   if (!clock) return;
-  const cycle = transport && engine && !transport.paused ? transport.cycleAt(engine.getTime()) : 0;
+  const cycle = transport && engine && !transport.paused ? clockOf(deck).cycleAt(engine.getTime()) : 0;
   clock.setHold(window ? { start: window.from, end: window.to } : null, cycle);
 }
 
@@ -1515,6 +1644,7 @@ function songUnload(deck) {
   if (!s) return;
   if (s.endTimer) clearTimeout(s.endTimer);
   songDecks[deck] = null;
+  deckClockApply(deck); // the deck's clock answers to its own SYNC button again
   songHandGridOver(deck); // the grid goes with the song - to the other deck, or to nobody
   if (engine) {
     try { engine.songFree(engineTrack(SONG_KEYS[deck])); } catch { /* engine between restarts */ }
@@ -1633,8 +1763,8 @@ async function songDetectKick(deck) {
 // channel, and it runs the gesture exactly as its own button does.
 const MIX_MIDI_KNOBS = ['trim', 'eqlo', 'eqmid', 'eqhi', 'djf', 'djres', 'fader'];
 const MIX_MIDI_HOLD = ['nudgedn', 'nudgeup', 'cue'];
-const MIX_MIDI_PRESS = ['jogdn', 'jogup', 'play', 'phones', 'sync', 'mult', 'keylock', 'quant',
-  'regions', 'loop', 'loophalve', 'loopdouble', 'temporange', 'next', 'prev'];
+const MIX_MIDI_PRESS = ['jogdn', 'jogup', 'jogsize', 'play', 'phones', 'sync', 'mult', 'keylock', 'quant',
+  'regions', 'loop', 'loophalve', 'loopdouble', 'temporange'];
 // `tempo` is the deck's pitch fader and `bend` the platter's pitch-bend mode - continuous like
 // the platter pair, but dispatched to their own gestures rather than through mixMidiValue.
 const MIX_MIDI_DECK_CTLS = [...MIX_MIDI_KNOBS, ...MIX_MIDI_HOLD, ...MIX_MIDI_PRESS, 'scrub', 'search', 'bend', 'tempo'];
@@ -2143,6 +2273,7 @@ function mixMidiButton(deck, name, down) {
     case 'nudgeup': songNudge(deck, { hold: down ? 1 : 0 }); return;
     case 'jogdn': songNudge(deck, { jog: -1 }); return;
     case 'jogup': songNudge(deck, { jog: 1 }); return;
+    case 'jogsize': deckJogApply(deck, { step: 1 }); return;
     case 'cue':
       // A deck holding a FILE previews from its cue point right here. A deck holding CODE has no
       // cue POINT - a pattern is not a recording with a place in it - but the gesture still means
@@ -2164,7 +2295,10 @@ function mixMidiButton(deck, name, down) {
       applyMixTargets([{ deck, name: 'cue', value: on ? 0 : 1 }]);
       return;
     }
-    case 'sync': songSetMeta(deck, { sync: !s?.sync }); return;
+    case 'sync':
+      if (s) songSetMeta(deck, { sync: !s.sync });
+      else liveSetSync(deck, !deckLive[deck].sync);
+      return;
     case 'keylock': songSetMeta(deck, { keylock: !s?.keylock }); return;
     case 'quant': songSetMeta(deck, { quantize: s?.quantize === false }); return;
     case 'regions': setDeckLoops(deck, !deckLoopsOn[deck]); return;
@@ -2183,7 +2317,6 @@ function mixMidiButton(deck, name, down) {
       // on-screen button is disabled for it. The pad matches.
       if (deck !== songMasterDeck) songSetMeta(deck, { syncMult: songMultNext(deck) });
       return;
-    case 'next': case 'prev': mixActionNotify(deck, name); return;
     default:
   }
 }
@@ -2365,7 +2498,7 @@ function mixFeedbackLit(target) {
     case 'play': return deckPlaying(deck);
     case 'cue': return !!s?.cueHeld;
     case 'phones': return (mixState.perDeck[deck]?.get('cue') ?? 0) > 0;
-    case 'sync': return !!s?.sync;
+    case 'sync': return s ? !!s.sync : deckLive[deck].sync; // a deck playing code has one too
     case 'keylock': return !!s?.keylock;
     case 'quant': return s ? s.quantize !== false : null;
     case 'regions': return !!deckLoopsOn[deck];
@@ -2395,7 +2528,8 @@ function mixFeedbackLamps({ force = false } = {}) {
     if (lit == null) continue;
     if (!force && mixLampSent.get(target) === lit) continue;
     mixLampSent.set(target, lit);
-    out.push(['note', m.channel ?? 0, m.num, lit ? 127 : 0]);
+    // A learned binding counts channels 1-16, as the page shows them; the port counts 0-15.
+    out.push(['note', (m.channel ?? 1) - 1, m.num, lit ? 127 : 0]);
   }
   if (out.length) {
     try { engine.midiOut(out); } catch { /* engine between restarts */ }
@@ -2408,7 +2542,7 @@ function mixFeedbackBlank() {
   const out = [];
   for (const [target, m] of Object.entries(settings.mixMidi ?? {})) {
     if (m.kind !== 'note' || mixFeedbackLit(target) == null) continue;
-    out.push(['note', m.channel ?? 0, m.num, 0]);
+    out.push(['note', (m.channel ?? 1) - 1, m.num, 0]);
   }
   const meters = mixMeterProfile();
   for (const deck of ['a', 'b']) {
@@ -2442,6 +2576,11 @@ function mixDeskTracks() {
 function deckPlaying(deck) {
   return [...schedulers].some(([key, sch]) => deckOfKey(key) === deck && sch.running)
     || !!songDecks[deck]?.playing;
+}
+
+/** Both decks' clocks as plain data - sent wherever the room's snapshot is, for the same mirrors. */
+function deckClockBody() {
+  return { a: deckClocks.a?.snapshot() ?? null, b: deckClocks.b?.snapshot() ?? null };
 }
 
 function mixDeskBody() {
@@ -2482,6 +2621,10 @@ function mixDeskBody() {
     // window it is holding (seconds into the file on a song deck, cycles into the arrangement on
     // a livecoded one - the pane that draws it knows which kind it is drawing).
     deckLoop: { a: deckLoopState('a'), b: deckLoopState('b') },
+    // ...and how far its jog buttons step it, in beats.
+    deckJog: { a: mixState.deckJog.a.beats, b: mixState.deckJog.b.beats },
+    // How many tracks have gone out tonight: the library browser re-reads which when this moves.
+    playedN: songPlayedSession.size + codePlayedSession.size,
     // The FX unit, plus the chain list the picker and the step pads walk.
     fx: { ...mixState.fx, chains: djFxChainNames() },
     link: linkState.enabled ? { peers: linkState.peers } : null,
@@ -2492,6 +2635,10 @@ function mixDeskBody() {
     // running at whatever cps the last eval's setbpm() had baked in until the next eval happened
     // to correct it. The desk moves the clock far more often than an eval does.
     transport: transport?.snapshot() ?? null,
+    // ...and each deck's own, which is the one a deck's code is read by (see deckClocks), with
+    // what the hand has asked of it: the SYNC button and the held nudge.
+    deckTransport: deckClockBody(),
+    live: Object.fromEntries(['a', 'b'].map((d) => [d, { sync: deckLive[d].sync, nudge: deckLive[d].nudge }])),
     xf: mixState.xf,
     faders: { ...mixState.faders },
     cue: activeCue ? { name: activeCue.name } : null,
@@ -2581,7 +2728,16 @@ function serveMixEvents(res) {
 // which is what colors its waveform strip the way a song deck's file-analyzed waveform is
 // colored. The bands arrive as a second reply from the same reader synth, so they are held here
 // and ride out on the next frame with the level they were measured beside.
-const deckLevels = { a: null, b: null };
+const deckLevels = { a: null, b: null, m: null };
+// `m` is the master: the peak of all the hardware outputs summed (see masterLevelTake). Between two
+// readings by the mixer's poll, the highest peak is what matters - an over that lasted one
+// reply must still be there when the poll comes.
+let masterPeakHeld = 0;
+function masterLevelTake(p, r) {
+  deckLevels.m = { p, r };
+  if (p > masterPeakHeld) masterPeakHeld = p;
+  deckLevelNotify();
+}
 const deckBands = { a: null, b: null };
 
 /**
@@ -2844,7 +3000,7 @@ async function fxLoadChain(name) {
     mappedEngine.setChain(tid, [sigs[deck].instrument, ...sigs[deck].fxChain]);
     let sch = fxSchedulers[deck];
     if (!sch) {
-      sch = new patternCore.Scheduler(mappedEngine, { transport, trackId: tid, label: FX_KEYS[deck], deck });
+      sch = new patternCore.Scheduler(mappedEngine, { transport: clockOf(deck), trackId: tid, label: FX_KEYS[deck], deck });
       fxSchedulers[deck] = sch;
     }
     sch.setPattern(sigs[deck]);
@@ -3078,10 +3234,26 @@ setInterval(syncVstTransport, VST_TRANSPORT_SYNC_MS);
 // ticks from (see below). `event` says what just happened to the clock beyond its tempo:
 // 'start', 'stop', 'rebase' (a running clock's phase moved) - the transport announces those
 // itself (onStateChange) - or 'sync'.
+//
+// A deck whose clock has left the room's (see deckClocks: sync off, a nudge held, a place moved
+// by one) gets a message of its own, to its own tracks' plugins, and the room's message leaves
+// those tracks out - so a jogged deck's plugin sequencers jump with it and a deck at its own
+// tempo has its synced delays at that tempo. With both decks on the room's clock this is the one
+// message it always was.
 function syncEngineClock(event = 'sync') {
   if (!engine || !transport) return;
   const targetSec = engine.getTime() + VST_TRANSPORT_LOOKAHEAD_SEC;
-  engine.setTempo(transport.cps * 240, transport.cycleAt(targetSec) * 4, targetSec, !transport.paused, event);
+  const own = ['a', 'b'].filter((d) => deckClocks[d]?.deviates);
+  const tracksOf = (d) => [...trackIds].filter(([label]) => deckOfKey(label) === d).map(([, id]) => id);
+  const except = own.flatMap(tracksOf);
+  engine.setTempo(transport.cps * 240, transport.cycleAt(targetSec) * 4, targetSec, !transport.paused, event,
+    except.length ? { except } : null);
+  for (const d of own) {
+    const only = tracksOf(d);
+    if (!only.length) continue;
+    const clock = deckClocks[d];
+    engine.setTempo(clock.cps * 240, clock.cycleAt(targetSec) * 4, targetSec, !clock.paused, event, { only });
+  }
 }
 
 // MIDI clock out: sclang sends the ticks from its mirror of the transport, to the destination
@@ -3238,12 +3410,19 @@ function songFollowDeck() {
   if (!mixState.dj || (linkState.enabled && linkState.peers)) return null;
   const d = deckLeader();
   const s = d && songDecks[d];
-  return s?.playing && !s.sync && s.bpm ? d : null;
+  if (s) return s.playing && !s.sync && s.bpm ? d : null;
+  // ...or a deck playing code with its sync off: it runs on a clock of its own (see deckClocks),
+  // and leading the room means the room's clock is on it.
+  return d && !deckLive[d].sync && deckRunning(d) && deckClocks[d] ? d : null;
 }
 
 /** The song as a session report: its tempo now, and its beat count at `atSec`. */
 function songFollowReport(deck, atSec) {
   const s = songDecks[deck];
+  if (!s) {
+    const clock = deckClocks[deck];
+    return { bpm: clock.cps * 240, beats: clock.cycleAt(atSec) * songSync.BEATS_PER_CYCLE, atSec };
+  }
   return {
     bpm: s.bpm * s.rate,
     beats: ((songPlayheadSec(deck, atSec) - s.anchorSec) * s.bpm) / 60,
@@ -3276,7 +3455,8 @@ function clockFollowSong({ adopt = false } = {}) {
     const report = songFollowReport(deck, now);
     if (!linkSync.sameTempo(report.bpm, transport.cps * 240)) transport.setCps(report.bpm / 240);
     if (transport.paused) return; // nothing to align: a start lands on the song's bar (transportStart)
-    const ridden = ['a', 'b'].some((d) => d !== deck && (deckRunning(d) || (songDecks[d]?.playing && songDecks[d].sync)));
+    const ridden = ['a', 'b'].some((d) => d !== deck
+      && (songDecks[d] ? songDecks[d].playing && songDecks[d].sync : deckRunning(d) && deckLive[d].sync));
     const measured = linkSync.phaseDelta(transport.cycleAt(now), report.beats);
     const step = linkSync.followStep(measured, songFollow.offset, { mayAdopt: adopt || (songFollow.adoptPending && !ridden) });
     songFollow.offset = step.offset;
@@ -4107,6 +4287,20 @@ function wireEngine() {
     if (kind === 'start') linkPushPlaying(true);
     else if (kind === 'stop') linkPushPlaying(false);
   };
+  for (const d of ['a', 'b']) {
+    if (!deckClocks[d]) deckClocks[d] = new patternCore.DeckClock(transport);
+    // A deck's clock moving on its own account - a nudge, a bend, its own tempo, a jog. Riding
+    // the room it says nothing: the room's hooks below speak for every clock on it.
+    deckClocks[d].onCpsChange = () => {
+      syncVstTransport();
+      if (d === songFollow.deck) clockFollowSong();
+      mixNotify();
+    };
+    deckClocks[d].onStateChange = (kind) => {
+      syncEngineClock(kind);
+      mixNotify();
+    };
+  }
   transport.onCpsChange = () => {
     // The clock moved for a reason of poptart's own (an eval, a migration, a record taking the
     // grid): the session follows. A peer's own tempo arriving is excluded, or the two would push
@@ -4187,6 +4381,7 @@ function wireEngine() {
   // The strip's channel meters (see deckLevelNotify): fold each ~20/sec reply to one
   // conservative mono figure per deck and push over the desk SSE stream, carrying whichever
   // band reading came with it.
+  engine.onMasterLevel = masterLevelTake;
   engine.onDeckLevel = (deck, peakL, rmsL, peakR, rmsR) => {
     const d = deck === 1 ? 'b' : 'a';
     deckLevels[d] = {
@@ -4478,7 +4673,7 @@ function setDeckLoops(deck, on, { pinned = true } = {}) {
   deckLoopsPinned[deck] = pinned;
   deckLoopsOn[deck] = on !== false;
   if (clock) {
-    const cycle = transport && engine && !transport.paused ? transport.cycleAt(engine.getTime()) : 0;
+    const cycle = transport && engine && !transport.paused ? clockOf(deck).cycleAt(engine.getTime()) : 0;
     clock.setLoops(deckLoopsOn[deck], cycle);
   }
   mixNotify();
@@ -4502,7 +4697,7 @@ function arrangeEnded(deck) {
   const clock = arrangeClocks[deck];
   if (!clock || !engine || !transport || transport.paused || !deckRunning(deck)) return false;
   const end = clock.endCycle();
-  return end != null && transport.cycleAt(engine.getTime()) >= end;
+  return end != null && clockOf(deck).cycleAt(engine.getTime()) >= end;
 }
 
 function arrangeEndWatch() {
@@ -4542,6 +4737,7 @@ function stopPlayback(deck = null, { hush = false } = {}) {
       }
     }
     pauseSong(deck);
+    deckLiveRelease(deck); // a nudge still held when the deck stops is let go with it
     for (const id of [...kbHeld.keys()]) if (deckOfKey(id) === deck) releaseKbNotes(id);
     const otherPlaying = [...schedulers].some(([key, sch]) => deckOfKey(key) !== deck && sch.running)
       || ['a', 'b'].some((d) => d !== deck && songDecks[d]?.playing);
@@ -4557,13 +4753,14 @@ function stopPlayback(deck = null, { hush = false } = {}) {
   // Reset the shared clock to cycle 0 and freeze it - the next eval starts from the top. The
   // live note log counts in that clock's cycles, so it goes too.
   transport?.stop();
+  for (const d of ['a', 'b']) deckLiveRelease(d);
   clearLiveLog();
   for (const d of ['a', 'b']) arrangeClocks[d]?.reset(); // back to the top, every loop armed
   // Now that nothing is playing, any plugin edit held back during the performance is free to
   // capture (the suspension it costs has nothing left to interrupt).
   flushPluginCaptures();
   mixNotify(); // both decks' songs just paused - the panes' playheads follow the SSE frame
-  return { transport: transport?.snapshot() ?? null };
+  return { transport: transport?.snapshot() ?? null, deckTransport: deckClockBody() };
 }
 
 // Each deck's painted clips, kept for the same reason and read the same lazily: a clips() head
@@ -5048,9 +5245,10 @@ function highlightGrid(sig, start, end, from, count, clock = null) {
 
 // The cycle the transport is on right now (0 while paused / just after a stop). The highlight
 // window starts here so a running clock gets the cycles it's about to play, not cycle 0.
-function currentGridCycle() {
-  if (!transport) return 0;
-  return Math.max(0, Math.floor(transport.cycleAt(transport.getTime())));
+function currentGridCycle(deck = 'a') {
+  const clock = clockOf(deck);
+  if (!clock) return 0;
+  return Math.max(0, Math.floor(clock.cycleAt(clock.getTime())));
 }
 
 // Pattern files - named saves and work-in-progress sessions under ~/.poptart/patterns, plus the
@@ -5310,7 +5508,7 @@ const liveKey = (note, index) => (Number.isFinite(index) ? `${note}:${Math.max(0
 
 function handleMidiNoteIn(trackId, note, vel, isOn, index = null) {
   if (!engine || !transport) return;
-  const now = transport.cycleAt(engine.getTime());
+  const now = clockOf('a').cycleAt(engine.getTime());
   const key = liveKey(note, index);
   if (isOn && vel > 0) {
     let held = liveHeld.get(trackId);
@@ -5368,7 +5566,7 @@ function midiRecStatus() {
   const body = { phase, armCycle, startCycle, endCycle, cycles, grid, results, transport: transport.snapshot() };
   if (phase !== 'done') {
     // The take so far, per track - completed events and the keys still down, closed at now.
-    const now = transport.cycleAt(engine.getTime());
+    const now = clockOf('a').cycleAt(engine.getTime());
     body.now = now;
     body.events = liveTakes(armCycle, now);
   }
@@ -5388,7 +5586,7 @@ function liveTakes(since, now) {
 
 function midiRecTick() {
   if (!midiRec || midiRec.phase === 'done') return;
-  const pos = transport.cycleAt(engine.getTime());
+  const pos = clockOf('a').cycleAt(engine.getTime());
   if (midiRec.phase === 'armed' && pos >= midiRec.startCycle) midiRec.phase = 'recording';
   // Small overshoot so a note-off landing right on the end boundary completes its event first.
   if (pos >= midiRec.endCycle + 0.02) finalizeMidiRec();
@@ -5503,7 +5701,7 @@ function setRecTap(label, on) {
 
 function trackRecTick() {
   if (!trackRec || trackRec.phase === 'done') return;
-  const pos = transport.cycleAt(engine.getTime());
+  const pos = clockOf('a').cycleAt(engine.getTime());
   if (trackRec.phase === 'armed' && pos >= trackRec.startCycle) trackRec.phase = 'recording';
 }
 
@@ -5694,10 +5892,14 @@ function mixStatus() {
       .map(({ peakL, rmsL, peakR, rmsR }) => ({ peakL, rmsL, peakR, rmsR }));
     queue.length = 0;
   }
+  const master = masterPeakHeld;
+  masterPeakHeld = 0;
   return {
     on: mixMonitorOn,
     tracks: [...schedulers.keys()],
     levels,
+    // The summed outputs' highest peak since the last poll (above 1 = an over).
+    master,
     spec: Object.fromEntries(mixSpecs),
     bandFreqs: engine ? engine.mixBandFreqs() : [],
     // Whether the tracks are analyzed individually or the plots have only the master - the
@@ -7122,6 +7324,16 @@ const routes = {
     // schedules a note (see clockFollowSong) - a stopped clock just takes the tempo here, and
     // starts on the song's bar in transportStart.
     if (body.start !== false && !deckRunning(deck)) clockFollowSong({ adopt: true });
+    // The deck's own tempo, for when its sync is off: what it declared, or the default (see
+    // deckClocks). Synced, this only waits its turn.
+    deckClocks[deck]?.setFreeBpm(decks[deck].bpm ?? DEFAULT_CPS * 240);
+    // A deck about to start under a clock that is already running comes in on the room's bar,
+    // whatever place its own clock was left at by the last thing it played.
+    if (transport && !transport.paused && body.start !== false && !deckRunning(deck)) {
+      deckLiveRelease(deck);
+      deckClockAlign(deck);
+    }
+
     const arrangements = evaluated.map((b) => b.sig).filter((v) => v?.poptartArrangeBlock);
     if (arrangements.length) {
       const clips = arrangements.flatMap((a) => a.clips);
@@ -7132,7 +7344,7 @@ const routes = {
         if (!labels.has(label)) eventLogQueue.push(`[arrange] no block called ${JSON.stringify(label)} - its clips play nothing`);
       }
       const regions = arrangements.flatMap((a) => patternCore.arrangementLoops(a.clips, a.opts));
-      const nowCycle = transport ? transport.cycleAt(engine ? engine.getTime() : transport.getTime()) : 0;
+      const nowCycle = transport ? clockOf(deck).cycleAt(engine ? engine.getTime() : transport.getTime()) : 0;
       // An unarranged song loops whatever DJ mode's blanket default says (see deckLoopsOn): the
       // arrangement is read here, so a deck that comes up holding one arms itself. Asked on every
       // eval and reported only when it moves, so carving the song later - which is what makes the
@@ -7269,7 +7481,7 @@ const routes = {
     // so their windows open exactly on the downbeat - which keeps a `.preset()`'s first
     // application inside the first window too, rather than a whole cycle later (see
     // Scheduler#start).
-    let scheduleFrom = transport.cycleAt(engine.getTime());
+    let scheduleFrom = clockOf(deck).cycleAt(engine.getTime());
     const starting = active.length > 0 && body.start !== false && transport.paused;
     const toStart = [];
 
@@ -7314,7 +7526,7 @@ const routes = {
       // least a send lead away.
       if (sch && !sch.running && starting) mappedEngine.hush(tid);
       if (!sch) {
-        sch = new patternCore.Scheduler(mappedEngine, { transport, trackId: tid, label: key, deck: deckOfKey(key) });
+        sch = new patternCore.Scheduler(mappedEngine, { transport: clockOf(deckOfKey(key)), trackId: tid, label: key, deck: deckOfKey(key) });
         schedulers.set(key, sch);
       }
       // Hand-edit freezes go on BEFORE the pattern does: setPattern pushes any pinned `{ state }`,
@@ -7368,7 +7580,7 @@ const routes = {
     // track's first window inline so playback lights up immediately without a follow-up request.
     for (const k of [...hlTracks.keys()]) if (deckOfKey(k) === deck) hlTracks.delete(k);
     for (const b of active) hlTracks.set(keyOfBlock(b.label), { sig: b.sig, start: b.start, end: b.end, clock: b.trackClock ?? null });
-    const gridFrom = currentGridCycle();
+    const gridFrom = currentGridCycle(deck);
 
     // Pairs with the event-loop watchdog above: an evaluation that held the process this long
     // starved the scheduler of the OTHER deck too, and the terminal should name the culprit.
@@ -7405,6 +7617,7 @@ const routes = {
       body: {
         cps: transport.cps,
         transport: transport.snapshot(),
+        deckTransport: deckClockBody(),
         scale: deckScale, // what setscale() left in force for this deck - the piano roll colors by it
         groove: grooveReport(deckGroove), // ...and the feel it left, which the editor's groove control shows
         arrange: arrangeClocks[deck]?.snapshot() ?? null, // the song clock the painter's playhead runs
@@ -7466,7 +7679,7 @@ const routes = {
     const deck = body?.deck === 'b' ? 'b' : 'a';
     const clock = arrangeClocks[deck];
     if (!clock || !engine || !transport) return { status: 200, body: { released: null, arrange: clock?.snapshot() ?? null } };
-    const released = clock.release(transport.cycleAt(engine.getTime()));
+    const released = clock.release(clockOf(deck).cycleAt(engine.getTime()));
     return { status: 200, body: { released, arrange: clock.snapshot() } };
   },
 
@@ -7634,7 +7847,10 @@ const routes = {
   'GET /api/highlight': async (q) => {
     const from = Math.max(0, Math.floor(Number(q.from)) || 0);
     const count = Math.min(HL_WINDOW * 4, Math.max(1, Math.floor(Number(q.count)) || HL_WINDOW));
-    const tracks = [...hlTracks.entries()].map(([label, t]) => ({
+    // `deck` narrows it to one deck's tracks: `from` counts on that deck's own clock (see
+    // deckClocks), and two decks at different tempos are not on the same cycle.
+    const only = q.deck === 'a' || q.deck === 'b' ? q.deck : null;
+    const tracks = [...hlTracks.entries()].filter(([label]) => !only || deckOfKey(label) === only).map(([label, t]) => ({
       label,
       // Through the track's own clock where it has one (clip-relative time - see the arrangement
       // pass of /api/evaluate), which holds the deck's clock and so follows its releases and seeks.
@@ -7664,7 +7880,7 @@ const routes = {
     if (arrangeEnded(deck)) arrangeEndWatch();
     return {
       status: 200,
-      body: { ended: !deckRunning(deck), transport: transport?.snapshot() ?? null, arrange: arrangeClocks[deck]?.snapshot() ?? null },
+      body: { ended: !deckRunning(deck), transport: transport?.snapshot() ?? null, deckTransport: deckClockBody(), arrange: arrangeClocks[deck]?.snapshot() ?? null },
     };
   },
 
@@ -7714,7 +7930,7 @@ const routes = {
   'POST /api/liveNotes': async (body) => {
     if (!engine || !transport) throw new Error(engineError ?? 'engine not loaded');
     const trackId = String(body.trackId ?? '');
-    const now = transport.cycleAt(engine.getTime());
+    const now = clockOf(deckOfKey(trackId)).cycleAt(engine.getTime());
     return { status: 200, body: { events: liveEventsFor(trackId, -Infinity, now), now, transport: transport.snapshot() } };
   },
 
@@ -8104,6 +8320,7 @@ const routes = {
       // colors its rows by both. Sent with the library rather than polled: the window re-reads
       // it on open and after every deck load, which is exactly when either can have changed.
       playedSession: [...songPlayedSession.keys()],
+      playedSaves: [...codePlayedSession],
       onDeck: Object.fromEntries(['a', 'b']
         .filter((d) => songDecks[d]?.path)
         .map((d) => [d, { path: songDecks[d].path, playing: deckPlaying(d) }])),
@@ -8227,7 +8444,7 @@ const routes = {
     if (midiRec && midiRec.phase !== 'done') throw new Error('a MIDI recording is already armed or running - cancel it first');
     const cycles = Math.min(64, Math.max(1, Math.round(Number(body.cycles) || 4)));
     const grid = Math.max(0, Math.round(body.grid == null ? 16 : Number(body.grid) || 0));
-    const armCycle = transport.cycleAt(engine.getTime());
+    const armCycle = clockOf('a').cycleAt(engine.getTime());
     const startCycle = patternCore.recordStartCycle(armCycle, cycles, PHRASE_CYCLES);
     if (midiRec?.timer) clearInterval(midiRec.timer);
     midiRec = {
@@ -8398,7 +8615,13 @@ const routes = {
   // Body: { on }. Turning it OFF does not move the clock: the tempo the desk left in force is
   // the one the room is dancing to, and deck a's next eval drives it again as it always does.
   'POST /api/mix/dj': async (body) => {
+    // Outside dj mode the one deck's clock is the room's. A main deck running at a tempo of its
+    // own hands that tempo to the room on the way out, so the music does not change speed.
+    if (!body.on && mixState.dj && !songDecks.a && !deckLive.a.sync && deckRunning('a') && deckClocks.a) {
+      transport.setCps(deckClocks.a.baseCps);
+    }
     mixState.dj = !!body.on;
+    for (const d of ['a', 'b']) deckLiveRelease(d);
     // The leader and the tracklist both read the decks' playing state by sampling it (see
     // deckLeader); while the desk is open that happens on a timer too, not only on desk frames.
     if (mixState.dj && !djSetTimer) {
@@ -8436,6 +8659,12 @@ const routes = {
     if (!transport) throw new Error(engineError ?? 'engine not loaded');
     const deck = body.deck === 'b' ? 'b' : 'a';
     return { status: 200, body: { deck, ...deckLoopApply(deck, body) } };
+  },
+
+  // A deck's jog size (see deckJogApply). Body: { deck, beats? (a rung of the ladder), step? (+-1) }.
+  'POST /api/mix/jogsize': async (body) => {
+    const deck = body.deck === 'b' ? 'b' : 'a';
+    return { status: 200, body: { deck, ...deckJogApply(deck, body) } };
   },
 
   // The DJ FX unit's live controls. Body, all optional: { chain (a chain's name, or null to
@@ -8692,6 +8921,7 @@ const routes = {
     }
     for (const key of mixAllKeys()) neutralizeMix(key);
     mixState.deckTempo = { a: { frac: 0, range: 6 }, b: { frac: 0, range: 6 } };
+    for (const d of ['a', 'b']) deckLiveRelease(d);
     // Outside a mix, loop regions are the workflow again - and unpinned, so the next session's
     // songs get to choose for themselves (see deckLoopsOn).
     setDeckLoops('a', true, { pinned: false });
@@ -8744,6 +8974,11 @@ const routes = {
     for (const key of [...trackIds.keys()]) if (deckOfKey(key) === 'b') dropTrack(key); // never-promoted leftovers
     decks.a = { ...decks.b };
     decks.b = { scale: null, bpm: null, groove: null };
+    // The promoted tracks' schedulers keep the clock they were built on, so that clock is the
+    // main deck's now, with what the hand had asked of it - and nothing they play moves.
+    [deckClocks.a, deckClocks.b] = [deckClocks.b, deckClocks.a];
+    [deckLive.a, deckLive.b] = [deckLive.b, deckLive.a];
+    for (const d of ['a', 'b']) if (fxSchedulers[d] && deckClocks[d]) fxSchedulers[d].transport = deckClocks[d];
     patternCore.setGlobalScale(decks.a.scale ?? null);
     patternCore.restoreGlobalGroove(decks.a.groove ?? null);
     liveStateIds.a = liveStateIds.b;
@@ -8762,6 +8997,7 @@ const routes = {
     // gone, its setbpm drives again) - a no-op when the migration already landed on its native.
     mixState.tempoOverride = null;
     mixState.deckTempo = { a: { frac: 0, range: 6 }, b: { frac: 0, range: 6 } };
+    for (const d of ['a', 'b']) deckLiveRelease(d);
     // The promoted deck's loop flag travels with its song: it is deck A now, and leaving DJ
     // mode re-arms the regions either way - the next session opens with them off again, and
     // unpinned, so the songs it opens on choose for themselves (see deckLoopsOn).
@@ -8815,6 +9051,15 @@ const routes = {
         return Number.isFinite(a) && a >= 0 && a <= duration ? a : null;
       } catch { return null; }
     })();
+    // A deck holding a file keeps its rate on the song, and its clock goes back to the room's
+    // (its FX unit still reads it) - leaving nothing of a nudge its last track was given.
+    deckLive[deck].nudge = 0;
+    deckLive[deck].bend = 0;
+    if (deckClocks[deck]) {
+      deckClocks[deck].setBend(0);
+      deckClocks[deck].setSync(true);
+      deckClockAlign(deck);
+    }
     songDecks[deck] = {
       path: srcPath,
       title: String(body.title ?? '').trim() || path.basename(srcPath),
@@ -8987,6 +9232,14 @@ const routes = {
   'POST /api/song/nudge': async (body) => {
     const deck = body.deck === 'b' ? 'b' : 'a';
     return { status: 200, body: songNudge(deck, body) };
+  },
+
+  // The SYNC button of a deck playing code (see liveSetSync; a deck holding a file posts its own
+  // through /api/song/meta). Body: { deck, sync }.
+  'POST /api/mix/livesync': async (body) => {
+    if (!transport) throw new Error(engineError ?? 'engine not loaded');
+    const deck = body.deck === 'b' ? 'b' : 'a';
+    return { status: 200, body: liveSetSync(deck, body.sync) };
   },
 
   // The song's transient times (seconds, ascending) - what the pane's scrub magnet pulls the

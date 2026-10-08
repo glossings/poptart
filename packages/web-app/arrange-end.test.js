@@ -36,6 +36,7 @@ async function host({ cycle = 0, paused = false, running = ['kick', 'b:hat'] } =
     deckOfKey: (key) => (key.startsWith('b:') ? 'b' : 'a'),
     engine: { getTime: () => 0 },
     transport: { paused, cycleAt: () => cycle },
+    clockOf: () => env.transport, // every deck on the room's clock (see deck-clock.test.js for the rest)
     stopPlayback: (deck) => stopped.push(deck),
   };
   // eslint-disable-next-line no-new-func

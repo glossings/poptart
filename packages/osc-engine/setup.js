@@ -30,6 +30,7 @@ const {
   privateScRoot,
   installPrivateSc,
   consentToInstall,
+  windowsTar,
   SC_RELEASE,
 } = require('./private-sc');
 const { liveEngineStacks } = require('./orphans');
@@ -166,11 +167,12 @@ async function downloadTo(url, destPath, { attempts = 3, pauseMs = 1500, sleep =
   }
 }
 
-// macOS ships `unzip`; Windows 10+ ships bsdtar (which reads zips) as `tar`; Linux `unzip` is
-// near-universal (and the failure message names it if not).
+// macOS ships `unzip`; Windows 10+ ships bsdtar (which reads zips) as System32's tar.exe (see
+// windowsTar for why it is not left to PATH); Linux `unzip` is near-universal (and the failure
+// message names it if not).
 function extractZip(zipPath, destDir) {
   if (process.platform === 'win32') {
-    execFileSync('tar', ['-xf', zipPath, '-C', destDir]);
+    execFileSync(windowsTar(), ['-xf', zipPath, '-C', destDir]);
   } else {
     execFileSync('unzip', ['-q', '-o', zipPath, '-d', destDir]);
   }

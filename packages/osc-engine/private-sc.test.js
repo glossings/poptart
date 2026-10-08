@@ -202,6 +202,13 @@ function rootWithVersions(versions) {
   return root;
 }
 
+test('Windows unpacks with the system tar by its full path, whatever PATH puts first', () => {
+  // Git Bash and MSYS2 put their own GNU tar ahead of System32's bsdtar; it cannot read a zip and
+  // takes a drive letter for a remote host, so the name alone is never handed to PATH.
+  assert.equal(priv.windowsTar({ SystemRoot: 'D:\\WinNT' }), 'D:\\WinNT\\System32\\tar.exe');
+  assert.equal(priv.windowsTar({}), 'C:\\Windows\\System32\\tar.exe');
+});
+
 test('pruning removes other versions and keeps the pinned one', () => {
   const root = rootWithVersions(['3.13.0', '3.14.1', '3.15.0']);
   const removed = priv.pruneOldVersions({ root, keep: '3.14.1', protect: null });

@@ -26,6 +26,7 @@
     </script>
     <link rel="stylesheet" href="/vendor/codemirror/lib/codemirror.css" />
     <link rel="stylesheet" href="/vendor/codemirror/addon/hint/show-hint.css" />
+    <link rel="stylesheet" href="/vendor/codemirror/addon/dialog/dialog.css" />
     <link rel="stylesheet" href="/themes.css" />
     <link rel="stylesheet" href="style.css" />
   </head>
@@ -93,11 +94,9 @@
           <div id="deckAHead" class="deck-head">
             <span class="deck-b-title deck-only">deck A</span>
             <!-- The picker is the organize window (→A / →B on its rows); the select behind it
-                 is the set's queue bookkeeping (nextInSet / stepDeckBQueue), never shown. -->
+                 is what the deck's loader reads its pick from, never shown. -->
             <select id="deckAFile" hidden></select>
             <button id="deckASong" class="small deck-song deck-only" title="the song on this deck - click to pick another (opens organize; loading clears this deck's current tracks)">pick a song…</button>
-            <button id="deckAPrev" class="small deck-only" title="load the previous song in the active playlist onto this deck">&#9198;</button>
-            <button id="deckANext" class="small deck-only" title="load the next song in the active playlist onto this deck">&#9197;</button>
             <button id="deckAPlay" class="small deck-only" data-chord-title="{mod+enter}">&#9654; play</button>
             <button id="deckAUpdate" class="small deck-only" title="evaluate without changing play state">&#8635;</button>
             <button id="deckAKeep" class="small deck-only" title="leave DJ mode keeping THIS pane as the song (deck B is dropped)">&#9167; keep</button>
@@ -106,6 +105,14 @@
             <button id="deckALoopHalve" class="small deck-only deck-loop-len-btn" title="halve the loop length (the loop you are hearing keeps its start and gets shorter)">&divide;2</button>
             <span id="deckALoopLen" class="deck-loop-len" title="how long a loop on this deck is, in bars of its own tempo"></span>
             <button id="deckALoopDouble" class="small deck-only deck-loop-len-btn" title="double the loop length (the loop you are hearing keeps its start and runs further)">&times;2</button>
+            <span class="deck-head-gap"></span>
+            <button id="deckAJogDn" class="small deck-only deck-live-ctl" title="jog back by the jog size"><svg class="song-ctl-icon" viewBox="0 0 12 10" aria-hidden="true"><rect x="1" y="1" width="1.6" height="8" rx="0.4"/><path d="M11 1 4.2 5 11 9Z"/></svg></button>
+            <button id="deckANudgeDn" class="small deck-only deck-live-ctl" title="hold: drag the platter (&minus;4% while held)"><svg class="song-ctl-icon" viewBox="0 0 12 10" aria-hidden="true"><path d="M9.4 1 2.6 5 9.4 9Z"/></svg></button>
+            <button id="deckANudgeUp" class="small deck-only deck-live-ctl" title="hold: push the platter (+4% while held)"><svg class="song-ctl-icon" viewBox="0 0 12 10" aria-hidden="true"><path d="M2.6 1 9.4 5 2.6 9Z"/></svg></button>
+            <button id="deckAJogUp" class="small deck-only deck-live-ctl" title="jog forward by the jog size"><svg class="song-ctl-icon" viewBox="0 0 12 10" aria-hidden="true"><path d="M1 1 7.8 5 1 9Z"/><rect x="9.4" y="1" width="1.6" height="8" rx="0.4"/></svg></button>
+            <button id="deckAJogSize" class="small deck-only deck-live-ctl deck-loop-len-btn" title="jog size: how many beats one jog steps - click for the next size, right-click for the one before">1</button>
+            <button id="deckASync" class="small deck-only deck-live-ctl" title="ride the master clock; off, this deck runs at its own tempo - its setbpm, moved by its tempo fader">sync</button>
+            <span id="deckAPhrase" class="deck-loop-len deck-only deck-live-ctl" title="phrase . bar . beat of this deck, counted from its first downbeat (8 bars to a phrase)"></span>
           </div>
           <textarea id="editor" spellcheck="false">keys: n("0 2 3 <5 7>")
   .scale("F minor")
@@ -123,6 +130,7 @@
             <div class="song-title-row">
               <span id="songTitleA" class="song-title"></span>
               <span id="songRateA" class="song-rate" title="playing rate vs native (sync / nudge / clamp)"></span>
+              <span id="songPhraseA" class="song-time song-phrase" title="phrase . bar . beat of this deck, counted from its first downbeat (8 bars to a phrase)"></span>
               <span id="songTimeA" class="song-time"></span>
             </div>
             <canvas id="songDetailA" class="song-detail stack-deck-a"></canvas>
@@ -130,10 +138,11 @@
             <div class="song-ctl-row">
               <button id="songCueA" class="small song-cue" data-chord-title="cue - hold to preview from the cue point ({app+c}), release to drop back on it, paused. Pressing while paused sets the cue point exactly at the playhead and makes it the beatgrid's downbeat (the waveform pulls onto transients as you scrub); pressing while playing takes the deck back to it">cue</button>
               <span class="song-ctl-sep"></span>
-              <button id="songJogDnA" class="small" title="jog back one beat (bar-fix; alt-less click after sync got the beats right)"><svg class="song-ctl-icon" viewBox="0 0 12 10" aria-hidden="true"><rect x="1" y="1" width="1.6" height="8" rx="0.4"/><path d="M11 1 4.2 5 11 9Z"/></svg></button>
+              <button id="songJogDnA" class="small" title="jog back by the jog size (one beat is the bar-fix after sync got the beats right)"><svg class="song-ctl-icon" viewBox="0 0 12 10" aria-hidden="true"><rect x="1" y="1" width="1.6" height="8" rx="0.4"/><path d="M11 1 4.2 5 11 9Z"/></svg></button>
               <button id="songNudgeDnA" class="small" title="hold: drag the platter (&minus;4% while held)"><svg class="song-ctl-icon" viewBox="0 0 12 10" aria-hidden="true"><path d="M9.4 1 2.6 5 9.4 9Z"/></svg></button>
               <button id="songNudgeUpA" class="small" title="hold: push the platter (+4% while held)"><svg class="song-ctl-icon" viewBox="0 0 12 10" aria-hidden="true"><path d="M2.6 1 9.4 5 2.6 9Z"/></svg></button>
-              <button id="songJogUpA" class="small" title="jog forward one beat"><svg class="song-ctl-icon" viewBox="0 0 12 10" aria-hidden="true"><path d="M1 1 7.8 5 1 9Z"/><rect x="9.4" y="1" width="1.6" height="8" rx="0.4"/></svg></button>
+              <button id="songJogUpA" class="small" title="jog forward by the jog size"><svg class="song-ctl-icon" viewBox="0 0 12 10" aria-hidden="true"><path d="M1 1 7.8 5 1 9Z"/><rect x="9.4" y="1" width="1.6" height="8" rx="0.4"/></svg></button>
+              <button id="songJogSizeA" class="small deck-loop-len-btn" title="jog size: how many beats one jog steps - click for the next size, right-click for the one before">1</button>
               <span class="song-ctl-gap"></span>
               <label class="song-bpm-label">bpm <input id="songBpmA" class="song-bpm" type="number" min="20" max="400" step="any" placeholder="&mdash;" /></label>
               <button id="songAnchorA" class="small" title="anchor the beatgrid's downbeat at the playhead - kept on the track across loads; right-click to re-analyze when the grid itself is wrong">&#9875;</button>
@@ -153,8 +162,6 @@
             <span class="deck-b-title">deck B</span>
             <select id="deckBFile" hidden></select>
             <button id="deckBSong" class="small deck-song" title="the song on this deck - click to pick another (opens organize)">pick a song…</button>
-            <button id="deckBPrev" class="small" title="queue the previous song in the active playlist">&#9198;</button>
-            <button id="deckBNext" class="small" data-chord-title="queue the next song in the active playlist ({mod+shift+.})">⏭</button>
             <button id="deckBPlay" class="small" data-chord-title="{mod+enter} in this pane">▶ play</button>
             <button id="deckBUpdate" class="small" title="evaluate without changing play state">↻</button>
             <button id="deckBKeep" class="small" data-chord-title="leave DJ mode keeping THIS pane as the song - it is promoted with zero engine churn ({mod+shift+enter})">&#9167; keep</button>
@@ -163,6 +170,14 @@
             <button id="deckBLoopHalve" class="small deck-loop-len-btn" title="halve the loop length (the loop you are hearing keeps its start and gets shorter)">&divide;2</button>
             <span id="deckBLoopLen" class="deck-loop-len" title="how long a loop on this deck is, in bars of its own tempo"></span>
             <button id="deckBLoopDouble" class="small deck-loop-len-btn" title="double the loop length (the loop you are hearing keeps its start and runs further)">&times;2</button>
+            <span class="deck-head-gap"></span>
+            <button id="deckBJogDn" class="small deck-live-ctl" title="jog back by the jog size"><svg class="song-ctl-icon" viewBox="0 0 12 10" aria-hidden="true"><rect x="1" y="1" width="1.6" height="8" rx="0.4"/><path d="M11 1 4.2 5 11 9Z"/></svg></button>
+            <button id="deckBNudgeDn" class="small deck-live-ctl" title="hold: drag the platter (&minus;4% while held)"><svg class="song-ctl-icon" viewBox="0 0 12 10" aria-hidden="true"><path d="M9.4 1 2.6 5 9.4 9Z"/></svg></button>
+            <button id="deckBNudgeUp" class="small deck-live-ctl" title="hold: push the platter (+4% while held)"><svg class="song-ctl-icon" viewBox="0 0 12 10" aria-hidden="true"><path d="M2.6 1 9.4 5 2.6 9Z"/></svg></button>
+            <button id="deckBJogUp" class="small deck-live-ctl" title="jog forward by the jog size"><svg class="song-ctl-icon" viewBox="0 0 12 10" aria-hidden="true"><path d="M1 1 7.8 5 1 9Z"/><rect x="9.4" y="1" width="1.6" height="8" rx="0.4"/></svg></button>
+            <button id="deckBJogSize" class="small deck-live-ctl deck-loop-len-btn" title="jog size: how many beats one jog steps - click for the next size, right-click for the one before">1</button>
+            <button id="deckBSync" class="small deck-live-ctl" title="ride the master clock; off, this deck runs at its own tempo - its setbpm, moved by its tempo fader">sync</button>
+            <span id="deckBPhrase" class="deck-loop-len deck-live-ctl" title="phrase . bar . beat of this deck, counted from its first downbeat (8 bars to a phrase)"></span>
           </div>
           <textarea id="deckBEditor" spellcheck="false"></textarea>
           <!-- Songs phase 3: when deck B holds a disk FILE this replaces the editor - a zoomed
@@ -172,6 +187,7 @@
             <div class="song-title-row">
               <span id="songTitleB" class="song-title"></span>
               <span id="songRateB" class="song-rate" title="playing rate vs native (sync / nudge / clamp)"></span>
+              <span id="songPhraseB" class="song-time song-phrase" title="phrase . bar . beat of this deck, counted from its first downbeat (8 bars to a phrase)"></span>
               <span id="songTimeB" class="song-time"></span>
             </div>
             <canvas id="songDetailB" class="song-detail stack-deck-b"></canvas>
@@ -179,10 +195,11 @@
             <div class="song-ctl-row">
               <button id="songCueB" class="small song-cue" data-chord-title="cue - hold to preview from the cue point ({app+c}), release to drop back on it, paused. Pressing while paused sets the cue point exactly at the playhead and makes it the beatgrid's downbeat (the waveform pulls onto transients as you scrub); pressing while playing takes the deck back to it">cue</button>
               <span class="song-ctl-sep"></span>
-              <button id="songJogDnB" class="small" title="jog back one beat (bar-fix; alt-less click after sync got the beats right)"><svg class="song-ctl-icon" viewBox="0 0 12 10" aria-hidden="true"><rect x="1" y="1" width="1.6" height="8" rx="0.4"/><path d="M11 1 4.2 5 11 9Z"/></svg></button>
+              <button id="songJogDnB" class="small" title="jog back by the jog size (one beat is the bar-fix after sync got the beats right)"><svg class="song-ctl-icon" viewBox="0 0 12 10" aria-hidden="true"><rect x="1" y="1" width="1.6" height="8" rx="0.4"/><path d="M11 1 4.2 5 11 9Z"/></svg></button>
               <button id="songNudgeDnB" class="small" title="hold: drag the platter (&minus;4% while held)"><svg class="song-ctl-icon" viewBox="0 0 12 10" aria-hidden="true"><path d="M9.4 1 2.6 5 9.4 9Z"/></svg></button>
               <button id="songNudgeUpB" class="small" title="hold: push the platter (+4% while held)"><svg class="song-ctl-icon" viewBox="0 0 12 10" aria-hidden="true"><path d="M2.6 1 9.4 5 2.6 9Z"/></svg></button>
-              <button id="songJogUpB" class="small" title="jog forward one beat"><svg class="song-ctl-icon" viewBox="0 0 12 10" aria-hidden="true"><path d="M1 1 7.8 5 1 9Z"/><rect x="9.4" y="1" width="1.6" height="8" rx="0.4"/></svg></button>
+              <button id="songJogUpB" class="small" title="jog forward by the jog size"><svg class="song-ctl-icon" viewBox="0 0 12 10" aria-hidden="true"><path d="M1 1 7.8 5 1 9Z"/><rect x="9.4" y="1" width="1.6" height="8" rx="0.4"/></svg></button>
+              <button id="songJogSizeB" class="small deck-loop-len-btn" title="jog size: how many beats one jog steps - click for the next size, right-click for the one before">1</button>
               <span class="song-ctl-gap"></span>
               <label class="song-bpm-label">bpm <input id="songBpmB" class="song-bpm" type="number" min="20" max="400" step="any" placeholder="&mdash;" /></label>
               <button id="songAnchorB" class="small" title="anchor the beatgrid's downbeat at the playhead - kept on the track across loads; right-click to re-analyze when the grid itself is wrong">&#9875;</button>
@@ -277,7 +294,7 @@
               <h2>pattern files
                 <button id="fileNewBtn" class="small" title="clear the editor and start a new pattern">＋ new</button>
                 <button id="fileImportBtn" class="small" title="open a patch file someone sent you">import</button>
-                <button id="fileOrganizeBtn" class="small" title="the library - saves, imported tracks and playlists, with columns to sort and search by">organize</button>
+                <button id="fileOrganizeBtn" class="small" data-chord-title="the library - saves, imported tracks and playlists, with columns to sort and search by; enter or a double-click opens a save ({app+o})">organize</button>
               </h2>
               <input id="fileImportInput" type="file" accept=".js,text/javascript" hidden />
               <div class="file-save-row">
@@ -563,6 +580,7 @@
         <div class="mix-center">
           <label class="mix-swap-label" title="swap mode: gating a stem in throws the other deck's same-named stem out (and back out brings it back) - the phase-continuous stem swap. Also flips the crossfader to the hold-through-center curve (both decks full at center, gates decide)">
             <input id="mixSwap" type="checkbox" /> swap</label>
+          <span id="mixMaster" class="master-peak" title="master: the peak of everything this song puts out, all outputs summed, in dB against full scale. Red means the sum went over full scale and would distort as one stereo mix"><span class="master-peak-light"></span><span id="mixMasterDb" class="mix-meter-db">-∞</span></span>
           <div class="xf-scale">
             <input id="crossfader" class="dj-fader" type="range" min="-1" max="1" step="0.01" value="0"
               title="crossfader - constant power (each deck ~-3 dB at center, energy stays level); with swap on it holds both decks full through center instead" />
@@ -585,7 +603,7 @@
           <div id="mixMenu" class="ctx-menu hidden" role="menu"></div>
           <div class="mix-actions">
             <button id="mixStack" class="small" title="stack the decks: deck B's waveform directly under deck A's, playheads on one vertical line, so the beats of the two can be read against each other (side by side again with another press)">&#8645;</button>
-            <button id="mixLearn" class="small" title="MIDI learn: arm this, then click a control and move the hardware one that should drive it, over and over; click again or press esc to finish. Alt+click a control to unbind it. Learnable: the crossfader, every channel strip and the FX unit (the on pad binds latched, shift+click it for the momentary hold pad; the plugin picker binds the step-forward pad, shift+click for back), and on each deck cue, play, sync, 1×, key, Q, the regions switch, the loop and its two length buttons, the tempo slider and its range, the platter (click the waveform, then spin a jog wheel - shift+click for its coarse search mode, alt-free), the drag buttons (shift+click binds the wheel's pitch-bend instead), the jog steps, the headphone button and the ⏮/⏭ queue steps">midi</button>
+            <button id="mixLearn" class="small" title="MIDI learn: arm this, then click a control and move the hardware one that should drive it, over and over; click again or press esc to finish. Alt+click a control to unbind it. Learnable: the crossfader, every channel strip and the FX unit (the on pad binds latched, shift+click it for the momentary hold pad; the plugin picker binds the step-forward pad, shift+click for back), and on each deck cue, play, sync, 1×, key, Q, the regions switch, the loop and its two length buttons, the tempo slider and its range, the platter (click the waveform, then spin a jog wheel - shift+click for its coarse search mode, alt-free), the drag buttons (shift+click binds the wheel's pitch-bend instead), the jog steps and their size and the headphone button">midi</button>
           </div>
         </div>
         <div class="mix-meter-col" id="mixMeterColB"></div>
@@ -1224,6 +1242,7 @@
           <button id="mixerViewBtn" class="small mixer-view-btn"
             title="color-coded per track, or the summed master alone">by track</button>
           <span class="spacer"></span>
+          <span id="mixerMaster" class="master-peak" title="master: the peak of everything this song puts out, all outputs summed, in dB against full scale. Red means the sum went over full scale and would distort as one stereo mix"><span class="master-peak-light"></span><span id="mixerMasterDb" class="mix-meter-db">-∞</span></span>
           <button id="mixerClose" class="small">✕</button>
         </div>
         <div class="mixer-plots">
@@ -1254,6 +1273,8 @@
     <script src="/vendor/codemirror/addon/hint/show-hint.js"></script>
     <script src="/vendor/codemirror/addon/comment/comment.js"></script>
     <script src="/vendor/codemirror/addon/search/searchcursor.js"></script>
+    <script src="/vendor/codemirror/addon/dialog/dialog.js"></script>
+    <script src="/vendor/codemirror/addon/search/search.js"></script>
     <script src="/vendor/codemirror/keymap/sublime.js"></script>
     <!-- The keyboard model (the two modifier families, and how every chord is spelled on this
          platform) - before client.js, which is written in its terms, and shared with the guide (docs/). -->

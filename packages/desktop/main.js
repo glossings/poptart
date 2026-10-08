@@ -132,7 +132,24 @@ if (process.platform !== 'darwin') {
       { role: 'appMenu' },
       { role: 'fileMenu' },
       { role: 'editMenu' },
-      { role: 'viewMenu' },
+      {
+        // The default View menu, with the three zoom items done by hand: the roles zoom
+        // silently, and the window has to hear about a zoom (see zoomWindow).
+        label: 'View',
+        submenu: [
+          { role: 'reload' },
+          { role: 'forceReload' },
+          { role: 'toggleDevTools' },
+          { type: 'separator' },
+          { label: 'Actual Size', accelerator: 'CommandOrControl+0', click: (_item, target) => zoomWindow(target, null) },
+          { label: 'Zoom In', accelerator: 'CommandOrControl+Plus', click: (_item, target) => zoomWindow(target, ZOOM_STEP) },
+          // cmd+= is the same key without shift, which is how most hands press "zoom in".
+          { label: 'Zoom In', accelerator: 'CommandOrControl+=', visible: false, acceleratorWorksWhenHidden: true, click: (_item, target) => zoomWindow(target, ZOOM_STEP) },
+          { label: 'Zoom Out', accelerator: 'CommandOrControl+-', click: (_item, target) => zoomWindow(target, -ZOOM_STEP) },
+          { type: 'separator' },
+          { role: 'togglefullscreen' },
+        ],
+      },
       { role: 'windowMenu' },
       {
         role: 'help',
@@ -159,9 +176,73 @@ const MAC_TITLE_BAR_CSS = `
   header { -webkit-app-region: drag; }
   header > * { -webkit-app-region: no-drag; }
   header > .logo, header > h1 { -webkit-app-region: drag; }
-  html:not(.poptart-fullscreen) header { padding-left: 94px; }
+  html:not(.poptart-fullscreen) header { padding-left: calc(94px / var(--poptart-zoom, 1)); }
   html:not(.poptart-fullscreen) header > .logo { display: none; }
 `;
+
+// Zoom. The window's buttons do not scale with the page, so both things that were measured
+// against them have to follow a zoom: the room the header leaves (divided by the factor above,
+// so it stays 94 window pixels wide) and the buttons' height in a header that is now taller or
+// shorter. The page is also shown the new percentage for a moment - a zoom is otherwise only
+// visible as "everything is a bit smaller than it was".
+const ZOOM_STEP = 0.5; // in Chromium zoom levels; the factor is 1.2 ** level
+const ZOOM_LEVELS = [-4, 5]; // 48% to 249%
+const ZOOM_CSS = `
+  #poptartZoom {
+    position: fixed; z-index: 2147483647; pointer-events: none; opacity: 0;
+    top: calc(64px / var(--poptart-zoom, 1)); right: calc(16px / var(--poptart-zoom, 1));
+    padding: calc(6px / var(--poptart-zoom, 1)) calc(12px / var(--poptart-zoom, 1));
+    border-radius: calc(6px / var(--poptart-zoom, 1));
+    background: rgba(0, 0, 0, 0.8); color: #fff;
+    font: 600 calc(13px / var(--poptart-zoom, 1)) ui-monospace, Menlo, monospace;
+  }
+  #poptartZoom.show { animation: poptart-zoom-fade 1200ms ease-out; }
+  @keyframes poptart-zoom-fade { 0%, 65% { opacity: 1; } 100% { opacity: 0; } }
+`;
+
+const zoomFactorOf = (level) => 1.2 ** level;
+const zoomPercent = (level) => Math.round(zoomFactorOf(level) * 100);
+const nextZoomLevel = (level, step) =>
+  step === null ? 0 : Math.min(ZOOM_LEVELS[1], Math.max(ZOOM_LEVELS[0], level + step));
+/** Where the window's buttons sit so they stay centered in a header zoomed by `factor`. */
+const trafficLightsAt = (factor) => ({
+  x: TRAFFIC_LIGHTS.x,
+  y: Math.max(2, Math.round((TRAFFIC_LIGHTS.y + 8) * factor - 8)),
+});
+
+/** Tell the main window's page its zoom, and (with `show`) flash the percentage. */
+function syncZoom({ show = false } = {}) {
+  if (!win || win.isDestroyed()) return;
+  const level = win.webContents.getZoomLevel();
+  const factor = zoomFactorOf(level);
+  if (MAC_TITLE_BAR) win.setWindowButtonPosition(trafficLightsAt(factor));
+  win.webContents
+    .executeJavaScript(
+      `(() => {
+        document.documentElement.style.setProperty('--poptart-zoom', ${factor});
+        if (!${show}) return;
+        let badge = document.getElementById('poptartZoom');
+        if (!badge) {
+          badge = document.createElement('div');
+          badge.id = 'poptartZoom';
+          document.body.appendChild(badge);
+        }
+        badge.textContent = '${zoomPercent(level)}%';
+        badge.classList.remove('show');
+        void badge.offsetWidth; // restart the fade when one zoom follows another
+        badge.classList.add('show');
+      })()`,
+    )
+    .catch(() => {});
+}
+
+/** One zoom step (`null` = back to 100%) on the window the menu item was chosen in. */
+function zoomWindow(target, step) {
+  const contents = (target ?? win)?.webContents;
+  if (!contents || contents.isDestroyed()) return;
+  contents.setZoomLevel(nextZoomLevel(contents.getZoomLevel(), step));
+  if (target === win || !target) syncZoom({ show: true });
+}
 
 function syncFullScreenClass() {
   if (!win || win.isDestroyed()) return;
@@ -239,8 +320,13 @@ function createWindow() {
     } else if (/^https?:/.test(url)) shell.openExternal(url);
     return { action: 'deny' };
   });
+  // Injected CSS belongs to the document, so it goes in again on every load. So does the zoom:
+  // Chromium remembers it per origin, so a page can arrive already zoomed.
+  win.webContents.on('did-finish-load', () => {
+    win?.webContents.insertCSS(ZOOM_CSS).catch(() => {});
+    syncZoom();
+  });
   if (MAC_TITLE_BAR) {
-    // Injected CSS belongs to the document, so it goes in again on every load.
     win.webContents.on('did-finish-load', () => {
       win?.webContents.insertCSS(MAC_TITLE_BAR_CSS).catch(() => {});
       syncFullScreenClass();

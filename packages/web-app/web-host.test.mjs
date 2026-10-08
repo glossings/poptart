@@ -468,11 +468,11 @@ test('every path the editor asks for is one the host has an answer for', () => {
     'POST /api/link',
     // the DJ desk's song player: DJ mode is refused at its opener (client.js, desktopOnly)
     'POST /api/song/play', 'POST /api/song/cue', 'POST /api/song/pause', 'POST /api/song/seek',
-    'POST /api/song/stop', 'POST /api/song/meta', 'POST /api/song/nudge',
+    'POST /api/song/stop', 'POST /api/song/meta', 'POST /api/song/nudge', 'POST /api/song/reanalyze',
     'GET /api/song/onsets', 'GET /api/song/waveform',
     // the DJ desk's own controls, same door: the loop toggles and tempo sliders live in the
     // deck heads (hidden outside mix mode), the FX unit in the mix strip
-    'POST /api/arrangeLoops', 'POST /api/mix/decktempo', 'POST /api/mix/loop', 'POST /api/mix/fx', 'POST /api/mix/fxchain',
+    'POST /api/arrangeLoops', 'POST /api/mix/decktempo', 'POST /api/mix/livesync', 'POST /api/mix/jogsize', 'POST /api/mix/loop', 'POST /api/mix/fx', 'POST /api/mix/fxchain',
     'POST /api/mix/feedback',
     // ...and the mode itself, which this build never enters (openMixMode refuses it), so the
     // tempo rule it switches on - setbpm as metadata - can never come up here either.

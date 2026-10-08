@@ -12,7 +12,7 @@ export { feedOsc, oscInUse, latestOsc, normalizeOscAddress } from './osc.mjs';
 export { setAudioInputLayout, audioInputLayout, audioInputChannelCount, resolveInputChannels } from './audio-inputs.mjs';
 export { setMacro, macroValue, MACRO_COUNT } from './macros.mjs';
 export { setFxKnob, fxKnobValue, FX_KNOB_COUNT } from './fxknobs.mjs';
-export { Scheduler, Transport, setEventLogger } from './scheduler.mjs';
+export { Scheduler, Transport, DeckClock, setEventLogger } from './scheduler.mjs';
 export { parseScaleName, degreeToMidi, midiToDegree, noteToMidi } from './notes.mjs';
 export { setGlobalScale, globalScale, scaleAtOctave, scaleParts, DEFAULT_SCALE, DEFAULT_SCALE_OCTAVE } from './notes.mjs';
 export { recordingToMini, UNQUANTIZED_GRID, recordingToRoll, captureWindow, recordStartCycle, UNQUANTIZED_ROLL_GRID } from './record.mjs';

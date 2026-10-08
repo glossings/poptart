@@ -83,7 +83,9 @@ function findCachedZip({ cacheDir, version, platform = process.platform, arch = 
 }
 
 // The platform's own unzip: ditto keeps the app bundle's symlinks and signature intact on macOS,
-// Windows 10+ ships bsdtar (which reads zips) as `tar`, and Linux has unzip.
+// Windows 10+ ships bsdtar (which reads zips) as System32's tar.exe, and Linux has unzip. The
+// full path, not PATH: a shell with its own tools first (Git Bash) hands over GNU tar, which
+// cannot read a zip and takes the `C:` of a Windows path for a remote host.
 function unpackZip(zipPath, destDir, { platform = process.platform, run = spawnSync } = {}) {
   fs.rmSync(destDir, { recursive: true, force: true });
   fs.mkdirSync(destDir, { recursive: true });
@@ -91,7 +93,7 @@ function unpackZip(zipPath, destDir, { platform = process.platform, run = spawnS
     platform === 'darwin'
       ? ['ditto', ['-x', '-k', zipPath, destDir]]
       : platform === 'win32'
-        ? ['tar', ['-xf', zipPath, '-C', destDir]]
+        ? [path.win32.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'tar.exe'), ['-xf', zipPath, '-C', destDir]]
         : ['unzip', ['-q', '-o', zipPath, '-d', destDir]];
   const res = run(cmd, args, { stdio: 'inherit' });
   if (res.status !== 0) throw new Error(`${cmd} could not unpack ${zipPath}`);
