@@ -343,9 +343,19 @@ test('stablePort falls back to a free port when its own is taken', async () => {
 test('the preferred port is overridable, and an unbindable one still yields a usable port', async () => {
   const free = await findFreePort();
   assert.equal(await stablePort({ preferred: free }), free);
-  // Port 1 needs privileges this process does not have, so it exercises the error path.
-  const fallback = await stablePort({ preferred: 1 });
-  assert.ok(fallback > 1024, `expected a usable high port, got ${fallback}`);
+  // A port something is already listening on cannot be bound, on any platform. (Port 1 was the
+  // example here, as one that needs privileges - which is a Unix rule: Windows binds it happily,
+  // so there this exercised nothing and failed.)
+  const holder = net.createServer();
+  await new Promise((resolve) => holder.listen(0, '127.0.0.1', resolve));
+  const taken = holder.address().port;
+  try {
+    const fallback = await stablePort({ preferred: taken });
+    assert.notEqual(fallback, taken, 'a port in use is not handed back');
+    assert.ok(Number.isInteger(fallback) && fallback > 0, `expected a usable port, got ${fallback}`);
+  } finally {
+    await new Promise((resolve) => holder.close(resolve));
+  }
 });
 
 test('an explicit preferred port is honoured, which is how POPTART_PORT pins it', async () => {
