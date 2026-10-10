@@ -38,11 +38,12 @@ function loadWaveGeometry() {
     const DJ_END_WARN_HURRY = ${num('DJ_END_WARN_HURRY')};
     ${grab('function djLiveWindow(')}
     ${grab('function djLiveTraceCycle(')}
+    ${grab('function djLiveTraceAdd(')}
     ${grab('function djEndWarnAt(')}
-    return { djLiveWindow, djLiveTraceCycle, djEndWarnAt, DJ_LIVE_TRACE_LAG, DJ_END_WARN_SEC, DJ_END_WARN_HURRY };
+    return { djLiveWindow, djLiveTraceCycle, djLiveTraceAdd, djEndWarnAt, DJ_LIVE_TRACE_LAG, DJ_END_WARN_SEC, DJ_END_WARN_HURRY };
   `)();
 }
-const { djLiveWindow, djLiveTraceCycle, djEndWarnAt, DJ_LIVE_TRACE_LAG, DJ_END_WARN_SEC, DJ_END_WARN_HURRY } = loadWaveGeometry();
+const { djLiveWindow, djLiveTraceCycle, djLiveTraceAdd, djEndWarnAt, DJ_LIVE_TRACE_LAG, DJ_END_WARN_SEC, DJ_END_WARN_HURRY } = loadWaveGeometry();
 
 // 120bpm: bpm = cps x 240, and a cycle is four beats - so half a cycle a second, two seconds a bar.
 const CPS = 0.5;
@@ -304,4 +305,87 @@ test('the livecoded strip is scaled by the deck\'s tempo without the nudge or th
   assert.equal(deckBaseCps(() => ({ cps: 0.5 }))('a'), 0.5, 'the room\'s snapshot carries no bend');
   const draw = CLIENT_SRC.slice(CLIENT_SRC.indexOf('function djLiveWaveDraw('));
   assert.match(draw.slice(0, draw.indexOf('\n}\n')), /const cps = deckBaseCps\(deck\)/);
+});
+
+// ---------------------------------------------------------------------------------------------
+// The trace under a clock that is being moved
+// ---------------------------------------------------------------------------------------------
+
+test('a nudged deck carries the drums already on its strip along with their beat lines', async () => {
+  // Reported 2026-10-10: holding the platter on a deck playing code slid the bar lines and left
+  // the drums behind. A frame used to be kept with its arrival TIME and placed again at every
+  // draw from the tempo, so whatever the clock had been moved by since - a held drag, a jog, the
+  // tempo fader - was how far each hit sat from the beat it was played on. Kept at the deck cycle
+  // it sounded on, the hit and its line are one position and nothing can come between them.
+  const { Transport, DeckClock } = await import('../pattern-core/src/scheduler.mjs');
+  const songSync = require('./song-sync.js');
+  let now = 0;
+  const room = new Transport(() => now, { cps: CPS, paused: true });
+  room.start(now);
+  const deck = new DeckClock(room);
+  deck.align();
+  const mirror = () => { const t = deck.snapshot(); return { cps: t.cps, pos: t.baseCycle + (now - t.baseSec) * t.cps }; };
+
+  // A kick on every beat of the deck's clock; its meter frame lands one lag later and is stamped
+  // exactly as djLiveTracePush stamps it.
+  const ring = [];
+  const kicks = []; // the frames that carry a kick, with the beat each one IS
+  const waiting = [];
+  let beat = Math.floor(deck.cycleAt(now) * 4);
+  const run = (until) => {
+    while (now < until - 1e-9) {
+      now += 0.005;
+      const at = Math.floor(deck.cycleAt(now) * 4);
+      if (at !== beat) { beat = at; waiting.push({ due: now + DJ_LIVE_TRACE_LAG / 1000, cycle: at / 4 }); }
+      while (waiting.length && waiting[0].due <= now) {
+        const { cps, pos } = mirror();
+        const frame = { c: djLiveTraceCycle(now * 1000, now * 1000, pos, cps), p: 1 };
+        djLiveTraceAdd(ring, frame, 2000);
+        kicks.push({ frame, cycle: waiting.shift().cycle });
+      }
+    }
+  };
+  // The run above steps 5ms at a time, twice over (the beat, then the lag): 10ms is its own grain.
+  // What it is looking for is 80ms (the drag) and 500ms (the jog).
+  const SIM_SLOP_MS = 12;
+  const worstMs = () => Math.max(...kicks.map((k) => Math.abs(k.frame.c - k.cycle) / CPS * 1000));
+
+  run(4);
+  assert.ok(worstMs() < SIM_SLOP_MS, `on a straight clock a kick sits on its beat (${worstMs()}ms)`);
+  deck.setBend(songSync.effectiveRate(1, -1, 0) - 1); // the drag, held for two seconds
+  run(6);
+  deck.setBend(0);
+  run(7);
+  assert.ok(Math.abs(deck.offset) > 0.03, 'the drag really did move the deck against the room');
+  assert.ok(worstMs() < SIM_SLOP_MS, `and every kick, before the drag and during it, is still on its beat (${worstMs()}ms)`);
+  // A beat forward: the same again for a step. Taken between kicks - a frame still in flight when
+  // the clock steps measured sound from before the step and is stamped after it, which is one
+  // lag's worth of trace out of place at the seam and not what this is about.
+  while (waiting.length) run(now + 0.005);
+  deck.jog(0.25);
+  beat = Math.floor(deck.cycleAt(now) * 4); // the step is not itself a kick
+  run(9);
+  assert.ok(worstMs() < SIM_SLOP_MS, `a jog leaves them there too (${worstMs()}ms)`);
+});
+
+test('the history only runs forward: a clock stepped back gives up what it is about to replay', () => {
+  const ring = [];
+  for (const c of [1, 1.1, 1.2, 1.3]) djLiveTraceAdd(ring, { c }, 100);
+  djLiveTraceAdd(ring, { c: 1.15 }, 100); // jogged back a little
+  assert.deepEqual(ring.map((f) => f.c), [1, 1.1, 1.15]);
+  djLiveTraceAdd(ring, { c: 0 }, 100); // back to the top
+  assert.deepEqual(ring.map((f) => f.c), [0]);
+  // A paused clock stamps every frame alike; they are kept, not taken for a step back.
+  djLiveTraceAdd(ring, { c: 0 }, 100);
+  assert.equal(ring.length, 2);
+  for (let i = 0; i < 10; i++) djLiveTraceAdd(ring, { c: 1 + i }, 4);
+  assert.deepEqual(ring.map((f) => f.c), [7, 8, 9, 10], 'and it is still a ring');
+});
+
+test('the strip stamps a frame as it lands and draws it from the stamp', () => {
+  const src = fs.readFileSync(path.join(__dirname, 'public/client.js'), 'utf8');
+  assert.match(src, /const c = djLiveTraceCycle\(t, t, currentCyclePos\(deck\), deckClock\(deck\)\.cps\);/,
+    'the position reads the clock as it is being bent');
+  assert.match(src, /const x = xOf\(ring\[i\]\.c\);/);
+  assert.doesNotMatch(src, /djLiveTraceCycle\(ring\[i\]/, 'nothing works a kept frame out again from the tempo');
 });

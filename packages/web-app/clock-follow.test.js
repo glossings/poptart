@@ -156,3 +156,79 @@ test('a synced livecoded leader is the room already, and is not followed', async
   r.clockFollowSong();
   assert.equal(r.transport.cps * 240, 120);
 });
+
+// ---------------------------------------------------------------------------------------------
+// A nudged leader that is still in sync
+// ---------------------------------------------------------------------------------------------
+
+async function nudgedRig({ otherAudible = false, peers = 0, midiClock = null, leaderSync = true } = {}) {
+  const { Transport, DeckClock } = await import('../pattern-core/src/scheduler.mjs');
+  let now = 100;
+  const transport = new Transport(() => now, { cps: 0.5, paused: true });
+  const deckClocks = { a: new DeckClock(transport), b: new DeckClock(transport) };
+  transport.start(100);
+  const deckLive = { a: { sync: leaderSync, nudge: 0, bend: 0 }, b: { sync: true, nudge: 0, bend: 0 } };
+  deckClocks.a.setSync(leaderSync);
+  const relocated = [];
+  const rebases = [];
+  const make = new Function('engine', 'transport', 'songDecks', 'linkState', 'mixState', 'midiClockActive',
+    'deckLeader', 'deckAudible', 'deckClocks', 'deckLive', 'deckSchedulers', 'syncEngineClock', 'mixNotify', `
+    ${grabFn('clockTakeLeaderPlace')}
+    return { clockTakeLeaderPlace };
+  `);
+  const api = make({ getTime: () => now }, transport, { a: null, b: null }, { enabled: peers > 0, peers }, { dj: true }, midiClock,
+    () => 'a', (d) => (d === 'a' ? true : otherAudible), deckClocks, deckLive,
+    (d) => [{ relocate: (delta) => relocated.push([d, delta]) }], (why) => rebases.push(why), () => {});
+  const at = (t) => { now = t; };
+  // Deck A plays for four seconds, then the platter is dragged for two (4% slow) and let go.
+  at(104);
+  deckClocks.a.setBend(-0.04);
+  at(106);
+  deckClocks.a.setBend(0);
+  at(107);
+  return { ...api, transport, deckClocks, relocated, rebases, at, now: () => now };
+}
+
+test('a deck coming in beside a nudged leader locks onto where the leader IS', async () => {
+  const r = await nudgedRig();
+  const leaderWas = r.deckClocks.a.cycleAt(r.now());
+  assert.ok(Math.abs(r.deckClocks.a.offset + 0.04) < 1e-9, `the drag left deck A ${r.deckClocks.a.offset} cycles off the room`);
+  const moved = r.clockTakeLeaderPlace('b'); // what evaluate and a song's play press do first
+  assert.ok(Math.abs(moved + 0.04) < 1e-9);
+  assert.ok(Math.abs(r.deckClocks.a.cycleAt(r.now()) - leaderWas) < 1e-9, 'the leader itself did not move');
+  assert.ok(Math.abs(r.transport.cycleAt(r.now()) - leaderWas) < 1e-9, 'the room is on the leader');
+  assert.ok(Math.abs(r.deckClocks.a.offset) < 1e-9);
+  // ...so the deck that aligns to the room next is on the leader's bar, and stays there.
+  r.deckClocks.b.align();
+  r.at(111);
+  assert.ok(Math.abs(r.deckClocks.b.cycleAt(111) - r.deckClocks.a.cycleAt(111)) < 1e-9);
+  assert.deepEqual(r.rebases, ['rebase'], 'the engine and the MIDI clock are told once');
+  assert.equal(r.relocated.length, 1, 'what the incoming deck still schedules is carried across');
+  assert.equal(r.relocated[0][0], 'b');
+  assert.ok(Math.abs(r.relocated[0][1] + 0.04) < 1e-9);
+});
+
+test('the room is not moved from under anything riding it', async () => {
+  for (const [name, opts] of [['another deck sounding in sync', { otherAudible: true }], ['a Link session', { peers: 2 }],
+    ['a MIDI clock destination', { midiClock: 'TR-8S' }]]) {
+    const r = await nudgedRig(opts);
+    const roomWas = r.transport.cycleAt(r.now());
+    assert.equal(r.clockTakeLeaderPlace('b'), 0, name);
+    assert.equal(r.transport.cycleAt(r.now()), roomWas, name);
+    assert.ok(Math.abs(r.deckClocks.a.offset + 0.04) < 1e-9, `${name}: the nudge still stands against it`);
+  }
+});
+
+test('a leader nobody nudged, and one with its sync off, are left to the paths they already have', async () => {
+  const straight = await nudgedRig();
+  straight.clockTakeLeaderPlace('b');
+  assert.equal(straight.clockTakeLeaderPlace('b'), 0, 'already there: nothing to move, nothing announced');
+  assert.equal(straight.rebases.length, 1);
+  const free = await nudgedRig({ leaderSync: false });
+  assert.equal(free.clockTakeLeaderPlace('b'), 0, 'clockFollowSong follows a free leader');
+});
+
+test('both kinds of deck ask before they start', () => {
+  assert.match(SRC, /if \(body\.start !== false && !deckRunning\(deck\)\) clockTakeLeaderPlace\(deck\);/, 'a deck of code, in evaluate');
+  assert.match(grabFn('songPlayDeck'), /clockTakeLeaderPlace\(deck\);\s+const nowSec = engine\.getTime\(\);/, 'a song, before it reads the clock');
+});

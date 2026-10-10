@@ -28919,7 +28919,6 @@ function makeSongPane(deck) {
   const nudgeDnEl = byId('songNudgeDn');
   const nudgeUpEl = byId('songNudgeUp');
   const hostEl = deck === 'a' ? document.getElementById('editorPane') : deckBPaneEl;
-  const keepBtn = document.getElementById(deck === 'a' ? 'deckAKeep' : 'deckBKeep');
   const updBtn = document.getElementById(deck === 'a' ? 'deckAUpdate' : 'deckBUpdate');
   const hostCM = () => (deck === 'a' ? cm : deckBCM);
   const D = `deck ${U}`;
@@ -29087,7 +29086,6 @@ function makeSongPane(deck) {
   // editor holds your wip), so a failure there keeps the pane up and says so on the strip.
   P.open = async () => {
     hostEl.classList.add('song-on');
-    keepBtn.disabled = true; // a file can't be promoted to the single editor (see exitDjMode)
     updBtn.disabled = true; // a file has nothing to re-evaluate
     paneEl.classList.remove('hidden');
     detailEl.classList.remove('hidden');
@@ -29115,7 +29113,6 @@ function makeSongPane(deck) {
   P.close = () => {
     P.cueUp(); // a pane going away under a held cue would otherwise leave the deck previewing
     hostEl.classList.remove('song-on');
-    keepBtn.disabled = false;
     updBtn.disabled = false;
     paneEl.classList.add('hidden');
     detailEl.classList.add('hidden'); // in the stack it would otherwise sit there blank
@@ -29653,18 +29650,38 @@ const songPanes = { a: makeSongPane('a'), b: makeSongPane('b') };
 
 const DJ_LIVE_TRACE_LAG = 90; // ms: the meter's analysis window plus the SSE coalesce (see above)
 const DJ_LIVE_TRACE_MAX = 2000; // ~80s of history at the feed's ~25/sec - past the widest zoom
-const djLiveTrace = { a: [], b: [] }; // [{ t: performance.now() as it landed, p, r, b }]
+const djLiveTrace = { a: [], b: [] }; // [{ c: the deck's cycle it sounded on, p, r, b }]
 
-/** Every level frame kept with the moment it arrived, rather than only the latest. */
+/**
+ * Every level frame kept, rather than only the latest - and kept at the place on the DECK'S OWN
+ * CLOCK where it sounded, which is the place its beat line is drawn. Stamped with the moment it
+ * arrived instead (as it was), a frame's place was worked out again at every draw from the tempo:
+ * right while the clock ran straight, and wrong by exactly as much as a nudge, a jog or a tempo
+ * fader had moved the clock since - the bar lines went with the clock and the drums already on
+ * the strip stayed behind. A hit and its beat are one position now, so the gesture slides the
+ * whole picture, as it does a song deck's.
+ */
 function djLiveTracePush(frame) {
   const t = performance.now();
   for (const deck of ['a', 'b']) {
     const v = frame?.[deck];
     if (!v) continue;
-    const ring = djLiveTrace[deck];
-    ring.push({ t, p: v.p ?? 0, r: v.r ?? 0, b: v.b ?? null });
-    if (ring.length > DJ_LIVE_TRACE_MAX) ring.splice(0, ring.length - DJ_LIVE_TRACE_MAX);
+    // The clock's rate as it is being bent: this is a position, not a scale (see deckBaseCps).
+    const c = djLiveTraceCycle(t, t, currentCyclePos(deck), deckClock(deck).cps);
+    djLiveTraceAdd(djLiveTrace[deck], { c, p: v.p ?? 0, r: v.r ?? 0, b: v.b ?? null }, DJ_LIVE_TRACE_MAX);
   }
+}
+
+/**
+ * A frame onto a deck's history, which only ever runs forward. A clock stepped BACK (a jog, a cue
+ * to the top, a restart) is about to sound those cycles again, and what was heard there the first
+ * time gives way to it - two takes of one bar drawn over each other is not a waveform, and a
+ * strip with its past on the far side of the playhead is not a history.
+ */
+function djLiveTraceAdd(ring, frame, max) {
+  while (ring.length && ring[ring.length - 1].c > frame.c) ring.pop();
+  ring.push(frame);
+  if (ring.length > max) ring.splice(0, ring.length - max);
 }
 
 // Built here rather than in the markup: they only ever live in the stack, which applyMixStack
@@ -29703,7 +29720,9 @@ function djLiveWindow(cycNow, cps, spanSec, w) {
  * The cycle a meter frame belongs on. `t` is when the frame ARRIVED; the sound it measured
  * happened DJ_LIVE_TRACE_LAG earlier than that, so the trace is slid further back into the past,
  * never forward. Getting this sign wrong is the failure that looks like a working strip whose
- * beats sit twice the lag off the grid.
+ * beats sit twice the lag off the grid. Asked once, as the frame lands (djLiveTracePush, with
+ * `nowMs` = `t`), and the answer is kept: a clock that is nudged afterwards has moved the frame's
+ * beat line too, and working the place out again from the tempo would leave the frame behind.
  */
 function djLiveTraceCycle(t, nowMs, cycNow, cps) {
   return cycNow - ((nowMs - t + DJ_LIVE_TRACE_LAG) / 1000) * cps;
@@ -29778,21 +29797,22 @@ function djLiveWaveDraw(deck) {
 
   // The level trace, mirrored around the center exactly as a song's waveform is: translucent peak
   // with the solid rms body inside it, each column colored by its band balance (the same read and
-  // the same two alphas as songDrawColumns). Columns are placed by the timestamp each frame
-  // arrived under, not by their position in the ring, so a stalled feed leaves a gap rather than
-  // quietly sliding the whole history off the beat. Normalized to the loudest thing still on
-  // screen, with a floor so a silent deck doesn't magnify its own noise into a waveform.
+  // the same two alphas as songDrawColumns). Columns are placed by the cycle each frame sounded
+  // on (see djLiveTracePush), not by their position in the ring, so a stalled feed leaves a gap
+  // rather than quietly sliding the whole history off the beat - and not by how long ago they
+  // arrived, so a nudged clock carries them with their bar lines. Normalized to the loudest thing
+  // still on screen, with a floor so a silent deck doesn't magnify its own noise into a waveform.
   const ring = djLiveTrace[deck];
   const nowMs = performance.now();
-  const cycOfT = (t) => djLiveTraceCycle(t, nowMs, cycNow, cps);
+  const newest = djLiveTraceCycle(nowMs, nowMs, cycNow, deckClock(deck).cps); // where a frame landing now would go
   let loudest = 0;
   for (const s of ring) if (s.p > loudest) loudest = s.p;
   const norm = loudest < 0.02 ? 1 : Math.min(6, 1 / loudest);
   const cols = [];
   for (let i = 0; i < ring.length; i++) {
-    const x = xOf(cycOfT(ring[i].t));
+    const x = xOf(ring[i].c);
     if (x < -8 || x > w + 8) continue;
-    const to = xOf(cycOfT(i + 1 < ring.length ? ring[i + 1].t : nowMs));
+    const to = xOf(i + 1 < ring.length ? ring[i + 1].c : newest);
     cols.push({ x, cw: Math.max(1, to - x) + 0.6, s: ring[i] });
   }
   for (const col of cols) {
@@ -31640,8 +31660,6 @@ for (const deck of ['a', 'b']) {
 document.getElementById('deckBSong').addEventListener('click', () => openOrganize('b'));
 document.getElementById('deckBPlay').addEventListener('click', (e) => deckPlayPress('b', e.shiftKey));
 document.getElementById('deckBUpdate').addEventListener('click', () => evalDeckB(false));
-document.getElementById('deckAKeep').addEventListener('click', () => exitDjMode('a'));
-document.getElementById('deckBKeep').addEventListener('click', () => exitDjMode('b'));
 document.getElementById('deckASong').addEventListener('click', () => openOrganize('a'));
 document.getElementById('deckAPlay').addEventListener('click', (e) => deckPlayPress('a', e.shiftKey));
 
@@ -35609,8 +35627,8 @@ function openEditorMenu(ed, e) {
   const deck = ed === deckBCM ? 'b' : 'a';
   if (arrangeMod && labelsMod && !songPanes[deck]?.song) {
     items.push(arState && arDeck === deck
-      ? ['close the arrangement', () => closeArrangeEditor(), chordLabel('app+a')]
-      : ['paint the arrangement', () => openArrangePainter(deck), `${chordLabel('app+a')} — where each track plays across the song, as clips on a timeline`]);
+      ? ['close arrangement', () => closeArrangeEditor(), chordLabel('app+a')]
+      : ['view arrangement', () => openArrangePainter(deck), chordLabel('app+a')]);
   }
   items.push('-');
   if (selected) {

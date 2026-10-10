@@ -834,6 +834,8 @@ function songPlayDeck(deck, { pos, rate, now: startNow } = {}) {
   const from = Number.isFinite(at)
     ? (spent(at) ? 0 : Math.min(Math.max(0, at), s.duration))
     : (spent(s.posSec) ? 0 : s.posSec);
+  // A song coming in beside a nudged deck of code locks onto where that deck IS (see the function).
+  clockTakeLeaderPlace(deck);
   const nowSec = engine.getTime();
   let startSec = nowSec + SONG_START_LEAD_SEC;
   const others = othersPlaying(deck);
@@ -1062,11 +1064,13 @@ function songSetMeta(deck, patch) {
   if ('keylock' in patch && !!patch.keylock !== s.keylock) {
     s.keylock = !!patch.keylock;
     if (s.playing && engine) {
-      // Swap the running player for the other def at the current playhead, declicked (the
-      // old one release-fades under the new one, exactly like a restart).
-      const now = engine.getTime();
-      const pos = songPlayheadSec(deck, now);
-      const startSec = now + SONG_START_LEAD_SEC;
+      // Swap the running player for the other def, declicked (the old one release-fades under
+      // the new one, exactly like a restart) - at the place the playhead WILL be when the new
+      // one starts, not where it is as this is sent. The old one plays on through the lead, so
+      // a start from the present place came in that far behind it: the record dropped back
+      // 150ms at every press, which at dance tempos is most of a half beat.
+      const startSec = engine.getTime() + SONG_START_LEAD_SEC;
+      const pos = songPlayheadSec(deck, startSec);
       engine.songStart(engineTrack(SONG_KEYS[deck]), pos, s.rate + s.servo, startSec, s.keylock ? 1 : 0);
       s.posSec = pos;
       s.startSec = startSec;
@@ -3469,6 +3473,42 @@ function clockFollowSong({ adopt = false } = {}) {
   } finally {
     songFollowing = false;
   }
+}
+
+/**
+ * The room's clock onto the place of the deck leading it, before `forDeck` comes in. A nudge or a
+ * jog moves one deck against the room - which is the gesture's whole use while another deck is
+ * playing, and leaves the room somewhere nobody is once that deck is the only one: the next deck
+ * to start locked onto the bar the leader had LEFT (reported 2026-10-10). So while nothing rides
+ * the room but its leader, the room is wherever the leader is. The leader itself does not move,
+ * and neither does anything that could be heard to: another deck sounding in sync, a Link session
+ * or a MIDI clock destination is something riding the room, and its place is left alone.
+ *
+ * Only a deck playing code with its sync ON needs this. With sync off it is followed outright
+ * (clockFollowSong), and a song that leads either is the room's grid or is followed the same way.
+ * Returns how far the room moved, in cycles.
+ */
+function clockTakeLeaderPlace(forDeck) {
+  if (!engine || !transport || transport.paused || !mixState.dj) return 0;
+  if ((linkState.enabled && linkState.peers) || midiClockActive) return 0;
+  const lead = deckLeader();
+  const clock = lead && deckClocks[lead];
+  if (!clock || lead === forDeck || songDecks[lead] || !deckLive[lead].sync) return 0;
+  const other = lead === 'a' ? 'b' : 'a';
+  if (songDecks[other] ? songDecks[other].playing && songDecks[other].sync : deckAudible(other) && deckLive[other].sync) return 0;
+  const off = clock.offset;
+  if (Math.abs(off) < 1e-9) return 0;
+  const now = engine.getTime();
+  const otherClock = deckClocks[other];
+  const before = otherClock ? otherClock.cycleAt(now) : 0;
+  transport.shiftCycles(off); // every synced deck clock goes with it, the leader's included...
+  clock.align(); // ...which puts the leader back exactly where it was: on the room, now
+  // Whatever of the other deck's is still scheduling (its FX unit) is carried across the step.
+  const moved = otherClock ? otherClock.cycleAt(now) - before : 0;
+  if (moved) for (const sch of deckSchedulers(other)) sch.relocate(moved);
+  syncEngineClock('rebase');
+  mixNotify();
+  return off;
 }
 
 // How far ahead of "now" play-from-stop puts its start position. The schedulers start with the
@@ -7324,6 +7364,8 @@ const routes = {
     // schedules a note (see clockFollowSong) - a stopped clock just takes the tempo here, and
     // starts on the song's bar in transportStart.
     if (body.start !== false && !deckRunning(deck)) clockFollowSong({ adopt: true });
+    // ...and under a deck playing code that has been nudged, takes the place it was nudged to.
+    if (body.start !== false && !deckRunning(deck)) clockTakeLeaderPlace(deck);
     // The deck's own tempo, for when its sync is off: what it declared, or the default (see
     // deckClocks). Synced, this only waits its turn.
     deckClocks[deck]?.setFreeBpm(decks[deck].bpm ?? DEFAULT_CPS * 240);

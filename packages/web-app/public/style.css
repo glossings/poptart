@@ -4748,7 +4748,7 @@ body.mix-on.mix-stacked .song-overview {
 }
 /* Deck A's head is always there now - it carries the pane's code | arrange switch, which is the
    only view control outside DJ mode. What grows in DJ mode is the DECK chrome beside it: the title,
-   the song picker, play, update and keep. */
+   the song picker, play and update. */
 #deckAHead .deck-only {
   display: none;
 }
@@ -4801,8 +4801,8 @@ body.mix-on #deckAHead .deck-song {
 .deck-song.empty {
   color: var(--text-dim);
 }
-/* "keep" while the pane holds a song file (the single-editor world can't hold one) and the
-   tempo slider before both decks have a tempo: dimmed, not clickable, no hover. */
+/* A control that has nothing to act on yet (the tempo slider before both decks have a tempo):
+   dimmed, not clickable, no hover. */
 #deckBHead button:disabled,
 #deckAHead button:disabled,
 .mix-center button:disabled {

@@ -89,7 +89,7 @@
              title="drag to divide the height between the waveforms and the decks - push past either and it folds to a rail (double-click resets)"></div>
         <div id="editorPane">
           <!-- The pane's own head: deck chrome, shown only in DJ mode (body.mix-on), where the
-               main editor IS deck A: load a song, play it, or leave DJ mode keeping this pane.
+               main editor IS deck A: load a song and play it.
                app+A flips the pane between code and arrangement - there is no switch for it. -->
           <div id="deckAHead" class="deck-head">
             <span class="deck-b-title deck-only">deck A</span>
@@ -99,7 +99,6 @@
             <button id="deckASong" class="small deck-song deck-only" title="the song on this deck - click to pick another (opens organize; loading clears this deck's current tracks)">pick a song…</button>
             <button id="deckAPlay" class="small deck-only" data-chord-title="{mod+enter}">&#9654; play</button>
             <button id="deckAUpdate" class="small deck-only" title="evaluate without changing play state">&#8635;</button>
-            <button id="deckAKeep" class="small deck-only" title="leave DJ mode keeping THIS pane as the song (deck B is dropped)">&#9167; keep</button>
             <span class="deck-head-gap"></span>
             <button id="deckALoop" class="small deck-only deck-loop" title="loop the next stretch of this deck from where it is playing, like a player’s loop button - the length is beside it, and it holds until you press again. Works on a deck playing code and on one playing a file; nothing is written into the song">loop</button>
             <button id="deckALoopHalve" class="small deck-only deck-loop-len-btn" title="halve the loop length (the loop you are hearing keeps its start and gets shorter)">&divide;2</button>
@@ -164,7 +163,6 @@
             <button id="deckBSong" class="small deck-song" title="the song on this deck - click to pick another (opens organize)">pick a song…</button>
             <button id="deckBPlay" class="small" data-chord-title="{mod+enter} in this pane">▶ play</button>
             <button id="deckBUpdate" class="small" title="evaluate without changing play state">↻</button>
-            <button id="deckBKeep" class="small" data-chord-title="leave DJ mode keeping THIS pane as the song - it is promoted with zero engine churn ({mod+shift+enter})">&#9167; keep</button>
             <span class="deck-head-gap"></span>
             <button id="deckBLoop" class="small deck-loop" title="loop the next stretch of this deck from where it is playing, like a player’s loop button - the length is beside it, and it holds until you press again. Works on a deck playing code and on one playing a file; nothing is written into the song">loop</button>
             <button id="deckBLoopHalve" class="small deck-loop-len-btn" title="halve the loop length (the loop you are hearing keeps its start and gets shorter)">&divide;2</button>

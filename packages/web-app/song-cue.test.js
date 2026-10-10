@@ -171,3 +171,40 @@ test('releasing the press parks the deck back on the cue', () => {
   assert.equal(m.deck.posSec, 12, 'home again - the next play reads posSec for its entry');
   assert.equal(m.deck.cueHeld, false);
 });
+
+// ---------------------------------------------------------------------------------------------
+// The key button on a playing deck
+// ---------------------------------------------------------------------------------------------
+
+test('switching keylock on a playing deck starts the new player where the playhead will be', () => {
+  // Reported 2026-10-10: pressing key dropped the record back. The swap starts the other player a
+  // lead ahead of now (so its timestamped bundle arrives early) while the old one plays on - and
+  // it was started from where the playhead was when the message was SENT, a lead behind.
+  const DEPS2 = ['songDecks', 'engine', 'engineTrack', 'SONG_KEYS', 'decks', 'songDetectKick', 'importTracks',
+    'setTrackAnchor', 'readSongTags', 'deckSongPrefs', 'songArmTimers', 'songApplyRate', 'mixNotify'];
+  // eslint-disable-next-line no-new-func
+  const make = new Function(...DEPS2, `
+    ${grabConst('SONG_START_LEAD_SEC')}
+    ${grabFn('songPlayheadSec')}
+    ${grabFn('songSetMeta')}
+    return { songSetMeta, songPlayheadSec, SONG_START_LEAD_SEC };
+  `);
+  for (const rate of [1, 1.06, 0.94]) {
+    for (const keylock of [false, true]) {
+      const started = [];
+      const songDecks = { a: { duration: DURATION, posSec: 30, startSec: NOW - 10, playing: true, rate, servo: 0, keylock, bpm: 120 }, b: null };
+      const engine = { getTime: () => NOW, songStart: (...args) => started.push(args) };
+      const api = make(songDecks, engine, (k) => k, { a: 'song:a', b: 'song:b' }, { a: {}, b: {} }, () => {}, () => {},
+        () => {}, () => {}, { a: {}, b: {} }, () => {}, () => {}, () => {});
+      const before = (at) => 30 + (at - (NOW - 10)) * rate; // where the OLD player is at any moment
+      api.songSetMeta('a', { keylock: !keylock });
+      assert.equal(started.length, 1);
+      const [, pos, , startSec, flag] = started[0];
+      assert.equal(flag, keylock ? 0 : 1, 'the other def');
+      assert.equal(startSec, NOW + api.SONG_START_LEAD_SEC);
+      assert.ok(Math.abs(pos - before(startSec)) < 1e-9, `rate ${rate}: starts at ${pos}, the record is at ${before(startSec)} by then`);
+      // ...and the model agrees with the engine, so nothing reads the swap as a jump.
+      assert.ok(Math.abs(api.songPlayheadSec('a', startSec + 1) - before(startSec + 1)) < 1e-9);
+    }
+  }
+});

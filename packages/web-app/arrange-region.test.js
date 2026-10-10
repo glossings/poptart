@@ -1073,7 +1073,7 @@ test('the editor menu opens the painter on the deck that was clicked', () => {
   const menu = grab('openEditorMenu');
   assert.match(menu, /const deck = ed === deckBCM \? 'b' : 'a';/);
   assert.match(menu, /if \(arrangeMod && labelsMod && !songPanes\[deck\]\?\.song\) \{/);
-  assert.match(menu, /\['paint the arrangement', \(\) => openArrangePainter\(deck\), `\$\{chordLabel\('app\+a'\)\}/);
-  assert.match(menu, /arState && arDeck === deck\s+\? \['close the arrangement', \(\) => closeArrangeEditor\(\)/,
+  assert.match(menu, /\['view arrangement', \(\) => openArrangePainter\(deck\), chordLabel\('app\+a'\)\]/);
+  assert.match(menu, /arState && arDeck === deck\s+\? \['close arrangement', \(\) => closeArrangeEditor\(\)/,
     'on the deck it is already open on, the item puts it away');
 });
