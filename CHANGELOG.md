@@ -2,6 +2,107 @@
 
 What changed in each release, newest first.
 
+## 0.3.0 - 2026-10-10
+
+### Added
+
+- Poptart-web: add frequency shifter
+- Add host flag to dev server
+- Add projector
+- Add ability to send code out as a feed
+- Add resolution and minification settings
+- Improvements to DJ mode:
+  - Add codeable FX units
+  - Add jogwheel nudge
+  - Add looping
+  - Allow fx deck switch to be bound to a toggle
+  - DJ controller feedback (including meters)
+  - Swap from shared tempos to faders
+  - Automatically save a record of played tracks
+  - Give livecode decks independent clocks (and allow nudging)
+  - Variable jog size
+  - Phrase counters
+- Improvements to Organize:
+  - A proper browser (sorting, more columns, ratings)
+  - Allow resizing Organize columns, fix rating column visibility
+  - Add Organize filters for tempo/key
+  - Allow multitrack editing in Organize
+  - Add hotkey
+  - Allow use outside of DJ mode
+  - Remove playlist selection and back/forward buttons
+  - Display currently playing tracks and previously played tracks
+  - Allow filtering for mixable tracks
+- Allow cue to come from the same device as output
+- Add arrangement to right click menu
+- Underline words with special functions while hovering
+- Add swing manager: ability to draw, edit, save swing patterns
+  - Call 'swing's by name
+  - Patternable swing, global swing
+  - Swing extraction from a file
+- Pattern folders
+- Clipping indicator
+
+### Fixed
+
+- Fix jittery visualization for ducker and compressor
+- Fix tests workflow (via setting POPTART_HOME during a step)
+- Avoid turning parameter/device names into mini notation
+- Avoid background throttling in desktop build
+- Don't write plugin state on evaluate
+- Fix bug where Play in DJ mode would immediately end a track
+- Don't block Measure when DJ decks are paused
+- Avoid re-polling device lists during playback
+- Don't allow bpm changes via code in DJ mode
+- Fix bug where no setbpm broke tempo faders
+- Avoid stalling livecode events while another deck loads
+- Fix a bug where DJ controller talkback was off by one
+- Avoid dropping notes due to floating point errors at cycle boundaries
+- Avoid Key shifting a playing track in time
+- Avoid idle tracks being held over upon switching songs, leading to memory issues
+- Skip plugin state string in file searches
+- Clean up sclang processes if a server is killed while booting
+- Process basic (letter) shortcuts by key name instead of position
+- Properly handle sampler notes in tracks with 'copy' and 'pcopy'
+- Dropping and reordering fx no longer reset their state
+- Gracefully handle failed modulator cleanup
+- Avoid extra waveform showing up in DJ mode
+- Make double-click on playlist tracks not re-add them
+- Cue on livecode decks now returns to track head
+- Make presets and rolls unique across DJ decks
+- Properly apply Trim to groups
+
+### Changed
+
+- Several upgrades to distort (character knob, several new shapes, drawable shapes)
+- Better tooltips
+- Bump scsynth memory
+- UI fixes for mobile
+- Rename arrangement loops to Regions and default to Off
+- End of track warnings
+- Properly analyze waveforms for livecode tracks
+- Revert to DJ mode looping when there is no arrangement from the user
+- Store bpm and key after analysis
+- Higher resolution faders
+- Flip tempo fader directions
+- Make cue work with livecode decks and restart tracks which have finished
+- Move Regions to settings
+- Stability: more allocation, voice cap, load gauge
+- Show 120 for tracks without setbpm
+- Detect new midi devices after server running
+- Preserve selected theme on desktop
+- Unbind anchor from cue
+- Preserve quantize/sync settings across reloads
+- Include livecode decks in leader handoff
+- Snap cue to nearest beat
+- Store anchors (and allow re-analysis)
+- More visible beatgrids
+- Upgrade Key mode to preserve transients and avoid clipping
+- Move focus to opposite deck after a track starts playing
+- Caffeinate the desktop version
+- Find and (improved) zoom on desktop
+- Request midi access when interacting with clock setting
+- Delete Keep button
+
 ## 0.2.0 - 2026-09-25
 
 ### Added
