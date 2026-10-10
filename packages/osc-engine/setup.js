@@ -96,6 +96,21 @@ function assetUrl(asset) {
   return asset.url ?? `${VSTPLUGIN_UPLOAD_BASE}/${asset.upload}/${asset.file}`;
 }
 
+// A second home for the upstream zips: the `v0.6.2` release of poptart's fork, which is where an
+// unmodified copy of each one goes. git.iem.at is one server at a university, and on 2026-10-10
+// it stopped answering for most of an hour - every first run on Windows and Linux in that time
+// ended with no VSTPlugin and an engine that could not boot. The copy is asked for FIRST (GitHub
+// is the host the SuperCollider download already depends on) and upstream second, so a copy that
+// is not there costs one 404 and nothing else. Either way the bytes are held to the same pinned
+// sha256, so it does not matter which host answered.
+const VSTPLUGIN_MIRROR_BASE = `https://github.com/glossings/vstplugin/releases/download/${VSTPLUGIN_RELEASE.version}`;
+
+/** Every place an asset can be fetched from, in the order to try them. */
+function assetUrls(asset) {
+  if (asset.url) return [asset.url]; // the fork's own build has one home
+  return [`${VSTPLUGIN_MIRROR_BASE}/${asset.file}`, assetUrl(asset)];
+}
+
 // sha256 of the `host` prober in every macOS build poptart has shipped or replaced, with what is
 // wrong with it. `host` is rebuilt with every fork release (the editor window code is compiled
 // into it too), so its hash identifies the build: an installed extension matching one of these
@@ -167,6 +182,24 @@ async function downloadTo(url, destPath, { attempts = 3, pauseMs = 1500, sleep =
   }
 }
 
+/**
+ * downloadTo over a list of sources: the first that delivers wins. A source that fails for any
+ * reason - a 404, a host that is down - hands over to the next, and when none delivers the error
+ * names what each one said, because "fetch failed" alone does not say which host to look at.
+ */
+async function downloadFirst(urls, destPath, opts) {
+  const failures = [];
+  for (const url of urls) {
+    try {
+      await downloadTo(url, destPath, opts);
+      return url;
+    } catch (err) {
+      failures.push(`${new URL(url).host}: ${err.message}`);
+    }
+  }
+  throw new Error(failures.length > 1 ? `no source delivered it (${failures.join('; ')})` : failures[0] ?? 'nowhere to download it from');
+}
+
 // macOS ships `unzip`; Windows 10+ ships bsdtar (which reads zips) as System32's tar.exe (see
 // windowsTar for why it is not left to PATH); Linux `unzip` is near-universal (and the failure
 // message names it if not).
@@ -192,7 +225,7 @@ async function installVstPlugin({ log = console } = {}) {
   try {
     const zipPath = path.join(tmpDir, asset.file);
     log.log(`[poptart] downloading VSTPlugin ${VSTPLUGIN_RELEASE.version} (${asset.file})...`);
-    await downloadTo(assetUrl(asset), zipPath);
+    await downloadFirst(assetUrls(asset), zipPath);
     const actual = sha256File(zipPath);
     if (actual !== asset.sha256) {
       throw new Error(
@@ -441,8 +474,10 @@ module.exports = {
   runSetup,
   installVstPlugin,
   downloadTo,
+  downloadFirst,
   pickAsset,
   assetUrl,
+  assetUrls,
   outdatedHostDir,
   OUTDATED_MACOS_HOSTS,
   sha256File,

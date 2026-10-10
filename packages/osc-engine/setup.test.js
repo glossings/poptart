@@ -20,6 +20,8 @@ const {
   findSclangSymlinkOnPath,
   VSTPLUGIN_RELEASE,
   downloadTo,
+  downloadFirst,
+  assetUrls,
 } = require('./setup.js');
 
 test('release table covers the supported platforms and pins full checksums', () => {
@@ -180,4 +182,59 @@ test('it gives up after the last attempt, and never retries a 404', async (t) =>
   global.fetch = async () => { calls += 1; return { ok: false, status: 404 }; };
   await assert.rejects(() => downloadTo('https://example.invalid/gone.zip', path.join(dir, 'b.zip'), { pauseMs: 0 }), /HTTP 404/);
   assert.strictEqual(calls, 1, 'asking again cannot fix a wrong URL');
+});
+
+// --- two homes for the upstream zips ---------------------------------------------------------
+// git.iem.at went dark on 2026-10-10 and took every Windows and Linux first run with it. The
+// upstream builds are asked for from poptart's fork on GitHub first, and from upstream second.
+
+test('an upstream build is asked for from the fork first and from upstream second; the fork\'s own build has one home', () => {
+  for (const [platform, arch] of [['win32', 'x64'], ['linux', 'x64'], ['linux', 'arm64']]) {
+    const asset = pickAsset(platform, arch);
+    const urls = assetUrls(asset);
+    assert.strictEqual(urls.length, 2);
+    assert.strictEqual(urls[0], `https://github.com/glossings/vstplugin/releases/download/${VSTPLUGIN_RELEASE.version}/${asset.file}`);
+    assert.strictEqual(urls[1], assetUrl(asset));
+  }
+  const mac = pickAsset('darwin', 'arm64');
+  assert.deepStrictEqual(assetUrls(mac), [mac.url]);
+});
+
+test('a source that is missing or down hands over to the next one', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'poptart-dl-'));
+  const realFetch = global.fetch;
+  t.after(() => { global.fetch = realFetch; });
+  const payload = { ok: true, status: 200, arrayBuffer: async () => new TextEncoder().encode('the payload').buffer };
+
+  // The copy is not there (a 404): one request, then upstream delivers.
+  let asked = [];
+  global.fetch = async (url) => { asked.push(url); return url.includes('first') ? { ok: false, status: 404 } : payload; };
+  const from = await downloadFirst(['https://first.invalid/x.zip', 'https://second.invalid/x.zip'], path.join(dir, 'a.zip'), { pauseMs: 0 });
+  assert.strictEqual(from, 'https://second.invalid/x.zip');
+  assert.deepStrictEqual(asked, ['https://first.invalid/x.zip', 'https://second.invalid/x.zip']);
+  assert.strictEqual(fs.readFileSync(path.join(dir, 'a.zip'), 'utf8'), 'the payload');
+
+  // The first host is down: its retries are spent, then the second delivers.
+  asked = [];
+  global.fetch = async (url) => { asked.push(url); if (url.includes('first')) throw new TypeError('fetch failed'); return payload; };
+  await downloadFirst(['https://first.invalid/x.zip', 'https://second.invalid/x.zip'], path.join(dir, 'b.zip'), { pauseMs: 0 });
+  assert.strictEqual(asked.filter((u) => u.includes('first')).length, 3);
+  assert.strictEqual(asked.filter((u) => u.includes('second')).length, 1);
+
+  // The first one that delivers ends it.
+  asked = [];
+  global.fetch = async (url) => { asked.push(url); return payload; };
+  await downloadFirst(['https://first.invalid/x.zip', 'https://second.invalid/x.zip'], path.join(dir, 'c.zip'), { pauseMs: 0 });
+  assert.deepStrictEqual(asked, ['https://first.invalid/x.zip']);
+});
+
+test('when no source delivers, the error says what each host answered', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'poptart-dl-'));
+  const realFetch = global.fetch;
+  t.after(() => { global.fetch = realFetch; });
+  global.fetch = async (url) => { if (url.includes('first')) return { ok: false, status: 404 }; throw new TypeError('fetch failed'); };
+  await assert.rejects(
+    () => downloadFirst(['https://first.invalid/x.zip', 'https://second.invalid/x.zip'], path.join(dir, 'a.zip'), { pauseMs: 0 }),
+    /first\.invalid: download failed: HTTP 404.*second\.invalid: fetch failed/,
+  );
 });

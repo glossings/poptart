@@ -2,14 +2,17 @@
 
 Poptart is like a livecoding environment, a CDJ, and a DAW had a baby.
 
-```js
-n("0 2 3")
-  .scale("F minor")
-  .synth("Serum 2")
-  .param("Filter 1 Freq", sine({ rate: 0.3 }).range(200, 5000))
-```
+If you want to try it out now, check out [poptart.glossing.dev](https://poptart.glossing.dev). It has arrangements, piano rolls, a mixer, and native synths and effects.
 
-That's a synth line in F minor played through Serum, with its filter cutoff swept by a 0.3 Hz sine. Edit the code, hit eval, and the sound changes underneath your hands.
+| Arrangement | Piano roll |
+| :---: | :---: |
+| ![The arrangement view](packages/web-app/public/docs/img/arrange.png) | ![A piano roll](packages/web-app/public/docs/img/pianoroll.png) |
+| **Mixer** | **Native synths and effects** |
+| ![The mixer](packages/web-app/public/docs/img/mixer.png) | ![The wavetable synth](packages/web-app/public/docs/img/device-wavetable.png) |
+
+If you want the full version, with DJ mode and your VST plugins, download it from [Releases](https://github.com/glossings/poptart/releases/latest) on the right, or [clone the repo](#getting-started-from-source).
+
+![DJ mode: a deck playing code and a deck playing a song, their waveforms stacked above and the mixer below](packages/web-app/public/docs/img/dj-mode.png)
 
 If you somehow ended up here without previously checking out [Tidal Cycles](https://tidalcycles.org) and [Strudel](https://strudel.cc), please do yourself a favor and give them a try - Poptart mirrors a lot of the patterning concepts and mini notation pioneered in those programs.
 
