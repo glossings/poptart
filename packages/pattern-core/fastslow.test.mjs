@@ -88,6 +88,65 @@ test('.slow(2) spreads the pattern over two cycles', () => {
   close(onsets(sig, 1)[0].start, 0);
 });
 
+test('an onset that lands on a cycle boundary when slowed is that cycle\'s downbeat', () => {
+  // Twelve steps: the seventh starts at 6 x (1/12) summed in floats, 0.49999999999999994. Slowed
+  // by 2 that is a hair before cycle 1, and read without tolerance it was nobody's onset - the
+  // numeric path put it at the last instant of cycle 0, and a patterned factor (what the editor
+  // makes of .slow("2")) dropped it. Only the first pass: one cycle later the sum rounds to 1.5.
+  const STR = 'd3 ~ [~ [d3 e3]] f3 ~ [e3 d3] <g3 c3> ~ <~ a2> d3 ~ ~';
+  const spellings = {
+    '.slow(2)': note(STR).slow(2),
+    '.slow("2")': note(STR).slow('2'),
+    '.slow("<2>")': note(STR).slow('<2>'),
+    'mini /2': note(`[${STR}]/2`),
+  };
+  for (const [name, sig] of Object.entries(spellings)) {
+    for (const [cycle, want] of [[1, 67], [3, 60], [5, 67]]) {
+      const first = onsets(sig, cycle)[0];
+      assert.equal(first?.value, want, `${name}, cycle ${cycle}`);
+      close(first.start, 0, `${name}, cycle ${cycle} starts on the downbeat`);
+    }
+    // ...and it is not ALSO the tail end of the cycle before.
+    assert.ok(onsets(sig, 0).every((st) => st.start < 0.99), `${name}: nothing at the end of cycle 0`);
+  }
+});
+
+test('every transform that moves an onset across a cycle edge reads the edge with tolerance', () => {
+  // The same float hair, everywhere a step is re-timed against the cycle. Each of these either
+  // lost the note, left it at the last instant of the cycle before, or emitted a zero-length one.
+  const seq = (count) => Array.from({ length: count }, (_, i) => i).join(' ');
+  const all = (sig, cycles) => Array.from({ length: cycles }, (_, c) => sig.stepsForCycle(c).filter((st) => st.value != null)).flat();
+  const sound = (sig, cycles) => all(sig, cycles).filter((st) => !st.cont);
+  const tidy = (name, sig, cycles = 24) => {
+    for (const st of all(sig, cycles)) {
+      assert.ok(st.end - st.start > 1e-7, `${name}: a sliver of ${st.value}`);
+      if (!st.cont) assert.ok(st.start < 1 - 1e-7 || st.start >= 1, `${name}: ${st.value} at the last instant of a cycle`);
+    }
+  };
+
+  // .echo(): a copy of the step at 2/3, shifted by 1/3, lands on the next downbeat. Cycle -1
+  // feeds cycle 0, so every cycle carries all nine onsets.
+  for (const [count, reps, time] of [[3, 3, 1 / 3], [6, 4, 1 / 6], [12, 3, 1 / 12], [10, 2, 0.1], [24, 3, 1 / 12]]) {
+    const sig = n(seq(count)).echo(reps, time);
+    assert.equal(sound(sig, 24).length, count * reps * 24, `echo(${reps}, ${time}) over ${count} steps keeps every copy`);
+    tidy(`echo(${reps}, ${time}) over ${count}`, sig);
+  }
+
+  // Weighted alternation stretches a pick over several cycles, the way "/" does.
+  for (const count of [12, 14, 24]) {
+    for (const str of [`<[${seq(count)}]@2 99>`, `<[${seq(count)}]@3>`, `<[${seq(count)}]@4 [${seq(count)}]@2>`]) tidy(str, n(str));
+  }
+  assert.equal(onsets(n(`<[${seq(12)}]@2 99>`), 1)[0].value, 6);
+  close(onsets(n(`<[${seq(12)}]@2 99>`), 1)[0].start, 0);
+
+  // A slowed note that ends a hair past the boundary left a sliver of a tail, which a binop then
+  // took for a step of its own.
+  for (const count of [3, 6, 9, 11]) {
+    tidy(`slow(3) over ${count}`, n(seq(count)).slow(3));
+    tidy(`slow(2) + slow(3) over ${count}`, n(seq(count)).slow(2).add(n(seq(count)).slow(3)));
+  }
+});
+
 test('.fast(4).slow(4) round-trips to the original grid', () => {
   const steps = onsets(n('0 1 2 3').fast(4).slow(4));
   assert.deepEqual(steps.map((st) => st.value), [0, 1, 2, 3]);

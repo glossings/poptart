@@ -96,6 +96,13 @@ function specMatches(spec, e) {
   if (e.ctrlKey !== wantCtrl) return false;
   if (e.altKey !== wantAlt) return false;
   if (e.shiftKey !== spec.shift) return false;
+  // A LETTER chord names the character, not the position: alt+A is the key with A printed on it,
+  // which on an AZERTY keyboard sits where QWERTY has Q. Matching letters by position there fired
+  // app+Q for a press of A and swallowed the keystroke, so the arrangement never opened - and it
+  // disagreed with CodeMirror and the document handler, which both go by the character. Position
+  // is only the fallback, for a press that types no Latin letter at all (option+A is 'å' on a
+  // Mac, and a Cyrillic or Greek layout has no 'a' to give).
+  if (spec.code && /^[a-z]$/.test(spec.key) && /^[a-z]$/i.test(e.key)) return e.key.toLowerCase() === spec.key;
   if (spec.code) return e.code === spec.code;
   return spec.key != null && e.key.toLowerCase() === spec.key;
 }

@@ -52,6 +52,16 @@ test('the clock state does not ask for access by itself', async () => {
   assert.equal(fake.asked(), 0);
 });
 
+test('the clock state asks when the picker is reached for, and a refusal is the answer', async () => {
+  const fake = fakeAccess();
+  const midi = createWebMidi({ requestAccess: fake.requestAccess, prefs: null });
+  assert.deepEqual(await midi.clockState({ ask: true }), { destinations: ['TR-8S'], selected: null, active: null });
+  assert.equal(fake.asked(), 1);
+  const refused = createWebMidi({ requestAccess: async () => { throw new Error('denied'); }, prefs: null });
+  await assert.rejects(refused.clockState({ ask: true }), /would not give MIDI access/);
+  await assert.rejects(createWebMidi({ requestAccess: null, prefs: null }).clockState({ ask: true }), /Chrome, Edge and Firefox/);
+});
+
 /** A transport at 120 bpm (cps 0.5), cycle zero at second zero, and a context's clock. */
 function clockRig({ paused }) {
   const context = { currentTime: 0, getOutputTimestamp() { return { contextTime: this.currentTime, performanceTime: this.currentTime * 1000 }; } };

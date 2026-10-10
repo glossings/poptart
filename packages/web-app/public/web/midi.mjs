@@ -203,11 +203,13 @@ export function createWebMidi({
     return { selected: want, active };
   }
 
-  async function clockState() {
+  async function clockState({ ask = false } = {}) {
     let destinations = [];
     // Listing asks for access, which is a prompt - so only once somebody has asked for MIDI, or
-    // chosen a clock before. A settings tab being drawn is not a reason to prompt.
-    if (access || wanted) { try { destinations = await outputs(); } catch { /* refused */ } }
+    // chosen a clock before. A settings tab being drawn is not a reason to prompt; reaching for
+    // the picker is (`ask`), and a refusal then is the answer rather than an empty list.
+    if (ask) destinations = await outputs();
+    else if (access || wanted) { try { destinations = await outputs(); } catch { /* refused */ } }
     return { destinations, selected: wanted, active: clockName };
   }
 

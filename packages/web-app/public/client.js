@@ -21780,9 +21780,9 @@ preferVst3Toggle.addEventListener('change', async () => {
 const midiClockSelect = document.getElementById('midiClockSelect');
 const midiClockTitle = midiClockSelect.title;
 
-async function refreshMidiClock() {
+async function refreshMidiClock(ask = false) {
   try {
-    const { destinations, selected, active } = await api('GET', '/api/midiClock');
+    const { destinations, selected, active } = await api('GET', ask ? '/api/midiClock?ask=1' : '/api/midiClock');
     midiClockSelect.innerHTML = '';
     midiClockSelect.appendChild(new Option('off', ''));
     for (const name of destinations) midiClockSelect.appendChild(new Option(name, name));
@@ -21810,6 +21810,20 @@ midiClockSelect.addEventListener('change', async () => {
     refreshMidiClock().catch(() => {});
   }
 });
+
+// In the browser the destinations are listed only once the page has MIDI access, and the tab
+// being drawn does not ask for it: reaching for a picker that has nothing but "off" does.
+async function askMidiClockDestinations(open) {
+  if (midiClockSelect.options.length > 1) return;
+  await refreshMidiClock(true);
+  if (open && midiClockSelect.options.length > 1) { try { midiClockSelect.showPicker(); } catch { /* the next click opens it */ } }
+}
+midiClockSelect.addEventListener('mousedown', (e) => {
+  if (midiClockSelect.options.length > 1) return;
+  e.preventDefault(); // an "off"-only menu would sit open, stale, under the browser's prompt
+  askMidiClockDestinations(true);
+});
+midiClockSelect.addEventListener('focus', () => { askMidiClockDestinations(false); });
 
 // The desk's talk-back port (settings → sync), the same picker as the clock's: which MIDI
 // destination the desk writes its lamps and meters to. Everything about WHAT it writes is the
@@ -27893,14 +27907,16 @@ paintChordLabels();
 // hotkey()/editor no-op on the server, DSL builders no-op here). See the `hotkey`, `editor`, and
 // the util helpers handed to that sandbox below.
 //
-// Matching is on event.code (physical key position), so a chord fires regardless of which
-// character Shift/AltGr would produce - `cmd+shift+.` matches the `.` key even though the event's
-// .key is `>`. Combos are strings like 'cmd+shift+0', 'ctrl+p', 'mod+enter', 'app+g'. Modifiers:
-// cmd/meta, ctrl, alt/option, shift, and the two PLATFORM ones - `mod` is the editing modifier
-// (cmd on macOS, ctrl elsewhere) and `app` is the app's own (ctrl on macOS, alt elsewhere). A
-// built-in chord takes `app+`; a literal `ctrl+` means ctrl on every platform, which is almost
-// never what an app chord wants. The parser and matcher themselves (comboToSpec / specMatches)
-// live in public/chords.js with the rest of the keyboard model - see the note at its head.
+// Digits and punctuation match on event.code (physical key position), so a chord fires regardless
+// of which character Shift/AltGr would produce - `cmd+shift+.` matches the `.` key even though the
+// event's .key is `>`. Letters match the character the layout types, so alt+A is the key marked A
+// on AZERTY as much as on QWERTY (see specMatches). Combos are strings like 'cmd+shift+0',
+// 'ctrl+p', 'mod+enter', 'app+g'. Modifiers: cmd/meta, ctrl, alt/option, shift, and the two
+// PLATFORM ones - `mod` is the editing modifier (cmd on macOS, ctrl elsewhere) and `app` is the
+// app's own (ctrl on macOS, alt elsewhere). A built-in chord takes `app+`; a literal `ctrl+`
+// means ctrl on every platform, which is almost never what an app chord wants. The parser and
+// matcher themselves (comboToSpec / specMatches) live in public/chords.js with the rest of the
+// keyboard model - see the note at its head.
 // ---------------------------------------------------------------------------------------------
 
 const builtinHotkeys = []; // app chords - persist for the session
@@ -35585,6 +35601,16 @@ function openEditorMenu(ed, e) {
       if (block.group) items.push([`ungroup ${block.label}`, () => arUngroup(block.label, ed), 'the tracks in it play on their own again']);
       if (block.parent != null) items.push([`take ${block.label} out of ${block.parent}`, () => arTakeOut(block.label, ed)]);
     }
+  }
+  // The arrangement painter, for the deck whose code was clicked rather than the armed one: the
+  // pointer has already said which. Until this, the chord was the only way in for a song that has
+  // no arrangement yet to double-click. A deck holding a song file has nothing to arrange (see
+  // openArrangePainter), so it is not offered there.
+  const deck = ed === deckBCM ? 'b' : 'a';
+  if (arrangeMod && labelsMod && !songPanes[deck]?.song) {
+    items.push(arState && arDeck === deck
+      ? ['close the arrangement', () => closeArrangeEditor(), chordLabel('app+a')]
+      : ['paint the arrangement', () => openArrangePainter(deck), `${chordLabel('app+a')} — where each track plays across the song, as clips on a timeline`]);
   }
   items.push('-');
   if (selected) {

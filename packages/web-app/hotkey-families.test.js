@@ -114,6 +114,29 @@ test('an app chord is not fired by the same letter with nothing held', () => {
 // Labels - the half that reaches a person
 // ---------------------------------------------------------------------------------------------
 
+test('a letter chord follows the letter printed on the key, not its QWERTY position', () => {
+  // AZERTY: the key marked A sits where QWERTY has Q, so it reports code KeyQ and key 'a'. Matched
+  // by position, alt+A fired app+Q (quantize) and the dispatcher swallowed the press before the
+  // arrangement's own handler saw it.
+  const azertyA = { ...ev('a', ALT), code: 'KeyQ' };
+  const azertyQ = { ...ev('q', ALT), code: 'KeyA' };
+  assert.equal(pc.specMatches(pc.comboToSpec('app+q'), azertyA), false);
+  assert.equal(pc.specMatches(pc.comboToSpec('app+a'), azertyA), true);
+  assert.equal(pc.specMatches(pc.comboToSpec('app+q'), azertyQ), true);
+  // AZERTY's M is on the key QWERTY calls Semicolon.
+  assert.equal(pc.specMatches(pc.comboToSpec('app+m'), { ...ev('m', ALT), code: 'Semicolon' }), true);
+  // Shift only changes the case.
+  assert.equal(pc.specMatches(pc.comboToSpec('app+shift+a'), { ...ev('A', { altKey: true, shiftKey: true }), code: 'KeyQ' }), true);
+
+  // A press that types no Latin letter falls back to position: option+A is 'å' on a Mac, and a
+  // Cyrillic layout types 'ф' from the same key.
+  assert.equal(mac.specMatches(mac.comboToSpec('alt+a'), { ...ev('å', ALT), code: 'KeyA' }), true);
+  assert.equal(pc.specMatches(pc.comboToSpec('app+a'), { ...ev('ф', ALT), code: 'KeyA' }), true);
+
+  // Punctuation and digits stay positional, so shift cannot change which chord a key is.
+  assert.equal(mac.specMatches(mac.comboToSpec('cmd+shift+.'), { ...ev('>', { metaKey: true, shiftKey: true }), code: 'Period' }), true);
+});
+
 test('a chord is written the way the platform it is bound on writes it', () => {
   assert.equal(mac.chordLabel('app+a'), '⌃A');
   assert.equal(pc.chordLabel('app+a'), 'alt+A');

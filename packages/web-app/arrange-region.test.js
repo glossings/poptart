@@ -1064,3 +1064,16 @@ test('the wiring: the title and a corner mark show it, and the menu resets it', 
   assert.match(SRC, /items\.push\(\['enter at bar 1', \(\) => arResetEntry\(targets\),/);
   assert.match(grab('arResetEntry'), /for \(const c of targets\) delete c\.off;\s+writeArrangeCall\(\);/);
 });
+
+test('the editor menu opens the painter on the deck that was clicked', () => {
+  // The chord was the only way in for a song with no arrangement yet, and a chord can fail to
+  // arrive (a keyboard layout, a browser that keeps the key). The menu names the deck from the
+  // editor under the pointer rather than the armed one, and a deck holding a song file - which
+  // has no blocks to arrange - is not offered a painter that would refuse it.
+  const menu = grab('openEditorMenu');
+  assert.match(menu, /const deck = ed === deckBCM \? 'b' : 'a';/);
+  assert.match(menu, /if \(arrangeMod && labelsMod && !songPanes\[deck\]\?\.song\) \{/);
+  assert.match(menu, /\['paint the arrangement', \(\) => openArrangePainter\(deck\), `\$\{chordLabel\('app\+a'\)\}/);
+  assert.match(menu, /arState && arDeck === deck\s+\? \['close the arrangement', \(\) => closeArrangeEditor\(\)/,
+    'on the deck it is already open on, the item puts it away');
+});

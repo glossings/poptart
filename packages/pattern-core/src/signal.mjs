@@ -556,8 +556,10 @@ export class Sig {
     //
     // Every signal kind counts as patterned except a constant: a Sig with no grid of its own (an
     // LFO, a macro knob, `rand()`) is read once per cycle (.hold()) and drives the rate like any
-    // other pattern, and a constant-valued Sig - Signal(2), or the mini("2", …) the editor's
-    // location transpile makes of a `"2"` literal - takes the exact numeric path below.
+    // other pattern, and a constant-valued Sig - Signal(2) - takes the exact numeric path below.
+    // A `"2"` literal is NOT one of those: the editor's location transpile makes it mini("2", …),
+    // a one-step pattern with no constVal, so it comes through here as a single whole-cycle
+    // window. The two routes have to agree on every onset, and fastslow.test.mjs holds them to it.
     const factorSig = factor instanceof Sig ? factor : null;
     if (typeof factor === 'string' || (factorSig && factorSig.constVal === undefined)) {
       return this._fastPatterned(factorSig && !factorSig.stepsForCycle ? factorSig.hold() : toSignal(factor));
@@ -2566,12 +2568,15 @@ export class Sig {
             if (s.value == null || s.cont) continue;
             const start = src + s.start + shift - cycle;
             const end = src + s.end + shift - cycle;
-            if (end <= 0 || start >= 1) continue;
+            // Tolerant edges (see warpSteps): a copy shifted by 1/3 from a step at 2/3 lands a
+            // float hair off the boundary, and read exactly it was either the last instant of
+            // this cycle or a tail with no onset in the next - an echo that never sounded.
+            if (end <= MIX_EPS || start >= 1 - MIX_EPS) continue;
             const v = variantAt(n).sample(src + (s.start + s.end) / 2, 1);
             const value = v == null ? null : v;
             // Onset before this cycle -> a ringing tail, not a fresh trigger (cont), same as a tie.
-            if (start < 0) out.push({ ...s, start: 0, end, value, cont: true });
-            else out.push({ ...s, start, end, value });
+            if (start < -MIX_EPS) out.push({ ...s, start: 0, end, value, cont: true });
+            else out.push({ ...s, start: Math.max(0, start), end, value });
           }
         }
       }

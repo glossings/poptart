@@ -683,7 +683,15 @@ export function createHost({
       if (!midi) return [];
       return midi.inputs();
     },
-    'GET /api/midiClock': async () => (midi ? midi.clockState() : { destinations: [], selected: null, active: null }),
+    // `ask=1` is the picker being reached for: the one moment this listing may prompt for access.
+    'GET /api/midiClock': async (_body, query) => {
+      const ask = query?.get('ask') === '1';
+      if (!midi) {
+        if (ask) throw new Unsupported('MIDI clock out', 'this browser has no MIDI');
+        return { destinations: [], selected: null, active: null };
+      }
+      return midi.clockState({ ask });
+    },
     // The DJ desk is not in this build, so its talk-back port has nothing to write to - but
     // the settings row is in the same page, and a row that logs an error as the tab opens is
     // a broken row. Answered as an empty picker, exactly as the clock's is with no MIDI.

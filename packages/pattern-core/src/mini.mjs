@@ -155,6 +155,7 @@ export function getStepsForCycle(ast, cycleNumber) {
 // playback, cycles included. An onset whose mapped start falls in an earlier result cycle is
 // reported as a `cont` tail, like a tie or an echo tail; scanning one source cycle beyond the
 // covered span catches tails up to a source cycle long (echo's bounded-lookback convention).
+const WARP_EPS = 1e-9;
 export function warpSteps(baseStepsForCycle, f) {
   if (!baseStepsForCycle) return null;
   return (cycle) => {
@@ -168,9 +169,16 @@ export function warpSteps(baseStepsForCycle, f) {
         const b = (src + s.end) / f;
         const start = Math.min(a, b) - cycle;
         const end = Math.max(a, b) - cycle;
-        if (end <= 0 || start >= 1) continue;
-        if (start < 0) out.push({ ...s, start: 0, end, cont: true });
-        else out.push({ ...s, start, end });
+        // The cycle's edges take the same tolerance every other grid here does. A source onset is
+        // a sum of float step widths - the seventh of twelve steps starts at 0.49999999999999994,
+        // not 0.5 - so slowed by 2 it maps a hair BEFORE cycle 1 rather than onto it. Read
+        // exactly, that made it a last-instant onset of cycle 0 and a `cont` tail in cycle 1:
+        // no onset at the downbeat, and a rate window (which ends before its edge) lost the note
+        // outright. Within the tolerance it is the next cycle's onset at 0 - and a note that ENDS
+        // a hair past the boundary leaves no sliver of a tail in the cycle after.
+        if (end <= WARP_EPS || start >= 1 - WARP_EPS) continue;
+        if (start < -WARP_EPS) out.push({ ...s, start: 0, end, cont: true });
+        else out.push({ ...s, start: Math.max(0, start), end });
       }
     }
     return out.sort((a, b) => a.start - b.start);
@@ -993,8 +1001,10 @@ function astToSteps(node, cycle, salt = 0) {
       for (const s of astToSteps(pick.node, innerCycle, salt)) {
         const start = s.start * pick.w - offset;
         const end = s.end * pick.w - offset;
-        if (end <= 0 || start >= 1) continue;
-        if (start >= 0) out.push({ ...s, start, end });
+        // Tolerant edges, as in warpSteps: a float hair either side of the boundary is the
+        // boundary, so the onset belongs to the cycle it lands on and leaves no sliver behind.
+        if (end <= RATE_EPS || start >= 1 - RATE_EPS) continue;
+        if (start >= -RATE_EPS) out.push({ ...s, start: Math.max(0, start), end });
         else out.push({ ...s, start: 0, end, cont: true });
       }
       return out;
@@ -1178,12 +1188,15 @@ function seqToSteps(items, cycle, salt = 0) {
 function clipAndRescale(steps, a, b) {
   const out = [];
   for (const s of steps) {
-    if (s.end <= a || s.start >= b) continue;
+    // The window's edges are tolerant, for the reason warpSteps' are: a step that starts a float
+    // hair before `a` (0.49999999999999994 for the seventh of twelve) is this window's onset,
+    // not the previous window's last instant and a tail here.
+    if (s.end <= a || s.start >= b - RATE_EPS) continue;
     const start = Math.max(s.start, a);
     // An event's tail past `b` is kept (its rescaled end lands past 1): it genuinely rings
     // into the next cycle, whose own window then reports it as a `cont` step (onset before
     // the window). This is what makes "a/2" one 2-cycle-long note instead of two onsets.
-    out.push({ ...s, start: (start - a) / (b - a), end: (s.end - a) / (b - a), cont: s.cont || start > s.start || undefined });
+    out.push({ ...s, start: (start - a) / (b - a), end: (s.end - a) / (b - a), cont: s.cont || start > s.start + RATE_EPS || undefined });
   }
   return out;
 }
