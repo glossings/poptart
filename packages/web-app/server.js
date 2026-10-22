@@ -1338,6 +1338,38 @@ const deckLiveSynced = (deck) => !mixState.dj || deckLive[deck].sync;
 // patternCore.monitorPicker). Made on first use: patternCore is an import that lands after this
 // file has run.
 const monitorPickers = { a: null, b: null };
+// The labeled blocks each deck's last eval saw ({ key, body }), for following a rename.
+const lastEvalBlocks = { a: null, b: null };
+
+/**
+ * A track renamed - `bass:` retyped as `sub:`, or cmd+R, or the mixer's rename - would get a fresh
+ * track under its new name: its plugins reopened from what the code last pinned, and an edit still
+ * held in the old plugin (deferred mode, mid-set) stranded under a name the buffer no longer has.
+ * So the track goes with the name, as complete-mix re-keys a deck: a key that is gone, and exactly
+ * one new key whose body is byte-identical (the editor's own rule for following a hand rename into
+ * the arrangement - see arFollowHandRenames), is that block under a new name. Anything less certain
+ * is left alone, and a track left behind with edits still only in its plugin says so.
+ *
+ * `blocks` is this eval's labeled blocks as { key, body }; `fresh` a newly opened buffer, which
+ * renames nothing.
+ */
+function followTrackRenames(deck, blocks, fresh) {
+  const before = fresh ? null : lastEvalBlocks[deck];
+  lastEvalBlocks[deck] = blocks;
+  if (!before) return;
+  const keysBefore = new Set(before.map((b) => b.key));
+  const keysNow = new Set(blocks.map((b) => b.key));
+  for (const old of before) {
+    if (keysNow.has(old.key) || !trackIds.has(old.key)) continue;
+    const cands = blocks.filter((b) => !keysBefore.has(b.key) && b.body === old.body && !trackIds.has(b.key));
+    if (cands.length === 1) {
+      rekeyTrack(old.key, cands[0].key);
+      console.log(`[poptart] ${old.key} is ${cands[0].key} now - its track went with the name`);
+    } else if ([...autoPinDirty.values()].some((d) => d.trackId === old.key)) {
+      eventLogQueue.push(`[${old.key}] is gone from the code with plugin edits not yet written into it - undo brings the track back with them`);
+    }
+  }
+}
 const monitorPickerOf = (deck) => (monitorPickers[deck] ??= patternCore.monitorPicker());
 
 /** Put a deck's clock where its state says: sync, the fader's share of its own tempo, the bend. */
@@ -1633,6 +1665,35 @@ function deckLoopState(deck) {
  * `deckRunning(forDeck)` test and re-rated the record on the other deck (reported 2026-10-05,
  * the second time). Mixing is not the moment to let a buffer argue about tempo.
  */
+/**
+ * DJ mode's two exceptions to "setbpm is metadata", for a deck playing code on the room's clock:
+ *
+ *   - the FIRST track: nothing on either deck is sounding, so there is no room to re-rate - the
+ *     deck's tempo (its setbpm, or the 120 default) becomes the room's, as a song taking the grid
+ *     does, scaled by its tempo fader;
+ *   - the LEADER changing its number: re-evaluating the deck the room is following with a
+ *     DIFFERENT setbpm is a tempo change, livecoded. Restating the same number is not - an update
+ *     with the code's tempo untouched must leave whatever the fader did alone.
+ *
+ * Anything else stays the desk's (see clockHeldByDesk). A signal-driven setbpm has no single
+ * number to set the room to, and a deck with sync off already runs its own setbpm (setFreeBpm).
+ * `fresh` is a song newly loaded onto the deck: its number is where the deck starts, not a change.
+ */
+const djDeclaredBpm = { a: undefined, b: undefined }; // each deck's number at its last DJ-mode eval
+function djCodeTempo(deck, { fresh = false, alone = false } = {}) {
+  const native = deckNativeBpm(deck);
+  const before = fresh ? undefined : djDeclaredBpm[deck];
+  djDeclaredBpm[deck] = native;
+  if (!mixState.dj || native == null || !transport || !deckLiveSynced(deck)) return;
+  const changed = before !== undefined && before !== native && deckLeader() === deck;
+  if (!alone && !changed) return;
+  const bpm = Math.min(400, Math.max(20, native * deckTempoMult(deck)));
+  if (mixState.tempoOverride != null) mixState.tempoOverride = bpm; // the fader's hold, moved with it
+  if (deck === 'a') declaredBpm = native; // what a Link session counts as restated (see declareTempo)
+  transport.rampBpm(bpm, 0);
+  mixNotify();
+}
+
 function clockHeldByDesk(forDeck = null) {
   if (mixState.dj) return true;
   if (mixState.tempoOverride != null) return true;
@@ -3224,7 +3285,10 @@ function rekeyTrack(from, to) {
       handTaken.add(`${to}|${k.slice(pfx.length)}`);
     }
   }
-  if (conf?.trackId === from) conf.trackId = to;
+  if (conf?.trackId === from) {
+    conf.trackId = to;
+    conf.was = from; // the editor is still polling under the old name until it is told (see confPending)
+  }
   if (trackRec?.label === from) trackRec.label = to;
 }
 
@@ -6427,6 +6491,7 @@ const PREVIEW_SLICE_MAX_SEC = 600;
 const eventLogQueue = [];
 let autoPinTimer = null;
 let autoPinRun = null; // the capture pass in flight, so a flush can wait for it instead of racing
+let autoPinRunAll = false; // ...and whether it is a whole flush, or only the quiet tracks' slots
 
 function handlePluginEdited(trackId, slot) {
   // The DJ FX unit's returns are nobody's pattern: an edit there is mirrored to the twin deck's
@@ -6731,19 +6796,111 @@ async function setDeviceParam(body) {
  * and two writeProgram calls must not race for the same slot's temp file), and a slot that can't
  * be captured is logged rather than thrown, so a flush never fails the request it rides on.
  */
-function flushPluginCaptures() {
-  if (!autoPinRun) {
-    autoPinRun = captureDirtyPlugins().finally(() => {
-      autoPinRun = null;
+// ---------------------------------------------------------------------------------------------
+// Quiet-track captures. Deferred mode keeps a mid-set edit only in its plugin until a stop or a
+// save, and a long set can go an hour without either - an hour of sound design a crash would take
+// with it. But a capture only costs anything where the plugin can be heard: the suspension drops
+// the notes and the processing of a plugin nobody is listening to just as harmlessly as it does
+// with the clock stopped. So a held slot is captured as soon as its track goes quiet:
+//
+//   - stopped: muted, soloed away, or otherwise not playing (it rings out first - see the hold),
+//   - silenced: its gain or postgain at zero this moment (a midicc() mute on a controller reads
+//     here as it does in the poll), its desk fader or its deck's crossfade at zero, or the same
+//     for any group it plays through.
+//
+// Quiet has to last before it counts: long enough for a stopped track's release tails and the
+// effects' tails behind a closed gain. The instrument slot behind a closed gain has nothing to
+// wait for - the gain is after it - so it goes sooner. A track the buffer no longer has is left
+// alone: there is nowhere to write it (see the eval's rename follow for the case that matters).
+// ---------------------------------------------------------------------------------------------
+
+const QUIET_LEVEL = 0.001;
+const QUIET_TAIL_MS = 3000;
+const QUIET_INSTRUMENT_MS = 500;
+const QUIET_TICK_MS = 250;
+// "trackId|slot" -> when its track was last seen going quiet, while it has stayed quiet.
+const quietSince = new Map();
+// The track keys each deck's buffer had at its last eval.
+const bufferKeys = { a: new Set(), b: new Set() };
+
+/** 'stopped', 'silenced', or null for a track someone can hear right now. */
+function trackQuiet(key) {
+  const sch = schedulers.get(key);
+  if (!sch || !sch.running) return 'stopped';
+  const closed = (k) => {
+    const s = schedulers.get(k);
+    if (s && ['gain', 'postgain'].some((n) => {
+      const v = s.channelNow(n);
+      return v != null && Math.abs(v) <= QUIET_LEVEL;
+    })) return true;
+    return mixState.perTrack.get(k)?.get('fader') === 0;
+  };
+  if ([key, ...mixGroupChain(key)].some(closed)) return 'silenced';
+  const deck = deckOfKey(key);
+  if (mixState.dj && deckXfGain(deck) * mixState.faders[deck] <= QUIET_LEVEL) return 'silenced';
+  return null;
+}
+
+function quietCaptureTick() {
+  if (AUTOPIN_MODE !== 'deferred' || !engine || (transport?.paused ?? true) || !autoPinDirty.size) {
+    quietSince.clear();
+    return;
+  }
+  const now = Date.now();
+  const due = new Set();
+  for (const [k, { trackId, slot }] of autoPinDirty) {
+    const why = bufferKeys[deckOfKey(trackId)]?.has(trackId) ? trackQuiet(trackId) : null;
+    if (!why) {
+      quietSince.delete(k);
+      continue;
+    }
+    if (!quietSince.has(k)) quietSince.set(k, now);
+    const wait = why === 'silenced' && slot === 0 ? QUIET_INSTRUMENT_MS : QUIET_TAIL_MS;
+    if (now - quietSince.get(k) >= wait) due.add(k);
+  }
+  for (const k of [...quietSince.keys()]) if (!autoPinDirty.has(k)) quietSince.delete(k);
+  if (!due.size || autoPinRun) return;
+  const still = (k) => due.has(k) && autoPinDirty.has(k) && trackQuiet(autoPinDirty.get(k).trackId) != null;
+  const run = captureDirtyPlugins(still)
+    .then(() => {
+      const done = [...due].filter((k) => !autoPinDirty.has(k));
+      if (done.length) console.log(`[auto-pin] captured ${done.join(', ')} while the track was quiet`);
+    })
+    .finally(() => {
+      if (autoPinRun === run) autoPinRun = null;
     });
+  autoPinRun = run;
+  autoPinRunAll = false;
+}
+setInterval(quietCaptureTick, QUIET_TICK_MS).unref?.();
+
+function flushPluginCaptures() {
+  // A quiet-track pass in flight captures only some slots, so a flush asked for meanwhile runs
+  // after it rather than being answered by it.
+  if (!autoPinRun || !autoPinRunAll) {
+    const prev = autoPinRun;
+    const run = (prev ? prev.catch(() => {}) : Promise.resolve())
+      .then(() => captureDirtyPlugins())
+      .finally(() => {
+        if (autoPinRun === run) {
+          autoPinRun = null;
+          autoPinRunAll = false;
+        }
+      });
+    autoPinRun = run;
+    autoPinRunAll = true;
   }
   return autoPinRun;
 }
 
-async function captureDirtyPlugins() {
+// `which` narrows the pass to the slots it says yes to (by "trackId|slot" key), asked again before
+// each one: the quiet-track captures below, where a track can come back up mid-pass.
+async function captureDirtyPlugins(which = null) {
   if (!engine) return;
-  while (autoPinDirty.size) {
-    const [key, { trackId, slot, plugin, preset, speculative }] = autoPinDirty.entries().next().value;
+  for (;;) {
+    const next = which ? [...autoPinDirty].find(([k]) => which(k)) : autoPinDirty.entries().next().value;
+    if (!next) break;
+    const [key, { trackId, slot, plugin, preset, speculative }] = next;
     autoPinDirty.delete(key);
     // Reordering a chain moves which plugin a slot holds. A pending capture for slot 2 would then
     // read - and the editor would write - the wrong plugin's program, so drop it instead. The
@@ -7592,6 +7749,9 @@ const routes = {
     // A deck coming in under a free-running song takes the song's tempo and bar line before it
     // schedules a note (see clockFollowSong) - a stopped clock just takes the tempo here, and
     // starts on the song's bar in transportStart.
+    // Nothing sounding on either deck yet (the first track of a DJ set), or the leading deck's
+    // setbpm changed: the code's tempo is the room's (see djCodeTempo).
+    djCodeTempo(deck, { fresh: body.fresh === true, alone: !deckAudible('a') && !deckAudible('b') });
     if (body.start !== false && !deckRunning(deck)) clockFollowSong({ adopt: true });
     // ...and under a deck playing code that has been nudged, takes the place it was nudged to.
     if (body.start !== false && !deckRunning(deck)) clockTakeLeaderPlace(deck);
@@ -7723,6 +7883,14 @@ const routes = {
       if (trackIds.has(to)) dropTrack(to);
       rekeyTrack(from, to);
     }
+    // A renamed track takes its track with it, held plugin edits and all (see followTrackRenames).
+    // After the takeovers, which have already moved a cued track onto its plain name.
+    bufferKeys[deck] = new Set(built.map(keyOf));
+    followTrackRenames(
+      deck,
+      built.filter((b) => b.kind === 'labeled').map((b) => ({ key: keyOf(b), body: b.code.trim() })),
+      body.fresh === true,
+    );
     // A block's OWN marker turns its track's `mon` on. A monitored group's members need nothing
     // of their own: they mix into the group, and the group is what goes to the headphones.
     for (const b of active) if (b.monitored) b.sig = patternCore.monitorSig(b.sig);
@@ -8505,10 +8673,12 @@ const routes = {
   // knob swept between polls lands once at its final position. Body: { trackId }.
   'POST /api/confPending': async (body) => {
     const trackId = body.trackId ?? 'default';
-    if (!conf || conf.trackId !== trackId) return { status: 200, body: { active: false, params: [] } };
+    // A poll under the name the track had before a rename (see followTrackRenames) is the same
+    // session: it is answered, and told the track's name now.
+    if (!conf || (conf.trackId !== trackId && conf.was !== trackId)) return { status: 200, body: { active: false, params: [], trackId: null } };
     const params = [...conf.touched.values()];
     conf.touched.clear();
-    return { status: 200, body: { active: true, params } };
+    return { status: 200, body: { active: true, params, trackId: conf.trackId } };
   },
 
   // --- pattern files (the editor's "files" tab) ---
@@ -8969,6 +9139,7 @@ const routes = {
       transport.setCps(deckClocks.a.baseCps);
     }
     mixState.dj = !!body.on;
+    djDeclaredBpm.a = djDeclaredBpm.b = undefined; // what each deck's code says is learned afresh
     for (const d of ['a', 'b']) deckLiveRelease(d);
     // The leader and the tracklist both read the decks' playing state by sampling it (see
     // deckLeader); while the desk is open that happens on a timer too, not only on desk frames.
@@ -9327,6 +9498,9 @@ const routes = {
     [deckClocks.a, deckClocks.b] = [deckClocks.b, deckClocks.a];
     [deckLive.a, deckLive.b] = [deckLive.b, deckLive.a];
     [monitorPickers.a, monitorPickers.b] = [monitorPickers.b, null];
+    [djDeclaredBpm.a, djDeclaredBpm.b] = [djDeclaredBpm.b, undefined];
+    [lastEvalBlocks.a, lastEvalBlocks.b] = [null, null]; // the promotion re-eval keys everything anew
+    bufferKeys.b = new Set();
     for (const d of ['a', 'b']) if (fxSchedulers[d] && deckClocks[d]) fxSchedulers[d].transport = deckClocks[d];
     patternCore.setGlobalScale(decks.a.scale ?? null);
     patternCore.restoreGlobalGroove(decks.a.groove ?? null);

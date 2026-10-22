@@ -1210,6 +1210,14 @@ footer#console {
   font-style: italic;
 }
 
+/* The label of the track conf is writing into (see client.js's updateMutedDim) - the sidebar's
+   lit conf button, on the code itself. */
+.cm-s-poptart span.cm-conf-label {
+  background: var(--accent, #d08770);
+  color: #1a1a1a !important;
+  border-radius: var(--r-xs);
+}
+
 /* muted / un-soloed blocks (see client.js's updateMutedDim) - rendered like comments: one dim
    color, no syntax highlighting, so only code that's actually playing is lit up. !important
    beats every per-token color above. */

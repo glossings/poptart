@@ -193,7 +193,9 @@ test('every built-in chord is a rebindable action, and the app ones default to a
   for (const id of ids) {
     const action = mac.HOTKEY_ACTIONS.find((a) => a.id === id);
     assert.ok(action, `${id} is not in HOTKEY_ACTIONS`);
-    if (id !== 'projector') assert.match(action.combos[0], /^app\+/, `${id} defaults to a literal key rather than the app family`);
+    // An action can start with no chord at all (conf - the editor menu has it); one that has a
+    // chord defaults into the app family.
+    if (id !== 'projector' && action.combos.length) assert.match(action.combos[0], /^app\+/, `${id} defaults to a literal key rather than the app family`);
   }
 });
 

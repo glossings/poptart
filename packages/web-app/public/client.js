@@ -2131,7 +2131,7 @@ async function pollPluginEdits({ flush = false } = {}) {
   // Said once when edits start being held, so a plugin tweak that hasn't reached the code yet
   // doesn't look like auto-pin missed it.
   if (pending && !pinsPending) {
-    logLine('plugin edited - writing its state into the code on the next play, stop or save (capturing it now would interrupt the plugin)');
+    logLine(`plugin edited - its state is written into the code once its track is quiet (stopped, muted or turned down), or on stop or save; ${hotkeyLabel('capture')} writes it now`);
   }
   pinsPending = pending ?? 0;
 }
@@ -2159,9 +2159,26 @@ async function settlePluginState() {
 // .param("Name", ...) for it already exists in the block, overwrites that value in place.
 // ---------------------------------------------------------------------------------------------
 
-let confSession = null; // { trackLabel, timer } while a track is configuring
+let confSession = null; // { trackLabel, timer } while a track is configuring - trackLabel is the server's key
 
-async function toggleConf(trackLabel, btn) {
+// The server's name for the track whose code `idx` is in, in `ed`'s buffer - the innermost one,
+// so a member inside a group's braces is itself rather than its group - or null outside any track.
+function trackKeyAt(ed, idx) {
+  if (!labelsMod) return null;
+  const hit = labelsMod.splitLabeledBlocks(ed.getValue())
+    .filter((b) => b.kind !== 'bare' && idx >= b.start && idx <= b.end)
+    .sort((x, y) => (y.depth ?? 0) - (x.depth ?? 0))[0];
+  if (!hit) return null;
+  return deckTrackId(ed, hit.monitored ? `${hit.label}${groupsMod?.MONITOR_SUFFIX ?? '~M'}` : hit.label);
+}
+
+// Everything that shows which track conf is on: the sidebar's buttons and the label in the code.
+function syncConfShown() {
+  for (const b of document.querySelectorAll('.conf-btn')) b.classList.toggle('conf-active', b.dataset.track === confSession?.trackLabel);
+  for (const ed of [cm, deckBCM]) if (ed) updateMutedDim(ed);
+}
+
+async function toggleConf(trackLabel) {
   if (confSession && confSession.trackLabel === trackLabel) {
     await stopConf();
     return;
@@ -2174,8 +2191,8 @@ async function toggleConf(trackLabel, btn) {
     return;
   }
   confSession = { trackLabel, timer: setInterval(() => pollConf().catch(() => {}), 200) };
-  btn?.classList.add('conf-active');
-  logLine(`conf on for "${trackLabel}" - move knobs in its plugin windows and they drop into the code (click conf again to finish)`);
+  syncConfShown();
+  logLine(`conf on for "${deckTrackParts(trackLabel).label}" - move knobs in its plugin windows and they drop into the code (conf again to finish)`);
 }
 
 async function stopConf() {
@@ -2185,14 +2202,20 @@ async function stopConf() {
   confSession = null;
   try { await pollConf(trackLabel); } catch {} // final drain of anything touched since the last poll
   try { await api('POST', '/api/confMode', { trackId: trackLabel, on: false }); } catch {}
-  document.querySelectorAll('.conf-active').forEach((b) => b.classList.remove('conf-active'));
+  syncConfShown();
 }
 
 async function pollConf(labelOverride) {
   const trackLabel = labelOverride ?? confSession?.trackLabel;
   if (!trackLabel) return;
-  const { active, params } = await api('POST', '/api/confPending', { trackId: trackLabel });
-  for (const p of params ?? []) upsertParam(trackLabel, p.slot, paramSpellingInCode(trackLabel, p), p.value);
+  const { active, params, trackId } = await api('POST', '/api/confPending', { trackId: trackLabel });
+  // Renamed since conf was turned on: the track is called this now, and so is the session.
+  const now = trackId ?? trackLabel;
+  if (now !== trackLabel && confSession?.trackLabel === trackLabel) {
+    confSession.trackLabel = now;
+    syncConfShown();
+  }
+  for (const p of params ?? []) upsertParam(now, p.slot, paramSpellingInCode(now, p), p.value);
   // active:false on a session we think is live means the server restarted out from under it -
   // stop and say so instead of silently polling a dead session with the button still lit.
   // (Not on the final-drain call from stopConf, which passes labelOverride and expects this.)
@@ -2446,6 +2469,17 @@ function updateMutedDim(ed = cm) {
     marks.push(
       ed.markText(ed.posFromIndex(b.start), ed.posFromIndex(b.end), { className: 'cm-muted-code' }),
     );
+  }
+  // The track conf is writing into, lit on its label - the sidebar's conf button, where you are
+  // looking. Rebuilt with the rest on every edit, so it follows the label wherever it moves.
+  const conf = confSession ? deckTrackParts(confSession.trackLabel) : null;
+  if (conf && conf.ed === ed) {
+    const block = blockForTrack(code, conf.label);
+    const tok = block && NESTED_LABEL_TOKEN_RE.exec(code.slice(block.start, block.start + 80));
+    if (tok) {
+      const from = block.start + tok[1].length;
+      marks.push(ed.markText(ed.posFromIndex(from), ed.posFromIndex(from + tok[2].length), { className: 'cm-conf-label', title: 'conf is on: knobs moved in its plugin windows are written into the code' }));
+    }
   }
 }
 
@@ -19792,8 +19826,9 @@ function renderTracks(result) {
     confBtn.className = 'small conf-btn';
     confBtn.textContent = 'conf';
     confBtn.title = 'capture knobs you touch into .param(...) calls';
-    if (confSession && confSession.trackLabel === t.label) confBtn.classList.add('conf-active');
-    confBtn.onclick = () => toggleConf(t.label, confBtn);
+    confBtn.dataset.track = t.key ?? t.label;
+    if (confSession && confSession.trackLabel === confBtn.dataset.track) confBtn.classList.add('conf-active');
+    confBtn.onclick = () => toggleConf(confBtn.dataset.track);
     head.appendChild(confBtn);
     trackInfo.appendChild(head);
 
@@ -28222,6 +28257,24 @@ addBuiltinHotkey('record', () => (recState ? cancelMidiRecord(true) : startMidiR
 // ctrl+b - bounce the block the cursor is in to audio (mirrors the record panel's button).
 addBuiltinHotkey('bounce', () => bounceBlockAtCursor());
 
+// conf for the track the caret is in, toggled - moved there from another track, as the sidebar's
+// button does. No chord by default (settings → hotkeys… gives it one); the editor menu has it too.
+addBuiltinHotkey('conf', () => {
+  const ed = activeCM();
+  const key = trackKeyAt(ed, ed.indexFromPos(ed.getCursor()));
+  if (key) toggleConf(key);
+  else if (confSession) stopConf();
+  else logLine('conf: put the cursor in a track first', true);
+});
+
+// app+k - write every plugin edit the server is still holding into the code now, rather than
+// waiting for its track to go quiet or for a stop or save (see settlePluginState).
+addBuiltinHotkey('capture', async () => {
+  const waiting = pinsPending;
+  await settlePluginState();
+  logLine(waiting ? 'plugin edits written into the code' : 'no plugin edits waiting to be written');
+});
+
 // app+m - toggle the open piano roll's computer keyboard (its ⌨ button).
 addBuiltinHotkey('rollKeys', () => { if (prState) prSetKeyboard(!prKbOn); else logLine('open a piano roll first - ⌨ plays the roll on screen', true); });
 
@@ -28244,6 +28297,9 @@ const hotkeysNote = document.getElementById('hotkeysNote');
 let hotkeyLearning = null; // the id of the action whose chord is being learned
 
 function renderHotkeys() {
+  // Rebuilt whole on every change, so the place in the list is put back after: a click on a row
+  // far down must not throw the list back to the top.
+  const scrolled = hotkeysList.scrollTop;
   hotkeysList.replaceChildren();
   let section = null;
   for (const a of HOTKEY_ACTIONS) {
@@ -28264,8 +28320,8 @@ function renderHotkeys() {
     chord.className = 'small hotkeys-chord';
     const learning = hotkeyLearning === a.id;
     chord.classList.toggle('learning', learning);
-    chord.textContent = learning ? 'press a chord…' : hotkeyCombos(a.id).map(chordLabel).join(' / ') || 'no key';
-    chord.title = 'click, then press the new chord - esc keeps this one, backspace leaves it without a key';
+    chord.textContent = learning ? 'press keys…' : hotkeyCombos(a.id).map(chordLabel).join(' / ') || 'no key';
+    chord.title = 'click, then press the new shortcut - esc keeps this one, backspace leaves it without a key';
     chord.addEventListener('click', () => {
       hotkeyLearning = learning ? null : a.id;
       hotkeysNote.textContent = '';
@@ -28274,7 +28330,7 @@ function renderHotkeys() {
     const reset = document.createElement('button');
     reset.className = 'small hotkeys-reset';
     reset.textContent = '↺';
-    reset.title = `back to ${[...new Set(a.combos.map(chordLabel))].join(' / ')}`;
+    reset.title = `back to ${[...new Set(a.combos.map(chordLabel))].join(' / ') || 'no key'}`;
     // Hidden rather than removed, so the chord column doesn't move when a row is changed.
     reset.style.visibility = hotkeyIsDefault(a.id) ? 'hidden' : '';
     reset.addEventListener('click', () => {
@@ -28283,8 +28339,9 @@ function renderHotkeys() {
     });
     row.append(name, chord, reset);
     hotkeysList.append(row);
-    if (learning) chord.focus();
+    if (learning) chord.focus({ preventScroll: true });
   }
+  hotkeysList.scrollTop = scrolled;
 }
 
 function sayHotkeysTaken(combo, takenFrom) {
@@ -29121,6 +29178,39 @@ async function loadDeckAFile(value = document.getElementById('deckAFile').value)
     }
     if (mixModeOn) mixRefresh(); // its old stems left the strip; a song track may have arrived
     return true;
+  } catch (e) {
+    logLine(e.message ?? String(e), true);
+  }
+}
+
+// A deck head's ＋ new: an empty livecode track on that deck, whatever it held (a song, a pattern)
+// cleared off it engine-side exactly as a load clears it. Deck A is the main editor, so it is the
+// files tab's ＋ new - the buffer it leaves goes under work in progress. Not on a deck that is
+// playing: that would be the room's music stopped by one click, and stopping it first is one more.
+async function newDeckTrack(deck) {
+  if (!mixModeOn) return;
+  const U = deck.toUpperCase();
+  if (deckPlayingNow[deck]) {
+    logLine(`deck ${U} is playing - stop it first to start a new track on it`, true);
+    return;
+  }
+  try {
+    await api('POST', '/api/mix/clear', { deck });
+    clearPatternRegions(deck);
+    songPanes[deck].clear();
+    if (deck === 'a') {
+      await newPatternFile();
+    } else if (deckBCM) {
+      deckBCM.setOption('readOnly', false);
+      deckBCM.setValue('');
+      forgetExpandedFolds(deckBCM);
+      refoldAll(deckBCM);
+      deckBFileName = null;
+      deckBCM.focus();
+      logLine('deck B: new track - write it, then play it when ready');
+    }
+    djSetActiveDeck(deck);
+    mixRefresh(); // the old song's stems left the strip
   } catch (e) {
     logLine(e.message ?? String(e), true);
   }
@@ -32129,6 +32219,8 @@ for (const deck of ['a', 'b']) {
   }
 }
 document.getElementById('deckBSong').addEventListener('click', () => openOrganize('b'));
+document.getElementById('deckBNew').addEventListener('click', () => newDeckTrack('b'));
+document.getElementById('deckANew').addEventListener('click', () => newDeckTrack('a'));
 document.getElementById('deckBPlay').addEventListener('click', (e) => deckPlayPress('b', e.shiftKey));
 document.getElementById('deckBUpdate').addEventListener('click', () => evalDeckB(false, { byHand: true }));
 document.getElementById('deckASong').addEventListener('click', () => openOrganize('a'));
@@ -36091,6 +36183,16 @@ function openEditorMenu(ed, e) {
     ? ['save as snippet…', () => openSnippetSave(ed), 'keep this selection - and the rolls, shapes, presets and packs it names - for every project']
     : ['insert snippet…', () => openSnippetBrowser(ed), 'put a kept phrase in here, sidecar and all']];
   items.push(['add an effect…', () => insertFxCall(ed), `${hotkeyLabel('fx')} — an .fx("") at the caret, with the plugin list open`]);
+  // conf for the track under the caret - the sidebar's conf button, from the code, for either deck.
+  if (!selected) {
+    const key = trackKeyAt(ed, ed.indexFromPos(ed.getCursor()));
+    if (key) {
+      const on = confSession?.trackLabel === key;
+      const chord = hotkeyLabel('conf');
+      const what = on ? 'stop writing knob moves into the code' : 'knobs moved in its plugin windows are written into the code as .param(...)';
+      items.push([on ? 'stop conf' : 'conf this track', () => toggleConf(key), chord ? `${chord} — ${what}` : what]);
+    }
+  }
   // The envelope panel for the sampler track under the caret - the way in for a chain that has no
   // envelope call yet to double-click.
   if (!selected && samplerctlMod) {

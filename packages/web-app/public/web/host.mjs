@@ -940,10 +940,12 @@ export function createHost({
     // between two polls lands once at the position it ended on.
     'POST /api/confPending': async (body) => {
       const label = String(body?.trackId ?? '');
-      if (conf?.label !== label) return { active: false, params: [] };
+      if (conf?.label !== label) return { active: false, params: [], trackId: null };
       const params = [...conf.touched.values()];
       conf.touched.clear();
-      return { active: true, params };
+      // The name the track goes by (the desktop answers a renamed track's new one; nothing renames
+      // a track's session here, so it is the one asked about).
+      return { active: true, params, trackId: conf.label };
     },
 
     // On the desktop these are the plugin scan. Here the answer is the same either way and a

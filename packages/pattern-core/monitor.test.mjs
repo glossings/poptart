@@ -87,3 +87,24 @@ test('monitoring is the mon channel control, which a dropped marker resets like 
   assert.equal(sig.channel.mon.constVal ?? sig.channel.mon.sample(0, 1, 0), 1);
   assert.ok(sig.channel.postgain, 'the rest of the strip is kept');
 });
+
+test('a track reports what a channel control reads right now, a controller mute included', async () => {
+  const { Scheduler, Transport } = await import('./src/scheduler.mjs');
+  const { midicc } = await import('./src/signal.mjs');
+  const { feedMidiCC } = await import('./src/midi.mjs');
+  const engine = {
+    getTime: () => Date.now() / 1000,
+    createTrack() {}, loadInstrument() {}, loadEffect() {}, unloadEffect() {},
+    noteOn() {}, noteOff() {}, setParam() {},
+  };
+  const transport = new Transport(engine.getTime, { cps: 0.5, paused: true });
+  const sch = new Scheduler(engine, { transport, trackId: 't' });
+  const cc = midicc('Quiet Test Twister');
+  sch.setPattern(s('bd').gain(cc(0, 2).hold().mul(-1).add(1)));
+  feedMidiCC('Quiet Test Twister Port', 2, 0, 0);
+  assert.equal(sch.channelNow('gain'), 1);
+  feedMidiCC('Quiet Test Twister Port', 2, 0, 1);
+  assert.equal(sch.channelNow('gain'), 0, 'the knob is all the way up: the track is muted');
+  assert.equal(sch.channelNow('postgain'), 1, 'a control the pattern leaves alone reads its default');
+  transport.dispose();
+});

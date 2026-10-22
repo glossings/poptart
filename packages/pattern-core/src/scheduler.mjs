@@ -898,6 +898,26 @@ export class Scheduler {
     ];
   }
 
+  /**
+   * What channel control `name` reads right now - the value the poll is sending - or its neutral
+   * default when the pattern doesn't set it, or null when its signal answers nothing. A host asks
+   * this to know whether a track can be heard at all (see the web app's quiet captures); a
+   * midicc() driving it reads the knob's latest position, as the poll does.
+   */
+  channelNow(name) {
+    const sig = this.pattern ? this._channelSigs(this.pattern)[name] : null;
+    if (!sig) return CHANNEL_DEFAULTS[name] ?? null;
+    const t = this.engine.getTime();
+    const cycle = this.transport.cycleAt(t);
+    let v;
+    try {
+      v = this._readAt(cycle, (song) => sig.sample(t, this.transport.cps, song));
+    } catch {
+      return null;
+    }
+    return typeof v === 'number' && !Number.isNaN(v) ? v : null;
+  }
+
   // The channel controls the engine is sent: the pattern's own, plus a granular track's streamed
   // position (see grainPosSig). Everything that walks the channel map goes through here, so the
   // stream is polled, runs natively and snaps back on re-eval exactly as a control set by name.

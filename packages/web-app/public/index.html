@@ -97,6 +97,7 @@
                  is what the deck's loader reads its pick from, never shown. -->
             <select id="deckAFile" hidden></select>
             <button id="deckASong" class="small deck-song deck-only" title="the song on this deck - click to pick another (opens organize; loading clears this deck's current tracks)">pick a song…</button>
+            <button id="deckANew" class="small deck-only" title="start a new livecode track on this deck: an empty buffer, with whatever the deck held cleared (the previous buffer stays under work in progress)">＋ new</button>
             <button id="deckAPlay" class="small deck-only" data-chord-title="{#play}">&#9654; play</button>
             <button id="deckAUpdate" class="small deck-only" title="evaluate without changing play state">&#8635;</button>
             <span class="deck-head-gap"></span>
@@ -161,6 +162,7 @@
             <span class="deck-b-title">deck B</span>
             <select id="deckBFile" hidden></select>
             <button id="deckBSong" class="small deck-song" title="the song on this deck - click to pick another (opens organize)">pick a song…</button>
+            <button id="deckBNew" class="small" title="start a new livecode track on this deck: an empty buffer, with whatever the deck held cleared">＋ new</button>
             <button id="deckBPlay" class="small" data-chord-title="{#play} in this pane">▶ play</button>
             <button id="deckBUpdate" class="small" title="evaluate without changing play state">↻</button>
             <span class="deck-head-gap"></span>
@@ -355,6 +357,13 @@
                    and collapsed by :empty - this is a fault light, not a hint. -->
               <div id="audioDeviceWarning" class="settings-warning"></div>
             </section>
+            <section id="hotkeysSection">
+              <h2>hotkeys</h2>
+              <div class="settings-actions">
+                <button id="hotkeysOpenBtn" class="small"
+                  title="every app shortcut, with a way to change any of them">edit hotkeys…</button>
+              </div>
+            </section>
             <section id="mixerSection">
               <h2>mixer</h2>
               <div class="settings-actions">
@@ -404,10 +413,6 @@
                 <input id="ctrlTooltipsToggle" type="checkbox" checked />
                 tooltips only with ctrl held
               </label>
-              <div class="settings-actions">
-                <button id="hotkeysOpenBtn" class="small"
-                  title="every app chord, with a way to learn a different one for any of them">hotkeys…</button>
-              </div>
             </section>
             <section id="pianorollSection">
               <h2>piano roll</h2>
