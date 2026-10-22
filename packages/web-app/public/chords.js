@@ -176,6 +176,8 @@ const HOTKEY_ACTIONS = [
     tip: 'in DJ mode, turns the active deck\'s loop regions on and off. Outside it, releases the loop region playback is in' },
   { id: 'cue', section: 'decks', label: 'cue', combos: ['app+c'],
     tip: 'in DJ mode, held: previews the active deck from its cue point, and drops back on it at release' },
+  { id: 'deckZoom', section: 'decks', label: 'full-screen deck', combos: ['app+z'],
+    tip: 'in DJ mode, shows the active deck alone across the view, and both decks again' },
 ];
 const HOTKEY_BY_ID = Object.fromEntries(HOTKEY_ACTIONS.map((a) => [a.id, a]));
 const HOTKEYS_STORE = 'poptart.hotkeys';

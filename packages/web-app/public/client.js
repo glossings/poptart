@@ -589,6 +589,7 @@ function mainEditorKeys() {
       // first, so the two are a different keystroke on every platform.
       group: (ed) => groupSelection(ed),
       loops: () => loopsChord(),
+      deckZoom: () => { if (mixModeOn) djToggleZoom(); },
     }),
   };
 }
@@ -665,7 +666,7 @@ setTimeout(editorReady, 2000);
 // panel says so with `keeps-transport`, and those two keys alone reach past it; everything else
 // (⌘S in particular) still belongs to the dialog.
 // The actions the handler below takes, in the order it tries them (see HOTKEY_ACTIONS).
-const DOC_HOTKEYS = ['play', 'stop', 'cue', 'loops', 'arrange', 'save', 'saveAs', 'dj', 'organize'];
+const DOC_HOTKEYS = ['play', 'stop', 'cue', 'loops', 'arrange', 'save', 'saveAs', 'dj', 'organize', 'deckZoom'];
 // On the DESK the loops chord is the deck's loop switch, the chord for the button in its head -
 // because DJ mode opens with the loops OFF, so there is usually no armed region for the one-region
 // release below to let go of, and the thing the hand wants is the loops back. Off the desk it
@@ -749,6 +750,9 @@ document.addEventListener('keydown', (e) => {
   } else if (action === 'organize' && !arKeyInField()) {
     e.preventDefault();
     toggleOrganize(); // the library browser: open a song (onto the armed deck, on the desk)
+  } else if (action === 'deckZoom' && mixModeOn && !arKeyInField()) {
+    e.preventDefault();
+    djToggleZoom(); // the armed deck full-screen, or both decks back (see djSetZoom)
   }
 });
 
@@ -28640,6 +28644,7 @@ function deckBEditorKeys() {
       // gutter draws the result.
       group: (ed) => groupSelection(ed),
       loops: () => loopsChord(),
+      deckZoom: () => { if (mixModeOn) djToggleZoom(); },
     }),
   };
 }
@@ -29031,6 +29036,7 @@ function closeMixMode() {
   mixStripEl.classList.add('hidden');
   applyMixStack(); // canvases back into their panes, stack region away
   djApplyRegionSizes();
+  djSetZoom(null); // off the desk there is one pane, never a hidden one
   djSetActiveDeck('a'); // one editor again: the rings come off
   cm.refresh();
 }
@@ -30663,8 +30669,16 @@ window.addEventListener('resize', () => djApplyRegionSizes()); // re-cap, never 
 // neither deck), and the pane wears an accent ring so which one is armed is never a guess.
 // Deck A outside DJ mode, always - there is no other deck to mean.
 let djActiveDeck = 'a';
+// One deck full-screen (its ⤢, or the deckZoom chord): the other deck's pane steps out and this
+// one takes both columns, for reading the code from across the room mid-set. The hidden deck
+// plays on; the waveforms and the mixer stay (they fold on their own rails). While one deck is
+// alone it is the armed one and stays so - the keys must never play a deck you cannot see, so
+// the automatic hand-overs (djFocusOnPlay) wait until both decks are back. Never stored: a
+// reload, or leaving DJ mode, comes back to the pair.
+let djZoomedDeck = null;
 
 function djSetActiveDeck(deck) {
+  if (djZoomedDeck && mixModeOn) deck = djZoomedDeck;
   djActiveDeck = deck === 'b' && mixModeOn ? 'b' : 'a';
   for (const d of ['a', 'b']) {
     songPanes[d].setActive(d === djActiveDeck);
@@ -30674,6 +30688,28 @@ function djSetActiveDeck(deck) {
 }
 document.getElementById('editorPane').addEventListener('pointerdown', () => djSetActiveDeck('a'), true);
 document.getElementById('deckBPane').addEventListener('pointerdown', () => djSetActiveDeck('b'), true);
+
+function djSetZoom(deck) {
+  djZoomedDeck = mixModeOn && (deck === 'a' || deck === 'b') ? deck : null;
+  for (const d of ['a', 'b']) {
+    const alone = djZoomedDeck === d;
+    document.body.classList.toggle(`dj-zoom-${d}`, alone);
+    const btn = document.getElementById(`deck${d.toUpperCase()}Zoom`);
+    btn.textContent = alone ? '⤡' : '⤢';
+    btn.title = alone ? 'back to both decks' : 'full-screen this deck';
+    btn.classList.toggle('on', alone);
+  }
+  if (djZoomedDeck) djSetActiveDeck(djZoomedDeck);
+  djRegionsReflow();
+}
+/** The chord: the armed deck full-screen, or both decks back. */
+function djToggleZoom() {
+  djSetZoom(djZoomedDeck ? null : djActiveDeck);
+}
+for (const d of ['a', 'b']) {
+  document.getElementById(`deck${d.toUpperCase()}Zoom`)
+    .addEventListener('click', () => djSetZoom(djZoomedDeck ? null : d));
+}
 
 /** The active deck if it is holding a SONG - what the waveform hotkeys (cue, zoom) need. */
 function songActiveDeck() {

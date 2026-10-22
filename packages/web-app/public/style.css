@@ -4705,6 +4705,18 @@ body.mix-on.mix-stacked #deckBPane {
   grid-row: 3;
   grid-column: 2;
 }
+/* One deck full-screen (djSetZoom): the other pane steps out and this one takes both columns. */
+body.mix-on.dj-zoom-a #deckBPane,
+body.mix-on.dj-zoom-b #editorPane {
+  display: none;
+}
+body.mix-on.mix-stacked.dj-zoom-a #editorPane,
+body.mix-on.mix-stacked.dj-zoom-b #deckBPane {
+  grid-column: 1 / -1;
+}
+body.mix-on.dj-zoom-b #deckBPane {
+  border-left: 0; /* nothing to its left to divide it from */
+}
 
 /* ---------------------------------------------------- DJ mode: resizable regions
    Three stacked regions in DJ mode - waveforms, decks, mixer - with a drag handle on each seam.
@@ -4879,7 +4891,8 @@ body.mix-on #deckAHead .deck-song {
   background: var(--bg-panel);
   border-color: var(--border);
 }
-.deck-loop.on {
+.deck-loop.on,
+.deck-zoom.on {
   color: var(--accent);
   border-color: var(--accent);
 }
