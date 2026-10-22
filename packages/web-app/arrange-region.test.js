@@ -1077,3 +1077,29 @@ test('the editor menu opens the painter on the deck that was clicked', () => {
   assert.match(menu, /arState && arDeck === deck\s+\? \['close arrangement', \(\) => closeArrangeEditor\(\)/,
     'on the deck it is already open on, the item puts it away');
 });
+
+test('the editor menu finds its editor by the path the right-click took, not by where its target ended up', () => {
+  // Reported 2026-10-10: the browser's menu came up in place of this one, seemingly at random.
+  // CodeMirror handles the right-click first and, on any line but the cursor's, moves the cursor
+  // there and redraws the line - so the event reaches the document with a target that has been
+  // taken out of the page. composedPath() is fixed when the event is dispatched.
+  const SRC2 = fs.readFileSync(path.join(__dirname, 'public', 'client.js'), 'utf8');
+  const at = SRC2.indexOf('function editorOfEvent(');
+  assert.ok(at > 0);
+  const fn = SRC2.slice(at, SRC2.indexOf('\n}\n', at) + 3);
+  // Run it for real: a target detached from the document, with the editor still on its path.
+  const cm = { name: 'main' };
+  const deckBCM = { name: 'b' };
+  const editorAt = () => null; // what asking the detached target answers
+  // eslint-disable-next-line no-new-func
+  const editorOfEvent = new Function('cm', 'deckBCM', 'editorAt', `${fn}; return editorOfEvent;`)(cm, deckBCM, editorAt);
+  const el = (cls, extra = {}) => ({ classList: { contains: (c) => cls.split(' ').includes(c) }, ...extra });
+  const path2 = [el('CodeMirror-line'), el('CodeMirror-code'), el('CodeMirror-scroll'), el('CodeMirror cm-s-poptart', { CodeMirror: cm }), el('pane'), {}];
+  assert.equal(editorOfEvent({ composedPath: () => path2, target: {} }), cm);
+  assert.equal(editorOfEvent({ composedPath: () => [el('CodeMirror', { CodeMirror: deckBCM })], target: {} }), deckBCM);
+  assert.equal(editorOfEvent({ composedPath: () => [el('CodeMirror', { CodeMirror: { name: 'a guide example' } })], target: {} }), null, 'only the two the player writes in');
+  assert.equal(editorOfEvent({ composedPath: () => [el('console')], target: {} }), null);
+  assert.match(SRC2, /const ed = editorOfEvent\(e\);\s+if \(!ed\) return;\s+\/\/ Shift\+right-click/, 'and the right-click handler asks it');
+  assert.match(SRC2, /if \(e\.target\.closest\?\.\('\.ctx-menu'\) && !e\.shiftKey\) \{ e\.preventDefault\(\); return; \}/,
+    'a right-click on an open menu does not bring up the browser\'s');
+});

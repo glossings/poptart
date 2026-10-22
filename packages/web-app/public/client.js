@@ -34203,17 +34203,26 @@ function orgPlaylistMenu(p, x, y) {
   openCtxMenu(orgMenu, x, y, {
     head: p.name,
     items: [
-      ['rename…', () => {
-        const next = prompt('playlist name:', p.name)?.trim();
+      ['rename…', async () => {
+        const next = await askText(`Rename the playlist "${p.name}".`, {
+          label: 'name',
+          value: p.name,
+          confirm: 'rename',
+          problem: (v) => (v ? null : 'a playlist needs a name'),
+        });
         if (!next) return;
         p.name = next;
         saveLibraryDoc();
         orgRender();
       }],
-      ['put in folder…', () => {
-        const next = prompt('folder (blank for none, "/" to nest):', p.folder ?? '');
+      ['put in folder…', async () => {
+        const next = await askText('Put the playlist in a folder. Leave blank for none; "/" nests.', {
+          label: 'folder',
+          value: p.folder ?? '',
+          confirm: 'move',
+        });
         if (next == null) return;
-        if (next.trim()) p.folder = next.trim();
+        if (next) p.folder = next;
         else delete p.folder;
         saveLibraryDoc();
         orgRender();
@@ -35589,6 +35598,22 @@ function editorAt(target) {
   return ed === cm || ed === deckBCM ? ed : null;
 }
 
+/**
+ * The same, for an event that has already passed through CodeMirror on its way up. Asked by the
+ * path the event was dispatched along, not by where its target is NOW: CodeMirror's own handler
+ * runs first, and a right-click on any line but the cursor's moves the cursor there and redraws
+ * the line - so by the time the event reaches the document its target is an element that is no
+ * longer in the page, with no editor above it. Read that way, the press looked like one outside
+ * the code and the browser's menu came up in place of this one, depending on nothing but which
+ * line the cursor had been left on.
+ */
+function editorOfEvent(e) {
+  for (const el of e.composedPath?.() ?? []) {
+    if (el.classList?.contains('CodeMirror')) return el.CodeMirror === cm || el.CodeMirror === deckBCM ? el.CodeMirror : null;
+  }
+  return editorAt(e.target);
+}
+
 function openEditorMenu(ed, e) {
   const selected = ed.somethingSelected();
   const items = [selected
@@ -35812,7 +35837,9 @@ async function duplicateTrack(ed, block) {
 }
 
 document.addEventListener('contextmenu', (e) => {
-  const ed = editorAt(e.target);
+  // A right-click on one of the app's own menus is not a request for the browser's.
+  if (e.target.closest?.('.ctx-menu') && !e.shiftKey) { e.preventDefault(); return; }
+  const ed = editorOfEvent(e);
   if (!ed) return;
   // Shift+right-click is the way through to the browser's own menu - spellcheck, inspect, and
   // whatever else it offers. A page that takes the right button over should leave one.
