@@ -308,3 +308,43 @@ test('a snippet is saved as the editor posts it, and listed with its body and wh
   // The file is the one the desktop's snippets.js writes for the same post.
   assert.equal(await storage.readSnippet('acid'), require('./snippets.js').composeSnippet(posted));
 });
+
+// ---- replays ----------------------------------------------------------------------------------
+
+test('a night recorded here is the same file the desktop writes, and lists, keeps and expires the same', async () => {
+  const replayLog = require('./public/replay-log.js');
+  const { createReplayStore } = require('./replays.js');
+  let clock = new Date(2026, 9, 22, 21, 30, 12).getTime();
+  const store = memoryStore();
+  const storage = createStorage(store, { meta, replayLog, now: () => clock });
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'poptart-replays-web-'));
+  const desktop = createReplayStore({ dir, now: () => clock });
+  const evals = [
+    { at: clock, deck: 'a', code: 'a: s("bd*4")', start: true, name: 'kick' },
+    { at: clock + 60000, deck: 'a', code: 'a: s("bd*4")', start: false }, // a repeat: left out
+    { at: clock + 120000, deck: 'b', code: 'b: s("hh*8")', start: true },
+  ];
+  for (const e of evals) {
+    assert.deepEqual(await storage.recordReplay(e), await desktop.record(e));
+  }
+  const id = replayLog.replayIdFor(evals[0].at);
+  assert.equal(await read(store, `patterns/replays/${id}.jsonl`), fs.readFileSync(path.join(dir, `${id}.jsonl`), 'utf8'));
+  const strip = ({ bytes, ...rest }) => rest; // sizes are counted in characters here, bytes there
+  assert.deepEqual((await storage.listReplays()).map(strip), (await desktop.list()).map(strip));
+
+  await storage.setReplayKept(id, true);
+  assert.equal((await storage.loadReplay(id)).kept, true);
+  // a month on, a starred night stays and an unstarred one goes
+  clock += 31 * 24 * 3600 * 1000;
+  const later = await storage.recordReplay({ deck: 'a', code: 'later', start: true });
+  await storage.setReplayKept(id, false);
+  clock += 31 * 24 * 3600 * 1000;
+  await storage.recordReplay({ deck: 'a', code: 'later still', start: true }); // a third night, now live
+  assert.deepEqual((await storage.replaysOlderThan(30)).ids, [id, later.id]);
+  assert.equal((await storage.pruneReplays(await storage.replayDays())).deleted, 2);
+  assert.equal((await storage.listReplays()).length, 1);
+});
+
+async function read(store, key) {
+  return (await store.get(key))?.text ?? null;
+}

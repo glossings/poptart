@@ -25,6 +25,9 @@ const SNAPSHOTS = 'snapshots/';
 const LIBRARY_KEY = 'patterns/library.json';
 const PREBAKE_KEY = 'prebake/prebake.js';
 const PINNED_KEY = 'prebake/pinned.js';
+const REPLAYS = 'patterns/replays/';
+const REPLAYS_KEPT_KEY = 'patterns/replays/kept.json';
+const REPLAYS_DAYS_KEY = 'patterns/replays/retention.json';
 
 /** How many history snapshots are kept. The desktop's number, for the same reason. */
 export const MAX_SNAPSHOTS = 500;
@@ -94,7 +97,7 @@ function fromBase64(text) {
   return out.buffer;
 }
 
-export function createStorage(store, { meta = globalThis, now = () => Date.now(), blobs = null, maxSnapshots = MAX_SNAPSHOTS, snippetFormat = null } = {}) {
+export function createStorage(store, { meta = globalThis, now = () => Date.now(), blobs = null, maxSnapshots = MAX_SNAPSHOTS, snippetFormat = null, replayLog = null } = {}) {
   const { parseMeta, displayLabel, patternNameProblem, matchesQuery } = meta;
   if (typeof patternNameProblem !== 'function') {
     throw new Error('[storage] the pattern metadata helpers are missing - pattern-meta.js has to load first');
@@ -254,6 +257,135 @@ export function createStorage(store, { meta = globalThis, now = () => Date.now()
     await write(`${SNIPPETS}${String(name).trim()}.js`, snippetFormat.composeSnippet({ title, tags, body, defs: Array.isArray(defs) ? defs : [] }));
   }
 
+  // --- replays: the desktop's replays.js, over keys (the format is public/replay-log.js) ---
+  //
+  // One record per night at patterns/replays/<month>/<stamp>.jsonl, the path it has there. A
+  // record is rewritten whole on each eval rather than appended to - a store has no append - which
+  // is fine at a night's size. Nothing here pins captured states: this store never sweeps them.
+
+  const replayKey = (id) => {
+    if (!replayLog?.replayIdOk(id)) throw new Error('bad replay id (expected "YYYY-MM/YYYY-MM-DD-HHMMSS")');
+    return `${REPLAYS}${id}.jsonl`;
+  };
+  const replayIds = async () => (await store.keys(REPLAYS))
+    .filter((k) => k.endsWith('.jsonl'))
+    .map((k) => k.slice(REPLAYS.length, -'.jsonl'.length))
+    .filter((id) => replayLog.replayIdOk(id))
+    .sort();
+  const replayEntries = async (id) => replayLog.parseReplay(await read(replayKey(id)));
+  async function replayKept() {
+    try {
+      const ids = JSON.parse((await read(REPLAYS_KEPT_KEY)) ?? '[]');
+      return new Set(Array.isArray(ids) ? ids.filter((id) => replayLog.replayIdOk(id)) : []);
+    } catch {
+      return new Set();
+    }
+  }
+  const writeReplayKept = (ids) => write(REPLAYS_KEPT_KEY, JSON.stringify([...ids].sort()));
+
+  let replayNow = null; // { id, lastAt, last: { a, b } } - the night being written
+  let replayQueue = Promise.resolve();
+
+  function recordReplay(raw) {
+    const run = replayQueue.then(async () => {
+      const entry = replayLog.replayEntry({ ...raw, at: raw.at ?? now() });
+      if (!entry.code.trim()) return { id: replayNow?.id ?? null, recorded: false };
+      if (!replayNow || !replayLog.replayContinues(replayNow.lastAt, entry.at)) {
+        let resumed = null;
+        if (!replayNow) {
+          // A reload mid-set carries on the night rather than starting another.
+          const ids = await replayIds();
+          const id = ids[ids.length - 1];
+          const entries = id ? await replayEntries(id) : [];
+          const lastAt = entries.length ? entries[entries.length - 1].at : null;
+          if (replayLog.replayContinues(lastAt, entry.at)) {
+            const held = replayLog.replayDecksAt(entries, entries.length - 1);
+            resumed = { id, lastAt, last: { a: held.a?.code ?? null, b: held.b?.code ?? null } };
+          }
+        }
+        replayNow = resumed ?? { id: replayLog.replayIdFor(entry.at), lastAt: null, last: { a: null, b: null } };
+      }
+      if (!entry.start && replayNow.last[entry.deck] === entry.code) {
+        replayNow.lastAt = entry.at;
+        return { id: replayNow.id, recorded: false };
+      }
+      const key = replayKey(replayNow.id);
+      await write(key, `${(await read(key)) ?? ''}${replayLog.replayLine(entry)}`);
+      replayNow.last[entry.deck] = entry.code;
+      replayNow.lastAt = entry.at;
+      return { id: replayNow.id, recorded: true };
+    });
+    replayQueue = run.catch(() => {});
+    return run;
+  }
+
+  async function listReplays() {
+    const kept = await replayKept();
+    const out = [];
+    for (const id of await replayIds()) {
+      const record = await store.get(replayKey(id));
+      const summary = replayLog.summarizeReplay(replayLog.parseReplay(record?.text ?? ''));
+      if (!summary.count) continue;
+      out.push({ id, month: id.slice(0, 7), ...summary, bytes: (record?.text ?? '').length, kept: kept.has(id), live: replayNow?.id === id });
+    }
+    return out.sort((x, y) => y.started - x.started);
+  }
+
+  async function loadReplay(id) {
+    const entries = await replayEntries(id);
+    if (!entries.length) throw new Error('that replay is not here');
+    return { id, kept: (await replayKept()).has(id), entries };
+  }
+
+  async function setReplayKept(id, keep) {
+    replayKey(id);
+    const ids = await replayKept();
+    if (keep) ids.add(id);
+    else ids.delete(id);
+    await writeReplayKept(ids);
+    return { id, kept: !!keep };
+  }
+
+  async function deleteReplay(id) {
+    await store.delete(replayKey(id));
+    if (replayNow?.id === id) replayNow = null;
+    const ids = await replayKept();
+    if (ids.delete(id)) await writeReplayKept(ids);
+    return { ok: true };
+  }
+
+  async function replayDays() {
+    const n = Number(await read(REPLAYS_DAYS_KEY));
+    return Number.isFinite(n) && (await store.get(REPLAYS_DAYS_KEY)) ? n : replayLog.REPLAY_KEEP_DAYS;
+  }
+
+  async function replaysOlderThan(days, at = now()) {
+    if (!(Number(days) > 0)) return { ids: [], bytes: 0 };
+    const cutoff = replayLog.replayCutoff(days, at);
+    const kept = await replayKept();
+    const ids = [];
+    let bytes = 0;
+    for (const id of await replayIds()) {
+      if (kept.has(id) || replayNow?.id === id) continue;
+      const record = await store.get(replayKey(id));
+      if (!record || record.mtime >= cutoff) continue;
+      ids.push(id);
+      bytes += (record.text ?? '').length;
+    }
+    return { ids, bytes };
+  }
+
+  async function pruneReplays(days, at = now()) {
+    const { ids, bytes } = await replaysOlderThan(days, at);
+    for (const id of ids) await store.delete(replayKey(id));
+    return { deleted: ids.length, freed: bytes };
+  }
+
+  async function setReplayDays(days) {
+    await write(REPLAYS_DAYS_KEY, String(days));
+    return days > 0 ? pruneReplays(days) : { deleted: 0, freed: 0 };
+  }
+
   /** Moves one record to another key, refusing to write over something already there. */
   async function rename(fromKey, toKey) {
     const held = await store.get(fromKey);
@@ -392,6 +524,17 @@ export function createStorage(store, { meta = globalThis, now = () => Date.now()
     writeSnippet: (name, code) => write(`${SNIPPETS}${String(name).trim()}.js`, code),
     deleteSnippet: (name) => store.delete(`${SNIPPETS}${String(name).trim()}.js`),
     renameSnippet: (from, to) => rename(`${SNIPPETS}${from}.js`, `${SNIPPETS}${to}.js`),
+
+    // replays
+    recordReplay,
+    listReplays,
+    loadReplay,
+    setReplayKept,
+    deleteReplay,
+    replayDays,
+    replaysOlderThan,
+    pruneReplays,
+    setReplayDays,
 
     // history
     putSnapshot,

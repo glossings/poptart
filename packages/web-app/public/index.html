@@ -73,6 +73,26 @@
         <button id="updateBtn" title="evaluate without changing play state"><span class="ico">↻</span> update</button>
       </header>
 
+      <!-- An open replay (see the replays section of client.js): the night's by-hand evals on a
+           timeline. Scrubbing puts that moment's code on the decks; play runs the night again
+           from there, each eval landing when it did. -->
+      <div id="replayBar" class="hidden">
+        <span id="replayTitle" class="replay-title"></span>
+        <button id="replayPrev" class="small" title="the eval before this one"><svg class="song-ctl-icon" viewBox="0 0 12 10" aria-hidden="true"><rect x="1" y="1" width="1.6" height="8" rx="0.4"/><path d="M11 1 4.2 5 11 9Z"/></svg></button>
+        <button id="replayPlay" class="small replay-play" title="play the night from here: this moment's code goes on the decks, and each eval after it lands when it did">&#9654; play</button>
+        <button id="replayNext" class="small" title="the next eval"><svg class="song-ctl-icon" viewBox="0 0 12 10" aria-hidden="true"><path d="M1 1 7.8 5 1 9Z"/><rect x="9.4" y="1" width="1.6" height="8" rx="0.4"/></svg></button>
+        <select id="replaySpeed" title="how fast the night goes by while it plays">
+          <option value="1">1&times;</option>
+          <option value="4">4&times;</option>
+          <option value="16">16&times;</option>
+          <option value="64">64&times;</option>
+        </select>
+        <canvas id="replayTimeline" tabindex="0"></canvas>
+        <span id="replayTime" class="replay-time"></span>
+        <button id="replayKeep" class="small" title="keep this replay - kept replays are never deleted on their own">&#9734;</button>
+        <button id="replayClose" class="small" title="close the replay">&#10005;</button>
+      </div>
+
       <main>
         <!-- Stacked decks (the ⇅ strip button): both decks' detail waveforms move up here, one
              directly above the other at the same scale, playheads on one vertical line - the
@@ -314,6 +334,8 @@
               <div id="fileList" class="panel list">loading…</div>
               <h2 id="wipHeading">work in progress</h2>
               <div id="wipList" class="panel list"></div>
+              <h2 id="replayHeading">replays</h2>
+              <div id="replayList" class="panel list"></div>
             </section>
             <!-- The browser build keeps everything in this browser's storage, and a public site
                  with no accounts has no other way to hand somebody their work: export writes it
@@ -445,6 +467,16 @@
                 </select>
               </label>
               <div id="wipRetentionNote" class="files-note"></div>
+              <label class="settings-row">keep replays
+                <select id="replayRetentionSelect" title="every eval you make by hand goes into the night's replay; starred replays are kept until you delete them">
+                  <option value="7">7 days</option>
+                  <option value="30">30 days</option>
+                  <option value="90">90 days</option>
+                  <option value="365">1 year</option>
+                  <option value="0">forever</option>
+                </select>
+              </label>
+              <div id="replayRetentionNote" class="files-note"></div>
             </section>
             <section id="librarySection">
               <h2>sample library</h2>
@@ -1307,6 +1339,7 @@
     <script src="chords.js"></script>
     <script src="api-docs.js"></script>
     <script src="pattern-meta.js"></script>
+    <script src="replay-log.js"></script>
     <script src="theme-file.js"></script>
     <script src="snippet-code.js"></script>
     <script src="projector-frame.js"></script>

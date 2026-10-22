@@ -188,7 +188,7 @@ export async function boot({
   const blobs = createBlobs(store);
   // pinned-defs.js owns the ★ library's file format and the snippet format (see storage and prebake).
   await import('./pinned-defs.js');
-  const storage = createStorage(store, { meta: globalThis, blobs, snippetFormat: globalThis.poptartPinnedDefs });
+  const storage = createStorage(store, { meta: globalThis, blobs, snippetFormat: globalThis.poptartPinnedDefs, replayLog: globalThis.poptartReplayLog });
 
   const samples = createSampleStore({ context, store, warn });
   // A pack written as a list - _pack("kit", […]), what the pack panel and the sample map write -

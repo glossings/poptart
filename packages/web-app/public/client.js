@@ -2349,9 +2349,14 @@ function wipRowKey(code) {
 }
 
 let wipListedRow = null;
+// True while a replay is on the decks only to be LOOKED at (see openReplay): scrubbing writes the
+// night's code into the editor, and none of that is your work - so the autosave holds off until
+// the replay is played or closed, and your session file keeps what you had.
+let replayHoldsBuffers = false;
 
 async function saveWip() {
   clearTimeout(wipTimer);
+  if (replayHoldsBuffers) return;
   const code = cm.getValue();
   const id = wipSessionId;
   if (code === wipLastSent) return;
@@ -4372,7 +4377,7 @@ function wireFigureDrag(canvas, trackLabel, slot, entry) {
     if (grab.band !== undefined) entry.focus = grab.band;
     if (grab.role !== undefined) entry.focus = grab.role;
     const move = (ev) => { const b = bodyFor(ev); if (b) send(b, false); };
-    const up = (ev) => {
+    const up = () => {
       canvas.removeEventListener('pointermove', move);
       canvas.removeEventListener('pointerup', up);
       canvas.removeEventListener('pointercancel', up);
@@ -19966,6 +19971,7 @@ async function evaluate(start, { byHand = false } = {}) {
   try {
     const result = await pending;
     bufferFreshOpened = false; // the fresh eval landed; from here edits are livecoding
+    if (byHand) replayRecord('a', code, start, currentSavedName); // a moment of the night (see replays)
     transport = result.transport ?? { cps: result.cps ?? transport.cps, baseSec: 0, baseCycle: 0, paused: !start };
     if (result.deckTransport) deckTransports = result.deckTransport;
     setPatchScale(result.scale); // a setscale() in the buffer re-colors (and re-folds) the roll
@@ -20922,7 +20928,7 @@ function activateTab(name) {
   settingsTab.classList.toggle('hidden', name !== 'settings');
   if (name === 'sounds') loadSamples();
   if (name === 'files') refreshPatternFiles();
-  if (name === 'settings') { refreshAudioDevices(); refreshAudioInputs(); refreshSamplesDir().then(refreshMapSources); refreshPreferVst3(); refreshWipRetention(); refreshDjRegions(); refreshMidiClock(); refreshMixFeedback(); refreshLink(); if (window.__poptartHostReady) refreshDownloads(); }
+  if (name === 'settings') { refreshAudioDevices(); refreshAudioInputs(); refreshSamplesDir().then(refreshMapSources); refreshPreferVst3(); refreshWipRetention(); refreshReplayRetention(); refreshDjRegions(); refreshMidiClock(); refreshMixFeedback(); refreshLink(); if (window.__poptartHostReady) refreshDownloads(); }
 }
 
 for (const btn of document.querySelectorAll('.side-tab')) {
@@ -27128,6 +27134,7 @@ async function refreshPatternFiles() {
     renderSavedPatterns(patterns, !!q);
     renderWipPatterns(wip ?? [], !!q);
     markCurrentFileRow();
+    refreshReplays();
   } catch (e) {
     fileList.textContent = 'failed to list patterns';
     logLine(e.message ?? String(e), true);
@@ -30893,6 +30900,7 @@ async function evalDeckB(start, how) {
     const pending = api('POST', '/api/evaluate', { code, deck: 'b', start, arrangeFrom, name: deckBFileName ?? undefined });
     if (newPacks.length) openPackById(newPacks[0], {}, deckBCM); // it has no files - here is where to pick them
     const result = await pending;
+    if (byHand) replayRecord('b', code, start, deckBFileName);
     takeClocks(result);
     setPatchScale(result.scale, 'b'); // deck B's own key and feel, for a roll opened on it
     setPatchGroove(result.groove ?? null, 'b');
@@ -36652,6 +36660,520 @@ if (EMBEDDED) {
     }
   });
 }
+
+// ---------------------------------------------------------------------------------------------
+// Replays: the night as it was played (public/replay-log.js has the format, replays.js the files).
+// Every eval made by hand that lands is recorded - evaluate and evalDeckB call replayRecord - and
+// an open replay puts the night back on the decks:
+//
+// - Scrubbing the timeline, or stepping eval to eval, WRITES that moment's code into each deck's
+//   editor and evaluates nothing. Looking costs nothing: the autosave holds off (see
+//   replayHoldsBuffers), and closing a replay you only looked at puts back what the decks held.
+// - Play evaluates that moment and lets the night run on from there, each eval landing when it
+//   did (faster with the speed select). From the first play the night's code is what is playing,
+//   so it stays on the decks after close: deck A's buffer becomes a new work-in-progress session,
+//   and neither deck is "the saved pattern" any more - cmd+S asks for a name rather than writing
+//   the night over a song.
+// - An eval by hand while it runs is you taking over: the replay stops advancing.
+//
+// The replay's own evals are not by hand, so they are never recorded into tonight's replay.
+// ---------------------------------------------------------------------------------------------
+
+const RL = globalThis.poptartReplayLog;
+const replayBar = document.getElementById('replayBar');
+const replayTitleEl = document.getElementById('replayTitle');
+const replayTimeline = document.getElementById('replayTimeline');
+const replayPlayBtn = document.getElementById('replayPlay');
+const replaySpeedSel = document.getElementById('replaySpeed');
+const replayTimeEl = document.getElementById('replayTime');
+const replayKeepBtn = document.getElementById('replayKeep');
+const replayListEl = document.getElementById('replayList');
+
+// The open replay: { id, kept, entries, decks (the ones it played on), t (the cursor, in the
+// night's own ms), i (the entry the cursor is on or after), speed, played, running (the clock it
+// runs on, { wall, t }, or null while it stands still), raf, stash (what the decks held) }.
+let replayView = null;
+let replayRecordWarned = false;
+
+function replayRecord(deck, code, start, name) {
+  if (replayView) {
+    if (replayView.running) replayPause(); // you took over
+    replayTakeOver(); // ...and the code you just played is yours now, not something being looked at
+  }
+  api('POST', '/api/replays/record', { deck, code, start, name: name ?? undefined })
+    .then((r) => { if (r?.recorded) replayListStale(); })
+    .catch((e) => {
+      if (replayRecordWarned) return;
+      replayRecordWarned = true; // once - a keepsake must never nag over a performance
+      logLine(`the replay could not record (${e.message ?? e}) - tonight's evals aren't being kept`, true);
+    });
+}
+
+const replayPad = (n) => String(n).padStart(2, '0');
+/** Time into the night: 0:00, 4:12, 1:02:45. */
+function replayElapsed(ms) {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  return h ? `${h}:${replayPad(m)}:${replayPad(s % 60)}` : `${m}:${replayPad(s % 60)}`;
+}
+/** A night's length in words: "48m", "3h 12m". */
+function replayLength(ms) {
+  const m = Math.max(0, Math.round(ms / 60000));
+  return m >= 60 ? `${Math.floor(m / 60)}h ${replayPad(m % 60)}m` : `${m}m`;
+}
+const replayWhen = (ms) => new Date(ms).toLocaleString([], { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+const replayClockOf = (ms) => new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+// --- the list, in the files tab ---
+
+let replayListTimer = null;
+function replayListStale() {
+  clearTimeout(replayListTimer);
+  replayListTimer = setTimeout(() => {
+    if (!filesTab.classList.contains('hidden')) refreshReplays();
+  }, 1500);
+}
+
+async function refreshReplays() {
+  try {
+    const { replays } = await api('GET', '/api/replays');
+    renderReplays(replays ?? []);
+  } catch (e) {
+    replayListEl.textContent = 'failed to list replays';
+    logLine(e.message ?? String(e), true);
+  }
+}
+
+// One row per night, in the files tab's row style: when it started on the first line, the rest
+// dim underneath, the star and the delete beside it.
+function renderReplays(list) {
+  replayListEl.innerHTML = '';
+  if (!list.length) {
+    replayListEl.textContent = 'nothing yet - every eval you make by hand is recorded, one replay a night';
+    return;
+  }
+  for (const r of list) {
+    const row = document.createElement('div');
+    row.className = 'file-row';
+    row.dataset.replay = r.id;
+    row.title = 'open this replay';
+    const main = document.createElement('span');
+    main.className = 'file-main';
+    const label = document.createElement('span');
+    label.className = 'file-label';
+    label.textContent = replayWhen(r.started);
+    const bits = [];
+    if (r.live) bits.push('recording');
+    bits.push(replayLength(r.ended - r.started), `${r.count} eval${r.count === 1 ? '' : 's'}`);
+    if (r.decks.length > 1) bits.push('decks A + B');
+    if (r.names.length) bits.push(r.names.slice(0, 3).join(', ') + (r.names.length > 3 ? ', …' : ''));
+    const meta = document.createElement('span');
+    meta.className = 'file-meta';
+    meta.textContent = bits.join(' · ');
+    main.append(label, meta);
+    row.appendChild(main);
+    const buttons = [
+      [r.kept ? '★' : '☆', r.kept ? 'kept - click to let it expire like the rest' : 'keep this replay - kept replays are never deleted on their own', () => setReplayKept(r.id, !r.kept)],
+      ['✕', 'delete this replay', () => deleteReplay(r)],
+    ];
+    for (const [glyph, title, onClick] of buttons) {
+      const btn = document.createElement('button');
+      btn.className = 'small';
+      btn.textContent = glyph;
+      btn.title = title;
+      btn.onclick = (e) => {
+        e.stopPropagation();
+        onClick();
+      };
+      row.appendChild(btn);
+    }
+    row.onclick = () => openReplay(r.id);
+    replayListEl.appendChild(row);
+  }
+  markCurrentReplayRow();
+}
+
+function markCurrentReplayRow() {
+  for (const row of replayListEl.querySelectorAll('.file-row')) {
+    row.classList.toggle('current', !!replayView && row.dataset.replay === replayView.id);
+  }
+}
+
+async function setReplayKept(id, kept) {
+  try {
+    await api('POST', '/api/replays/keep', { id, kept });
+    if (replayView?.id === id) {
+      replayView.kept = kept;
+      replayShowKept();
+    }
+    refreshReplays();
+  } catch (e) {
+    logLine(e.message ?? String(e), true);
+  }
+}
+
+async function deleteReplay(r) {
+  if (!confirm(`delete the replay of ${replayWhen(r.started)}?${r.kept ? '\n\nit is starred.' : ''}`)) return;
+  try {
+    if (replayView?.id === r.id) closeReplay();
+    await api('POST', '/api/replays/delete', { id: r.id });
+    logLine(`deleted the replay of ${replayWhen(r.started)}`);
+    refreshReplays();
+  } catch (e) {
+    logLine(e.message ?? String(e), true);
+  }
+}
+
+// --- the bar ---
+
+async function openReplay(id) {
+  try {
+    const { entries, kept } = await api('GET', `/api/replays/load?id=${encodeURIComponent(id)}`);
+    if (!entries?.length) return;
+    if (replayView) closeReplay();
+    // A night that used both decks needs both decks. Opening DJ mode asks about the current song
+    // first, and can be cancelled - in which case there is nowhere to put deck B's half.
+    if (entries.some((e) => e.deck === 'b') && !mixModeOn) {
+      await openMixMode();
+      if (!mixModeOn) return;
+    }
+    // Your session file gets what you had before anything is written over it.
+    await settlePluginState();
+    await saveWip();
+    replayView = {
+      id,
+      kept: !!kept,
+      entries,
+      decks: [...new Set(entries.map((e) => e.deck))].sort(),
+      t: entries[0].at,
+      i: 0,
+      speed: Number(replaySpeedSel.value) || 1,
+      played: false,
+      running: null,
+      raf: 0,
+      stash: { a: cm.getValue(), b: deckBCM ? deckBCM.getValue() : null },
+    };
+    replayHoldsBuffers = true;
+    replayTitleEl.textContent = `replay · ${replayWhen(entries[0].at)}`;
+    replayBar.classList.remove('hidden');
+    replayShowKept();
+    replayShow(entries[0].at);
+    djRegionsReflow(); // the editors lost the bar's height
+    markCurrentReplayRow();
+    replayTimeline.focus();
+  } catch (e) {
+    logLine(e.message ?? String(e), true);
+  }
+}
+
+function closeReplay() {
+  const v = replayView;
+  if (!v) return;
+  replayPause();
+  replayView = null;
+  if (!v.played) {
+    // Only looked at: the decks go back to exactly what they held, and the autosave - which held
+    // off the whole time - finds nothing new to write.
+    if (cm.getValue() !== v.stash.a) setBufferQuietly(v.stash.a);
+    if (deckBCM && v.stash.b != null && deckBCM.getValue() !== v.stash.b) replayWrite('b', v.stash.b);
+  }
+  replayHoldsBuffers = false;
+  replayBar.classList.add('hidden');
+  djRegionsReflow();
+  markCurrentReplayRow();
+}
+
+function replayShowKept() {
+  const kept = !!replayView?.kept;
+  replayKeepBtn.textContent = kept ? '★' : '☆';
+  replayKeepBtn.classList.toggle('on', kept);
+  replayKeepBtn.title = kept ? 'kept - click to let it expire like the rest' : 'keep this replay - kept replays are never deleted on their own';
+}
+
+/** Puts `code` in a deck's editor without evaluating it. */
+function replayWrite(deck, code) {
+  if (deck === 'a') {
+    if (cm.getValue() !== code) setBufferQuietly(code);
+    return;
+  }
+  if (!deckBCM || deckBCM.getValue() === code) return;
+  deckBCM.setOption('readOnly', false);
+  deckBCM.setValue(code);
+  forgetExpandedFolds(deckBCM);
+  refoldAll(deckBCM);
+}
+
+const replayDeckPlaying = (deck) => (mixModeOn ? !!deckPlayingNow[deck] : playing);
+const replayEval = (deck, start) => (deck === 'b' ? evalDeckB(start) : evaluate(start));
+
+/** Moves the cursor to `t` and puts each deck's code of that moment on it. Evaluates nothing. */
+function replayShow(t) {
+  const v = replayView;
+  const first = v.entries[0].at;
+  const last = v.entries[v.entries.length - 1].at;
+  v.t = Math.max(first, Math.min(last, t));
+  v.i = Math.max(0, RL.replayIndexAt(v.entries, v.t));
+  const held = RL.replayDecksAt(v.entries, v.i);
+  for (const d of v.decks) if (held[d]) replayWrite(d, held[d].code);
+  replayDraw();
+}
+
+// The first play makes the night's code yours (see the header): a fresh session under work in
+// progress, and no saved name on either deck. The flush inside rollWipSession is still held off
+// here, so what goes to the old session is nothing - it already has your work (see openReplay).
+async function replayTakeOver() {
+  const v = replayView;
+  if (!v || v.played) return;
+  v.played = true;
+  await rollWipSession();
+  replayHoldsBuffers = false;
+  setCurrentSavedName(null);
+  deckBFileName = null;
+  saveWip();
+}
+
+/** Evaluates the moment under the cursor on every deck the night has code for by then. */
+function replayPlayMoment() {
+  const v = replayView;
+  const held = RL.replayDecksAt(v.entries, v.i);
+  for (const d of v.decks) {
+    if (!held[d]) continue;
+    if (mixModeOn && songPanes[d].song) {
+      if (deckPlayingNow[d]) {
+        logLine(`replay: deck ${d.toUpperCase()} is playing a track - its half of the night waits until you stop it`, true);
+        continue;
+      }
+      songPanes[d].clear();
+      api('POST', '/api/mix/clear', { deck: d }).catch(() => {});
+    }
+    replayWrite(d, held[d].code);
+    replayEval(d, !replayDeckPlaying(d));
+  }
+}
+
+async function replayPlay() {
+  const v = replayView;
+  if (!v) return;
+  if (v.running) return replayPause();
+  if (v.i >= v.entries.length - 1 && v.t >= v.entries[v.entries.length - 1].at && v.entries.length > 1) {
+    replayShow(v.entries[0].at); // at the end: play means from the top
+  }
+  await replayTakeOver();
+  replayPlayMoment();
+  v.running = { wall: performance.now(), t: v.t };
+  replayPlayBtn.textContent = '❚❚ pause';
+  cancelAnimationFrame(v.raf);
+  v.raf = requestAnimationFrame(replayTick);
+}
+
+function replayPause() {
+  const v = replayView;
+  if (!v?.running) return;
+  v.t = replayNow();
+  v.running = null;
+  cancelAnimationFrame(v.raf);
+  replayPlayBtn.innerHTML = '&#9654; play';
+  replayDraw();
+}
+
+function replayNow() {
+  const v = replayView;
+  return v.running ? v.running.t + (performance.now() - v.running.wall) * v.speed : v.t;
+}
+
+// The night's clock running: every entry the cursor passes is played. At high speed several can
+// pass in one frame - only the last of them per deck is evaluated, since the ones before it would
+// be replaced before they were heard.
+function replayTick() {
+  const v = replayView;
+  if (!v?.running) return;
+  const t = replayNow();
+  const last = v.entries[v.entries.length - 1].at;
+  const due = {};
+  while (v.i + 1 < v.entries.length && v.entries[v.i + 1].at <= t) {
+    v.i += 1;
+    const e = v.entries[v.i];
+    due[e.deck] = { code: e.code, start: e.start || due[e.deck]?.start };
+  }
+  for (const [d, e] of Object.entries(due)) {
+    replayWrite(d, e.code);
+    replayEval(d, e.start);
+  }
+  v.t = Math.min(t, last);
+  replayDraw();
+  if (t >= last) {
+    replayPause();
+    logLine('replay: that was the last eval of the night');
+    return;
+  }
+  v.raf = requestAnimationFrame(replayTick);
+}
+
+/** Jumps the cursor; a running replay plays the moment it lands on and runs on from there. */
+function replayGo(t) {
+  const v = replayView;
+  if (!v) return;
+  const wasRunning = !!v.running;
+  if (wasRunning) replayPause();
+  replayShow(t);
+  if (wasRunning) {
+    replayPlayMoment();
+    v.running = { wall: performance.now(), t: v.t };
+    replayPlayBtn.textContent = '❚❚ pause';
+    v.raf = requestAnimationFrame(replayTick);
+  }
+}
+
+function replayStep(dir) {
+  const v = replayView;
+  if (!v) return;
+  // Back from between two entries lands on the one the cursor is past, not the one before it.
+  const onEntry = v.t === v.entries[v.i].at;
+  const k = dir < 0 ? (onEntry ? v.i - 1 : v.i) : v.i + 1;
+  const e = v.entries[Math.max(0, Math.min(v.entries.length - 1, k))];
+  replayGo(e.at);
+}
+
+// One lane per deck the night used, a tick per eval (play presses in the accent), the evals
+// already behind the cursor in full color and the ones ahead of it dim.
+function replayDraw() {
+  const v = replayView;
+  if (!v) return;
+  const c = replayTimeline;
+  const dpr = window.devicePixelRatio || 1;
+  const w = c.clientWidth;
+  const h = c.clientHeight;
+  if (!w || !h) return;
+  if (c.width !== Math.round(w * dpr) || c.height !== Math.round(h * dpr)) {
+    c.width = Math.round(w * dpr);
+    c.height = Math.round(h * dpr);
+  }
+  const ctx = c.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  const { accent, dim, text } = songThemeColors();
+  const x = replayX(w);
+  const laneH = (h - 4) / v.decks.length;
+  v.entries.forEach((e, k) => {
+    const lane = v.decks.indexOf(e.deck);
+    ctx.fillStyle = e.start ? accent : (k <= v.i ? text : dim);
+    ctx.globalAlpha = k <= v.i ? 1 : 0.5;
+    ctx.fillRect(Math.round(x(e.at)), 2 + lane * laneH + 2, 1, laneH - 4);
+  });
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = accent;
+  ctx.fillRect(Math.round(x(v.t)) - 1, 0, 2, h);
+  const first = v.entries[0].at;
+  replayTimeEl.textContent = `${replayClockOf(v.t)} · ${replayElapsed(v.t - first)} · ${v.i + 1}/${v.entries.length}`;
+}
+
+/** Night-ms -> x for a timeline `w` wide (a night under a minute is drawn a minute long). */
+function replayX(w) {
+  const first = replayView.entries[0].at;
+  const span = Math.max(60000, replayView.entries[replayView.entries.length - 1].at - first);
+  return (t) => 4 + ((t - first) / span) * (w - 8);
+}
+function replayTAt(px) {
+  const first = replayView.entries[0].at;
+  const span = Math.max(60000, replayView.entries[replayView.entries.length - 1].at - first);
+  return first + ((px - 4) / Math.max(1, replayTimeline.clientWidth - 8)) * span;
+}
+
+// Scrubbing: the code follows the pointer and nothing is evaluated until it lets go - then a
+// running replay plays where it landed.
+replayTimeline.addEventListener('pointerdown', (e) => {
+  if (!replayView || e.button !== 0) return;
+  e.preventDefault();
+  replayTimeline.focus();
+  replayTimeline.setPointerCapture(e.pointerId);
+  const wasRunning = !!replayView.running;
+  if (wasRunning) replayPause();
+  const at = (ev) => replayTAt(ev.clientX - replayTimeline.getBoundingClientRect().left);
+  replayShow(at(e));
+  const move = (ev) => replayShow(at(ev));
+  const up = (ev) => {
+    replayTimeline.removeEventListener('pointermove', move);
+    replayTimeline.removeEventListener('pointerup', up);
+    replayTimeline.removeEventListener('pointercancel', up);
+    if (wasRunning && replayView) replayPlay(); // runs on from where it was let go
+  };
+  replayTimeline.addEventListener('pointermove', move);
+  replayTimeline.addEventListener('pointerup', up);
+  replayTimeline.addEventListener('pointercancel', up);
+});
+// Where the pointer is, in the night's own clock.
+replayTimeline.addEventListener('pointermove', (e) => {
+  if (!replayView || e.buttons) return;
+  const t = replayTAt(e.clientX - replayTimeline.getBoundingClientRect().left);
+  const first = replayView.entries[0].at;
+  replayTimeline.title = `${replayClockOf(t)} (${replayElapsed(t - first)} in)${replayView.decks.length > 1 ? ' - deck A above, deck B below' : ''}`;
+});
+replayTimeline.addEventListener('keydown', (e) => {
+  if (!replayView) return;
+  if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+    e.preventDefault();
+    replayStep(e.key === 'ArrowLeft' ? -1 : 1);
+  } else if (e.key === ' ') {
+    e.preventDefault();
+    replayPlay();
+  } else if (e.key === 'Escape') {
+    e.preventDefault();
+    closeReplay();
+  }
+});
+replaySpeedSel.addEventListener('change', () => {
+  const v = replayView;
+  const speed = Number(replaySpeedSel.value) || 1;
+  if (!v) return;
+  if (v.running) v.running = { wall: performance.now(), t: replayNow() }; // rebased at the old speed
+  v.speed = speed;
+});
+replayPlayBtn.addEventListener('click', () => replayPlay());
+document.getElementById('replayPrev').addEventListener('click', () => replayStep(-1));
+document.getElementById('replayNext').addEventListener('click', () => replayStep(1));
+document.getElementById('replayClose').addEventListener('click', () => closeReplay());
+replayKeepBtn.addEventListener('click', () => replayView && setReplayKept(replayView.id, !replayView.kept));
+window.addEventListener('resize', () => replayDraw());
+
+// How long replays nobody starred are kept: 30 days unless changed. Priced before it deletes,
+// like the sessions' setting above it.
+const replayRetentionSelect = document.getElementById('replayRetentionSelect');
+const replayRetentionNote = document.getElementById('replayRetentionNote');
+const replayCost = (n, bytes) => `${n} replay${n === 1 ? '' : 's'} (${(bytes / 1048576).toFixed(1)}mb)`;
+
+async function refreshReplayRetention() {
+  try {
+    const { days, preview } = await api('GET', '/api/replays/retention');
+    replayRetentionSelect.value = String(days);
+    replayRetentionNote.textContent = days
+      ? `replays without a star are deleted ${days} day${days === 1 ? '' : 's'} after their last eval${preview.replays ? `; ${replayCost(preview.replays, preview.bytes)} past that now` : ''}`
+      : 'every replay is kept until you delete it in the files tab';
+  } catch (e) {
+    logLine(e.message ?? String(e), true);
+  }
+}
+
+replayRetentionSelect.addEventListener('change', async () => {
+  const days = Number(replayRetentionSelect.value);
+  try {
+    if (days > 0) {
+      const { preview } = await api('GET', `/api/replays/retention?days=${days}`);
+      const ok = preview.replays === 0
+        || confirm(`delete ${replayCost(preview.replays, preview.bytes)} older than ${days} day${days === 1 ? '' : 's'}?\n\nstarred replays are not touched. this keeps applying as replays age.`);
+      if (!ok) return refreshReplayRetention();
+    }
+    const res = await api('POST', '/api/replays/retention', { days });
+    logLine(days
+      ? `keeping replays for ${days} day${days === 1 ? '' : 's'} - deleted ${res.deleted}`
+      : 'keeping every replay until you delete it');
+    refreshReplays();
+    refreshReplayRetention();
+  } catch (e) {
+    logLine(e.message ?? String(e), true);
+    refreshReplayRetention();
+  }
+});
 
 // ---------------------------------------------------------------------------------------------
 // The arrangement painter - ctrl+A.

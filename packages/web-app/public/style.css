@@ -24,35 +24,40 @@ body {
 .layout {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
-  /* header / main / the mixer's drag handle / the mix strip / console. The two sized rows are
-     properties rather than values because DJ mode moves the springy one between them as its
-     regions fold (see djApplyRegionSizes); outside DJ mode they hold these defaults. */
-  grid-template-rows: auto var(--dj-row-main) auto var(--dj-row-strip) auto;
+  /* header / an open replay / main / the mixer's drag handle / the mix strip / console. The two
+     sized rows are properties rather than values because DJ mode moves the springy one between
+     them as its regions fold (see djApplyRegionSizes); outside DJ mode they hold these defaults.
+     The replay's row is empty (and so no height) while no replay is open. */
+  grid-template-rows: auto auto var(--dj-row-main) auto var(--dj-row-strip) auto;
   height: 100vh;
 }
 .layout > header {
   grid-column: 1 / -1;
 }
+#replayBar {
+  grid-column: 1 / -1;
+  grid-row: 2;
+}
 main {
   grid-column: 1;
-  grid-row: 2;
+  grid-row: 3;
 }
 aside {
   grid-column: 2;
-  grid-row: 2 / span 3; /* down past the handle and mix-strip rows */
+  grid-row: 3 / span 3; /* down past the handle and mix-strip rows */
 }
 #djStripResize {
   grid-column: 1;
-  grid-row: 3;
+  grid-row: 4;
 }
 #mixStrip,
 #djStripRail {
   grid-column: 1;
-  grid-row: 4;
+  grid-row: 5;
 }
 #console {
   grid-column: 1 / -1;
-  grid-row: 5;
+  grid-row: 6;
 }
 
 /* ------------------------------------------------------------------ header */
@@ -749,7 +754,13 @@ aside h2 {
   flex: 2;
 }
 
-#wipHeading {
+/* replays are a night each - a handful at most once the retention has done its work */
+#replayList {
+  flex: 1;
+}
+
+#wipHeading,
+#replayHeading {
   margin-top: 10px;
 }
 
@@ -6914,7 +6925,8 @@ html[data-embed] #console,
 html[data-embed] #mixStrip,
 html[data-embed] #djStripRail,
 html[data-embed] #djStripResize,
-html[data-embed] #deckAHead {
+html[data-embed] #deckAHead,
+html[data-embed] #replayBar {
   display: none !important;
 }
 html[data-embed] .layout {
@@ -6933,4 +6945,64 @@ html[data-embed] .cm-s-poptart.CodeMirror {
 }
 html[data-embed] .cm-s-poptart .CodeMirror-gutters {
   background: var(--bg-raised);
+}
+
+/* ---------------------------------------------------------------- replays
+   The bar an open replay stands in, across the page under the header: the deck head's look, so it
+   reads as transport rather than as a panel. Everything in it holds its width - the time and the
+   play/pause button change under the hand and must not move the timeline. */
+#replayBar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-panel);
+  min-width: 0;
+}
+#replayBar.hidden {
+  display: none;
+}
+.replay-title {
+  flex: none;
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+#replayBar .small:has(.song-ctl-icon) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding-left: 7px;
+  padding-right: 7px;
+}
+.replay-play {
+  flex: none;
+  min-width: 64px;
+}
+#replayTimeline {
+  flex: 1;
+  min-width: 0;
+  height: 26px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: var(--bg);
+  cursor: pointer;
+  touch-action: none;
+}
+#replayTimeline:focus-visible {
+  outline: 1px solid var(--accent);
+}
+.replay-time {
+  flex: none;
+  min-width: 128px;
+  text-align: right;
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 10px;
+  color: var(--text-dim);
+}
+#replayKeep.on {
+  color: var(--accent);
+  border-color: var(--accent);
 }

@@ -524,6 +524,7 @@ export function createHost({
     return recorder;
   };
 
+  let replaysExpired = false; // see the replay routes
   const routes = {
     // ---- what the editor asks before anything else -------------------------------------------
 
@@ -1383,6 +1384,33 @@ export function createHost({
     'POST /api/patterns/wip/delete': async (body) => {
       await storage.deleteWip(body.id);
       return { ok: true };
+    },
+
+    // Replays (see storage.mjs). Old ones without a star expire on the first eval of a page load:
+    // this build has no timer of its own to do it on.
+    'POST /api/replays/record': async (body) => {
+      const { code } = await storage.dehydrateOnLoad(body.code ?? '');
+      const res = await storage.recordReplay({ deck: body.deck, code, start: body.start, name: body.name });
+      if (!replaysExpired) {
+        replaysExpired = true;
+        await storage.pruneReplays(await storage.replayDays());
+      }
+      return res;
+    },
+    'GET /api/replays': async () => ({ replays: await storage.listReplays(), days: await storage.replayDays() }),
+    'GET /api/replays/load': async (_body, query) => storage.loadReplay(query.get('id')),
+    'POST /api/replays/keep': async (body) => storage.setReplayKept(body.id, !!body.kept),
+    'POST /api/replays/delete': async (body) => storage.deleteReplay(body.id),
+    'GET /api/replays/retention': async (_body, query) => {
+      const days = await storage.replayDays();
+      const asked = query.get('days') == null ? days : Number(query.get('days'));
+      const { ids, bytes } = await storage.replaysOlderThan(asked);
+      return { days, preview: { days: asked, replays: ids.length, bytes } };
+    },
+    'POST /api/replays/retention': async (body) => {
+      const days = Math.max(0, Math.min(3650, Math.round(Number(body?.days ?? 0)) || 0));
+      const { deleted, freed } = await storage.setReplayDays(days);
+      return { days, deleted, freed };
     },
 
     'POST /api/snapshot': async (body) => ({ id: await storage.putSnapshot(body.code ?? '') }),

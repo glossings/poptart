@@ -5388,6 +5388,11 @@ const {
 } = require('./pattern-files');
 const { matchesQuery, parseMeta } = require('./public/pattern-meta.js');
 const setLog = require('./set-log');
+const replayLog = require('./public/replay-log.js');
+const { createReplayStore } = require('./replays');
+
+// The night as it was played, one by-hand eval at a time (see replays.js).
+const replays = createReplayStore({ referencedIds: (text) => blobs.referencedIds(text) });
 
 // One import call's ceiling. A folder walk can turn up a whole archive, and the collection is
 // written as one JSON document - past this, the honest answer is "a folder at a time".
@@ -7004,8 +7009,9 @@ function schedulePrune() {
     // after the sweep read it would leave its states behind until the next round, which is harmless
     // but pointless.
     Promise.resolve(expireWipSessions())
+      .then(() => expireReplays())
       .then(() => pruneSnapshots())
-      .then(() => blobs.sweepBlobs({ scanDirs: [WIP_DIR, SNAPSHOT_DIR, PREBAKE_DIR, snippets.SNIPPETS_DIR], alsoKeep: [...liveStateIds.a, ...liveStateIds.b, ...djFxBlobIds()] }))
+      .then(() => sweepStates())
       .then(({ deleted, freed }) => {
         if (deleted) console.log(`[poptart] released ${deleted} captured plugin state(s), ${(freed / 1048576).toFixed(1)}MB`);
       })
@@ -7018,6 +7024,25 @@ function schedulePrune() {
 // a state stays safe from the moment it is written into the code, whether or not it has reached a
 // file yet.
 const liveStateIds = { a: new Set(), b: new Set() }; // per deck - both decks' states are in use
+
+// Mark and sweep the captured states: everything a session, a snapshot, the prebake, a snippet or
+// a replay names (a replay through its small `.states` sidecar - see replays.js), and whatever
+// the decks hold right now, is kept.
+function sweepStates() {
+  return blobs.sweepBlobs({
+    scanDirs: [WIP_DIR, SNAPSHOT_DIR, PREBAKE_DIR, snippets.SNIPPETS_DIR, replays.dir],
+    alsoKeep: [...liveStateIds.a, ...liveStateIds.b, ...djFxBlobIds()],
+  });
+}
+
+// Replays nobody kept go after the retention setting's days - 30 unless changed, 0 for never.
+const replayKeepDays = () => Number(settings.replayRetentionDays ?? replayLog.REPLAY_KEEP_DAYS);
+function expireReplays() {
+  const days = replayKeepDays();
+  if (!(days > 0)) return;
+  const { deleted, freed } = replays.prune(days);
+  if (deleted) console.log(`[poptart] expired ${deleted} replay(s) older than ${days} day(s), ${(freed / 1048576).toFixed(1)}MB`);
+}
 
 // The retention policy, if the settings tab has been asked for one: session files older than
 // `wipRetentionMonths` go, which is also what lets the state store shrink (a session pins the
@@ -8875,6 +8900,48 @@ const routes = {
     return { status: 200, body: { saved: true } };
   },
 
+  // --- replays (see replays.js and public/replay-log.js) ---
+
+  // Body: { deck, code, start, name } - one by-hand eval that landed. Handles, like the autosave:
+  // a replay is machine-local, and a buffer holding a state in full is written as its handle.
+  'POST /api/replays/record': async (body) => {
+    const { code } = await blobs.dehydrate(String(body.code ?? ''));
+    const res = await replays.record({ deck: body.deck, code, start: body.start, name: body.name });
+    schedulePrune(); // the first eval of a day is also when last month's replays expire
+    return { status: 200, body: res };
+  },
+
+  'GET /api/replays': async () => ({ status: 200, body: { replays: await replays.list(), days: replayKeepDays() } }),
+
+  // Query: { id } -> { id, kept, entries }.
+  'GET /api/replays/load': async (q) => ({ status: 200, body: await replays.load(q.id) }),
+
+  // Body: { id, kept }.
+  'POST /api/replays/keep': async (body) => ({ status: 200, body: replays.setKept(body.id, !!body.kept) }),
+
+  // Body: { id }.
+  'POST /api/replays/delete': async (body) => {
+    const res = replays.remove(body.id);
+    return { status: 200, body: res };
+  },
+
+  // How long unkept replays last, priced like the session retention: GET says what a policy of
+  // `days` would delete right now, POST applies it at once.
+  'GET /api/replays/retention': async (q) => {
+    const days = replayKeepDays();
+    const asked = q?.days == null ? days : Number(q.days);
+    const { ids, bytes } = replays.olderThan(asked);
+    return { status: 200, body: { days, preview: { days: asked, replays: ids.length, bytes } } };
+  },
+  'POST /api/replays/retention': async (body) => {
+    const days = Math.max(0, Math.min(3650, Math.round(Number(body?.days ?? 0)) || 0));
+    settings.replayRetentionDays = days;
+    saveSettings();
+    const { deleted, freed } = days > 0 ? replays.prune(days) : { deleted: 0, freed: 0 };
+    const swept = await sweepStates();
+    return { status: 200, body: { days, deleted, freed: freed + swept.freed } };
+  },
+
   // Code snapshots - what the editor's URL points at (see snapshots.js). The buffer used to be
   // base64'd into the hash itself, which put a megabyte-URL pushState in front of every eval.
   // Body: { code } -> { id }.
@@ -10008,7 +10075,7 @@ const routes = {
     const { deleted, freed } = months > 0 ? pruneWipSessions(months) : { deleted: 0, freed: 0 };
     if (months > 0) setLog.pruneSetLogs(months); // set tracklists expire with the sessions
     // The states those sessions were holding alive can go with them, if nothing else names them.
-    const swept = await blobs.sweepBlobs({ scanDirs: [WIP_DIR, SNAPSHOT_DIR, PREBAKE_DIR, snippets.SNIPPETS_DIR], alsoKeep: [...liveStateIds.a, ...liveStateIds.b, ...djFxBlobIds()] });
+    const swept = await sweepStates();
     return { status: 200, body: { months, deleted, freed: freed + swept.freed } };
   },
 
