@@ -462,6 +462,25 @@ export function createEvaluator({ patternCore, engine, transport, prebakeDefs = 
     }
     const gridFrom = Math.floor(transport.cycleAt(transport.getTime()));
 
+    // What a sampler track plays, in the desktop's shape (see trackSampleInfo in server.js): the
+    // first file it sounds and its length after .fit(). The length is known once the file has
+    // decoded - which a pack played for the first time has not, on its first eval.
+    const trackSampleInfo = (sig) => {
+      const sources = patternCore.sampleSourcesOf(sig, { cycles: 4 });
+      if (!sources.length) return null;
+      const { ref, index, fit } = sources[0];
+      const out = { ref, index, fit, others: sources.length - 1, file: null, path: null, count: 0, seconds: null, cycles: null };
+      let got = null;
+      if (ref.startsWith('rec:')) {
+        const held = engine.samples?.named?.('rec', ref.slice(4));
+        got = held ? { file: `${ref.slice(4)}.wav`, index: 0, count: 1, seconds: (held.buffer ?? held)?.duration ?? null } : null;
+      } else {
+        got = engine.samples?.describe?.(ref.startsWith('sp:') ? ref.slice(3) : ref, index) ?? null;
+      }
+      if (!got?.file) return { ...out, count: got?.count ?? 0 };
+      return { ...out, ...got, cycles: patternCore.fittedCycles(got.seconds, transport.cps > 0 ? 1 / transport.cps : 0, fit) };
+    };
+
     // Every track, playing or not, in the shape the editor's track list reads: the muted ones
     // are drawn with a badge rather than left out, and the chain is `instrument` plus `fxChain`
     // because that is what it concatenates.
@@ -479,6 +498,7 @@ export function createEvaluator({ patternCore, engine, transport, prebakeDefs = 
         end: b.end,
         instrument: b.sig.instrument ?? null,
         fxChain: [...(b.sig.fxChain ?? [])],
+        sample: b.sig.sampler ? trackSampleInfo(b.sig) : null,
         paramNames: paramLabels(b.sig),
         grid: playing ? highlightGrid(patternCore, b.sig, b.start, b.end, gridFrom, HL_WINDOW, b.trackClock ?? arrangeClock) : null,
       };

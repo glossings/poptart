@@ -5254,6 +5254,62 @@ const HL_WINDOW = 32; // cycles of grid shipped per track (initial window and ea
 
 const hlTracks = new Map(); // label -> { sig, start, end, clock } for the last eval's active tracks
 
+// The files a sampler source ref names, in index order - the engine's spelling (a bare name is a
+// folder pack, "sp:" a named one, "file:" one path under the samples root, "rec:" a bounce).
+// Deliberately mirrors OscEngine's _resolveSource: what is shown must be what is sounding.
+function sampleRefFiles(ref) {
+  const { listPackFiles, resolveSampleFile, expandPackEntries } = require('@poptart/osc-engine/samples');
+  const { resolveRecording } = require('@poptart/osc-engine/recordings');
+  if (ref.startsWith('sp:')) return expandPackEntries(patternCore?.lookupPack(ref.slice(3))?.files ?? []);
+  if (ref.startsWith('file:')) return [resolveSampleFile(ref.slice(5))].filter(Boolean);
+  if (ref.startsWith('rec:')) return [resolveRecording(ref.slice(4))].filter(Boolean);
+  return listPackFiles(ref);
+}
+
+// Header reads, by path, kept while the file is unchanged - a track list redrawn on every eval
+// asks for the same few files over and over.
+const audioHeaderCache = new Map(); // path -> { mtimeMs, size, info }
+function audioHeaderOf(file) {
+  let stat;
+  try {
+    stat = fs.statSync(file);
+  } catch {
+    return null;
+  }
+  const held = audioHeaderCache.get(file);
+  if (held && held.mtimeMs === stat.mtimeMs && held.size === stat.size) return held.info;
+  const info = require('@poptart/osc-engine/audio-header').readAudioHeader(file);
+  if (audioHeaderCache.size > 256) audioHeaderCache.clear();
+  audioHeaderCache.set(file, { mtimeMs: stat.mtimeMs, size: stat.size, info });
+  return info;
+}
+
+/**
+ * What a sampler track plays, for the track list (where a synth track shows its instrument): the
+ * first file it sounds, how long that is - after .fit() when it has one - and how many other
+ * sources it plays besides. Null for a track that is not a sampler. The length comes from the
+ * file's header, never from decoding it, so naming the sample costs the eval next to nothing.
+ */
+function trackSampleInfo(sig, cps) {
+  const sources = patternCore.sampleSourcesOf(sig, { cycles: 4 });
+  if (!sources.length) return null;
+  const { ref, index, fit } = sources[0];
+  const out = { ref, index, fit, others: sources.length - 1, file: null, path: null, count: 0, seconds: null, cycles: null };
+  const files = sampleRefFiles(ref);
+  if (!files?.length) return out;
+  const i = ((index % files.length) + files.length) % files.length; // wrapped, as the sampler wraps it
+  const seconds = audioHeaderOf(files[i])?.duration ?? null;
+  return {
+    ...out,
+    index: i,
+    file: path.basename(files[i]),
+    path: files[i],
+    count: files.length,
+    seconds,
+    cycles: patternCore.fittedCycles(seconds, cps > 0 ? 1 / cps : 0, fit),
+  };
+}
+
 // The sounding steps of a track for cycles [from, from+count), each as { start, end, cont?, locs }.
 // Every pattern signal on the track contributes (see patternSigs), so a `.param("x","0 1")` /
 // `.gain("1 0.5")` / `.speed("<1 2>")` modulation highlights just like the note pattern. `locs` are
@@ -7304,15 +7360,10 @@ const routes = {
   // a folder whose contents the editor has never seen. Deliberately mirrors OscEngine's
   // _resolveSource - the panel must open the file that is actually sounding, not a near miss.
   'GET /api/sampleFile': async (query) => {
-    const { listPackFiles, resolveSampleFile, expandPackEntries, sampleKey } = require('@poptart/osc-engine/samples');
-    const { resolveRecording } = require('@poptart/osc-engine/recordings');
+    const { sampleKey } = require('@poptart/osc-engine/samples');
     const ref = String(query.ref ?? '').trim();
     if (!ref) throw new Error('sampleFile needs a source ref');
-    let files = null;
-    if (ref.startsWith('sp:')) files = expandPackEntries(patternCore?.lookupPack(ref.slice(3))?.files ?? []);
-    else if (ref.startsWith('file:')) files = [resolveSampleFile(ref.slice(5))].filter(Boolean);
-    else if (ref.startsWith('rec:')) files = [resolveRecording(ref.slice(4))].filter(Boolean);
-    else files = listPackFiles(ref);
+    const files = sampleRefFiles(ref);
     if (!files?.length) return { status: 200, body: { ref, file: null, count: 0 } };
     const n = Number(query.i);
     const i = ((Math.round(Number.isFinite(n) ? n : 0) % files.length) + files.length) % files.length;
@@ -8099,6 +8150,7 @@ const routes = {
       end: b.end,
       instrument: b.sig.instrument,
       fxChain: b.sig.fxChain,
+      sample: b.sig.sampler ? trackSampleInfo(b.sig, clockOf(deck).cps) : null,
       paramNames: paramLabels(b.sig),
       grid: active.includes(b) ? highlightGrid(b.sig, b.start, b.end, gridFrom, HL_WINDOW, b.trackClock ?? arrangeClocks[deck]) : null,
     }));

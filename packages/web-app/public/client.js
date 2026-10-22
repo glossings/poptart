@@ -19846,7 +19846,8 @@ function renderTracks(result) {
       const row = document.createElement('div');
       row.className = 'chain-row';
       const name = document.createElement('span');
-      name.textContent = `${slot}  ${plugin ?? '(no instrument)'}`;
+      name.textContent = `${slot}  ${plugin ?? (t.sample ? sampleRowName(t.sample) : '(no instrument)')}`;
+      if (!plugin && t.sample) name.title = sampleRowTitle(t.sample);
       row.appendChild(name);
       if (plugin) {
         const uiBtn = document.createElement('button');
@@ -19858,6 +19859,14 @@ function renderTracks(result) {
       }
       trackInfo.appendChild(row);
     });
+    // A sampler has no instrument to name, so slot 0 names the sample, and this says how long it
+    // is (after .fit() when there is one) and what key its file name gives.
+    if (!t.instrument && t.sample) {
+      const row = document.createElement('div');
+      row.className = 'chain-params';
+      row.textContent = sampleRowFacts(t.sample);
+      trackInfo.appendChild(row);
+    }
     if (t.paramNames.length) {
       const row = document.createElement('div');
       row.className = 'chain-params';
@@ -19867,6 +19876,40 @@ function renderTracks(result) {
   }
   // The marks in the code were just re-anchored by the eval that got us here - draw them again.
   paintHeldPresets();
+}
+
+// The track list's sample row (see trackSampleInfo in server.js): the file, or the source as
+// written when there is no file to name.
+// A pack is named with its index, as `s("psyhyp:9")` names it; se()/sr() name one file already.
+const sampleSourceText = (sample) => (/^(file|rec):/.test(sample.ref) ? sample.ref : `${sample.ref}:${sample.index}`);
+
+function sampleRowName(sample) {
+  const name = sample.file ?? `${sampleSourceText(sample)} (not found)`;
+  return sample.others ? `${name} +${sample.others} more` : name;
+}
+
+function sampleRowTitle(sample) {
+  const lines = [sampleSourceText(sample)];
+  if (sample.path) lines.push(sample.path);
+  if (sample.seconds) lines.push(`${sample.seconds.toFixed(2)} s at its own speed`);
+  if (sample.others) lines.push(`the track plays ${sample.others} other source${sample.others === 1 ? '' : 's'} as well - this is the first`);
+  return lines.join('\n');
+}
+
+/** A length in bars (cycles) as a musician says it: "4 bars", "1 bar", "1/8 bar", "2.6 bars". */
+function barsText(c) {
+  const near = (x, y) => Math.abs(x - y) < 0.02 * Math.max(1, y);
+  if (near(c, Math.round(c)) && Math.round(c) >= 1) return `${Math.round(c)} bar${Math.round(c) === 1 ? '' : 's'}`;
+  if (c < 1 && near(1 / c, Math.round(1 / c))) return `1/${Math.round(1 / c)} bar`; // what .fit() makes of a one-shot
+  return `${c < 1 ? c.toFixed(2) : c.toFixed(1)} bars`;
+}
+
+/** "4 bars, fitted · key A minor" - the length in bars (cycles), then the key from the file name. */
+function sampleRowFacts(sample) {
+  const c = sample.cycles;
+  const bars = !(c > 0) ? 'length unknown' : `${barsText(c)}${sample.fit != null ? ', fitted' : ''}`;
+  const key = sample.file ? globalThis.poptartSampleKey?.keyFromSampleName(sample.file) : null;
+  return `${bars} · key ${key ?? 'unknown'}`;
 }
 
 function badge(text, cls) {

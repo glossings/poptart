@@ -593,6 +593,20 @@ export function createSampleStore({
       const file = manifest?.files?.[index]?.file;
       return file ? `${pack}/${file}` : null;
     },
+    /**
+     * What a pack's index names, for the track list: { file, index, count, seconds }, `seconds`
+     * once the file is decoded and null until then. Read exactly as get() reads it, so the name
+     * shown is the file that plays - or none, where nothing would.
+     */
+    describe(pack, index) {
+      const via = viaDefinition(pack, index);
+      if (via) return this.describe(via.pack, via.index);
+      const files = manifestOf(pack)?.files ?? [];
+      const file = files[index];
+      if (!file) return { file: null, index, count: files.length, seconds: null };
+      const held = decoded.get(keyOf(pack, index));
+      return { file: file.file, index, count: files.length, seconds: held?.buffer?.duration ?? null };
+    },
     /** The names in an added pack, newest last, without their extension - sr("'s completion. */
     names(pack) {
       return (added.get(pack)?.files ?? []).map((f) => f.file.replace(/\.wav$/i, ''));
