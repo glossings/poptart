@@ -126,6 +126,8 @@ function quantizeToPcs(note, pcs) {
 // slightly-too-small push and a note that jumps to the front of the queue. In musical terms this is
 // enormous: a "rushed" feel is 5-30ms, and the budget is 100ms at any tempo.
 const MAX_EARLY_SHIFT_SEC = DEFAULT_LOOKAHEAD_SEC - POLL_INTERVAL_MS / 1000 - 0.02;
+// A chain where nothing is late: no slot's events move (see Scheduler#_compensation).
+const NO_COMPENSATION = Object.freeze([0]);
 // The last moment a message is worth timestamping for. Under it the audio thread would be handed a
 // time it has already passed, and would play the note immediately - and possibly after one written
 // behind it. Only an early shift can get near this; nothing else here schedules for "now".
@@ -1476,11 +1478,32 @@ export class Scheduler {
     withDefDeck(this.deck, () => this._tickOnDeck());
   }
 
+  // How early each slot's events go out, in seconds, by slot: the delay of that slot's device and
+  // of every one after it, since its output passes through all of them (the engines'
+  // slotLatencies). Index 0 is the whole chain - what a note is played early by. Plugin delay
+  // compensation, the way a DAW does it, except that the late track moves rather than the others:
+  // the rest of the song stays on the clock, so sync to other gear and to the decks is untouched.
+  //
+  // What moves: notes, samples and preset swaps. What does not: polled controls and modulators,
+  // which reach the device on time and so run ahead of the sound by the device's delay.
+  _compensation() {
+    if (typeof this.engine.slotLatencies !== 'function') return NO_COMPENSATION;
+    const per = this.engine.slotLatencies(this.trackId);
+    if (!Array.isArray(per) || !per.some((s) => s > 0)) return NO_COMPENSATION;
+    const out = new Array(per.length + 1).fill(0);
+    for (let i = per.length - 1; i >= 0; i--) out[i] = out[i + 1] + (Number(per[i]) > 0 ? Number(per[i]) : 0);
+    return out;
+  }
+
   _tickOnDeck() {
     if (!this.pattern) return;
     try {
       const nowSec = this.engine.getTime();
-      const targetCycle = this.transport.cycleAt(nowSec + DEFAULT_LOOKAHEAD_SEC);
+      // A chain with a device that is late by design (a spectral pitch shifter) has its events
+      // played that much early - so this track looks that much further ahead, and every note
+      // still reaches the engine a full lookahead before it is sent to sound.
+      this._comp = this._compensation();
+      const targetCycle = this.transport.cycleAt(nowSec + DEFAULT_LOOKAHEAD_SEC + this._comp[0]);
 
       // The window only ever moves forward. A clock started a little ahead of now (play-from-stop
       // starts it a lookahead ahead - see Transport#start) reads as negative time until it gets
@@ -1563,6 +1586,9 @@ export class Scheduler {
   // that can ask to be scheduled in the past (see _timeShiftSec).
   _scheduleNoteEdges(fromCycle, toCycle, nowSec = this.engine.getTime()) {
     if (!this.pattern.stepsForCycle) return; // top-level pattern has no note structure (e.g. a bare LFO)
+    // How early the chain needs its notes (see _compensation). Everything below is worked out at
+    // the time the note is HEARD; only what goes to the engine moves, at the very end.
+    const comp = this._comp?.[0] ?? 0;
 
     // Only onsets newly entering the lookahead window - each tick advances `fromCycle` to the
     // previous tick's `toCycle`, so this never double-fires. The window is tested against the GRID
@@ -1589,7 +1615,9 @@ export class Scheduler {
       // (see timeShift), the other control read at the point of emission. Every channel above and
       // below is sampled at the GRID position, shift included - the event's musical position is
       // where it was written, and swing moves the sound, not the note.
-      const shiftSec = this._timeShiftSec(step, songStart, delta, gridSec, nowSec);
+      // The floor is measured from the moment the note is SENT to sound, which compensation moves
+      // earlier - hence `nowSec + comp`.
+      const shiftSec = this._timeShiftSec(step, songStart, delta, gridSec, nowSec + comp);
       const onsetSec = gridSec + shiftSec;
       // The END is warped too, and at ITS OWN grid position rather than the onset's - swing bends
       // the time axis, so both edges of the note follow the bend they each sit on. Translating the
@@ -1642,7 +1670,7 @@ export class Scheduler {
         // The engine reports back what it resolved the config down to (fit -> rate, slice ->
         // window, and the window's length in seconds) - that's what .log() prints, since none
         // of it can be known here: it depends on the sample file's own length.
-        const info = this.engine.playSample(this.trackId, pack, cfg, onsetSec, offsetSec);
+        const info = this.engine.playSample(this.trackId, pack, cfg, onsetSec - comp, offsetSec - comp);
         if (logAt) {
           this._logEvent(logAt[0], logAt[1], formatSampleEvent(pack, cfg, info, stepEndCycle - stepStartCycle));
         }
@@ -1655,8 +1683,8 @@ export class Scheduler {
           this._logEvent(logAt[0], logAt[1], formatNoteEvent(midiNote, vel));
         }
         if (vel <= 0) continue;
-        this.engine.noteOn(this.trackId, midiNote, Math.min(1, vel), onsetSec);
-        this.engine.noteOff(this.trackId, midiNote, Math.max(onsetSec + 0.001, offsetSec - NOTE_OFF_EARLY_SEC));
+        this.engine.noteOn(this.trackId, midiNote, Math.min(1, vel), onsetSec - comp);
+        this.engine.noteOff(this.trackId, midiNote, Math.max(onsetSec + 0.001, offsetSec - NOTE_OFF_EARLY_SEC) - comp);
       }
     }
   }
@@ -1770,7 +1798,9 @@ export class Scheduler {
         // notes at that onset play (see PRESET_SWAP_LEAD_SEC). The QUEUE still carries the true
         // onset: which preset a knob you turn belongs to is a question about the music, not
         // about how long a plugin takes to swallow a program.
-        const why = this._applyPreset(slot, name, atSec - PRESET_SWAP_LEAD_SEC);
+        // Early by the delay of this slot and everything after it (see _compensation): a swap on
+        // the instrument is heard through the whole chain, one on the last effect through itself.
+        const why = this._applyPreset(slot, name, atSec - PRESET_SWAP_LEAD_SEC - (this._comp?.[slot] ?? 0));
         if (why && !this._presetWarned.has(`${slot} ${name}`)) {
           this._presetWarned.add(`${slot} ${name}`);
           warnPattern(`[scheduler] track "${this.label}" slot ${slot}: ${why}`);

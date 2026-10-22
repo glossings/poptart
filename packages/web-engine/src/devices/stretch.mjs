@@ -23,6 +23,7 @@ export const SHIFT = defineDevice({
     "in": 2,
     "out": 2
   },
+  "latencySec": 0.12,
   "params": [
     {
       "id": "pitch",

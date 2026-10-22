@@ -459,6 +459,13 @@ export function defineDevice(spec) {
   const license = String(spec.license ?? '').trim();
   if (!license) fail(id, 'every device records its license (it ends up in the About screen)');
 
+  // How late the device's output is behind its input, in seconds, at every setting: a spectral
+  // shifter has to hear a whole analysis window before it can say anything about it. The
+  // scheduler plays a track's notes this much early (see slotLatencies on both engines), so a
+  // device that is late by design still lands on the beat. 0 for nearly everything.
+  const latencySec = spec.latencySec ?? 0;
+  if (!isFiniteNumber(latencySec) || latencySec < 0 || latencySec > 1) fail(id, 'latencySec is seconds, 0 to 1');
+
   return Object.freeze({
     id,
     kind,
@@ -475,6 +482,7 @@ export function defineDevice(spec) {
     channels: Object.freeze(channels),
     sidechain,
     notes,
+    latencySec,
     params: Object.freeze(params),
     figures: Object.freeze(figures),
     panel: definePanel(id, spec.panel, params),

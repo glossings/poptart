@@ -180,6 +180,10 @@ var currentTempo = 120;
 // ...and the tempo of each track whose deck is on a clock of its own (trackId -> bpm), which is
 // what a plugin opening on such a track starts at. Empty while every deck rides the host clock.
 var trackTempo = IdentityDictionary.new;
+// ...and where that clock was last put (trackId -> [beats, the SystemClock moment they are true
+// at, playing]), so a device opening on such a track starts at its deck's position rather than
+// the host clock's (see trackBeats).
+var trackPlace = IdentityDictionary.new, trackBeats;
 var jsonEscape, toJson, replyOk, replyErr, pluginList, runScan, trackDefName, buildTrackDef, channelDefault;
 var sharedTrackDef, trackDef, trackDefState; // the one track SynthDef this engine builds (see sharedTrackDef)
 var awaitTrack, awaitLoaded, reclaimStuckTrack, resolvePlugin, resolveParamIndex, watchPluginEdits;
@@ -510,11 +514,12 @@ buildTrackDef = { |key|
                 // fx chain a VST instrument would.
                 // Two kinds of device sit in every slot and exactly one of them is ever
                 // loaded: a plugin (VSTPlugin) and one of poptart's own (PoptartDevice, see
-                // native/devices/ - the same synths and effects the browser build plays). An
-                // empty UGen of either kind outputs silence, not its input, so summing them is
-                // how a slot carries both without a def per combination - which matters because
-                // a track's def is built once, at birth, long before a pattern says what goes
-                // in its slots. The native device takes the track's bend as a SIGNAL rather
+                // native/devices/ - the same synths and effects the browser build plays). Here
+                // neither has an input, so the empty one is silent and summing them is how the
+                // slot carries both without a def per combination - which matters because a
+                // track's def is built once, at birth, long before a pattern says what goes in
+                // its slots. (The effect slots below cannot sum: an empty VSTPlugin passes its
+                // input through.) The native device takes the track's bend as a SIGNAL rather
                 // than as MIDI, since it has no MIDI to take.
                 sig = VSTPlugin.ar(nil, 2, id: \slot0)
                     + if (hasNativeDevices) { \PoptartDevice.asClass.ar([], 2, bendV, nil, \nslot0) } { Silent.ar(2) }
@@ -535,14 +540,22 @@ buildTrackDef = { |key|
                 // The plugin and the native device in this slot, one of which is loaded (see the
                 // instrument slot above). A native device reads the sidechain as a second signal
                 // rather than a second bus, and only the ones that cross-modulate read it at all.
-                var wet = VSTPlugin.ar(Ref([[sig[0], sig[1]], [scIn[0], scIn[1]]]), 2, id: ("slot" ++ i).asSymbol)
-                    + if (hasNativeDevices) {
-                        \PoptartDevice.asClass.ar([sig[0], sig[1]], 2, 0, [scIn[0], scIn[1]], ("nslot" ++ i).asSymbol)
-                    } { Silent.ar(2) };
+                var plugin = VSTPlugin.ar(Ref([[sig[0], sig[1]], [scIn[0], scIn[1]]]), 2, id: ("slot" ++ i).asSymbol);
+                var device = if (hasNativeDevices) {
+                    \PoptartDevice.asClass.ar([sig[0], sig[1]], 2, 0, [scIn[0], scIn[1]], ("nslot" ++ i).asSymbol)
+                } { Silent.ar(2) };
+                // Which of the two is this slot's output: 1 while a native device is in it, set
+                // by the load that put it there (see loadDevice and loadEffect). NOT a sum, as the
+                // instrument slot is: an empty VSTPlugin passes its input through (measured,
+                // VSTPlugin 0.6.2, NRT), so summing would play the dry signal under every native
+                // effect - under a pitch shifter's latency, as an echo.
+                // Not lagged: it only ever changes in the message that also flips `active`,
+                // whose own lag is the fade.
+                var native = ("native" ++ i).asSymbol.kr(0);
+                var wet = (plugin * (1 - native)) + (device * native);
                 // How much of this slot reaches the rest of the chain. Two things multiplied:
-                // `active`, the bypass flipped on only once a plugin actually loads (an empty
-                // VSTPlugin slot outputs silence, not pass-through, so an unloaded slot must read
-                // as fully dry whatever else says), and `wet`, the user's own mix control
+                // `active`, the bypass flipped on only once a plugin actually loads (so an
+                // unloaded slot reads as fully dry whatever else says), and `wet`, the user's own mix control
                 // (Sig#wet, a channel control named wet1..wetN - see CHANNEL_DEFAULTS).
                 //
                 // Linear rather than equal-power: a wet knob's endpoints have to be EXACTLY the
@@ -2405,7 +2418,8 @@ OSCdef(\poptartLoadEffect, { |msg|
                                 track[\loaded][slot] = pluginId;
                                 self.setPlaying(true); // see loadInstrument
                                 self.setTempo(trackTempo[key] ? currentTempo);
-                                track[\synth].set(("active" ++ slot).asSymbol, 1); // un-bypass the slot
+                                // Un-bypass the slot, on its plugin half (see the slot's `native`).
+                                track[\synth].set(("active" ++ slot).asSymbol, 1, ("native" ++ slot).asSymbol, 0);
                                 dropSlotRamps.(key, track, slot); // the open cleared their mappings (see dropRamp)
                                 watchPluginEdits.(track, key, slot, self);
                                 ("poptart: loaded effect " ++ pluginId ++ " in slot " ++ slot).postln;
@@ -2460,7 +2474,8 @@ OSCdef(\poptartLoadDevice, { |msg|
     var key = msg[1].asSymbol;
     var position = msg[2].asInteger;
     var name = msg[3].asString;
-    var params = msg[4..].clump(2).collect { |pair| (id: pair[0].asString, name: pair[1].asString) };
+    // id, name and default position per control (native-devices.js's deviceParamArgs).
+    var params = msg[4..].clump(3).collect { |c| (id: c[0].asString, name: c[1].asString, default: c[2] !? { |d| d.asFloat }) };
     fork {
         var track = awaitTrack.(key);
         var slot, ctl;
@@ -2492,7 +2507,9 @@ OSCdef(\poptartLoadDevice, { |msg|
                     ctl.open(name, params, { |self, ok|
                         if (ok and: { track[\wanted][slot] == name }) {
                             track[\loaded][slot] = name;
-                            if (slot >= 1) { track[\synth].set(("active" ++ slot).asSymbol, 1) };
+                            // Un-bypassed on its device half, in one message so no block hears
+                            // the plugin half's pass-through (see the slot's `native`).
+                            if (slot >= 1) { track[\synth].set(("active" ++ slot).asSymbol, 1, ("native" ++ slot).asSymbol, 1) };
                             dropSlotRamps.(key, track, slot);
                             watchPluginEdits.(track, key, slot, self);
                             // What the device has to be told rather than hear for itself: the
@@ -2500,8 +2517,8 @@ OSCdef(\poptartLoadDevice, { |msg|
                             // its first block), and whether anything is routed into its key
                             // input. The route may have been wired before the device opened, so
                             // this asks rather than waiting to be told.
-                            self.setTempo(currentTempo);
-                            self.setTransportPos((hostClock !? { |c| c.beats }) ? 0);
+                            self.setTempo(trackTempo[key] ? currentTempo);
+                            self.setTransportPos(trackBeats.(key));
                             tellKeyPatched.(track, slot, nil, key);
                             ("poptart: loaded device " ++ name ++ " in slot " ++ slot).postln;
                         } {
@@ -2590,6 +2607,15 @@ hostClock = TempoClock(currentTempo / 60).permanent_(true);
 // The event is what MIDI clock's realtime messages are about: 'start' and 'rebase' make the
 // tick train relocate at its next sixteenth (see clockTickerStart), 'stop' sends the stop. A
 // plain tempo change or the periodic re-sync is 'sync' and needs nothing beyond the anchor.
+// Where a track's transport is now, in beats: its deck's own clock, run forward from where it
+// was last put (frozen while that deck is paused), or the host clock's mirror for a track that
+// rides the host clock.
+trackBeats = { |key|
+    trackPlace[key] !? { |p|
+        if (p[2]) { p[0] + ((SystemClock.seconds - p[1]) * (trackTempo[key] ? currentTempo) / 60) } { p[0] }
+    } ?? { (hostClock !? { |c| c.beats }) ? 0 }
+};
+
 hostClockSync = { |bpm, beats, latency, playing, event|
     var tempo = bpm / 60;
     if ((hostClock.tempo - tempo).abs > 1e-9) { hostClock.tempo_(tempo) };
@@ -2750,10 +2776,15 @@ OSCdef(\poptartSetTempo, { |msg|
     var scope = if (msg.size > 6) { msg[6].asSymbol } { \all };
     var listed = if (msg.size > 7) { msg.copyToEnd(7).collect(_.asSymbol) } { [] };
     if (scope == \only) {
-        listed.do { |key| trackTempo[key] = bpm };
+        listed.do { |key|
+            trackTempo[key] = bpm;
+            trackPlace[key] = [beats, SystemClock.seconds + latency, playing];
+        };
     } {
         currentTempo = bpm;
-        trackTempo.keys.do { |key| if (listed.includes(key).not) { trackTempo.removeAt(key) } };
+        trackTempo.keys.do { |key|
+            if (listed.includes(key).not) { trackTempo.removeAt(key); trackPlace.removeAt(key) };
+        };
         hostClockSync.(bpm, beats, latency, playing, event);
     };
     bundleNow.(latency, {

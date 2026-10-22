@@ -6614,9 +6614,9 @@ function widgetsOf(panel) {
  * plugin's own window answers: a `.param()` call while conf is armed for that track, and
  * otherwise a capture of the whole device.
  *
- * A device's program is its control positions and nothing else (PoptartDevice.sc's
- * writeProgram), so the second half is the plugin path unchanged - auto-pin writes the positions
- * into the call as `{ state }`, and `.preset()` restores them.
+ * A device's program is its controls and the files on them, so the second half is the plugin
+ * path unchanged - auto-pin writes them into the call as `{ state }`, in the browser's format
+ * (osc-engine's deviceStateText), and `.preset()` restores them.
  */
 function noteDeviceEdit(trackLabel, slot, param, arg) {
   if (conf && conf.trackId === trackLabel) {

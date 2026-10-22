@@ -58,20 +58,78 @@ function nativeDevice(name, opts) {
 }
 
 /**
- * The device's controls as OSC arguments: id, name, id, name...
+ * The device's controls as OSC arguments: id, name, default position, id, name, default position...
  *
  * Sent with the load, because this is all sclang needs to turn `.param("LPG Color", 0.3)` into a
  * control index, and it saves the engine's two halves keeping a second copy of the catalog in
  * step. Flat arguments rather than JSON so nothing has to be escaped or parsed: a control name
  * is upstream's own text, and some of it has quotes in.
+ *
+ * The default is there because the controller answers "where is this control" from its own
+ * record (PoptartDevice.sc's `get`, which .hold()/.release() read), and the UGen opens every
+ * control at its default - so the record has to start there too, not at 0. Position 0 is the
+ * bottom of the range: -24 semitones on Shift's pitch, not no shift.
  */
 function deviceParamArgs(device) {
   const out = [];
   for (const p of device.params) {
     out.push(String(p.id));
     out.push(String(p.name));
+    out.push(normalize(p, p.default));
   }
   return out;
+}
+
+/**
+ * A device's settings as a captured state - THE BROWSER'S FORMAT, byte for byte in shape: the
+ * device, its version, every control by id in real units, and the file each file-playing control
+ * is pointed at (web-audio-engine.mjs's getPluginState). Base64 of the JSON, no compression, as
+ * the browser writes it. One format is what lets a preset made on either engine open on the
+ * other: a song is the same song wherever it is played.
+ *
+ * `positions` is by control id, 0..1; `files` is by control id, option slot -> the reference
+ * loaded there (the engine's deviceSlot answers both).
+ */
+function deviceStateText(device, positions = {}, files = {}) {
+  const params = {};
+  const refs = {};
+  for (const p of device.params) {
+    const value = denormalize(p, positions[p.id] ?? normalize(p, p.default));
+    // Trimmed to what a control can mean, so a linear 0 does not come back as -1.8e-15.
+    params[p.id] = Number(value.toFixed(6));
+    if (p.takes) {
+      const ref = files[p.id]?.[Math.round(value)];
+      if (ref) refs[p.id] = ref;
+    }
+  }
+  const json = JSON.stringify({ device: device.id, version: device.version, params, files: refs });
+  return Buffer.from(json, 'utf8').toString('base64');
+}
+
+/**
+ * A captured state read back for one device: where each control it names goes, as positions,
+ * and the files it points controls at - or null when it is not a state of this device at all.
+ *
+ * Reads the browser's format, which is also what the desktop now writes (deviceStateText): real
+ * units by control id. A display name is accepted where an id is expected, as `.param()` accepts
+ * both. Controls the state does not name keep where they are; names the device does not have
+ * (a state from a later version) are skipped.
+ */
+function readDeviceState(device, doc) {
+  if (!doc || typeof doc !== 'object' || !doc.params || typeof doc.params !== 'object') return null;
+  if (doc.device != null && String(doc.device).toLowerCase() !== device.id.toLowerCase()) return null;
+  const positions = {};
+  for (const [name, value] of Object.entries(doc.params)) {
+    const p = deviceParam(device, name);
+    if (!p || typeof value !== 'number' || !Number.isFinite(value)) continue;
+    positions[p.id] = normalize(p, value);
+  }
+  const files = {};
+  for (const [name, ref] of Object.entries(doc.files ?? {})) {
+    const p = deviceParam(device, name);
+    if (p?.takes && typeof ref === 'string' && ref) files[p.id] = ref;
+  }
+  return { positions, files };
 }
 
 /**
@@ -227,6 +285,8 @@ module.exports = {
   deviceParamRows,
   devicePositions,
   deviceRows,
+  deviceStateText,
+  readDeviceState,
   paramPosition,
   forgetNativeDevices,
 };

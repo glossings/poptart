@@ -6337,6 +6337,7 @@
       "kind": "fx",
       "version": 1,
       "sidechain": false,
+      "latencySec": 0.12,
       "params": [
         {
           "id": "pitch",
@@ -6554,6 +6555,44 @@
           "ui": "number",
           "group": "",
           "rate": "k"
+        }
+      ]
+    },
+    {
+      "id": "Voice",
+      "name": "Voice",
+      "kind": "fx",
+      "version": 1,
+      "sidechain": false,
+      "latencySec": 0.05,
+      "params": [
+        {
+          "id": "pitch",
+          "name": "Pitch",
+          "min": -24,
+          "max": 24,
+          "default": 0,
+          "step": 0,
+          "curve": "lin",
+          "curveExp": 2,
+          "unit": "st",
+          "ui": "knob",
+          "group": "",
+          "rate": "a"
+        },
+        {
+          "id": "formant",
+          "name": "Formant",
+          "min": -12,
+          "max": 12,
+          "default": 0,
+          "step": 0,
+          "curve": "lin",
+          "curveExp": 2,
+          "unit": "st",
+          "ui": "knob",
+          "group": "",
+          "rate": "a"
         }
       ]
     },

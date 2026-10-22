@@ -55,6 +55,10 @@ export function stretchDescriptor(sourceUrl) {
     build: 'wasm',
     processor: 'poptart-wasm-shift',
     channels: { in: 2, out: 2 },
+    // The library's default analysis block, 0.12 s (presetDefault), is how late everything comes
+    // out - measured: a click returns exactly 0.12 s later at 44.1, 48 and 96 kHz. The scheduler
+    // plays a Shift track's notes that much early, so the shifted sound lands on the beat.
+    latencySec: 0.12,
     // Pitch and formant are a-rate so a signal can be patched onto them - a vibrato written as
     // `.param("Pitch", lfo(...))` is the obvious thing to want. The value is still read once a
     // block, as every parameter here is; the tonality limit is not worth modulating at all.

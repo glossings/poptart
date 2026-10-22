@@ -1999,6 +1999,17 @@ export class WebAudioEngine {
    * The device in one slot and everything a panel is drawn from. Null for an empty slot, which
    * is what a double-click on a name the buffer has since changed asks about.
    */
+  /**
+   * How late each slot of a track's chain is, in seconds, by slot index: what a device declares
+   * as its `latencySec` (a spectral shifter's analysis window). The scheduler plays notes early
+   * by the sum, so a device that is late by design still lands on the beat. An empty slot is 0.
+   */
+  slotLatencies(trackId) {
+    const out = [];
+    for (const [index, filled] of this.tracks.get(trackId)?.slots ?? []) out[index] = filled.descriptor.latencySec ?? 0;
+    return Array.from(out, (v) => v ?? 0);
+  }
+
   deviceState(trackId, slot) {
     const filled = this.tracks.get(trackId)?.slots.get(slot);
     if (!filled) return null;

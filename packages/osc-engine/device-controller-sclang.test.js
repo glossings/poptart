@@ -56,8 +56,10 @@ synth = Synth.basicNew(\\pd_ctl, srv, 1000);
 ctl = PoptartDeviceController(synth, \\nslot0, def);
 ("CTLINDEX<" ++ ctl.synthIndex ++ ">").postln;
 
-params = [(id: "engine", name: "Engine"), (id: "lpgcolor", name: "LPG Color")];
+params = [(id: "engine", name: "Engine", default: 0.125), (id: "lpgcolor", name: "LPG Color", default: 0.5)];
 ctl.open("Plaits", params, { |self, ok| ("OPENED<" ++ ok ++ ">").postln });
+// A control nobody has set is at its default, which is where the UGen opened it - not at 0.
+ctl.get(1, { |v| ("FRESH<" ++ v ++ ">").postln });
 
 // A control resolves by either spelling, in any case - the rule the browser follows too.
 ("BYID<" ++ ctl.info.findParamIndex("lpgcolor") ++ ">").postln;
@@ -129,6 +131,7 @@ test('the device controller resolves controls, sends unit commands and round-tri
   assert.strictEqual(mark('BYNONE'), 'nil');
   assert.strictEqual(mark('COUNT'), '2');
   assert.strictEqual(mark('PARAMNAME'), 'LPG Color');
+  assert.strictEqual(mark('FRESH'), '0.5');
 
   // The unit commands, as they went out. The node id and the UGen index address one slot.
   const sent = [...text.matchAll(/^SENT<(.*)>$/gm)].map((m) => m[1]);

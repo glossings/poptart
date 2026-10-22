@@ -23,7 +23,9 @@ const { samplesRoot, listPackFiles, resolveSampleFile, expandPackEntries, sliceE
 const { recordingsRoot, resolveRecording } = require('./recordings');
 const { analyzeSlices } = require('./analysis');
 const { ensurePoptartExtension, ensureDeviceExtension, userExtensionsDir, sclangStartupFile } = require('./extensions');
-const { nativeDevice, deviceParam, deviceParamArgs, devicePositions, paramPosition } = require('./native-devices');
+const {
+  nativeDevice, deviceParam, deviceParamArgs, devicePositions, paramPosition, deviceStateText, readDeviceState,
+} = require('./native-devices');
 const {
   privateScInstalled,
   privateSclangPath,
@@ -1160,6 +1162,23 @@ class OscEngine {
    * `positions` is every control of the device, by id, 0..1; `driven` names what is moving any
    * of them, so a window can draw that control as something it does not own.
    */
+  /**
+   * How late each slot of a track's chain is, in seconds, by slot index - the scheduler plays the
+   * track's notes early by the sum (see the browser engine's slotLatencies, which this matches).
+   * Only poptart's own devices declare one (`latencySec` in the catalog): a plugin is taken to be
+   * on time, since VSTPlugin is not asked what it reports.
+   */
+  slotLatencies(trackId) {
+    const out = [];
+    const prefix = `${trackId}:`;
+    for (const [key, device] of this._slotDevices) {
+      if (!key.startsWith(prefix)) continue;
+      const slot = Number(key.slice(prefix.length));
+      if (Number.isInteger(slot) && slot >= 0) out[slot] = device.latencySec ?? 0;
+    }
+    return Array.from(out, (v) => v ?? 0);
+  }
+
   deviceSlot(trackId, slot) {
     const key = `${trackId}:${slot}`;
     const device = this._slotDevices.get(key);
@@ -1330,6 +1349,12 @@ class OscEngine {
 
   /** Captures the current full state of the plugin in a chain slot as an opaque string. */
   async getPluginState(trackId, slotIndex) {
+    // One of poptart's own devices is captured here, from the record this half keeps of where
+    // its controls are (see _devicePositions) - not from sclang, whose program is positions by
+    // index and the desktop's alone. What comes out is the browser's format (deviceStateText),
+    // so the same preset opens on either engine.
+    const slot = this.deviceSlot(trackId, slotIndex);
+    if (slot) return deviceStateText(this._slotDevices.get(`${trackId}:${slotIndex}`), slot.positions, slot.files);
     const reply = await this._request('/poptart/getPluginState', [trackId, slotIndex]);
     const data = await fsp.readFile(reply.path);
     await fsp.unlink(reply.path).catch(() => {}); // sclang's temp copy; already gone is fine
@@ -1391,8 +1416,12 @@ class OscEngine {
     // would sound the INIT preset until it lands. Latency 0: the hold starts now, and the cold
     // path in poptart.scd keeps it up (and then drops the missed notes) until the program is in.
     this._send('/poptart/statePending', [trackId, slotIndex, targetTime == null ? 0 : this._latency(targetTime), seq]);
+    const device = this._slotDevices.get(`${trackId}:${slotIndex}`);
     const work = (async () => {
-      const data = await this._inflateState(String(state), trackId, slotIndex);
+      const read = device ? await this._readDeviceState(device, String(state), trackId, slotIndex) : null;
+      const data = device
+        ? read && Buffer.from(JSON.stringify({ device: device.id, params: read.positions }), 'utf8')
+        : await this._inflateState(String(state), trackId, slotIndex);
       if (superseded()) return;
       if (!data) {
         // The announce above opened a note-hold window, and a state that turns out to be
@@ -1412,6 +1441,16 @@ class OscEngine {
       // able to drop it, or the older program lands on top of the newer one. Superseding it here
       // only covers the part before it is sent.
       this._send('/poptart/setPluginState', [trackId, slotIndex, stateFile, latency, seq]);
+      if (read) {
+        // The record follows the preset, so a window opened on it and the next capture both
+        // start from what it set. Then the files, through the path `.param("sample", ...)`
+        // takes, after the program so the control ends on the slot its file landed in.
+        const held = this._devicePositions.get(`${trackId}:${slotIndex}`);
+        if (held) Object.assign(held, read.positions);
+        for (const [id, ref] of Object.entries(read.files)) {
+          this._loadDeviceSample(trackId, slotIndex, device, deviceParam(device, id), ref, targetTime);
+        }
+      }
     })().catch((e) => {
       this._warnOnce(`state-write:${trackId}:${slotIndex}`, `[poptart] could not restore plugin state for ${trackId}/slot ${slotIndex}: ${e.message ?? e}`);
       if (!superseded()) this.cancelPluginState(trackId, slotIndex); // release the announced hold (see above)
@@ -1456,6 +1495,42 @@ class OscEngine {
   // to the same handful of programs every cycle, and re-inflating a couple of megabytes each time
   // is the one avoidable cost in a swap. Small and fixed rather than clever: the cache holds whole
   // programs, so its ceiling matters more than its hit rate.
+  /**
+   * A captured state for one of poptart's own devices, read for that device (readDeviceState), or
+   * null with a warning when it is not one.
+   *
+   * Not _inflateState: a device's state is the browser's - base64 of plain JSON - and a plugin's
+   * is gzipped, so this takes either (and JSON typed out by hand, as the browser does), where a
+   * plugin path that took plain bytes would hand a VST garbage. Small enough to read every time.
+   */
+  async _readDeviceState(device, state, trackId, slotIndex) {
+    let text = state.trim();
+    if (text.startsWith('@')) {
+      text = this._stateResolver ? await this._stateResolver(text.slice(1)) : null;
+      if (text == null) {
+        this._warnOnce(`state:${trackId}:${slotIndex}`,
+          `[poptart] device state ${state} for ${trackId}/slot ${slotIndex} isn't in the store - leaving ${device.id} as it is`);
+        return null;
+      }
+      text = String(text).trim();
+    }
+    let doc = null;
+    try {
+      if (text.startsWith('{')) doc = JSON.parse(text);
+      else {
+        let bytes = Buffer.from(text, 'base64');
+        if (bytes[0] === 0x1f && bytes[1] === 0x8b) bytes = await gunzip(bytes);
+        doc = JSON.parse(bytes.toString('utf8'));
+      }
+    } catch { /* reported below, with the other ways of not being a state */ }
+    const read = readDeviceState(device, doc);
+    if (!read) {
+      this._warnOnce(`state:${trackId}:${slotIndex}`,
+        `[poptart] the state for ${trackId}/slot ${slotIndex} is not a ${device.id} state - leaving it as it is`);
+    }
+    return read;
+  }
+
   async _inflateState(state, trackId, slotIndex) {
     // Cached under whatever the code said - a handle is a shorter key for the same program, and
     // the same handle every cycle, which is exactly what this cache is for.

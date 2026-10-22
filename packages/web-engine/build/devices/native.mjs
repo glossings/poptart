@@ -46,6 +46,7 @@ import { LIMITER } from '../../src/devices/limiter.mjs';
 import { MULTIBAND } from '../../src/devices/multiband.mjs';
 import { REVERB } from '../../src/devices/reverb.mjs';
 import { FREQSHIFT } from '../../src/devices/freqshift.mjs';
+import { VOICE } from '../../src/devices/voice.mjs';
 import { CHORUS } from '../../src/devices/chorus.mjs';
 import { FLANGER } from '../../src/devices/flanger.mjs';
 import { PHASER } from '../../src/devices/phaser.mjs';
@@ -117,6 +118,7 @@ const OWN = [
   { descriptor: MULTIBAND, source: 'multiband.cc' },
   { descriptor: REVERB, source: 'reverb.cc' },
   { descriptor: FREQSHIFT, source: 'freqshift.cc' },
+  { descriptor: VOICE, source: 'voice.cc' },
   { descriptor: CHORUS, source: 'chorus.cc' },
   { descriptor: FLANGER, source: 'flanger.cc' },
   { descriptor: PHASER, source: 'phaser.cc' },
@@ -394,6 +396,8 @@ export function catalogJson(devices) {
     kind: d.kind,
     version: d.version ?? 1,
     sidechain: !!d.sidechain,
+    // How late the device is, which the scheduler plays its track's notes early by.
+    ...(d.latencySec ? { latencySec: d.latencySec } : {}),
     params: d.params.map((p) => ({
       id: p.id,
       name: p.name,

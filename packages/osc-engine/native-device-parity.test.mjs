@@ -35,6 +35,7 @@ import { LimiterProcessor } from '../web-engine/src/devices/limiter.mjs';
 import { MultibandProcessor } from '../web-engine/src/devices/multiband.mjs';
 import { ReverbProcessor } from '../web-engine/src/devices/reverb.mjs';
 import { FreqShiftProcessor } from '../web-engine/src/devices/freqshift.mjs';
+import { VoiceProcessor } from '../web-engine/src/devices/voice.mjs';
 import { ChorusProcessor } from '../web-engine/src/devices/chorus.mjs';
 import { FlangerProcessor } from '../web-engine/src/devices/flanger.mjs';
 import { PhaserProcessor } from '../web-engine/src/devices/phaser.mjs';
@@ -67,6 +68,7 @@ const PROCESSORS = {
   Multiband: MultibandProcessor,
   Reverb: ReverbProcessor,
   FreqShift: FreqShiftProcessor,
+  Voice: VoiceProcessor,
   Chorus: ChorusProcessor,
   Flanger: FlangerProcessor,
   Phaser: PhaserProcessor,
@@ -275,6 +277,13 @@ function testSignal(frames, channels = 2, seed = 7, keyed = true) {
  * one past the options the descriptor ships with - the browser's own rule (its _spareOption),
  * mirrored on the desktop by osc-engine's sample path.
  */
+/**
+ * The devices that are compared over a longer run than the rest: one that is late by design says
+ * nothing for its first 50 ms, and has to have tracked a pitch and laid down grains before the two
+ * engines can be said to agree about it.
+ */
+const LONG_RUN = { Voice: BLOCK * 240 };
+
 const SAMPLED = {
   Granular: { param: 'sample' },
   Convolver: { param: 'ir' },
@@ -474,7 +483,7 @@ function waysToPlay(device) {
 for (const one of devices.filter((d) => !STOCK_NODES.has(d.id))) {
   test(`${one.id} sounds the same compiled as it does in the browser`, { skip: compiler ? false : 'no clang++' }, () => {
     const binary = buildHarness(devices);
-    const frames = BLOCK * 24;             // about 64 ms, long enough for a tail
+    const frames = LONG_RUN[one.id] ?? BLOCK * 24;   // about 64 ms, long enough for a tail
     const { device } = one;
     // A device that plays a file is handed one, on both engines, in the first spare slot of the
     // control that takes it - and that control is then POINTED at it, since a draw across the

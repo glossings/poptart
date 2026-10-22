@@ -308,6 +308,8 @@ class MappedEngine {
   // reads so that a route the new pattern dropped is torn down. Nothing to map: the keys and the
   // route spelling are the scheduler's own, and they come straight back.
   paramRoutes(...a) { return this.engine.paramRoutes(...a); }
+  // How late each slot's device is: seconds, nothing to map. The scheduler plays notes early by it.
+  slotLatencies(...a) { return this.engine.slotLatencies(...a); }
 }
 
 /**
@@ -318,6 +320,6 @@ class MappedEngine {
  * whole file exists to prevent. Kept in step with the `typeof this.engine.X === 'function'`
  * checks in scheduler.mjs by a test, not by memory.
  */
-MappedEngine.OPTIONAL = Object.freeze(['connectParam', 'disconnectParam', 'paramRoutes']);
+MappedEngine.OPTIONAL = Object.freeze(['connectParam', 'disconnectParam', 'paramRoutes', 'slotLatencies']);
 
 module.exports = { MappedEngine, loadMappings, toNormalized, toRealWorld };

@@ -20,7 +20,7 @@ const path = require('node:path');
 const { OscEngine } = require('./index.js');
 const {
   nativeDevice, nativeDevices, deviceParam, deviceParamArgs, deviceParamRows, deviceRows,
-  devicePositions, paramPosition, forgetNativeDevices,
+  devicePositions, paramPosition, forgetNativeDevices, deviceStateText, readDeviceState,
 } = require('./native-devices');
 
 const DESCRIPTOR = path.join(__dirname, '..', 'web-engine', 'src', 'descriptor.mjs');
@@ -70,10 +70,15 @@ test('a load sends the device and its controls, and leaves plugin names alone', 
   const [device, fx, plugin, pluginFx] = sent;
   assert.strictEqual(device.addr, '/poptart/loadDevice');
   assert.deepStrictEqual(device.args.slice(0, 3), ['t', 0, 'Plaits']);
-  // The controls ride along as id/name pairs - all sclang needs to resolve `.param()` by name.
-  const pairs = device.args.slice(3);
-  assert.strictEqual(pairs.length, nativeDevice('Plaits').params.length * 2);
-  assert.deepStrictEqual(pairs.slice(0, 4), ['engine', 'Engine', 'harmonics', 'Harmonics']);
+  // The controls ride along as id, name and default position - what sclang needs to resolve
+  // `.param()` by name, and where its record of each control starts.
+  const triples = device.args.slice(3);
+  const plaits = nativeDevice('Plaits');
+  assert.strictEqual(triples.length, plaits.params.length * 3);
+  assert.deepStrictEqual(triples.slice(0, 6), [
+    'engine', 'Engine', devicePositions(plaits).engine,
+    'harmonics', 'Harmonics', devicePositions(plaits).harmonics,
+  ]);
   assert.strictEqual(fx.addr, '/poptart/loadDevice');
   assert.deepStrictEqual(fx.args.slice(0, 3), ['t', 1, 'Galactic']);
   assert.strictEqual(plugin.addr, '/poptart/loadInstrument');
@@ -424,4 +429,149 @@ test('a different device in the slot forgets what was loaded on the last one', (
   e.loadEffect('verb', 'Convolver', 1);
   e.setParam('verb', 1, 'ir', 'break:0');
   assert.strictEqual(sampleSends(sent).length, 2);
+});
+
+// --- presets: one format on both engines ---------------------------------------------------------
+
+const decodeText = (text) => JSON.parse(Buffer.from(text, 'base64').toString('utf8'));
+
+test('a device preset is the browser\'s format: real units by control id, the version and the files', async () => {
+  // Checked against the browser's own descriptors and defaults, which is what its getPluginState
+  // writes ({ device, version, params: { ...values }, files }) for a device nobody has touched.
+  const { defaultValues } = await import(DESCRIPTOR);
+  const { DEVICES } = await import(path.join(__dirname, '..', 'web-engine', 'src', 'catalog.mjs'));
+  const web = new Map(DEVICES.map((d) => [d.id, d]));
+  for (const device of nativeDevices()) {
+    const theirs = web.get(device.id);
+    const doc = decodeText(deviceStateText(device, devicePositions(device)));
+    assert.deepStrictEqual(Object.keys(doc), ['device', 'version', 'params', 'files']);
+    assert.strictEqual(doc.device, theirs.id);
+    assert.strictEqual(doc.version, theirs.version, `${device.id}: version`);
+    assert.deepStrictEqual(Object.keys(doc.params), Object.keys(defaultValues(theirs)), `${device.id}: control ids`);
+    for (const [id, want] of Object.entries(defaultValues(theirs))) {
+      assert.ok(Math.abs(doc.params[id] - want) < 1e-5, `${device.id}.${id}: ${doc.params[id]}, browser default ${want}`);
+    }
+    assert.deepStrictEqual(doc.files, {});
+  }
+});
+
+test('a control nobody touched is captured at its default, not at the bottom of its range', () => {
+  // Shift's pitch rests at 0 semitones, which is position 0.5. A record that started every control
+  // at 0 wrote -24 semitones into every capture, and the preset then played two octaves down.
+  const { e } = engine();
+  e.loadEffect('t', 'Shift', 1);
+  return e.getPluginState('t', 1).then((text) => {
+    assert.deepStrictEqual(decodeText(text).params, { pitch: 0, formant: 0, tonality: 8000 });
+  });
+});
+
+test('a device is captured from where its controls are, without asking sclang', async () => {
+  const { e, sent } = engine();
+  e.loadEffect('t', 'Shift', 1);
+  e.setParam('t', 1, 'Pitch', 0.75);
+  const doc = decodeText(await e.getPluginState('t', 1));
+  assert.strictEqual(doc.params.pitch, 12);
+  assert.ok(!sent.some((m) => m.addr === '/poptart/getPluginState'), 'a device capture never goes to sclang');
+});
+
+test('a preset reads back to the positions it was written from, on every device', () => {
+  for (const device of nativeDevices()) {
+    const positions = {};
+    device.params.forEach((p, i) => { positions[p.id] = paramPosition(device, p.id, ((i * 37) % 100) / 100); });
+    const back = readDeviceState(device, decodeText(deviceStateText(device, positions)));
+    for (const p of device.params) {
+      // Every position here is one paramPosition produced, so a stepped control is already on
+      // its step and comes back where it went in.
+      const want = positions[p.id];
+      assert.ok(Math.abs(back.positions[p.id] - want) < 1e-5, `${device.id}.${p.id}: ${back.positions[p.id]} vs ${want}`);
+    }
+  }
+});
+
+test('a state names controls by id or by name, and another device\'s state is not read', () => {
+  const shift = nativeDevice('Shift');
+  assert.deepStrictEqual(readDeviceState(shift, { device: 'Shift', params: { Pitch: 12, nope: 1 } }).positions, { pitch: 0.75 });
+  assert.strictEqual(readDeviceState(shift, { device: 'Plaits', params: { pitch: 0 } }), null);
+  assert.strictEqual(readDeviceState(shift, null), null);
+  assert.strictEqual(readDeviceState(shift, { device: 'Shift' }), null);
+});
+
+/** The program a restore handed sclang, read out of the file it wrote. */
+function restoredProgram(sent) {
+  const msg = sent.filter((m) => m.addr === '/poptart/setPluginState').at(-1);
+  assert.ok(msg, 'a program went to sclang');
+  const program = JSON.parse(fs.readFileSync(msg.args[2], 'utf8'));
+  fs.unlinkSync(msg.args[2]);
+  return program;
+}
+
+test('a preset made in the browser restores onto the desktop device as positions', async () => {
+  const { e, sent } = engine();
+  e.loadEffect('t', 'Shift', 1);
+  // Exactly what the browser writes: base64 of plain JSON, real units, by id.
+  const browser = Buffer.from(JSON.stringify({ device: 'Shift', version: 1, params: { pitch: 12, formant: -6, tonality: 0 }, files: {} })).toString('base64');
+  e.setStateResolver(async (id) => (id === 'abc' ? browser : null));
+  e.setPluginState('t', 1, '@abc');
+  await e._stateIdle();
+  assert.deepStrictEqual(restoredProgram(sent), { device: 'Shift', params: { pitch: 0.75, formant: 0.25, tonality: 0 } });
+  // The record follows, so the window and the next capture start from the preset.
+  assert.deepStrictEqual(e.deviceSlot('t', 1).positions, { pitch: 0.75, formant: 0.25, tonality: 0 });
+  assert.deepStrictEqual(decodeText(await e.getPluginState('t', 1)).params, { pitch: 12, formant: -6, tonality: 0 });
+});
+
+test('a gzipped state and JSON typed out by hand are read too', async () => {
+  const zlib = require('node:zlib');
+  const { e, sent } = engine();
+  e.loadEffect('t', 'Shift', 1);
+  e.setPluginState('t', 1, zlib.gzipSync(JSON.stringify({ device: 'Shift', params: { pitch: -24 } })).toString('base64'));
+  await e._stateIdle();
+  assert.deepStrictEqual(restoredProgram(sent).params, { pitch: 0 });
+  e.setPluginState('t', 1, '{ "device": "Shift", "params": { "Pitch": 24 } }');
+  await e._stateIdle();
+  assert.deepStrictEqual(restoredProgram(sent).params, { pitch: 1 });
+});
+
+test('a state that is not this device\'s warns and changes nothing', async () => {
+  const { e, sent, warned } = engine();
+  e.loadEffect('t', 'Shift', 1);
+  e.setPluginState('t', 1, Buffer.from(JSON.stringify({ device: 'Plaits', params: { engine: 3 } })).toString('base64'));
+  await e._stateIdle();
+  assert.ok(!sent.some((m) => m.addr === '/poptart/setPluginState'));
+  assert.ok(warned.some((w) => /not a Shift state/.test(w)), warned.join('\n'));
+  assert.strictEqual(e.deviceSlot('t', 1).positions.pitch, 0.5);
+});
+
+test('a preset carries the files on its controls, and restoring one loads them', async () => {
+  const { e, sent } = withPack();
+  e.loadInstrument('cloud', 'Granular');
+  e.setParam('cloud', 0, 'sample', 'break:1');
+  const text = await e.getPluginState('cloud', 0);
+  assert.deepStrictEqual(decodeText(text).files, { sample: 'break:1' });
+
+  const fresh = withPack();
+  fresh.e.loadInstrument('cloud', 'Granular');
+  fresh.e.setPluginState('cloud', 0, text);
+  await fresh.e._stateIdle();
+  restoredProgram(fresh.sent);
+  assert.deepStrictEqual(sampleSends(fresh.sent).map((a) => a.slice(4)), [['break', 1]]);
+  assert.deepStrictEqual(fresh.e.deviceSlot('cloud', 0).files.sample, { [deviceParam(nativeDevice('Granular'), 'sample').options.length]: 'break:1' });
+});
+
+// --- latency: what the scheduler plays a track's notes early by --------------------------------
+
+test('a device\'s delay is the one the browser declares, and a slot reports it', async () => {
+  const { DEVICES } = await import(path.join(__dirname, '..', 'web-engine', 'src', 'catalog.mjs'));
+  const web = new Map(DEVICES.map((d) => [d.id, d]));
+  for (const device of nativeDevices()) {
+    assert.strictEqual(device.latencySec ?? 0, web.get(device.id).latencySec ?? 0, `${device.id}: desktop and browser disagree on its delay`);
+  }
+  assert.strictEqual(nativeDevice('Shift').latencySec, 0.12);
+
+  const { e } = engine();
+  e.loadInstrument('t', 'Plaits');
+  e.loadEffect('t', 'Shift', 1);
+  e.loadEffect('t', 'ValhallaDelay', 2); // a plugin: taken to be on time
+  e.loadEffect('t', 'Filter', 3);
+  assert.deepStrictEqual(e.slotLatencies('t'), [0, 0.12, 0, 0]);
+  assert.deepStrictEqual(e.slotLatencies('nobody'), []);
 });

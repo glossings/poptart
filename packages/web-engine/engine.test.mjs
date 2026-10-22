@@ -1179,3 +1179,12 @@ test('a strip control\'s first value is where the track starts; later ones glide
   engine.setParam('t1', -1, 'postgain', 0.5, 0);
   assert.ok(track.postGain.gain.rampedTo(0.5), 'a change after that glides, so a fader move does not click');
 });
+
+test('a slot reports how late its device is, which is what the scheduler plays notes early by', () => {
+  const { engine } = makeEngine();
+  engine.loadInstrument('t', 'Plaits');
+  engine.loadEffect('t', 'Shift', 1);
+  engine.loadEffect('t', 'Filter', 3);
+  assert.deepEqual(engine.slotLatencies('t'), [0, 0.12, 0, 0]);
+  assert.deepEqual(engine.slotLatencies('nobody'), []);
+});

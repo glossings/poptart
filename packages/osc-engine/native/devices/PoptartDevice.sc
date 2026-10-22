@@ -170,6 +170,12 @@ PoptartDeviceController {
         var resp, answered = false;
         deviceName = name.asString;
         info = PoptartDeviceDesc(name, params ? []);
+        // The UGen opens every control at the device's default (PoptartDevice.cpp's install), so
+        // that is where this record starts: a control nobody has touched is AT its default, and
+        // `get` - what .hold()/.release() put back - has to say so. Position 0 is the bottom of
+        // a control's range, not its rest.
+        positions = Array.fill(positions.size, 0);
+        (params ? []).do { |p, i| if (i < positions.size) { positions[i] = p[\default] ? 0 } };
         resp = OSCFunc({ |msg|
             if (answered.not) {
                 answered = true;
@@ -237,10 +243,11 @@ PoptartDeviceController {
     /**
      * The device's program, written where a plugin writes its own.
      *
-     * A ported device has no state but its controls - no samples loaded into it, no sub-presets -
-     * so the positions ARE the program, and they are written as the same JSON the browser's
-     * capture carries. The file is what `synth("Plaits", { state })` round-trips through, so the
-     * two engines' presets stay one format.
+     * A device has no state but its controls, so the positions ARE the program: this engine's
+     * own form of it, positions by control, which is what readProgram takes. It is not the
+     * preset a song carries. That is written and read by the engine's Node half
+     * (native-devices.js's deviceStateText and readDeviceState) in the browser's format - real
+     * units by control id, plus the files - so a preset made on either engine opens on the other.
      */
     writeProgram { |path, action|
         var ok = false;
