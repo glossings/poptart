@@ -43,21 +43,6 @@ no completion notes.
 
 ---
 
-[ ] Deck B's panels. A double-click on deck B opens a plugin's own window and nothing else: the
-    text panels (arrangement, automation, lfo, piano roll, groove, preset, sample pack, slice,
-    envelope, record) are refused, because they and everything under them read and write the
-    main editor - about 360 direct uses of it across client.js, plus the debounced evals (which
-    evaluate deck A), the definition registries, the fold machinery, the held-preset marks and
-    the playback regions (three places skip any region whose deck is not 'a'). A plugin window
-    opened from deck B is also never captured: markSlotDirty returns null for a `b:` key, and
-    the pin writer (writePluginState, createPresetForSlot, applyBufferEdits) looks blocks up by
-    bare label in the main editor, so stripping the prefix would write into deck A's block of
-    the same name. The shape of the work: one "the editor this panel was opened from" handle
-    (editor + deck + eval function) passed to each panel in place of the global, the writer
-    taught to resolve `b:<label>` to deck B's buffer, and the three region filters keyed by that
-    handle's deck. One panel family at a time, each driven in the headless editor rig before
-    the next.
-
 [ ] Ship the plugin host fix for bundles with several plugins inside. A bundle's plugins are
     probed side by side, and two copies of one binary starting at once can knock one over; the
     cache then lists only the survivor, and the other name is unknown to the engine on every

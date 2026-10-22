@@ -172,11 +172,13 @@ test('a reported edit is never downgraded to a speculative one', async () => {
   assert.equal(h.deps.autoPinReady.get('pad|0')?.state, handleOf('PROGRAM-A'));
 });
 
-test('the queued deck is left alone here too', async () => {
+test('deck b\'s open editors are asked too - its captures land in deck b\'s own code', async () => {
+  // The editor resolves "b:<label>" to deck b's buffer (see writePluginState in client.js), so a
+  // plugin window opened from deck b is captured exactly as one opened from deck a is.
   const h = harness();
   h.deps.handTaken.add('b:pad|0');
-  assert.equal(h.captureOpenEditors(), 0);
-  assert.equal(h.deps.autoPinDirty.size, 0);
+  assert.equal(h.captureOpenEditors(), 1);
+  assert.equal(h.deps.autoPinDirty.get('b:pad|0')?.trackId, 'b:pad');
 });
 
 test('a slot that changed hands since the ask is dropped quietly', async () => {

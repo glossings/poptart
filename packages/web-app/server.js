@@ -6440,13 +6440,9 @@ function handlePluginEdited(trackId, slot) {
  * frozen the slot. Returns the key, or null for a slot auto-pin doesn't write.
  */
 function markSlotDirty(trackId, slot, speculative) {
-  // Not for the queued deck's tracks: at mix time the songs are ~done (mixing is playback, per
-  // the design), deck b's code lives in the other pane under UNPREFIXED labels the pin-writer
-  // can't target - every capture ended in "auto-pin: no .fx(...) call for b:kick - state not
-  // written" (and a loaded song's own preset restores fire these edit events too, so mixing
-  // sprayed that warning constantly). A promoted track re-keys to a plain label on complete-mix
-  // and pins normally again from there.
-  if (deckOfKey(trackId) === 'b') return null;
+  // Either deck's tracks: deck b's are keyed "b:<label>", and the editor resolves that prefix to
+  // deck b's own buffer and writes the capture there under the bare label (see writePluginState in
+  // client.js), exactly as it writes deck a's into the main one.
   const key = `${trackId}|${slot}`;
   if (speculative && autoPinDirty.get(key)?.speculative === false) return key;
   autoPinDirty.set(key, {

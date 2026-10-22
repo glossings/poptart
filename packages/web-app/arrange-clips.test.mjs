@@ -125,6 +125,9 @@ function painter({ code = '', clips = null, deck = 'a' } = {}) {
   const env = {
     arCM: cm,
     cm,
+    // The deck the piano roll is on: the same one here, as it is whenever a clip's roll is opened
+    // from the painter (see arOpenClipRoll).
+    prCM: cm,
     arState,
     arDeck: deck,
     arrangeMod,

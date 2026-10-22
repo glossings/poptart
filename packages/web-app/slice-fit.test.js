@@ -43,18 +43,18 @@ const bodies = ['codeOnly', 'blockOwnCode', 'matchParen', 'sliceSourceCallAt', '
   .join('\n\n');
 
 /**
- * The panel's fit functions, over a fixed buffer of code. `sliceState`/`cm`/`transport` are the
- * globals they read; the panel is looking at the end of the buffer, as it would be having been
- * opened from the `.slices(...)` there.
+ * The panel's fit functions, over a fixed buffer of code. `sliceState`/`sliceCM`/`transport` are
+ * the globals they read - `sliceCM` being the deck the panel was opened on; the panel is looking at
+ * the end of the buffer, as it would be having been opened from the `.slices(...)` there.
  */
 function panel(code, { duration = 4.8, cps = 0.5 } = {}) {
-  const cm = { getValue: () => code, indexFromPos: (i) => i, posFromIndex: (i) => i };
+  const sliceCM = { getValue: () => code, indexFromPos: (i) => i, posFromIndex: (i) => i };
   const sliceState = { at: code.length - 1, source: null, buffer: duration ? { duration } : null };
   // eslint-disable-next-line no-new-func
-  return new Function('labelsMod', 'cm', 'sliceState', 'transport', 'sliceAtNow', `
+  return new Function('labelsMod', 'sliceCM', 'sliceState', 'transport', 'sliceAtNow', `
     ${bodies}
     return { sliceFitCall, sliceFitCycles, sliceFitChain, prFitCycles };
-  `)(labelsMod, cm, sliceState, { cps }, () => sliceState.at);
+  `)(labelsMod, sliceCM, sliceState, { cps }, () => sliceState.at);
 }
 
 /** What the engine makes of the same file at the same tempo - the number the panel has to match. */

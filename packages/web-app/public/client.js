@@ -89,10 +89,12 @@ const coreReady = Promise.all([
     initGroovePanel();
     initWidgetHandles(); // double-click a call's name to open its editor (needs all of the above)
     updateMutedDim();
+    if (deckBCM) updateMutedDim(deckBCM); // DJ mode was open before the modules finished loading
     // Which spans are DATA (rather than roll ids) is a question only pianoroll.mjs can answer, so
     // the folds made before it landed have to be dropped and worked out again - re-running
     // foldConfigBlobs alone would find every span already marked and leave the wrong chips up.
     refoldAll();
+    if (deckBCM) refoldAll(deckBCM);
   })
   .catch((e) => logLine(`pattern-core import failed (no live highlighting / lfo editor): ${e.message}`, true));
 
@@ -116,13 +118,15 @@ const rollDefs = makeDefRegistry({
   library: () => prPrebakeRolls,
   libraryNote: 'prebake',
   otherRefs: (code, id) => arClipRefCount(code, id),
-  otherRenameEdits: (code, from, to) => arClipRenameEdits(code, from, to),
+  otherRenameEdits: (code, from, to, ed) => arClipRenameEdits(code, from, to, ed),
   panel: {
+    // The deck the panel is editing - which buffer every gesture of this kind reads and writes.
+    editor: () => prCM,
     current: () => prState?.rollId ?? null,
     open: (id, carry) => openRollById(id, carry),
     close: () => closePianorollEditor(),
     carry: () => prCarry(),
-    sourceCall: (refs) => sourceCallAmong(refs, prState?.source),
+    sourceCall: (refs) => sourceCallAmong(refs, prState?.source, prCM),
     setCurrent: (from, to) => {
       if (prState?.rollId === from) {
         prState.rollId = to;
@@ -154,6 +158,7 @@ const shapeDefs = makeDefRegistry({
   library: () => [...Object.keys(shapeMod?.SHAPE_PRESETS ?? {}), ...prPrebakeShapes],
   libraryNote: 'preset',
   panel: {
+    editor: () => lfoCM,
     current: () => lfoState?.shapeId ?? null,
     open: (id, carry) => openShapeById(id, carry ?? {}),
     close: () => closeLfoEditor(),
@@ -195,12 +200,13 @@ const presetDefs = makeDefRegistry({
     ofCall: (code, call) => presetTargetAt(code, call.start)?.plugin ?? '',
   },
   panel: {
+    editor: () => presetCM,
     current: () => presetState?.id ?? null,
     scope: () => presetState?.scope ?? null,
     open: (id) => openPresetById(id, presetCarry()),
     close: () => closePresetPanel(),
     carry: () => presetCarry(),
-    sourceCall: (refs) => sourceCallAmong(refs, presetState?.source),
+    sourceCall: (refs) => sourceCallAmong(refs, presetState?.source, presetCM),
     setCurrent: (from, to) => {
       if (presetState?.id !== from) return;
       presetState.id = to;
@@ -225,6 +231,7 @@ const packDefs = makeDefRegistry({
   library: () => prPrebakePacks.map((p) => p.id),
   libraryNote: 'prebake',
   panel: {
+    editor: () => packCM,
     current: () => packState?.id ?? null,
     open: (id) => openPackById(id),
     close: () => closePackPanel(),
@@ -254,11 +261,12 @@ const sliceDefs = makeDefRegistry({
   library: () => prPrebakeSlices.map((p) => p.id),
   libraryNote: 'prebake',
   panel: {
+    editor: () => sliceCM,
     current: () => sliceState?.id ?? null,
     open: (id) => openSliceSetById(id, sliceCarry()),
     close: () => closeSlicePanel(),
     carry: () => sliceCarry(),
-    sourceCall: (refs) => sourceCallAmong(refs, sliceState?.source),
+    sourceCall: (refs) => sourceCallAmong(refs, sliceState?.source, sliceCM),
     setCurrent: (from, to) => {
       if (sliceState?.id === from) sliceState.id = to;
     },
@@ -283,6 +291,7 @@ const autoDefs = makeDefRegistry({
   library: () => prPrebakeAutos.map((p) => p.id),
   libraryNote: 'prebake',
   panel: {
+    editor: () => arCM, // the painter's deck: a lane is drawn against that deck's arrangement
     current: () => arState?.autoId ?? null,
     // Only ever called from the arrange view's own picker, so there is always a panel to pin it
     // in; a create() from anywhere else files the definition and leaves the view alone.
@@ -316,11 +325,12 @@ const grooveDefs = makeDefRegistry({
   library: () => [...Object.keys(grooveMod?.GROOVE_PRESETS ?? {}), ...prPrebakeGrooves.map((g) => g.id)],
   libraryNote: 'preset',
   panel: {
+    editor: () => grooveCM,
     current: () => grooveState?.grooveId ?? null,
     open: (id) => openGrooveById(id, grooveCarry()),
     close: () => closeGroovePanel(),
     carry: () => grooveCarry(), // the call it is looking through - a table has no view state of its own
-    sourceCall: (refs) => sourceCallAmong(refs, grooveState?.callSource),
+    sourceCall: (refs) => sourceCallAmong(refs, grooveState?.callSource, grooveCM),
     setCurrent: (from, to) => {
       if (grooveState?.grooveId === from) {
         grooveState.grooveId = to;
@@ -418,11 +428,13 @@ function runLogFix(fix) {
 }
 
 // samples("tidalcycles/dirt-samples") -> samples("tidalcycles/dirt-samples", "dirt"), then an update
-// so the new names are in. The call is found by its source, written with any quote.
+// so the new names are in. The call is found by its source, written with any quote - in whichever
+// deck's code says it, the main buffer first.
 function prefixSamplesCall(source, prefix) {
-  const code = cm.getValue();
   const esc = source.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const re = new RegExp(`\\bsamples\\(\\s*(["'\`])${esc}\\1\\s*\\)`);
+  const ed = [cm, deckBCM].find((e) => e && re.test(e.getValue())) ?? cm;
+  const code = ed.getValue();
   const m = re.exec(code);
   if (!m) {
     logLine(`there is no samples("${source}") without a prefix in the buffer to add one to`, 'warn');
@@ -430,9 +442,10 @@ function prefixSamplesCall(source, prefix) {
   }
   const q = m[1];
   const at = m.index;
-  cm.replaceRange(`samples(${q}${source}${q}, ${q}${prefix}${q})`, cm.posFromIndex(at), cm.posFromIndex(at + m[0].length), '+samples');
+  ed.replaceRange(`samples(${q}${source}${q}, ${q}${prefix}${q})`, ed.posFromIndex(at), ed.posFromIndex(at + m[0].length), '+samples');
   logLine(`${source}'s packs are ${prefix}_… now`);
-  evaluate(false, { byHand: true });
+  if (ed === cm) evaluate(false, { byHand: true });
+  else evalDeckB(false, { byHand: true });
   return true;
 }
 
@@ -579,6 +592,61 @@ function mainEditorKeys() {
     }),
   };
 }
+// DJ mode's second livecode deck: the CodeMirror in the deck B pane, made the first time the split
+// opens (see openMixMode). Declared up here beside the main editor rather than with the rest of
+// DJ mode because it is the other half of the same question - which buffer is this? - and code all
+// over this file asks it, some of it running long before the DJ section's own declarations have.
+let deckBCM = null;
+
+// What every livecode deck's editor carries: the handlers that keep the folds, the open panels and
+// the muted-code dimming in step with the buffer. Registered once, here or wherever the feature lives, and run
+// on the main editor at once and on deck B's the moment it is made - so a handler written for one
+// deck is never quietly missing from the other.
+const deckEditorHooks = [];
+function onEveryDeck(hook) {
+  deckEditorHooks.push(hook);
+  hook(cm);
+  if (deckBCM) hook(deckBCM);
+}
+
+// Which livecode deck an editor is, and the other way round. Anything that is not deck B's pane -
+// the main buffer, and before DJ mode has ever opened that is all there is - is deck A.
+const deckOfCM = (ed) => (ed && ed === deckBCM ? 'b' : 'a');
+const cmOfDeck = (deck) => (deck === 'b' && deckBCM ? deckBCM : cm);
+// The server's name for a track of `ed`'s deck: deck B's are keyed "b:<label>", exactly as the
+// highlighter and the plugin windows already address them, and deck A's are the bare label.
+const deckTrackId = (ed, label) => (label == null ? null : deckOfCM(ed) === 'b' ? `b:${label}` : label);
+// ...and back: the editor a server track id's code is in, and its label there. What the engine
+// hands back about a track - a plugin captured, a knob moved under conf, a slot held - comes keyed
+// this way, and the write it asks for belongs in that deck's buffer under the bare label.
+function deckTrackParts(trackId) {
+  const id = String(trackId ?? '');
+  return id.startsWith('b:') ? { ed: cmOfDeck('b'), label: id.slice(2) } : { ed: cm, label: id };
+}
+
+/** Re-evaluate the deck `ed` belongs to, keeping its play state: the panels' "update" path. */
+function evalEditor(ed) {
+  return evalDeckOf(ed, false);
+}
+
+/** ...or with `start`, playing it - what a bounce or a recorded take landing in the code asks for. */
+function evalDeckOf(ed, start) {
+  return deckOfCM(ed) === 'b' ? evalDeckB(start) : evaluate(start);
+}
+
+/**
+ * A panel's debounced re-evaluation, aimed at the deck the panel is editing. `slot` is the panel's
+ * own { timer, ed }. A panel that moves to the other deck with a run still pending fires the first
+ * deck's at once rather than dropping it: the edit is already in that buffer, and it should be what
+ * that deck plays, not something that waits for the next unrelated eval to be heard.
+ */
+function deckEvalSoon(slot, ed, ms) {
+  clearTimeout(slot.timer);
+  if (slot.timer && slot.ed !== ed) evalEditor(slot.ed);
+  slot.ed = ed;
+  slot.timer = setTimeout(() => { slot.timer = null; evalEditor(ed); }, ms);
+}
+
 // Show the editor pane: CodeMirror is up and the buffer this URL opens with is in it. Called from
 // every exit of the boot handler below (index.html sets the flag, style.css hides the pane while
 // it's there) and, as a backstop, on a timer - a request that never comes back must not leave the
@@ -671,7 +739,9 @@ document.addEventListener('keydown', (e) => {
     else openArrangePainter();
   } else if (action === 'save' || action === 'saveAs') {
     e.preventDefault(); // the browser's own "save page" is never what's wanted here
-    if (action === 'saveAs') savePatternFileAs();
+    // The deck you are working in (see activeCM): deck B's buffer is a pattern file of its own.
+    if (activeCM() === deckBCM) saveDeckBFile(action === 'saveAs');
+    else if (action === 'saveAs') savePatternFileAs();
     else savePatternFile();
   } else if (action === 'dj' && !arKeyInField()) {
     e.preventDefault();
@@ -1126,8 +1196,7 @@ window.addEventListener('popstate', async () => {
 // after every write, so a note drawn into a roll would slam its own definitions block shut again -
 // which is what "expand it and keep working" used to do. The choice isn't in the text, so it is
 // remembered here, by what the fold is OF rather than where it is: an edit moves the offsets.
-const expandedFolds = new Set();
-
+//
 // A GROUP's members are the other way round: they start open and stay open until you fold them.
 //
 // They used to fold themselves, because a chip is smaller than four nested blocks - but the blocks
@@ -1135,76 +1204,86 @@ const expandedFolds = new Set();
 // you were in the middle of writing. So the caret in the gutter is the whole of it (see
 // foldGroups): press it to put a group away, press it again to open it. Held by the group's label,
 // so the choice survives the edits and the re-evaluations that rebuild every other fold.
-const collapsedGroups = new Set();
+//
+// Both are kept PER EDITOR. Each livecode deck folds its own buffer, and a chip opened on one deck
+// says nothing about a chip that happens to share its key on the other - two songs can both have a
+// `drums` group, and folding one must leave the other where it is. `openRuns` is the third piece:
+// the spans of the definition runs the player has opened, rebuilt at the top of each
+// foldConfigBlobs pass. Opening a run is a request to READ it, so the folds that would otherwise
+// chip what is inside one - a roll's note string, a preset's captured program - stand down within
+// it. While the run is folded they never come up: its own chip already covers them.
+const editorFolds = new WeakMap();
+
+/** The fold memory of one editor: { expanded, collapsed, openRuns }, made on first ask. */
+function foldsOf(ed = cm) {
+  let folds = editorFolds.get(ed);
+  if (!folds) editorFolds.set(ed, (folds = { expanded: new Set(), collapsed: new Set(), openRuns: [] }));
+  return folds;
+}
 
 // A buffer being swapped out wholesale takes its folds - and the choices made about them - with
 // it. Whatever the next patch holds, nobody has opened any of it yet.
-function forgetExpandedFolds() {
-  expandedFolds.clear();
-  collapsedGroups.clear();
+function forgetExpandedFolds(ed = cm) {
+  const folds = foldsOf(ed);
+  folds.expanded.clear();
+  folds.collapsed.clear();
 }
+
+// The editors that fold at all: the livecode decks. The rest - the FX chain editor, an embedded
+// panel's snippet - are small views onto code that is never long enough to need it.
+const foldsHere = (ed) => ed === cm || (!!ed && ed === deckBCM);
 
 // Every fold this file makes is re-derivable from the buffer, so switching one off is "drop them
 // all and work them out again" rather than a hunt for the marks that have to go. This is also the
 // only form that is safe to run over a buffer that already has folds: foldConfigBlobs alone is
 // additive, and an edit that half-clears a mark can leave it laying a second widget beside the
-// first - a chip and the text it was standing in for, both on screen.
-function refoldAll() {
-  cm.operation(() => {
-    for (const mk of cm.getAllMarks()) if (mk.poptartFold) mk.clear();
-    foldConfigBlobs();
+// first - a chip and the text it was standing in for, both on screen. Code that edits whichever
+// editor it was handed - the group gestures, the panels, the painter - passes that editor, and an
+// editor that doesn't fold is simply left alone.
+function refoldAll(ed = cm) {
+  if (!foldsHere(ed)) return;
+  ed.operation(() => {
+    for (const mk of ed.getAllMarks()) if (mk.poptartFold) mk.clear();
+    foldConfigBlobs(ed);
   });
 }
 
-// Refold after a write into `ed`, IF that pane folds at all: only the main buffer does (deck B has
-// no gutters and no chips), so a write elsewhere is simply left alone. For code that edits
-// whichever editor it was handed - the group gestures work on the painter's deck or the pane under
-// the caret - this is the question they actually mean to ask.
-function refoldEditor(ed) {
-  if (ed === cm) refoldAll();
-}
-
-// Spans of the definition runs the player has opened, rebuilt at the top of each foldConfigBlobs
-// pass. Opening a run is a request to READ it, so the folds that would otherwise chip what is
-// inside one - a roll's note string, a preset's captured program - stand down within it. While the
-// run is folded they never come up: its own chip already covers them.
-let openDefRunSpans = [];
-
-function foldSpan(fromIdx, toIdx, label, title, key = null, onOpen = null) {
-  if (key !== null && expandedFolds.has(key)) return; // opened by hand - leave it open
-  if (openDefRunSpans.some(([a, b]) => fromIdx >= a && toIdx <= b)) return; // inside one that was
-  const from = cm.posFromIndex(fromIdx);
-  const to = cm.posFromIndex(toIdx);
-  if (cm.findMarks(from, to).some((mk) => mk.poptartFold)) return; // already folded
+function foldSpan(ed, fromIdx, toIdx, label, title, key = null, onOpen = null) {
+  const folds = foldsOf(ed);
+  if (key !== null && folds.expanded.has(key)) return; // opened by hand - leave it open
+  if (folds.openRuns.some(([a, b]) => fromIdx >= a && toIdx <= b)) return; // inside one that was
+  const from = ed.posFromIndex(fromIdx);
+  const to = ed.posFromIndex(toIdx);
+  if (ed.findMarks(from, to).some((mk) => mk.poptartFold)) return; // already folded
   const widget = document.createElement('span');
   widget.className = 'cm-config-fold';
   widget.textContent = label;
   widget.title = title;
-  const mk = cm.markText(from, to, { replacedWith: widget, atomic: true });
+  const mk = ed.markText(from, to, { replacedWith: widget, atomic: true });
   mk.poptartFold = true;
   widget.onclick = () => {
-    if (key !== null) expandedFolds.add(key);
-    if (onOpen) onOpen(); // a group's fold is remembered the other way round - see collapsedGroups
+    if (key !== null) folds.expanded.add(key);
+    if (onOpen) onOpen(); // a group's fold is remembered the other way round - see foldsOf
     mk.clear();
   };
 }
 
-function foldConfigBlobs() {
-  const code = cm.getValue();
+function foldConfigBlobs(ed = cm) {
+  const code = ed.getValue();
   let m;
   // Runs first, so every pass below knows where they are: a folded one covers its contents with a
   // single chip that they find already marked and leave alone, and an opened one holds them off
-  // entirely (see openDefRunSpans).
-  openDefRunSpans = [];
-  for (const reg of DEF_REGISTRIES) foldDefRuns(code, reg);
-  foldGroups(code);
+  // entirely (see foldsOf).
+  foldsOf(ed).openRuns = [];
+  for (const reg of DEF_REGISTRIES) foldDefRuns(ed, code, reg);
+  foldGroups(ed, code);
   // Captured plugin state written out in full - a patch pasted in from outside, or a definition
   // typed by hand. What the editor writes is a handle into the store (see blobs.js), which is
   // short and stays on screen; this is for the ones that aren't.
   const stateRe = /\{\s*state:\s*"[A-Za-z0-9+/=]+"\s*\}/g;
   while ((m = stateRe.exec(code))) {
     const kb = Math.max(1, Math.round(m[0].length / 1024));
-    foldSpan(m.index, m.index + m[0].length, `{◆ ${kb}kb}`, 'captured plugin state — click to expand', `state@${m.index}`);
+    foldSpan(ed, m.index, m.index + m[0].length, `{◆ ${kb}kb}`, 'captured plugin state — click to expand', `state@${m.index}`);
   }
   // lfo() shape strings and pianoroll() note strings: editor-written data, not code to read, so
   // they always fold - length doesn't matter. An empty string is left alone: there's nothing to
@@ -1228,7 +1307,7 @@ function foldConfigBlobs() {
     const start = m.index + m[0].length - str.length;
     // Keyed by where the CALL starts: drawing into a roll rewrites what is inside it and leaves
     // its own offset alone, which is exactly the run of edits this has to hold across.
-    foldSpan(start, start + str.length, '"⋯"', DATA_ARG_TITLES[m[1]], `data@${m.index}`);
+    foldSpan(ed, start, start + str.length, '"⋯"', DATA_ARG_TITLES[m[1]], `data@${m.index}`);
   }
   // _arrange(...): the WHOLE CALL folds, the way a definitions run does. The clips, the membership,
   // the loops and the pinned lanes are all the painter's - and so is the call around them, which
@@ -1244,7 +1323,7 @@ function foldConfigBlobs() {
     const open = m.index + m[0].length - 1;
     const close = matchParen(code, open);
     if (close < 0 || !code.slice(open + 1, close).trim()) continue;
-    foldSpan(m.index, close + 1, '⋯ arrangement', DATA_ARG_TITLES.arrange, key);
+    foldSpan(ed, m.index, close + 1, '⋯ arrangement', DATA_ARG_TITLES.arrange, key);
   }
   // The same blob one call along, as a named preset's third argument. This is for the definitions
   // no run covers - one that chains, or shares its line with code - since inside a folded run the
@@ -1255,7 +1334,7 @@ function foldConfigBlobs() {
     const str = m[1];
     const start = m.index + m[0].length - str.length;
     const kb = Math.max(1, Math.round(str.length / 1024));
-    foldSpan(start, start + str.length, `"◆ ${kb}kb"`, 'captured plugin state — click to expand', `preset@${m.index}`);
+    foldSpan(ed, start, start + str.length, `"◆ ${kb}kb"`, 'captured plugin state — click to expand', `preset@${m.index}`);
   }
   // _roll(id, "notes", …) - the same note data, one argument further along. The id stays visible:
   // it is the name the patterns say, and the whole point of a definitions block is reading it.
@@ -1266,7 +1345,7 @@ function foldConfigBlobs() {
     const str = m[1];
     if (str.length <= 2) continue;
     const start = m.index + m[0].length - str.length;
-    foldSpan(start, start + str.length, '"⋯"', DATA_ARG_TITLES.pianoroll, `rollarg@${m.index}`);
+    foldSpan(ed, start, start + str.length, '"⋯"', DATA_ARG_TITLES.pianoroll, `rollarg@${m.index}`);
   }
 }
 
@@ -1279,7 +1358,7 @@ const ROLL_CHIP_IDS = 6;
  * "there is a group here" even when nothing is hidden - which is the other half of not folding on
  * its own: you can see what you have, and put it away when you want to.
  */
-function groupCaret(label, count, folded) {
+function groupCaret(ed, label, count, folded) {
   const el = document.createElement('span');
   el.className = `cm-group-caret${folded ? ' cm-group-caret-folded' : ''}`;
   el.textContent = folded ? '▸' : '▾';
@@ -1288,9 +1367,10 @@ function groupCaret(label, count, folded) {
   el.onclick = (e) => {
     e.preventDefault();
     e.stopPropagation();
-    if (collapsedGroups.has(label)) collapsedGroups.delete(label);
-    else collapsedGroups.add(label);
-    refoldAll();
+    const { collapsed } = foldsOf(ed);
+    if (collapsed.has(label)) collapsed.delete(label);
+    else collapsed.add(label);
+    refoldAll(ed);
   };
   return el;
 }
@@ -1306,16 +1386,17 @@ function groupCaret(label, count, folded) {
  * tracks, which was the idea, but it also meant the buffer hid two thirds of itself every time you
  * pressed cmd+enter - including the member you were in the middle of writing. A song that puts its
  * own music away is worse than a long song. So the default is open and the caret is the whole of
- * the control; what stays remembered is which groups you FOLDED (collapsedGroups), not which you
- * opened.
+ * the control; what stays remembered is which groups you FOLDED (foldsOf's `collapsed`), not which
+ * you opened.
  *
  * What folds is the character span between the braces (the splitter's bodyStart/bodyEnd), so the
  * fold can never take anything that isn't the group's own body - setup lines inside it included,
  * since a `const` written among a group's tracks belongs to that section.
  */
-function foldGroups(code) {
+function foldGroups(ed, code) {
   if (!labelsMod || !groupsMod) return;
-  cm.clearGutter(GROUP_GUTTER);
+  ed.clearGutter(GROUP_GUTTER);
+  const collapsedGroups = foldsOf(ed).collapsed;
   const blocks = labelsMod.splitLabeledBlocks(code);
   const groups = blocks.filter((b) => b.group && b.bodyStart != null);
   if (!groups.length) {
@@ -1332,11 +1413,11 @@ function foldGroups(code) {
     live.add(group.label);
     if (hiddenByAncestor(group.label)) continue;
     const folded = collapsedGroups.has(group.label);
-    cm.setGutterMarker(cm.posFromIndex(group.start).line, GROUP_GUTTER, groupCaret(group.label, kids.length, folded));
+    ed.setGutterMarker(ed.posFromIndex(group.start).line, GROUP_GUTTER, groupCaret(ed, group.label, kids.length, folded));
     if (!folded) continue;
     // The body folds; the group's own line - `drums: group({` through `}).fx(…)` - stays on
     // screen around the chip, so the mixdown's chain is always in reach.
-    foldSpan(group.bodyStart, group.bodyEnd, ` ⋯ ${kids.length} track${kids.length === 1 ? '' : 's'} `,
+    foldSpan(ed, group.bodyStart, group.bodyEnd, ` ⋯ ${kids.length} track${kids.length === 1 ? '' : 's'} `,
       `${group.label}: ${kids.map((k) => k.label).join(', ')} — click to open`, null,
       () => collapsedGroups.delete(group.label)); // the chip is the caret's other face
   }
@@ -1356,7 +1437,8 @@ function foldGroups(code) {
 // from the buffer so much as disguised it as a blank line, which is precisely the line a tidy
 // player selects and deletes, losing the roll with it. A chip you can see is safer than a gap you
 // can't, and it costs one line at the bottom of the buffer, below everything that is played.
-function foldDefRuns(code, reg) {
+function foldDefRuns(ed, code, reg) {
+  const folds = foldsOf(ed);
   for (const run of reg.runs(code)) {
     const ids = run.map((d) => d.id);
     const from = run[0].start;
@@ -1364,8 +1446,8 @@ function foldDefRuns(code, reg) {
     // Keyed by the names it holds, not its offset: the block sits at the bottom of the buffer, so
     // anything typed above it moves it, and an offset key would forget the moment you typed.
     const key = `defs:${reg.kind}:${ids.join(',')}`;
-    if (expandedFolds.has(key)) {
-      openDefRunSpans.push([from, to]);
+    if (folds.expanded.has(key)) {
+      folds.openRuns.push([from, to]);
       continue; // opened to be read - and everything in it is part of what there is to read
     }
     const shown =
@@ -1373,6 +1455,7 @@ function foldDefRuns(code, reg) {
         ? [...ids.slice(0, ROLL_CHIP_IDS), `+${ids.length - ROLL_CHIP_IDS} more`]
         : ids;
     foldSpan(
+      ed,
       from,
       to,
       `⋯ ${reg.section}`,
@@ -1408,9 +1491,9 @@ function runLineRange(code, run) {
 // Undo and redo put the text back but not the marks an edit cleared along the way, so a cmd-Z can
 // leave a definitions block sitting on screen. Re-derive the folds whenever one lands - which is
 // rare, unlike the per-keystroke changes this deliberately ignores.
-cm.on('changes', (_, changes) => {
-  if (changes.some((c) => c.origin === 'undo' || c.origin === 'redo')) refoldAll();
-});
+onEveryDeck((ed) => ed.on('changes', (_, changes) => {
+  if (changes.some((c) => c.origin === 'undo' || c.origin === 'redo')) refoldAll(ed);
+}));
 
 // String/bracket-aware scan from an opening paren to its matching close; -1 if unbalanced. The one
 // call-span scanner in this file - conf's param upsert, the lfo/pianoroll editors, and the MIDI
@@ -1581,8 +1664,8 @@ function paramCallArgs(code, open, close) {
 // Returns how the capture was filed, for the freeze on the slot it came from (see syncHeldPresets):
 // 'eval' - written, and an evaluation is on its way to put it where the scheduler reads it;
 // 'already' - the code said it word for word, so it is already there; null - nowhere to write it.
-function writePresetState(trackLabel, slot, state, plugin, preset) {
-  const code = cm.getValue();
+function writePresetState(trackLabel, slot, state, plugin, preset, ed = cm) {
+  const code = ed.getValue();
   // Scoped to the plugin the state came OUT of: several presets in this buffer may be called
   // `disco`, and the one being captured into is this plugin's (see makeDefRegistry's scope). An
   // uncaptured placeholder matches too, and this capture is what gives it its owner.
@@ -1593,24 +1676,24 @@ function writePresetState(trackLabel, slot, state, plugin, preset) {
     // typed in and not yet evaluated (materialize writes them at eval time). Write one rather than
     // drop the program on the floor: a captured sound is the one thing here that can't be redone.
     const [from, to, text] = presetDefs.defsEdit(code, [preset], () => body);
-    cm.replaceRange(text, cm.posFromIndex(from), cm.posFromIndex(to), '+autopin');
-    refoldAll();
+    ed.replaceRange(text, ed.posFromIndex(from), ed.posFromIndex(to), '+autopin');
+    refoldAll(ed);
     logLine(`captured ${plugin ?? 'plugin'} into preset "${preset}" (which had no definition)`);
-    presetScheduleEval();
+    presetScheduleEval(ed);
     return 'eval';
   }
   const [, idEnd] = defIdLiteralRange(code, def);
   const replacement = `, ${body}`;
-  const from = cm.posFromIndex(idEnd);
-  const to = cm.posFromIndex(def.close);
+  const from = ed.posFromIndex(idEnd);
+  const to = ed.posFromIndex(def.close);
   // Identical text means the plugin came back exactly as the code already describes it - a gesture
   // that landed back where it started, or a capture racing an edit elsewhere. Writing it anyway
   // would spend an undo step, a change event and a megabyte-scale buffer edit on nothing.
-  if (cm.getRange(from, to) === replacement) return 'already';
-  cm.replaceRange(replacement, from, to, '+autopin'); // one merged undo step, as in createPresetForSlot
-  refoldAll();
+  if (ed.getRange(from, to) === replacement) return 'already';
+  ed.replaceRange(replacement, from, to, '+autopin'); // one merged undo step, as in createPresetForSlot
+  refoldAll(ed);
   logLine(`captured ${plugin ?? 'plugin'} into preset "${preset}"`);
-  presetScheduleEval();
+  presetScheduleEval(ed);
   return 'eval';
 }
 
@@ -1640,12 +1723,12 @@ function presetCallForSlot(code, trackLabel, slot) {
 // The `+`-prefixed origin is what makes CodeMirror merge consecutive writes into a single undo
 // step (same trick as the copy-line edits): a knob drag can't bury your last real edit under a run
 // of them.
-function applyBufferEdits(edits, origin) {
+function applyBufferEdits(edits, origin, ed = cm) {
   const order = new Map(edits.map((e, i) => [e, i]));
   const inOrder = [...edits].sort((a, b) => (b[0] - a[0]) || (order.get(a) - order.get(b)));
-  cm.operation(() => {
+  ed.operation(() => {
     for (const [from, to, text] of inOrder) {
-      cm.replaceRange(text, cm.posFromIndex(from), cm.posFromIndex(to), origin);
+      ed.replaceRange(text, ed.posFromIndex(from), ed.posFromIndex(to), origin);
     }
   });
 }
@@ -1711,24 +1794,27 @@ function isPlainSetting(arg) {
   return !!str && !/[\s<>\[\]{}~*!?|,@]/.test(str[1]);
 }
 
-function writePluginState(trackLabel, slot, state, plugin, preset) {
+// `trackId` is the server's name for the track, so a capture out of a deck B plugin ("b:lead") is
+// written into deck B's buffer, under the label its code says.
+function writePluginState(trackId, slot, state, plugin, preset) {
   if (!labelsMod) return null;
-  const code = cm.getValue();
+  const { ed, label: trackLabel } = deckTrackParts(trackId);
+  const code = ed.getValue();
   slot = slotOfPluginNow(code, trackLabel, slot, plugin);
   // Which preset this belongs in, most reliable first: the one the server says was loaded when the
   // knob moved (a hold, or whatever the pattern had reached), then whatever the buffer's own
   // .preset(...) for this slot names. The second is what covers a capture landing before the eval
   // that would have told the server about a preset this function itself just wrote.
   const named = preset ?? idsNamedIn(presetCallForSlot(code, trackLabel, slot)?.str ?? '')[0] ?? null;
-  if (named) return writePresetState(trackLabel, slot, state, plugin, named);
-  return createPresetForSlot(code, trackLabel, slot, plugin, state);
+  if (named) return writePresetState(trackLabel, slot, state, plugin, named, ed);
+  return createPresetForSlot(code, trackLabel, slot, plugin, state, ed);
 }
 
 // Nothing names this slot's sound yet, so auto-pin gives it a name: a definition holding the
 // program, and a `.preset("name")` on the chain right after the plugin it came from. Any legacy
 // `{ state }` on that call goes at the same time - the preset replaces it, and leaving both would
 // be two descriptions of one sound, the pinned one silently ignored (see Scheduler#setPattern).
-function createPresetForSlot(code, trackLabel, slot, plugin, state) {
+function createPresetForSlot(code, trackLabel, slot, plugin, state, ed = cm) {
   const block = blockForTrack(code, trackLabel);
   const call = block && findChainCall(code, block, slot);
   if (!call) {
@@ -1749,7 +1835,7 @@ function createPresetForSlot(code, trackLabel, slot, plugin, state) {
   // belongs to its plugin (see makeDefRegistry's scope), so every slot in a chain can have one
   // called `lead` and each means the one on that plugin. The suffix is only the fallback for a name
   // already taken ON THIS PLUGIN - the same plugin twice in one chain.
-  const rows = presetDefs.allIds(plugin ?? null);
+  const rows = presetDefs.allIds(plugin ?? null, code);
   const id = freshDefId(trackLabel, (name) => rows.some((r) => r.id === name), 'preset');
   // A name taken by something outside the buffer gets a word, for the same reason it does when a
   // roll or shape is auto-named: the suffix is otherwise unexplained (see libraryBumpNote). `own`
@@ -1764,10 +1850,10 @@ function createPresetForSlot(code, trackLabel, slot, plugin, state) {
   ];
   // The legacy `{ state }` argument, if this call still carries one.
   if (call.afterFirstArg < call.closeParen) edits.push([call.afterFirstArg, call.closeParen, '']);
-  applyBufferEdits(edits, '+autopin');
-  refoldAll();
+  applyBufferEdits(edits, '+autopin', ed);
+  refoldAll(ed);
   logLine(`captured ${plugin ?? 'plugin'} into new preset "${id}"`);
-  presetScheduleEval();
+  presetScheduleEval(ed);
   return 'eval';
 }
 
@@ -1811,17 +1897,17 @@ function findLegacyStateCall(code) {
   return null;
 }
 
-function convertLegacyStates() {
+function convertLegacyStates(ed = cm) {
   if (!labelsMod) return;
   const converted = [];
   for (let guard = 0; guard < 64; guard++) { // a bound, not a budget: a buffer has a handful of these
-    const code = cm.getValue();
+    const code = ed.getValue();
     const call = findLegacyStateCall(code);
     if (!call) break;
     const { label, slot, plugin, state } = call;
     // Named after the track, like an auto-pinned capture (see createPresetForSlot) - and unique
     // within the PLUGIN, since a preset belongs to the plugin it came from.
-    const rows = presetDefs.allIds(plugin);
+    const rows = presetDefs.allIds(plugin, code);
     const id = freshDefId(label, (name) => rows.some((r) => r.id === name), 'preset');
     const wantedId = preferredDefId(label, 'preset');
     const fromLibrary = rows.find((r) => r.id === wantedId && !r.own);
@@ -1836,11 +1922,11 @@ function convertLegacyStates() {
       presetDefs.defsEdit(code, [id], () => `${JSON.stringify(plugin)}, ${JSON.stringify(state)}`),
     ];
     if (!driven) edits.push([call.closeParen + 1, call.closeParen + 1, `.preset(${JSON.stringify(id)})`]);
-    applyBufferEdits(edits, '+legacyState');
+    applyBufferEdits(edits, '+legacyState', ed);
     converted.push(`"${label}" ${slot === 0 ? 'synth' : `fx slot ${slot}`} → preset "${id}"${driven ? ' (filed only: that slot is already driven by .preset(…))' : ''}`);
   }
   if (!converted.length) return;
-  refoldAll();
+  refoldAll(ed);
   logLine(`converted legacy { state } into presets: ${converted.join('; ')}`);
 }
 
@@ -1933,7 +2019,7 @@ window.addEventListener('focus', () => {
 // panel holding a slot it is editing, and a plugin window held open on one.
 let heldSlots = []; // [{ trackId, slot, preset, why }] as of the last poll
 let heldMarks = []; // the marks drawn for them
-let heldRanges = []; // document spans the playback highlighter must not light
+let heldRanges = []; // [deck, from, to] - document spans the playback highlighter must not light
 let heldPainted = ''; // the holds + buffer generation last drawn, so an unchanged poll costs nothing
 
 function heldTitle(h) {
@@ -1950,7 +2036,7 @@ function syncHeldPresets(holds) {
   // Nothing held means nothing to redraw, however much the buffer changes - which matters, because
   // this runs twice a second and typing changes the buffer generation on every keystroke.
   const sig = heldSlots.length
-    ? `${heldSlots.map((h) => `${h.trackId}|${h.slot}|${h.preset ?? ''}|${h.why}`).sort().join(',')}@${cm.changeGeneration()}`
+    ? `${heldSlots.map((h) => `${h.trackId}|${h.slot}|${h.preset ?? ''}|${h.why}`).sort().join(',')}@${cm.changeGeneration()}/${deckBCM?.changeGeneration() ?? ''}`
     : '';
   if (sig === heldPainted) return; // nothing held has moved, and neither has the buffer
   heldPainted = sig;
@@ -1962,14 +2048,15 @@ function paintHeldPresets() {
   for (const mk of heldMarks) mk.clear();
   heldMarks = [];
   heldRanges = [];
-  const code = heldSlots.length && labelsMod ? cm.getValue() : '';
-  for (const h of heldSlots) {
-    const call = presetCallForSlot(code, h.trackId, h.slot);
+  for (const h of labelsMod ? heldSlots : []) {
+    // Drawn in the code of the deck the slot plays on: a deck B track's id is "b:<label>".
+    const { ed, label } = deckTrackParts(h.trackId);
+    const call = presetCallForSlot(ed.getValue(), label, h.slot);
     if (!call) continue;
     // The whole name string is what the highlighter must leave alone: every name in `<a b>` is one
     // this slot is not playing right now, including the one it is (its light would be a lie about
     // the pattern rather than about the sound).
-    heldRanges.push([call.from, call.to]);
+    heldRanges.push([deckOfCM(ed), call.from, call.to]);
     let from = call.from;
     let to = call.to;
     const m = h.preset ? idWordRe(h.preset).exec(call.str) : null;
@@ -1977,7 +2064,7 @@ function paintHeldPresets() {
       from = call.from + m.index;
       to = from + m[0].length;
     }
-    heldMarks.push(cm.markText(cm.posFromIndex(from), cm.posFromIndex(to), {
+    heldMarks.push(ed.markText(ed.posFromIndex(from), ed.posFromIndex(to), {
       className: 'cm-held',
       title: heldTitle(h),
     }));
@@ -1987,9 +2074,9 @@ function paintHeldPresets() {
   if (heldRanges.join(';') !== before) for (const r of patternRegions) r.lastKey = '';
 }
 
-/** Whether a document span sits inside a held `.preset(...)` name (see paintHeldPresets). */
-function inHeldRange(from, to) {
-  return heldRanges.some(([a, b]) => from >= a && to <= b);
+/** Whether a span of deck `deck`'s document sits inside a held `.preset(...)` name (see paintHeldPresets). */
+function inHeldRange(from, to, deck = 'a') {
+  return heldRanges.some(([d, a, b]) => d === deck && from >= a && to <= b);
 }
 
 // Captures written into the buffer whose slot is still frozen until the sound is where the
@@ -1998,6 +2085,9 @@ function inHeldRange(from, to) {
 // server's sequence number, so committing one can never release a knob turned after it.
 let commitQueue = []; // report on the next poll
 let commitOnEval = []; // ...once the evaluation carrying them has come back
+// ...which is the evaluation of the deck the capture was written into: a deck B track's id is
+// "b:<label>" (see writePluginState), and deck A's eval must not thaw a slot deck B's code holds.
+const isDeckBCommit = (c) => String(c.trackId).startsWith('b:');
 
 async function pollPluginEdits({ flush = false } = {}) {
   // The preset panel's hold is renewed here rather than on a timer of its own - the server treats
@@ -2025,8 +2115,9 @@ async function pollPluginEdits({ flush = false } = {}) {
     // set them (see settingParamEdits). Written first and with the same origin, so the whole
     // capture is one undo step.
     if (e.replacesParams) {
-      const drop = settingParamEdits(cm.getValue(), e.trackId, e.slot);
-      if (drop.length) applyBufferEdits(drop, '+autopin');
+      const { ed, label } = deckTrackParts(e.trackId);
+      const drop = settingParamEdits(ed.getValue(), label, e.slot);
+      if (drop.length) applyBufferEdits(drop, '+autopin', ed);
     }
     const filed = writePluginState(e.trackId, e.slot, e.state, e.plugin, e.preset);
     const commit = { trackId: e.trackId, slot: e.slot, seq: e.seq };
@@ -2129,15 +2220,17 @@ function blockForTrack(code, label) {
   return live[live.length - 1] ?? named[named.length - 1] ?? null;
 }
 
-function upsertParam(trackLabel, slot, name, value) {
+// `trackId` is the server's name for the track, so a deck B track's .param() lands in deck B.
+function upsertParam(trackId, slot, name, value) {
   if (!labelsMod) return;
-  const code = cm.getValue();
+  const { ed, label: trackLabel } = deckTrackParts(trackId);
+  const code = ed.getValue();
   const block = blockForTrack(code, trackLabel);
   if (!block) return;
   // Overwrite an existing .param() for this name, else insert one targeting the touched slot.
   const existing = findParamCall(code, block, name, slot);
   if (existing) {
-    cm.replaceRange(` ${value}`, cm.posFromIndex(existing.valueStart), cm.posFromIndex(existing.valueEnd));
+    ed.replaceRange(` ${value}`, ed.posFromIndex(existing.valueStart), ed.posFromIndex(existing.valueEnd));
     return;
   }
   const call = findChainCall(code, block, slot);
@@ -2145,7 +2238,7 @@ function upsertParam(trackLabel, slot, name, value) {
     logLine(`conf: couldn't find slot ${slot}'s call in "${trackLabel}" - re-evaluate and try again`, true);
     return;
   }
-  cm.replaceRange(`.param(${JSON.stringify(name)}, ${value})`, cm.posFromIndex(call.closeParen + 1));
+  ed.replaceRange(`.param(${JSON.stringify(name)}, ${value})`, ed.posFromIndex(call.closeParen + 1));
 }
 
 let hashTimer = null;
@@ -2154,10 +2247,13 @@ cm.on('change', () => {
   // A history restore already put this state on screen - re-titling and re-storing it is just
   // work, and the entry the user navigated to is already what the URL says.
   if (!restoringFromHistory) hashTimer = setTimeout(syncBufferState, 400);
-  clearTimeout(mutedDimTimer);
-  mutedDimTimer = setTimeout(updateMutedDim, 150);
   scheduleWipSave();
 });
+// Dimming is every deck's, though: a muted block in deck B's code is as silent as one in deck A's.
+onEveryDeck((ed) => ed.on('change', () => {
+  clearTimeout(mutedDimTimers.get(ed));
+  mutedDimTimers.set(ed, setTimeout(() => updateMutedDim(ed), 150));
+}));
 
 // ---------------------------------------------------------------------------------------------
 // Work-in-progress autosave. Everything you type goes to a file on disk whether or not you ever
@@ -2283,8 +2379,9 @@ window.addEventListener('pagehide', () => {
 // same treatment from the syntax mode itself.
 // ---------------------------------------------------------------------------------------------
 
-let mutedDimTimer = null;
-let mutedDimMarks = [];
+// Per editor, since each deck dims its own buffer.
+const mutedDimTimers = new WeakMap();
+const mutedDimMarks = new WeakMap();
 
 // A label inside a group's braces is tokenized by the JS mode as an object PROPERTY (that is what
 // `kicks:` inside `{ }` is to JavaScript), which the theme paints dimmer than the top-level labels
@@ -2293,25 +2390,26 @@ let mutedDimMarks = [];
 // keeps its property color.
 const NESTED_LABEL_TOKEN_RE = /^([ \t]*)([A-Za-z_$][\w$]*)\s*:/;
 
-function markMemberLabels(code, blocks) {
+function markMemberLabels(ed, code, blocks, marks) {
   for (const b of blocks) {
     if (b.parent == null || b.kind === 'bare') continue;
     const m = NESTED_LABEL_TOKEN_RE.exec(code.slice(b.start, b.start + 80));
     if (!m) continue;
     const from = b.start + m[1].length;
-    mutedDimMarks.push(
-      cm.markText(cm.posFromIndex(from), cm.posFromIndex(from + m[2].length), { className: 'cm-member-label' }),
+    marks.push(
+      ed.markText(ed.posFromIndex(from), ed.posFromIndex(from + m[2].length), { className: 'cm-member-label' }),
     );
   }
 }
 
-function updateMutedDim() {
+function updateMutedDim(ed = cm) {
   if (!labelsMod) return;
-  for (const mk of mutedDimMarks) mk.clear();
-  mutedDimMarks = [];
-  const code = cm.getValue();
+  for (const mk of mutedDimMarks.get(ed) ?? []) mk.clear();
+  const marks = [];
+  mutedDimMarks.set(ed, marks);
+  const code = ed.getValue();
   const blocks = labelsMod.splitLabeledBlocks(code);
-  markMemberLabels(code, blocks);
+  markMemberLabels(ed, code, blocks, marks);
   // Markers travel the group tree exactly as the host applies them (see /api/evaluate): mute and
   // solo reach everything UNDER the marked label, and a soloed track keeps the groups ABOVE it -
   // so what dims here is what will actually fall silent.
@@ -2323,8 +2421,8 @@ function updateMutedDim() {
   const anySolo = blocks.some((b) => isSoloed(b) && !isMuted(b));
   for (const b of blocks) {
     if (!isMuted(b) && !(anySolo && !isSoloed(b))) continue;
-    mutedDimMarks.push(
-      cm.markText(cm.posFromIndex(b.start), cm.posFromIndex(b.end), { className: 'cm-muted-code' }),
+    marks.push(
+      ed.markText(ed.posFromIndex(b.start), ed.posFromIndex(b.end), { className: 'cm-muted-code' }),
     );
   }
 }
@@ -2384,9 +2482,11 @@ function paramHints(cur, typed, textBefore, editor, target = null) {
   const slot = target != null
     ? paramSlotAt(editor.getValue(), textBefore.length, target)
     : (sinceBlockStart.match(/\.fx\s*\(/g) ?? []).length;
-  // This track's slot; failing that, whatever is loaded at that slot anywhere.
+  // This track's slot; failing that, whatever is loaded at that slot anywhere. The track as the
+  // server names it, so deck B's `lead` is "b:lead" and not deck A's track of the same name.
+  const track = block ? deckTrackId(editor, block.label) : null;
   const entry =
-    (block && chainSlots.find((s) => s.track === block.label && s.slot === slot)) ??
+    (block && chainSlots.find((s) => s.track === track && s.slot === slot)) ??
     chainSlots.find((s) => s.slot === slot);
   // Fall back to every loaded plugin's params (tagged by plugin) if the slot isn't loaded yet.
   const pool = entry?.params?.length
@@ -3010,7 +3110,7 @@ function attachWidgetHandles(editor) {
   editor.on('mousedown', (_ed, e) => {
     if (e.detail !== 2 || e.button !== 0) return;
     const idx = editor.indexFromPos(editor.coordsChar({ left: e.clientX, top: e.clientY }, 'window'));
-    const took = editor === cm ? openWidgetAt(editor.getValue(), idx) : openDeckBWidgetAt(editor.getValue(), idx);
+    const took = openWidgetAt(editor.getValue(), idx, editor);
     if (took) {
       clearHandleMark(); // the panel is up; the underline would be left pointing at nothing
       e.preventDefault(); // the double-click WAS the gesture
@@ -3065,15 +3165,13 @@ function updateHandleMark(editor, point) {
  * Whether a double-click at `idx` would open an editor - openWidgetAt's question, asked without
  * opening anything. It has to follow that function: a word is only a handle where its own finder
  * says the call around it is real, which is what keeps `end(` in plain JavaScript, or a `synth` in
- * a comment, from being underlined. Deck B is the one place the two differ, since only the plugin
- * windows open for it (see openDeckBWidgetAt) - the rest would edit deck A's buffer, and a handle
- * that answers with an explanation is not one worth advertising.
+ * a comment, from being underlined. Both livecode decks answer it the same way, since every panel
+ * opens against either of them.
  */
 function isWidgetHandleAt(editor, code, idx) {
   // The FX chain editor holds a chain and nothing else, so its handles are its own (there is no
   // labeled block for findChainHandleAt to find) - see fxChainSlotAt.
   if (editor === fxEdCM) return !!fxChainSlotAt(code, idx);
-  if (editor !== cm) return !!findChainHandleAt(code, idx);
   if (arrangeMod && (findArrangeCallAt(code, idx)?.onName || findAutoCallAt(code, idx)?.onName)) return true;
   if (shapeMod && findLfoCallAt(code, idx)?.onName) return true;
   if (pianorollMod && findPianorollCallAt(code, idx)?.onName) return true;
@@ -3086,39 +3184,17 @@ function isWidgetHandleAt(editor, code, idx) {
 }
 
 /**
- * Deck B's widget handles. The plugin editors (synth/fx names) are the engine's own windows, so
- * they open for either deck - the split pane's tracks are keyed "b:<label>" server-side, exactly
- * as the highlighter already addresses them. The text-editing panels (roll, arrange, preset, …)
- * are a different story: they write back into the buffer, and everything under them - the
- * definition registries, their debounced evals, the fold machinery - still reads and writes deck
- * A's buffer only. Opening one against deck B would edit the wrong deck's code, so until they are
- * taught the split, the handle says what to do instead of silently doing nothing.
+ * Opens whichever editor `idx` in `ed`'s buffer is the handle for. True if one of them took it.
+ * Either livecode deck: every panel is opened against the deck it was asked from, and from then on
+ * reads and writes that deck's buffer and evaluates that deck.
  */
-function openDeckBWidgetAt(code, idx) {
-  const chain = findChainHandleAt(code, idx);
-  if (chain) {
-    showPluginEditor(`b:${chain.label}`, chain.slot);
-    return true;
-  }
-  const panel = [
-    ['arrange', arrangeMod && findArrangeCallAt(code, idx)],
-    ['lfo', shapeMod && findLfoCallAt(code, idx)],
-    ['piano roll', pianorollMod && findPianorollCallAt(code, idx)],
-    ['preset', findPresetCallAt(code, idx)],
-    ['sample pack', findSpCallAt(code, idx)],
-    ['slice', slicesMod && findSliceCallAt(code, idx)],
-    ['envelope', findEnvelopeHandleAt(code, idx) && { onName: true }],
-    ['record', findRecordCallAt(code, idx)],
-  ].find(([, call]) => call?.onName);
-  if (panel) logLine(`deck B: the ${panel[0]} panel can only edit deck A's buffer so far - move the pattern there to open it`);
-  return false;
-}
-
-/** Opens whichever editor `idx` is the handle for. True if one of them took it. */
-function openWidgetAt(code, idx) {
+function openWidgetAt(code, idx, ed = cm) {
   const arr = arrangeMod && findArrangeCallAt(code, idx);
   if (arr?.onName) {
-    if (!arState || arr.start !== arState.callStart) openArrangeEditor(arr);
+    // The painter is opened against the deck the call is in (see openArrangePainter), and only
+    // reopened in place for another call in that same deck.
+    if (!arState || arCM !== ed) openArrangePainter(deckOfCM(ed));
+    else if (arr.start !== arState.callStart) openArrangeEditor(arr);
     arCanvas.focus({ preventScroll: true }); // the keys (delete, undo) belong to the clips now
     return true;
   }
@@ -3129,13 +3205,13 @@ function openWidgetAt(code, idx) {
   const autoCall = arrangeMod && findAutoCallAt(code, idx);
   if (autoCall?.onName) {
     if (!code.slice(autoCall.open + 1, autoCall.close).trim()) {
-      const at = cm.setBookmark(cm.posFromIndex(idx));
-      const named = autoDefs.materialize();
+      const at = ed.setBookmark(ed.posFromIndex(idx));
+      const named = autoDefs.materialize(ed);
       const back = at.find();
       at.clear();
-      if (named && back) return openWidgetAt(cm.getValue(), cm.indexFromPos(back));
+      if (named && back) return openWidgetAt(ed.getValue(), ed.indexFromPos(back), ed);
     }
-    openAutoFromIdCall(autoCall, code);
+    openAutoFromIdCall(autoCall, code, ed);
     return true;
   }
   const lfo = shapeMod && findLfoCallAt(code, idx);
@@ -3144,19 +3220,19 @@ function openWidgetAt(code, idx) {
     // became - a bookmark carries the handle's position across the rewrite, since a definitions
     // block inserted above moves every offset below it along. Same dance as pianoroll's.
     if (!code.slice(lfo.open + 1, lfo.close).trim()) {
-      const at = cm.setBookmark(cm.posFromIndex(idx));
-      const named = shapeDefs.materialize();
+      const at = ed.setBookmark(ed.posFromIndex(idx));
+      const named = shapeDefs.materialize(ed);
       const back = at.find();
       at.clear();
-      if (named && back) return openWidgetAt(cm.getValue(), cm.indexFromPos(back));
+      if (named && back) return openWidgetAt(ed.getValue(), ed.indexFromPos(back), ed);
     }
     // lfo("<pluck swell>") NAMES shapes rather than drawing them, so open the definition instead:
     // writing breakpoints back into this call would serialize them over the names.
     if (shapeDefs.isIdCall(code.slice(lfo.open + 1, lfo.close))) {
-      openShapeFromIdCall(lfo, code);
+      openShapeFromIdCall(lfo, code, ed);
       return true;
     }
-    if (!lfoState || lfo.start !== lfoState.callStart) openLfoEditor(lfo);
+    if (!lfoState || lfoCM !== ed || lfo.start !== lfoState.callStart) openLfoEditor(lfo, ed);
     return true;
   }
   const roll = pianorollMod && findPianorollCallAt(code, idx);
@@ -3165,21 +3241,21 @@ function openWidgetAt(code, idx) {
     // became - a bookmark carries the handle's position across the rewrite, since a definitions
     // block inserted above moves every offset below it along.
     if (!code.slice(roll.open + 1, roll.close).trim()) {
-      const at = cm.setBookmark(cm.posFromIndex(idx));
-      const named = rollDefs.materialize();
+      const at = ed.setBookmark(ed.posFromIndex(idx));
+      const named = rollDefs.materialize(ed);
       const back = at.find();
       at.clear();
-      if (named && back) return openWidgetAt(cm.getValue(), cm.indexFromPos(back));
+      if (named && back) return openWidgetAt(ed.getValue(), ed.indexFromPos(back), ed);
     }
     // pianoroll("<0 chorus>") NAMES rolls rather than drawing them: the notes live in the roll(...)
     // definitions, so open whichever one is playing and follow the call from there. Writing notes
     // back into this call would serialize them over the ids, which is why it is never opened
     // directly.
     if (rollDefs.isIdCall(code.slice(roll.open + 1, roll.close))) {
-      openRollFromIdCall(roll, code);
+      openRollFromIdCall(roll, code, ed);
       return true;
     }
-    if (!prState || roll.start !== prState.callStart) openPianorollEditor(roll);
+    if (!prState || prCM !== ed || roll.start !== prState.callStart) openPianorollEditor(roll, null, ed);
     // Opening the roll on purpose hands it the keyboard: cmd-A, the arrows and delete belong to
     // the notes now, not to the code buffer.
     prCanvas.focus({ preventScroll: true });
@@ -3195,15 +3271,15 @@ function openWidgetAt(code, idx) {
     // whichever one is playing and follow the call from there (writing a table back into this call
     // would serialize it over the names).
     if (grooveDefs.isIdCall(code.slice(swingCall.open + 1, swingCall.close))) {
-      if (openGrooveFromIdCall(swingCall, code)) return true;
+      if (openGrooveFromIdCall(swingCall, code, ed)) return true;
     }
     if (read.grid !== null || (read.name === null && read.data === null)) {
       // A plain swing: turn it into the table that says the same thing, then open that. The numbers
       // are unchanged by construction - a two-slot alternating table at the same depth IS this
       // swing - so the sound does not move as the panel opens.
-      if (grooveMakeDrawable(swingCall, read)) return true;
+      if (grooveMakeDrawable(swingCall, read, ed)) return true;
     }
-    if (!grooveState || swingCall.start !== grooveState.callStart) openGrooveEditor(swingCall);
+    if (!grooveState || grooveCM !== ed || swingCall.start !== grooveState.callStart) openGrooveEditor(swingCall, ed);
     return true;
   }
   const preset = findPresetCallAt(code, idx);
@@ -3212,13 +3288,13 @@ function openWidgetAt(code, idx) {
     // carries the handle's position across the rewrite, since a definitions block inserted above
     // moves every offset below it along. Same dance as the roll's and the shape's.
     if (!code.slice(preset.open + 1, preset.close).trim()) {
-      const at = cm.setBookmark(cm.posFromIndex(idx));
-      const named = presetDefs.materialize();
+      const at = ed.setBookmark(ed.posFromIndex(idx));
+      const named = presetDefs.materialize(ed);
       const back = at.find();
       at.clear();
-      if (named && back) return openWidgetAt(cm.getValue(), cm.indexFromPos(back));
+      if (named && back) return openWidgetAt(ed.getValue(), ed.indexFromPos(back), ed);
     }
-    openPresetFromCall(preset, code);
+    openPresetFromCall(preset, code, ed);
     return true;
   }
   const packCall = findSpCallAt(code, idx);
@@ -3226,13 +3302,13 @@ function openWidgetAt(code, idx) {
     // An empty sp() has no name yet. Give it one, then open whatever it became - the same bookmark
     // dance as the roll's, since the definition is written below and moves nothing above it.
     if (!code.slice(packCall.open + 1, packCall.close).trim()) {
-      const at = cm.setBookmark(cm.posFromIndex(idx));
-      const named = packDefs.materialize();
+      const at = ed.setBookmark(ed.posFromIndex(idx));
+      const named = packDefs.materialize(ed);
       const back = at.find();
       at.clear();
-      if (named && back) return openWidgetAt(cm.getValue(), cm.indexFromPos(back));
+      if (named && back) return openWidgetAt(ed.getValue(), ed.indexFromPos(back), ed);
     }
-    openPackFromCall(packCall, code);
+    openPackFromCall(packCall, code, ed);
     return true;
   }
   // `slice`/`slices` on a sampler chain: the chop markers, drawn on the sample itself. Asked after
@@ -3240,18 +3316,18 @@ function openWidgetAt(code, idx) {
   // have to WRITE a `.slices()` onto the chain before there is anything to open (see the slice
   // editor section).
   const sliceCall = slicesMod && findSliceCallAt(code, idx);
-  if (sliceCall?.onName && openSliceEditorFromCall(sliceCall, code, idx)) return true;
+  if (sliceCall?.onName && openSliceEditorFromCall(sliceCall, code, idx, ed)) return true;
   // The envelope and playback controls of a sampler chain - or its s()/se()/sr() source - open the
   // envelope drawn over the sample. Asked after the slice editor, whose `slice` is also a sampler word.
-  if (findEnvelopeHandleAt(code, idx) && openEnvelopeAt(code, idx)) return true;
+  if (findEnvelopeHandleAt(code, idx) && openEnvelopeAt(code, idx, ed)) return true;
   const rec = findRecordCallAt(code, idx);
   if (rec?.onName) {
-    if (!recordState || rec.start !== recordState.callStart) openRecordPanel(rec);
+    if (!recordState || recCM !== ed || rec.start !== recordState.callStart) openRecordPanel(rec, ed);
     return true;
   }
   const chain = findChainHandleAt(code, idx);
   if (chain) {
-    showPluginEditor(chain.label, chain.slot);
+    showPluginEditor(deckTrackId(ed, chain.label), chain.slot);
     return true;
   }
   return false;
@@ -3318,7 +3394,8 @@ function showPluginEditor(trackId, slot) {
     .finally(() => { releasesInFlight = 0; }));
   // Only worth saying where a pattern would otherwise be swapping this slot's whole program - and
   // the marked name in the code says the rest.
-  if (labelsMod && presetCallForSlot(cm.getValue(), trackId, slot)) {
+  const { ed, label } = deckTrackParts(trackId);
+  if (labelsMod && presetCallForSlot(ed.getValue(), label, slot)) {
     logLine(`${trackId} slot ${slot}: holding its preset while you work in the plugin - click in the code to hand it back`);
   }
 }
@@ -3736,6 +3813,10 @@ document.addEventListener('scroll', () => {
  * while one still plays it.
  */
 function deviceShapePicker(trackLabel, slot, widget, showValue) {
+  // The deck whose code plays this device: its curves are that buffer's shapes, and a pick is
+  // written there and evaluated there.
+  const host = deckTrackParts(trackLabel).ed;
+  const shapes = (fn) => shapeDefs.withEditor(host, fn);
   const builtIns = widget.options.slice(0, widget.fixed ?? widget.options.length);
   const isBuiltIn = (id) => builtIns.includes(id);
   const say = (text, err = false) => logLine(`${trackLabel}: ${text}`, err);
@@ -3805,13 +3886,13 @@ function deviceShapePicker(trackLabel, slot, widget, showValue) {
    */
   const play = (id) => {
     upsertParam(trackLabel, slot, widget.name, JSON.stringify(id));
-    return evaluate(false).then(() => setDevice(id));
+    return evalEditor(host).then(() => setDevice(id));
   };
 
   /** The breakpoints a curve is made of, where they can be read here; null for a library one. */
   const pointsOf = (id) => {
     if (isBuiltIn(id)) return figure()?.builtIns?.[id] ?? null;
-    const code = cm.getValue();
+    const code = host.getValue();
     const def = shapeDefs.findDef(code, id);
     if (!def) return null;
     const [, rest] = splitFirstArg(code.slice(def.open + 1, def.close));
@@ -3831,21 +3912,21 @@ function deviceShapePicker(trackLabel, slot, widget, showValue) {
    * The name only exists once the buffer has been evaluated, so the device is set after that.
    */
   const makeShape = (id, points, { open = true } = {}) => {
-    const [start, end, text] = shapeDefs.defsEdit(cm.getValue(), [id], () => JSON.stringify(points));
-    cm.replaceRange(text, cm.posFromIndex(start), cm.posFromIndex(end));
+    const [start, end, text] = shapeDefs.defsEdit(host.getValue(), [id], () => JSON.stringify(points));
+    host.replaceRange(text, host.posFromIndex(start), host.posFromIndex(end));
     upsertParam(trackLabel, slot, widget.name, JSON.stringify(id));
-    refoldAll();
-    evaluate(false).then(() => setDevice(id));
-    if (open) openShapeById(id, { options: axesOptions() });
+    refoldAll(host);
+    evalEditor(host).then(() => setDevice(id));
+    if (open) openShapeById(id, { options: axesOptions() }, host);
   };
   const nameFor = (stem) => {
-    const rows = shapeDefs.allIds();
+    const rows = shapes(() => shapeDefs.allIds());
     return freshDefId(stem.replace(/\d+$/, '') || stem, (n) => isBuiltIn(n) || rows.some((r) => r.id === n), 'shape');
   };
   /** A copy of `id` under the next free spelling of its name, played at once. */
   const copy = (id, { open = true } = {}) => {
     const points = pointsOf(id);
-    if (points == null) return shapeDefs.duplicate(id); // a library shape: its source is fetched first
+    if (points == null) return shapes(() => shapeDefs.duplicate(id)); // a library shape: its source is fetched first
     const to = nameFor(id);
     makeShape(to, points, { open });
     say(`"${to}" is a copy of ${isBuiltIn(id) ? `the built-in ${id}` : `"${id}"`}`);
@@ -3858,22 +3939,22 @@ function deviceShapePicker(trackLabel, slot, widget, showValue) {
     libraryNote: shapeDefs.libraryNote,
     allIds: () => [
       ...builtIns.map((id) => ({ id, scope: null, note: 'built-in', own: false })),
-      ...shapeDefs.allIds().filter((r) => !isBuiltIn(r.id) && !(r.note === shapeDefs.libraryNote && shapeMod?.SHAPE_PRESETS?.[r.id] != null)),
+      ...shapes(() => shapeDefs.allIds()).filter((r) => !isBuiltIn(r.id) && !(r.note === shapeDefs.libraryNote && shapeMod?.SHAPE_PRESETS?.[r.id] != null)),
     ],
-    pinState: (id, sc) => (isBuiltIn(id) ? 'none' : shapeDefs.pinState(id, sc)),
-    pin: (id, sc) => shapeDefs.pin(id, sc),
-    unpin: (id, sc) => shapeDefs.unpin(id, sc),
+    pinState: (id, sc) => (isBuiltIn(id) ? 'none' : shapes(() => shapeDefs.pinState(id, sc))),
+    pin: (id, sc) => shapes(() => shapeDefs.pin(id, sc)),
+    unpin: (id, sc) => shapes(() => shapeDefs.unpin(id, sc)),
     duplicate: (id) => copy(id),
     remove: (id, sc) => {
-      if (deviceUses(cm.getValue(), id).length) return say(`can't delete "${id}": a .param("${widget.name}", …) still plays it`, true);
-      shapeDefs.remove(id, sc);
+      if (deviceUses(host.getValue(), id).length) return say(`can't delete "${id}": a .param("${widget.name}", …) still plays it`, true);
+      shapes(() => shapeDefs.remove(id, sc));
     },
     rename: (from, to) => {
       if (isBuiltIn(to)) { say(`"${to}" is a built-in curve's name - pick another`, true); return sync(); }
       // Typing over a built-in's name makes your own copy by that name, and plays it.
       if (isBuiltIn(from)) {
         if (DEF_ID_BAD.test(to)) { say(`a curve's name has to be one plain word - "${to}" isn't`, true); return sync(); }
-        if (shapeDefs.allIds().some((r) => r.id === to)) { say(`there is already a shape called "${to}"`, true); return sync(); }
+        if (shapes(() => shapeDefs.allIds()).some((r) => r.id === to)) { say(`there is already a shape called "${to}"`, true); return sync(); }
         const points = pointsOf(from);
         if (points == null) return sync();
         makeShape(to, points, { open: false });
@@ -3881,7 +3962,7 @@ function deviceShapePicker(trackLabel, slot, widget, showValue) {
         return;
       }
       // The registry carries the .param() settings that name it as well (see shapeDefs).
-      shapeDefs.rename(from, to);
+      shapes(() => shapeDefs.rename(from, to));
     },
   };
 
@@ -3893,7 +3974,7 @@ function deviceShapePicker(trackLabel, slot, widget, showValue) {
     open: (id) => play(id),
     create: (id) => {
       if (DEF_ID_BAD.test(id)) return say(`a curve's name has to be one plain word - "${id}" isn't`, true);
-      if (isBuiltIn(id) || shapeDefs.allIds().some((r) => r.id === id)) return play(id);
+      if (isBuiltIn(id) || shapes(() => shapeDefs.allIds()).some((r) => r.id === id)) return play(id);
       makeShape(id, pointsNow());
       say(`new curve "${id}", from the one that was playing`);
     },
@@ -3942,7 +4023,7 @@ function deviceShapePicker(trackLabel, slot, widget, showValue) {
     const on = current();
     if (on == null) { makeShape(nameFor(trackLabel), pointsNow()); return; }
     if (isBuiltIn(on)) { copy(on); return; }
-    openShapeById(on, { options: axesOptions() });
+    openShapeById(on, { options: axesOptions() }, host);
   });
 
   function sync() {
@@ -5613,9 +5694,10 @@ function showDevicePanel(trackLabel, slot, panel, { raise = true } = {}) {
  * Cutoff" over a line that says "filter.cutoff" would leave two calls for one control, both live,
  * with the lower one quietly winning.
  */
-function paramSpellingInCode(trackLabel, { name, id }) {
+function paramSpellingInCode(trackId, { name, id }) {
   if (!labelsMod) return name;
-  const code = cm.getValue();
+  const { ed, label: trackLabel } = deckTrackParts(trackId);
+  const code = ed.getValue();
   const block = blockForTrack(code, trackLabel);
   if (!block) return name;
   return [name, id].find((spelling) => findParamCall(code, block, spelling)) ?? name;
@@ -6216,6 +6298,7 @@ const lfoRateWrap = document.getElementById('lfoRateWrap');
 const lfoModeWrap = document.getElementById('lfoModeWrap');
 
 let lfoState = null; // { marker, callStart, points, rate, mode, shapeId, idLiteral }
+let lfoCM = cm; // the deck the shape on screen is in - see prCM, which is the same idea for the roll
 let lfoSuppressCursor = false;
 const LFO_END_SNAP_PX = 6; // how near the other end's level a dragged end has to come to catch on it
 const LFO_EVAL_DEBOUNCE_MS = 150; // quiet time after the last shape edit before it re-evaluates
@@ -6289,7 +6372,7 @@ function serializeLfoCall(state) {
 function lfoCallParts() {
   const range = lfoState?.callSource?.find();
   if (!range) return null;
-  const text = cm.getRange(range.from, range.to);
+  const text = lfoCM.getRange(range.from, range.to);
   const open = text.indexOf('(');
   const close = text.lastIndexOf(')');
   if (open < 0 || close < open) return null;
@@ -6297,7 +6380,7 @@ function lfoCallParts() {
   // Read off the call's own text rather than the buffer's: the follow loop asks for this every
   // frame, and cm.getValue() rebuilds the whole document each time it is called.
   const rel = idStringRange({ open, close }, text);
-  const start = cm.indexFromPos(range.from);
+  const start = lfoCM.indexFromPos(range.from);
   const callee = (/^\s*([\w$]+)/.exec(text) ?? [])[1] ?? 'lfo';
   return { range, shape, opts: opts.trim(), callee, idRange: rel && [start + rel[0], start + rel[1]] };
 }
@@ -6311,10 +6394,10 @@ function lfoCallee() {
 function writeLfoSourceCall(range, text) {
   lfoSuppressCursor = true;
   try {
-    cm.replaceRange(text, range.from, range.to);
+    lfoCM.replaceRange(text, range.from, range.to);
     lfoState.callSource.clear();
-    const startIdx = cm.indexFromPos(range.from);
-    lfoState.callSource = cm.markText(range.from, cm.posFromIndex(startIdx + text.length), {});
+    const startIdx = lfoCM.indexFromPos(range.from);
+    lfoState.callSource = lfoCM.markText(range.from, lfoCM.posFromIndex(startIdx + text.length), {});
   } finally {
     lfoSuppressCursor = false;
   }
@@ -6326,7 +6409,7 @@ function writeLfoOptions() {
   const parts = lfoCallParts();
   if (!parts || parts.callee !== 'lfo') return; // a grain window has neither (see lfoSyncHead)
   writeLfoSourceCall(parts.range, `lfo(${parts.shape}, ${lfoCfgText(lfoState)})`);
-  refoldAll(); // rate/mode rewrite the call too, taking the shape's fold with it - see writeLfoCall
+  refoldAll(lfoCM); // rate/mode rewrite the call too, taking the shape's fold with it - see writeLfoCall
   lfoScheduleEval();
 }
 
@@ -6350,7 +6433,7 @@ function lfoUseInCall(id) {
   const parts = lfoCallParts();
   if (!parts || idLiteralValue(parts.shape) === id) return;
   writeLfoSourceCall(parts.range, `${parts.callee}(${JSON.stringify(id)}${parts.opts ? `, ${parts.opts}` : ''})`);
-  refoldAll();
+  refoldAll(lfoCM);
   lfoHead.closePicker(); // sending one is the end of a browse - hand the canvas back
   logLine(`${parts.callee}(${parts.shape}) now plays "${id}"`);
   // Following it is only possible into a definition this buffer holds. A built-in preset plays
@@ -6404,7 +6487,7 @@ function lfoFollowPlayingShape() {
   // reading the call whole would take its atom for a shape name.
   const range = lfoCallParts()?.idRange;
   if (!range) return;
-  const id = activeIdIn(range[0], range[1]);
+  const id = activeIdIn(range[0], range[1], lfoCM);
   if (id == null || id === lfoState.shapeId) return;
   // Only into something there is a shape to show for. A name that is neither ours nor a preset -
   // prebake's, whose points the editor never sees - would fail to open every frame for as long as
@@ -6426,10 +6509,14 @@ function writeLfoRateMode() {
   else writeLfoCall();
 }
 
-function openLfoEditor(call) {
-  const from = cm.posFromIndex(call.start);
-  const to = cm.posFromIndex(call.close + 1);
-  const inner = cm.getValue().slice(call.open + 1, call.close);
+// `ed` is the deck the call is in; opened on the other one, the panel moves across (see
+// openPianorollEditor).
+function openLfoEditor(call, ed = lfoState ? lfoCM : cm) {
+  if (lfoState && ed !== lfoCM) closeLfoEditor();
+  lfoCM = ed;
+  const from = lfoCM.posFromIndex(call.start);
+  const to = lfoCM.posFromIndex(call.close + 1);
+  const inner = lfoCM.getValue().slice(call.open + 1, call.close);
   if (lfoState?.marker) lfoState.marker.clear();
   // The call marker outlives a switch only while it is being carried INTO the new state (lfoCarry).
   // Any other one is the panel's last look at some other call, and dropping the reference without
@@ -6438,7 +6525,7 @@ function openLfoEditor(call) {
   // A shape(...) definition is an lfo() with a name in front of it - drop the name and the rest
   // reads identically, exactly as a roll(...) reads as a pianoroll().
   lfoState = {
-    marker: cm.markText(from, to, {}),
+    marker: lfoCM.markText(from, to, {}),
     callStart: call.start,
     // Set when this is a shape(...) definition: the name it is filed under, and the literal to
     // write back. Null for an inline lfo(...), which is the whole of its own modulator.
@@ -6469,20 +6556,20 @@ function openLfoEditor(call) {
  * Puts shape `id`'s definition under the editor. A built-in preset is copied into the buffer first
  * (see forkShapePreset); false (and a line) for anything else this buffer hasn't got.
  */
-function openShapeById(id, from = {}) {
+function openShapeById(id, from = {}, ed = lfoState ? lfoCM : cm) {
   const name = String(id);
-  const def = shapeDefs.defsInBuffer().find((d) => d.id === name);
+  const def = shapeDefs.defsInBuffer(ed.getValue()).find((d) => d.id === name);
   if (!def) {
-    if (shapeMod?.SHAPE_PRESETS?.[name]) return forkShapePreset(name, from);
+    if (shapeMod?.SHAPE_PRESETS?.[name]) return forkShapePreset(name, from, ed);
     logLine(
-      shapeDefs.allIds().some((r) => r.id === name)
+      shapeDefs.allIds(null, ed.getValue()).some((r) => r.id === name)
         ? `shape "${id}" is defined in prebake.js - open it there to edit its points`
         : `no shape(${JSON.stringify(name)}, …) in this buffer to open`,
       true
     );
     return false;
   }
-  openLfoEditor({ ...def, ...from });
+  openLfoEditor({ ...def, ...from }, ed);
   return true;
 }
 
@@ -6497,16 +6584,16 @@ function openShapeById(id, from = {}) {
  * Prebake's shapes are library entries too, but their data isn't ours to copy - the editor only
  * ever learns their names - so those still say where to go and edit them.
  */
-function forkShapePreset(id, from = {}) {
+function forkShapePreset(id, from = {}, ed = lfoState ? lfoCM : cm) {
   const data = shapeMod?.SHAPE_PRESETS?.[id];
   if (data == null) return false;
-  const [start, end, text] = shapeDefs.defsEdit(cm.getValue(), [id], () => JSON.stringify(data));
-  cm.replaceRange(text, cm.posFromIndex(start), cm.posFromIndex(end));
-  refoldAll(); // the new definition starts life hidden, like every other one
-  const def = shapeDefs.defsInBuffer().find((d) => d.id === id);
+  const [start, end, text] = shapeDefs.defsEdit(ed.getValue(), [id], () => JSON.stringify(data));
+  ed.replaceRange(text, ed.posFromIndex(start), ed.posFromIndex(end));
+  refoldAll(ed); // the new definition starts life hidden, like every other one
+  const def = shapeDefs.defsInBuffer(ed.getValue()).find((d) => d.id === id);
   if (!def) return false; // can't happen; never open a panel over a definition that isn't there
   logLine(`shape "${id}" was a built-in preset - copied into this buffer, where it now shadows it`);
-  openLfoEditor({ ...def, ...from });
+  openLfoEditor({ ...def, ...from }, ed);
   lfoScheduleEval();
   return true;
 }
@@ -6516,16 +6603,16 @@ function forkShapePreset(id, from = {}) {
 // spans, exactly as the roll and preset panels do. The shape names are on that grid like any other
 // atom: the transpile wraps them in mini() for the purpose, and the server ships their steps with
 // the track's own (see patternSigs). Stopped, it opens the first one named.
-function openShapeFromIdCall(call, code) {
+function openShapeFromIdCall(call, code, ed = cm) {
   const range = idStringRange(call, code);
   const id = range
-    && (activeIdIn(range[0], range[1]) ?? (code.slice(range[0], range[1]).match(/[\w$]+/) ?? [])[0]);
+    && (activeIdIn(range[0], range[1], ed) ?? (code.slice(range[0], range[1]).match(/[\w$]+/) ?? [])[0]);
   if (id == null) return false;
   // Marked so the panel's rate/mode controls can write back into this call while a definition of
   // its own is on screen (see writeLfoOptions).
-  const callSource = cm.markText(cm.posFromIndex(call.start), cm.posFromIndex(call.close + 1), {});
+  const callSource = ed.markText(ed.posFromIndex(call.start), ed.posFromIndex(call.close + 1), {});
   const { rate, rateHz, mode, phase, glide } = parseLfoCall(code.slice(call.open + 1, call.close));
-  if (openShapeById(id, { callSource, options: { rate, rateHz, mode, phase, glide } })) return true;
+  if (openShapeById(id, { callSource, options: { rate, rateHz, mode, phase, glide } }, ed)) return true;
   callSource.clear();
   return false;
 }
@@ -6545,11 +6632,11 @@ function writeLfoCall() {
   const text = serializeLfoCall(lfoState);
   lfoSuppressCursor = true;
   try {
-    cm.replaceRange(text, range.from, range.to);
+    lfoCM.replaceRange(text, range.from, range.to);
     // replaceRange collapses the marker - re-pin it over the fresh text
     lfoState.marker.clear();
-    const startIdx = cm.indexFromPos(range.from);
-    lfoState.marker = cm.markText(range.from, cm.posFromIndex(startIdx + text.length), {});
+    const startIdx = lfoCM.indexFromPos(range.from);
+    lfoState.marker = lfoCM.markText(range.from, lfoCM.posFromIndex(startIdx + text.length), {});
     lfoState.callStart = startIdx;
   } finally {
     lfoSuppressCursor = false; // never leave it latched: that would wedge the panel shut for good
@@ -6557,17 +6644,16 @@ function writeLfoCall() {
   // Rewriting the call clears any fold covering it, so dragging a breakpoint would flick the shape
   // open and (an eval later) shut again. Re-fold now, in the same frame - as writePianorollCall
   // does, and for the same reason.
-  refoldAll();
+  refoldAll(lfoCM);
   lfoScheduleEval();
 }
 
 // A shape edit isn't finished until it *sounds*, so every write re-evaluates the buffer - debounced,
 // so dragging a breakpoint costs one request, not one per pointerup. evaluate(false) is the "update"
 // path: a stopped clock stays stopped, a running one keeps running with the new modulation.
-let lfoEvalTimer = null;
+const lfoEvalSoon = { timer: null, ed: null };
 function lfoScheduleEval() {
-  clearTimeout(lfoEvalTimer);
-  lfoEvalTimer = setTimeout(() => { lfoEvalTimer = null; evaluate(false); }, LFO_EVAL_DEBOUNCE_MS);
+  deckEvalSoon(lfoEvalSoon, lfoCM, LFO_EVAL_DEBOUNCE_MS); // the deck the shape is in
 }
 
 // The reverse direction: the panel re-reads the call whenever it's edited by hand, so tweaking
@@ -6580,7 +6666,7 @@ function syncLfoFromCode() {
   // lfo call) - there is nothing left to edit, so the panel goes with it. This is the only thing
   // that closes it by itself now that opening is an explicit double-click.
   if (!range) { closeLfoEditor(); return; }
-  const text = cm.getRange(range.from, range.to);
+  const text = lfoCM.getRange(range.from, range.to);
   // The call must still be the KIND the panel opened: a definition edited back into a plain lfo()
   // (or the other way round) is a different thing to be editing.
   // Read off the registry rather than spelled out here: a definition is `_shape(`, and a guard that
@@ -6593,7 +6679,7 @@ function syncLfoFromCode() {
   if (open < 0 || close < open) return; // mid-edit, not a whole call right now - wait for the next change
   const body = text.slice(open + 1, close);
   const parsed = parseLfoCall(lfoState.idLiteral ? splitFirstArg(body)[1] : body);
-  lfoState.callStart = cm.indexFromPos(range.from);
+  lfoState.callStart = lfoCM.indexFromPos(range.from);
   lfoState.points = parsed.points;
   // A _shape(...) definition carries no rate or mode - those live on the lfo() that names it, so
   // re-reading the definition must not reset them to the parse's defaults.
@@ -6616,7 +6702,9 @@ function initLfoEditor() {
   // Opening is initWidgetHandles' job (double-click the name). Closing is the ✕, Escape, or the
   // call itself leaving the buffer - see syncLfoFromCode. Nothing about where the text cursor
   // happens to be: a panel you asked for stays put while you edit around it.
-  cm.on('change', syncLfoFromCode); // hand edits to the open call flow back into the panel
+  // Hand edits to the open call flow back into the panel - either deck's, but only those to the
+  // buffer the panel is editing.
+  onEveryDeck((ed) => ed.on('change', () => { if (ed === lfoCM) syncLfoFromCode(); }));
 
   // The head: the name is the title and typing over it renames the shape everywhere it is played;
   // the ▾ behind it searches every shape there is and offers to make one that matches nothing.
@@ -6730,13 +6818,14 @@ function canvasToLfo(px, py) {
 function lfoGateRegion() {
   const range = (lfoState?.callSource ?? lfoState?.marker)?.find?.();
   if (!range) return null;
-  const from = cm.indexFromPos(range.from);
-  const to = cm.indexFromPos(range.to);
+  const from = lfoCM.indexFromPos(range.from);
+  const to = lfoCM.indexFromPos(range.to);
+  const deck = deckOfCM(lfoCM);
   for (const r of patternRegions) {
-    if (r.deck !== 'a') continue; // panels live on the main editor; deck B's offsets are another doc's
+    if (r.deck !== deck) continue; // the panel's own deck: the other's offsets are another doc's
     const a = r.anchor.find();
     if (!a) continue;
-    if (cm.indexFromPos(a.from) <= from && cm.indexFromPos(a.to) >= to) return r;
+    if (lfoCM.indexFromPos(a.from) <= from && lfoCM.indexFromPos(a.to) >= to) return r;
   }
   return null;
 }
@@ -6777,7 +6866,7 @@ function lastGateBefore(region, cyclePos) {
 function lfoPhaseNow() {
   if (!lfoState || transport.paused) return null;
   if (lfoCallee() !== 'lfo') return null; // a grain window is played per grain - nothing to follow
-  const pos = currentCyclePos();
+  const pos = currentCyclePos(deckOfCM(lfoCM)); // the deck the shape plays on, by its own clock
   let turns;
   if (lfoState.mode === 'free') {
     // A free-running rate counts the ENGINE's seconds, which is what its anchor counts (see the
@@ -7041,6 +7130,7 @@ const presetCloseBtn = document.getElementById('presetClose');
 // { label, slot } this panel has asked the server to hold, remembered so the release doesn't have
 // to re-derive a target that may have moved.
 let presetState = null;
+let presetCM = cm; // the deck the preset on screen is defined in - see prCM
 
 const presetCarry = () => (presetState ? { source: presetState.source } : null);
 
@@ -7134,8 +7224,8 @@ function presetDefParts(code, def) {
 // change under it (add an .fx() above and slot 1 is a different plugin).
 function presetTarget() {
   if (!presetState) return null;
-  const code = cm.getValue();
-  const call = sourceCallAmong(presetDefs.idCalls(code), presetState.source);
+  const code = presetCM.getValue();
+  const call = sourceCallAmong(presetDefs.idCalls(code), presetState.source, presetCM);
   return call ? presetTargetAt(code, call.start) : null;
 }
 
@@ -7165,56 +7255,56 @@ const presetHead = makeNamePicker({
 function presetUseInCall(id, sc = presetTarget()?.plugin ?? null) {
   const span = presetState?.source?.find();
   if (!span) return;
-  const was = cm.getRange(span.from, span.to);
+  const was = presetCM.getRange(span.from, span.to);
   if (was === id) return openPresetById(id, presetCarry(), sc); // already the one named
   // A mark over just the string BODY collapses when the body is replaced wholesale, so take the
   // quotes in for the duration of the edit and put the inner mark back over the new name - the
   // same trick, and for the same reason, as makeDefRegistry's fork.
-  const quoted = cm.markText({ line: span.from.line, ch: span.from.ch - 1 }, { line: span.to.line, ch: span.to.ch + 1 }, {});
-  cm.replaceRange(id, span.from, span.to);
+  const quoted = presetCM.markText({ line: span.from.line, ch: span.from.ch - 1 }, { line: span.to.line, ch: span.to.ch + 1 }, {});
+  presetCM.replaceRange(id, span.from, span.to);
   const after = quoted.find();
   quoted.clear();
   presetState.source?.clear();
   presetState.source = after
-    ? cm.markText({ line: after.from.line, ch: after.from.ch + 1 }, { line: after.to.line, ch: after.to.ch - 1 }, {})
+    ? presetCM.markText({ line: after.from.line, ch: after.from.ch + 1 }, { line: after.to.line, ch: after.to.ch - 1 }, {})
     : null;
   logLine(`.preset("${was}") now plays "${id}"`);
   // Follow it, but only where there is something to follow: a library preset has no definition in
   // this buffer to edit, and the call naming it IS the whole gesture - reporting the missing
   // definition as a failure right after a write that worked would read as if the write hadn't.
-  if (presetDefs.findDef(cm.getValue(), id, sc)) openPresetById(id, { source: presetState.source }, sc);
+  if (presetDefs.findDef(presetCM.getValue(), id, sc)) openPresetById(id, { source: presetState.source }, sc);
   else presetSyncHead();
   presetScheduleEval();
 }
 
-function openPresetById(id, from = {}, sc = presetTarget()?.plugin ?? null) {
-  const def = presetDefs.findDef(cm.getValue(), String(id), sc);
+function openPresetById(id, from = {}, sc = presetTarget()?.plugin ?? null, ed = presetState ? presetCM : cm) {
+  const def = presetDefs.findDef(ed.getValue(), String(id), sc);
   if (!def) {
     logLine(
-      presetDefs.allIds(sc).some((r) => r.id === String(id))
+      presetDefs.allIds(sc, ed.getValue()).some((r) => r.id === String(id))
         ? `preset "${id}" comes from the shared library - there is no definition here to edit. Capture one of your own and it will shadow it.`
         : `no preset called "${id}"${sc ? ` for ${sc}` : ''} is defined in this buffer`,
       true
     );
     return false;
   }
-  showPresetPanel({ ...def, ...from });
+  showPresetPanel({ ...def, ...from }, ed);
   return true;
 }
 
 // `.preset("<a b>")` names presets, so open the one you can HEAR - read off the playback
 // highlighter's own lit spans, the same grid the scheduler plays, so the panel can never disagree
 // with what is sounding. Stopped, it opens the first one named.
-function openPresetFromCall(call, code) {
+function openPresetFromCall(call, code, ed = cm) {
   const range = idStringRange(call, code);
   if (!range) return false;
   const [from, to] = range;
-  const id = activeIdIn(from, to) ?? (code.slice(from, to).match(/[\w$]+/) ?? [])[0];
+  const id = activeIdIn(from, to, ed) ?? (code.slice(from, to).match(/[\w$]+/) ?? [])[0];
   if (id == null) return false;
-  const source = cm.markText(cm.posFromIndex(from), cm.posFromIndex(to), {});
+  const source = ed.markText(ed.posFromIndex(from), ed.posFromIndex(to), {});
   // Read from the call rather than from presetTarget(), which follows the panel - and the panel is
   // either closed or still showing whatever was open before this double-click.
-  if (openPresetById(id, { source }, presetTargetAt(code, call.start)?.plugin ?? null)) return true;
+  if (openPresetById(id, { source }, presetTargetAt(code, call.start)?.plugin ?? null, ed)) return true;
   source.clear();
   return false;
 }
@@ -7226,7 +7316,8 @@ function openPresetFromCall(call, code) {
 // happened to be sounding, and a and b drift together instead of apart.
 function presetHold(id) {
   const target = presetTarget();
-  const at = target ? { label: target.label, slot: target.slot } : null;
+  // Held by the server's name for the track: a deck B track's is "b:<label>" (see deckTrackId).
+  const at = target ? { label: deckTrackId(presetCM, target.label), slot: target.slot } : null;
   const was = presetState?.held ?? null;
   // Release the old slot first when the panel has moved to a different one, or the abandoned slot
   // would stay frozen with no panel left to unfreeze it.
@@ -7255,7 +7346,7 @@ function presetHold(id) {
 // plugin is the one the slot holds. Used to tell a preset the scheduler merely hasn't caught up
 // with from one it will go on refusing however long you wait.
 function presetLoadableHere(id) {
-  const def = presetDefs.findDef(cm.getValue(), id, presetState?.scope ?? null);
+  const def = presetDefs.findDef(presetCM.getValue(), id, presetState?.scope ?? null);
   if (!def) return false;
   const plugin = presetTarget()?.plugin;
   return !plugin || !def.scope || def.scope === plugin;
@@ -7266,7 +7357,11 @@ function presetRelease(at) {
   api('POST', '/api/presetHold', { trackId: at.label, slot: at.slot, preset: null }).catch(() => {});
 }
 
-function showPresetPanel(next) {
+// `ed` is the deck the definition is in; opened on the other one, the panel moves across (see
+// openPianorollEditor) - letting go of the slot it was holding there.
+function showPresetPanel(next, ed = presetState ? presetCM : cm) {
+  if (presetState && ed !== presetCM) closePresetPanel();
+  presetCM = ed;
   // Only markers this panel is done with are cleared - switching presets in the picker carries the
   // source along (see presetCarry), and clearing it would drop the call being looked through.
   if (presetState?.marker && presetState.marker !== next.marker) presetState.marker.clear();
@@ -7277,7 +7372,7 @@ function showPresetPanel(next) {
     // right one of however many presets share this name across the buffer's plugins.
     scope: next.scope ?? '',
     source: next.source ?? null,
-    marker: cm.markText(cm.posFromIndex(next.start), cm.posFromIndex(next.close + 1), {}),
+    marker: presetCM.markText(presetCM.posFromIndex(next.start), presetCM.posFromIndex(next.close + 1), {}),
   };
   setPresetStatus('');
   presetPanel.classList.remove('hidden');
@@ -7308,7 +7403,7 @@ function setPresetStatus(text, cls = '') {
 // definition shows up here instead of being quietly out of date.
 function presetSyncHead() {
   if (!presetState) return;
-  const code = cm.getValue();
+  const code = presetCM.getValue();
   const def = presetDefs.findDef(code, presetState.id, presetState.scope);
   // Only the calls aimed at this preset's own plugin count as sharing it - another plugin's
   // .preset("disco") names a different preset, and a rename here leaves it alone.
@@ -7354,10 +7449,12 @@ function presetStateSize(state) {
 // one, debounced like the shape editor's so a knob drag costs one request. evaluate(false) is the
 // "update" path: a stopped clock stays stopped, a running one keeps running. The plugin itself is
 // already holding what was captured, and markStateApplied stops the eval pushing it back.
-let presetEvalTimer = null;
-function presetScheduleEval() {
-  clearTimeout(presetEvalTimer);
-  presetEvalTimer = setTimeout(() => { presetEvalTimer = null; evaluate(false); }, LFO_EVAL_DEBOUNCE_MS);
+//
+// `ed` is the deck the program was written into: the panel's own, or - for a capture out of a
+// plugin window (see writePluginState) - whichever deck plays that plugin.
+const presetEvalSoon = { timer: null, ed: null };
+function presetScheduleEval(ed = presetCM) {
+  deckEvalSoon(presetEvalSoon, ed, LFO_EVAL_DEBOUNCE_MS);
 }
 
 // The definition the panel is anchored to left the buffer (deleted, or typed into something that
@@ -7367,12 +7464,13 @@ function syncPresetFromCode() {
   if (!presetState) return;
   const range = presetState.marker.find();
   if (!range) { closePresetPanel(); return; }
-  if (!/^\s*_preset\s*\(/.test(cm.getRange(range.from, range.to))) { closePresetPanel(); return; }
+  if (!/^\s*_preset\s*\(/.test(presetCM.getRange(range.from, range.to))) { closePresetPanel(); return; }
   presetSyncHead();
 }
 
 function initPresetPanel() {
-  cm.on('change', syncPresetFromCode);
+  // Either deck's edits, but only those to the buffer the panel is editing.
+  onEveryDeck((ed) => ed.on('change', () => { if (ed === presetCM) syncPresetFromCode(); }));
 
   // The head: the same widget, the same gestures, as the roll's and the shape's (makeNamePicker).
   presetName.addEventListener('keydown', (e) => {
@@ -7459,6 +7557,8 @@ const GROOVE_DOCK_H = 150; // slimmer in the roll's flow: two readable lanes, no
 const GROOVE_MAX_DEPTH = 2; // twice as drawn - a depth is a multiplier, so there is no musical stop
 
 let grooveState = null; // { marker, callStart, grooveId, idLiteral, callSource, rollSource, time[], vel[], depth, depthText, velDepth }
+// The deck the groove on screen is in - see prCM. Docked under a roll it is the roll's own deck.
+let grooveCM = cm;
 let grooveDrag = null; // { kind, lane, pointerId, ... } while a lane is being drawn, selected or lifted
 // A run of slots in one lane, selected with the arrow tool - the roll's own time selection, on the
 // lanes' axis (see prState.regionSpan / bendSel, and the arrangement's automation span this is
@@ -7471,7 +7571,7 @@ let grooveCaret = 0; // the last slot pressed, which is where a paste lands when
 let grooveClipboard = null; // { lane, values: number[] }
 let grooveDepthSlider = null;
 let grooveVelSlider = null;
-let grooveEvalTimer = null;
+const grooveEvalSoon = { timer: null, ed: null };
 let grooveLiveTimer = null;
 let grooveWriteTimer = null;
 let grooveSuppressCursor = false;
@@ -7513,9 +7613,9 @@ function saveGrooveAs(id) {
     return;
   }
   // The definition first, so the call has something real to name by the time it is rewritten.
-  const [start, end, text] = grooveDefs.defsEdit(cm.getValue(), [name], () => JSON.stringify(grooveTableText(st)));
-  cm.replaceRange(text, cm.posFromIndex(start), cm.posFromIndex(end));
-  refoldAll(); // definitions start life folded away, like every other one
+  const [start, end, text] = grooveDefs.defsEdit(grooveCM.getValue(), [name], () => JSON.stringify(grooveTableText(st)));
+  grooveCM.replaceRange(text, grooveCM.posFromIndex(start), grooveCM.posFromIndex(end));
+  refoldAll(grooveCM); // definitions start life folded away, like every other one
   // The call now says the name instead of the numbers. For a roll that is its `groove` opt; for a
   // .swing() it is the shape argument, which the panel's own marker still spans.
   st.grooveId = name;
@@ -7530,7 +7630,7 @@ function saveGrooveAs(id) {
     const range = st.marker.find();
     grooveSuppressCursor = true;
     try {
-      cm.replaceRange(serializeSwingCall(st), range.from, range.to);
+      grooveCM.replaceRange(serializeSwingCall(st), range.from, range.to);
     } finally {
       grooveSuppressCursor = false;
     }
@@ -7615,8 +7715,8 @@ function parseSwingCall(inner) {
  * A grid that is a PATTERN (`.swing(0.5, "<8 16>")`) describes two grids over one bar and no single
  * table can stand for it, so that one is left alone and says so.
  */
-function grooveMakeDrawable(call, read) {
-  const code = cm.getValue();
+function grooveMakeDrawable(call, read, ed = cm) {
+  const code = ed.getValue();
   const gridText = read.grid === null ? '' : String(read.grid).trim();
   if (gridText && !/^\d+$/.test(gridText)) {
     logLine(`swing: this call's grid is a pattern (${gridText}), which is two grids over one bar - a groove is one table, so there is nothing single to draw. Give it a plain grid to draw it.`, true);
@@ -7630,19 +7730,19 @@ function grooveMakeDrawable(call, read) {
   const table = Array.from({ length: grid }, (_, k) => (k % 2 ? 1 : 0)).join(' ');
   grooveSuppressCursor = true;
   try {
-    cm.replaceRange(
+    ed.replaceRange(
       `.swing(${depthText}, ${JSON.stringify(table)})`,
-      cm.posFromIndex(call.start),
-      cm.posFromIndex(call.close + 1)
+      ed.posFromIndex(call.start),
+      ed.posFromIndex(call.close + 1)
     );
   } finally {
     grooveSuppressCursor = false;
   }
   // Re-found rather than reused: the call it was is not the call it now is, and the panel's marker
   // has to span the new text.
-  const again = findSwingCallAt(cm.getValue(), call.start + 2);
+  const again = findSwingCallAt(ed.getValue(), call.start + 2);
   if (!again) return false;
-  openGrooveEditor(again);
+  openGrooveEditor(again, ed);
   grooveScheduleEval();
   return true;
 }
@@ -7687,14 +7787,14 @@ function writeGrooveCall() {
   const text = serializeSwingCall(grooveState);
   grooveSuppressCursor = true;
   try {
-    cm.replaceRange(text, range.from, range.to);
+    grooveCM.replaceRange(text, range.from, range.to);
   } finally {
     grooveSuppressCursor = false;
   }
   // Re-anchored for the reason writeGrooveDef re-anchors: a mark whose whole span was replaced is
   // a mark that no longer exists.
   grooveState.marker.clear();
-  grooveState.marker = cm.markText(range.from, cm.posFromIndex(cm.indexFromPos(range.from) + text.length), {});
+  grooveState.marker = grooveCM.markText(range.from, grooveCM.posFromIndex(grooveCM.indexFromPos(range.from) + text.length), {});
   grooveScheduleEval();
 }
 
@@ -7735,20 +7835,20 @@ function writeGrooveCallOptions() {
   if (!st?.grooveId) return;
   const range = st.callSource?.find();
   if (!range) return;
-  const code = cm.getValue();
-  const from = cm.indexFromPos(range.from);
+  const code = grooveCM.getValue();
+  const from = grooveCM.indexFromPos(range.from);
   // The call may have been edited or deleted under us; only rewrite something that is still a
   // .swing( - the same guard the lfo panel's option write makes.
   if (!/^\.\s*swing\s*\(/.test(code.slice(from, from + 24))) return;
   const text = serializeSwingCall(st);
   grooveSuppressCursor = true;
   try {
-    cm.replaceRange(text, range.from, range.to);
+    grooveCM.replaceRange(text, range.from, range.to);
   } finally {
     grooveSuppressCursor = false;
   }
   st.callSource.clear();
-  st.callSource = cm.markText(range.from, cm.posFromIndex(cm.indexFromPos(range.from) + text.length), {});
+  st.callSource = grooveCM.markText(range.from, grooveCM.posFromIndex(grooveCM.indexFromPos(range.from) + text.length), {});
 }
 
 /**
@@ -7766,7 +7866,7 @@ function writeGrooveDef() {
   if (range) {
     grooveSuppressCursor = true;
     try {
-      cm.replaceRange(text, range.from, range.to);
+      grooveCM.replaceRange(text, range.from, range.to);
     } finally {
       grooveSuppressCursor = false;
     }
@@ -7774,15 +7874,15 @@ function writeGrooveDef() {
     // the write re-anchors on its own text - without this the NEXT sync found nothing, read the
     // call as gone, and closed the panel out from under the drag.
     st.marker.clear();
-    const from = cm.indexFromPos(range.from);
-    st.marker = cm.markText(range.from, cm.posFromIndex(from + text.length), {});
+    const from = grooveCM.indexFromPos(range.from);
+    st.marker = grooveCM.markText(range.from, grooveCM.posFromIndex(from + text.length), {});
   } else {
     // The definition left the buffer under us (undo, a hand edit): file it afresh, and re-anchor
     // on what was filed so the next stroke writes rather than appending again.
-    const [start, end, out] = grooveDefs.defsEdit(cm.getValue(), [st.grooveId], () => JSON.stringify(grooveTableText(st)));
-    cm.replaceRange(out, cm.posFromIndex(start), cm.posFromIndex(end));
+    const [start, end, out] = grooveDefs.defsEdit(grooveCM.getValue(), [st.grooveId], () => JSON.stringify(grooveTableText(st)));
+    grooveCM.replaceRange(out, grooveCM.posFromIndex(start), grooveCM.posFromIndex(end));
     const def = grooveDefs.defsInBuffer().find((d) => d.id === st.grooveId);
-    if (def) st.marker = cm.markText(cm.posFromIndex(def.start), cm.posFromIndex(def.close + 1), {});
+    if (def) st.marker = grooveCM.markText(grooveCM.posFromIndex(def.start), grooveCM.posFromIndex(def.close + 1), {});
   }
   grooveScheduleEval();
 }
@@ -7797,7 +7897,7 @@ function grooveLiveSync() {
   grooveLiveTimer = setTimeout(() => {
     grooveLiveTimer = null;
     if (!grooveState?.grooveId) return;
-    api('POST', '/api/liveGroove', { id: grooveState.grooveId, table: grooveTableText(grooveState) }).catch(() => {});
+    api('POST', '/api/liveGroove', { deck: deckOfCM(grooveCM), id: grooveState.grooveId, table: grooveTableText(grooveState) }).catch(() => {});
   }, 40);
 }
 
@@ -7818,20 +7918,20 @@ function grooveWriteNow() {
 }
 
 function grooveScheduleEval() {
-  if (grooveEvalTimer) clearTimeout(grooveEvalTimer);
-  grooveEvalTimer = setTimeout(() => {
-    grooveEvalTimer = null;
-    evaluate(false);
-  }, 240);
+  deckEvalSoon(grooveEvalSoon, grooveCM, 240); // the deck the groove is in
 }
 
 // --- opening and closing ----------------------------------------------------------------------
 
-function openGrooveEditor(call) {
+// `ed` is the deck the call is in; opened on the other one, the panel moves across (see
+// openPianorollEditor).
+function openGrooveEditor(call, ed = grooveState ? grooveCM : cm) {
+  if (grooveState && ed !== grooveCM) closeGroovePanel();
+  grooveCM = ed;
   grooveClearSel(); // a new table, so nothing selected on the last one carries over
-  const code = cm.getValue();
-  const from = cm.posFromIndex(call.start);
-  const to = cm.posFromIndex(call.close + 1);
+  const code = grooveCM.getValue();
+  const from = grooveCM.posFromIndex(call.start);
+  const to = grooveCM.posFromIndex(call.close + 1);
   const inner = code.slice(call.open + 1, call.close);
   if (grooveState?.marker) grooveState.marker.clear();
   // The call marker outlives a switch only while it is being carried INTO the new state
@@ -7843,7 +7943,7 @@ function openGrooveEditor(call) {
   const read = call.idLiteral ? null : parseSwingCall(inner);
   const table = grooveOpenTable(call, read);
   grooveState = {
-    marker: cm.markText(from, to, {}),
+    marker: grooveCM.markText(from, to, {}),
     callStart: call.start,
     // Set when this is a _groove(...) definition: the name it is filed under, and the literal to
     // write back. Null for a table written inline, which is the whole of its own groove.
@@ -7899,7 +7999,7 @@ function openGrooveForRoll() {
     // prebake groove, or one defined nowhere): quietly editing a drawn copy instead would convert
     // the roll's named reference to inline data on the first drag, and openGrooveById already said
     // what the matter was.
-    return openGrooveById(named, { options: { rollSource: true, depth: prState.swing || 1, ...prRollVelOpts() } });
+    return openGrooveById(named, { options: { rollSource: true, depth: prState.swing || 1, ...prRollVelOpts() } }, prCM);
   }
   return false; // nothing set: the select's `new` is the creating gesture
 }
@@ -7921,6 +8021,8 @@ function openGrooveDraftForRoll() {
     return false;
   }
   const split = grooveSplit(table);
+  if (grooveState && grooveCM !== prCM) closeGroovePanel(); // docked under the roll: the roll's deck
+  grooveCM = prCM;
   if (grooveState?.marker) grooveState.marker.clear();
   if (grooveState?.callSource) grooveState.callSource.clear();
   grooveClearSel();
@@ -7958,10 +8060,10 @@ function grooveMaterializeForRoll(tableText) {
   } catch {
     text = prRollPlainTable(); // unreadable leftovers start straight rather than refusing to open
   }
-  const name = nextGrooveName();
-  const [start, end, out] = grooveDefs.defsEdit(cm.getValue(), [name], () => JSON.stringify(text));
-  cm.replaceRange(out, cm.posFromIndex(start), cm.posFromIndex(end));
-  refoldAll(); // the new definition starts life folded away, like every other one
+  const name = nextGrooveName(prCM);
+  const [start, end, out] = grooveDefs.defsEdit(prCM.getValue(), [name], () => JSON.stringify(text));
+  prCM.replaceRange(out, prCM.posFromIndex(start), prCM.posFromIndex(end));
+  refoldAll(prCM); // the new definition starts life folded away, like every other one
   prState.groove = name;
   writePianorollCall();
   return name;
@@ -7982,7 +8084,7 @@ function grooveOpenTable(call, read) {
   const fallback = () => ({ time: new Array(16).fill(0), vel: null });
   if (!grooveMod) return fallback();
   const text = call.idLiteral
-    ? (/(["'])((?:\\.|(?!\1).)*?)\1/.exec(cm.getValue().slice(call.open + 1, call.close).replace(call.idLiteral, '')) ?? [])[2]
+    ? (/(["'])((?:\\.|(?!\1).)*?)\1/.exec(grooveCM.getValue().slice(call.open + 1, call.close).replace(call.idLiteral, '')) ?? [])[2]
     : null;
   const source = text ?? (read?.data ? read.data.join(' ') : null);
   if (source == null && read?.name) {
@@ -8006,20 +8108,20 @@ const grooveSplit = (table) => ({ time: [...table.time], vel: table.vel ? [...ta
  * Puts groove `id`'s definition under the editor. A built-in preset is copied into the buffer first
  * (see forkGroovePreset); false (and a line) for anything else this buffer hasn't got.
  */
-function openGrooveById(id, from = {}) {
+function openGrooveById(id, from = {}, ed = grooveState ? grooveCM : cm) {
   const name = String(id);
-  const def = grooveDefs.defsInBuffer().find((d) => d.id === name);
+  const def = grooveDefs.defsInBuffer(ed.getValue()).find((d) => d.id === name);
   if (!def) {
-    if (grooveMod?.GROOVE_PRESETS?.[name]) return forkGroovePreset(name, from);
+    if (grooveMod?.GROOVE_PRESETS?.[name]) return forkGroovePreset(name, from, ed);
     logLine(
-      grooveDefs.allIds().some((r) => r.id === name)
+      grooveDefs.allIds(null, ed.getValue()).some((r) => r.id === name)
         ? `groove "${id}" is defined in prebake.js - open it there to edit its table`
         : `no _groove(${JSON.stringify(name)}, …) in this buffer to open`,
       true
     );
     return false;
   }
-  openGrooveEditor({ ...def, ...from });
+  openGrooveEditor({ ...def, ...from }, ed);
   return true;
 }
 
@@ -8030,16 +8132,16 @@ function openGrooveById(id, from = {}) {
  * first, presets after - see resolveGroove) then hands every .swing(…, "clave16") already playing the
  * copy on screen, slot for slot identical until one is moved.
  */
-function forkGroovePreset(id, from = {}) {
+function forkGroovePreset(id, from = {}, ed = grooveState ? grooveCM : cm) {
   const data = grooveMod?.GROOVE_PRESETS?.[id];
   if (data == null) return false;
-  const [start, end, text] = grooveDefs.defsEdit(cm.getValue(), [id], () => JSON.stringify(data));
-  cm.replaceRange(text, cm.posFromIndex(start), cm.posFromIndex(end));
-  refoldAll(); // the new definition starts life hidden, like every other one
-  const def = grooveDefs.defsInBuffer().find((d) => d.id === id);
+  const [start, end, text] = grooveDefs.defsEdit(ed.getValue(), [id], () => JSON.stringify(data));
+  ed.replaceRange(text, ed.posFromIndex(start), ed.posFromIndex(end));
+  refoldAll(ed); // the new definition starts life hidden, like every other one
+  const def = grooveDefs.defsInBuffer(ed.getValue()).find((d) => d.id === id);
   if (!def) return false;
   logLine(`groove "${id}" was a built-in preset - copied into this buffer, where it now shadows it`);
-  openGrooveEditor({ ...def, ...from });
+  openGrooveEditor({ ...def, ...from }, ed);
   grooveScheduleEval();
   return true;
 }
@@ -8047,18 +8149,18 @@ function forkGroovePreset(id, from = {}) {
 // .swing(1, "<samba bossa>") NAMES grooves rather than drawing them: the table lives in the
 // _groove(...) definitions, so open the one you can HEAR - read off the playback highlighter's lit
 // spans, exactly as the shape and roll panels do. Stopped, it opens the first one named.
-function openGrooveFromIdCall(call, code) {
+function openGrooveFromIdCall(call, code, ed = cm) {
   const range = idStringRange(call, code);
   const id = range
-    && (activeIdIn(range[0], range[1]) ?? (code.slice(range[0], range[1]).match(/[\w$]+/) ?? [])[0]);
+    && (activeIdIn(range[0], range[1], ed) ?? (code.slice(range[0], range[1]).match(/[\w$]+/) ?? [])[0]);
   if (id == null) return false;
   // Marked so the panel's depth sliders can write back into this call while a definition of its own
   // is on screen (see writeGrooveCallOptions).
-  const callSource = cm.markText(cm.posFromIndex(call.start), cm.posFromIndex(call.close + 1), {});
+  const callSource = ed.markText(ed.posFromIndex(call.start), ed.posFromIndex(call.close + 1), {});
   const read = parseSwingCall(code.slice(call.open + 1, call.close));
   const velDepth = swingVelAfter(code, call);
   const options = { depth: Number.isFinite(read.depth) ? read.depth : 1, ...(velDepth === null ? {} : { velDepth }) };
-  if (openGrooveById(id, { callSource, options })) return true;
+  if (openGrooveById(id, { callSource, options }, ed)) return true;
   callSource.clear();
   return false;
 }
@@ -8090,7 +8192,7 @@ function grooveUseInCall(id) {
   if (!range) return false;
   grooveSuppressCursor = true;
   try {
-    cm.replaceRange(`.swing(${grooveDepthText(st)}, ${JSON.stringify(String(id))})`, range.from, range.to);
+    grooveCM.replaceRange(`.swing(${grooveDepthText(st)}, ${JSON.stringify(String(id))})`, range.from, range.to);
   } finally {
     grooveSuppressCursor = false;
   }
@@ -8123,7 +8225,7 @@ function grooveSyncHead() {
   grooveUseBtn.classList.toggle('hidden', onRoll || plays === grooveState?.grooveId);
   grooveUseBtn.title = `play "${grooveState?.grooveId}" in the swing() this panel came from`
     + (plays == null ? '' : ` (it plays "${plays}" now)`);
-  grooveHead.syncHead(named ? grooveDefs.refCalls(cm.getValue(), grooveState.grooveId).length : 0);
+  grooveHead.syncHead(named ? grooveDefs.refCalls(grooveCM.getValue(), grooveState.grooveId).length : 0);
 }
 
 /**
@@ -8134,7 +8236,8 @@ function grooveSyncHead() {
  * The editor has to answer this for itself because the roll draws its own swung onsets - the panel
  * and the scheduler must agree about where a note sounds, and the scheduler asks resolveGroove.
  */
-function grooveTableFor(str) {
+// Asked about the roll's own groove (see prGrooveTable), so it reads the roll's deck by default.
+function grooveTableFor(str, ed = prCM) {
   if (!grooveMod || str == null) return null;
   const text = String(str).trim();
   if (!text) return null;
@@ -8146,9 +8249,9 @@ function grooveTableFor(str) {
     }
   };
   if (grooveMod.grooveNameLike(text)) {
-    const def = grooveDefs.defsInBuffer().find((d) => d.id === text);
+    const def = grooveDefs.defsInBuffer(ed.getValue()).find((d) => d.id === text);
     if (def) {
-      const inner = cm.getValue().slice(def.open + 1, def.close);
+      const inner = ed.getValue().slice(def.open + 1, def.close);
       const body = (/(["'`])((?:\\.|(?!\1)[\s\S])*?)\1/.exec(inner.replace(def.idLiteral, '')) ?? [])[2];
       if (body != null) return parse(body);
     }
@@ -8167,8 +8270,8 @@ const prGrooveTable = () => (prState?.groove ? grooveTableFor(prState.groove) : 
 function grooveSourceInner() {
   const range = grooveState?.callSource?.find();
   if (!range) return '';
-  const code = cm.getValue();
-  const at = cm.indexFromPos(range.from);
+  const code = grooveCM.getValue();
+  const at = grooveCM.indexFromPos(range.from);
   const call = findSwingCallAt(code, at + 1);
   return call ? code.slice(call.open + 1, call.close) : '';
 }
@@ -8570,7 +8673,7 @@ async function grooveExtractFrom(dt) {
  * as bufferSetscale, and the same reason: a second call would silently re-feel every other track.
  */
 function bufferSetgroove() {
-  const code = cm.getValue();
+  const code = grooveCM.getValue();
   const re = /^[^\S\n]*setgroove\s*\(\s*(['"])([^'"]*)\1\s*(?:,\s*([^)]*?)\s*)?\)[^\S\n]*\n?/gm;
   let last = null;
   let m;
@@ -8587,11 +8690,11 @@ function writeSetgroove(name, depthText) {
     ? ''
     : `setgroove(${JSON.stringify(String(name))}${depthText && depthText !== '1' ? `, ${depthText}` : ''})\n`;
   if (existing) {
-    cm.replaceRange(line, cm.posFromIndex(existing.from), cm.posFromIndex(existing.to));
+    grooveCM.replaceRange(line, grooveCM.posFromIndex(existing.from), grooveCM.posFromIndex(existing.to));
   } else if (line) {
     // At the top, where a document-wide statement belongs and where setscale's own line goes when a
     // buffer has none (see the midi import's takeKey).
-    cm.replaceRange(line, { line: 0, ch: 0 }, { line: 0, ch: 0 });
+    grooveCM.replaceRange(line, { line: 0, ch: 0 }, { line: 0, ch: 0 });
   }
   grooveScheduleEval(); // the feel of every quiet track just changed, so the buffer is played again
 }
@@ -9038,7 +9141,7 @@ function syncGrooveFromCode() {
   // opened on - there is nothing left to edit, so the panel goes with it. The only thing that closes
   // it by itself, now that opening is an explicit double-click.
   if (!range) { closeGroovePanel(); return; }
-  const text = cm.getRange(range.from, range.to);
+  const text = grooveCM.getRange(range.from, range.to);
   if (!text.trim()) return; // a collapsed mark mid-write - the writer re-anchors it (writeGrooveDef)
   // Read off the registry rather than spelled out, for the reason syncLfoFromCode gives: a
   // definition is `_groove(`, and a guard that said `groove(` would fail on every one there is.
@@ -9048,7 +9151,7 @@ function syncGrooveFromCode() {
   const close = text.lastIndexOf(')');
   if (open < 0 || close < open) return; // mid-edit, not a whole call right now - wait for the next change
   const body = text.slice(open + 1, close);
-  if (st.marker) st.callStart = cm.indexFromPos(range.from);
+  if (st.marker) st.callStart = grooveCM.indexFromPos(range.from);
   if (st.idLiteral) {
     // A definition carries only the table; the depths live on the .swing() that names it, so
     // re-reading it must not reset them.
@@ -9089,7 +9192,8 @@ function initGroovePanel() {
   initGrooveCanvas();
   // Opening is initWidgetHandles' job (double-click the name) or the roll's own button. Closing is
   // the ✕, Escape, or what it was editing leaving the buffer - see syncGrooveFromCode.
-  cm.on('change', syncGrooveFromCode);
+  // Either deck's edits, but only those to the buffer the panel is editing.
+  onEveryDeck((ed) => ed.on('change', () => { if (ed === grooveCM) syncGrooveFromCode(); }));
 
   grooveCloseBtn.addEventListener('click', () => closeGroovePanel());
 
@@ -9164,7 +9268,7 @@ function initGroovePanel() {
       return;
     }
     closeGroovePanel();
-    cm.focus();
+    grooveCM.focus();
   });
 
   // The name box, on the same terms as every other panel's: Enter commits, Escape reverts, and the
@@ -9400,6 +9504,10 @@ function axisGate(g, dx, dy) {
 }
 
 let prState = null; // see openPianorollEditor for the full shape (notes, steps, pitchTop, zoom, scroll, sel, tool, cmdMode, trackLabel)
+// The deck the roll on screen belongs to: the editor it was opened from, which every read and write
+// the panel makes goes to - its call, its definitions, its debounced eval, the track it previews
+// through. Either livecode deck can open it, and it edits one of them at a time.
+let prCM = cm;
 let prSuppressCursor = false;
 let prPreviewEnabled = localStorage.getItem('poptartPianorollPreview') !== '0';
 let prSounding = null; // midi note currently ringing from a preview (so we can note-off it)
@@ -9506,22 +9614,35 @@ let patchScale = null;
 // every evaluation after it, exactly as the key is. `{ shape, depth }` or null. Read-only here: the
 // buffer's line is the truth, and this is what the editor was told it says.
 let patchGroove = null;
+// Both are kept per livecode deck, since each evaluates a buffer of its own (the server keeps a key
+// and a feel per deck too), and the two above are always the ones of the deck the roll is on - so a
+// roll opened on deck B is colored by deck B's key, whatever deck A's setscale() says.
+const deckKeys = { a: { scale: null, groove: null }, b: { scale: null, groove: null } };
 
-function setPatchGroove(entry) {
-  const next = entry && entry.shape ? { shape: String(entry.shape), depth: Number(entry.depth) || 0 } : null;
-  const same = (!next && !patchGroove) || (next && patchGroove && next.shape === patchGroove.shape && next.depth === patchGroove.depth);
-  patchGroove = next;
-  if (same) return;
-  // A track with no swing of its own plays by this, so the roll's own groove control has to say so
-  // (see prSyncGrooveSel), and the panel's session button is its own toggle.
-  if (prState) prSyncGrooveSel();
-  grooveSyncSessionBtn();
+function setPatchGroove(entry, deck = 'a') {
+  deckKeys[deck].groove = entry && entry.shape ? { shape: String(entry.shape), depth: Number(entry.depth) || 0 } : null;
+  syncPatchKey();
 }
 
-function setPatchScale(name) {
-  const next = name ?? null;
-  if (next === patchScale) return;
-  patchScale = next;
+function setPatchScale(name, deck = 'a') {
+  deckKeys[deck].scale = name ?? null;
+  syncPatchKey();
+}
+
+/** Points patchScale and patchGroove at the roll's deck, and redraws what reads them if they moved. */
+function syncPatchKey() {
+  const own = deckKeys[deckOfCM(prCM)];
+  const next = own.groove;
+  const same = (!next && !patchGroove) || (next && patchGroove && next.shape === patchGroove.shape && next.depth === patchGroove.depth);
+  patchGroove = next;
+  if (!same) {
+    // A track with no swing of its own plays by this, so the roll's own groove control has to say so
+    // (see prSyncGrooveSel), and the panel's session button is its own toggle.
+    if (prState) prSyncGrooveSel();
+    grooveSyncSessionBtn();
+  }
+  if (own.scale === patchScale) return;
+  patchScale = own.scale;
   if (prScaleLabel) prScaleLabel.textContent = prNoteMode() ? (patchScale ?? '') : '';
   prSyncKeyboardBtn(); // the ⌨ tooltip names the tonic when the keyboard is transposed to the key
   if (prState) drawPianoroll();
@@ -9909,13 +10030,13 @@ function findPianorollCallAt(code, idx) {
 }
 
 // The label of the block a `pianoroll(...)` call lives in - the engine track we preview through.
-function prBlockLabelAt(idx) {
+function prBlockLabelAt(idx, code = prCM.getValue()) {
   if (!labelsMod) return null;
   // `end` is the next block's start, so the test is half-open: a call at a block's very first
   // character - which is what a column-0 `pianoroll()` is - belongs to THAT block, not the one
   // above it. (blockAtCursor deliberately keeps the closed test: a cursor may sit at the end of
   // the buffer, which is one past the last block.)
-  return labelsMod.splitLabeledBlocks(cm.getValue()).findLast((b) => idx >= b.start && idx < b.end)?.label ?? null;
+  return labelsMod.splitLabeledBlocks(code).findLast((b) => idx >= b.start && idx < b.end)?.label ?? null;
 }
 
 /**
@@ -9932,34 +10053,42 @@ function prBlockLabelAt(idx) {
 // is asked every frame, and finding the track means lexing the buffer.
 let prClipClock = { gen: -1, twin: null, roll: null, clock: null };
 function prSongPos() {
-  const twin = songEndClocks.a ?? (arDeck === 'a' ? arClockTwin : null);
-  if (!twin || !arrangeMod) return currentCyclePos();
-  const gen = cm.changeGeneration();
+  const deck = deckOfCM(prCM); // the roll's own deck, whose clock its track plays by
+  const twin = songEndClocks[deck] ?? (arDeck === deck ? arClockTwin : null);
+  if (!twin || !arrangeMod) return currentCyclePos(deck);
+  const gen = prCM.changeGeneration();
   if (prClipClock.gen !== gen || prClipClock.twin !== twin || prClipClock.roll !== prState.rollId) {
-    const label = prPlayingTrack();
-    const own = label == null ? [] : arrangeMod.clipsOfLabel(arReadDef(cm.getValue())?.clips ?? [], label);
+    const label = prPlayingLabel();
+    const own = label == null ? [] : arrangeMod.clipsOfLabel(arReadDef(prCM.getValue())?.clips ?? [], label);
     // A clips() row places its rolls itself, so its track stays on the song's own clock.
     const clock = own.length && !own.some((c) => c.roll) ? new arrangeMod.ClipClock(twin, own) : null;
     prClipClock = { gen, twin, roll: prState.rollId, clock };
   }
-  return (prClipClock.clock ?? twin).posAt(currentCyclePos());
+  return (prClipClock.clock ?? twin).posAt(currentCyclePos(deck));
 }
 
-function prPlayingTrack() {
+// The LABEL of that track, as its own deck's code says it - what the buffer reads (its clips, its
+// block). prPlayingTrack below is the same track as the server names it, which is what a preview,
+// the keyboard and a capture are sent to.
+function prPlayingLabel() {
   if (!prState || !labelsMod) return null;
-  const code = cm.getValue();
+  const code = prCM.getValue();
   const labelAt = (idx) => labelsMod.splitLabeledBlocks(code).findLast((b) => idx >= b.start && idx < b.end)?.label ?? null;
   const src = prState.source?.find();
-  if (src) return labelAt(cm.indexFromPos(src.from));
+  if (src) return labelAt(prCM.indexFromPos(src.from));
   if (prState.rollId != null) {
     const call = rollDefs.refCalls(code, prState.rollId)[0];
     if (call) return labelAt(call.start);
     // A roll drawn into an arrangement clip is named by no pattern at all - the clip names it (see
     // clips()) - so the track that plays it is the one whose row that clip is on.
-    const owner = arTrackOfRoll(prState.rollId);
+    const owner = arTrackOfRoll(prState.rollId, prCM);
     if (owner) return owner;
   }
   return prState.trackLabel;
+}
+
+function prPlayingTrack() {
+  return deckTrackId(prCM, prPlayingLabel());
 }
 
 // --- note preview: play the drawn note through the track's own synth (if the 🎧 toggle is on and
@@ -10290,12 +10419,12 @@ function defLineRange(code, def) {
   return [def.start, end];
 }
 
-/** Applies [from, to, text] edits as one undoable step. Sorted here, so callers needn't be. */
-function applyEdits(edits) {
+/** Applies [from, to, text] edits to `ed` as one undoable step. Sorted here, so callers needn't be. */
+function applyEdits(edits, ed = cm) {
   const sorted = [...edits].sort((a, b) => a[0] - b[0]);
-  cm.operation(() => {
+  ed.operation(() => {
     for (let i = sorted.length - 1; i >= 0; i--) {
-      cm.replaceRange(sorted[i][2], cm.posFromIndex(sorted[i][0]), cm.posFromIndex(sorted[i][1]));
+      ed.replaceRange(sorted[i][2], ed.posFromIndex(sorted[i][0]), ed.posFromIndex(sorted[i][1]));
     }
   });
 }
@@ -10332,12 +10461,12 @@ function libraryBumpNote(kind, wanted, got, note) {
   logLine(`named this ${kind} "${got}": "${wanted}" is a ${note} ${kind} already, and a ${kind} of your own by that name would shadow it.`);
 }
 
-/** Which of `refs` the panel is looking THROUGH, given the marker over its id string. */
-function sourceCallAmong(refs, sourceMark) {
+/** Which of `refs` the panel is looking THROUGH, given the marker over its id string in `ed`. */
+function sourceCallAmong(refs, sourceMark, ed) {
   const range = sourceMark?.find();
   if (!range) return null;
-  const a = cm.indexFromPos(range.from);
-  const b = cm.indexFromPos(range.to);
+  const a = ed.indexFromPos(range.from);
+  const b = ed.indexFromPos(range.to);
   return refs.find((call) => call.from <= a && call.to >= b) ?? null;
 }
 
@@ -10358,7 +10487,8 @@ function sourceCallAmong(refs, sourceMark) {
  *   isData      (str) => true if the useCall's string is DATA rather than names; null when the
  *               module that can tell hasn't loaded yet, in which case nothing is assumed
  *   library     () => ids that exist without being defined here (prebake, built-in presets)
- *   panel       the editor panel's hooks - see the roll instance below for the full shape
+ *   panel       the editor panel's hooks - see the roll instance below for the full shape. Its
+ *               `editor` says which deck's buffer the kind's gestures act on
  */
 // Every floating panel is z-index 30 in the stylesheet, so two of them open at once stack in DOM
 // order - which put the arrangement over the piano roll however you got there, since it is written
@@ -10384,6 +10514,25 @@ function makeDefRegistry(opts) {
     otherRefsNoun = 'clip',
   } = opts;
   const say = (line, isError) => logLine(line, isError);
+  // The editor this kind's gestures read and write: the deck its panel was opened from. Every
+  // livecode deck has definitions of its own, so a picker, a rename or a delete acts on the buffer
+  // the panel is looking at - deck B's panel never reaches into deck A's code, or the other way.
+  //
+  // A gesture made from somewhere OTHER than the panel - a device window's curve picker, which
+  // belongs to whichever deck plays that device - names its deck with withEditor. The panel is
+  // only told about (opened, renamed under, re-evaluated through) what happens in the deck it is
+  // showing; anything else just re-evaluates the deck it was done in.
+  let override = null;
+  const panelCM = () => panel.editor?.() ?? cm;
+  const target = () => override ?? panelCM();
+  const onPanel = (ed) => ed === panelCM();
+  function withEditor(ed, fn) {
+    const was = override;
+    override = ed;
+    try { return fn(); } finally { override = was; }
+  }
+  const showIn = (ed, id, carry) => { if (onPanel(ed)) panel.open(id, carry); };
+  const evalSoon = (ed) => (onPanel(ed) ? panel.scheduleEval() : evalEditor(ed));
 
   // A kind whose names are only unique WITHIN something else. A preset belongs to the plugin it was
   // captured from - a program is meaningless to any other plugin - so `disco` on a delay and `disco`
@@ -10417,7 +10566,7 @@ function makeDefRegistry(opts) {
 
   // Every definition in the buffer: { id, idLiteral, start, open, close }. Commented-out ones are
   // skipped - they define nothing, so there is nothing there to open.
-  function defsInBuffer(code = cm.getValue()) {
+  function defsInBuffer(code = target().getValue()) {
     const isCode = codeOnly(code);
     const re = new RegExp(`\\b${defCall}\\s*\\(`, 'g');
     const out = [];
@@ -10545,7 +10694,7 @@ function makeDefRegistry(opts) {
    * scoped kind to one owner, which is what the preset picker lists - offering a slot the presets
    * of some other plugin would only ever be offering it names it can't load.
    */
-  function allIds(sc = null, code = cm.getValue()) {
+  function allIds(sc = null, code = target().getValue()) {
     const own = defsInBuffer(code).map((d) => ({ id: d.id, scope: d.scope, note: '', own: true }));
     const rows = [
       ...own,
@@ -10556,13 +10705,16 @@ function makeDefRegistry(opts) {
     return sc === null ? rows : rows.filter((r) => sameScope(r.scope, sc));
   }
 
-  /** Gives every un-named and un-defined one in the buffer a definition. True if it wrote. */
-  function materialize() {
+  /**
+   * Gives every un-named and un-defined one in `ed`'s buffer a definition. True if it wrote. An
+   * evaluation names the deck it is evaluating; a double-click on an empty call names its own.
+   */
+  function materialize(ed = target()) {
     if (isData('') === null || !labelsMod) return false; // can't yet tell a name from data
     // ...or a new name from a library one. A definition written now would be written OVER the
     // library's, empty, and shadow it from then on - so nothing is written until the list is in.
     if (!prLibraryKnown) return false;
-    const code = cm.getValue();
+    const code = ed.getValue();
     // { id, scope } rather than a flat set of names: for a scoped kind the same name is free again
     // under a different plugin, and the definition written for it records which one it belongs to.
     // Kept apart from the buffer's own names so a bump can say WHICH kind of collision it was: one
@@ -10584,7 +10736,7 @@ function makeDefRegistry(opts) {
     while ((m = bare.exec(code)) !== null) {
       if (!isCode(m.index)) continue;
       const sc = scopeOfCall(code, { start: m.index });
-      const label = prBlockLabelAt(m.index);
+      const label = prBlockLabelAt(m.index, code);
       const id = freshDefId(label, (name) => isTaken(name, sc), kind);
       const wanted = preferredDefId(label, kind);
       if (inLibrary(wanted, sc)) libraryBumpNote(label, wanted, id, libraryNote);
@@ -10601,16 +10753,16 @@ function makeDefRegistry(opts) {
     }
     if (!created.length) return false;
 
-    cm.operation(() => {
+    ed.operation(() => {
       for (let i = rewrites.length - 1; i >= 0; i--) {
         const [from, to, text] = rewrites[i];
-        cm.replaceRange(text, cm.posFromIndex(from), cm.posFromIndex(to));
+        ed.replaceRange(text, ed.posFromIndex(from), ed.posFromIndex(to));
       }
       // Computed after the rewrites, since an inserted id moves everything below it along.
-      const [from, to, text] = defsEdit(cm.getValue(), created);
-      cm.replaceRange(text, cm.posFromIndex(from), cm.posFromIndex(to));
+      const [from, to, text] = defsEdit(ed.getValue(), created);
+      ed.replaceRange(text, ed.posFromIndex(from), ed.posFromIndex(to));
     });
-    refoldAll(); // the new block starts life hidden, like every other one
+    refoldAll(ed); // the new block starts life hidden, like every other one
     say(`new ${label}${created.length === 1 ? '' : 's'}: ${created.map((c) => c.id).join(', ')}`);
     return true;
   }
@@ -10619,20 +10771,21 @@ function makeDefRegistry(opts) {
   // until a pattern says its name, which is the point: you draw the variation first and swap it in
   // when you are ready.
   function create(id, sc = panelScope()) {
-    const code = cm.getValue();
+    const ed = target();
+    const code = ed.getValue();
     if (!id || DEF_ID_BAD.test(id)) {
       return say(`can't create a ${label} called "${id}": a name has to be one plain word`, true);
     }
     if (findDef(code, id, sc) || inLibrary(id, sc)) {
-      panel.open(id, panel.carry()); // it already exists - showing it is what was meant anyway
+      showIn(ed, id, panel.carry()); // it already exists - showing it is what was meant anyway
       return;
     }
     const [from, to, text] = defsEdit(code, [{ id, scope: sc ?? '' }]);
-    cm.replaceRange(text, cm.posFromIndex(from), cm.posFromIndex(to));
-    refoldAll();
+    ed.replaceRange(text, ed.posFromIndex(from), ed.posFromIndex(to));
+    refoldAll(ed);
     say(`new ${label}: ${id}`);
-    panel.open(id, panel.carry());
-    panel.scheduleEval();
+    showIn(ed, id, panel.carry());
+    evalSoon(ed);
   }
 
   // Throwing one away from the picker. Refused while a pattern still names it - not out of
@@ -10640,7 +10793,8 @@ function makeDefRegistry(opts) {
   // fresh empty definition on the next evaluation (see materialize), so it would come straight
   // back with its data gone. Take it out of the patterns first and the delete goes through.
   function remove(id, sc = panelScope()) {
-    const code = cm.getValue();
+    const ed = target();
+    const code = ed.getValue();
     const def = findDef(code, id, sc);
     const refuse = (why) => say(`can't delete ${label} "${id}": ${why}`, true);
     if (!def) {
@@ -10659,15 +10813,15 @@ function makeDefRegistry(opts) {
         + `- delete the clips (${hotkeyLabel('arrange')}) first, or the part goes silent where they are`);
     }
     const [from, to] = removalRange(code, def);
-    const wasOpen = panel.current() === id;
-    cm.replaceRange('', cm.posFromIndex(from), cm.posFromIndex(to));
-    refoldAll();
+    const wasOpen = onPanel(ed) && panel.current() === id;
+    ed.replaceRange('', ed.posFromIndex(from), ed.posFromIndex(to));
+    refoldAll(ed);
     say(`deleted ${label} "${id}"`);
-    panel.scheduleEval();
+    evalSoon(ed);
     // The panel was showing the one that just went: put another up rather than closing, since
     // deleting from the picker is usually one of several tidying gestures.
     if (wasOpen) {
-      const next = defsInBuffer().find((d) => d.id !== id && sameScope(d.scope, def.scope));
+      const next = defsInBuffer(ed.getValue()).find((d) => d.id !== id && sameScope(d.scope, def.scope));
       if (next) panel.open(next.id, panel.carry());
       else panel.close();
     }
@@ -10689,7 +10843,8 @@ function makeDefRegistry(opts) {
   // pointing at nothing would silently swap the part for silence. Unless it is SHARED and you are
   // looking at it through one of the patterns playing it, which asks for something else: see fork.
   function rename(from, to, sc = panelScope()) {
-    const code = cm.getValue();
+    const ed = target();
+    const code = ed.getValue();
     const refuse = (why) => { say(`can't rename ${label} "${from}" to "${to}": ${why}`, true); panel.syncHead(); };
     if (!to || DEF_ID_BAD.test(to)) return refuse('a name has to be one plain word');
     const def = findDef(code, from, sc);
@@ -10701,7 +10856,7 @@ function makeDefRegistry(opts) {
     }
 
     const refs = refCalls(code, from, def.scope);
-    const here = panel.sourceCall(refs);
+    const here = onPanel(ed) ? panel.sourceCall(refs) : null;
     if (here && refs.length > 1) return fork(code, def, from, to, here, refs.length - 1);
 
     const [litStart, litEnd] = defIdLiteralRange(code, def);
@@ -10709,12 +10864,12 @@ function makeDefRegistry(opts) {
     for (const call of refs) edits.push(...idOccurrenceEdits(call, from, to));
     // References that are not calls at all: the arrangement's clips name a roll the way a pattern
     // does (see clips()), and a rename that left them behind would swap a part for silence.
-    const elsewhere = otherRenameEdits(code, from, to);
-    applyEdits([...edits, ...elsewhere]);
-    panel.setCurrent(from, to);
-    refoldAll();
+    const elsewhere = otherRenameEdits(code, from, to, ed);
+    applyEdits([...edits, ...elsewhere], ed);
+    if (onPanel(ed)) panel.setCurrent(from, to);
+    refoldAll(ed);
     panel.syncHead();
-    panel.scheduleEval();
+    evalSoon(ed);
     const also = elsewhere.length ? ` (${otherRefs(code, from)} ${otherRefsNoun}(s) updated)` : '';
     say(`renamed ${label} "${from}" to "${to}"${refs.length ? ` (${refs.length} pattern(s) updated)` : ''}${also}`);
   }
@@ -10729,6 +10884,7 @@ function makeDefRegistry(opts) {
   // Opened straight from the picker there is no `source` call, so there is nothing to unlink it
   // from and a rename there stays a plain rename.
   function fork(code, def, from, to, call, others) {
+    const ed = target();
     const [litStart, litEnd] = defIdLiteralRange(code, def);
     const text = code.slice(def.start, def.close + 1);
     const copy = text.slice(0, litStart - def.start) + JSON.stringify(to) + text.slice(litEnd - def.start);
@@ -10738,19 +10894,19 @@ function makeDefRegistry(opts) {
     // The quotes are never part of an edit, so a mark that takes them IN survives having the whole
     // string body replaced - which is what renaming a one-name call does - and comes back sitting
     // over the new name, ready to go on being followed.
-    const quoted = cm.markText(cm.posFromIndex(call.from - 1), cm.posFromIndex(call.to + 1), {});
+    const quoted = ed.markText(ed.posFromIndex(call.from - 1), ed.posFromIndex(call.to + 1), {});
     const view = panel.carry();
     const oldSource = view?.source ?? null;
-    applyEdits([[def.close + 1, def.close + 1, `\n${indent}${copy}`], ...idOccurrenceEdits(call, from, to)]);
+    applyEdits([[def.close + 1, def.close + 1, `\n${indent}${copy}`], ...idOccurrenceEdits(call, from, to)], ed);
     const span = quoted.find();
     quoted.clear();
     oldSource?.clear();
     if (view) {
       view.source = span
-        ? cm.markText({ line: span.from.line, ch: span.from.ch + 1 }, { line: span.to.line, ch: span.to.ch - 1 }, {})
+        ? ed.markText({ line: span.from.line, ch: span.from.ch + 1 }, { line: span.to.line, ch: span.to.ch - 1 }, {})
         : null;
     }
-    refoldAll();
+    refoldAll(ed);
     panel.open(to, view); // the same data stays on screen, now under the name just given it
     panel.scheduleEval();
     say(
@@ -10771,7 +10927,8 @@ function makeDefRegistry(opts) {
   // promise; the buffer's own copy is still written synchronously.
   function duplicate(id = panel.current(), sc = panelScope()) {
     if (id == null) return;
-    const code = cm.getValue();
+    const ed = target();
+    const code = ed.getValue();
     const def = findDef(code, id, sc);
     if (!def && inLibrary(id, sc)) return duplicateFromLibrary(id, sc);
     if (!def) {
@@ -10787,26 +10944,27 @@ function makeDefRegistry(opts) {
     const copy = text.slice(0, litStart - def.start) + JSON.stringify(to) + text.slice(litEnd - def.start);
     const lineStart = code.lastIndexOf('\n', def.start - 1) + 1;
     const indent = /^[ \t]*/.exec(code.slice(lineStart, def.start))[0];
-    applyEdits([[def.close + 1, def.close + 1, `\n${indent}${copy}`]]);
-    refoldAll();
+    applyEdits([[def.close + 1, def.close + 1, `\n${indent}${copy}`]], ed);
+    refoldAll(ed);
     say(`${label} "${to}" is a copy of "${id}"`);
-    panel.open(to, panel.carry());
-    panel.scheduleEval();
+    showIn(ed, to, panel.carry());
+    evalSoon(ed);
   }
 
   async function duplicateFromLibrary(id, sc) {
+    const ed = target(); // the deck that asked, whichever one the panel is on once the fetch lands
     const src = await librarySource(id, sc);
     if (!src) return false;
-    const code = cm.getValue();
+    const code = ed.getValue();
     const rows = allIds(src.scope || null, code);
     const stem = id.replace(/\d+$/, '') || id;
     const to = freshDefId(stem, (name) => rows.some((r) => r.id === name), kind);
     const [from, end, text] = defsEdit(code, [{ id: to, scope: src.scope }], () => src.body);
-    cm.replaceRange(text, cm.posFromIndex(from), cm.posFromIndex(end));
-    refoldAll();
+    ed.replaceRange(text, ed.posFromIndex(from), ed.posFromIndex(end));
+    refoldAll(ed);
     say(`${label} "${to}" is a copy of library ${label} "${id}"`);
-    panel.open(to, panel.carry());
-    panel.scheduleEval();
+    showIn(ed, to, panel.carry());
+    evalSoon(ed);
     return true;
   }
 
@@ -10834,21 +10992,22 @@ function makeDefRegistry(opts) {
    * Brings library definition `id` into this buffer under its OWN name, so the panel has text to
    * draw into. The copy shadows the library's (see pin), so nothing changes about what plays; once
    * it has been drawn into, its ★ reads "differs" and a click files the edit back to the library.
-   * True when the buffer now defines it.
+   * True when the buffer now defines it. `ed` is the deck being opened on, taken before the fetch
+   * so the copy lands there whatever the panel is showing by the time it comes back.
    */
-  async function adopt(id, sc = null) {
-    if (findDef(cm.getValue(), id, sc)) return true;
+  async function adopt(id, sc = null, ed = target()) {
+    if (findDef(ed.getValue(), id, sc)) return true;
     if (!inLibrary(id, sc)) return false;
     const src = await librarySource(id, sc);
     if (!src) return false;
-    const code = cm.getValue();
+    const code = ed.getValue();
     if (findDef(code, id, sc)) return true; // a second open landed while this one was fetching
     const [from, to, text] = defsEdit(code, [{ id: String(id), scope: src.scope }], () => src.body);
-    cm.replaceRange(text, cm.posFromIndex(from), cm.posFromIndex(to));
-    refoldAll();
+    ed.replaceRange(text, ed.posFromIndex(from), ed.posFromIndex(to));
+    refoldAll(ed);
     const starred = !!pinnedEntry(id, sc);
     say(`${label} "${id}" copied into this buffer from your library${starred ? ' - click its ★ after editing to update the library' : ''}`);
-    panel.scheduleEval();
+    evalSoon(ed);
     return true;
   }
 
@@ -10868,7 +11027,8 @@ function makeDefRegistry(opts) {
   function pinState(id, sc = null) {
     const e = pinnedEntry(id, sc);
     if (!e) return 'none';
-    const code = cm.getValue();
+    const ed = target();
+    const code = ed.getValue();
     const def = findDef(code, id, sc);
     if (!def) return 'library';
     return defText(code, def) === e.code ? 'same' : 'differs';
@@ -10876,7 +11036,8 @@ function makeDefRegistry(opts) {
 
   /** Copies this buffer's definition of `id` into the library (over an older pinned copy, if any). */
   async function pin(id, sc = null) {
-    const code = cm.getValue();
+    const ed = target();
+    const code = ed.getValue();
     const def = findDef(code, id, sc);
     if (!def) return say(`can't pin ${label} "${id}": its definition is not in this buffer`, true);
     const had = pinnedEntry(id, def.scope);
@@ -10901,14 +11062,15 @@ function makeDefRegistry(opts) {
   async function unpin(id, sc = null) {
     const e = pinnedEntry(id, sc);
     if (!e) return;
-    const code = cm.getValue();
+    const ed = target();
+    const code = ed.getValue();
     let copied = false;
     if (!findDef(code, id, e.scope)) {
       const inner = e.code.slice(e.code.indexOf('(') + 1, e.code.lastIndexOf(')'));
       const body = splitFirstArg(inner)[1].trim();
       const [from, to, text] = defsEdit(code, [{ id: String(id), scope: e.scope }], () => body);
-      cm.replaceRange(text, cm.posFromIndex(from), cm.posFromIndex(to));
-      refoldAll();
+      ed.replaceRange(text, ed.posFromIndex(from), ed.posFromIndex(to));
+      refoldAll(ed);
       copied = true;
     }
     try {
@@ -10917,13 +11079,13 @@ function makeDefRegistry(opts) {
       for (const msg of res.errors ?? []) say(`library: ${msg}`, true);
       say(`${label} "${id}" is out of your library${copied ? ' - this buffer keeps its own copy' : ''}`);
       prRefreshRollList();
-      if (copied) panel.scheduleEval();
+      if (copied) evalSoon(ed);
     } catch (err) {
       say(`can't take ${label} "${id}" out of your library: ${err.message ?? err}`, true);
     }
   }
 
-  return { kind, label, section, defCall, useCall, legacyCall, libraryNote, isIdString, isIdCall, defsInBuffer, findDef, idCalls, refCalls, runs, removalRange, defsEdit, allIds, inLibrary, materialize, create, remove, rename, duplicate, adopt, pinState, pin, unpin };
+  return { kind, label, section, defCall, useCall, legacyCall, libraryNote, isIdString, isIdCall, defsInBuffer, findDef, idCalls, refCalls, runs, removalRange, defsEdit, allIds, inLibrary, materialize, create, remove, rename, duplicate, adopt, pinState, pin, unpin, withEditor };
 }
 
 
@@ -10932,21 +11094,22 @@ function makeDefRegistry(opts) {
 // those words stay free for whatever they should mean to a person later. A patch saved before that
 // still says the old ones, and they are no longer bound - so rewrite them the first time it is
 // evaluated, which is the only moment it matters. Only calls that actually look like DEFINITIONS
-// (a literal id first) are touched, so someone's own `const roll = …` is left alone.
-function migrateDefNames() {
+// (a literal id first) are touched, so someone's own `const roll = …` is left alone. Run against
+// whichever deck is being evaluated - either of them can be handed an old patch.
+function migrateDefNames(ed = cm) {
   // Five passes, each reading what the last wrote: runs() looks for the private names, so the
   // labels above them can only be found once the calls have been renamed - the indentation those
   // labels left behind can only be squared up once they are gone - and only then is the block in
   // the shape sinkDefRuns will agree to move, which is what leaves the runs adjacent enough for
   // the last pass to close the gaps between them.
-  const renamed = renameLegacyDefCalls();
-  const labels = legacyLabelLines(cm.getValue());
-  if (labels.length) applyEdits(labels.map(([from, to]) => [from, to, '']));
-  const dedented = dedentDefRuns();
-  const sunk = sinkDefRuns();
-  const tightened = tightenDefRuns();
+  const renamed = renameLegacyDefCalls(ed);
+  const labels = legacyLabelLines(ed.getValue());
+  if (labels.length) applyEdits(labels.map(([from, to]) => [from, to, '']), ed);
+  const dedented = dedentDefRuns(ed);
+  const sunk = sinkDefRuns(ed);
+  const tightened = tightenDefRuns(ed);
   if (!renamed && !labels.length && !dedented && !sunk && !tightened) return;
-  refoldAll();
+  refoldAll(ed);
   const parts = [];
   if (renamed) parts.push(`${renamed} definition${renamed === 1 ? '' : 's'} renamed to the editor's private form`);
   if (labels.length) parts.push(`${labels.length} leftover label${labels.length === 1 ? '' : 's'} removed`);
@@ -10964,8 +11127,8 @@ function migrateDefNames() {
 // Only TOP-LEVEL runs are touched. A definition indented inside a function body is indented on
 // purpose, and while re-indenting it would cost nothing but looks, code the editor did not write is
 // not code the editor should reformat.
-function dedentDefRuns() {
-  const code = cm.getValue();
+function dedentDefRuns(ed = cm) {
+  const code = ed.getValue();
   const isCode = codeOnly(code);
   const edits = [];
   for (const reg of DEF_REGISTRIES) {
@@ -10979,7 +11142,7 @@ function dedentDefRuns() {
       }
     }
   }
-  if (edits.length) applyEdits(edits);
+  if (edits.length) applyEdits(edits, ed);
   return edits.length;
 }
 
@@ -10990,8 +11153,8 @@ function dedentDefRuns() {
 //
 // Nothing about playback minds: resolution is lazy (see rollPattern in signal.mjs), so a
 // definition reads the same either side of the pattern that names it.
-function sinkDefRuns() {
-  const code = cm.getValue();
+function sinkDefRuns(ed = cm) {
+  const code = ed.getValue();
   const isCode = codeOnly(code);
   const found = [];
   for (const reg of DEF_REGISTRIES) {
@@ -11019,7 +11182,7 @@ function sinkDefRuns() {
     .join('')
     .replace(/\n+$/, '');
   const gap = '\n'.repeat(Math.max(0, 2 - /\n*$/.exec(code)[0].length));
-  applyEdits([...found.map((f) => [...f.span, '']), [code.length, code.length, `${gap}${block}`]]);
+  applyEdits([...found.map((f) => [...f.span, '']), [code.length, code.length, `${gap}${block}`]], ed);
   return found.reduce((n, f) => n + f.run.length, 0);
 }
 
@@ -11085,8 +11248,8 @@ function footSpans(code) {
 // rather than as structure, so they are squeezed onto consecutive lines. Only the space BETWEEN
 // two runs is touched: the blank line that separates the whole block from the player's code is
 // what tells them apart, and it is above the first run.
-function tightenDefRuns() {
-  const code = cm.getValue();
+function tightenDefRuns(ed = cm) {
+  const code = ed.getValue();
   const spans = footSpans(code); // the definition runs and the arrangement, which stacks with them
   const edits = [];
   for (let i = 1; i < spans.length; i++) {
@@ -11096,7 +11259,7 @@ function tightenDefRuns() {
     // one below it, and closing that gap would strand it against the block above.
     if (gap !== '\n' && /^[ \t;]*\n\s*$/.test(gap)) edits.push([from, to, '\n']);
   }
-  if (edits.length) applyEdits(edits);
+  if (edits.length) applyEdits(edits, ed);
   return edits.length;
 }
 
@@ -11115,8 +11278,8 @@ function atTopLevel(code, isCode, at) {
 // Pass one: roll(...) / shape(...) -> _roll(...) / _shape(...). Only calls that actually look like
 // DEFINITIONS (a literal id first) are touched, so someone's own `const roll = …` is left alone.
 // Returns how many were rewritten.
-function renameLegacyDefCalls() {
-  const code = cm.getValue();
+function renameLegacyDefCalls(ed = cm) {
+  const code = ed.getValue();
   const isCode = codeOnly(code);
   const edits = [];
   for (const reg of DEF_REGISTRIES) {
@@ -11136,7 +11299,7 @@ function renameLegacyDefCalls() {
       edits.push([m.index, m.index, '_']);
     }
   }
-  if (edits.length) applyEdits(edits);
+  if (edits.length) applyEdits(edits, ed);
   return edits.length;
 }
 
@@ -11200,7 +11363,7 @@ function lfoSyncHead() {
   lfoLockBtn.title = lfoFollowLocked ? 'pinned to this shape' : 'following the playing shape';
   lfoRateUnit.textContent = lfoState?.rateHz ? 'hz' : 'cyc';
   lfoRateUnit.title = lfoState?.rateHz ? 'free-running — click for cycles' : 'synced to the cycle — click for hz';
-  lfoHead.syncHead(named ? shapeDefs.refCalls(cm.getValue(), lfoState.shapeId).length : 0);
+  lfoHead.syncHead(named ? shapeDefs.refCalls(lfoCM.getValue(), lfoState.shapeId).length : 0);
 }
 
 
@@ -11398,7 +11561,7 @@ function prSyncGrooveSel() {
   // where it can be read in full.
   if (patchGroove) prGrooveSel.add(new Option('session', 'session'));
   const seen = new Set();
-  for (const { id } of (grooveMod ? grooveDefs.allIds() : [])) {
+  for (const { id } of (grooveMod ? grooveDefs.allIds(null, prCM.getValue()) : [])) { // the roll's own deck's
     if (seen.has(id)) continue;
     seen.add(id);
     prGrooveSel.add(new Option(id, `g:${id}`));
@@ -11423,26 +11586,30 @@ function prSyncGrooveSel() {
     : 'the feel this roll plays by';
 }
 
-/** The next name nothing holds - groove1, groove2, ... - for the definitions made automatically. */
-function nextGrooveName() {
-  const used = new Set([...grooveDefs.allIds().map((r) => r.id), ...Object.keys(grooveMod?.GROOVE_PRESETS ?? {})]);
+/** The next name nothing in `ed`'s buffer holds - groove1, groove2, ... - for the definitions made automatically. */
+function nextGrooveName(ed = grooveCM) {
+  const used = new Set([...grooveDefs.allIds(null, ed.getValue()).map((r) => r.id), ...Object.keys(grooveMod?.GROOVE_PRESETS ?? {})]);
   let i = 1;
   while (used.has(`groove${i}`)) i++;
   return `groove${i}`;
 }
 
-function openPianorollEditor(call, carry = null) {
+// `ed` is the deck the call is in. Opened on the other deck from the one it is showing, the panel
+// puts that roll away first - exactly as if its call had left the buffer - and moves across.
+function openPianorollEditor(call, carry = null, ed = prState ? prCM : cm) {
+  if (prState && ed !== prCM) closePianorollEditor();
+  prCM = ed;
   const wasOpen = !!prState; // a fresh open refreshes the roll list; a follow-switch must not
   if (!wasOpen) prCmdMode = 'vel'; // every fresh open starts on velocity (see prCmdMode)
-  const from = cm.posFromIndex(call.start);
-  const to = cm.posFromIndex(call.close + 1);
-  const inner = cm.getValue().slice(call.open + 1, call.close);
+  const from = prCM.posFromIndex(call.start);
+  const to = prCM.posFromIndex(call.close + 1);
+  const inner = prCM.getValue().slice(call.open + 1, call.close);
   if (prState?.marker) prState.marker.clear();
   // A roll(...) definition is a pianoroll() call with an id in front of it - drop the id and the
   // rest parses identically.
   const { notes, grid, len, start, mode, swing, swinggrid, groove, swingvel, bend } = parsePianorollCall(call.idLiteral ? splitFirstArg(inner)[1] : inner);
   prState = {
-    marker: cm.markText(from, to, {}),
+    marker: prCM.markText(from, to, {}),
     callStart: call.start,
     notes,
     grid, // granularity: cells per cycle (the *grid multiplier)
@@ -11497,6 +11664,7 @@ function openPianorollEditor(call, carry = null) {
     // panel can keep asking which roll is sounding. Null when a definition was opened directly.
     source: carry?.source ?? null,
   };
+  syncPatchKey(); // the key and the feel the roll is drawn by are its own deck's (see deckKeys)
   prPushHistory(); // the state the roll opened in - what the first cmd-Z comes back to
   prFramePitch();
   // Following the pattern from one roll to the next must not throw the view away: the notes are
@@ -11547,12 +11715,12 @@ function prCarry() {
  * into buffer text, so that copy is what makes it editable (see makeDefRegistry's adopt). The copy
  * arrives a fetch later, so this answers true and opens it then.
  */
-function openRollById(id, carry = null, { adopt = true } = {}) {
-  const def = rollDefs.defsInBuffer().find((d) => d.id === String(id));
+function openRollById(id, carry = null, { adopt = true, ed = prState ? prCM : cm } = {}) {
+  const def = rollDefs.defsInBuffer(ed.getValue()).find((d) => d.id === String(id));
   if (!def && adopt && rollDefs.inLibrary(String(id), null)) {
-    rollDefs.adopt(String(id)).then((ok) => {
+    rollDefs.adopt(String(id), null, ed).then((ok) => {
       if (!ok) return prSyncRollHead();
-      openRollById(id, carry, { adopt: false });
+      openRollById(id, carry, { adopt: false, ed });
       prCanvas.focus({ preventScroll: true });
     });
     return true;
@@ -11561,36 +11729,38 @@ function openRollById(id, carry = null, { adopt = true } = {}) {
     logLine(`no roll(${JSON.stringify(String(id))}, …) in this buffer to open`, true);
     return false;
   }
-  openPianorollEditor(def, carry);
+  openPianorollEditor(def, carry, ed);
   return true;
 }
 
 // Double-clicked the name of a pianoroll("<0 chorus>"): open whichever roll is sounding right now,
 // or the first id named when nothing is playing, and follow the call from there.
-function openRollFromIdCall(call, code) {
+function openRollFromIdCall(call, code, ed = cm) {
   const range = idStringRange(call, code);
   if (!range) return;
   const [from, to] = range;
-  const id = activeIdIn(from, to) ?? (code.slice(from, to).match(/[\w$]+/) ?? [])[0];
+  const id = activeIdIn(from, to, ed) ?? (code.slice(from, to).match(/[\w$]+/) ?? [])[0];
   if (id == null) return;
-  const source = cm.markText(cm.posFromIndex(from), cm.posFromIndex(to), {});
+  const source = ed.markText(ed.posFromIndex(from), ed.posFromIndex(to), {});
   // Just the source marker: no view to carry on a first open, so the roll frames its own notes.
-  if (openRollById(id, { source })) {
+  if (openRollById(id, { source }, { ed })) {
     prCanvas.focus({ preventScroll: true });
   } else {
     source.clear();
   }
 }
 
-// The id sounding inside a document range, read off the playback highlighter's own lit spans - the
-// same grid the scheduler plays, so a panel can never disagree with what you are hearing. Not
-// roll-specific: rolls, presets and lfo shapes all name their definitions in a mini string, and all
-// three ask this the same question about it.
-function activeIdIn(from, to) {
+// The id sounding inside a range of `ed`'s document, read off the playback highlighter's own lit
+// spans - the same grid the scheduler plays, so a panel can never disagree with what you are
+// hearing. Not roll-specific: rolls, presets and lfo shapes all name their definitions in a mini
+// string, and all three ask this the same question about it. Only that deck's regions count: the
+// other deck's offsets are into another document.
+function activeIdIn(from, to, ed = cm) {
+  const deck = deckOfCM(ed);
   for (const r of patternRegions) {
-    if (r.deck !== 'a') continue; // panels read main-editor offsets; deck B's are another doc's
+    if (r.deck !== deck) continue;
     for (const [a, b] of r.litSpans ?? []) {
-      if (a >= from && b <= to) return cm.getRange(cm.posFromIndex(a), cm.posFromIndex(b)).trim();
+      if (a >= from && b <= to) return ed.getRange(ed.posFromIndex(a), ed.posFromIndex(b)).trim();
     }
   }
   return null;
@@ -11605,11 +11775,11 @@ function prFollowPlayingRoll() {
   if (document.activeElement === prName || !prPicker.classList.contains('hidden')) return;
   const range = prState.source.find();
   if (!range) return;
-  const id = activeIdIn(cm.indexFromPos(range.from), cm.indexFromPos(range.to));
+  const id = activeIdIn(prCM.indexFromPos(range.from), prCM.indexFromPos(range.to), prCM);
   if (id == null || id === prState.rollId) return;
   // Following into a library roll the buffer has no copy of stays put: copying one in is a
   // decision to edit it, and a bar ticking over isn't that (and this runs every frame).
-  if (!rollDefs.findDef(cm.getValue(), id)) return;
+  if (!rollDefs.findDef(prCM.getValue(), id)) return;
   openRollById(id, prCarry());
 }
 
@@ -11643,24 +11813,24 @@ const rollPicker = makeNamePicker({
 function prUseInCall(id) {
   const span = prState?.source?.find();
   if (!span) return;
-  const was = cm.getRange(span.from, span.to);
+  const was = prCM.getRange(span.from, span.to);
   if (was === id) return;
   // A mark over just the string BODY collapses when the body is replaced wholesale, so take the
   // quotes in for the duration of the edit and put the inner mark back over the new name (see
   // presetUseInCall, and makeDefRegistry's fork).
-  const quoted = cm.markText({ line: span.from.line, ch: span.from.ch - 1 }, { line: span.to.line, ch: span.to.ch + 1 }, {});
-  cm.replaceRange(id, span.from, span.to);
+  const quoted = prCM.markText({ line: span.from.line, ch: span.from.ch - 1 }, { line: span.to.line, ch: span.to.ch + 1 }, {});
+  prCM.replaceRange(id, span.from, span.to);
   const after = quoted.find();
   quoted.clear();
   prState.source.clear();
   prState.source = after
-    ? cm.markText({ line: after.from.line, ch: after.from.ch + 1 }, { line: after.to.line, ch: after.to.ch - 1 }, {})
+    ? prCM.markText({ line: after.from.line, ch: after.from.ch + 1 }, { line: after.to.line, ch: after.to.ch - 1 }, {})
     : null;
-  refoldAll();
+  refoldAll(prCM);
   logLine(`pianoroll("${was}") now plays "${id}"`);
   // Playing a library roll here isn't editing it, so the panel only follows one the buffer defines
   // (opening a library one would copy it in - see openRollById).
-  if (id !== prState.rollId && rollDefs.findDef(cm.getValue(), id)) openRollById(id, prCarry());
+  if (id !== prState.rollId && rollDefs.findDef(prCM.getValue(), id)) openRollById(id, prCarry());
   else prSyncRollHead();
   prScheduleEval();
 }
@@ -11671,7 +11841,7 @@ function prSyncRollHead() {
   prLockBtn.classList.toggle('active', prFollowLocked);
   prLockBtn.title = prFollowLocked ? 'pinned to this roll' : 'following the playing roll';
   // Only a roll being watched through a pattern can be shared in the sense the tooltip means.
-  const shared = prState?.source && prState.rollId ? rollDefs.refCalls(cm.getValue(), prState.rollId).length : 0;
+  const shared = prState?.source && prState.rollId ? rollDefs.refCalls(prCM.getValue(), prState.rollId).length : 0;
   rollPicker.syncHead(shared);
 }
 
@@ -12137,11 +12307,11 @@ function writePianorollCall(record = true) {
   const text = serializePianorollCall(prState);
   prSuppressCursor = true;
   try {
-    cm.replaceRange(text, range.from, range.to);
+    prCM.replaceRange(text, range.from, range.to);
     // replaceRange collapses the marker - re-pin it over the fresh text (see writeLfoCall)
     prState.marker.clear();
-    const startIdx = cm.indexFromPos(range.from);
-    prState.marker = cm.markText(range.from, cm.posFromIndex(startIdx + text.length), {});
+    const startIdx = prCM.indexFromPos(range.from);
+    prState.marker = prCM.markText(range.from, prCM.posFromIndex(startIdx + text.length), {});
     prState.callStart = startIdx;
   } finally {
     prSuppressCursor = false; // never leave it latched: that would wedge the panel shut for good
@@ -12149,17 +12319,16 @@ function writePianorollCall(record = true) {
   // Rewriting the call clears any fold covering it, so a note drawn into a roll would flick its
   // whole definitions block open and (an eval later) shut again. Re-fold now, in the same frame -
   // all of them, since the half-cleared mark this edit just left behind has to go with them.
-  refoldAll();
+  refoldAll(prCM);
   prScheduleEval();
 }
 
 // A roll edit isn't finished until it *sounds*, so every write re-evaluates the buffer - debounced,
 // so a drag that touches a dozen notes still costs one request. evaluate(false) is the "update"
 // path (the ⏎ shortcut): it keeps the current play state, so drawing while stopped stays stopped.
-let prEvalTimer = null;
+const prEvalSoon = { timer: null, ed: null };
 function prScheduleEval() {
-  clearTimeout(prEvalTimer);
-  prEvalTimer = setTimeout(() => { prEvalTimer = null; evaluate(false); }, PR_EVAL_DEBOUNCE_MS);
+  deckEvalSoon(prEvalSoon, prCM, PR_EVAL_DEBOUNCE_MS); // the deck the roll is on
 }
 
 // A control that streams while you hold it (the swing slider) would otherwise rewrite the call -
@@ -12199,6 +12368,7 @@ function prPushRoll() {
   const id = idLiteralValue(prState.idLiteral);
   if (id === null) return; // an id built from a variable - not a name we can put on the wire
   api('POST', '/api/liveRoll', {
+    deck: deckOfCM(prCM), // each deck's definitions are its own (see liveOnDeck in server.js)
     id,
     notes: pianorollMod.serializePianoRoll(prLiveNotes(prState.notes)),
     opts: prCallOpts(prState),
@@ -12238,7 +12408,7 @@ function syncPianorollFromCode() {
   // pianoroll call) - nothing left to draw on, so the roll goes with it. This is the only thing
   // that closes it by itself now that opening is an explicit double-click.
   if (!range) { closePianorollEditor(); return; }
-  const text = cm.getRange(range.from, range.to);
+  const text = prCM.getRange(range.from, range.to);
   // The call must still be the KIND the panel opened: a definition edited back into a plain
   // pianoroll() (or the other way round) is no longer the thing on screen.
   const stillTheCall = new RegExp(`^\\s*${prState.idLiteral ? rollDefs.defCall : 'pianoroll'}\\s*\\(`);
@@ -12256,7 +12426,7 @@ function syncPianorollFromCode() {
   if (open < 0 || close < open) return; // mid-edit, not a whole call right now - wait for the next change
   const body = text.slice(open + 1, close);
   const parsed = parsePianorollCall(prState.idLiteral ? splitFirstArg(body)[1] : body);
-  prState.callStart = cm.indexFromPos(range.from);
+  prState.callStart = prCM.indexFromPos(range.from);
   prState.grid = parsed.grid;
   prState.len = parsed.len;
   prState.start = parsed.start;
@@ -12838,7 +13008,7 @@ function prSetLane(valueFor) {
 function prBendPluginRange() {
   const at = prChainAt();
   if (at == null || !labelsMod) return null;
-  const code = cm.getValue();
+  const code = prCM.getValue();
   const block = labelsMod.splitLabeledBlocks(code).findLast((b) => at >= b.start && at < b.end);
   if (!block) return null;
   const body = code.slice(block.start, block.end);
@@ -14085,13 +14255,13 @@ function prOpenHarmonyMenu(e) {
 function prChainAt() {
   if (!prState) return null;
   const src = prState.source?.find();
-  if (src) return cm.indexFromPos(src.from);
+  if (src) return prCM.indexFromPos(src.from);
   if (prState.rollId != null) {
-    const call = rollDefs.refCalls(cm.getValue(), prState.rollId)[0];
+    const call = rollDefs.refCalls(prCM.getValue(), prState.rollId)[0];
     if (call) return call.start;
   }
   const range = prState.marker?.find();
-  return range ? cm.indexFromPos(range.from) : prState.callStart ?? null;
+  return range ? prCM.indexFromPos(range.from) : prState.callStart ?? null;
 }
 
 /**
@@ -14102,7 +14272,7 @@ function prChainAt() {
 function prSamplerChain() {
   const at = prChainAt();
   if (at == null || !labelsMod) return null;
-  const code = cm.getValue();
+  const code = prCM.getValue();
   const call = sliceSourceCallAt(code, at);
   const ref = call ? sliceChainSourceAt(code, at) : null;
   return ref ? { code, at, call, ref } : null;
@@ -14136,7 +14306,7 @@ function prReadChain(force = false) {
   // every keystroke while the panel is open (a `.slices()` typed onto the track changes which axes
   // the roll may be drawn on), and the read splits the whole buffer into blocks - cheap once, not
   // cheap on every character.
-  const gen = cm.changeGeneration();
+  const gen = prCM.changeGeneration();
   if (!force && prState._chainGen === gen) return;
   prState._chainGen = gen;
   const chain = prSamplerChain();
@@ -14347,7 +14517,7 @@ function prFitCycles(fit, duration) {
 function prWriteSliceEntry(id, entries) {
   const def = sliceDefOf(id);
   if (!def || !slicesMod || !entries.length) return;
-  const cur = sliceSetOf(cm.getValue(), def);
+  const cur = sliceSetOf(prCM.getValue(), def);
   // A bare list applies to whatever plays, so turning it into a map would change what the files it
   // wasn't drawn on hear. It only gets here empty (a set that says nothing yet), where there is
   // nothing to lose.
@@ -14355,12 +14525,12 @@ function prWriteSliceEntry(id, entries) {
   for (const { key, marks } of entries) {
     set[key] = slicesMod.normalizeSliceEntry({ fit: slicesMod.sliceEntryFor(cur, key)?.fit ?? null, marks });
   }
-  cm.replaceRange(
+  prCM.replaceRange(
     `${def.idLiteral}, ${slicesMod.serializeSliceSet(set)}`,
-    cm.posFromIndex(def.open + 1),
-    cm.posFromIndex(def.close),
+    prCM.posFromIndex(def.open + 1),
+    prCM.posFromIndex(def.close),
   );
-  refoldAll();
+  refoldAll(prCM);
 }
 
 /**
@@ -14369,10 +14539,10 @@ function prWriteSliceEntry(id, entries) {
  * set made this way is the same set the slice editor opens, and can be redrawn there afterwards.
  */
 function prMakeSliceSet(chain) {
-  cm.replaceRange('.slices()', cm.posFromIndex(chain.call.close + 1));
-  sliceDefs.materialize();
+  prCM.replaceRange('.slices()', prCM.posFromIndex(chain.call.close + 1));
+  sliceDefs.materialize(prCM);
   const at = prChainAt();
-  return at == null ? null : prSliceSetOnChain(cm.getValue(), at);
+  return at == null ? null : prSliceSetOnChain(prCM.getValue(), at);
 }
 
 async function prSliceToNotes(targets) {
@@ -16115,7 +16285,9 @@ const prRefocus = () => { if (prState) prCanvas.focus({ preventScroll: true }); 
 function initPianorollEditor() {
   // Opening is initWidgetHandles' job (double-click the name). Closing is the ✕, Escape, or the
   // call itself leaving the buffer - see syncPianorollFromCode.
-  cm.on('change', syncPianorollFromCode); // hand edits to the open call flow back into the panel
+  // Hand edits to the open call flow back into the panel - either deck's, but only those to the
+  // buffer the panel is editing.
+  onEveryDeck((ed) => ed.on('change', () => { if (ed === prCM) syncPianorollFromCode(); }));
   // Asked for up front, not on first open: auto-naming has to know which ids prebake already
   // holds, or naming a prebake roll from a pattern would quietly define an empty one over it.
   prRefreshRollList();
@@ -16506,7 +16678,7 @@ function initPianorollEditor() {
     if (!prState) return;
     const range = prState.marker.find();
     if (!range) return;
-    const code = cm.getValue();
+    const code = prCM.getValue();
     const notes = prLiveNotes(prState.notes);
     // With `scale` on, the roll is being drawn IN that key, so it's written out in it: scale
     // degrees plus a `.sc(octave)`, which re-keys with the setscale line instead of freezing the
@@ -16559,15 +16731,15 @@ function initPianorollEditor() {
       if (def) edits.push([...rollDefs.removalRange(code, def), '']);
       played = refs.length;
     } else {
-      const from = cm.indexFromPos(range.from);
-      edits.push([from, cm.indexFromPos(range.to), exprAt(from)]);
+      const from = prCM.indexFromPos(range.from);
+      edits.push([from, prCM.indexFromPos(range.to), exprAt(from)]);
     }
 
     prSuppressCursor = true;
-    applyEdits(edits);
+    applyEdits(edits, prCM);
     closePianorollEditor(); // the call the panel was anchored to is gone now
     prSuppressCursor = false;
-    if (id) refoldAll(); // the definitions block lost a line - its chip has to be redrawn
+    if (id) refoldAll(prCM); // the definitions block lost a line - its chip has to be redrawn
     prScheduleEval(); // the rewrite plays the same notes - keep the running track in step with it
     const what = id
       ? `roll "${id}" → mini-notation in ${played} pattern${played === 1 ? '' : 's'}, and its definition is gone`
@@ -16611,7 +16783,7 @@ function initPianorollEditor() {
   // the panel's own grid/len inputs - still swallow it.
   const typingInField = () => {
     const el = document.activeElement;
-    if (!el || cm.getWrapperElement().contains(el)) return false;
+    if (!el || [cm, deckBCM].some((ed) => ed?.getWrapperElement().contains(el))) return false; // either deck's code
     return /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName) || el.isContentEditable;
   };
   document.addEventListener('keydown', (e) => {
@@ -16830,10 +17002,10 @@ function highlightTick() {
     // has it - and the grid deliberately says nothing about that: a grid is computed in windows and
     // shipped ahead of the sound, while a hold comes and goes between them (see server.js's
     // patternSigs). Dropping those spans HERE is what lets a hold start and stop being drawn within
-    // half a second instead of surviving until the next evaluation. Held ranges are main-editor
-    // offsets, so only deck A's regions filter by them.
-    const lit = heldRanges.length && r.deck === 'a'
-      ? [...locs.values()].filter((l) => !inHeldRange(base + l[0], base + l[1]))
+    // half a second instead of surviving until the next evaluation. Each held range is in its own
+    // deck's document, so a region is filtered by its deck's alone.
+    const lit = heldRanges.length
+      ? [...locs.values()].filter((l) => !inHeldRange(base + l[0], base + l[1], r.deck))
       : [...locs.values()];
     const key = lit.map((l) => `${l[0]}-${l[1]}`).sort().join(',');
     if (key === r.lastKey) continue; // same atoms still sounding - don't churn marks
@@ -17119,16 +17291,18 @@ function applyRecording(results, take) {
   }
   const window = [take.startCycle, take.endCycle];
   const quantize = take.grid;
-  let evalNeeded = false;
+  const evalNeeded = new Set(); // the decks whose code a take was written into
   for (const r of results) {
+    // `label` is the server's name for the track - a deck B one's take goes into deck B's code.
     const { label, events } = r;
+    const { ed, label: own } = deckTrackParts(label);
     const n = events.length;
     const countIn = events.filter((ev) => ev.start < take.startCycle).length;
     const what = `${n} note${n === 1 ? '' : 's'}${countIn ? ` (${countIn} from the count-in, before cell 0)` : ''}`;
     // 1. the open roll - this track's, or the very call the take would otherwise be written under
     // (a definition two tracks share, opened through the other one)
-    const target = rollTargetForTrack(label);
-    if (prState && (prPlayingTrack() === label || (target && prState.callStart === target.start))) {
+    const target = rollTargetForTrack(own, ed);
+    if (prState && (prPlayingTrack() === label || (target && prCM === ed && prState.callStart === target.start))) {
       // Most of it is already in (prRecGhosts wrote each note as its key came up); this adds what
       // was still down when the window closed, and files the whole take as one undo step.
       const take = prRecTake(label);
@@ -17147,14 +17321,14 @@ function applyRecording(results, take) {
     }
     // 2. the block's roll
     if (target) {
-      const code = cm.getValue();
+      const code = ed.getValue();
       const inner = code.slice(target.open + 1, target.close);
       const parsed = parsePianorollCall(target.idLiteral ? splitFirstArg(inner)[1] : inner);
       const out = recordMod.recordingToRoll(events, parsed, { window, quantize });
       const text = serializePianorollCall({ ...parsed, grid: out.grid, len: out.len, start: out.start, idLiteral: target.idLiteral ?? null });
-      cm.replaceRange(text, cm.posFromIndex(target.start), cm.posFromIndex(target.close + 1));
-      refoldAll();
-      evalNeeded = true;
+      ed.replaceRange(text, ed.posFromIndex(target.start), ed.posFromIndex(target.close + 1));
+      refoldAll(ed);
+      evalNeeded.add(ed);
       logLine(`midi record: ${what} into ${target.idLiteral ? `roll ${target.idLiteral}` : 'the roll'} of "${label}"`);
       continue;
     }
@@ -17166,20 +17340,20 @@ function applyRecording(results, take) {
     const fresh = { notes: [], grid, len: grid * take.cycles, start: 0 };
     const out = recordMod.recordingToRoll(events, fresh, { window, quantize });
     const state = { notes: out.notes, grid: out.grid, len: out.len, start: out.start, mode: 'note', swing: 0, swinggrid: null };
-    const rollId = freeRollId(label, new Set(rollDefs.allIds().map((r) => r.id)));
-    if (replaceKbCall(label, `pianoroll(${JSON.stringify(rollId)})`)) {
+    const rollId = freeRollId(own, new Set(rollDefs.allIds(null, ed.getValue()).map((r) => r.id)));
+    if (replaceKbCall(own, `pianoroll(${JSON.stringify(rollId)})`, ed)) {
       // Against the buffer as replaceKbCall left it - the call it rewrote sits above the block
       // this appends to, so its offsets have to be read after that edit, not before.
-      const [defFrom, defTo, defText] = rollDefs.defsEdit(cm.getValue(), [rollId], () => serializePianorollBody(state));
-      cm.replaceRange(defText, cm.posFromIndex(defFrom), cm.posFromIndex(defTo));
-      refoldAll(); // the definitions block starts life folded to its one chip
-      evalNeeded = true;
+      const [defFrom, defTo, defText] = rollDefs.defsEdit(ed.getValue(), [rollId], () => serializePianorollBody(state));
+      ed.replaceRange(defText, ed.posFromIndex(defFrom), ed.posFromIndex(defTo));
+      refoldAll(ed); // the definitions block starts life folded to its one chip
+      evalNeeded.add(ed);
       logLine(`midi record: ${what} into a new roll "${rollId}" in "${label}" - double-click the pianoroll name to open it`);
     } else {
       logLine(`midi record ("${label}"): no pianoroll or midikeys/kb call found to write ${what} into - it was: ${pianorollMod.serializePianoRoll(out.notes.filter((nt) => !nt.hidden))}`, true);
     }
   }
-  if (evalNeeded) evaluate(true);
+  for (const ed of evalNeeded) evalDeckOf(ed, true);
 }
 
 /**
@@ -17189,9 +17363,9 @@ function applyRecording(results, take) {
  * pattern naming several rolls - which one a take belongs in is not a question this can answer).
  * Shape: { start, open, close, idLiteral } - the span to replace, and the id when it is a definition.
  */
-function rollTargetForTrack(label) {
+function rollTargetForTrack(label, ed = cm) {
   if (!labelsMod || !pianorollMod) return null;
-  const code = cm.getValue();
+  const code = ed.getValue();
   const block = blockForTrack(code, label);
   if (!block) return null;
   const re = /\bpianoroll\s*\(/g;
@@ -17262,9 +17436,9 @@ async function prCapture() {
 // Finds the live-keys call in the labeled block and swaps the whole call expression for the
 // recorded roll. Handles the MIDI routes - `midikeys("device")(ch)` directly, or `kb(ch)`
 // through a `const kb = midikeys(...)` binding. First candidate in the block wins.
-function replaceKbCall(label, replacement) {
+function replaceKbCall(label, replacement, ed = cm) {
   if (!labelsMod) return false;
-  const code = cm.getValue();
+  const code = ed.getValue();
   const block = blockForTrack(code, label);
   if (!block) return false;
 
@@ -17301,16 +17475,16 @@ function replaceKbCall(label, replacement) {
 
   spans.sort((a, b) => a[0] - b[0]);
   const [from, to] = spans[0];
-  cm.replaceRange(replacement, cm.posFromIndex(from), cm.posFromIndex(to));
-  removeChainedScale(from + replacement.length);
+  ed.replaceRange(replacement, ed.posFromIndex(from), ed.posFromIndex(to));
+  removeChainedScale(from + replacement.length, ed);
   return true;
 }
 
 // Recorded notes are absolute MIDI (live scale-quantization already happened engine-side), so
 // a .scale() chained directly onto the replaced call would wrongly remap them as degrees -
 // walk the method chain that follows the replacement and drop the first .scale(...) in it.
-function removeChainedScale(idx) {
-  const code = cm.getValue();
+function removeChainedScale(idx, ed = cm) {
+  const code = ed.getValue();
   let i = idx;
   for (;;) {
     let j = i;
@@ -17326,7 +17500,7 @@ function removeChainedScale(idx) {
     const close = matchParen(code, p);
     if (close < 0) return;
     if (m[0] === 'scale') {
-      cm.replaceRange('', cm.posFromIndex(j), cm.posFromIndex(close + 1));
+      ed.replaceRange('', ed.posFromIndex(j), ed.posFromIndex(close + 1));
       logLine('midi record: dropped the chained .scale() - the recorded notes are already absolute');
       return;
     }
@@ -17363,6 +17537,9 @@ const recordStatus = document.getElementById('recordStatus');
 const recordClose = document.getElementById('recordClose');
 
 let recordState = null; // { marker, callStart, label, cycles, name, wrapTail, normalize } while a panel is open
+// The deck the `.record(...)` call on screen is in - see prCM. `recordState.label` is the server's
+// name for the track, so a deck B one meters and bounces as "b:<label>".
+let recCM = cm;
 let recordSuppressCursor = false;
 let trackRecState = null; // latest /api/trackRecord status while armed/recording, else null
 let trackRecPoll = null;
@@ -17407,20 +17584,22 @@ function serializeRecordCall({ cycles, name, wrapTail, normalize }) {
   return `.record({ ${parts.join(', ')} })`;
 }
 
-// The label of the block a call lives in - the engine track the panel meters and bounces.
-function blockLabelAt(idx) {
+// The label of the block a call in `ed`'s buffer lives in - the engine track the panel meters and
+// bounces, as `ed`'s deck names it to the server.
+function blockLabelAt(idx, ed = recCM) {
   if (!labelsMod) return null;
-  return labelsMod.splitLabeledBlocks(cm.getValue()).findLast((b) => idx >= b.start && idx <= b.end)?.label ?? null;
+  const label = labelsMod.splitLabeledBlocks(ed.getValue()).findLast((b) => idx >= b.start && idx <= b.end)?.label ?? null;
+  return deckTrackId(ed, label);
 }
 
-function openRecordPanel(call) {
-  const code = cm.getValue();
-  const label = blockLabelAt(call.start);
+function openRecordPanel(call, ed = cm) {
+  const code = ed.getValue();
+  const label = blockLabelAt(call.start, ed);
   if (!label) return;
   showRecordPanel(label, parseRecordCall(code.slice(call.open + 1, call.close)), {
-    marker: cm.markText(cm.posFromIndex(call.start), cm.posFromIndex(call.close + 1), {}),
+    marker: ed.markText(ed.posFromIndex(call.start), ed.posFromIndex(call.close + 1), {}),
     callStart: call.start,
-  });
+  }, ed);
 }
 
 /**
@@ -17429,7 +17608,8 @@ function openRecordPanel(call) {
  * read-only about the code and exists to show the count-in, the meter, and the result: the visible
  * confirmation a hotkey otherwise wouldn't get.
  */
-function showRecordPanel(label, opts, anchor = null) {
+function showRecordPanel(label, opts, anchor = null, ed = cm) {
+  recCM = ed;
   if (recordState?.marker) recordState.marker.clear();
   if (recordState && recordState.label !== label) setRecordTap(recordState.label, false);
   recordState = { marker: null, callStart: null, ...anchor, label, ...opts };
@@ -17485,18 +17665,17 @@ function writeRecordCall() {
   const text = serializeRecordCall(recordState);
   recordSuppressCursor = true;
   try {
-    cm.replaceRange(text, range.from, range.to);
+    recCM.replaceRange(text, range.from, range.to);
     recordState.marker.clear(); // replaceRange collapses it - re-pin over the fresh text
-    const startIdx = cm.indexFromPos(range.from);
-    recordState.marker = cm.markText(range.from, cm.posFromIndex(startIdx + text.length), {});
+    const startIdx = recCM.indexFromPos(range.from);
+    recordState.marker = recCM.markText(range.from, recCM.posFromIndex(startIdx + text.length), {});
     recordState.callStart = startIdx;
   } finally {
     recordSuppressCursor = false; // never leave it latched: that wedges the panel shut for good
   }
-  clearTimeout(recordEvalTimer);
-  recordEvalTimer = setTimeout(() => { recordEvalTimer = null; evaluate(false); }, RECORD_EVAL_DEBOUNCE_MS);
+  deckEvalSoon(recordEvalSoon, recCM, RECORD_EVAL_DEBOUNCE_MS); // the deck the call is in
 }
-let recordEvalTimer = null;
+const recordEvalSoon = { timer: null, ed: null };
 
 // Hand edits to the open call flow back into the panel, so tweaking `cycles:` in the code updates
 // it instead of being silently reverted by the next click.
@@ -17506,13 +17685,13 @@ function syncRecordFromCode() {
   // The call went out of the buffer under the panel (deleted, or edited into something that is no
   // longer a .record call) - there is nothing to write settings back into, so the panel goes too.
   if (!range) { closeRecordPanel(); return; }
-  const text = cm.getRange(range.from, range.to);
+  const text = recCM.getRange(range.from, range.to);
   if (!/^\s*\.\s*record\s*\(/.test(text)) { closeRecordPanel(); return; }
   const open = text.indexOf('(');
   const close = text.lastIndexOf(')');
   if (open < 0 || close < open) return; // mid-edit, not a whole call right now
   const parsed = parseRecordCall(text.slice(open + 1, close));
-  recordState.callStart = cm.indexFromPos(range.from);
+  recordState.callStart = recCM.indexFromPos(range.from);
   Object.assign(recordState, parsed);
   recordCycles.value = parsed.cycles;
   recordName.value = parsed.name;
@@ -17649,10 +17828,12 @@ function updateRecordButton() {
 // Mute the block that was bounced and add one below it playing the recording. Both carry the same
 // label on purpose: the bounce takes the original's place on that engine track. Only one of the
 // two may be live at a time - two active blocks sharing a label would collide on one scheduler -
-// which is exactly what the mute guarantees.
-function applyBounce(label, result) {
+// which is exactly what the mute guarantees. `trackId` is the server's name for the track, so a
+// deck B bounce is written into deck B's buffer.
+function applyBounce(trackId, result) {
   if (!labelsMod) return;
-  const code = cm.getValue();
+  const { ed, label } = deckTrackParts(trackId);
+  const code = ed.getValue();
   const block = labelsMod.splitLabeledBlocks(code).find((b) => b.label === label && !b.muted);
   if (!block) {
     logLine(`bounce: recorded "${result.name}" but couldn't find the "${label}" block to replace - play it with sr("${result.name}").slow(${result.cycles})`, true);
@@ -17670,8 +17851,8 @@ function applyBounce(label, result) {
   const replacement = `\n${indent}${label}: sr("${result.name}").slow(${result.cycles})`;
 
   // End first, so inserting below doesn't shift the label's own offset out from under the mute.
-  cm.replaceRange(replacement, cm.posFromIndex(blockEnd), cm.posFromIndex(blockEnd));
-  cm.replaceRange('_', cm.posFromIndex(labelIdx), cm.posFromIndex(labelIdx));
+  ed.replaceRange(replacement, ed.posFromIndex(blockEnd), ed.posFromIndex(blockEnd));
+  ed.replaceRange('_', ed.posFromIndex(labelIdx), ed.posFromIndex(labelIdx));
 
   // What normalizing did, where it did anything worth a number - the waveform below is drawn from
   // the file as written, so this is the only place the take's original level is still on show.
@@ -17688,7 +17869,7 @@ function applyBounce(label, result) {
   recordWaveCycles = result.cycles;
   recordAgain.classList.remove('hidden');
   drawRecordScope();
-  evaluate(true);
+  evalDeckOf(ed, true);
 }
 
 // The panel's one-line outcome. Empty clears it (the row collapses via :empty), so nothing
@@ -17904,7 +18085,8 @@ function initRecordPanel() {
   // Opening is initWidgetHandles' job (double-click the name). Closing is the ✕ or the call itself
   // leaving the buffer - see syncRecordFromCode. A ctrl+b panel, which has no call at all, closes
   // only on the ✕.
-  cm.on('change', syncRecordFromCode);
+  // Either deck's edits, but only those to the buffer the panel is editing.
+  onEveryDeck((ed) => ed.on('change', () => { if (ed === recCM) syncRecordFromCode(); }));
 
   const fromPanel = () => {
     if (!recordState) return;
@@ -17930,12 +18112,14 @@ function initRecordPanel() {
 }
 
 // app+b - bounce the block the cursor is in, with no .record() call needed. Uses that block's
-// .record() options if it has them, so the hotkey and the panel agree on the length.
+// .record() options if it has them, so the hotkey and the panel agree on the length. In DJ mode
+// it is the deck the caret is in (see activeCM).
 function bounceBlockAtCursor() {
-  const code = cm.getValue();
-  const idx = cm.indexFromPos(cm.getCursor());
-  const label = blockLabelAt(idx);
-  if (!label || label.startsWith('$')) {
+  const ed = activeCM();
+  const code = ed.getValue();
+  const idx = ed.indexFromPos(ed.getCursor());
+  const label = blockLabelAt(idx, ed);
+  if (!label || deckTrackParts(label).label.startsWith('$')) {
     logLine(`${hotkeyLabel('bounce')}: put the cursor in a named block to bounce it`, true);
     return;
   }
@@ -17945,7 +18129,7 @@ function bounceBlockAtCursor() {
   // Open the panel on the way in, so a hotkey bounce still shows its count-in, its meter, and -
   // the point of it - what actually got recorded when it lands.
   if (!recordState || recordState.label !== label) {
-    showRecordPanel(label, opts, call ? { marker: cm.markText(cm.posFromIndex(call.start), cm.posFromIndex(call.close + 1), {}), callStart: call.start } : null);
+    showRecordPanel(label, opts, call ? { marker: ed.markText(ed.posFromIndex(call.start), ed.posFromIndex(call.close + 1), {}), callStart: call.start } : null, ed);
   }
   startTrackRecord(label, opts);
 }
@@ -19648,19 +19832,19 @@ function updateTransportButtons() {
  * nothing in it yet, and the next thing to do is write its tracks - between braces the editor may
  * as well have opened. The root is the exception: `main: group()` has no braces on purpose (its
  * members are implicit - see pattern-core's groups.mjs) and is left as written. mixctl's
- * openGroupEdits is the edit; this applies it to the main editor's buffer and, on a run by hand,
- * puts the cursor where the first member goes. A panel's own debounced eval opens the braces too,
- * so what the engine plays is the buffer either way, but leaves the cursor alone: a rewrite under
- * a hand that is elsewhere shouldn't move it.
+ * openGroupEdits is the edit; this applies it to the evaluated deck's buffer and, on a run by
+ * hand, puts the cursor where the first member goes. A panel's own debounced eval opens the braces
+ * too, so what the engine plays is the buffer either way, but leaves the cursor alone: a rewrite
+ * under a hand that is elsewhere shouldn't move it.
  */
-function openBareGroups(placeCursor) {
+function openBareGroups(placeCursor, ed = cm) {
   if (!mixctlMod) return;
-  const { edits } = mixctlMod.openGroupEdits(cm.getValue());
+  const { edits } = mixctlMod.openGroupEdits(ed.getValue());
   if (!edits.length) return;
-  applyEdits(edits.map((e) => [e.from, e.to, e.text]));
-  for (const e of edits) collapsedGroups.delete(e.label); // just opened, so it wants to be seen
+  applyEdits(edits.map((e) => [e.from, e.to, e.text]), ed);
+  for (const e of edits) foldsOf(ed).collapsed.delete(e.label); // just opened, so it wants to be seen
   // applyEdits works back to front, so the first edit's offsets still hold in the new buffer.
-  if (placeCursor) cm.setCursor(cm.posFromIndex(edits[0].from + edits[0].caret));
+  if (placeCursor) ed.setCursor(ed.posFromIndex(edits[0].from + edits[0].caret));
   logLine(`${edits.map((e) => e.label).join(', ')}: group({ }) - the tracks written between the braces mix into it`);
 }
 
@@ -19689,20 +19873,21 @@ async function evaluate(start, { byHand = false } = {}) {
   // since materialize below decides what every un-defined name MEANS from that list. Once, in
   // practice - after the first answer this is a flag test.
   if (!prLibraryKnown) await prRefreshRollList();
-  const packsBefore = new Set(packDefs.defsInBuffer().map((d) => d.id));
-  for (const reg of DEF_REGISTRIES) reg.materialize(); // a name said in a pianoroll()/lfo()/.preset()/sp() gets its definition first
+  const packsBefore = new Set(packDefs.defsInBuffer(cm.getValue()).map((d) => d.id));
+  for (const reg of DEF_REGISTRIES) reg.materialize(cm); // a name said in a pianoroll()/lfo()/.preset()/sp() gets its definition first
   openBareGroups(byHand); // `drums: group()` grows its braces - and, by hand, the cursor goes inside them
   // a track typed since the last eval joins the arrangement, playing throughout (after materialize,
   // so a definition written into the buffer has not moved the call out from under it)
   arOnBuffer('a', arReconcileTracks);
-  const newPacks = packDefs.defsInBuffer().map((d) => d.id).filter((id) => !packsBefore.has(id));
+  const newPacks = packDefs.defsInBuffer(cm.getValue()).map((d) => d.id).filter((id) => !packsBefore.has(id));
   const code = cm.getValue();
   // Whatever auto-pin has written into the buffer is in THIS code, so this is the evaluation that
   // puts those programs where the scheduler reads them - and so the one that thaws their slots
   // (see pollPluginEdits). Taken before the request goes out: a capture written after this point
   // belongs to the next eval, not to this one.
-  const filed = commitOnEval;
-  commitOnEval = [];
+  // Deck B's captures wait for deck B's own evaluation (see evalDeckB).
+  const filed = commitOnEval.filter((c) => !isDeckBCommit(c));
+  commitOnEval = commitOnEval.filter(isDeckBCommit);
   // Starting from stopped with the painter's marker down plays from THERE: the marker is where you
   // were looking, and a song that always starts at bar 0 is a song whose outro you never hear
   // without sitting through it. Sent with the eval so it lands on the same song clock the eval
@@ -19715,7 +19900,7 @@ async function evaluate(start, { byHand = false } = {}) {
   const pending = api('POST', '/api/evaluate', { code, start, arrangeFrom, fresh: bufferFreshOpened || undefined, name: currentSavedName ?? undefined });
   checkpointUrl(); // a state you played is a state worth finding again in browser history
   saveWip();       // ...and worth having on disk right now, not a debounce from now
-  if (newPacks.length) openPackById(newPacks[0]); // it has no files - here is where to pick them
+  if (newPacks.length) openPackById(newPacks[0], {}, cm); // it has no files - here is where to pick them
   try {
     const result = await pending;
     bufferFreshOpened = false; // the fresh eval landed; from here edits are livecoding
@@ -19772,7 +19957,7 @@ async function doStop(deck = null) {
   // In DJ mode, Cmd+. in an editor stops just that pane's deck (the other keeps playing on the
   // shared clock); outside DJ mode - or from the play button / the global hotkey - it stops
   // everything, as ever. The record cancels only apply when the main deck is going down: both
-  // record into the main editor's song.
+  // windows are counted on deck A's clock, which a stop of deck B alone leaves running.
   const perDeck = deck && mixModeOn ? deck : null;
   if (!perDeck || perDeck === 'a') {
     if (recState) cancelMidiRecord(true);
@@ -21585,7 +21770,8 @@ function renderDownloads(repos) {
 
 // samples("…") at the top of the buffer - below a title/tags header - unless it is there already.
 function insertSamplesCall(source) {
-  const code = cm.getValue();
+  const ed = activeCM(); // the deck being worked in
+  const code = ed.getValue();
   const esc = source.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   if (new RegExp(`\\bsamples\\(\\s*(["'\`])${esc}\\1`).test(code)) {
     logLine(`samples("${source}") is in the buffer already`);
@@ -21594,9 +21780,10 @@ function insertSamplesCall(source) {
   const lines = code.split('\n');
   let at = 0;
   while (at < lines.length && /^\s*\/\/\s*@/.test(lines[at])) at += 1;
-  cm.replaceRange(`samples("${source}")\n`, { line: at, ch: 0 }, { line: at, ch: 0 }, '+samples');
+  ed.replaceRange(`samples("${source}")\n`, { line: at, ch: 0 }, { line: at, ch: 0 }, '+samples');
   logLine(`added samples("${source}")`);
-  evaluate(false, { byHand: true });
+  if (ed === cm) evaluate(false, { byHand: true });
+  else evalDeckB(false, { byHand: true });
 }
 
 /**
@@ -22243,6 +22430,7 @@ const packMenu = document.getElementById('packMenu');
 // { id, entries, own } - the pack on screen. `own`: defined in this buffer (editable); otherwise
 // it is the library's, shown as it is, and the ★ is how it becomes this buffer's to edit.
 let packState = null;
+let packCM = cm; // the deck the pack on screen is defined in - see prCM
 let packBrowse = { path: null, parent: null, dirs: [], files: [], samplesRoot: '' };
 // What is selected in each list, and the row the last plain click or arrow landed on (the end a
 // shift-range extends from). Browse keys are "d:name" / "f:name" in the current folder; entry keys
@@ -22254,7 +22442,7 @@ const packWalks = new Map(); // folder path -> { at, walk } - every audio file u
 // screen, with `matched` the real count (adding them all goes back for the rest).
 let packFind = { query: '', running: false, files: [], matched: 0, total: 0, truncated: false, seq: 0 };
 let packFindTimer = null;
-let packEvalTimer = null;
+const packEvalSoon = { timer: null, ed: null };
 let packSuppressSync = false; // our own write-back, which the change listener must not re-read
 const PACK_EVAL_DEBOUNCE_MS = 250;
 const PACK_FIND_DEBOUNCE_MS = 200;
@@ -22263,8 +22451,7 @@ const PACK_WALK_LIMIT = 20000; // the cap on a whole-tree add, matching the serv
 const PACK_WALK_TTL_MS = 30000; // how long a folder's walk is reused, so a new file still shows up
 
 function packScheduleEval() {
-  clearTimeout(packEvalTimer);
-  packEvalTimer = setTimeout(() => { packEvalTimer = null; evaluate(false); }, PACK_EVAL_DEBOUNCE_MS);
+  deckEvalSoon(packEvalSoon, packCM, PACK_EVAL_DEBOUNCE_MS); // the deck the pack is in
 }
 
 const packHead = makeNamePicker({
@@ -22285,23 +22472,23 @@ const packHead = makeNamePicker({
 function packUseInCall(id) {
   const span = packState?.source?.find();
   if (!span) return;
-  const was = cm.getRange(span.from, span.to);
+  const was = packCM.getRange(span.from, span.to);
   if (was === id) return;
   const word = packState.id && idWordRe(packState.id, '').test(was) ? packState.id : null;
-  const quoted = cm.markText({ line: span.from.line, ch: span.from.ch - 1 }, { line: span.to.line, ch: span.to.ch + 1 }, {});
+  const quoted = packCM.markText({ line: span.from.line, ch: span.from.ch - 1 }, { line: span.to.line, ch: span.to.ch + 1 }, {});
   if (word) {
-    const from = cm.indexFromPos(span.from);
-    applyEdits(idOccurrenceEdits({ from, str: was }, word, id));
+    const from = packCM.indexFromPos(span.from);
+    applyEdits(idOccurrenceEdits({ from, str: was }, word, id), packCM);
   } else {
-    cm.replaceRange(id, span.from, span.to);
+    packCM.replaceRange(id, span.from, span.to);
   }
   const after = quoted.find();
   quoted.clear();
   packState.source.clear();
   packState.source = after
-    ? cm.markText({ line: after.from.line, ch: after.from.ch + 1 }, { line: after.to.line, ch: after.to.ch - 1 }, {})
+    ? packCM.markText({ line: after.from.line, ch: after.from.ch + 1 }, { line: after.to.line, ch: after.to.ch - 1 }, {})
     : null;
-  refoldAll();
+  refoldAll(packCM);
   logLine(`sp("${was}") now plays "${id}"`);
   if (id !== packState.id) openPackById(id);
   else packSyncHead();
@@ -22319,12 +22506,15 @@ function packEntriesOf(code, def) {
   });
 }
 
-const packDefOf = (id) => packDefs.findDef(cm.getValue(), String(id));
+const packDefOf = (id) => packDefs.findDef(packCM.getValue(), String(id));
 
 // `from.source`: a marker over the id string of the sp(...) the panel was opened through, which is
 // what the list's → writes into. Opened any other way, the first call that names the pack stands
 // in - picking a kit and sending it to the pattern is the point of having the list.
-function openPackById(id, from = {}) {
+// `ed` is the deck the pack is defined in; opened on the other one, the panel moves across.
+function openPackById(id, from = {}, ed = packState ? packCM : cm) {
+  if (packState && ed !== packCM) closePackPanel();
+  packCM = ed;
   const key = String(id);
   const def = packDefOf(key);
   const lib = def ? null : prPrebakePacks.find((p) => p.id === key);
@@ -22335,10 +22525,10 @@ function openPackById(id, from = {}) {
   let source = from.source ?? packState?.source ?? null;
   if (!source?.find()) {
     source = null;
-    const call = packDefs.refCalls(cm.getValue(), key)[0];
-    if (call) source = cm.markText(cm.posFromIndex(call.from), cm.posFromIndex(call.to), {});
+    const call = packDefs.refCalls(packCM.getValue(), key)[0];
+    if (call) source = packCM.markText(packCM.posFromIndex(call.from), packCM.posFromIndex(call.to), {});
   }
-  packState = { id: key, entries: def ? packEntriesOf(cm.getValue(), def) : [...lib.files], own: !!def, source };
+  packState = { id: key, entries: def ? packEntriesOf(packCM.getValue(), def) : [...lib.files], own: !!def, source };
   packSel.entries.clear();
   packSel.entriesAnchor = null;
   syncPreviewRouting(); // the panel auditions - settle where that comes out before it can
@@ -22359,14 +22549,14 @@ function openPackById(id, from = {}) {
 }
 
 // Double-clicked the name of an sp("<kit kit2>"): open the one sounding, or the first named.
-function openPackFromCall(call, code) {
+function openPackFromCall(call, code, ed = cm) {
   const range = idStringRange(call, code);
   if (!range) return false;
   const [from, to] = range;
-  const id = activeIdIn(from, to) ?? (code.slice(from, to).match(/[\w$]+/) ?? [])[0];
+  const id = activeIdIn(from, to, ed) ?? (code.slice(from, to).match(/[\w$]+/) ?? [])[0];
   if (id == null) return false;
-  const source = cm.markText(cm.posFromIndex(from), cm.posFromIndex(to), {});
-  if (openPackById(id, { source })) return true;
+  const source = ed.markText(ed.posFromIndex(from), ed.posFromIndex(to), {});
+  if (openPackById(id, { source }, ed)) return true;
   source.clear();
   return false;
 }
@@ -22385,16 +22575,16 @@ function closePackPanel() {
 // builder takes.
 function packWrite() {
   if (!packState?.own) return;
-  const code = cm.getValue();
+  const code = packCM.getValue();
   const def = packDefOf(packState.id);
   if (!def) return;
   packSuppressSync = true;
   try {
-    cm.replaceRange(`${def.idLiteral}, ${JSON.stringify(packState.entries)}`, cm.posFromIndex(def.open + 1), cm.posFromIndex(def.close));
+    packCM.replaceRange(`${def.idLiteral}, ${JSON.stringify(packState.entries)}`, packCM.posFromIndex(def.open + 1), packCM.posFromIndex(def.close));
   } finally {
     packSuppressSync = false;
   }
-  refoldAll();
+  refoldAll(packCM);
   packScheduleEval();
 }
 
@@ -23285,7 +23475,7 @@ function packSyncFromCode() {
       if (packState.own && !prPrebakePacks.some((p) => p.id === packState.id)) closePackPanel();
       return;
     }
-    const entries = packEntriesOf(cm.getValue(), def);
+    const entries = packEntriesOf(packCM.getValue(), def);
     if (JSON.stringify(entries) === JSON.stringify(packState.entries) && packState.own) return;
     packState.entries = entries;
     packState.own = true;
@@ -23334,7 +23524,8 @@ function packListKeys(list, e) {
 }
 
 function initPackPanel() {
-  cm.on('change', packSyncFromCode);
+  // Either deck's edits, but only those to the buffer the panel is editing.
+  onEveryDeck((ed) => ed.on('change', () => { if (ed === packCM) packSyncFromCode(); }));
 
   packName.addEventListener('keydown', (e) => {
     if (packTransportKey(e)) return;
@@ -23986,6 +24177,7 @@ async function packReshuffle() {
 // here, or a new one called kit if there is none.
 function openSampleMap() {
   if (!packState) {
+    packCM = activeCM(); // the deck being worked in - in DJ mode, the one the caret was last in
     const first = packDefs.defsInBuffer()[0]?.id ?? prPrebakePacks[0]?.id;
     if (first != null) openPackById(first);
     else packDefs.create('kit');
@@ -24164,7 +24356,8 @@ const SLICE_BTN_ZOOM = 1.4; // per-keypress zoom step for cmd ± (the wheel zoom
 // sliceApplyKey); `hand` says the markers have been edited by hand, which is what stands the
 // sensitivity slider down. `lit` is what the pattern is playing right now (sliceFollowTick).
 let sliceState = null;
-let sliceEvalTimer = null;
+let sliceCM = cm; // the deck the slice set on screen is defined in - see prCM
+const sliceEvalSoon = { timer: null, ed: null };
 let sliceDetectTimer = null;
 let sliceLiveAt = 0;
 let sliceLivePending = null;
@@ -24172,8 +24365,7 @@ let sliceSuppressSync = false; // our own write-back, which the change listener 
 let sliceLoadGen = 0; // a newer open supersedes an older one still decoding
 
 function sliceScheduleEval() {
-  clearTimeout(sliceEvalTimer);
-  sliceEvalTimer = setTimeout(() => { sliceEvalTimer = null; evaluate(false); }, SLICE_EVAL_DEBOUNCE_MS);
+  deckEvalSoon(sliceEvalSoon, sliceCM, SLICE_EVAL_DEBOUNCE_MS); // the deck the set is in
 }
 
 const sliceHead = makeNamePicker({
@@ -24205,14 +24397,14 @@ function sliceCarry() {
  */
 function sliceAtNow() {
   const span = sliceState?.source?.find();
-  return span ? cm.indexFromPos(span.from) : sliceState?.at ?? null;
+  return span ? sliceCM.indexFromPos(span.from) : sliceState?.at ?? null;
 }
 
 function sliceSyncHead() {
   const named = !!sliceState?.id;
   sliceFileEl.textContent = sliceState?.label ?? '';
   sliceFileEl.title = sliceState?.file ?? '';
-  sliceHead.syncHead(named ? sliceDefs.refCalls(cm.getValue(), sliceState.id).length : 0);
+  sliceHead.syncHead(named ? sliceDefs.refCalls(sliceCM.getValue(), sliceState.id).length : 0);
 }
 
 // --- the set, split around the file on screen -------------------------------------------------
@@ -24267,26 +24459,26 @@ const sliceSetSig = (set) => (Array.isArray(set)
 function sliceUseInCall(id) {
   const span = sliceState?.source?.find();
   if (!span) return;
-  const was = cm.getRange(span.from, span.to);
+  const was = sliceCM.getRange(span.from, span.to);
   if (was === id) return;
   const word = sliceState.id && idWordRe(sliceState.id, '').test(was) ? sliceState.id : null;
-  const quoted = cm.markText({ line: span.from.line, ch: span.from.ch - 1 }, { line: span.to.line, ch: span.to.ch + 1 }, {});
-  if (word) applyEdits(idOccurrenceEdits({ from: cm.indexFromPos(span.from), str: was }, word, id));
-  else cm.replaceRange(id, span.from, span.to);
+  const quoted = sliceCM.markText({ line: span.from.line, ch: span.from.ch - 1 }, { line: span.to.line, ch: span.to.ch + 1 }, {});
+  if (word) applyEdits(idOccurrenceEdits({ from: sliceCM.indexFromPos(span.from), str: was }, word, id), sliceCM);
+  else sliceCM.replaceRange(id, span.from, span.to);
   const after = quoted.find();
   quoted.clear();
   sliceState.source.clear();
   sliceState.source = after
-    ? cm.markText({ line: after.from.line, ch: after.from.ch + 1 }, { line: after.to.line, ch: after.to.ch - 1 }, {})
+    ? sliceCM.markText({ line: after.from.line, ch: after.from.ch + 1 }, { line: after.to.line, ch: after.to.ch - 1 }, {})
     : null;
-  refoldAll();
+  refoldAll(sliceCM);
   logLine(`.slices("${was}") now chops on "${id}"`);
   if (id !== sliceState.id) openSliceSetById(id, sliceCarry());
   else sliceSyncHead();
   sliceScheduleEval();
 }
 
-const sliceDefOf = (id) => sliceDefs.findDef(cm.getValue(), String(id));
+const sliceDefOf = (id) => sliceDefs.findDef(sliceCM.getValue(), String(id));
 
 /** The set a `_slices(...)` definition holds, read off the code: a map of files, or a bare list. */
 function sliceSetOf(code, def) {
@@ -24418,56 +24610,59 @@ function sliceRefFrom(kind, str, iCall) {
 }
 
 /** Opens whichever set the double-clicked call plays - making one if the chain has none yet. */
-function openSliceEditorFromCall(call, code, idx) {
+function openSliceEditorFromCall(call, code, idx, ed = cm) {
   if (call.kind === 'slices') {
     // An empty .slices() has no name yet. Give it one, then open whatever it became - a bookmark
     // carries the handle's position across the rewrite, since a definitions block written below
     // moves every offset above it not at all and the call's own rewrite moves the rest along. The
     // same dance as the roll's, the shape's and the pack's.
-    if (!code.slice(call.open + 1, call.close).trim()) return sliceMaterializeAt(idx);
+    if (!code.slice(call.open + 1, call.close).trim()) return sliceMaterializeAt(idx, ed);
     if (!sliceDefs.isIdCall(code.slice(call.open + 1, call.close))) {
       logLine('this .slices([...]) carries its positions inline - the editor writes named sets, so give it a name (.slices("break")) to draw it here', true);
       return false;
     }
-    return openSliceFromIdCall(call, code);
+    return openSliceFromIdCall(call, code, ed);
   }
   // Double-clicked `slice`: that call says WHICH chop to play, not where the chops are. Follow the
   // chain to the set it plays - or, the usual case the first time, give the chain one.
   const on = sliceCallOnChain(code, call.start);
-  if (on) return openSliceFromIdCall(on, code);
+  if (on) return openSliceFromIdCall(on, code, ed);
   // ...but only where there is a sample to chop. `.slice(` is also an everyday JavaScript method,
   // and a setup block's `list.slice(2)` must not have `.slices()` written onto it - so a chain with
   // no sampler source declines the handle and the double-click goes on to whatever else wants it.
   if (!sliceChainSourceAt(code, call.start)) return false;
-  const at = cm.setBookmark(cm.posFromIndex(idx));
-  cm.replaceRange('.slices()', cm.posFromIndex(call.close + 1));
+  const at = ed.setBookmark(ed.posFromIndex(idx));
+  ed.replaceRange('.slices()', ed.posFromIndex(call.close + 1));
   const back = at.find();
   at.clear();
-  return back ? sliceMaterializeAt(cm.indexFromPos(back)) : false;
+  return back ? sliceMaterializeAt(ed.indexFromPos(back), ed) : false;
 }
 
-function sliceMaterializeAt(idx) {
-  const at = cm.setBookmark(cm.posFromIndex(idx));
-  const named = sliceDefs.materialize();
+function sliceMaterializeAt(idx, ed = cm) {
+  const at = ed.setBookmark(ed.posFromIndex(idx));
+  const named = sliceDefs.materialize(ed);
   const back = at.find();
   at.clear();
-  return !!(named && back) && openWidgetAt(cm.getValue(), cm.indexFromPos(back));
+  return !!(named && back) && openWidgetAt(ed.getValue(), ed.indexFromPos(back), ed);
 }
 
 /** Double-clicked the name of a .slices("<tight loose>"): open the one sounding, or the first named. */
-function openSliceFromIdCall(call, code) {
+function openSliceFromIdCall(call, code, ed = cm) {
   const range = idStringRange(call, code);
   if (!range) return false;
   const [from, to] = range;
-  const id = activeIdIn(from, to) ?? (code.slice(from, to).match(/[\w$]+/) ?? [])[0];
+  const id = activeIdIn(from, to, ed) ?? (code.slice(from, to).match(/[\w$]+/) ?? [])[0];
   if (id == null) return false;
-  const source = cm.markText(cm.posFromIndex(from), cm.posFromIndex(to), {});
-  if (openSliceSetById(id, { source, at: call.start })) return true;
+  const source = ed.markText(ed.posFromIndex(from), ed.posFromIndex(to), {});
+  if (openSliceSetById(id, { source, at: call.start }, ed)) return true;
   source.clear();
   return false;
 }
 
-function openSliceSetById(id, from = {}) {
+// `ed` is the deck the set is defined in; opened on the other one, the panel moves across.
+function openSliceSetById(id, from = {}, ed = sliceState ? sliceCM : cm) {
+  if (sliceState && ed !== sliceCM) closeSlicePanel();
+  sliceCM = ed;
   const key = String(id);
   const def = sliceDefOf(key);
   const lib = def ? null : prPrebakeSlices.find((p) => p.id === key);
@@ -24478,17 +24673,17 @@ function openSliceSetById(id, from = {}) {
   let source = from.source ?? sliceState?.source ?? null;
   if (!source?.find()) {
     source = null;
-    const call = sliceDefs.refCalls(cm.getValue(), key)[0];
-    if (call) source = cm.markText(cm.posFromIndex(call.from), cm.posFromIndex(call.to), {});
+    const call = sliceDefs.refCalls(sliceCM.getValue(), key)[0];
+    if (call) source = sliceCM.markText(sliceCM.posFromIndex(call.from), sliceCM.posFromIndex(call.to), {});
   }
-  const at = from.at ?? (source?.find() ? cm.indexFromPos(source.find().from) : null);
+  const at = from.at ?? (source?.find() ? sliceCM.indexFromPos(source.find().from) : null);
   const keep = from.file
     ? { file: from.file, key: from.key ?? null, label: from.label ?? '', index: from.index ?? null,
       indices: from.indices ?? [], srcName: from.srcName ?? '', ref: from.ref ?? null }
     : { file: null, key: null, label: '', index: null, indices: [], srcName: '', ref: null };
   sliceState = {
     id: key,
-    set: def ? sliceSetOf(cm.getValue(), def) : lib.set ?? [],
+    set: def ? sliceSetOf(sliceCM.getValue(), def) : lib.set ?? [],
     positions: [],
     others: {},
     fit: null, // what this sample is fitted to, beside its markers (see sliceSyncFit)
@@ -24544,7 +24739,7 @@ async function sliceLoadSample() {
   try {
     if (!state.file) {
       const at = sliceAtNow();
-      const src = at == null ? null : sliceChainSourceAt(cm.getValue(), at);
+      const src = at == null ? null : sliceChainSourceAt(sliceCM.getValue(), at);
       if (!src) {
         sliceSay('no sampler source on this chain - open the set from a pattern that plays one', true);
         return;
@@ -24688,7 +24883,7 @@ const SLICE_FIT_MAX = 64;
 function sliceFitChain() {
   const at = sliceAtNow();
   if (at == null) return null;
-  const code = cm.getValue();
+  const code = sliceCM.getValue();
   const src = sliceSourceCallAt(code, at);
   return src ? { code, src } : null;
 }
@@ -24894,7 +25089,7 @@ function sliceLivePush() {
     return;
   }
   sliceLiveAt = now;
-  api('POST', '/api/liveSlices', { id: sliceState.id, set: sliceFullSet() })
+  api('POST', '/api/liveSlices', { deck: deckOfCM(sliceCM), id: sliceState.id, set: sliceFullSet() })
     .catch(() => { /* the live preview is a nicety - the write on release is what counts */ });
 }
 
@@ -24912,15 +25107,15 @@ function sliceCommit() {
   sliceState.set = sliceFullSet();
   sliceSuppressSync = true;
   try {
-    cm.replaceRange(
+    sliceCM.replaceRange(
       `${def.idLiteral}, ${slicesMod.serializeSliceSet(sliceState.set)}`,
-      cm.posFromIndex(def.open + 1),
-      cm.posFromIndex(def.close),
+      sliceCM.posFromIndex(def.open + 1),
+      sliceCM.posFromIndex(def.close),
     );
   } finally {
     sliceSuppressSync = false;
   }
-  refoldAll();
+  refoldAll(sliceCM);
   sliceScheduleEval();
 }
 
@@ -24936,7 +25131,7 @@ function sliceSyncFromCode() {
       return;
     }
     sliceSyncFit(); // a .fit() undo changes the buffer without touching a single marker
-    const set = sliceSetOf(cm.getValue(), def);
+    const set = sliceSetOf(sliceCM.getValue(), def);
     if (sliceState.own && sliceSetSig(set) === sliceSetSig(sliceFullSet())) return;
     sliceState.set = set;
     sliceState.own = true;
@@ -25427,14 +25622,14 @@ function sliceSelect(k, { audition = true } = {}) {
 // answer lives in the engine and isn't worth a wire.
 // ---------------------------------------------------------------------------------------------
 
-/** The region whose block holds document offset `at`, or null. */
-function sliceRegionAt(at) {
+/** The region whose block holds offset `at` of `ed`'s document, or null. */
+function sliceRegionAt(at, ed = sliceCM) {
   if (at == null) return null;
   for (const r of patternRegions) {
-    if (r.deck !== 'a' || r.cm !== cm) continue; // the panel reads main-editor offsets only
+    if (r.cm !== ed) continue; // that deck's own: the other's offsets are another doc's
     const range = r.anchor.find();
     if (!range) continue;
-    if (at >= cm.indexFromPos(range.from) && at <= cm.indexFromPos(range.to)) return r;
+    if (at >= ed.indexFromPos(range.from) && at <= ed.indexFromPos(range.to)) return r;
   }
   return null;
 }
@@ -25450,11 +25645,11 @@ function sliceRegion() {
  * hear rather than whichever the pattern happens to name first. Null while stopped, and null for a
  * chain that names no index at all (nothing to be right or wrong about).
  */
-function sliceSoundingIndexAt(at) {
+function sliceSoundingIndexAt(at, ed = sliceCM) {
   if (!playing) return null;
-  const region = sliceRegionAt(at);
+  const region = sliceRegionAt(at, ed);
   if (!region) return null;
-  const cyclePos = currentCyclePos();
+  const cyclePos = currentCyclePos(region.deck);
   const cycle = Math.floor(cyclePos);
   let first = null;
   for (const s of region.grid.get(cycle) ?? []) {
@@ -25538,9 +25733,9 @@ function sliceFollowTick() {
     // panel lights the pattern only while the set it is DRAWING is the one being played.
     const span = sliceState.source?.find();
     const sounding = span
-      ? activeIdIn(cm.indexFromPos(span.from), cm.indexFromPos(span.to))
+      ? activeIdIn(sliceCM.indexFromPos(span.from), sliceCM.indexFromPos(span.to), sliceCM)
       : null;
-    if (!sounding || sounding === sliceState.id) lit = sliceSoundingNow(region, currentCyclePos());
+    if (!sounding || sounding === sliceState.id) lit = sliceSoundingNow(region, currentCyclePos(region.deck));
   }
   if (!lit.length && !sliceState.lit.length) return;
   sliceState.lit = lit;
@@ -25717,8 +25912,8 @@ function initSlicePanel() {
     if (editMod(e) && (e.key === 'z' || e.key === 'Z')) {
       e.preventDefault();
       e.stopPropagation();
-      if (e.shiftKey) cm.redo();
-      else cm.undo();
+      if (e.shiftKey) sliceCM.redo();
+      else sliceCM.undo();
       return;
     }
     if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
@@ -25859,7 +26054,8 @@ function initSlicePanel() {
     if (e.key === 'Escape' && sliceState && !sliceHead.isOpen()) closeSlicePanel();
   });
   window.addEventListener('resize', () => { if (sliceState) sliceRender(); });
-  cm.on('change', sliceSyncFromCode);
+  // Either deck's edits, but only those to the buffer the panel is editing.
+  onEveryDeck((ed) => ed.on('change', () => { if (ed === sliceCM) sliceSyncFromCode(); }));
   sliceSensVal.textContent = sliceSensText(sliceSensNow());
   // Follows the pattern at the highlighter's own rate, off the same grid it lights atoms from.
   setInterval(sliceFollowTick, 33);
@@ -25916,13 +26112,13 @@ const ENV_LOCAL_CURVE_HZ = 200; // gain-curve points per second for an audition 
 // call, which moves with the text. `ctl` is what the code says (readSamplerControls) and `draft`
 // the values a drag in progress has moved, laid over it. `view` is { start, span } in file seconds.
 let envState = null;
-let envEvalTimer = null;
+let envCM = cm; // the deck the chain on screen is in - see prCM
+const envEvalSoon = { timer: null, ed: null };
 let envLoadGen = 0;
 const envPlayer = { source: null, startedAt: 0, clock: null, raf: null, gen: 0, total: 0 };
 
 function envScheduleEval() {
-  clearTimeout(envEvalTimer);
-  envEvalTimer = setTimeout(() => { envEvalTimer = null; evaluate(false); }, ENV_EVAL_DEBOUNCE_MS);
+  deckEvalSoon(envEvalSoon, envCM, ENV_EVAL_DEBOUNCE_MS); // the deck the chain is in
 }
 
 const envSay = (msg, isError = false) => {
@@ -25965,20 +26161,21 @@ function envSourceAt(code, idx) {
   return sliceChainSourceAt(code, idx) ? src : null;
 }
 
-function openEnvelopeAt(code, idx) {
+function openEnvelopeAt(code, idx, ed = cm) {
   if (!samplerctlMod) return false;
   const src = envSourceAt(code, idx);
   if (!src) return false;
   const chain = sliceChainSourceAt(code, idx);
   if (envState) closeEnvelopePanel();
+  envCM = ed;
   envState = {
     label: src.block.label,
-    at: cm.setBookmark(cm.posFromIndex(src.start)),
+    at: ed.setBookmark(ed.posFromIndex(src.start)),
     ref: chain.ref,
     name: chain.name,
     // The file being played right now where the index is a pattern, else the first one named - the
     // slice editor's rule, for the same reason.
-    index: sliceSoundingIndexAt(idx) ?? chain.index,
+    index: sliceSoundingIndexAt(idx, ed) ?? chain.index,
     file: null,
     buffer: null,
     peaks: null,
@@ -26010,7 +26207,7 @@ function closeEnvelopePanel() {
 
 /** Re-reads the chain's controls from the code. False (and the panel closed) once the track is gone. */
 function envRead() {
-  const ctl = samplerctlMod.readSamplerControls(cm.getValue(), envState.label);
+  const ctl = samplerctlMod.readSamplerControls(envCM.getValue(), envState.label);
   if (!ctl) {
     logLine(`the envelope panel closed: track "${envState.label}" is no longer in the buffer`);
     closeEnvelopePanel();
@@ -26051,7 +26248,7 @@ function envSyncFromCode() {
     if (!envRead()) return;
     envState.draft = null;
     const at = envState.at.find();
-    const chain = at ? sliceChainSourceAt(cm.getValue(), cm.indexFromPos(at)) : null;
+    const chain = at ? sliceChainSourceAt(envCM.getValue(), envCM.indexFromPos(at)) : null;
     if (chain && chain.ref !== envState.ref) {
       // A different source typed in: draw that one instead.
       Object.assign(envState, { ref: chain.ref, name: chain.name, index: chain.index, file: null, buffer: null, peaks: null });
@@ -26372,12 +26569,12 @@ function envSyncFoot() {
  */
 function envWrite(values) {
   if (!envState || !samplerctlMod) return;
-  const res = samplerctlMod.samplerControlEdits(cm.getValue(), envState.label, values);
+  const res = samplerctlMod.samplerControlEdits(envCM.getValue(), envState.label, values);
   envState.draft = null;
   if (!res) return envSay(`track "${envState.label}" has no code to write onto`, true);
   if (res.skipped.length) envSay(`${res.skipped.join(' and ')} ${res.skipped.length === 1 ? 'is' : 'are'} a pattern on this chain - left as written`);
   if (!res.edits.length) return;
-  applyEdits(res.edits.map((ed) => [ed.from, ed.to, ed.text]));
+  applyEdits(res.edits.map((e) => [e.from, e.to, e.text]), envCM);
   envRead();
   envScheduleEval();
 }
@@ -26597,8 +26794,8 @@ function initEnvelopePanel() {
     if (editMod(e) && (e.key === 'z' || e.key === 'Z')) {
       e.preventDefault();
       e.stopPropagation();
-      if (e.shiftKey) cm.redo();
-      else cm.undo();
+      if (e.shiftKey) envCM.redo();
+      else envCM.undo();
       return;
     }
     if (e.key === ' ' && !(e.target instanceof HTMLButtonElement)) {
@@ -26632,7 +26829,8 @@ function initEnvelopePanel() {
     if (e.key === 'Escape' && envState) closeEnvelopePanel();
   });
   window.addEventListener('resize', () => { if (envState) envRender(); });
-  cm.on('change', envSyncFromCode);
+  // Either deck's edits, but only those to the buffer the panel is editing.
+  onEveryDeck((ed) => ed.on('change', () => { if (ed === envCM) envSyncFromCode(); }));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -26982,9 +27180,9 @@ nameDialogBackdrop.addEventListener('click', (e) => {
 // pattern's own @title / first block label, slugged into a file name.
 let saveNameHint = null;
 
-function suggestedPatternName() {
-  const code = cm.getValue();
-  const label = saveNameHint
+function suggestedPatternName(ed = cm) {
+  const code = ed.getValue();
+  const label = (ed === cm && saveNameHint)
     || displayLabel({ title: parseMeta(code).title, code, borrowBlockLabel: true, fallback: '' });
   return String(label).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
 }
@@ -27281,27 +27479,29 @@ document.addEventListener('drop', (e) => {
   const audio = !file && window.__poptartHostReady
     ? Array.from(e.dataTransfer?.files ?? []).filter((f) => isAudioPath(f.name))
     : [];
+  // Which deck it landed on, if either: a drop on deck B's code is for deck B, as a drop on the
+  // main buffer is for deck A. Off both, it is for the deck being worked in (see activeCM).
+  const onDeck = [cm, deckBCM].find((ed) => ed?.getWrapperElement().contains(e.target)) ?? null;
   if (audio.length) {
     e.preventDefault();
     e.stopPropagation();
-    const onCode = cm.getWrapperElement().contains(e.target);
-    const at = onCode ? cm.coordsChar({ left: e.clientX, top: e.clientY }, 'window') : null;
-    keepDroppedAudio(audio, at);
+    const at = onDeck ? onDeck.coordsChar({ left: e.clientX, top: e.clientY }, 'window') : null;
+    keepDroppedAudio(audio, at, onDeck ?? cm);
     return;
   }
   if (!file) {
     // Not ours: CodeMirror inserts a dropped text file itself, so leave drops on the editor to it.
     // Elsewhere, swallow the drop rather than letting the browser navigate away from the patch.
-    if (!cm.getWrapperElement().contains(e.target)) e.preventDefault();
+    if (!onDeck) e.preventDefault();
     return;
   }
   e.preventDefault();
   e.stopPropagation();
-  openMidiImport(file);
+  openMidiImport(file, onDeck ?? activeCM());
 }, true);
 
-/** Files dropped on the browser build's window, into "your files" - and into the code at `at`. */
-async function keepDroppedAudio(files, at) {
+/** Files dropped on the browser build's window, into "your files" - and into `ed`'s code at `at`. */
+async function keepDroppedAudio(files, at, ed = cm) {
   const refs = [];
   for (const file of files) {
     try {
@@ -27312,13 +27512,14 @@ async function keepDroppedAudio(files, at) {
     }
   }
   if (!refs.length) return;
-  if (at) cm.replaceRange(refs.map((r) => `s(${JSON.stringify(r)})`).join('\n'), at);
+  if (at) ed.replaceRange(refs.map((r) => `s(${JSON.stringify(r)})`).join('\n'), at);
   logLine(`kept in this browser: ${refs.join(', ')}${at ? '' : ` - play with s(${JSON.stringify(refs[0])})`}`);
 }
 
 const midiErr = (e) => String(e?.message ?? e).replace(/^\[[\w-]+\]\s*/, '');
 
-async function openMidiImport(file) {
+// `ed` is the deck the lanes go into: the one the file was dropped on.
+async function openMidiImport(file, ed = cm) {
   let midifile;
   let parsed;
   try {
@@ -27335,7 +27536,8 @@ async function openMidiImport(file) {
     midifile,
     parsed,
     guess: midifile.detectKey(pitched),
-    existing: bufferSetscale(),
+    existing: bufferSetscale(ed),
+    ed,
   };
 
   const { bpm, timeSig, cycles, noteCount, lanes } = parsed;
@@ -27396,8 +27598,8 @@ function closeMidiImport() {
  * The `setscale("…")` call the buffer already carries, or null. The LAST one wins (the server
  * hoists it - see its evaluate route), so that's the one reported and the one an import edits.
  */
-function bufferSetscale() {
-  const code = cm.getValue();
+function bufferSetscale(ed = cm) {
+  const code = ed.getValue();
   const re = /^[^\S\n]*setscale\s*\(\s*(['"])([^'"]*)\1\s*\)/gm;
   let last = null;
   let m;
@@ -27491,6 +27693,7 @@ function freeRollId(label, taken) {
 function runMidiImport() {
   const st = midiImportState;
   if (!st) return;
+  const ed = st.ed ?? cm; // the deck the file was dropped on
   const takeKey = midiImportKeyBox.checked && !midiImportKeyBox.disabled;
   const key = midiImportKeyInput.value.trim();
   if (takeKey && midiImportOffKey(key)?.bad) {
@@ -27499,8 +27702,8 @@ function runMidiImport() {
   }
 
   const chosen = midiImportGridSel.value;
-  const taken = new Set(labelsMod ? labelsMod.splitLabeledBlocks(cm.getValue()).map((b) => b.label) : []);
-  const takenRolls = new Set(rollDefs.allIds().map((r) => r.id));
+  const taken = new Set(labelsMod ? labelsMod.splitLabeledBlocks(ed.getValue()).map((b) => b.label) : []);
+  const takenRolls = new Set(rollDefs.allIds(null, ed.getValue()).map((r) => r.id));
   const lines = [];
   const names = [];
   const drawn = new Map(); // roll id -> the notes and grid it is defined with
@@ -27527,16 +27730,16 @@ function runMidiImport() {
   // The key line, if the buffer doesn't already say it. setscale is hoisted and global, so a
   // second one would silently re-key every other lane - the existing call is edited instead.
   // Re-read rather than trusting what the dialog opened on: the buffer is editable behind it.
-  const existing = bufferSetscale();
+  const existing = bufferSetscale(ed);
   let reKeyed = null;
   if (takeKey && existing && existing.key !== key) {
-    cm.replaceRange(`setscale("${key}")`, cm.posFromIndex(existing.from), cm.posFromIndex(existing.to));
+    ed.replaceRange(`setscale("${key}")`, ed.posFromIndex(existing.from), ed.posFromIndex(existing.to));
     reKeyed = existing.key;
   } else if (takeKey && !existing) {
     lines.unshift(`setscale("${key}")`);
   }
 
-  const code = cm.getValue();
+  const code = ed.getValue();
   // Below the player's code, but ABOVE any definitions block already down there - that block is the
   // bottom of the buffer by construction, and the rolls this import is about to write join it.
   const at = firstDefRunStart(code) ?? code.length;
@@ -27546,25 +27749,25 @@ function runMidiImport() {
   const trailing = /\n*$/.exec(before)[0].length;
   const gap = before.trim() ? '\n'.repeat(Math.max(0, 2 - trailing)) : '';
   const text = `${gap}${lines.join('\n\n')}\n${at < code.length ? '\n' : ''}`;
-  cm.replaceRange(text, cm.posFromIndex(at), cm.posFromIndex(at));
+  ed.replaceRange(text, ed.posFromIndex(at), ed.posFromIndex(at));
   // Park the cursor on the end of the last lane rather than the blank line under it - that's
   // where the `.synth("…")` it still needs goes. Held as a bookmark across the definitions write
   // below, which may go in above it.
-  const caret = cm.setBookmark(cm.posFromIndex(at + text.replace(/\n+$/, '').length));
+  const caret = ed.setBookmark(ed.posFromIndex(at + text.replace(/\n+$/, '').length));
   // The notes themselves join the definitions block at the bottom - the same place every named
   // roll lives, folded to one chip - so the lanes above read as the parts they play.
   if (drawn.size) {
-    const [defFrom, defTo, defText] = rollDefs.defsEdit(cm.getValue(), [...drawn.keys()], (id) => drawn.get(id));
-    cm.replaceRange(defText, cm.posFromIndex(defFrom), cm.posFromIndex(defTo));
+    const [defFrom, defTo, defText] = rollDefs.defsEdit(ed.getValue(), [...drawn.keys()], (id) => drawn.get(id));
+    ed.replaceRange(defText, ed.posFromIndex(defFrom), ed.posFromIndex(defTo));
   }
-  refoldAll(); // the block starts life hidden, like every other one
+  refoldAll(ed); // the block starts life hidden, like every other one
   const caretAt = caret.find();
   caret.clear();
   if (caretAt) {
-    cm.setCursor(caretAt);
-    cm.scrollIntoView(caretAt, 80);
+    ed.setCursor(caretAt);
+    ed.scrollIntoView(caretAt, 80);
   }
-  cm.focus();
+  ed.focus();
 
   closeMidiImport();
   logLine(
@@ -28323,32 +28526,38 @@ coreReady
 // move must not rewrite the song.
 //
 // Opening or closing the split never touches the sound (hide the desk, keep the music); eject
-// and complete are the two ways a mix ends. Deck B's pane is a plain editor for now: no playback
-// highlighting (the grid machinery is single-pane), and its edits live only in the pane - a mix
-// plays saved songs. Complete hands its buffer (and file name) to the main editor, whose re-eval
-// finds every promoted track already playing under its new name and reprograms nothing.
+// and complete are the two ways a mix ends. Deck B's pane is a livecode deck exactly as the main
+// editor is - the same folds, panels, handles, highlighting and evaluation passes, all against its
+// own buffer and its own "b:"-keyed tracks. Complete hands its buffer (and file name) to the main
+// editor, whose re-eval finds every promoted track already playing under its new name and
+// reprograms nothing.
 // ---------------------------------------------------------------------------------------------
 
 let mixModeOn = false;
-let deckBCM = null; // CodeMirror in the deck B pane, created on first open
-
 // Deck B's keymap - mainEditorKeys' counterpart, rebuilt with it when the hotkeys change.
 function deckBEditorKeys() {
   return {
     'Tab': 'indentMore', // as in the main editor
+    'Shift-Alt-Down': (ed) => copyLines(ed, 'down'),
+    'Shift-Alt-Up': (ed) => copyLines(ed, 'up'),
+    'Alt-Up': 'swapLineUp',
+    'Alt-Down': 'swapLineDown',
     'Shift-Cmd-Enter': () => exitDjMode('b'),
     'Shift-Ctrl-Enter': () => exitDjMode('b'),
     'Ctrl-Space': (ed) => showPoptartHint(ed),
     ...hotkeyCMKeys({
-      play: () => evalDeckB(true),
+      play: () => evalDeckB(true, { byHand: true }),
       stop: () => doStop('b'), // this pane's deck only; deck A plays on
+      save: () => saveDeckBFile(),
+      saveAs: () => saveDeckBFile(true),
       // ...and the arrangement chord from this pane is THIS deck's arrangement - the painter
       // moves into deck B's half rather than taking the page (see openArrangePainter).
       arrange: () => (arState && arDeck === 'b' ? closeArrangeEditor() : openArrangePainter('b')),
+      dj: () => toggleMixMode(),
       fx: (ed) => insertFxCall(ed),
       organize: () => toggleOrganize(),
-      // Grouping works on this pane's own tracks too (its edits land in ITS buffer; there is
-      // just no fold gutter here to draw the result - see refoldEditor).
+      // Grouping works on this pane's own tracks too: its edits land in ITS buffer, and its own
+      // gutter draws the result.
       group: (ed) => groupSelection(ed),
       loops: () => loopsChord(),
     }),
@@ -28585,6 +28794,9 @@ async function openMixMode() {
       theme: 'poptart',
       keyMap: 'sublime',
       lineNumbers: true,
+      // The main editor's gutters, carets and all: deck B folds its own buffer exactly as deck A
+      // does (see foldGroups).
+      gutters: ['CodeMirror-linenumbers', GROUP_GUTTER],
       matchBrackets: true,
       autoCloseBrackets: true,
       viewportMargin: Infinity,
@@ -28598,6 +28810,9 @@ async function openMixMode() {
     // plugin slots exactly as a click in the main buffer does (see releaseSlotsHeldByHand).
     deckBCM.getWrapperElement().addEventListener('mousedown', releaseSlotsHeldByHand, true);
     arWatchBuffer(deckBCM); // the painter can be opened on this pane, and follows its buffer there
+    // ...and everything else a deck's editor carries: the folds' undo hook, the open panels'
+    // re-reads of their calls (see onEveryDeck).
+    for (const hook of deckEditorHooks) hook(deckBCM);
   }
   deckBCM.refresh();
   cm.refresh();
@@ -28637,7 +28852,9 @@ async function exitDjMode(keep = 'restore') {
         return;
       }
       const res = await api('POST', '/api/mix/complete');
+      closePanelsOn(deckBCM); // what they were editing moves; reopen them on it in the main editor
       cm.setValue(deckBCM.getValue());
+      forgetExpandedFolds(); // a new buffer here, as any file opened into it is (see openInEditor)
       setCurrentSavedName(deckBFileName);
       clearPatternRegions('b'); // the re-eval below rebuilds them as deck A's, in the main editor
       logLine(`DJ mode off - "${deckBFileName ?? 'deck B'}" is the set (promoted: ${res.promoted.join(', ')})`);
@@ -28685,8 +28902,10 @@ async function exitDjMode(keep = 'restore') {
 // The shared tail of every exit: the split closes, deck B's pane empties, the desk UI re-homes.
 function finishDjExit() {
   if (deckBCM) {
+    closePanelsOn(deckBCM); // before the buffer they are editing goes
     deckBCM.setOption('readOnly', false); // a song's descriptor card locked it
     deckBCM.setValue('');
+    forgetExpandedFolds(deckBCM);
   }
   songPanes.a.clear();
   songPanes.b.clear();
@@ -28696,11 +28915,31 @@ function finishDjExit() {
   closeMixMode();
 }
 
+/**
+ * Put away every panel that is editing `ed`'s buffer - the piano roll, the shape and groove
+ * editors, the preset, pack, slice, envelope and record panels. For a deck whose buffer is about to
+ * go (deck B, as DJ mode ends): a panel left open on it would go on writing into an editor nobody
+ * can see.
+ */
+function closePanelsOn(ed) {
+  if (!ed) return;
+  if (prState && prCM === ed) closePianorollEditor();
+  if (lfoState && lfoCM === ed) closeLfoEditor();
+  if (grooveState && grooveCM === ed) closeGroovePanel();
+  if (presetState && presetCM === ed) closePresetPanel();
+  if (packState && packCM === ed) closePackPanel();
+  if (sliceState && sliceCM === ed) closeSlicePanel();
+  if (envState && envCM === ed) closeEnvelopePanel();
+  if (recordState && recCM === ed) closeRecordPanel();
+}
+
 function closeMixMode() {
   // A painter open on deck B has no pane to live in once the split closes, and deck B's buffer is
   // about to be emptied - so it goes with it. One on deck A goes too: the layout it was drawn
-  // against is changing, exactly as it does on the way in.
+  // against is changing, exactly as it does on the way in. Every other panel open on deck B goes
+  // as well, since its buffer is going.
   if (arState) closeArrangeEditor();
+  closePanelsOn(deckBCM);
   mixModeOn = false;
   djTellServer(false); // ...and deck A's next eval drives the transport again
   mixUnfolded.clear(); // a group is one stem again the next time the desk opens
@@ -28819,6 +29058,10 @@ async function loadDeckBFile(value = document.getElementById('deckBFile').value)
       songPanes.b.clear();
       deckBCM.setOption('readOnly', false);
       deckBCM.setValue(code);
+      // A buffer swapped out wholesale, exactly as a file opened in the main editor is (see
+      // openInEditor): nothing in the new one has been opened yet, and it folds from scratch.
+      forgetExpandedFolds(deckBCM);
+      refoldAll(deckBCM);
       deckBFileName = value;
       logLine(`deck B loaded "${value}" - play it when ready`);
     }
@@ -30327,7 +30570,7 @@ function songActiveDeck() {
 /** Play/resume the active deck: its song if it holds one, otherwise its code. */
 function djPlayActive() {
   if (songActiveDeck()) songPlay(djActiveDeck);
-  else if (djActiveDeck === 'b') evalDeckB(true);
+  else if (djActiveDeck === 'b') evalDeckB(true, { byHand: true });
   else evaluate(true, { byHand: true });
 }
 
@@ -30431,7 +30674,36 @@ function songLoadLine(deck, res, title) {
     + ' - ▶ plays it';
 }
 
-async function evalDeckB(start) {
+/**
+ * Save deck B's buffer - the same save the main editor's ⌘S is, against the pattern file deck B
+ * holds (`deckBFileName`): over it without asking, or under a name when it has none or `as` asks
+ * for one. Deck B is a livecode deck like the other, and what is written into it while it plays
+ * is work worth keeping in its own file.
+ */
+async function saveDeckBFile(as = false) {
+  if (!deckBCM || songPanes.b.song) return; // a song file's pane holds a descriptor card, not code
+  let name = deckBFileName;
+  if (as || !name) {
+    name = await askPatternName({ title: 'save deck B as', value: deckBFileName || suggestedPatternName(deckBCM), allow: deckBFileName });
+    if (!name) return;
+  }
+  try {
+    await settlePluginState(); // a saved pattern must name the states it actually sounds like
+    await api('POST', '/api/patterns/save', { name, code: deckBCM.getValue() });
+    deckBFileName = name;
+    logLine(`saved deck B as pattern "${name}"`);
+    await refreshPatternFiles();
+    pulse(document.getElementById('saveFlash'), 'saved-flash');
+  } catch (e) {
+    logLine(e.message ?? String(e), true);
+  }
+}
+
+// Deck B's evaluation: the main editor's (see evaluate), against deck B's buffer and deck B's
+// tracks. `byHand` means the same thing it does there - the player's own cmd+enter or ↻, as against
+// a panel's debounced re-evaluation - and puts every chip they had opened back the same way.
+async function evalDeckB(start, how) {
+  const byHand = !!how?.byHand;
   if (!deckBCM) return;
   if (songPanes.b.song) {
     // The pane holds a file, not code: ▶ is play/resume through the same desk (cycle-quantized
@@ -30440,28 +30712,64 @@ async function evalDeckB(start) {
     else await songPlay('b');
     return;
   }
+  // Every pass the main pane's evaluation makes over its buffer, in the same order and for the
+  // same reasons (see evaluate), made over this one: an old patch's definitions migrated and its
+  // legacy states named, hand-renames followed into the arrangement, every name said given its
+  // definition, a bare group given its braces, and every track of the song filled into the
+  // arrangement - after materialize, so a definition it wrote has not moved a call out from under it.
+  if (byHand) {
+    forgetExpandedFolds(deckBCM);
+    refoldAll(deckBCM);
+  }
+  migrateDefNames(deckBCM);
+  convertLegacyStates(deckBCM);
+  arOnBuffer('b', () => {
+    arFollowHandRenames();
+  });
+  if (!prLibraryKnown) await prRefreshRollList();
+  const packsBefore = new Set(packDefs.defsInBuffer(deckBCM.getValue()).map((d) => d.id));
+  for (const reg of DEF_REGISTRIES) reg.materialize(deckBCM);
+  openBareGroups(byHand, deckBCM);
+  arOnBuffer('b', arReconcileTracks);
+  const newPacks = packDefs.defsInBuffer(deckBCM.getValue()).map((d) => d.id).filter((id) => !packsBefore.has(id));
+  const code = deckBCM.getValue();
+  // Deck B's own captures (see pollPluginEdits): this is the evaluation that puts their programs
+  // where the scheduler reads them, as deck A's does for its own.
+  const filed = commitOnEval.filter(isDeckBCommit);
+  commitOnEval = commitOnEval.filter((c) => !isDeckBCommit(c));
   try {
-    // Deck B has an arrangement of its own, so it gets the same buffer passes the main pane does:
-    // hand-renames followed in, and every track of this song filled into its
-    // arrangement (see arSyncBuffer). Without it a track typed into deck B would fall silent.
-    arSyncBuffer('b');
     // Same deal as the main pane's: for a deck that is stopped, deck B's marker - kept while the
     // painter is shut, like deck A's (see arKeptInsert) - says which bar of its song to start from.
     const arrangeFrom = start && arMarkerFor('b') != null ? arMarkerFor('b') : undefined;
-    const result = await api('POST', '/api/evaluate', { code: deckBCM.getValue(), deck: 'b', start, arrangeFrom, name: deckBFileName ?? undefined });
+    const pending = api('POST', '/api/evaluate', { code, deck: 'b', start, arrangeFrom, name: deckBFileName ?? undefined });
+    if (newPacks.length) openPackById(newPacks[0], {}, deckBCM); // it has no files - here is where to pick them
+    const result = await pending;
     takeClocks(result);
+    setPatchScale(result.scale, 'b'); // deck B's own key and feel, for a roll opened on it
+    setPatchGroove(result.groove ?? null, 'b');
     if (arDeck === 'b') arSetClock(result.arrange ?? null); // deck B's own song clock, for the playhead
     songEndSetClock('b', result.arrange ?? null);
+    refreshDevicePanel(); // ...the open device window may be one of deck B's
     // Deck B gets the same live playback highlighting as the main pane: its regions mark the
     // split editor, keyed "b:<label>" (which is how the /api/highlight top-ups find them).
     setupHighlighting(result.tracks, result.gridFrom ?? 0, result.gridCount ?? 32, 'b', deckBCM);
-    const n = result.tracks.filter((t) => t.active).length;
-    logLine(`deck B ${start ? 'playing' : 'updated'} (${n}/${result.tracks.length} pattern(s)`
-      + (result.deckBpm ? `, native ${result.deckBpm} bpm` : '') + ')');
+    refoldAll(deckBCM);
+    prNamesStale();
+    if (/\bsamples\s*\(/.test(code)) loadSamples();
+    if (prState && prNamesWanted()) prIndexLabels();
+    // Only for an eval the player asked for, as on the main pane: the panels re-evaluate as you drag.
+    if (byHand || start) {
+      const n = result.tracks.filter((t) => t.active).length;
+      logLine(`deck B ${start ? 'playing' : 'updated'} (${n}/${result.tracks.length} pattern(s)`
+        + (result.deckBpm ? `, native ${result.deckBpm} bpm` : '') + ')');
+    }
     if (start) playing = true;
+    loadChainParams();
+    commitQueue.push(...filed); // the programs are in the store now; their slots can swap again
     updateTransportButtons();
     mixRefresh();
   } catch (e) {
+    commitOnEval.push(...filed); // nothing was filed, so nothing is thawed
     logLine(`deck B: ${e.message ?? String(e)}`, true);
   }
 }
@@ -31294,7 +31602,7 @@ mixFxAssignEl.addEventListener('contextmenu', (e) => {
 // A chain is code, so this is the editor the rest of the app is: the poptart mode, autocomplete
 // and ctrl-hover docs, and double-click on a plugin name opens that plugin's own window - with
 // the difference that what you set in there is captured and pinned into THIS chain's code (the
-// buffer's auto-pin writer only ever writes the main buffer; see fxMirrorEdit in server.js).
+// decks' auto-pin writer only ever writes a deck's own buffer; see fxMirrorEdit in server.js).
 //
 // `song` is the head, shown grayed and not editable: a chain always starts from the deck it is
 // inserted on, and which deck that is belongs to the desk, not to the code.
@@ -31738,7 +32046,7 @@ function deckCuePress(deck, down) {
  */
 async function djCueRestart(deck) {
   await djCueStop(deck);
-  return deck === 'b' ? evalDeckB(true) : evaluate(true, { byHand: true });
+  return deck === 'b' ? evalDeckB(true, { byHand: true }) : evaluate(true, { byHand: true });
 }
 
 /** The stop a cue release wants: this deck only, and its voices with it rather than ringing on. */
@@ -31799,7 +32107,7 @@ for (const deck of ['a', 'b']) {
 }
 document.getElementById('deckBSong').addEventListener('click', () => openOrganize('b'));
 document.getElementById('deckBPlay').addEventListener('click', (e) => deckPlayPress('b', e.shiftKey));
-document.getElementById('deckBUpdate').addEventListener('click', () => evalDeckB(false));
+document.getElementById('deckBUpdate').addEventListener('click', () => evalDeckB(false, { byHand: true }));
 document.getElementById('deckASong').addEventListener('click', () => openOrganize('a'));
 document.getElementById('deckAPlay').addEventListener('click', (e) => deckPlayPress('a', e.shiftKey));
 
@@ -31813,7 +32121,7 @@ function deckPlayPress(deck, unquantized = false) {
   if (mixLearnArmed) return; // the learn handler (registered after this one) takes the click
   if (deckPlayingNow[deck]) return doStop(deck);
   if (mixModeOn && songPanes[deck].song) return songPlay(deck, unquantized);
-  return deck === 'b' ? evalDeckB(true) : evaluate(true, { byHand: true });
+  return deck === 'b' ? evalDeckB(true, { byHand: true }) : evaluate(true, { byHand: true });
 }
 
 // The transport pad.
@@ -35397,7 +35705,7 @@ async function insertSnippet(entry, ed = activeCM(), at = null) {
       ed.replaceRange(str, ed.posFromIndex(from), ed.posFromIndex(to));
     }
   });
-  if (ed === cm) refoldAll(); // the new definitions arrive folded, like every other block
+  refoldAll(ed); // the new definitions arrive folded, like every other block
   ed.focus();
   for (const r of plan.renames) logLine(renameNote(r));
   const n = plan.defs.length;
@@ -35762,10 +36070,10 @@ function openEditorMenu(ed, e) {
   items.push(['add an effect…', () => insertFxCall(ed), `${hotkeyLabel('fx')} — an .fx("") at the caret, with the plugin list open`]);
   // The envelope panel for the sampler track under the caret - the way in for a chain that has no
   // envelope call yet to double-click.
-  if (ed === cm && !selected && samplerctlMod) {
-    const at = cm.indexFromPos(cm.getCursor());
-    if (envSourceAt(cm.getValue(), at)) {
-      items.push(['edit envelope…', () => openEnvelopeAt(cm.getValue(), at), 'draw the attack, decay, sustain and release over the sample, and where it begins, ends and loops']);
+  if (!selected && samplerctlMod) {
+    const at = ed.indexFromPos(ed.getCursor());
+    if (envSourceAt(ed.getValue(), at)) {
+      items.push(['edit envelope…', () => openEnvelopeAt(ed.getValue(), at, ed), 'draw the attack, decay, sustain and release over the sample, and where it begins, ends and loops']);
     }
   }
   // The tree, where it is edited: grouping is a gesture over a selection, and ungrouping is aimed
@@ -35789,7 +36097,7 @@ function openEditorMenu(ed, e) {
   // pointer has already said which. Until this, the chord was the only way in for a song that has
   // no arrangement yet to double-click. A deck holding a song file has nothing to arrange (see
   // openArrangePainter), so it is not offered there.
-  const deck = ed === deckBCM ? 'b' : 'a';
+  const deck = deckOfCM(ed);
   if (arrangeMod && labelsMod && !songPanes[deck]?.song) {
     items.push(arState && arDeck === deck
       ? ['close arrangement', () => closeArrangeEditor(), hotkeyLabel('arrange')]
@@ -35963,7 +36271,7 @@ async function duplicateTrack(ed, block) {
   });
   const rollOf = (id) => plan.renames.find((r) => r.kind === 'roll' && r.from === id)?.to ?? id;
   const painted = arCopyTrackClips(ed, src.label, to, rollOf);
-  refoldEditor(ed);
+  refoldAll(ed);
   ed.setCursor(ed.posFromIndex(at + 2 + indent));
   ed.focus();
   const own = plan.renames.map((r) => {
@@ -36296,14 +36604,12 @@ const AR_PANEL_MIN_H = 260;
 // nothing to show for it - you are arranging one of them at a time.
 let arDeck = 'a';
 let arCM = cm;
-/**
- * Deck B's pane has no fold machinery (no gutters, no chips - see toggleMixMode's editor), and the
- * folds are display only, so a write into it simply doesn't refold. Everything in the painter that
- * rewrites the buffer goes through this rather than refoldAll for that reason.
- */
-const arRefold = () => { if (arCM === cm) refoldAll(); };
+/** Every rewrite the painter makes refolds the deck it was made in. */
+const arRefold = () => refoldAll(arCM);
+/** The groups folded away on the painter's deck - the code's own carets and the gutter's share it. */
+const arCollapsed = () => foldsOf(arCM).collapsed;
 
-// Which deck the painter's BUFFER PASSES are running against - see arSyncBuffer. Not the same
+// Which deck the painter's BUFFER PASSES are running against - see arOnBuffer. Not the same
 // question as `arDeck`: an evaluation of deck A has to migrate, follow renames in and reconcile
 // deck A's code whether or not the painter happens to be showing deck B.
 let arPassDeck = 'a';
@@ -36335,12 +36641,6 @@ function arOnBuffer(deck, run) {
     arPassDeck = prevPass;
   }
 }
-
-/** The whole set of them, for a deck evaluated in one go (deck B's). */
-const arSyncBuffer = (deck) => arOnBuffer(deck, () => {
-  arFollowHandRenames();
-  arReconcileTracks();
-});
 
 let arState = null;
 let arRaf = null;
@@ -36540,11 +36840,11 @@ function findAutoCallAt(code, idx) {
  * there is nowhere else to draw it - and the arrangement is always there to draw it against now,
  * so this makes one if the song has never had one.
  */
-function openAutoFromIdCall(call, code) {
+function openAutoFromIdCall(call, code, ed = cm) {
   const range = idStringRange(call, code);
   const id = range && (code.slice(range[0], range[1]).match(/[\w$]+/) ?? [])[0];
   if (id == null) return false;
-  if (!arState) openArrangePainter();
+  if (!arState || arCM !== ed) openArrangePainter(deckOfCM(ed)); // the lane's own deck's arrangement
   if (!arState) return false;
   arPinAuto(id);
   arCanvas.focus({ preventScroll: true });
@@ -36779,7 +37079,12 @@ function arRestoreView() {
 function openArrangeEditor(call) {
   if (!arrangeMod) return;
   const wasOpen = !!arState;
+  // Reopened in place, on the deck it is already on: closing hands the binding back to the main
+  // buffer, so the deck it was opened against is carried across the close.
+  const [deck, ed] = [arDeck, arCM];
   if (wasOpen) closeArrangeEditor();
+  arDeck = deck;
+  arCM = ed;
   const code = arCM.getValue();
   const from = arCM.posFromIndex(call.start);
   const to = arCM.posFromIndex(call.close + 1);
@@ -36915,8 +37220,8 @@ function arPlayheadLoop() {
  * A group's row is the fold handle and the family's color; unpainted it shows the union of its
  * members as a ghost, and painting it gates the whole submix.
  *
- * Rows under a FOLDED group are left out entirely (see collapsedGroups, shared with the code
- * editor's folds), which is what makes a forty-track song navigable: fold the drums and the drums
+ * Rows under a FOLDED group are left out entirely (see foldsOf, shared with the deck's own code
+ * folds), which is what makes a forty-track song navigable: fold the drums and the drums
  * are one row.
  */
 function arRefreshRows() {
@@ -36935,7 +37240,7 @@ function arRefreshRows() {
   const rows = [];
   for (const o of ordered) {
     // Hidden under a fold: the group above it is standing in for it.
-    if (groupsMod && groupsMod.ancestorsOf(o.label, parents).some((a) => collapsedGroups.has(a))) continue;
+    if (groupsMod && groupsMod.ancestorsOf(o.label, parents).some((a) => arCollapsed().has(a))) continue;
     rows.push({ label: o.label, own: true, depth: o.depth, parent: o.parent, group: groups.has(o.label) });
   }
   // Clips naming a block the buffer hasn't got: an orphan row of its own, at the top level.
@@ -37060,12 +37365,13 @@ function arCreateGroup(labels, name, ed = arCM) {
   const res = mixctlMod.groupWrapEdits(ed.getValue(), labels, name);
   if (res.error) { logLine(`group: ${res.error}`, true); return null; }
   arApplyEdits(ed, res.edits);
-  collapsedGroups.delete(res.name); // just made, so it wants to be seen
-  refoldEditor(ed);
+  foldsOf(ed).collapsed.delete(res.name); // just made, so it wants to be seen
+  refoldAll(ed);
   logLine(`${res.name} is a group of ${res.members.join(', ')} - they mix into it, so a .postgain() or .fx() on ${res.name} takes all of them`);
   // The painter's buffer is live, so it re-evaluates; a grouping made while WRITING waits for
-  // your own cmd+enter, since the buffer around it may be half-typed.
-  if (arState) { arRefreshRows(); drawArrange(); arScheduleEval(); }
+  // your own cmd+enter, since the buffer around it may be half-typed - and so does one made in the
+  // other deck's code while the painter shows this one.
+  if (arState && arCM === ed) { arRefreshRows(); drawArrange(); arScheduleEval(); }
   return res.name;
 }
 
@@ -37083,10 +37389,10 @@ function arUngroup(label, ed = arCM) {
   const res = mixctlMod.ungroupEdits(code, label);
   if (res.error) { logLine(`ungroup: ${res.error}`, true); return false; }
   arApplyEdits(ed, res.edits);
-  collapsedGroups.delete(label);
-  refoldEditor(ed);
+  foldsOf(ed).collapsed.delete(label);
+  refoldAll(ed);
   logLine(`${label} is not a group any more - what was in it plays on its own`);
-  if (arState) { arRefreshRows(); drawArrange(); arScheduleEval(); } // see arCreateGroup on why only the painter re-evals
+  if (arState && arCM === ed) { arRefreshRows(); drawArrange(); arScheduleEval(); } // see arCreateGroup on why only the painter re-evals
   return true;
 }
 
@@ -37096,9 +37402,9 @@ function arTakeOut(label, ed = arCM) {
   const res = mixctlMod.extractFromGroupEdits(ed.getValue(), label);
   if (res.error) { logLine(`ungroup: ${res.error}`, true); return false; }
   arApplyEdits(ed, res.edits);
-  refoldEditor(ed);
+  refoldAll(ed);
   logLine(`${label} is out of ${res.parent}`);
-  if (arState) { arRefreshRows(); drawArrange(); arScheduleEval(); } // see arCreateGroup on why only the painter re-evals
+  if (arState && arCM === ed) { arRefreshRows(); drawArrange(); arScheduleEval(); } // see arCreateGroup on why only the painter re-evals
   return true;
 }
 
@@ -37290,19 +37596,19 @@ function arAllClips() {
 const arClipsOfRoll = (id) => (id == null ? [] : arAllClips().filter((c) => c.roll === id));
 
 /**
- * The track whose clips play roll `id`, or null. Read off the MAIN deck's buffer on purpose: this
- * answers the piano roll panel, which is the main editor's (see prPlayingTrack), and a clip roll
- * is named by no pattern - the clip is its only reference.
+ * The track whose clips play roll `id`, or null. Read off the buffer of the deck the piano roll is
+ * on (see prPlayingLabel), which is the question being answered: a clip roll is named by no
+ * pattern, so the clip in that deck's own arrangement is its only reference.
  */
-function arTrackOfRoll(id) {
+function arTrackOfRoll(id, ed = prCM) {
   if (!arrangeMod || id == null) return null;
-  const read = arReadDef(cm.getValue());
+  const read = arReadDef(ed.getValue());
   return read?.clips.find((c) => c.roll === String(id))?.label ?? null;
 }
 
 /**
- * How many clips of the MAIN deck's arrangement play roll `id` - the reference count the roll
- * picker's delete asks for. A clip is a reference exactly as a `pianoroll("lead")` is, and it is
+ * How many clips of `code`'s arrangement play roll `id` - the reference count the roll picker's
+ * delete asks for, of the deck the picker is on. A clip is a reference exactly as a `pianoroll("lead")` is, and it is
  * one the code search can't see: it lives inside the arrangement's clip string.
  */
 function arClipRefCount(code, id) {
@@ -37315,14 +37621,15 @@ function arClipRefCount(code, id) {
  * roll's own head is the only way a roll's name changes, and a clip left naming the old one would
  * be a part silently gone.
  */
-function arClipRenameEdits(code, from, to) {
+function arClipRenameEdits(code, from, to, ed = prCM) {
   if (!arrangeMod) return [];
   const read = arReadDef(code);
   if (!read || !read.clips.some((c) => c.roll === from)) return [];
   const clips = read.clips.map((c) => (c.roll === from ? { ...c, roll: to } : c));
   // The painter keeps its own copy of the clips while it is open, and writes that copy back over
-  // the buffer at the next gesture - so it follows the rename here rather than undoing it.
-  if (arState && arDeck === 'a') for (const c of arState.clips) if (c.roll === from) c.roll = to;
+  // the buffer at the next gesture - so it follows the rename here rather than undoing it, when it
+  // is showing the deck the rename was made in.
+  if (arState && arCM === ed) for (const c of arState.clips) if (c.roll === from) c.roll = to;
   return [[read.def.start, read.def.close + 1, serializeArrangeCall({ ...read.opts, clips })]];
 }
 
@@ -37421,27 +37728,22 @@ function arUnlinkClips(targets) {
 }
 
 /**
- * Double-clicking a clip on a clips() row: open its roll to draw into. The piano roll panel reads
- * and writes the MAIN editor's document, so this is deck A's gesture; on deck B the clip still
- * plays, it just can't be drawn in from here.
+ * Double-clicking a clip on a clips() row: open its roll to draw into, in the piano roll panel -
+ * against the painter's own deck, so the notes land in the buffer that arrangement belongs to.
  */
 function arOpenClipRoll(clip) {
   if (!clip?.roll) return false;
-  if (arDeck !== 'a') {
-    logLine(`the piano roll draws into the main deck's buffer - bring this song over to deck A to draw "${clip.roll}"`, 'warn');
-    return true;
-  }
   // A library roll opens as a copy of its notes (openRollById adopts it), never as an empty one
   // shadowing them.
-  if (!rollDefs.findDef(cm.getValue(), clip.roll) && !rollDefs.inLibrary(clip.roll, null)) {
+  if (!rollDefs.findDef(arCM.getValue(), clip.roll) && !rollDefs.inLibrary(clip.roll, null)) {
     // The clip names a roll nothing defines - a hand-edited call, or a definition deleted from the
     // picker. Write it back under THAT name rather than refusing: the clip is the reference, so an
     // empty roll under the name it says is exactly what "nothing drawn in here yet" means.
-    const [from, to, text] = rollDefs.defsEdit(cm.getValue(), [clip.roll]);
-    cm.replaceRange(text, cm.posFromIndex(from), cm.posFromIndex(to));
-    refoldAll();
+    const [from, to, text] = rollDefs.defsEdit(arCM.getValue(), [clip.roll]);
+    arCM.replaceRange(text, arCM.posFromIndex(from), arCM.posFromIndex(to));
+    arRefold();
   }
-  openRollById(clip.roll);
+  openRollById(clip.roll, null, { ed: arCM });
   prCanvas.focus({ preventScroll: true });
   return true;
 }
@@ -37976,7 +38278,7 @@ function drawArrange() {
   if (groupsMod) {
     for (let lane = firstLane; lane <= lastLane; lane++) {
       const r = arState.rows[lane];
-      if (!r || !r.group || collapsedGroups.has(r.label)) continue;
+      if (!r || !r.group || arCollapsed().has(r.label)) continue;
       if (arState.clips.some((c) => c.label === r.label)) continue;
       const under = new Set(groupsMod.descendantsOf(r.label, arGroupTree()));
       const spans = arState.clips
@@ -38009,7 +38311,7 @@ function drawArrange() {
   if (groupsMod) {
     for (let lane = 0; lane < arState.rows.length; lane++) {
       const r = arState.rows[lane];
-      if (!r?.group || !collapsedGroups.has(r.label)) continue;
+      if (!r?.group || !arCollapsed().has(r.label)) continue;
       const withClips = groupsMod.descendantsOf(r.label, arGroupTree())
         .filter((l) => arState.clips.some((c) => c.label === l));
       if (withClips.length) squishLanes.set(lane, new Map(withClips.map((l, i) => [l, i])));
@@ -38303,12 +38605,12 @@ function drawArrange() {
       ctx.save();
       ctx.beginPath(); ctx.rect(0, top, AR_GUTTER - 4, AR_ROW); ctx.clip();
       // A group's row carries the fold caret - the same control the code editor's gutter has, and
-      // the same state (collapsedGroups), so folding a group here folds it there too.
+      // the same state (the deck's own foldsOf memory), so folding a group here folds it there too.
       let x = indent + 10;
       if (row.group) {
         ctx.fillStyle = col('--text-dim');
         ctx.globalAlpha = 0.9;
-        ctx.fillText(collapsedGroups.has(row.label) ? '▸' : '▾', x, y);
+        ctx.fillText(arCollapsed().has(row.label) ? '▸' : '▾', x, y);
         x += AR_CARET_W;
         ctx.globalAlpha = 1;
       }
@@ -38317,7 +38619,7 @@ function drawArrange() {
       ctx.globalAlpha = row.own ? 0.95 : 0.45;
       ctx.fillText(row.label, x, y);
       // A folded group says how many rows it is standing in for.
-      if (row.group && collapsedGroups.has(row.label)) {
+      if (row.group && arCollapsed().has(row.label)) {
         const n = groupsMod ? groupsMod.descendantsOf(row.label, arGroupTree()).length : 0;
         if (n) {
           ctx.fillStyle = col('--text-dim');
@@ -38764,9 +39066,9 @@ function arOpenMenu(clientX, clientY, hit, row) {
     }
     // The tree, from the row it is drawn as: fold, dissolve, or take this track out of its group.
     if (r.group) {
-      const shut = collapsedGroups.has(label);
+      const shut = arCollapsed().has(label);
       items.push([shut ? `unfold ${label}` : `fold ${label}`, () => {
-        if (shut) collapsedGroups.delete(label); else collapsedGroups.add(label);
+        if (shut) arCollapsed().delete(label); else arCollapsed().add(label);
         arRefreshRows(); arRefold(); drawArrange();
       }, 'the same fold the code has - they share it']);
       items.push([`ungroup ${label}`, () => arUngroup(label), 'the tracks in it play on their own again']);
@@ -39586,11 +39888,11 @@ function arGotoBlock(label) {
   if (!block) return;
   // A member of a group that has been FOLDED (see foldGroups) is behind a chip: open every group
   // above it, or the cursor would land on the chip instead of the code.
-  if (groupsMod && collapsedGroups.size) {
+  if (groupsMod && arCollapsed().size) {
     const parents = groupsMod.parentsOf(groupsMod.treeOfBlocks(blocks));
-    const shut = groupsMod.ancestorsOf(label, parents).filter((a) => collapsedGroups.has(a));
+    const shut = groupsMod.ancestorsOf(label, parents).filter((a) => arCollapsed().has(a));
     if (shut.length) {
-      for (const a of shut) collapsedGroups.delete(a);
+      for (const a of shut) arCollapsed().delete(a);
       arRefold();
     }
   }
@@ -39997,7 +40299,7 @@ function arAutoLivePush() {
     return;
   }
   arAutoLiveAt = now;
-  api('POST', '/api/liveAuto', { id: arState.autoId, points: shapeMod.serializeAutoPoints(arState.autoPts) })
+  api('POST', '/api/liveAuto', { deck: arDeck, id: arState.autoId, points: shapeMod.serializeAutoPoints(arState.autoPts) })
     .catch(() => { /* the live preview is a nicety - the write on release is what counts */ });
 }
 
@@ -40606,8 +40908,8 @@ function initArrangeCanvas() {
       if (r?.group) {
         const indent = Math.min(r.depth, AR_MAX_INDENT) * AR_INDENT;
         if (x >= indent && x < indent + 10 + AR_CARET_W) {
-          if (collapsedGroups.has(r.label)) collapsedGroups.delete(r.label);
-          else collapsedGroups.add(r.label);
+          if (arCollapsed().has(r.label)) arCollapsed().delete(r.label);
+          else arCollapsed().add(r.label);
           arRefreshRows();
           arRefold();
           drawArrange();

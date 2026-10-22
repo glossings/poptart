@@ -405,7 +405,7 @@ test("a FOLDED group's row draws its members squished into thin sub-lanes", () =
   // group's OWN clips (the submix gate) still draw full-height with a title.
   const draw = grab('drawArrange');
   assert.match(draw, /const squishLanes = new Map\(\);/);
-  assert.match(draw, /collapsedGroups\.has\(r\.label\)/);
+  assert.match(draw, /arCollapsed\(\)\.has\(r\.label\)/);
   assert.match(draw, /if \(squish\?\.has\(c\.label\)\) \{[\s\S]{0,400}continue;/,
     'a squished member clip skips the border/title drawing entirely');
 });
@@ -489,8 +489,8 @@ test('the whole _arrange call folds to a named chip, like a definitions run', ()
   // `_arrange(⋯)` left the one part of the call that says nothing on screen. Nobody types any of
   // it, so the chip stands in for the lot and names what it is instead.
   const fold = grab('foldConfigBlobs');
-  assert.match(fold, /foldSpan\(m\.index, close \+ 1, '⋯ arrangement'/);
-  assert.ok(!/foldSpan\(open \+ 1, close, '⋯',/.test(fold), 'no argument-only fold left behind');
+  assert.match(fold, /foldSpan\(ed, m\.index, close \+ 1, '⋯ arrangement'/);
+  assert.ok(!/foldSpan\(ed, open \+ 1, close, '⋯',/.test(fold), 'no argument-only fold left behind');
   assert.match(fold, /const key = `arrange:\$\{arrangeN\+\+\}`;/, 'keyed like a run\'s, by which one it is');
 });
 
@@ -530,23 +530,26 @@ test('a group gets a caret in the gutter and does NOT fold itself', () => {
   const fold = grab('foldGroups');
   assert.match(fold, /const groups = blocks\.filter\(\(b\) => b\.group && b\.bodyStart != null\);/,
     'what folds is the braces body the splitter measured - no side tree to read');
-  assert.match(fold, /cm\.setGutterMarker\(cm\.posFromIndex\(group\.start\)\.line, GROUP_GUTTER, groupCaret\(/);
+  assert.match(fold, /ed\.setGutterMarker\(ed\.posFromIndex\(group\.start\)\.line, GROUP_GUTTER, groupCaret\(ed, /);
   assert.match(fold, /if \(!folded\) continue;/, 'nothing folds unless the caret was pressed');
   // the fold is the body span, so the group's own line and its chain stay on screen
-  assert.match(fold, /foldSpan\(group\.bodyStart, group\.bodyEnd,/);
+  assert.match(fold, /foldSpan\(ed, group\.bodyStart, group\.bodyEnd,/);
   // a group inside a folded group is already hidden - marking it would lay a chip inside a chip
   assert.match(fold, /if \(hiddenByAncestor\(group\.label\)\) continue;/);
   // ...and a group that leaves the buffer forgets it was folded, so a new one of that name opens
   assert.match(fold, /for \(const label of \[\.\.\.collapsedGroups\]\) if \(!live\.has\(label\)\) collapsedGroups\.delete\(label\);/);
-  assert.match(SRC, /for \(const reg of DEF_REGISTRIES\) foldDefRuns\(code, reg\);\n\s+foldGroups\(code\);/);
-  // the gutter has to be declared at construction, and cleared at the top of every pass
-  assert.match(SRC, /gutters: \['CodeMirror-linenumbers', GROUP_GUTTER\],/);
-  assert.match(fold, /cm\.clearGutter\(GROUP_GUTTER\);/);
+  assert.match(SRC, /for \(const reg of DEF_REGISTRIES\) foldDefRuns\(ed, code, reg\);\n\s+foldGroups\(ed, code\);/);
+  // which groups are folded is that editor's own memory (see foldsOf)
+  assert.match(fold, /const collapsedGroups = foldsOf\(ed\)\.collapsed;/);
+  // the gutter has to be declared at construction - on both decks' editors - and cleared at the
+  // top of every pass
+  assert.equal((SRC.match(/gutters: \['CodeMirror-linenumbers', GROUP_GUTTER\],/g) ?? []).length, 2);
+  assert.match(fold, /ed\.clearGutter\(GROUP_GUTTER\);/);
   // a jump onto a member of a FOLDED group opens every group above it, or the cursor lands on a chip
-  assert.match(grab('arGotoBlock'), /groupsMod\.ancestorsOf\(label, parents\)\.filter\(\(a\) => collapsedGroups\.has\(a\)\)/);
-  assert.match(grab('arCreateGroup'), /collapsedGroups\.delete\(res\.name\);/, 'a group just made is shown');
+  assert.match(grab('arGotoBlock'), /groupsMod\.ancestorsOf\(label, parents\)\.filter\(\(a\) => arCollapsed\(\)\.has\(a\)\)/);
+  assert.match(grab('arCreateGroup'), /foldsOf\(ed\)\.collapsed\.delete\(res\.name\);/, 'a group just made is shown');
   // and a fresh buffer starts with nothing folded
-  assert.match(grab('forgetExpandedFolds'), /collapsedGroups\.clear\(\);/);
+  assert.match(grab('forgetExpandedFolds'), /folds\.collapsed\.clear\(\);/);
 });
 
 test('mod+G groups the selection, and the gesture asks for a name in place', () => {
@@ -568,8 +571,8 @@ test('mod+G groups the selection, and the gesture asks for a name in place', () 
 test('the caret says which way it will go, and toggles the group', () => {
   const caret = grab('groupCaret');
   assert.match(caret, /el\.textContent = folded \? '▸' : '▾';/);
-  assert.match(caret, /if \(collapsedGroups\.has\(label\)\) collapsedGroups\.delete\(label\);\n\s+else collapsedGroups\.add\(label\);/);
-  assert.match(caret, /refoldAll\(\);/, 'the marks are re-derived rather than patched');
+  assert.match(caret, /const \{ collapsed \} = foldsOf\(ed\);\n\s+if \(collapsed\.has\(label\)\) collapsed\.delete\(label\);\n\s+else collapsed\.add\(label\);/);
+  assert.match(caret, /refoldAll\(ed\);/, 'the marks are re-derived rather than patched, in the deck the caret is on');
   const css = fs.readFileSync(path.join(__dirname, 'public', 'style.css'), 'utf8');
   assert.match(css, /\.cm-s-poptart \.poptart-group-fold \{\n\s+width: 14px;\n\}/, 'a fixed gutter width, so the code does not shift');
 });
@@ -1072,7 +1075,7 @@ test('the editor menu opens the painter on the deck that was clicked', () => {
   // editor under the pointer rather than the armed one, and a deck holding a song file - which
   // has no blocks to arrange - is not offered a painter that would refuse it.
   const menu = grab('openEditorMenu');
-  assert.match(menu, /const deck = ed === deckBCM \? 'b' : 'a';/);
+  assert.match(menu, /const deck = deckOfCM\(ed\);/);
   assert.match(menu, /if \(arrangeMod && labelsMod && !songPanes\[deck\]\?\.song\) \{/);
   assert.match(menu, /\['view arrangement', \(\) => openArrangePainter\(deck\), hotkeyLabel\('arrange'\)\]/);
   assert.match(menu, /arState && arDeck === deck\s+\? \['close arrangement', \(\) => closeArrangeEditor\(\)/,

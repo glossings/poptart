@@ -85,6 +85,7 @@ const LIFTED = ['matchParen', 'codeOnly', 'arFindDef', 'arReadDef', 'parseArrang
 function panel({ code = '', arState = null, collapsed = [] } = {}) {
   const cm = fakeCm(code);
   const logged = [];
+  const folds = { expanded: new Set(), collapsed: new Set(collapsed), openRuns: [] };
   const env = {
     // The painter reads and writes the deck it is on, not "the editor" - arCM is cm outside DJ
     // mode and deckBCM on deck B (see openArrangePainter).
@@ -100,17 +101,18 @@ function panel({ code = '', arState = null, collapsed = [] } = {}) {
     logLine: (line) => logged.push(line),
     // chords.js's, as the browser has it: the log lines name a key, and this harness is macOS.
     chordLabel: (combo) => combo,
-    arRefold: () => {}, // refoldAll, but only for the main buffer - deck B has no folds
+    arRefold: () => {}, // refoldAll(arCM): every deck folds its own buffer
     arSizeCanvas: () => {},
     groupsMod,
-    cm, // arCreateGroup/arUngroup refold only when they are editing the main buffer
-    refoldEditor: () => {},
+    cm,
+    refoldAll: () => {}, // arCreateGroup/arUngroup refold the editor they were handed
     lastDefRunEnd: () => null, // where a new _groups(...) files in; the foot of the buffer here
     writeArrangeCall: () => {},
     drawArrange: () => {},
     arScheduleEval: () => {},
-    expandedFolds: new Set(),
-    collapsedGroups: new Set(collapsed), // which groups are folded - shared with the code editor's folds
+    // Which groups are folded - per editor, and shared with that deck's own code folds (see foldsOf).
+    foldsOf: () => folds,
+    arCollapsed: () => folds.collapsed,
     // The roll registry, as much of it as the clips() fill pass touches (see arMintRolls).
     rollDefs: {
       allIds: () => [],
