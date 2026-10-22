@@ -7,7 +7,8 @@ import assert from 'node:assert/strict';
 import {
   analyzeChord, chordsForNote, chordVoicings, closeVoicing, diatonicChords, doubleBassOctave,
   centerVoicing, drop2, drop3, extendedChordsOnNote, invertChord, pcName, preferFlats, romanNumeral,
-  shellVoicing, spreadVoicing,
+  shellVoicing, spreadVoicing, chordIntervals, chordExtension, rotateVoices, invertVoices, spreadVoices,
+  voicingVoices, leadVoices,
 } from './src/harmony.mjs';
 
 const C3 = 60, E3 = 64, G3 = 67, A3 = 69, B3 = 71;
@@ -247,4 +248,89 @@ test('pcName spells both ways', () => {
 test('romanNumeral exposed standalone for chords built elsewhere', () => {
   assert.equal(romanNumeral(7, { symbol: '7', intervals: [0, 4, 7, 10] }, 'c major'), 'V7');
   assert.equal(romanNumeral(7, { symbol: '7', intervals: [0, 4, 7, 10] }, null), null);
+});
+
+// ---------------------------------------------------------------------------------------------
+// Chord building and voice-wise voicing (the pattern methods' theory)
+// ---------------------------------------------------------------------------------------------
+
+test('chordIntervals: dictionary symbols, words for the numeric ones, and aliases', () => {
+  assert.deepEqual(chordIntervals('m9'), [0, 2, 3, 7, 10]);
+  assert.deepEqual(chordIntervals('dom7'), [0, 4, 7, 10]);
+  assert.deepEqual(chordIntervals('maj'), [0, 4, 7]);
+  assert.deepEqual(chordIntervals('M7'), chordIntervals('maj7'));
+  assert.deepEqual(chordIntervals('dom13'), [0, 2, 4, 7, 9, 10]); // played without the 11th
+  assert.deepEqual(chordIntervals('power'), [0, 7]);
+  assert.equal(chordIntervals('7'), null); // a number means an extension, not a quality
+  assert.equal(chordIntervals('m99'), null);
+});
+
+test('chordExtension: odd numbers stack thirds, 6 adds the sixth, the rest are null', () => {
+  assert.deepEqual(chordExtension(5), [0, 2, 4]);
+  assert.deepEqual(chordExtension(7), [0, 2, 4, 6]);
+  assert.deepEqual(chordExtension(13), [0, 2, 4, 6, 8, 10, 12]);
+  assert.deepEqual(chordExtension(6), [0, 2, 4, 5]);
+  assert.deepEqual(chordExtension(1), [0]);
+  assert.equal(chordExtension(4), null);
+  assert.equal(chordExtension(0), null);
+});
+
+test('rotateVoices: on a close chord it is the inversion; voices keep their order', () => {
+  assert.deepEqual(rotateVoices([C3, E3, G3], 1), [E3, G3, C3 + 12]);
+  assert.deepEqual(rotateVoices([C3, E3, G3], -1), [G3 - 12, C3, E3]);
+  assert.deepEqual(rotateVoices([C3, E3, G3], 3), [C3 + 12, E3 + 12, G3 + 12]);
+});
+
+test('rotateVoices: a drop-2 rotates to the drop-2 of the next inversion', () => {
+  const cmaj7 = [C3, E3, G3, B3];
+  const next = rotateVoices(drop2(cmaj7), 1);
+  assert.deepEqual([...next].sort((a, b) => a - b), drop2(invertChord(cmaj7, 1)));
+});
+
+test('invertVoices: inverts and stays centered where the chord was', () => {
+  assert.deepEqual(invertVoices([C3, E3, G3], 1), [C3 + 12, E3, G3]); // the C went up
+  assert.deepEqual(invertVoices([C3, E3, G3], 2), [C3, E3, G3 - 12]); // the G went down
+  assert.deepEqual(invertVoices([C3, E3, G3], 0), [C3, E3, G3]);
+});
+
+test('spreadVoices: outer voices move by octaves from the middle, pitch classes kept', () => {
+  assert.deepEqual(spreadVoices([C3, E3, G3], 1), [C3 - 12, E3, G3 + 12]);
+  assert.deepEqual(spreadVoices([C3, E3, G3, B3], 1), [C3 - 12, E3, G3, B3 + 12]);
+  assert.deepEqual(spreadVoices([C3, E3, G3, B3], 2), [C3 - 24, E3 - 12, G3 + 12, B3 + 24]);
+  assert.deepEqual(spreadVoices([C3, E3, G3], 0), [C3, E3, G3]);
+});
+
+test('voicingVoices: voice by voice, null for a dropped voice, undefined for an unknown name', () => {
+  assert.deepEqual(voicingVoices([C3, E3, G3, B3], 'drop2'), [C3, E3, G3 - 12, B3]);
+  assert.deepEqual(voicingVoices([C3, E3, G3, B3], 'drop3'), [C3, E3 - 12, G3, B3]);
+  assert.deepEqual(voicingVoices([C3, E3, G3, B3], 'open'), [C3, E3 + 12, G3, B3 + 12]);
+  assert.deepEqual(voicingVoices([C3, G3, E3 + 12], 'close'), [C3, G3, E3]);
+  assert.deepEqual(voicingVoices([C3, E3, C3 + 12], 'close'), [C3, E3, null]);
+  assert.deepEqual(voicingVoices([C3, E3, G3, B3 - 1, 74], 'shell'), [C3, E3, null, B3 - 1, null]);
+  assert.deepEqual(voicingVoices([C3, E3, G3], 'drop3'), [C3, E3, G3]); // doesn't apply: unchanged
+  assert.equal(voicingVoices([C3, E3, G3], 'wide'), undefined);
+});
+
+test('leadVoices: with nothing before, the chord as written', () => {
+  assert.deepEqual(leadVoices([C3, E3, G3]), [C3, E3, G3]);
+});
+
+test('leadVoices: keeps common tones and moves the rest by steps', () => {
+  // C major -> F major: C stays, E -> F, G -> A (second inversion of F).
+  assert.deepEqual([...leadVoices([65, 69, 72], [C3, E3, G3])].sort((a, b) => a - b), [C3, 65, A3]);
+  // C major -> G major: G stays, C -> B, E -> D.
+  assert.deepEqual([...leadVoices([55, 59, 62], [C3, E3, G3])].sort((a, b) => a - b), [59, 62, G3]);
+});
+
+test('leadVoices: home holds the chords near it', () => {
+  const led = leadVoices([C3, E3, G3], null, 84);
+  assert.ok(Math.abs(led.reduce((s, m) => s + m, 0) / 3 - 84) <= 6, `${led} not near 84`);
+});
+
+test('leadVoices: a voicing keeps its shape - only inversions and octaves are tried', () => {
+  const spread = spreadVoices([65, 69, 72], 1); // F A C spread an octave each way
+  const led = leadVoices(spread, [C3, E3, G3 + 12]);
+  const gaps = (a) => { const s = [...a].sort((x, y) => x - y); return [s[1] - s[0], s[2] - s[1]]; };
+  const shapes = [0, 1, 2].map((k) => gaps(rotateVoices(spread, k)).join());
+  assert.ok(shapes.includes(gaps(led).join()), `${led} is not a rotation of ${spread}`);
 });

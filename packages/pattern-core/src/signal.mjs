@@ -24,6 +24,7 @@ import { latestOsc, registerOscAddress, normalizeOscAddress } from './osc.mjs';
 import { macroValue, assertMacroIndex } from './macros.mjs';
 import { fxKnobValue, assertFxKnobIndex } from './fxknobs.mjs';
 import { Frac } from './frac.mjs';
+import { chordIntervals, chordExtension, invertVoices, spreadVoices, voicingVoices, leadVoices, VOICING_NAMES } from './harmony.mjs';
 
 /**
  * @typedef {Object} Step
@@ -124,6 +125,8 @@ function swingGridReport(stepsForCycle, n, cycles = 4) {
 const NO_GLOBAL_SCALE = `[signal] .sc() has no scale yet - put setscale("F minor") anywhere in the buffer. Playing in ${DEFAULT_SCALE} until then.`;
 // Said by .add(n(...)) / .sub(n(...)) on a note pattern that has no key to step in.
 const NO_SCALE_FOR_STEP = `[signal] .add(n(...)) steps in a scale, but this pattern has none - put .sc() before it or setscale("F minor") anywhere in the buffer. Stepping in ${DEFAULT_SCALE} until then.`;
+// Said by .chord(7) (a number: stack the key's thirds) on a note pattern that has no key.
+const NO_SCALE_FOR_CHORD = `[signal] .chord() with a number stacks the key's thirds, but this pattern has none - put .sc() before it or setscale("F minor") anywhere in the buffer. Building in ${DEFAULT_SCALE} until then.`;
 
 // A plugin name is a name, not a pattern. Which plugin is in a slot is fixed for as long as the
 // slot exists - a plugin takes hundreds of milliseconds to open and throws its voices away when it
@@ -1479,10 +1482,10 @@ export class Sig {
    * chromatic passing tone stays a passing tone after the step and .add(n(0)) changes nothing.
    * The key is the last .scale()/.sc() in the chain, else the global setscale().
    */
-  _degreeStep(fn) {
+  _degreeStep(fn, noScale = NO_SCALE_FOR_STEP) {
     let scale = this.scaleName ?? globalScale();
     if (!scale) {
-      warnUser(NO_SCALE_FOR_STEP);
+      warnUser(noScale);
       scale = DEFAULT_SCALE;
     }
     return (a, b) => {
@@ -2663,6 +2666,199 @@ export class Sig {
       }
       return out.sort((a, b) => a.start - b.start);
     };
+    return new Sig((t, cps, pos) => sampleViaSteps(stepsForCycle, t, cps, pos), { stepsForCycle, ...this._meta() });
+  }
+
+  // The chord methods' shared refusals, as warnings: the pattern comes back unchanged so a
+  // misplaced call keeps playing. `notes` adds the one that only voicing needs - scale degrees
+  // aren't pitches yet. Null when the method can go ahead.
+  _chordRefusal(method, eg, { notes = true } = {}) {
+    if (!this.stepsForCycle) {
+      return warnAndKeep(this, `[signal] .${method}() needs notes with a rhythm - e.g. ${eg}, or .seg(4) before it on a random line`);
+    }
+    if (this.sampler) {
+      return warnAndKeep(this, `[signal] .${method}() shapes the pattern's own notes - put it before .s(), e.g. ${eg}.s("pluck")`);
+    }
+    if (notes && this.pitchKind === 'degree') {
+      return warnAndKeep(this, `[signal] .${method}() voices notes, not scale degrees - put .sc() or .scale() before it`);
+    }
+    return null;
+  }
+
+  // A pattern whose chords are re-voiced by `fn(group, midis, cyclePos)` (see revoiceSteps).
+  _revoiced(fn) {
+    const base = this.stepsForCycle;
+    const stepsForCycle = (cycle) => revoiceSteps(base(cycle), (g, midis) => fn(g, midis, cycle + g.start));
+    return new Sig((t, cps, pos) => sampleViaSteps(stepsForCycle, t, cps, pos), { stepsForCycle, ...this._meta() });
+  }
+
+  /**
+   * Builds a chord on every note, the note as its root. A quality name - "m", "m7", "maj7",
+   * "dom7", "m9", "sus4", "dim", ... (harmony.mjs CHORD_NAMES) - is the same chord in any key. A
+   * number stacks the key's thirds up to that extension: 5 the triad (the default), 7 the seventh
+   * chord, 9/11/13 taller, so `n("0 1 4").sc().chord(7)` is Imaj7 iim7 V7 in a major key. The key
+   * is the last .scale()/.sc() before it, else setscale(); on scale degrees (n() with no .sc() yet)
+   * a number adds the degrees themselves, for a later .scale() to place.
+   *
+   * Patternable, read at each note's onset: `.chord("<m9 maj7>")`; a rest plays the root alone. The
+   * chord's notes are ordinary notes, so .inv(), .voicing(), .spread(), .lead() and .arp() shape
+   * them afterwards.
+   */
+  chord(quality = 5) {
+    const refusal = this._chordRefusal('chord', 'note("c3 f3").chord("m7")', { notes: false });
+    if (refusal) return refusal;
+    const qSig = toSignal(quality);
+    const degrees = this.pitchKind === 'degree';
+    let stepIn = null;
+    const keyStep = () => (stepIn ??= this._degreeStep((d, offset) => d + offset, NO_SCALE_FOR_CHORD));
+    for (const v of chordArgValues(qSig)) {
+      if (isExtension(v) ? !chordExtension(v) : !chordIntervals(v)) {
+        warnUser(`[signal] .chord(${JSON.stringify(v)}) is not a chord - give a quality (m, m7, maj7, dom7, m9, sus4, dim) or how high to stack the key (5, 7, 9). Playing the triad in key instead.`);
+      } else if (degrees && !isExtension(v)) {
+        warnUser(`[signal] .chord(${JSON.stringify(v)}) on scale degrees has no key to build in - put .sc() before it. Playing the triad in key instead.`);
+      }
+      if (!degrees && (isExtension(v) || !chordIntervals(v))) keyStep(); // say a missing key now, not mid-play
+    }
+    const tones = (root, q) => {
+      const intervals = !degrees && q != null && !isExtension(q) ? chordIntervals(q) : null;
+      if (intervals) return intervals.map((iv) => root + iv);
+      if (q == null) return [root];
+      const stack = (isExtension(q) ? chordExtension(q) : null) ?? chordExtension(5);
+      return degrees ? stack.map((s) => root + s) : stack.map((s) => keyStep()(root, s));
+    };
+    const base = this.stepsForCycle;
+    const stepsForCycle = (cycle) => {
+      const out = [];
+      for (const st of base(cycle)) {
+        const root = st.value == null ? NaN : degrees ? Number(st.value) : stepMidi(st.value);
+        if (!Number.isFinite(root)) {
+          out.push(st);
+          continue;
+        }
+        const q = chordArgAt(qSig, cycle + st.start);
+        for (const tone of tones(root, q.value)) {
+          const step = { ...st, value: tone };
+          if (q.locs.length) step.locs = [...stepLocs(st), ...q.locs];
+          out.push(step);
+        }
+      }
+      return out;
+    };
+    return new Sig((t, cps, pos) => sampleViaSteps(stepsForCycle, t, cps, pos), { stepsForCycle, ...this._meta() });
+  }
+
+  /**
+   * Inverts each chord: every voice moves up to the next chord tone, `n` times (down for a negative
+   * `n`), and the chord is moved by octaves back to where it was - so `.inv("<0 1 2>")` re-voices
+   * in place rather than climbing. Any voicing keeps its shape: a drop-2 stays a drop-2. After
+   * .lead(), it inverts from the voicing lead chose. Patternable, read at each chord's onset.
+   */
+  inv(n) {
+    const refusal = this._chordRefusal('inv', 'note("[c3,e3,g3]").inv(1)');
+    if (refusal) return refusal;
+    const nSig = toSignal(n);
+    return this._revoiced((g, midis, at) => {
+      const ev = chordArgAt(nSig, at);
+      const times = Math.round(Number(ev.value));
+      if (!Number.isFinite(times)) return midis;
+      g.locs = ev.locs;
+      return invertVoices(midis, times);
+    });
+  }
+
+  /**
+   * Re-voices each chord by name: "close" (every voice within the octave above the bass), "open"
+   * (every second voice above the bass up an octave), "drop2"/"drop3" (the second/third voice from
+   * the top down an octave), "shell" (root, 3rd and 7th only). A voicing that doesn't fit a chord
+   * (drop3 on a triad, shell with no 7th) leaves it as it is. Patternable, read at each chord's
+   * onset.
+   */
+  voicing(name) {
+    const refusal = this._chordRefusal('voicing', 'note("[c3,e3,g3,b3]").voicing("drop2")');
+    if (refusal) return refusal;
+    const nameSig = toSignal(name);
+    for (const v of chordArgValues(nameSig)) {
+      if (voicingVoices([60, 64, 67], v) === undefined) {
+        warnUser(`[signal] .voicing(${JSON.stringify(v)}) is not a voicing - use one of ${VOICING_NAMES.join(', ')}. Leaving those chords as they are.`);
+      }
+    }
+    return this._revoiced((g, midis, at) => {
+      const ev = chordArgAt(nameSig, at);
+      if (ev.value == null) return midis;
+      const voiced = voicingVoices(midis, ev.value);
+      if (!voiced) return midis;
+      g.locs = ev.locs;
+      return voiced;
+    });
+  }
+
+  /**
+   * Widens each chord by octaves from the middle out: the lowest and highest notes move `amount`
+   * octaves apart from the middle and the notes between move in proportion, rounded to whole
+   * octaves, so the chord keeps its notes. A negative amount narrows. Patternable, read at each
+   * chord's onset.
+   */
+  spread(amount) {
+    const refusal = this._chordRefusal('spread', 'note("[c3,e3,g3,b3]").spread(1)');
+    if (refusal) return refusal;
+    const amountSig = toSignal(amount);
+    return this._revoiced((g, midis, at) => {
+      const ev = chordArgAt(amountSig, at);
+      const n = Number(ev.value);
+      if (!Number.isFinite(n)) return midis;
+      g.locs = ev.locs;
+      return spreadVoices(midis, n);
+    });
+  }
+
+  /**
+   * Voice leading: each chord takes the inversion and octave that moves its notes least from the
+   * chord before, kept near `anchor` (a note, e.g. "c4"; patternable) or, without one, near where
+   * the chord was written. Voicings keep their shape - only inversions and octaves are chosen - so
+   * .voicing()/.spread() go before it, and an .inv() after it offsets from its choice. Single notes
+   * are left alone.
+   */
+  lead(anchor) {
+    const refusal = this._chordRefusal('lead', 'note("<[c3,e3,g3] [f3,a3,c4]>").lead()');
+    if (refusal) return refusal;
+    const anchorSig = anchor === undefined || anchor === null ? null : toSignal(anchor);
+    const base = this.stepsForCycle;
+    // Each cycle is led once and remembered, chaining from the last chord of the cycle before - so
+    // what played is what the next cycle leads from. A cycle asked for out of order looks back a
+    // few cycles and leads forward from there.
+    const memo = new Map();
+    const led = (cycle, depth) => {
+      if (memo.has(cycle)) return memo.get(cycle);
+      const before = depth < LEAD_LOOKBACK ? led(cycle - 1, depth + 1).last : null;
+      let prev = before?.out ?? null;
+      let last = before;
+      const steps = revoiceSteps(base(cycle), (g, midis) => {
+        if (midis.length < 2) return midis;
+        // A chord ringing in from the last cycle keeps the voicing it was struck with.
+        if (g.cont && before && before.written.join() === midis.join()) {
+          prev = before.out;
+          return before.out;
+        }
+        let home = null;
+        if (anchorSig) {
+          const ev = chordArgAt(anchorSig, cycle + g.start);
+          const midi = ev.value == null ? NaN : stepMidi(ev.value);
+          if (Number.isFinite(midi)) {
+            home = midi;
+            g.locs = ev.locs;
+          }
+        }
+        const out = leadVoices(midis, prev, home);
+        prev = out;
+        if (!g.cont) last = { written: midis, out };
+        return out;
+      });
+      const entry = { steps, last };
+      memo.set(cycle, entry);
+      if (memo.size > LEAD_MEMO) memo.delete(memo.keys().next().value);
+      return entry;
+    };
+    const stepsForCycle = (cycle) => [...led(cycle, 0).steps];
     return new Sig((t, cps, pos) => sampleViaSteps(stepsForCycle, t, cps, pos), { stepsForCycle, ...this._meta() });
   }
 
@@ -3994,6 +4190,83 @@ function arpIndexSteps(sig, cycle, seg) {
   }
   return sig.stepsForCycle(cycle);
 }
+
+// ---------------------------------------------------------------------------------------------
+// Chord shaping (Sig#chord/inv/voicing/spread/lead). A chord here is the notes that START
+// together - a "[c3,e3,g3]" stack, a .chord() fan, a drawn pianoroll() chord whatever its note
+// lengths - so a pedal held under a moving triad is not re-voiced with it, unlike .arp()'s
+// "everything ringing". Tails ringing in from the last cycle (`cont`) group apart from new
+// attacks at the same instant.
+// ---------------------------------------------------------------------------------------------
+
+// How many cycles back .lead() looks for the chord it leads from when it is asked for a cycle out
+// of order (a seek, a jump); played in order, each cycle chains from the one before.
+const LEAD_LOOKBACK = 4;
+const LEAD_MEMO = 64;
+
+// A step's pitch as a MIDI number, or NaN for a value that isn't one (a pack name).
+function stepMidi(value) {
+  try {
+    return parseNoteValue(value);
+  } catch {
+    return NaN;
+  }
+}
+
+// One cycle's chords: [{ start, cont, voices: [{ step, midi }] }], voices low to high, chords in
+// time order (at one instant, ringing tails before new attacks).
+function onsetGroups(steps) {
+  const groups = [];
+  for (const step of steps) {
+    const midi = stepMidi(step.value);
+    if (step.value == null || !Number.isFinite(midi)) continue;
+    const cont = !!step.cont;
+    const g = groups.find((x) => x.cont === cont && Math.abs(x.start - step.start) <= CHORD_EPS);
+    if (g) g.voices.push({ step, midi });
+    else groups.push({ start: step.start, cont, voices: [{ step, midi }] });
+  }
+  for (const g of groups) g.voices.sort((a, b) => a.midi - b.midi);
+  return groups.sort((a, b) => a.start - b.start || Number(b.cont) - Number(a.cont));
+}
+
+// Re-voices one cycle's chords: `fn(group, midis)` gets a chord's pitches low to high and returns
+// where each voice went (null drops it). Rests and non-pitch steps pass through. Highlight spans a
+// reading left on the group (`group.locs`) join every voice it shaped.
+function revoiceSteps(steps, fn) {
+  const out = steps.filter((s) => s.value == null || !Number.isFinite(stepMidi(s.value)));
+  for (const g of onsetGroups(steps)) {
+    const midis = g.voices.map((v) => v.midi);
+    const voiced = fn(g, midis) ?? midis;
+    g.voices.forEach((v, i) => {
+      if (voiced[i] == null) return;
+      const step = { ...v.step, value: voiced[i] };
+      if (g.locs?.length) step.locs = [...stepLocs(v.step), ...g.locs];
+      out.push(step);
+    });
+  }
+  return out.sort((a, b) => a.start - b.start);
+}
+
+// A chord method's argument at one onset, `{ value, locs }` - a literal without a reading.
+function chordArgAt(sig, cyclePos) {
+  if (sig.constVal !== undefined) return { value: sig.constVal, locs: [] };
+  return readEvent(sig, cyclePos);
+}
+
+// The values an argument shows in its first cycles - what a build-time check can see of it (a
+// value that only turns up later goes unchecked and falls back quietly).
+function chordArgValues(sig) {
+  if (sig.constVal !== undefined) return [sig.constVal];
+  if (!sig.stepsForCycle) return [];
+  const seen = new Set();
+  for (let cycle = 0; cycle < 8; cycle++) {
+    for (const s of sig.stepsForCycle(cycle)) if (s.value != null) seen.add(s.value);
+  }
+  return [...seen];
+}
+
+// Whether a .chord() argument means "stack the key this high" rather than a quality name.
+const isExtension = (v) => typeof v === 'number' || (typeof v === 'string' && v.trim() !== '' && Number.isFinite(Number(v)));
 
 // ---------------------------------------------------------------------------------------------
 // bite helpers (Sig#bite): the index pattern is resolved into absolute-time playhead events, and

@@ -637,9 +637,13 @@ no completion notes.
 
 [ ] Harmony phase 5 - next-chord suggestions: functional-harmony transition table (T->S->D->T,
     circle-of-fifths pull, secondary dominants + modal interchange as a "borrowed" section),
-    deterministic ranking + seeded tiebreak, repeated invoke cycles alternatives; add a
-    voice-leading pass (minimal total movement picks the suggested chord's inversion) which also
-    improves the phase-2 voicing menu's ordering. Build last - most design-heavy.
+    deterministic ranking + seeded tiebreak, repeated invoke cycles alternatives; the voice-leading
+    pass is harmony.mjs leadVoices (what .lead() uses) - have it pick the suggested chord's
+    inversion and order the phase-2 voicing menu. Build last - most design-heavy.
+
+[ ] Roman-numeral chord builder, parked by decision: chord("<I vi IV V7 bVII>") read against
+    setscale, a written quality overriding the key's. Wait until the .chord() method form has
+    been played with.
 
 [ ] Swing manager - what is still open after the phases. Swing is a per-slot TABLE now (groove.mjs):
     a time offset and a velocity scale per slot of a bar, with the `swing` channel as the depth on

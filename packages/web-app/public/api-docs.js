@@ -418,6 +418,26 @@ const API_DOCS = {
   ply: { kind: 'method', sig: 'ply(reps, fn)', desc: 'Repeats each event reps times within its own step. The optional (x, n) => pattern changes the nth repeat.', eg: '.ply(3, (x, n) => x.add(n * 12))' },
   echo: { kind: 'method', sig: 'echo(reps, time, fn)', desc: 'Repeats each event reps times, time cycles apart. The optional (x, n) => pattern changes the nth repeat.', eg: '.echo(4, 1/8, (x, n) => x.gain(0.6 ** n))' },
   arp: { kind: 'method', sig: 'arp(indices)', desc: 'Plays each chord one note at a time, in the order of the index pattern. Indices past the top note continue an octave up. On scale degrees, apply .scale() first.', eg: 'note("[c3,e3,g3]").arp("0 1 2 1")' },
+  chord: {
+    kind: 'method',
+    sig: 'chord(quality)',
+    desc: 'Builds a chord on each note, the note as its root. A quality name (m, m7, maj7, dom7, m9, sus4, dim, aug, add9) is the same chord in any key. A number stacks the key\'s thirds up to that extension: 5 is the triad (the default), 7 the seventh chord, 9, 11 and 13 taller. The key is the pattern\'s scale, else setscale().',
+    eg: 'n("0 3 4").sc().chord(7)',
+  },
+  inv: { kind: 'method', sig: 'inv(n)', desc: 'Inverts each chord n times, staying in the same register; a negative n inverts downward. The voicing keeps its shape.', eg: '.chord("m7").inv("<0 1 2>")' },
+  voicing: {
+    kind: 'method',
+    sig: 'voicing(name)',
+    desc: 'Re-voices each chord: close (every note within the octave above the bass), open (every second note above the bass up an octave), drop2 or drop3 (the second or third note from the top down an octave), shell (root, 3rd and 7th only).',
+    eg: '.chord(7).voicing("drop2")',
+  },
+  spread: { kind: 'method', sig: 'spread(amount)', desc: 'Widens each chord by octaves: the lowest and highest notes move amount octaves outward, the notes between in proportion. A negative amount narrows it.', eg: '.chord("maj9").spread(1)' },
+  lead: {
+    kind: 'method',
+    sig: 'lead(anchor)',
+    desc: 'Voice leading: each chord takes the inversion and octave that moves its notes least from the chord before, staying near anchor (a note) or, without one, where it was written. The voicing keeps its shape.',
+    eg: 'note("<c3 a2 f2 g2>").chord("maj7").lead()',
+  },
   bite: {
     kind: 'method',
     sig: 'bite(indices, {grid, len})',

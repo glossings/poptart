@@ -386,3 +386,251 @@ export function chordVoicings(midis) {
   push('bass octave', doubleBassOctave(notes));
   return out;
 }
+
+// ---------------------------------------------------------------------------------------------
+// Chord building and voice-wise voicing, for the pattern methods (.chord/.inv/.voicing/.spread/
+// .lead). Unlike the menu transforms above these keep VOICES: out[i] is where input voice i went
+// (null = that voice is dropped), so a drawn chord's per-note lengths and velocities stay with
+// their notes. Voices are compared by pitch, so callers pass them low to high.
+// ---------------------------------------------------------------------------------------------
+
+// How a pattern writes each quality. A bare number in mini notation is a number - and a number
+// means "stack the key's thirds this high" (chordExtension) - so the dictionary's numeric symbols
+// take a word: "dom7", "maj6", "maj69", "power". Symbols mini can't parse (^7, -7, ø) are not
+// offered. Every other dictionary symbol is its own spelling.
+const QUALITY_SPELLINGS = {
+  '': ['maj', 'M', 'major'],
+  m: ['m', 'min', 'minor'],
+  7: ['dom7'],
+  9: ['dom9'],
+  11: ['dom11'],
+  13: ['dom13'],
+  6: ['maj6', 'M6'],
+  '6/9': ['maj69'],
+  5: ['power'],
+  maj7: ['maj7', 'M7'],
+  maj9: ['maj9', 'M9'],
+  maj11: ['maj11', 'M11'],
+  maj13: ['maj13', 'M13'],
+  m7: ['m7', 'min7'],
+  mMaj7: ['mMaj7', 'mM7'],
+};
+
+// name -> intervals. The first dictionary entry for a symbol wins, which for the 13ths is the
+// way they're played (11th omitted).
+const QUALITY_BY_NAME = (() => {
+  const byName = new Map();
+  for (const entry of CHORD_QUALITIES) {
+    for (const name of QUALITY_SPELLINGS[entry.symbol] ?? [entry.symbol]) {
+      if (!byName.has(name)) byName.set(name, entry.intervals);
+    }
+  }
+  return byName;
+})();
+
+/** Every quality name chordIntervals() accepts, in dictionary order. */
+export const CHORD_NAMES = Object.freeze([...QUALITY_BY_NAME.keys()]);
+
+/** A quality name ("m9", "maj7", "dom7", "sus4") -> its semitone intervals above the root, or null. */
+export function chordIntervals(name) {
+  const intervals = QUALITY_BY_NAME.get(String(name));
+  return intervals ? [...intervals] : null;
+}
+
+/**
+ * The scale steps above the root for a chord stacked in the key up to extension `n`: 5 is the
+ * triad (0 2 4), 7 the seventh chord, 9/11/13 taller, 3 the root and third, 1 the root alone; 6
+ * is the triad plus the sixth. Null for anything else (even numbers besides 6, zero, negatives).
+ */
+export function chordExtension(n) {
+  const ext = Math.round(Number(n));
+  if (ext === 6) return [0, 2, 4, 5];
+  if (!Number.isFinite(ext) || ext < 1 || ext % 2 === 0) return null;
+  return Array.from({ length: (ext + 1) / 2 }, (_, i) => 2 * i);
+}
+
+const meanOf = (a) => a.reduce((s, m) => s + m, 0) / a.length;
+
+/**
+ * Every voice moves to the next chord tone up (`steps` > 0) or down (`steps` < 0), that many
+ * times. On a close chord that is the plain inversion (C E G -> E G C); on any other voicing it
+ * is the same shape on the next inversion - a drop-2 stays a drop-2, a spread chord stays
+ * spread - because each voice keeps its place in the stack. The chord tones are the voices' own
+ * pitch classes.
+ */
+export function rotateVoices(midis, steps = 1) {
+  const voices = (midis ?? []).map((m) => Math.round(m));
+  const pcs = [...new Set(voices.map(pc))].sort((a, b) => a - b);
+  const times = Math.round(steps);
+  if (!pcs.length || !times) return voices;
+  return voices.map((m) => {
+    let out = m;
+    for (let i = 0; i < Math.abs(times); i++) {
+      const at = pcs.indexOf(pc(out));
+      if (times > 0) out += ((pcs[(at + 1) % pcs.length] - pc(out)) + 12) % 12 || 12;
+      else out -= ((pc(out) - pcs[(at - 1 + pcs.length) % pcs.length]) + 12) % 12 || 12;
+    }
+    return out;
+  });
+}
+
+// Hands a re-voiced chord's pitches back to the notes they came from: each input note takes an
+// output pitch of its own pitch class (doublings pair in order), so the C that moved up an octave
+// is still the C - its length and velocity go with it. Pitches left over (a rotation can turn a
+// doubled root into a doubled third) fill the remaining notes in order.
+function byPitchClass(voices, pitches) {
+  const free = [...pitches];
+  const out = voices.map((m) => {
+    const i = free.findIndex((p) => p != null && pc(p) === pc(m));
+    if (i < 0) return null;
+    const p = free[i];
+    free[i] = null;
+    return p;
+  });
+  const rest = free.filter((p) => p != null);
+  return out.map((p) => (p == null ? rest.shift() : p));
+}
+
+/**
+ * rotateVoices, then moved by whole octaves back around where the chord was (centerVoicing's
+ * rule), so stepping through inversions re-voices the chord in place instead of climbing. Comes
+ * back note by note by pitch class: the input's C is the output's C.
+ */
+export function invertVoices(midis, steps = 1) {
+  const voices = (midis ?? []).map((m) => Math.round(m));
+  if (voices.length < 2) return voices;
+  const rotated = rotateVoices(voices, steps);
+  const shift = centerVoicing(rotated, voices)[0] - Math.min(...rotated);
+  return byPitchClass(voices, rotated.map((m) => m + shift));
+}
+
+/**
+ * Widens a chord by octaves, from the middle out: the lowest and highest voices move `amount`
+ * octaves away from the middle and the voices between move in proportion, rounded to whole
+ * octaves (a half rounds toward the middle), so every voice keeps its pitch class. A negative
+ * amount pulls the outer voices in.
+ */
+export function spreadVoices(midis, amount = 1) {
+  const voices = (midis ?? []).map((m) => Math.round(m));
+  const len = voices.length;
+  const n = Number(amount);
+  if (len < 2 || !Number.isFinite(n) || !n) return voices;
+  const rank = voices.map((m, i) => i).sort((a, b) => voices[a] - voices[b] || a - b);
+  const out = [...voices];
+  rank.forEach((v, r) => {
+    const x = (2 * r / (len - 1) - 1) * n;
+    out[v] += 12 * Math.sign(x) * Math.ceil(Math.abs(x) - 0.5);
+  });
+  return out;
+}
+
+/** The voicing names voicingVoices() knows. */
+export const VOICING_NAMES = Object.freeze(['close', 'open', 'drop2', 'drop3', 'shell']);
+
+/**
+ * A named voicing, voice by voice: 'close' folds every voice into the octave above the bass
+ * (doublings drop out), 'open' raises every second voice above the bass an octave, 'drop2' and
+ * 'drop3' drop the second and third voice from the top an octave, 'shell' keeps only the root,
+ * 3rd and 7th. Same voices back when the voicing doesn't apply to this chord (too few voices, no
+ * 7th to shell onto); undefined for a name it doesn't know.
+ */
+export function voicingVoices(midis, name) {
+  const voices = (midis ?? []).map((m) => Math.round(m));
+  const len = voices.length;
+  // Voice indices low to high (ties keep input order).
+  const order = voices.map((m, i) => i).sort((a, b) => voices[a] - voices[b] || a - b);
+  const moved = (fn) => {
+    const out = [...voices];
+    order.forEach((v, r) => { out[v] = fn(voices[v], r); });
+    return out;
+  };
+  switch (String(name)) {
+    case 'close': {
+      if (len < 2) return voices;
+      const bass = voices[order[0]];
+      const seen = new Set();
+      const out = moved((m, r) => (r === 0 ? m : bass + ((pc(m) - pc(bass)) + 12) % 12));
+      // A doubling folds onto a voice already there: keep the lower voice, drop the rest - but a
+      // chord of one pitch class keeps its octave, so a chord in stays a chord out.
+      if (new Set(voices.map(pc)).size === 1) return moved((m, r) => bass + 12 * Math.min(r, 1));
+      return out.map((m, i) => {
+        const key = i === order[0] ? bass : m === bass ? null : m;
+        if (key == null || seen.has(key)) return null;
+        seen.add(key);
+        return m;
+      });
+    }
+    case 'open':
+      return len < 3 ? voices : moved((m, r) => (r % 2 === 1 ? m + 12 : m));
+    case 'drop2':
+      return len < 3 ? voices : moved((m, r) => (r === len - 2 ? m - 12 : m));
+    case 'drop3':
+      return len < 4 ? voices : moved((m, r) => (r === len - 3 ? m - 12 : m));
+    case 'shell': {
+      const a = analyzeChord(voices);
+      if (!a) return voices;
+      const iv = (m) => ((pc(m) - a.rootPc) + 12) % 12;
+      const pick = (want) => order.find((v) => want.includes(iv(voices[v])));
+      const root = pick([0]);
+      const third = pick([3, 4]);
+      const seventh = pick([10, 11]);
+      if (root == null || third == null || seventh == null) return voices;
+      const above = (from, target) => { let m = from + 1; while (pc(m) !== pc(target)) m++; return m; };
+      const out = voices.map(() => null);
+      out[root] = voices[root];
+      out[third] = above(voices[root], voices[third]);
+      out[seventh] = above(out[third], voices[seventh]);
+      return out;
+    }
+    default:
+      return undefined;
+  }
+}
+
+// How far a led chord's middle may wander from home (in semitones) before it pays for it. Inside
+// the window only movement counts; past it every semitone costs as much as moving every voice one.
+const LEAD_WINDOW = 6;
+
+// How far voices travel between two chords. Same size: voice to voice, low to high - on a line,
+// pairing in order is the cheapest pairing there is. Different sizes: each note's distance to the
+// nearest note of the other chord, summed both ways, so a held common tone still costs nothing.
+function voiceMotion(a, b) {
+  if (a.length === b.length) {
+    const x = [...a].sort((p, q) => p - q);
+    const y = [...b].sort((p, q) => p - q);
+    return x.reduce((s, m, i) => s + Math.abs(m - y[i]), 0);
+  }
+  const near = (m, set) => Math.min(...set.map((v) => Math.abs(v - m)));
+  return a.reduce((s, m) => s + near(m, b), 0) + b.reduce((s, m) => s + near(m, a), 0);
+}
+
+/**
+ * Voice leading: the inversion (rotateVoices) and octave of this chord that moves least from
+ * `prev`, kept near `home` (a MIDI note; the chord's own middle when omitted). With no previous
+ * chord, the one whose middle is nearest home - the chord as written, when home is its own
+ * middle. The chord's shape survives (only rotations and octaves are tried); single notes come
+ * back untouched. Ties go to the fewer rotations, then the lower octave. Note by note by pitch
+ * class, like invertVoices.
+ */
+export function leadVoices(midis, prev = null, home = null) {
+  const voices = (midis ?? []).map((m) => Math.round(m));
+  if (voices.length < 2) return voices;
+  const center = Number.isFinite(home) ? home : meanOf(voices);
+  const before = prev?.length ? prev : null;
+  const pcCount = new Set(voices.map(pc)).size;
+  let best = voices;
+  let bestCost = Infinity;
+  for (let k = 0; k < pcCount; k++) {
+    const rotated = rotateVoices(voices, k);
+    const near = Math.round((center - meanOf(rotated)) / 12);
+    for (let oct = near - 2; oct <= near + 2; oct++) {
+      const cand = rotated.map((m) => m + 12 * oct);
+      const drift = Math.abs(meanOf(cand) - center);
+      const cost = before
+        ? voiceMotion(before, cand) + cand.length * Math.max(0, drift - LEAD_WINDOW)
+        : drift;
+      if (cost < bestCost - 1e-9) { best = cand; bestCost = cost; }
+    }
+  }
+  return byPitchClass(voices, best);
+}
