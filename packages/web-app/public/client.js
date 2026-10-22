@@ -2215,7 +2215,20 @@ async function pollConf(labelOverride) {
 // version that had been overridden, which is what made a `bass:` re-stated as a pianoroll report
 // "auto-pin: no synth(...) call" against the line above it.
 function blockForTrack(code, label) {
-  const named = labelsMod.splitLabeledBlocks(code).filter((b) => b.label === label);
+  // A monitored block's track is `<label>~M` (see groups.mjs's trackNames), and an unmarked one of
+  // the same name can be written beside it: each name picks among its own kind, the way the
+  // server picks which of them plays.
+  const suffix = groupsMod?.MONITOR_SUFFIX ?? '~M';
+  const monitored = String(label).endsWith(suffix);
+  const name = monitored ? label.slice(0, -suffix.length) : label;
+  const all = labelsMod.splitLabeledBlocks(code).filter((b) => b.label === name);
+  const named = all.some((b) => !!b.monitored === monitored) ? all.filter((b) => !!b.monitored === monitored) : all;
+  if (groupsMod) {
+    const ed = [cm, deckBCM].find((e) => e && e.getValue() === code);
+    const { shadowed } = groupsMod.trackNames(all, ed ? monitorPickerOf(ed).prefer : new Map());
+    const pick = named.find((b) => !b.muted && !shadowed.has(b));
+    if (pick) return pick;
+  }
   const live = named.filter((b) => !b.muted);
   return live[live.length - 1] ?? named[named.length - 1] ?? null;
 }
@@ -2372,8 +2385,8 @@ window.addEventListener('pagehide', () => {
 });
 
 // ---------------------------------------------------------------------------------------------
-// Muted-code dimming: blocks that won't play - muted (`_name:`) or not soloed while another
-// block is (`Sname:`) - render in the comment color, no syntax highlighting, so what's actually
+// Muted-code dimming: blocks that won't play - muted (`_name:`), not soloed while another
+// block is (`Sname:`), or an unmarked block another of the same name plays over - render in the comment color, no syntax highlighting, so what's actually
 // sounding is obvious at a glance. Recomputed straight from the buffer text on every edit
 // (mute/solo are just label spellings), no eval needed. Explicit `//` comments already get the
 // same treatment from the syntax mode itself.
@@ -2382,6 +2395,14 @@ window.addEventListener('pagehide', () => {
 // Per editor, since each deck dims its own buffer.
 const mutedDimTimers = new WeakMap();
 const mutedDimMarks = new WeakMap();
+// Per editor too: which block of a name was being cued (`M`), so that once the marker is dropped
+// the dimming - and blockForTrack - pick the block the server keeps playing (see monitorPicker).
+const monitorPickers = new WeakMap();
+function monitorPickerOf(ed) {
+  let p = monitorPickers.get(ed);
+  if (!p) monitorPickers.set(ed, (p = groupsMod.monitorPicker()));
+  return p;
+}
 
 // A label inside a group's braces is tokenized by the JS mode as an object PROPERTY (that is what
 // `kicks:` inside `{ }` is to JavaScript), which the theme paints dimmer than the top-level labels
@@ -2419,8 +2440,9 @@ function updateMutedDim(ed = cm) {
     ? groupsMod.markerResolver(blocks, tree, groupsMod.parentsOf(tree))
     : { isMuted: (b) => b.muted, isSoloed: (b) => b.soloed && !b.muted };
   const anySolo = blocks.some((b) => isSoloed(b) && !isMuted(b));
+  const shadowed = groupsMod ? monitorPickerOf(ed).names(blocks).shadowed : new Set();
   for (const b of blocks) {
-    if (!isMuted(b) && !(anySolo && !isSoloed(b))) continue;
+    if (!isMuted(b) && !(anySolo && !isSoloed(b)) && !shadowed.has(b)) continue;
     marks.push(
       ed.markText(ed.posFromIndex(b.start), ed.posFromIndex(b.end), { className: 'cm-muted-code' }),
     );
@@ -19764,6 +19786,7 @@ function renderTracks(result) {
     head.appendChild(name);
     if (t.muted) head.appendChild(badge('muted', 'badge-muted'));
     if (t.soloed) head.appendChild(badge('solo', 'badge-solo'));
+    if (t.monitored) head.appendChild(badge('cue', 'badge-solo'));
     if (!t.active && !t.muted) head.appendChild(badge('off', 'badge-muted'));
     const confBtn = document.createElement('button');
     confBtn.className = 'small conf-btn';
@@ -35517,7 +35540,7 @@ function setSnippetSaveNote(text, isError = false) {
 /** The name to offer: what the selection's first block calls itself. */
 function suggestedSnippetName(body) {
   const label = (/^[ \t]*([A-Za-z_$][\w$]*)[ \t]*:(?!:)/m.exec(body) ?? [])[1] ?? '';
-  return label === '$' ? '' : label.replace(/^[_S](?=[A-Za-z_$])/, '').toLowerCase();
+  return label === '$' ? '' : label.replace(/^[_SM](?=[A-Za-z_$])/, '').toLowerCase();
 }
 
 async function openSnippetSave(ed = activeCM()) {
@@ -36155,8 +36178,8 @@ function writeClipboard(text) {
 
 /**
  * Why `name` can't be a track's label, or '' when it can. The parser reads a leading or trailing
- * `_` as the mute marker and `S` as the solo marker (see labels.mjs's stripMarkers), so a name
- * spelled that way would come back as a different, muted or soloed track.
+ * `_` as the mute marker, `S` as the solo marker and `M` as the monitor marker (see labels.mjs's
+ * stripMarkers), so a name spelled that way would come back as a different, marked track.
  */
 function labelNameProblem(name) {
   if (!name) return 'a track needs a name';
@@ -36164,6 +36187,7 @@ function labelNameProblem(name) {
   if (name.startsWith('$')) return 'a name starting with $ is an unnamed track';
   if (/^_|_$/.test(name)) return 'a leading or trailing _ would read as the mute marker';
   if (/^S.|.S$/.test(name)) return 'a leading or trailing S would read as the solo marker';
+  if (/^M.|.M$/.test(name)) return 'a leading or trailing M would read as the monitor marker';
   return '';
 }
 

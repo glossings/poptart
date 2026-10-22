@@ -132,9 +132,9 @@ function labelTokenAt(code, block) {
   return { from, to: from + m[1].length, raw: m[1] };
 }
 
-// The token with its mute/solo markers stripped, exactly as the splitter's parseLabel strips
-// them (leading/trailing `_` mutes, then leading/trailing capital `S` solos, repeatedly, never
-// down to an empty name).
+// The token with its mute/solo/monitor markers stripped, exactly as the splitter's parseLabel
+// strips them (leading/trailing `_` mutes, then leading/trailing capital `S` solos, then capital
+// `M` monitors, repeatedly, never down to an empty name).
 function labelBase(raw) {
   let name = raw;
   let changed = true;
@@ -146,6 +146,9 @@ function labelBase(raw) {
     } else if (name.startsWith('S') || name.endsWith('S')) {
       name = name.startsWith('S') ? name.slice(1) : name.slice(0, -1);
       changed = true;
+    } else if (name.startsWith('M') || name.endsWith('M')) {
+      name = name.startsWith('M') ? name.slice(1) : name.slice(0, -1);
+      changed = true;
     }
   }
   return name;
@@ -153,17 +156,19 @@ function labelBase(raw) {
 
 /**
  * The edit that sets a block's mute/solo state: rewrites the label token in the canonical marker
- * form (`_Sname` - underscore first, exactly what parseLabel reads back as muted+soloed). Null
+ * form (`_SMname` - underscore first, exactly what parseLabel reads back as muted+soloed+monitored).
+ * A monitor marker the label already carries is kept: the mixer's buttons are mute and solo. Null
  * when the block isn't in the buffer or has no label token to mark. The block keeps its parsed
  * label either way, so nothing else about the strip changes identity.
  */
-export function flagEdit(code, label, { muted = false, soloed = false } = {}, ctx = null) {
+export function flagEdit(code, label, { muted = false, soloed = false, monitored = null } = {}, ctx = null) {
   const { blocks } = ctx ?? { blocks: splitLabeledBlocks(code) };
   const block = blocks.find((b) => b.label === label);
   if (!block) return null;
   const tok = labelTokenAt(code, block);
   if (!tok) return null;
-  const text = `${muted ? '_' : ''}${soloed ? 'S' : ''}${labelBase(tok.raw)}`;
+  const mon = monitored ?? !!block.monitored;
+  const text = `${muted ? '_' : ''}${soloed ? 'S' : ''}${mon ? 'M' : ''}${labelBase(tok.raw)}`;
   return { from: tok.from, to: tok.to, text };
 }
 
@@ -468,13 +473,13 @@ export function renameEdits(code, label, newName, ctx = null) {
     return { error: `"${name}" can't be a pattern name - names start with a letter, _ or $ and hold letters, digits, _ or $` };
   }
   if (name === '$' || labelBase(name) !== name) {
-    return { error: `"${name}" reads as a mute/solo marker (a leading or trailing _ or capital S) rather than a name` };
+    return { error: `"${name}" reads as a mute/solo/monitor marker (a leading or trailing _, capital S or capital M) rather than a name` };
   }
   if (blocks.some((b) => b !== block && b.label === name)) {
     return { error: `"${name}" is already another pattern's name` };
   }
   const map = new Map([[label, name]]);
-  const markers = `${block.muted ? '_' : ''}${block.soloed ? 'S' : ''}`;
+  const markers = `${block.muted ? '_' : ''}${block.soloed ? 'S' : ''}${block.monitored ? 'M' : ''}`;
   const tok = labelTokenAt(code, block);
   const head = tok
     ? { from: tok.from, to: tok.to, text: `${markers}${name}` }

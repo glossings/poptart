@@ -24,9 +24,11 @@ const path = require('node:path');
 // labels.mjs is ESM and this file is CommonJS, so it is imported once up front. The path comes
 // off the package the way param-mapping.test.js reaches scheduler.mjs.
 let labelsMod;
+let groupsMod;
 test.before(async () => {
   const dir = path.dirname(require.resolve('@poptart/pattern-core'));
   labelsMod = await import(require('node:url').pathToFileURL(path.join(dir, 'labels.mjs')).href);
+  groupsMod = await import(require('node:url').pathToFileURL(path.join(dir, 'groups.mjs')).href);
 });
 
 const SRC = fs.readFileSync(path.join(__dirname, 'public', 'client.js'), 'utf8');
@@ -50,7 +52,7 @@ const bodies = ['matchParen', 'codeOnly', 'blockOwnCode', 'firstStringLiteral', 
   .map(grab)
   .join('\n\n');
 // eslint-disable-next-line no-new-func
-const load = new Function('labelsMod', 'cm', `${bodies}\nreturn { findChainCall, findChainHandleAt, blockForTrack, applyBufferEdits, slotOfPluginNow };`);
+const loadWith = new Function('labelsMod', 'groupsMod', 'cm', 'deckBCM', 'monitorPickerOf', `${bodies}\nreturn { findChainCall, findChainHandleAt, blockForTrack, applyBufferEdits, slotOfPluginNow };`);
 
 // The editor stands in as a plain string, since every edit here is an offset splice.
 function fakeCm(text) {
@@ -64,6 +66,13 @@ function fakeCm(text) {
   return cm;
 }
 
+// The per-editor monitor picker, fresh for each editor as in client.js's monitorPickerOf.
+const pickers = new WeakMap();
+const pickerOf = (ed) => {
+  if (!pickers.has(ed)) pickers.set(ed, groupsMod.monitorPicker());
+  return pickers.get(ed);
+};
+const load = (labels, cm) => loadWith(labels, groupsMod, cm, null, pickerOf);
 const api = (cm = fakeCm('')) => load(labelsMod, cm);
 
 // What createPresetForSlot hands applyBufferEdits, in the order it hands it over: the definition
@@ -185,4 +194,14 @@ test('a capture follows its plugin when the chain was reordered before it was wr
   const twice = 'bass: pianoroll("60").synth("Serum").fx("Pro-Q").fx("Pro-Q").fx("ValhallaRoom")\n';
   assert.equal(slotOfPluginNow(twice, 'bass', 3, 'Pro-Q'), 3);
   assert.equal(slotOfPluginNow(code, 'bass', 1, 'Gone'), 1, 'a plugin no longer in the chain keeps its slot for the check to refuse');
+});
+
+test('a monitored track\'s captures land in the monitored block, and the plain name\'s in the original', () => {
+  // bass~M is the server's name for the cued copy written beside bass (groups.mjs's trackNames).
+  const { blockForTrack } = api();
+  const code = 'bass: pianoroll("a").synth("Serum 2")\nbassM: pianoroll("b").synth("Serum 2")\n';
+  assert.match(code.slice(...['start', 'end'].map((k) => blockForTrack(code, 'bass')[k])), /pianoroll\("a"\)/);
+  assert.match(code.slice(...['start', 'end'].map((k) => blockForTrack(code, 'bass~M')[k])), /pianoroll\("b"\)/);
+  // A monitored block alone answers to its plain name as well.
+  assert.equal(blockForTrack('leadM: s("bd")\n', 'lead').monitored, true);
 });

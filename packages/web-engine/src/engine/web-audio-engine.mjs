@@ -1615,7 +1615,7 @@ export class WebAudioEngine {
         // put the whole track into the bus for the length of the ramp.
         node = this.ctx.createGain();
         node.gain.value = send.amount ?? 1;
-        track.panner.connect(node);
+        track.monGate.connect(node); // a monitored track feeds no bus (see Track's monGate)
         node.connect(this._bus(send.name));
         track.sends.set(send.name, node);
         continue;

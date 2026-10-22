@@ -147,6 +147,8 @@ export function createEvaluator({ patternCore, engine, transport, prebakeDefs = 
   // about a name that is plainly in the buffer. (The desktop does this in its engine wrapper.)
   engine.setTrackResolver?.((label) => trackIds.get(label) ?? label);
   const hlTracks = new Map();          // label -> { sig, start, end, clock }
+  // Monitor (`M`) takeovers: which block was being cued (see patternCore.monitorPicker).
+  const monitorPicker = patternCore.monitorPicker();
   const eventLog = [];
   let nextTrackNum = 1;
   let arrangeClock = null;
@@ -398,13 +400,35 @@ export function createEvaluator({ patternCore, engine, transport, prebakeDefs = 
 
     // Mute and solo travel down the group tree, and solo travels up it as well: a soloed track is
     // only audible through the groups it mixes into. Mute wins over solo wherever it is written.
-    const { isMuted, isSoloed } = patternCore.markerResolver(built, groupTree, routed.routedParents);
+    const { isMuted, isSoloed, isMonitored } = patternCore.markerResolver(built, groupTree, routed.routedParents);
     const anySolo = built.some((b) => isSoloed(b) && !isMuted(b));
-    const active = built.filter((b) => !isMuted(b) && (!anySolo || isSoloed(b)));
+
+    // Monitor (`M`): a monitored block is a track of its own (`bass~M`) beside an unmarked one of
+    // the same name, and dropping the `M` re-keys it onto the plain name in place of the original
+    // (see the desktop server's eval, and patternCore.trackNames). The browser has no headphone
+    // cue, so here a monitored track is not heard at all - which the log says.
+    const cuedName = (label) => `${label}${patternCore.MONITOR_SUFFIX}`;
+    const names = monitorPicker.names(built, (label) => schedulers.has(cuedName(label)));
+    const active = built.filter((b) => !isMuted(b) && (!anySolo || isSoloed(b)) && !names.shadowed.has(b));
+    for (const { from, to } of names.handed.map((label) => ({ from: cuedName(label), to: label }))) {
+      if (!active.some((b) => names.nameOf(b) === to)) continue;
+      const old = schedulers.get(to);
+      if (old) old.stop();
+      if (trackIds.has(to)) engine.destroyTrack?.(trackIds.get(to));
+      const sch = schedulers.get(from);
+      schedulers.delete(from);
+      schedulers.set(to, sch);
+      sch.label = to;
+      trackIds.set(to, trackIds.get(from));
+      trackIds.delete(from);
+    }
+    for (const b of active) if (b.monitored) b.sig = patternCore.monitorSig(b.sig);
+    const cued = active.filter((b) => b.monitored).map((b) => b.label);
+    if (cued.length) say(`[${cued.join(', ')}] M plays to a headphone cue, which the browser doesn't have - not heard`);
 
     // Tracks whose label disappeared, or that are now muted or un-soloed, stop.
     for (const [label, sch] of [...schedulers]) {
-      if (active.some((b) => b.label === label)) continue;
+      if (active.some((b) => names.nameOf(b) === label)) continue;
       sch.stop();
       schedulers.delete(label);
     }
@@ -414,7 +438,7 @@ export function createEvaluator({ patternCore, engine, transport, prebakeDefs = 
     const toStart = [];
 
     for (const b of active) {
-      const label = b.label;
+      const label = names.nameOf(b);
       const tid = claimTrack(label);
       let sch = schedulers.get(label);
       engine.createTrack(tid);
@@ -434,7 +458,7 @@ export function createEvaluator({ patternCore, engine, transport, prebakeDefs = 
 
     hlTracks.clear();
     for (const b of active) {
-      hlTracks.set(b.label, { sig: b.sig, start: b.start, end: b.end, clock: b.trackClock ?? arrangeClock });
+      hlTracks.set(names.nameOf(b), { sig: b.sig, start: b.start, end: b.end, clock: b.trackClock ?? arrangeClock });
     }
     const gridFrom = Math.floor(transport.cycleAt(transport.getTime()));
 
@@ -445,9 +469,11 @@ export function createEvaluator({ patternCore, engine, transport, prebakeDefs = 
       const playing = active.includes(b);
       return {
         label: b.label,
-        key: b.label,
+        key: names.nameOf(b),
         muted: isMuted(b),
         soloed: isSoloed(b),
+        monitored: isMonitored(b),
+        shadowed: names.shadowed.has(b),
         active: playing,
         start: b.start,
         end: b.end,

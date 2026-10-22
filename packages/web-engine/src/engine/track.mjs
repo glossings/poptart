@@ -19,7 +19,7 @@
 import { TRACK_BEND_PARAM, argToValue, clampParam, defaultValues, findParam, normalize } from '../descriptor.mjs';
 
 /** Channel-strip controls this engine implements. The rest warn once - see the engine. */
-export const SUPPORTED_CHANNELS = Object.freeze(['gain', 'postgain', 'pan', 'dry', 'width', 'bassmono', 'bend', 'bendrange', 'out', 'grainsize', 'grainrate', 'grainpan', 'grainpos']);
+export const SUPPORTED_CHANNELS = Object.freeze(['gain', 'postgain', 'pan', 'dry', 'mon', 'width', 'bassmono', 'bend', 'bendrange', 'out', 'grainsize', 'grainrate', 'grainpan', 'grainpos']);
 
 /**
  * The strip's constant-power pan, the desktop's law: a sine/cosine pair referenced to the CENTER,
@@ -173,6 +173,11 @@ export class Track {
     this.stripSeen = new Set(); // the strip controls set so far (see setChannel)
     this.postGain = ctx.createGain();       // the `postgain` control: level out of it
     this.dryGain = ctx.createGain();        // the `dry` control: level to the master
+    // The `mon` control (a label's `M` marker): the desktop sends a monitored track to the
+    // headphone cue pair and nothing to the room. There is no cue pair here, so it is a gate on
+    // everything the room hears - the direct output and the bus sends - with the taps and
+    // analysers still reading the panner.
+    this.monGate = ctx.createGain();
 
     // THE STRIP, the desktop's order: width, then bass mono, then pan (see poptart.scd's track
     // synth). Width is mid/side - the sum left alone, the difference scaled, 0 mono and 4 four
@@ -237,7 +242,8 @@ export class Track {
     this.panL.connect(this.merge, 0, 0);
     this.panR.connect(this.merge, 0, 1);
     this.merge.connect(this.panner);
-    this.panner.connect(this.dryGain);
+    this.panner.connect(this.monGate);
+    this.monGate.connect(this.dryGain);
     this.master = master;
     this.dryGain.connect(master);
 
@@ -494,6 +500,7 @@ export class Track {
         return true;
       }
       case 'dry': rampParam(this.dryGain.gain, value, atTime, now, g); return true;
+      case 'mon': rampParam(this.monGate.gain, value > 0 ? 0 : 1, atTime, now, g); return true;
       default:
         if (name.startsWith('wet')) {
           // Kept for an empty slot too: the level waits for whatever device is put there.
@@ -620,6 +627,7 @@ export class Track {
       this.chainIn.disconnect();
       this.postGain.disconnect();
       this.panner.disconnect();
+      this.monGate.disconnect();
       this.merge.disconnect();
       this.split.disconnect();
       this.dryGain.disconnect();

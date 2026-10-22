@@ -150,14 +150,20 @@ export function descendantsOf(label, tree) {
  * `_lead:` beside `lead:`, and the unmarked one keeps playing. Inherited markers go by name, since
  * the tree is keyed by name.
  *
- * Returns `{ isMuted(block), isSoloed(block) }`. `parents` is the child-to-group map that solo
+ * Monitor (`M`) travels down the same way, for what the editor and the mixer SHOW: a member of a
+ * monitored group is heard in the headphones because the group is. The engine only needs the
+ * marked block itself (see monitorSig) - its members already mix into it.
+ *
+ * Returns `{ isMuted(block), isSoloed(block), isMonitored(block) }`. `parents` is the child-to-group map that solo
  * climbs, which the host takes from its routing and the editor from parentsOf(tree).
  */
 export function markerResolver(blocks, tree, parents) {
   const mutedUnder = new Set();
   const soloedUnder = new Set();
+  const monitoredUnder = new Set();
   const soloSources = [];
   for (const b of blocks) {
+    if (b.monitored) for (const label of descendantsOf(b.label, tree)) monitoredUnder.add(label);
     if (!b.muted && !b.soloed) continue;
     const under = descendantsOf(b.label, tree);
     for (const label of under) (b.muted ? mutedUnder : soloedUnder).add(label);
@@ -169,6 +175,7 @@ export function markerResolver(blocks, tree, parents) {
   return {
     isMuted: (b) => !!b.muted || mutedUnder.has(b.label),
     isSoloed: (b) => (!!b.soloed && !b.muted) || soloedUnder.has(b.label),
+    isMonitored: (b) => !!b.monitored || monitoredUnder.has(b.label),
   };
 }
 
@@ -273,3 +280,78 @@ export function routeGroups(blocks, busOf = (label) => label, tree = null) {
   return { groups, members, tree: t, parents, routedParents };
 }
 
+
+// The engine name a monitored block plays under, beside an unmarked block of the same name: the
+// suffix is not something a label can spell, so it never collides with a real track.
+export const MONITOR_SUFFIX = '~M';
+
+/**
+ * Which blocks play, and under which track name. Two blocks can strip to one name - `bass:` and
+ * `bassM:` - and the monitored one is a track of its own (`bass~M`), so a replacement part can be
+ * cued in the headphones while the original plays to the room. Among unmarked blocks of one name
+ * only one plays, and the rest are `shadowed`: the last one written, unless `prefer` names another
+ * (label -> its position among that name's unmuted blocks, in source order). The host remembers
+ * that position when a monitored block loses its `M` (see `monitorAt`), so the part that was
+ * cued is the one that takes over, wherever it was written. The same rule picks among two
+ * monitored blocks of one name. Muted blocks are never picked or shadowed: they play nothing,
+ * which is what has always let `_lead:` sit beside `lead:`.
+ *
+ * Returns `{ nameOf(block), shadowed: Set<block>, monitorAt: Map<label, position> }`.
+ */
+export function trackNames(blocks, prefer = new Map()) {
+  const byLabel = new Map();
+  for (const b of blocks) {
+    if (b.muted) continue;
+    if (!byLabel.has(b.label)) byLabel.set(b.label, []);
+    byLabel.get(b.label).push(b);
+  }
+  const shadowed = new Set();
+  const monitorAt = new Map();
+  for (const [label, all] of byLabel) {
+    for (const monitored of [false, true]) {
+      const same = all.filter((b) => !!b.monitored === monitored);
+      if (!same.length) continue;
+      const want = monitored ? null : prefer.get(label);
+      const pick = want != null && same.includes(all[want]) ? all[want] : same[same.length - 1];
+      for (const b of same) if (b !== pick) shadowed.add(b);
+      if (monitored) monitorAt.set(label, all.indexOf(pick));
+    }
+  }
+  return {
+    nameOf: (b) => (b.monitored ? `${b.label}${MONITOR_SUFFIX}` : b.label),
+    shadowed,
+    monitorAt,
+  };
+}
+
+/**
+ * trackNames with the memory a takeover needs, for one buffer across its evaluations. `wasCued`
+ * says whether a name had a monitored track playing until now (the host's schedulers know; by
+ * default, whether the last call saw one). A name that had one and now has only unmarked blocks
+ * is `handed` over: the host moves the cued track onto the plain name, and the block that was
+ * cued is the one picked to play from then on - for as long as the original is still written
+ * beside it.
+ */
+export function monitorPicker() {
+  let at = new Map();
+  const prefer = new Map();
+  return {
+    prefer,
+    names(blocks, wasCued = (label) => at.has(label)) {
+      const unmuted = blocks.filter((b) => !b.muted);
+      const cued = new Set(unmuted.filter((b) => b.monitored).map((b) => b.label));
+      const handed = [];
+      for (const label of new Set(unmuted.filter((b) => !b.monitored).map((b) => b.label))) {
+        if (cued.has(label) || !wasCued(label)) continue;
+        handed.push(label);
+        if (at.has(label)) prefer.set(label, at.get(label));
+      }
+      const names = trackNames(blocks, prefer);
+      at = names.monitorAt;
+      for (const label of [...prefer.keys()]) {
+        if (unmuted.filter((b) => b.label === label && !b.monitored).length < 2) prefer.delete(label);
+      }
+      return { ...names, handed };
+    },
+  };
+}

@@ -1333,6 +1333,13 @@ const deckLive = {
 };
 const deckLiveSynced = (deck) => !mixState.dj || deckLive[deck].sync;
 
+// Monitor (`M`) takeovers, per deck: which block was being cued, so that once its `M` is dropped
+// it is the one that keeps playing while the original is still written beside it (see
+// patternCore.monitorPicker). Made on first use: patternCore is an import that lands after this
+// file has run.
+const monitorPickers = { a: null, b: null };
+const monitorPickerOf = (deck) => (monitorPickers[deck] ??= patternCore.monitorPicker());
+
 /** Put a deck's clock where its state says: sync, the fader's share of its own tempo, the bend. */
 function deckClockApply(deck) {
   const clock = deckClocks[deck];
@@ -7692,16 +7699,46 @@ const routes = {
     // inside a soloed group.
     // Solo travels UP it as well: a soloed track is only audible through the groups it mixes into.
     // A block's own marker stays on that block, so `_lead:` beside `lead:` leaves the second playing.
-    const { isMuted, isSoloed } = patternCore.markerResolver(built, groupTree, routed.routedParents);
+    const { isMuted, isSoloed, isMonitored } = patternCore.markerResolver(built, groupTree, routed.routedParents);
     const anySolo = built.some((b) => isSoloed(b) && !isMuted(b));
-    const active = built.filter((b) => !isMuted(b) && (!anySolo || isSoloed(b)));
+
+    // Monitor (`M`): a monitored block plays to the headphone cue pair and not the room, as a
+    // track of its own (`bass~M`) beside an unmarked block of the same name - which is how a
+    // replacement part is cued while the original plays. Dropping the `M` hands the cued track
+    // over to the plain name: the original's track goes, and the cued one is re-keyed in its place
+    // (rekeyTrack - the engine never blinks), so the part already playing in the headphones simply
+    // opens onto the main output, its plugins loaded and its phase where it was.
+    const cuedKey = (label) => keyOfBlock(`${label}${patternCore.MONITOR_SUFFIX}`);
+    const names = monitorPickerOf(deck).names(built, (label) => schedulers.has(cuedKey(label)));
+    const keyOf = (b) => keyOfBlock(names.nameOf(b));
+    const active = built.filter((b) => !isMuted(b) && (!anySolo || isSoloed(b)) && !names.shadowed.has(b));
+    for (const { from, to } of names.handed.map((label) => ({ from: cuedKey(label), to: keyOfBlock(label) }))) {
+      if (!active.some((b) => keyOf(b) === to)) continue; // soloed away: nothing to take over
+      const old = schedulers.get(to);
+      if (old) {
+        old.stop();
+        schedulers.delete(to);
+        mappedEngine.removeChain(engineTrack(to));
+      }
+      if (trackIds.has(to)) dropTrack(to);
+      rekeyTrack(from, to);
+    }
+    // A block's OWN marker turns its track's `mon` on. A monitored group's members need nothing
+    // of their own: they mix into the group, and the group is what goes to the headphones.
+    for (const b of active) if (b.monitored) b.sig = patternCore.monitorSig(b.sig);
+    if (activeCue == null) {
+      const cued = active.filter((b) => b.monitored).map((b) => b.label);
+      if (cued.length) {
+        eventLogQueue.push(`[${cued.join(', ')}] M plays to the headphone cue, and no cue output is set in the audio settings - not heard`);
+      }
+    }
 
     // Stop tracks whose label disappeared (or that are now muted / un-soloed) - within THIS
     // deck only: the other deck's tracks are not in this buffer, and this eval must not touch
     // them (each deck sweeps its own).
     for (const [key, sch] of schedulers) {
       if (deckOfKey(key) !== deck) continue;
-      if (!active.some((b) => keyOfBlock(b.label) === key)) {
+      if (!active.some((b) => keyOf(b) === key)) {
         sch.stop();
         schedulers.delete(key);
         mappedEngine.removeChain(engineTrack(key));
@@ -7716,7 +7753,7 @@ const routes = {
     // voices first and eventually stops /s_new entirely. Every label in the buffer keeps its
     // track, muted or not; the song decks' own tracks are not the buffer's to reap.
     if (body.fresh === true) {
-      const claimed = new Set(built.map((b) => keyOfBlock(b.label)));
+      const claimed = new Set(built.map(keyOf));
       let reaped = 0;
       for (const key of [...trackIds.keys()]) {
         if (deckOfKey(key) !== deck || claimed.has(key)) continue;
@@ -7750,7 +7787,7 @@ const routes = {
     const toStart = [];
 
     for (const b of active) {
-      const key = keyOfBlock(b.label);
+      const key = keyOf(b);
       // The wrapper needs to know which plugin sits in each slot to pick the right mapping file.
       const tid = claimEngineTrack(key);
       // Sampler options on a chain that never names a source - note("c3").i(2) with no .s() -
@@ -7838,12 +7875,12 @@ const routes = {
 
     // Re-arm conf capture engine-side: sclang keeps the flag on its track object, which an
     // engine restart discards - the eval that recreates the track re-sends it. Idempotent.
-    if (conf && active.some((b) => keyOfBlock(b.label) === conf.trackId)) engine.setConfMode(engineTrack(conf.trackId), true);
+    if (conf && active.some((b) => keyOf(b) === conf.trackId)) engine.setConfMode(engineTrack(conf.trackId), true);
 
     // Refresh the highlight-grid source set to this eval's active tracks, and ship each active
     // track's first window inline so playback lights up immediately without a follow-up request.
     for (const k of [...hlTracks.keys()]) if (deckOfKey(k) === deck) hlTracks.delete(k);
-    for (const b of active) hlTracks.set(keyOfBlock(b.label), { sig: b.sig, start: b.start, end: b.end, clock: b.trackClock ?? null });
+    for (const b of active) hlTracks.set(keyOf(b), { sig: b.sig, start: b.start, end: b.end, clock: b.trackClock ?? null });
     const gridFrom = currentGridCycle(deck);
 
     // Pairs with the event-loop watchdog above: an evaluation that held the process this long
@@ -7856,11 +7893,14 @@ const routes = {
 
     const tracks = built.map((b) => ({
       label: b.label,
-      key: keyOfBlock(b.label), // what this track is called server-side (deck b keys are "b:<label>")
+      key: keyOf(b), // what this track is called server-side (deck b keys are "b:<label>", a monitored one's "<label>~M")
       // The EFFECTIVE flags - a member of a muted group reads as muted, which is what the
       // mixer's buttons and the editor's dimmed code both want to show.
       muted: isMuted(b),
       soloed: isSoloed(b),
+      monitored: isMonitored(b),
+      // An unmarked block another of the same name plays over (see trackNames).
+      shadowed: names.shadowed.has(b),
       active: active.includes(b),
       start: b.start,
       end: b.end,
@@ -9286,6 +9326,7 @@ const routes = {
     // main deck's now, with what the hand had asked of it - and nothing they play moves.
     [deckClocks.a, deckClocks.b] = [deckClocks.b, deckClocks.a];
     [deckLive.a, deckLive.b] = [deckLive.b, deckLive.a];
+    [monitorPickers.a, monitorPickers.b] = [monitorPickers.b, null];
     for (const d of ['a', 'b']) if (fxSchedulers[d] && deckClocks[d]) fxSchedulers[d].transport = deckClocks[d];
     patternCore.setGlobalScale(decks.a.scale ?? null);
     patternCore.restoreGlobalGroove(decks.a.groove ?? null);

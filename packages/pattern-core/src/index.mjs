@@ -5,7 +5,7 @@ export { normalizeSlicePositions, parseSlicePositions, serializeSlicePositions, 
 export { i, begin, end, loop, loopwrap, loopdir, speed, flip, stretch, fit, slice, splice, splicemode, attack, decay, sustain, release, envscale, grain, vel, clip, nudge, swing, swinggrid, swingvel, SAMPLER_CONTROL_NAMES } from './signal.mjs';
 // The binops as top-level builders - a layer piece's own verb: .set(note(30), add(note(12))).
 export { add, sub, mul, div, mod, set } from './signal.mjs';
-export { channelAt, soundingEnd, timeShift, grooveAt, grooveVelScale, endEdgeStep, withSoundingSpan, MAX_FX_SLOTS } from './signal.mjs';
+export { channelAt, soundingEnd, timeShift, grooveAt, grooveVelScale, endEdgeStep, withSoundingSpan, MAX_FX_SLOTS, monitorSig } from './signal.mjs';
 export { setPatternWarn, lfoShapes, lfoPoints, withNoteGate, withEventSpan, noteGateFromGrid, sampleEnvIR, NOTE_GATE_LOOKBACK_CYCLES } from './signal.mjs';
 export { feedMidiCC, midiInUse } from './midi.mjs';
 export { feedOsc, oscInUse, latestOsc, normalizeOscAddress } from './osc.mjs';
@@ -19,7 +19,7 @@ export { recordingToMini, UNQUANTIZED_GRID, recordingToRoll, captureWindow, reco
 export { parseMidiFile, midiFileToLanes, midiLanesToPianoroll, pickGrid, detectKey, GRID_CANDIDATES, BEATS_PER_CYCLE } from './midifile.mjs';
 export { parseMini, getStepsForCycle, stepLocs } from './mini.mjs';
 export { splitLabeledBlocks, isBareCallBlock, isBusBlock, isBodylessGroup, isRowlessBlock } from './labels.mjs';
-export { isGroupSig, routeGroups, treeOfBlocks, normalizeGroupTree, parentsOf, ancestorsOf, descendantsOf, markerResolver, groupOrder, GROUP_ROOT } from './groups.mjs';
+export { isGroupSig, routeGroups, treeOfBlocks, normalizeGroupTree, parentsOf, ancestorsOf, descendantsOf, markerResolver, trackNames, monitorPicker, MONITOR_SUFFIX, groupOrder, GROUP_ROOT } from './groups.mjs';
 export { injectLocations, isPatternPosition, miniOffRanges } from './locations.mjs';
 export { looksLikeShapeData, parseShapePoints, serializeShapePoints, sampleShape, curveInterp, SHAPE_PRESETS, parseAutoPoints, serializeAutoPoints, sampleAutoPoints, parseBendPoints, serializeBendPoints, sampleBendPoints, bendIsFlat } from './shape.mjs';
 export { extractGroove, fitGrooveGrid, grooveHitsOnGrid, grooveHitsInCycles, grooveHitsFromFile } from './groove-extract.mjs';

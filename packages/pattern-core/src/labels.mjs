@@ -5,6 +5,8 @@
 //   _bass: ...  /  bass_: ...   leading or trailing underscore mutes the pattern
 //   Sbass: ...  /  bassS: ...   leading or trailing capital S solos it (if anything is
 //                               soloed, only soloed patterns play; mute still wins)
+//   Mbass: ...  /  bassM: ...   leading or trailing capital M monitors it: it plays to the
+//                               headphone cue pair and not the main output
 //
 // A label must start at column 0 (identifier followed by ':' - inside a `group({ ... })` body it
 // may be indented, see NESTED_LABEL_RE) *and* be in code: a `name:` inside
@@ -133,7 +135,7 @@ function scan(state, text, mask = null, base = 0) {
 
 /**
  * @returns {Array<{ label: string, kind: 'labeled'|'anon'|'bare',
- *   muted: boolean, soloed: boolean, code: string, start: number, end: number,
+ *   muted: boolean, soloed: boolean, monitored: boolean, code: string, start: number, end: number,
  *   parent: string|null, depth: number, group?: boolean, bodyStart?: number, bodyEnd?: number }>}
  *   `start`/`end` are character offsets of the block in the original source (the label line
  *   included), for editor tooling. `code` is the block's executable source with the label
@@ -156,7 +158,7 @@ function scan(state, text, mask = null, base = 0) {
  * `bodyStart`/`bodyEnd` - the character span between them, which is what the editor folds. The
  * `group(` must head the block's expression; wrapped any deeper it is just an argument.
  *
- * `muted`/`soloed` are what THIS block's label says. A marker on a GROUP reaches everything under
+ * `muted`/`soloed`/`monitored` are what THIS block's label says. A marker on a GROUP reaches everything under
  * it, but that is the tree's business, so the host applies it (see groups.mjs's ancestorsOf and
  * descendantsOf) - this file stays a lexer.
  *
@@ -239,7 +241,7 @@ function splitBlocks(source, opts) {
       // `const`) is a setup block that binds/acts for the blocks below - see server.js.
       push();
       const label = `$${++counter.n}`;
-      current = { label, kind: 'bare', muted: false, soloed: false, code: line, start: base + offset, end: base + offset, parent, depth };
+      current = { label, kind: 'bare', muted: false, soloed: false, monitored: false, code: line, start: base + offset, end: base + offset, parent, depth };
       state = scan(newScan(), line);
       awaitingBody = false;
     } else if (current) {
@@ -418,14 +420,16 @@ function hasCode(text) {
 }
 
 /**
- * The mute/solo markers off a label token: `_bassS` -> { name: 'bass', muted, soloed }. Order
- * matters: strip mute underscores first so `_bassS:` works; keep stripping so `S_bass:` does too.
+ * The mute/solo/monitor markers off a label token: `_bassS` -> { name: 'bass', muted, soloed,
+ * monitored }. Order matters: strip mute underscores first so `_bassS:` works; keep stripping so
+ * `S_bass:` and `SMbass:` do too.
  * Never strip a marker if it would leave an empty name.
  */
 function stripMarkers(raw) {
   let name = raw;
   let muted = false;
   let soloed = false;
+  let monitored = false;
   let changed = true;
   while (changed && name.length > 1) {
     changed = false;
@@ -437,20 +441,24 @@ function stripMarkers(raw) {
       soloed = true;
       name = name.startsWith('S') ? name.slice(1) : name.slice(0, -1);
       changed = true;
+    } else if (name.length > 1 && (name.startsWith('M') || name.endsWith('M'))) {
+      monitored = true;
+      name = name.startsWith('M') ? name.slice(1) : name.slice(0, -1);
+      changed = true;
     }
   }
-  return { name, muted, soloed };
+  return { name, muted, soloed, monitored };
 }
 
 function parseLabel(raw, nextAnonName) {
   const stripped = stripMarkers(raw);
   let { name } = stripped;
-  const { muted, soloed } = stripped;
+  const { muted, soloed, monitored } = stripped;
   let anon = false;
 
   if (name === '$' || name === '') {
     name = nextAnonName();
     anon = true; // written `$:` - a track, just not a named one (see the kinds above)
   }
-  return { label: name, muted, soloed, anon };
+  return { label: name, muted, soloed, monitored, anon };
 }

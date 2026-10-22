@@ -277,11 +277,11 @@ var outOfRoom, outOfRoomSaid, outOfRoomPhrases;
 // The sampler's voice ceiling and the server's pressure gauge - see their definitions.
 var maxVoices = 1024, liveVoices, voiceBorn, voiceDone, voiceCapSaidAt = 0;
 var statusWatch, statusNodesHigh = false;
-// Set outright, never ramped. The first three are selectors, not levels. The grain controls are
+// Set outright, never ramped. The first three and mon are selectors, not levels. The grain controls are
 // levels, but their reader is a grain, which takes one value as it starts and keeps it: a ramp has
 // nothing to smooth there, and it would turn a polled rand() - a fresh draw per poll - into a
 // line wandering between draws, which is drift and not scatter.
-var steppedChannelControls = #[\out, \cue, \mdeck, \grainpos, \grainsize, \grainrate, \grainpan];
+var steppedChannelControls = #[\out, \cue, \mdeck, \mon, \grainpos, \grainsize, \grainrate, \grainpan];
 // The granular voice (see the poptart_sample_grain_ defs). GrainBuf reads ONE channel, so a stereo
 // file is granulated from a one-channel copy of each side, read the first time it is asked for:
 // bufnum -> [left, right], or \loading while the reads are out. Windows are keyed by the very
@@ -442,7 +442,7 @@ buildTrackDef = { |key|
     SynthDef(trackDefName.(key), { |inBus, gain = 1, postgain = 1, pan = 0, width = 1, bassmono = 0, out = 1, dry = 1, scSend, scSendGain = 1,
         bend = 0, bendrange = 2, bendOut,
         grainpos = 0, grainsize = 0.08, grainrate = 20, grainpan = 0, grainOut,
-        trim = 1, eqlo = 1, eqmid = 1, eqhi = 1, djf = 0, djres = 0, fader = 1, deck = 1, cue = 0, mdeck = -1,
+        trim = 1, eqlo = 1, eqmid = 1, eqhi = 1, djf = 0, djres = 0, fader = 1, deck = 1, cue = 0, mdeck = -1, mon = 0,
         busOut1, busOut2, busOut3, busOut4, busSend1 = 0, busSend2 = 0, busSend3 = 0, busSend4 = 0,
         fxOut, fxSend = 0,
         recOut, recSend = 0, mixOut, mixSend = 0|
@@ -474,6 +474,12 @@ buildTrackDef = { |key|
         // group's own output already applies it - carrying it into the sends too would square the
         // crossfade through every bus.
         var faderAmt = fader.lag(0.08).clip(0, 1);
+        // Monitor (a label's `M` marker - see monitorSig in pattern-core): the track goes to the
+        // headphone cue pair in full and to nothing the room hears - not the direct output, not
+        // its bus sends (which is how a group member reaches its group), not the DJ FX feed. The
+        // taps (recorder, mixer, deck meter) and the sidechain send keep reading it: they are
+        // listening, not playing. With no cue pair booted the track is simply not heard.
+        var mainAmt = 1 - mon.lag(0.05).clip(0, 1);
         var bendV, bendOn;
         // Pitch bend (Sig#bend), in semitones - a channel control like gain/pan, reaching this
         // synth by whichever route the control is driven from (a ramp for a polled signal, a
@@ -612,7 +618,7 @@ buildTrackDef = { |key|
         // doesn't click. Any number of tracks sending to the same bus sum into it; read the sum on
         // another track with the audio("name") source.
         [busOut1, busOut2, busOut3, busOut4].do { |b, i|
-            Out.ar(b, sig * [busSend1, busSend2, busSend3, busSend4][i].lag(0.02) * faderAmt);
+            Out.ar(b, sig * [busSend1, busSend2, busSend3, busSend4][i].lag(0.02) * faderAmt * mainAmt);
         };
         // Recorder tap (see the record section below): a copy of the post-fader output for the
         // meter and DiskOut synths, parked at trashBus with recSend 0 until a bounce taps it.
@@ -678,7 +684,8 @@ buildTrackDef = { |key|
         // deck at full level whatever the desk is doing. Compiled in only when the engine
         // booted with a cue pair (cueOffset from web-app's settings; an engine-restart choice).
         cueOffset !? {
-            Out.ar(cueOffset, live * cue.lag(0.05).clip(0, 1));
+            // ...or the whole of it, for a monitored track (`mon`, which also closes mainAmt).
+            Out.ar(cueOffset, live * cue.max(mon).lag(0.05).clip(0, 1));
         };
         // Deck meter send (the strip's channel meters): the same pre-fader point the cue tap
         // reads. mdeck picks the deck's meter bus (0 = A, 1 = B; a web-app birth arg), -1 - the
@@ -702,8 +709,8 @@ buildTrackDef = { |key|
         // One lag constant for both halves, so the swap is a crossfade between two paths that
         // carry the same signal and sums to unity throughout.
         fxAmt = fxSend.lag(0.08).clip(0, 1);
-        Out.ar(fxOut, live * fxAmt * faderAmt);
-        live = live * (1 - fxAmt) * faderAmt * deck.lag(0.08).clip(0, 1);
+        Out.ar(fxOut, live * fxAmt * faderAmt * mainAmt);
+        live = live * (1 - fxAmt) * faderAmt * deck.lag(0.08).clip(0, 1) * mainAmt;
         // `out` is the channel strip's stereo-pair selector (Sig#o, pseudo-slot -1 like gain/pan):
         // pair 1 = buses 0/1, pair 2 = 2/3, ..., wrapping past the device's last pair. Scaled by
         // `dry` (Sig#dry, channel control, default 1) so .dry(0)/.bsend() can mute the dry path

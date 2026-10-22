@@ -5134,11 +5134,25 @@ export const MAX_FX_SLOTS = 20; // must match maxSlots - 1 in poptart.scd (slot 
 // The binops a constant can be folded into a modulator's bounds through (see _binopValues).
 const LINEAR_OPS = new Set(['add', 'sub', 'mul', 'div']);
 
+/**
+ * A block whose label carries the monitor marker (`Mlead:` / `leadM:`): the same Sig with its
+ * `mon` channel control on, so it plays to the headphone cue pair instead of the main output.
+ * Riding a channel control means deleting the marker and re-evaluating snaps it back to 0 like
+ * any dropped control, with nothing of its own to tear down.
+ */
+export function monitorSig(sig) {
+  if (!sig || typeof sig._clone !== 'function') return sig;
+  return sig._clone({ channel: { ...sig.channel, mon: toSignal(1) } });
+}
+
 /** The channel controls a granular voice reads per grain rather than per block (see the scheduler). */
 export const GRAIN_CHANNELS = ['grainsize', 'grainrate', 'grainpan', 'grainpos'];
 export const CHANNEL_DEFAULTS = {
   gain: 1, postgain: 1, pan: 0, width: 1, bassmono: 0, out: 1, dry: 1,
   bend: 0, bendrange: DEFAULT_BEND_RANGE,
+  // Monitor (a label's `M` marker - see monitorSig): 1 sends the track to the headphone cue pair
+  // and nothing to the main output, its bus sends or the DJ FX feed. Not a builder of its own.
+  mon: 0,
   // The granular voice's live controls (Sig#grainsize and friends; grainpos is .begin(), streamed -
   // see the scheduler's _grainPosSig). Seconds, grains per second, -1..1, 0..1 of the file.
   grainsize: 0.08, grainrate: 20, grainpan: 0, grainpos: 0,
