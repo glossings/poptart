@@ -69,7 +69,7 @@
         <select id="themeSelect" title="color theme"></select>
         <button id="themeEditBtn" title="edit theme colors"><span class="ico">🎨</span></button>
         <a id="docsLink" class="hbtn" href="/docs/" target="_blank" rel="noopener" title="open the poptart guide in a new tab">docs <span class="ico">↗</span></a>
-        <button id="playBtn" class="primary" data-chord-title="{mod+enter}"><span class="ico">▶</span> play</button>
+        <button id="playBtn" class="primary" data-chord-title="{#play}"><span class="ico">▶</span> play</button>
         <button id="updateBtn" title="evaluate without changing play state"><span class="ico">↻</span> update</button>
       </header>
 
@@ -97,7 +97,7 @@
                  is what the deck's loader reads its pick from, never shown. -->
             <select id="deckAFile" hidden></select>
             <button id="deckASong" class="small deck-song deck-only" title="the song on this deck - click to pick another (opens organize; loading clears this deck's current tracks)">pick a song…</button>
-            <button id="deckAPlay" class="small deck-only" data-chord-title="{mod+enter}">&#9654; play</button>
+            <button id="deckAPlay" class="small deck-only" data-chord-title="{#play}">&#9654; play</button>
             <button id="deckAUpdate" class="small deck-only" title="evaluate without changing play state">&#8635;</button>
             <span class="deck-head-gap"></span>
             <button id="deckALoop" class="small deck-only deck-loop" title="loop the next stretch of this deck from where it is playing, like a player’s loop button - the length is beside it, and it holds until you press again. Works on a deck playing code and on one playing a file; nothing is written into the song">loop</button>
@@ -161,7 +161,7 @@
             <span class="deck-b-title">deck B</span>
             <select id="deckBFile" hidden></select>
             <button id="deckBSong" class="small deck-song" title="the song on this deck - click to pick another (opens organize)">pick a song…</button>
-            <button id="deckBPlay" class="small" data-chord-title="{mod+enter} in this pane">▶ play</button>
+            <button id="deckBPlay" class="small" data-chord-title="{#play} in this pane">▶ play</button>
             <button id="deckBUpdate" class="small" title="evaluate without changing play state">↻</button>
             <span class="deck-head-gap"></span>
             <button id="deckBLoop" class="small deck-loop" title="loop the next stretch of this deck from where it is playing, like a player’s loop button - the length is beside it, and it holds until you press again. Works on a deck playing code and on one playing a file; nothing is written into the song">loop</button>
@@ -296,8 +296,8 @@
               </h2>
               <input id="fileImportInput" type="file" accept=".js,text/javascript" hidden />
               <div class="file-save-row">
-                <button id="fileSaveBtn" data-chord-title="name this pattern and save it ({mod+s})">save</button>
-                <button id="fileSaveAsBtn" class="small" data-chord-title="save the buffer under a new name ({mod+shift+s})">save as…</button>
+                <button id="fileSaveBtn" data-chord-title="name this pattern and save it ({#save})">save</button>
+                <button id="fileSaveAsBtn" class="small" data-chord-title="save the buffer under a new name ({#saveAs})">save as…</button>
                 <span class="spacer"></span>
                 <button id="fileShareBtn" class="small hidden"
                   title="Copies a link that opens this pattern. Files added to this browser are named in it but not carried.">copy link</button>
@@ -404,6 +404,10 @@
                 <input id="ctrlTooltipsToggle" type="checkbox" checked />
                 tooltips only with ctrl held
               </label>
+              <div class="settings-actions">
+                <button id="hotkeysOpenBtn" class="small"
+                  title="every app chord, with a way to learn a different one for any of them">hotkeys…</button>
+              </div>
             </section>
             <section id="pianorollSection">
               <h2>piano roll</h2>
@@ -970,6 +974,21 @@
       </div>
     </div>
 
+    <div id="hotkeysBackdrop" class="dir-picker-backdrop hidden">
+      <div class="dir-picker hotkeys" role="dialog" aria-label="hotkeys">
+        <div class="dir-picker-head">
+          <span>hotkeys</span>
+          <span class="spacer"></span>
+          <button id="hotkeysClose" class="small">✕</button>
+        </div>
+        <div id="hotkeysList" class="hotkeys-list"></div>
+        <div class="dir-picker-foot">
+          <span id="hotkeysNote" class="dir-picker-note"></span>
+          <span class="spacer"></span>
+          <button id="hotkeysResetAll" class="small" title="every action back to its original chord">reset all</button>
+        </div>
+      </div>
+    </div>
     <div id="midiImportBackdrop" class="dir-picker-backdrop hidden">
       <div class="dir-picker midi-import" role="dialog" aria-label="import midi file">
         <div class="dir-picker-head">

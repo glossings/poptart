@@ -539,19 +539,17 @@ const cm = CodeMirror.fromTextArea(document.getElementById('editor'), {
   matchBrackets: true,
   autoCloseBrackets: true,
   viewportMargin: Infinity,
-  extraKeys: {
+  extraKeys: mainEditorKeys(),
+});
+
+// The main editor's keymap. Rebuilt whenever the hotkeys change (see the hotkeys section), so the
+// rebindable actions come from chords.js's table rather than being spelled here.
+function mainEditorKeys() {
+  return {
     // One indent level in, the mirror of the sublime keymap's Shift-Tab (indentLess). Left to
     // CodeMirror's default, Tab with nothing selected inserts a tab character - the only one in a
     // buffer made of spaces, and four columns wide against every two-space level around it.
     'Tab': 'indentMore',
-    'Cmd-Enter': () => evaluate(true, { byHand: true }),
-    'Ctrl-Enter': () => evaluate(true, { byHand: true }),
-    'Cmd-.': () => doStop('a'), // in DJ mode: this pane's deck only; otherwise a full stop
-    'Ctrl-.': () => doStop('a'),
-    'Cmd-S': () => savePatternFile(),
-    'Ctrl-S': () => savePatternFile(),
-    'Shift-Cmd-S': () => savePatternFileAs(),
-    'Shift-Ctrl-S': () => savePatternFileAs(),
     'Shift-Alt-Down': (cm) => copyLines(cm, 'down'),
     'Shift-Alt-Up': (cm) => copyLines(cm, 'up'),
     'Alt-Up': 'swapLineUp',
@@ -560,25 +558,27 @@ const cm = CodeMirror.fromTextArea(document.getElementById('editor'), {
     // The app's own chords have to be taken HERE as well as on the document, because CodeMirror's
     // keymaps bind several of them to editing commands of their own (the Mac keymap's Ctrl-A is
     // goLineStart, Ctrl-D delete-forward, Ctrl-F cursor-right) and it never lets the keystroke
-    // reach the document handler below. CM_APP is the app modifier in CodeMirror's spelling.
-    //
-    // The arrangement, never mod+A - select-all is select-all. This pane is deck A, so the chord
-    // here is deck A's arrangement (deck B's editor has its own).
-    [`${CM_APP}A`]: () => (arState && arDeck === 'a' ? closeArrangeEditor() : openArrangePainter('a')),
-    // DJ mode, the header's toggle.
-    [`${CM_APP}D`]: () => toggleMixMode(),
-    // The library browser (see toggleOrganize).
-    [`${CM_APP}O`]: () => toggleOrganize(),
-    // An effect at the caret (see insertFxCall).
-    [`${CM_APP}F`]: (ed) => insertFxCall(ed),
-    // Group the selected tracks (see groupSelection). The editing modifier, taking the sublime
-    // keymap's find-next - the mixer is app+G and the global dispatcher gets that first, so the
-    // two are a different keystroke on every platform. shift+ctrl+G is kept as it is: off macOS
-    // that was this chord back when plain ctrl+G meant the mixer.
-    [`${CM_MOD}G`]: (ed) => groupSelection(ed),
-    'Shift-Ctrl-G': (ed) => groupSelection(ed),
-  },
-});
+    // reach the document handler below. Spread last, so a chord someone learned wins over the
+    // editing commands above.
+    ...hotkeyCMKeys({
+      play: () => evaluate(true, { byHand: true }),
+      stop: () => doStop('a'), // in DJ mode: this pane's deck only; otherwise a full stop
+      save: () => savePatternFile(),
+      saveAs: () => savePatternFileAs(),
+      // The arrangement, never mod+A - select-all is select-all. This pane is deck A, so the chord
+      // here is deck A's arrangement (deck B's editor has its own).
+      arrange: () => (arState && arDeck === 'a' ? closeArrangeEditor() : openArrangePainter('a')),
+      dj: () => toggleMixMode(),
+      organize: () => toggleOrganize(),
+      fx: (ed) => insertFxCall(ed),
+      // Group the selected tracks (see groupSelection). The editing modifier by default, taking
+      // the sublime keymap's find-next - the mixer is app+G and the global dispatcher gets that
+      // first, so the two are a different keystroke on every platform.
+      group: (ed) => groupSelection(ed),
+      loops: () => loopsChord(),
+    }),
+  };
+}
 // Show the editor pane: CodeMirror is up and the buffer this URL opens with is in it. Called from
 // every exit of the boot handler below (index.html sets the flag, style.css hides the pane while
 // it's there) and, as a backstop, on a timer - a request that never comes back must not leave the
@@ -596,7 +596,16 @@ setTimeout(editorReady, 2000);
 // the piano roll are outside this guard entirely for that reason. A dialog that is that kind of
 // panel says so with `keeps-transport`, and those two keys alone reach past it; everything else
 // (⌘S in particular) still belongs to the dialog.
-const TRANSPORT_KEY = (e) => e.key === 'Enter' || (e.key === '.' && !e.shiftKey);
+// The actions the handler below takes, in the order it tries them (see HOTKEY_ACTIONS).
+const DOC_HOTKEYS = ['play', 'stop', 'cue', 'loops', 'arrange', 'save', 'saveAs', 'dj', 'organize'];
+// On the DESK the loops chord is the deck's loop switch, the chord for the button in its head -
+// because DJ mode opens with the loops OFF, so there is usually no armed region for the one-region
+// release below to let go of, and the thing the hand wants is the loops back. Off the desk it
+// stays what the arrangement's docs say: release the region playback is in.
+function loopsChord() {
+  if (mixModeOn) deckLoopsToggle(djActiveDeck);
+  else arrangeUnlock(); // see the arrange section
+}
 // Whichever deck was clicked into last (see djSetActiveDeck): its song if it holds one, its code if
 // it doesn't. Outside DJ mode that is always the one editor there is.
 function transportPlay() {
@@ -614,46 +623,45 @@ document.addEventListener('keydown', (e) => {
   // OR ctrl on any platform (CodeMirror binds both in extraKeys, and that is what every tooltip
   // promises), and neither key means anything else here. `app` is exact, because those chords are
   // the ones that used to collide - see appMod.
+  // The zoom is not one of the rebindable actions (see HOTKEY_ACTIONS in chords.js); everything
+  // else here is, and asks hotkeyMatches which action a keydown is.
   const edit = e.metaKey || e.ctrlKey;
-  const app = appMod(e);
-  if (e.defaultPrevented || !(edit || app)) return;
+  if (e.defaultPrevented) return;
+  const action = DOC_HOTKEYS.find((id) => hotkeyMatches(id, e));
+  if (!action && !edit) return;
+  const transport = action === 'play' || action === 'stop';
   const dialogs = [...document.querySelectorAll('.dir-picker-backdrop:not(.hidden)')];
   if (dialogs.length) {
     if (dialogs.some((d) => !d.classList.contains('keeps-transport'))) return;
-    if (!TRANSPORT_KEY(e)) return;
+    if (!transport) return;
   }
   // An APP chord belongs to whatever modal is up. Those are full editors (a chain, the prebake),
   // and opening the arrangement or flipping a deck's loops out from under a hand that is typing
-  // in one is not what it asked for. The transport family is left alone: stopping a deck is
+  // in one is not what it asked for. The transport and save are left alone: stopping a deck is
   // worth being able to do from anywhere.
-  if (app && anyModalOpen()) return;
-  if (edit && e.key === 'Enter') {
+  if (action && !transport && action !== 'save' && action !== 'saveAs' && anyModalOpen()) return;
+  if (action === 'play') {
     e.preventDefault();
     transportPlay();
-  } else if (edit && e.key === '.' && !e.shiftKey) {
+  } else if (action === 'stop') {
     e.preventDefault();
     transportStop();
-  } else if (edit && (e.key === '=' || e.key === '+' || e.key === '-' || e.key === '_') && mixModeOn && songActiveDeck()) {
+  } else if (!action && (e.key === '=' || e.key === '+' || e.key === '-' || e.key === '_') && mixModeOn && songActiveDeck()) {
     // ⌘± zooms the active song pane's waveform (the piano roll's own handler takes these
     // first when it has focus; this is the pane's turn).
     e.preventDefault();
     songPanes[songActiveDeck()].zoomBy(e.key === '-' || e.key === '_' ? 1 / PR_BTN_ZOOM : PR_BTN_ZOOM);
-  } else if (app && e.key.toLowerCase() === 'c' && !e.shiftKey && songCueTarget(e)) {
+  } else if (action === 'cue' && songCueTarget(e)) {
     // The CUE button, held until the key comes up - and only where the gesture has a target, so
     // nothing is taken from someone who meant to copy. The editing modifier is never touched here.
     e.preventDefault();
     if (!e.repeat) songCueKeyDown(e);
-  } else if (app && e.key.toLowerCase() === 'l' && !e.shiftKey) {
+  } else if (action === 'loops') {
     // An app chord like the arrangement's own, and not only by meaning: mod+L is the sublime
     // keymap's selectLine on every platform, so with the editor focused it never got this far.
     e.preventDefault();
-    // On the DESK this is the deck's loop switch, the chord for the button in its head - because
-    // DJ mode opens with the loops OFF, so there is usually no armed region for the one-region
-    // release below to let go of, and the thing the hand wants is the loops back. Off the desk
-    // it stays what the arrangement's docs say: release the region playback is in.
-    if (mixModeOn) deckLoopsToggle(djActiveDeck);
-    else arrangeUnlock(); // see the arrange section
-  } else if (app && e.key.toLowerCase() === 'a' && !e.shiftKey && !arKeyInField()) {
+    loopsChord();
+  } else if (action === 'arrange' && !arKeyInField()) {
     // The arrangement, both ways: it opens the painter and it puts it away again - on the deck you
     // are working on (in DJ mode, the armed one). The app modifier rather than the editing one
     // because mod+A is select-all wherever you are: in the editor, and inside the painter, where
@@ -661,14 +669,14 @@ document.addEventListener('keydown', (e) => {
     e.preventDefault();
     if (arState) closeArrangeEditor();
     else openArrangePainter();
-  } else if (edit && e.key.toLowerCase() === 's') {
+  } else if (action === 'save' || action === 'saveAs') {
     e.preventDefault(); // the browser's own "save page" is never what's wanted here
-    if (e.shiftKey) savePatternFileAs();
+    if (action === 'saveAs') savePatternFileAs();
     else savePatternFile();
-  } else if (app && e.key.toLowerCase() === 'd' && !e.shiftKey && !arKeyInField()) {
+  } else if (action === 'dj' && !arKeyInField()) {
     e.preventDefault();
     toggleMixMode(); // the performance mixer's split (see the mix section at the foot of this file)
-  } else if (app && e.key.toLowerCase() === 'o' && !e.shiftKey && !arKeyInField()) {
+  } else if (action === 'organize' && !arKeyInField()) {
     e.preventDefault();
     toggleOrganize(); // the library browser: open a song (onto the armed deck, on the desk)
   }
@@ -1205,7 +1213,7 @@ function foldConfigBlobs() {
     lfo: 'lfo shape — click to expand, or use the shape editor',
     grainshape: 'grain window — click to expand, or use the shape editor',
     pianoroll: 'piano roll notes — click to expand, or use the piano roll editor',
-    arrange: `the arrangement — click to expand, or press ${chordLabel('app+a')} to paint it`,
+    arrange: `the arrangement — click to expand, or press ${hotkeyLabel('arrange')} to paint it`,
   };
   const dataArgRe = /\b(lfo|grainshape|pianoroll)\s*\(\s*("(?:[^"\\\n]|\\.)*")/g;
   while ((m = dataArgRe.exec(code))) {
@@ -10648,7 +10656,7 @@ function makeDefRegistry(opts) {
     const clipped = otherRefs(code, id);
     if (clipped) {
       return refuse(`${clipped} clip${clipped === 1 ? '' : 's'} in the arrangement still play${clipped === 1 ? 's' : ''} it `
-        + `- delete the clips (${chordLabel('app+a')}) first, or the part goes silent where they are`);
+        + `- delete the clips (${hotkeyLabel('arrange')}) first, or the part goes silent where they are`);
     }
     const [from, to] = removalRange(code, def);
     const wasOpen = panel.current() === id;
@@ -17928,7 +17936,7 @@ function bounceBlockAtCursor() {
   const idx = cm.indexFromPos(cm.getCursor());
   const label = blockLabelAt(idx);
   if (!label || label.startsWith('$')) {
-    logLine(`${chordLabel('app+b')}: put the cursor in a named block to bounce it`, true);
+    logLine(`${hotkeyLabel('bounce')}: put the cursor in a named block to bounce it`, true);
     return;
   }
   if (trackRecState) return cancelTrackRecord(true);
@@ -19925,8 +19933,8 @@ function prSyncKeyboardBtn() {
   prKeysBtn.classList.toggle('active', prKbOn);
   const tonic = kbInKey() ? kbTonicName() : null;
   prKeysBtn.title = prKbOn
-    ? `computer keyboard: on - the keys play this roll's track (${chordLabel('app+m')})${tonic ? `, in the key: a = ${tonic}, shift raises a semitone` : ''}`
-    : `computer keyboard: play this roll's track from the typing keyboard (${chordLabel('app+m')})`;
+    ? `computer keyboard: on - the keys play this roll's track (${hotkeyLabel('rollKeys')})${tonic ? `, in the key: a = ${tonic}, shift raises a semitone` : ''}`
+    : `computer keyboard: play this roll's track from the typing keyboard (${hotkeyLabel('rollKeys')})`;
 }
 
 function kbSend(trackId, note, isOn, index = null) {
@@ -27926,6 +27934,12 @@ function addHotkey(list, combo, handler, label) {
   list.push({ spec: comboToSpec(combo), handler, combo, label });
 }
 
+// A built-in chord is one of the rebindable actions (HOTKEY_ACTIONS in chords.js): matched by id,
+// so it follows whatever chord the action holds now.
+function addBuiltinHotkey(id, handler) {
+  builtinHotkeys.push({ id, handler, combo: HOTKEY_BY_ID[id].label, label: HOTKEY_BY_ID[id].label });
+}
+
 // The editor whichever hotkey is running resolved to, held for the whole handler (activeCM
 // returns it in preference to live focus). Saved and restored rather than cleared: a chord
 // pressed while an earlier async handler is parked on a prompt() must give that one its deck
@@ -27950,7 +27964,7 @@ function anyModalOpen() {
   // askEl only exists once something has asked; it is built shown, so "not hidden" means open.
   // The FX chain editor is one of these: it is a full editor over the desk, and a chord typed in
   // it belongs to it - the loop switch and the mixer are not what a hand in a chain is after.
-  return [prebakeBackdrop, dirPickerBackdrop, midiImportBackdrop, snippetSaveBackdrop, snippetBrowseBackdrop, askEl, fxEdEl]
+  return [prebakeBackdrop, dirPickerBackdrop, midiImportBackdrop, snippetSaveBackdrop, snippetBrowseBackdrop, askEl, fxEdEl, hotkeysBackdrop]
     .some((el) => el && !el.classList.contains('hidden'));
 }
 
@@ -27959,7 +27973,7 @@ window.addEventListener(
   (e) => {
     if (e.repeat || anyModalOpen()) return;
     for (const hk of builtinHotkeys) {
-      if (specMatches(hk.spec, e)) { e.preventDefault(); e.stopPropagation(); runHotkey(hk, e); return; }
+      if (hotkeyMatches(hk.id, e)) { e.preventDefault(); e.stopPropagation(); runHotkey(hk, e); return; }
     }
     for (const hk of userHotkeys) {
       if (specMatches(hk.spec, e)) { e.preventDefault(); e.stopPropagation(); runHotkey(hk, e); return; }
@@ -27972,25 +27986,148 @@ window.addEventListener(
 // macOS, where cmd owns the browser's shortcuts, and alt elsewhere, where ctrl does) ---
 
 // app+p - minimize/restore the RHS panel, keeping whatever tab was open.
-addHotkey(builtinHotkeys, 'app+p', () => {
+addBuiltinHotkey('sidebar', () => {
   setSidebarCollapsed(!document.documentElement.hasAttribute('data-sidebar-collapsed'));
-}, 'toggle sidebar');
+});
 
 // app+r - arm/stop MIDI recording (mirrors the ● rec button).
-addHotkey(builtinHotkeys, 'app+r', () => (recState ? cancelMidiRecord(true) : startMidiRecord()), 'toggle record');
+addBuiltinHotkey('record', () => (recState ? cancelMidiRecord(true) : startMidiRecord()));
 
 // ctrl+b - bounce the block the cursor is in to audio (mirrors the record panel's button).
-addHotkey(builtinHotkeys, 'app+b', () => bounceBlockAtCursor(), 'bounce block to audio');
+addBuiltinHotkey('bounce', () => bounceBlockAtCursor());
 
 // app+m - toggle the open piano roll's computer keyboard (its ⌨ button).
-addHotkey(builtinHotkeys, 'app+m', () => { if (prState) prSetKeyboard(!prKbOn); else logLine('open a piano roll first - ⌨ plays the roll on screen', true); }, 'toggle the roll\'s computer keyboard');
+addBuiltinHotkey('rollKeys', () => { if (prState) prSetKeyboard(!prKbOn); else logLine('open a piano roll first - ⌨ plays the roll on screen', true); });
 
 // app+q - quantize the open roll (a dialog asks which division). Never cmd+Q: that is the
 // browser quitting, and no page gets to intercept it.
-addHotkey(builtinHotkeys, 'app+q', () => (prState ? prQuantize() : logLine(`open a piano roll first - ${chordLabel('app+q')} quantizes the roll on screen`, true)), 'quantize the roll');
+addBuiltinHotkey('quantize', () => (prState ? prQuantize() : logLine(`open a piano roll first - ${hotkeyLabel('quantize')} quantizes the roll on screen`, true)));
 
 // app+g - open/close the mixer (mirrors settings → open mixer…).
-addHotkey(builtinHotkeys, 'app+g', () => toggleMixer(), 'toggle mixer');
+addBuiltinHotkey('mixer', () => toggleMixer());
+
+// ---------------------------------------------------------------------------------------------
+// Settings → hotkeys…: every rebindable action with the chord it holds now, and a way to learn
+// another. Click a chord and press the new one; esc keeps the old one, backspace leaves the action
+// without a key. A chord another action holds is taken from it, and the foot says which.
+// ---------------------------------------------------------------------------------------------
+
+const hotkeysBackdrop = document.getElementById('hotkeysBackdrop');
+const hotkeysList = document.getElementById('hotkeysList');
+const hotkeysNote = document.getElementById('hotkeysNote');
+let hotkeyLearning = null; // the id of the action whose chord is being learned
+
+function renderHotkeys() {
+  hotkeysList.replaceChildren();
+  let section = null;
+  for (const a of HOTKEY_ACTIONS) {
+    if (a.section !== section) {
+      section = a.section;
+      const head = document.createElement('div');
+      head.className = 'hotkeys-section';
+      head.textContent = section;
+      hotkeysList.append(head);
+    }
+    const row = document.createElement('div');
+    row.className = 'hotkeys-row';
+    const name = document.createElement('span');
+    name.className = 'hotkeys-name';
+    name.textContent = a.label;
+    name.title = a.tip;
+    const chord = document.createElement('button');
+    chord.className = 'small hotkeys-chord';
+    const learning = hotkeyLearning === a.id;
+    chord.classList.toggle('learning', learning);
+    chord.textContent = learning ? 'press a chord…' : hotkeyCombos(a.id).map(chordLabel).join(' / ') || 'no key';
+    chord.title = 'click, then press the new chord - esc keeps this one, backspace leaves it without a key';
+    chord.addEventListener('click', () => {
+      hotkeyLearning = learning ? null : a.id;
+      hotkeysNote.textContent = '';
+      renderHotkeys();
+    });
+    const reset = document.createElement('button');
+    reset.className = 'small hotkeys-reset';
+    reset.textContent = '↺';
+    reset.title = `back to ${[...new Set(a.combos.map(chordLabel))].join(' / ')}`;
+    // Hidden rather than removed, so the chord column doesn't move when a row is changed.
+    reset.style.visibility = hotkeyIsDefault(a.id) ? 'hidden' : '';
+    reset.addEventListener('click', () => {
+      hotkeyLearning = null;
+      sayHotkeysTaken(a.combos[0], setHotkey(a.id, null));
+    });
+    row.append(name, chord, reset);
+    hotkeysList.append(row);
+    if (learning) chord.focus();
+  }
+}
+
+function sayHotkeysTaken(combo, takenFrom) {
+  hotkeysNote.textContent = takenFrom.length ? `${chordLabel(combo)} taken from ${takenFrom.join(', ')}` : '';
+}
+
+function openHotkeys() {
+  hotkeyLearning = null;
+  hotkeysNote.textContent = '';
+  renderHotkeys();
+  hotkeysBackdrop.classList.remove('hidden');
+}
+
+function closeHotkeys() {
+  hotkeyLearning = null;
+  hotkeysBackdrop.classList.add('hidden');
+}
+
+document.getElementById('hotkeysOpenBtn').addEventListener('click', openHotkeys);
+document.getElementById('hotkeysClose').addEventListener('click', closeHotkeys);
+document.getElementById('hotkeysResetAll').addEventListener('click', () => {
+  hotkeyLearning = null;
+  hotkeysNote.textContent = '';
+  resetAllHotkeys();
+});
+hotkeysBackdrop.addEventListener('click', (e) => { if (e.target === hotkeysBackdrop) closeHotkeys(); });
+
+// Capture, so a chord being learned reaches nothing else - not the dispatcher (which stands down
+// for the modal anyway), the document handler, or the browser's own use of the key.
+window.addEventListener('keydown', (e) => {
+  if (hotkeysBackdrop.classList.contains('hidden')) return;
+  if (!hotkeyLearning) {
+    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeHotkeys(); }
+    return;
+  }
+  e.preventDefault();
+  e.stopPropagation();
+  const id = hotkeyLearning;
+  if (e.key === 'Escape') {
+    hotkeyLearning = null;
+    renderHotkeys();
+    return;
+  }
+  const bare = !(e.metaKey || e.ctrlKey || e.altKey || e.shiftKey);
+  if (bare && (e.key === 'Backspace' || e.key === 'Delete')) {
+    hotkeyLearning = null;
+    hotkeysNote.textContent = '';
+    setHotkey(id, []);
+    return;
+  }
+  const combo = comboFromEvent(e);
+  if (!combo) return; // only modifiers so far - the key is still to come
+  const problem = hotkeyProblem(combo);
+  if (problem) {
+    hotkeysNote.textContent = `${chordLabel(combo)} ${problem}`;
+    return;
+  }
+  hotkeyLearning = null;
+  sayHotkeysTaken(combo, setHotkey(id, [combo]));
+}, true);
+
+// Any change, from here or from another window of the app: the editors' keymaps, every chord the
+// page writes, and the modal itself.
+window.addEventListener('poptart-hotkeys', () => {
+  cm.setOption('extraKeys', mainEditorKeys());
+  deckBCM?.setOption('extraKeys', deckBEditorKeys());
+  paintChordLabels();
+  if (!hotkeysBackdrop.classList.contains('hidden')) renderHotkeys();
+});
 
 // ---------------------------------------------------------------------------------------------
 // Userland API + sandbox. runUserPrebake() executes the prebake source in a function scope where
@@ -28194,6 +28331,29 @@ coreReady
 
 let mixModeOn = false;
 let deckBCM = null; // CodeMirror in the deck B pane, created on first open
+
+// Deck B's keymap - mainEditorKeys' counterpart, rebuilt with it when the hotkeys change.
+function deckBEditorKeys() {
+  return {
+    'Tab': 'indentMore', // as in the main editor
+    'Shift-Cmd-Enter': () => exitDjMode('b'),
+    'Shift-Ctrl-Enter': () => exitDjMode('b'),
+    'Ctrl-Space': (ed) => showPoptartHint(ed),
+    ...hotkeyCMKeys({
+      play: () => evalDeckB(true),
+      stop: () => doStop('b'), // this pane's deck only; deck A plays on
+      // ...and the arrangement chord from this pane is THIS deck's arrangement - the painter
+      // moves into deck B's half rather than taking the page (see openArrangePainter).
+      arrange: () => (arState && arDeck === 'b' ? closeArrangeEditor() : openArrangePainter('b')),
+      fx: (ed) => insertFxCall(ed),
+      organize: () => toggleOrganize(),
+      // Grouping works on this pane's own tracks too (its edits land in ITS buffer; there is
+      // just no fold gutter here to draw the result - see refoldEditor).
+      group: (ed) => groupSelection(ed),
+      loops: () => loopsChord(),
+    }),
+  };
+}
 let deckBFileName = null; // the saved pattern deck B holds - what complete hands the files tab
 let deckFileItems = new Map(); // deck picker option value ('file:<path>') -> its playlist file item
 
@@ -28428,25 +28588,7 @@ async function openMixMode() {
       matchBrackets: true,
       autoCloseBrackets: true,
       viewportMargin: Infinity,
-      extraKeys: {
-        'Tab': 'indentMore', // as in the main editor
-        'Cmd-Enter': () => evalDeckB(true),
-        'Ctrl-Enter': () => evalDeckB(true),
-        'Shift-Cmd-Enter': () => exitDjMode('b'),
-        'Shift-Ctrl-Enter': () => exitDjMode('b'),
-        'Cmd-.': () => doStop('b'), // this pane's deck only; deck A plays on
-        'Ctrl-.': () => doStop('b'),
-        'Ctrl-Space': (ed) => showPoptartHint(ed),
-        // ...and the arrangement chord from this pane is THIS deck's arrangement - the painter
-        // moves into deck B's half rather than taking the page (see openArrangePainter).
-        [`${CM_APP}A`]: () => (arState && arDeck === 'b' ? closeArrangeEditor() : openArrangePainter('b')),
-        [`${CM_APP}F`]: (ed) => insertFxCall(ed),
-        [`${CM_APP}O`]: () => toggleOrganize(),
-        // Grouping works on this pane's own tracks too (its edits land in ITS buffer; there is
-        // just no fold gutter here to draw the result - see refoldEditor).
-        [`${CM_MOD}G`]: (ed) => groupSelection(ed),
-        'Shift-Ctrl-G': (ed) => groupSelection(ed),
-      },
+      extraKeys: deckBEditorKeys(),
     });
     // Deck B is a live-coding pane, not a text box: same completions, ctrl-hover docs and
     // prebake-hotkey targeting as the main buffer, all resolved against ITS code.
@@ -30237,11 +30379,9 @@ function songCueKeyUp() {
   if (songPanes[deck].song) songPanes[deck].cueUp();
   else deckCuePress(deck, false);
 }
-// The app modifier by its KeyboardEvent name, for the keyup that has to end the hold: ctrl on
-// macOS, alt elsewhere (see appMod).
-const APP_MOD_KEY = IS_MAC ? 'Control' : 'Alt';
+// The keyup that has to end the hold: the chord's key, or any modifier it needs (see hotkeyReleases).
 document.addEventListener('keyup', (e) => {
-  if (e.key.toLowerCase() === 'c' || e.key === APP_MOD_KEY) songCueKeyUp();
+  if (hotkeyReleases('cue', e)) songCueKeyUp();
 });
 window.addEventListener('blur', songCueKeyUp);
 
@@ -35619,7 +35759,7 @@ function openEditorMenu(ed, e) {
   const items = [selected
     ? ['save as snippet…', () => openSnippetSave(ed), 'keep this selection - and the rolls, shapes, presets and packs it names - for every project']
     : ['insert snippet…', () => openSnippetBrowser(ed), 'put a kept phrase in here, sidecar and all']];
-  items.push(['add an effect…', () => insertFxCall(ed), `${chordLabel('app+f')} — an .fx("") at the caret, with the plugin list open`]);
+  items.push(['add an effect…', () => insertFxCall(ed), `${hotkeyLabel('fx')} — an .fx("") at the caret, with the plugin list open`]);
   // The envelope panel for the sampler track under the caret - the way in for a chain that has no
   // envelope call yet to double-click.
   if (ed === cm && !selected && samplerctlMod) {
@@ -35631,7 +35771,7 @@ function openEditorMenu(ed, e) {
   // The tree, where it is edited: grouping is a gesture over a selection, and ungrouping is aimed
   // at whatever track the caret is in.
   if (selected) {
-    items.push(['group these tracks…', () => groupSelection(ed), `${chordLabel('mod+g')} — one fader, one mute, and they fold away together`]);
+    items.push(['group these tracks…', () => groupSelection(ed), `${hotkeyLabel('group')} — one fader, one mute, and they fold away together`]);
   } else {
     const block = editorTrackAt(ed);
     if (block) {
@@ -35652,8 +35792,8 @@ function openEditorMenu(ed, e) {
   const deck = ed === deckBCM ? 'b' : 'a';
   if (arrangeMod && labelsMod && !songPanes[deck]?.song) {
     items.push(arState && arDeck === deck
-      ? ['close arrangement', () => closeArrangeEditor(), chordLabel('app+a')]
-      : ['view arrangement', () => openArrangePainter(deck), chordLabel('app+a')]);
+      ? ['close arrangement', () => closeArrangeEditor(), hotkeyLabel('arrange')]
+      : ['view arrangement', () => openArrangePainter(deck), hotkeyLabel('arrange')]);
   }
   items.push('-');
   if (selected) {
@@ -35952,11 +36092,11 @@ snippetBrowseBackdrop.addEventListener('keydown', (e) => {
 // a selection it keeps one, with none it opens the browser. The roll's clean-up is mod+J and the
 // two are separate keystrokes on every platform now that the families are (they were one chord off
 // macOS, where this used to be ctrl+J and so did the edit modifier).
-addHotkey(builtinHotkeys, 'app+j', () => {
+addBuiltinHotkey('snippets', () => {
   const ed = activeCM();
   if (ed.somethingSelected()) openSnippetSave(ed);
   else openSnippetBrowser(ed);
-}, 'keep the selection as a snippet / open the snippet browser');
+});
 
 // ---------------------------------------------------------------------------------------------
 // Embedded: a playable example in the guide (docs/docs.js). The page around the frame asks for
@@ -36347,7 +36487,7 @@ function openArrangePainter(deck = mixModeOn ? djActiveDeck : 'a') {
   if (!def) {
     const labels = arTrackLabels();
     if (!labels.length) {
-      logLine(`nothing to arrange yet - label a block (kick: s("bd*4")) and press ${chordLabel('app+a')} again`, 'warn');
+      logLine(`nothing to arrange yet - label a block (kick: s("bd*4")) and press ${hotkeyLabel('arrange')} again`, 'warn');
       return;
     }
     const groups = arGroupLabels();
@@ -38676,7 +38816,7 @@ function arClipMenuItems(targets) {
   const labels = [...new Set(targets.map((c) => c.label))];
   const one = labels.length === 1 ? labels[0] : null;
   if (one) {
-    items.push([`edit ${one}`, () => arEditBlock(one), `the code, on this block - double-clicking the clip is the same (${chordLabel('app+a')} comes back)`]);
+    items.push([`edit ${one}`, () => arEditBlock(one), `the code, on this block - double-clicking the clip is the same (${hotkeyLabel('arrange')} comes back)`]);
     items.push(['rename…', () => arRenameClip(targets[0]), `${chordLabel('mod+r')} — the block, its clips and its place in the tree`]);
   }
   // Color is about the CLIPS you right-clicked and no others. A whole track at once is the row's
@@ -41123,7 +41263,7 @@ function initArrangeCanvas() {
     // app+A shuts the painter (the key that opened it), mod+A takes every clip in it. Two chords
     // on every platform now, so neither has to give way: the guard this used to need - off macOS
     // ctrl+A was select-all, which had to win inside a panel - is what appMod does for it.
-    if (appMod(e) && !e.shiftKey && e.key.toLowerCase() === 'a') { closeArrangeEditor(); e.preventDefault(); return; }
+    if (hotkeyMatches('arrange', e)) { closeArrangeEditor(); e.preventDefault(); return; }
     if (mod && e.key.toLowerCase() === 'a') { arState.sel = new Set(arState.clips); drawArrange(); e.preventDefault(); return; }
     if (mod && !e.shiftKey && e.key.toLowerCase() === 'd') { arDuplicate(); e.preventDefault(); return; }
     if (!mod && e.key.toLowerCase() === 'b') { arToggleTool(); e.preventDefault(); return; }
@@ -41516,13 +41656,9 @@ window.addEventListener('message', (e) => {
   if (e.data.token !== PROJECTOR_TOKEN || e.data.seq !== projectorSeq) projectorFrame = '';
 });
 
-// F1 has no modifier, so it comes nowhere near the two chord families (see chords.js) and is taken
-// on its own. CodeMirror binds nothing to it, so this reaches the editor as readily as anywhere.
-document.addEventListener('keydown', (e) => {
-  if (e.key !== 'F1' || e.metaKey || e.ctrlKey || e.altKey || e.shiftKey || e.defaultPrevented) return;
-  e.preventDefault();
-  toggleProjector();
-});
+// F1 by default - no modifier, so it comes nowhere near the two chord families (see chords.js).
+// Taken by the dispatcher like the other built-ins, so a chord learned for it beats the editor.
+addBuiltinHotkey('projector', () => toggleProjector());
 
 const projectorResSelect = document.getElementById('projectorResSelect');
 projectorResSelect.value = projectorRes;

@@ -553,8 +553,9 @@ test('mod+G groups the selection, and the gesture asks for a name in place', () 
   // The editing modifier, taking the sublime keymap's find-next. It is the same chord on both
   // platforms now that the mixer is app+G; shift+ctrl+G stays bound because off macOS that was
   // this gesture back when plain ctrl+G was the mixer.
-  assert.match(SRC, /\[`\$\{CM_MOD\}G`\]: \(ed\) => groupSelection\(ed\),/);
-  assert.match(SRC, /'Shift-Ctrl-G': \(ed\) => groupSelection\(ed\),/, 'the old off-macOS chord still works');
+  assert.match(SRC, /group: \(ed\) => groupSelection\(ed\),/);
+  const CHORDS = fs.readFileSync(path.join(__dirname, 'public', 'chords.js'), 'utf8');
+  assert.match(CHORDS, /label: 'group tracks', combos: \['mod\+g', 'shift\+ctrl\+g'\]/, 'the old off-macOS chord still works');
   const sel = grab('groupSelection');
   // The membership rule lives in pattern-core (mixctl's selectionMembers, tested there): the
   // outermost blocks the selection touches, never a group whose body holds the whole selection.
@@ -1073,7 +1074,7 @@ test('the editor menu opens the painter on the deck that was clicked', () => {
   const menu = grab('openEditorMenu');
   assert.match(menu, /const deck = ed === deckBCM \? 'b' : 'a';/);
   assert.match(menu, /if \(arrangeMod && labelsMod && !songPanes\[deck\]\?\.song\) \{/);
-  assert.match(menu, /\['view arrangement', \(\) => openArrangePainter\(deck\), chordLabel\('app\+a'\)\]/);
+  assert.match(menu, /\['view arrangement', \(\) => openArrangePainter\(deck\), hotkeyLabel\('arrange'\)\]/);
   assert.match(menu, /arState && arDeck === deck\s+\? \['close arrangement', \(\) => closeArrangeEditor\(\)/,
     'on the deck it is already open on, the item puts it away');
 });

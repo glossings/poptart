@@ -3522,6 +3522,62 @@ body.mix-on #phraseViz {
   font-size: 12px;
 }
 
+/* --------------------------------------------------------------- hotkeys */
+
+.hotkeys {
+  width: min(440px, 92vw);
+}
+
+.hotkeys-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 2px 12px 10px;
+}
+
+.hotkeys-section {
+  margin: 10px 0 4px;
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+}
+
+.hotkeys-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 0;
+  font-size: 12px;
+}
+
+.hotkeys-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Fixed width, so learning (and a long two-chord default) never moves the row. */
+.hotkeys-chord {
+  flex: none;
+  width: 150px;
+  font-family: var(--mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hotkeys-chord.learning {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.hotkeys-reset {
+  flex: none;
+}
+
 /* --------------------------------------------------------------- midi import */
 
 .midi-import {

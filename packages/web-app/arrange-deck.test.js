@@ -235,10 +235,10 @@ test('the painter refuses a deck that holds a song FILE', () => {
 });
 
 test('the arrangement chord means THIS pane\'s arrangement, in either editor', () => {
-  // Bound through CM_APP, so the keystroke follows the platform (ctrl on macOS, alt elsewhere)
-  // while staying one chord in the source - see the modifier-families note in client.js.
-  assert.match(SRC, /\[`\$\{CM_APP\}A`\]: \(\) => \(arState && arDeck === 'a' \? closeArrangeEditor\(\) : openArrangePainter\('a'\)\)/);
-  assert.match(SRC, /\[`\$\{CM_APP\}A`\]: \(\) => \(arState && arDeck === 'b' \? closeArrangeEditor\(\) : openArrangePainter\('b'\)\)/);
+  // Bound through the action table (hotkeyCMKeys), so the keystroke follows the platform and any
+  // chord learned for it while staying one action in the source - see HOTKEY_ACTIONS in chords.js.
+  assert.match(SRC, /arrange: \(\) => \(arState && arDeck === 'a' \? closeArrangeEditor\(\) : openArrangePainter\('a'\)\)/);
+  assert.match(SRC, /arrange: \(\) => \(arState && arDeck === 'b' \? closeArrangeEditor\(\) : openArrangePainter\('b'\)\)/);
   // ...and the painter no longer refuses to open during a mix
   assert.ok(!/leave DJ mode first \(ctrl\+D\)/.test(SRC), 'the refusal is gone - that is the whole feature');
 });

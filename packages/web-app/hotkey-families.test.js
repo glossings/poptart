@@ -23,10 +23,15 @@ const CLIENT = fs.readFileSync(path.join(__dirname, 'public', 'client.js'), 'utf
 
 // chords.js is a plain browser script over one global. Loading it with a `navigator` of our own is
 // the whole of the platform fake - there is nothing else about the machine it reads.
-function load(platform) {
+function load(platform, stored = null) {
+  // The rebindings live in localStorage; a Map-backed stand-in is all of it chords.js touches.
+  const store = new Map(stored ? [['poptart.hotkeys', JSON.stringify(stored)]] : []);
+  const localStorage = { getItem: (k) => store.get(k) ?? null, setItem: (k, v) => store.set(k, v) };
   // eslint-disable-next-line no-new-func
-  return new Function('navigator', `${SRC}
-    return { IS_MAC, CM_APP, CM_MOD, MOD_LABEL, comboToSpec, specMatches, editMod, appMod, chordLabel, expandChords };`)({ platform });
+  return new Function('navigator', 'localStorage', `${SRC}
+    return { IS_MAC, CM_APP, CM_MOD, MOD_LABEL, comboToSpec, specMatches, editMod, appMod, chordLabel, expandChords,
+      HOTKEY_ACTIONS, hotkeyCombos, hotkeyMatches, hotkeyLabel, hotkeyReleases, hotkeyCMKeys, comboToCM,
+      comboFromEvent, hotkeyProblem, setHotkey, resetAllHotkeys, hotkeyIsDefault };`)({ platform }, localStorage);
 }
 const mac = load('MacIntel');
 const pc = load('Win32');
@@ -181,31 +186,112 @@ test('CodeMirror gets the same rule in its own spelling', () => {
 // bug: the rule existing is no use if a handler goes around it.
 // ---------------------------------------------------------------------------------------------
 
-test('every built-in chord is registered as app+, never a literal ctrl+', () => {
-  const combos = [...CLIENT.matchAll(/addHotkey\(builtinHotkeys, '([^']+)'/g)].map((m) => m[1]);
-  assert.ok(combos.length >= 7, `expected the built-in chords, found ${combos.length}`);
-  for (const combo of combos) {
-    assert.match(combo, /^app\+/, `${combo} is bound to a literal key rather than the app family`);
+test('every built-in chord is a rebindable action, and the app ones default to app+', () => {
+  const ids = [...CLIENT.matchAll(/addBuiltinHotkey\('([^']+)'/g)].map((m) => m[1]);
+  assert.ok(ids.length >= 8, `expected the built-in chords, found ${ids.length}`);
+  assert.ok(!/addHotkey\(builtinHotkeys/.test(CLIENT), 'a built-in chord is bound around the action table');
+  for (const id of ids) {
+    const action = mac.HOTKEY_ACTIONS.find((a) => a.id === id);
+    assert.ok(action, `${id} is not in HOTKEY_ACTIONS`);
+    if (id !== 'projector') assert.match(action.combos[0], /^app\+/, `${id} defaults to a literal key rather than the app family`);
   }
 });
 
-test('the chords hardcoded outside the dispatcher ask appMod rather than .ctrlKey', () => {
-  // The document keydown handler (cue, the arrangement, DJ mode) and the painter's own close key.
-  // Each of these was `e.ctrlKey && !e.metaKey && ...` before, which is what collided off macOS.
-  for (const key of ['c', 'a', 'd']) {
-    assert.match(CLIENT, new RegExp(`app && e\\.key\\.toLowerCase\\(\\) === '${key}'`),
-      `the document handler's ${key} chord does not go through appMod`);
+test('the chords taken outside the dispatcher ask the action table', () => {
+  // The document keydown handler and the painter's own close key. Each of these once tested a key
+  // of its own, which is what collided off macOS - and what a rebinding could not reach.
+  assert.match(CLIENT, /const action = DOC_HOTKEYS\.find\(\(id\) => hotkeyMatches\(id, e\)\);/);
+  for (const id of ['cue', 'loops', 'arrange', 'dj', 'organize']) {
+    assert.match(CLIENT, new RegExp(`action === '${id}'`), `the document handler's ${id} chord is not the action's`);
   }
-  assert.match(CLIENT, /if \(appMod\(e\) && !e\.shiftKey && e\.key\.toLowerCase\(\) === 'a'\) \{ closeArrangeEditor\(\)/);
-  assert.match(CLIENT, /const app = appMod\(e\);/);
+  assert.match(CLIENT, /if \(hotkeyMatches\('arrange', e\)\) \{ closeArrangeEditor\(\)/);
+  assert.match(CLIENT, /if \(hotkeyReleases\('cue', e\)\) songCueKeyUp\(\);/);
 });
 
-test('the editor binds its app chords through CM_APP, so a keymap cannot keep them', () => {
+test('both editors take their app chords from the table, so a keymap cannot keep them', () => {
   // CodeMirror's Mac keymap has Ctrl-A/D/F of its own and never lets them reach the document.
-  for (const letter of ['A', 'D', 'F']) {
-    assert.ok(CLIENT.includes(`[\`\${CM_APP}${letter}\`]`), `the editor's ${letter} chord is not platform-aware`);
-  }
+  assert.match(CLIENT, /extraKeys: mainEditorKeys\(\),/);
+  assert.match(CLIENT, /extraKeys: deckBEditorKeys\(\),/);
+  assert.equal((CLIENT.match(/\.\.\.hotkeyCMKeys\(\{/g) ?? []).length, 2);
   assert.ok(!/'Ctrl-[ADF]':/.test(CLIENT), 'a literal Ctrl- binding is back in extraKeys');
+});
+
+// ---------------------------------------------------------------------------------------------
+// Rebinding
+// ---------------------------------------------------------------------------------------------
+
+test('the defaults are the chords the app always had', () => {
+  assert.deepEqual(mac.hotkeyCombos('play'), ['mod+enter', 'ctrl+enter']);
+  // Off macOS mod IS ctrl, so the two defaults are one chord and the list says it once.
+  assert.deepEqual(pc.hotkeyCombos('play'), ['mod+enter']);
+  assert.equal(mac.hotkeyMatches('organize', ev('o', CTRL)), true);
+  assert.equal(pc.hotkeyMatches('organize', ev('o', ALT)), true);
+  assert.equal(pc.hotkeyMatches('organize', ev('o', CTRL)), false);
+  assert.equal(mac.hotkeyMatches('projector', ev('F1')), true);
+  assert.equal(mac.hotkeyLabel('mixer'), '⌃G');
+});
+
+test('a learned chord replaces the defaults and takes the chord from whoever held it', () => {
+  const p = load('MacIntel');
+  assert.deepEqual(p.setHotkey('organize', ['app+g']), ['mixer']);
+  assert.equal(p.hotkeyMatches('organize', ev('g', CTRL)), true);
+  assert.equal(p.hotkeyMatches('organize', ev('o', CTRL)), false);
+  assert.equal(p.hotkeyMatches('mixer', ev('g', CTRL)), false);
+  assert.equal(p.hotkeyLabel('mixer'), '');
+  // A tooltip written as {app+o} follows the action; one written as {app+g} follows the mixer,
+  // which has no key now and so reads as written.
+  assert.equal(p.expandChords('library ({app+o})'), 'library (⌃G)');
+  assert.equal(p.expandChords('{#mixer}'), 'no key');
+  // Reset puts organize back on its own chord and leaves the mixer where the take left it.
+  p.setHotkey('organize', null);
+  assert.equal(p.hotkeyIsDefault('organize'), true);
+  assert.equal(p.hotkeyMatches('organize', ev('o', CTRL)), true);
+  p.resetAllHotkeys();
+  assert.equal(p.hotkeyMatches('mixer', ev('g', CTRL)), true);
+});
+
+test('taking one of two default chords leaves the other', () => {
+  const p = load('MacIntel');
+  p.setHotkey('mixer', ['ctrl+enter']);
+  assert.deepEqual(p.hotkeyCombos('play'), ['mod+enter']);
+});
+
+test('the bindings survive a reload, and junk in storage is ignored', () => {
+  const p = load('Win32', { stop: ['mod+k'], nonsense: ['mod+q'], save: 'mod+w' });
+  assert.equal(p.hotkeyMatches('stop', ev('k', CTRL)), true);
+  assert.deepEqual(p.hotkeyCombos('save'), ['mod+s']);
+});
+
+test('a keypress becomes a combo in the platform tokens', () => {
+  assert.equal(mac.comboFromEvent(ev('k', CMD)), 'mod+k');
+  assert.equal(mac.comboFromEvent(ev('k', CTRL)), 'app+k');
+  assert.equal(pc.comboFromEvent(ev('k', CTRL)), 'mod+k');
+  assert.equal(pc.comboFromEvent(ev('k', ALT)), 'app+k');
+  assert.equal(mac.comboFromEvent({ ...ev('>', { metaKey: true, shiftKey: true }), code: 'Period' }), 'mod+shift+.');
+  assert.equal(mac.comboFromEvent({ ...ev('Shift', CMD), code: 'ShiftLeft' }), null, 'modifiers alone are not a chord yet');
+  assert.equal(mac.comboFromEvent(ev('F5')), 'f5');
+});
+
+test('a key that types something needs a modifier other than shift', () => {
+  assert.equal(mac.hotkeyProblem('k'), 'needs a modifier');
+  assert.equal(mac.hotkeyProblem('shift+k'), 'needs a modifier');
+  assert.equal(mac.hotkeyProblem('mod+k'), null);
+  assert.equal(mac.hotkeyProblem('f5'), null);
+});
+
+test('CodeMirror gets each action under every chord it holds', () => {
+  const fn = () => {};
+  assert.deepEqual(Object.keys(mac.hotkeyCMKeys({ play: fn })), ['Cmd-Enter', 'Ctrl-Enter']);
+  assert.deepEqual(Object.keys(pc.hotkeyCMKeys({ organize: fn })), ['Alt-O']);
+  assert.equal(mac.comboToCM('mod+shift+s'), 'Shift-Cmd-S');
+  assert.equal(pc.comboToCM('app+.'), 'Alt-.');
+});
+
+test('a held chord ends on its key or any of its modifiers', () => {
+  assert.equal(mac.hotkeyReleases('cue', ev('c')), true);
+  assert.equal(mac.hotkeyReleases('cue', ev('Control')), true);
+  assert.equal(mac.hotkeyReleases('cue', ev('Alt')), false);
+  assert.equal(pc.hotkeyReleases('cue', ev('Alt')), true);
 });
 
 // The guide's chapters, as [name, html].
@@ -218,7 +304,7 @@ test('the unlock-loop chord is the app\'s, because mod+L is the editor\'s select
   // It was taken with either of cmd/ctrl, and the sublime keymap binds both to selectLine (cmd on
   // macOS, ctrl elsewhere) - so from inside the editor, where the guide says to press it, only
   // macOS's ctrl+L ever arrived. As an app chord it is a key CodeMirror leaves alone everywhere.
-  assert.match(CLIENT, /app && e\.key\.toLowerCase\(\) === 'l' && !e\.shiftKey\) \{/);
+  assert.equal(mac.HOTKEY_ACTIONS.find((a) => a.id === 'loops').combos[0], 'app+l');
   const docs = guidePages().map(([, html]) => html).join('\n');
   assert.ok(docs.includes('{app+l}') && !docs.includes('{mod+l}'), 'the guide names the chord that is bound');
 });
