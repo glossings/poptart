@@ -634,3 +634,40 @@ export function leadVoices(midis, prev = null, home = null) {
   }
   return byPitchClass(voices, best);
 }
+
+// ---------------------------------------------------------------------------------------------
+// Just intonation. Each of the 12 tempered intervals has a pure ratio it stands for; retuning a
+// note is moving it from the tempered interval to that ratio, the octaves kept. 5-limit is the
+// classic table (major third 5/4, minor seventh 9/5); 7-limit swaps in the harmonic seventh (7/4)
+// and the septimal tritone (7/5), which is what makes a dominant seventh ring.
+// ---------------------------------------------------------------------------------------------
+
+const JI_5 = [1, 16 / 15, 9 / 8, 6 / 5, 5 / 4, 4 / 3, 45 / 32, 3 / 2, 8 / 5, 5 / 3, 9 / 5, 15 / 8];
+const JI_7 = [1, 16 / 15, 9 / 8, 6 / 5, 5 / 4, 4 / 3, 7 / 5, 3 / 2, 8 / 5, 5 / 3, 7 / 4, 15 / 8];
+
+/** The prime limits .ji() knows. */
+export const JI_LIMITS = [5, 7];
+
+/**
+ * An interval of `semitones` (tempered, or near enough - it is read as its nearest semitone) as the
+ * pure ratio it stands for, in semitones: justInterval(4) is 3.863 (5/4), justInterval(16) is
+ * 15.863. Negative intervals mirror (a fifth down is 3/2 down).
+ */
+export function justInterval(semitones, limit = 5) {
+  const table = Number(limit) === 7 ? JI_7 : JI_5;
+  const k = Math.round(semitones);
+  if (k < 0) return -justInterval(-k, limit);
+  return 12 * Math.floor(k / 12) + 12 * Math.log2(table[k % 12]);
+}
+
+/**
+ * A chord retuned to pure ratios: every note moved to the just version of its interval above
+ * `reference` (a MIDI pitch, which stays where it is), or above the chord's lowest note when there is
+ * no reference. Returns the notes in their own order.
+ */
+export function justVoices(midis, reference = null, limit = 5) {
+  if (!midis.length) return midis;
+  const ref = reference ?? Math.min(...midis);
+  return midis.map((m) => ref + justInterval(m - ref, limit));
+}
+

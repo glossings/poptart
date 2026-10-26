@@ -443,3 +443,42 @@ test('the two directions compose, and neither disturbs the plain spellings', () 
   // A colon-ending name NOT glued to a group is still an ordinary atom, whatever it looks like.
   assert.deepEqual(values('bd: [0 1]'), ['bd:', '0', '1']);
 });
+
+// ---------------------------------------------------------------------------------------------
+// Fractional rates
+// ---------------------------------------------------------------------------------------------
+
+function onsets(str, cycle) {
+  return getStepsForCycle(parseMini(str), cycle)
+    .filter((s) => s.value != null && !s.cont)
+    .map((s) => Number(s.start.toFixed(6)));
+}
+
+test('fast: "a*1.5" is three onsets over two cycles, not "a*2"', () => {
+  assert.deepEqual(onsets('a*1.5', 0), [0, 0.666667]);
+  assert.deepEqual(onsets('a*1.5', 1), [0.333333]);
+  assert.deepEqual(onsets('a*1.5', 2), [0, 0.666667]); // and it repeats every two cycles
+});
+
+test('fast: "a*0.5" plays every other cycle, as "a/2" does', () => {
+  assert.deepEqual(onsets('a*0.5', 0), onsets('a/2', 0));
+  assert.deepEqual(onsets('a*0.5', 1), onsets('a/2', 1));
+  assert.deepEqual(onsets('a*0.5', 1), []);
+});
+
+test('slow: "a/1.5" is two onsets over three cycles', () => {
+  assert.deepEqual(onsets('a/1.5', 0), [0]);
+  assert.deepEqual(onsets('a/1.5', 1), [0.5]);
+  assert.deepEqual(onsets('a/1.5', 2), []);
+});
+
+test('a rate of zero plays nothing rather than rounding up to one', () => {
+  assert.deepEqual(onsets('a*0', 0), []);
+  assert.deepEqual(onsets('a/0', 0), []);
+});
+
+test('a whole-number rate is untouched by the fractional path', () => {
+  assert.deepEqual(onsets('a*2', 0), [0, 0.5]);
+  assert.deepEqual(onsets('[a b]*1.5', 0), [0, 0.333333, 0.666667]);
+  assert.deepEqual(onsets('a*<1.5 2>', 0), [0, 0.666667]);
+});

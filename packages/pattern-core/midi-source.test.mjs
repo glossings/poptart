@@ -111,6 +111,39 @@ test('a static midikeys scale still goes the zero-latency way', () => {
   assert.equal(call.args[5], null);
 });
 
+// A tuning on a keyboard (2026-10-25): its pitches sit between the keys, so the route can't fold
+// to the engine's whole-key quantize, and snapping keys to its nearest pitches would reach only 12
+// of 31-EDO's steps. Keys map to STEPS instead - the root's key plays the root, each key up the next.
+test('a midikeys tuning maps each key to the next step, through the per-note map', () => {
+  const { engine, callsTo } = mockEngine();
+  const kb = midikeys('KeyStep')(1);
+  new Scheduler(engine, { trackId: 'lead', cps: 1 }).setPattern(kb.scale('c3 31edo').synth('Wavetable'));
+  const [call] = callsTo('setMidiNotes');
+  const map = call.args[5];
+  assert.equal(typeof map, 'function', 'a tuning goes to the per-note map');
+  assert.equal(map(60, 0), 60, 'the root key plays the root');
+  assert.equal(map(61, 0), 60.387, 'one key up is one 31-EDO step, kept to a thousandth');
+  assert.equal(map(91, 0), 72, '31 keys up is the octave');
+  assert.equal(map(59, 0), 59.613, 'below the root counts down');
+  // A mode of a tuning: each key is the next step OF THE MODE.
+  new Scheduler(engine, { trackId: 'b', cps: 1 }).setPattern(kb.scale('c3 31edo major').synth('Wavetable'));
+  const modeMap = callsTo('setMidiNotes')[1].args[5];
+  assert.deepEqual([60, 61, 62, 67].map((k) => modeMap(k, 0)), [60, 61.935, 63.871, 72]);
+});
+
+test('"nearest" snaps each live key to the tuning\'s nearest pitch instead', () => {
+  const { engine, callsTo } = mockEngine();
+  const kb = midikeys('KeyStep')(1);
+  new Scheduler(engine, { trackId: 'lead', cps: 1 }).setPattern(kb.scale('c3 9/8 5/4 4/3 3/2 5/3 15/8 2/1', 'nearest').synth('Wavetable'));
+  const map = callsTo('setMidiNotes')[0].args[5];
+  assert.equal(map(64, 0), 63.863, 'e3 plays the pure third');
+  assert.equal(map(67, 0), 67.02, 'g3 the pure fifth');
+  assert.equal(map(61, 0), 60, 'c#3 is a semitone from c3 and 1.039 from the just d3 (9/8): c3 is nearer');
+  // The editor hands the word over wrapped, as it does every literal in pattern position.
+  new Scheduler(engine, { trackId: 'b', cps: 1 }).setPattern(kb.scale('c3 31edo', mini('nearest')).synth('Wavetable'));
+  assert.equal(callsTo('setMidiNotes')[1].args[5](64, 0), 63.871, 'e3 snaps to 31-EDO step 10');
+});
+
 test('a normal pattern is untouched by any of this', () => {
   const sig = note('c3 e3').add(note(12));
   assert.equal(sig.inputSource, null);

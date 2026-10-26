@@ -1,4 +1,4 @@
-// .seg(n) - sample-and-hold on an even n-per-cycle grid (Strudel's segment/seg), plus the
+// .seg(n) - sample-and-hold on an even n-per-cycle grid (also spelled segment), plus the
 // patterned-bound form of irand() that says the same thing from the other end (irand("8!8")).
 // Pure pattern math - no scheduler/engine boot (see testing notes).
 
@@ -71,7 +71,7 @@ test('.seg() rejects a non-positive step count', () => {
   assert.throws(() => n('0 1').seg(-4), /positive number of steps/);
 });
 
-test('.segment() is the same operator under Strudel\'s longer name', () => {
+test('.segment() is the same operator under its longer name', () => {
   assert.deepEqual(valuesAt(n('0 1 2 3').segment(2), 0), valuesAt(n('0 1 2 3').seg(2), 0));
 });
 

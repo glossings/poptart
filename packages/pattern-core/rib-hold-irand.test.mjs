@@ -1,6 +1,6 @@
 // Step 4 of the all-signals rewrite: irand (a deterministic per-cycle random integer), .rib()
 // (loop a band of cycles via an exact query remap), and naked .hold() (freeze a continuous signal
-// into strudel-cycle updates). Pure pattern math - no scheduler/engine boot (see testing notes).
+// into once-per-cycle updates). Pure pattern math - no scheduler/engine boot (see testing notes).
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -179,7 +179,7 @@ test('a rest in .rib()\'s length silences as well as a rest in its time', () => 
 });
 
 // ---------------------------------------------------------------------------------------------
-// naked .hold(): discretize a continuous signal into strudel-cycle updates
+// naked .hold(): discretize a continuous signal into once-per-cycle updates
 // ---------------------------------------------------------------------------------------------
 
 test('naked .hold() on a continuous signal takes one value per cycle', () => {

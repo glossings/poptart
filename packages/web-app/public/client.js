@@ -4,7 +4,7 @@
 // inside `.param("…")`, plugin names inside `.synth("…")`/`.fx("…")`, documented method/builder
 // names elsewhere - see api-docs.js, which also feeds the doc panel beside the popup and the
 // ctrl-hover tooltip), live playback highlighting of mini-notation (the atom currently sounding lights
-// up, Strudel-style), a searchable params panel, plugin browser, an interactive theme editor,
+// up), a searchable params panel, plugin browser, an interactive theme editor,
 // and transport - all over the same fetch('/api/…') endpoints. No build step: CodeMirror 5 is
 // loaded as plain scripts from /vendor/codemirror/, and pattern-core's own mini parser + label
 // splitter are imported as ESM from /pattern-core/ (both served by server.js), so the browser
@@ -3670,6 +3670,7 @@ function deviceNumber(widget, { onDrag, onCommit, register }) {
       }
     };
     input.addEventListener('keydown', (ev) => {
+      if (packTransportKey(ev)) return; // play and stop reach the page from a number box too
       if (ev.key === 'Enter') finish(true);
       else if (ev.key === 'Escape') finish(false);
       ev.stopPropagation();
@@ -4380,7 +4381,7 @@ function wireFigureDrag(canvas, trackLabel, slot, entry) {
     if (grab.band !== undefined) entry.focus = grab.band;
     if (grab.role !== undefined) entry.focus = grab.role;
     const move = (ev) => { const b = bodyFor(ev); if (b) send(b, false); };
-    const up = () => {
+    const up = (ev) => {
       canvas.removeEventListener('pointermove', move);
       canvas.removeEventListener('pointerup', up);
       canvas.removeEventListener('pointercancel', up);
@@ -6324,6 +6325,7 @@ filePickSearchEl.addEventListener('input', () => {
   drawFilePickFolders();
 });
 filePickSearchEl.addEventListener('keydown', (e) => {
+  if (packTransportKey(e)) return; // play and stop while browsing, as in the pack panel
   if (e.key === 'Enter') { e.preventDefault(); takeFilePick(); }
   else if (e.key === 'ArrowDown') { e.preventDefault(); stepFilePick(1); }
   else if (e.key === 'ArrowUp') { e.preventDefault(); stepFilePick(-1); }
@@ -7542,6 +7544,7 @@ function initPresetPanel() {
 
   // The head: the same widget, the same gestures, as the roll's and the shape's (makeNamePicker).
   presetName.addEventListener('keydown', (e) => {
+    if (packTransportKey(e)) return; // play and stop reach the page from the panel's boxes too
     if (e.key === 'Enter') { e.preventDefault(); presetName.blur(); }
     else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); presetHead.revertName(); presetName.blur(); return; }
     e.stopPropagation();
@@ -7550,6 +7553,7 @@ function initPresetPanel() {
 
   presetSearch.addEventListener('input', () => presetHead.renderList(true));
   presetSearch.addEventListener('keydown', (e) => {
+    if (packTransportKey(e)) return;
     if (e.key === 'ArrowDown') { e.preventDefault(); presetHead.move(1); }
     else if (e.key === 'ArrowUp') { e.preventDefault(); presetHead.move(-1); }
     else if (e.key === 'Enter') { e.preventDefault(); presetHead.choose(); }
@@ -9670,7 +9674,12 @@ let prRefreshCursor = () => {}; // re-derives the canvas cursor in place (set by
 const NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
 // c3 = 60 (see notes.mjs), so the octave number is two below the raw MIDI octave: 60 -> C3,
 // and the bottom of the range reads C-2, which is what plugin displays show there too.
-const midiName = (m) => `${NOTE_NAMES[((m % 12) + 12) % 12]}${Math.floor(m / 12) - 2}`;
+// A pitch between keys (a tuning's) is named by its nearest key and how far off it is in cents.
+const midiName = (m) => {
+  const key = Math.round(m);
+  const cents = Math.round((m - key) * 100);
+  return `${NOTE_NAMES[((key % 12) + 12) % 12]}${Math.floor(key / 12) - 2}${cents ? (cents > 0 ? `+${cents}` : `${cents}`) : ''}`;
+};
 const isBlackKey = (m) => [1, 3, 6, 8, 10].includes(((m % 12) + 12) % 12);
 const pitchClass = (m) => ((m % 12) + 12) % 12;
 
@@ -9690,6 +9699,16 @@ const deckKeys = { a: { scale: null, groove: null }, b: { scale: null, groove: n
 function setPatchGroove(entry, deck = 'a') {
   deckKeys[deck].groove = entry && entry.shape ? { shape: String(entry.shape), depth: Number(entry.depth) || 0 } : null;
   syncPatchKey();
+}
+
+// The .scl tunings the server read for a buffer: the roll parses scale names itself (see prScaleInfo),
+// and a file only the server can read has to reach this side as data.
+function registerTunings(list) {
+  if (!Array.isArray(list) || !notesMod?.registerTuning) return;
+  for (const t of list) {
+    try { notesMod.registerTuning(t.name, { intervals: t.intervals, period: t.period }); } catch { /* reported server-side */ }
+  }
+  prScaleCache = { name: null, info: null }; // a tuning re-read under the same name redraws the rows
 }
 
 function setPatchScale(name, deck = 'a') {
@@ -9728,10 +9747,20 @@ function prScaleInfo() {
   if (prScaleCache.name !== patchScale) {
     let info = null;
     try {
-      const { rootMidi, intervals } = notesMod.parseScaleName(patchScale);
+      const { rootMidi, intervals, period, tuned } = notesMod.parseScaleName(patchScale);
       // `intervals` (semitones above the root, ascending from 0) is what the ⌨'s in-key layout is
       // built from; `pcs` is what the roll's lanes are colored by.
-      info = { tonic: pitchClass(rootMidi), intervals, pcs: new Set(intervals.map((iv) => pitchClass(rootMidi + iv))) };
+      info = { tonic: pitchClass(rootMidi), intervals, pcs: new Set(intervals.map((iv) => pitchClass(Math.round(rootMidi + iv)))) };
+      if (tuned) {
+        // A tuning off the 12-tone grid: its own pitches ARE the roll's rows (see prLaneList), each
+        // with its degree, so the gutter can count steps and mark the root.
+        const len = intervals.length;
+        const at = (d) => rootMidi + intervals[((d % len) + len) % len] + period * Math.floor(d / len);
+        const pitches = [];
+        const lo = -Math.ceil(((rootMidi + 1) / period) * len) - len;
+        for (let d = lo; at(d) <= 127; d++) if (at(d) >= 0) pitches.push({ midi: at(d), degree: d, step: ((d % len) + len) % len });
+        Object.assign(info, { tuned: true, rootMidi, period, size: len, pitches });
+      }
     } catch {
       info = null; // the server already reported the bad name at the setscale call
     }
@@ -9825,7 +9854,12 @@ const prRowOf = (nt) =>
   (prIndexMode() ? pianorollMod.noteIndex(nt) : prSliceMode() ? (pianorollMod.noteSlice(nt) ?? 0) : nt.midi);
 
 /** Move a note to row `row` on the axis currently on screen, leaving its other channels alone. */
-const prSetRow = (nt, row) => { nt[prRowField()] = Math.max(0, Math.min(127, Math.round(row))); };
+// A pitch is kept exact - a tuning's lanes sit between the keys - and an index or a slice is whole.
+const prSetRow = (nt, row) => {
+  const field = prRowField();
+  const v = Math.max(0, Math.min(127, Number(row)));
+  nt[field] = field === 'midi' ? Math.round(v * 1000) / 1000 : Math.round(v);
+};
 
 /** A fresh note at row `row`: the drawn channel takes the row, the other one its resting value. */
 const prNewNote = (row, cell) => ({
@@ -9840,7 +9874,8 @@ const prNewNote = (row, cell) => ({
 });
 
 /** Rows either side of one another in the axis's own units: an octave, or a group of 4 numbers. */
-const prAxisJump = () => (prNoteMode() ? 12 : PR_INDEX_GROUP);
+// On the keyboard, an octave - or a tuning's own period, which need not be one (a tritave, say).
+const prAxisJump = () => (prNoteMode() ? (prScaleInfo()?.tuned ? prScaleInfo().period : 12) : PR_INDEX_GROUP);
 
 // What each axis calls itself, and what its rows mean - the mode button's face and its tooltip.
 const PR_MODE_ROWS = {
@@ -10063,6 +10098,14 @@ function prSetMode(mode) {
 function prLaneList() {
   const used = [...new Set(prLiveNotes(prState.notes).map(prRowOf))].sort((a, b) => a - b);
   if (prState.fold) return used.length ? used : null;
+  // A tuning's pitches are always the rows: the 12 keys of a piano are not its grid. Anything drawn
+  // off it (a roll from another key) keeps a lane of its own, dimmed, as an out-of-key note does.
+  const tuning = prNoteMode() ? prScaleInfo() : null;
+  if (tuning?.tuned) {
+    const lanes = tuning.pitches.map((p) => p.midi);
+    for (const midi of used) if (!prTuningPitchAt(midi, tuning)) lanes.push(midi);
+    return lanes.sort((a, b) => a - b);
+  }
   const info = prNoteMode() && prState.scaleFold ? prScaleInfo() : null;
   if (!info) return null;
   const inUse = new Set(used);
@@ -10074,7 +10117,26 @@ function prLaneList() {
 // Where a pitch sits in the key: 2 = the tonic, 1 = in the scale, 0 = out of it. null when no
 // scale is set, which leaves the roll on its plain black/white lanes. Both the grid and the piano
 // gutter shade by this, so "in key" is visible as color and not merely as the absence of dimming.
-const prScaleRank = (midi, info) => (!info ? null : pitchClass(midi) === info.tonic ? 2 : info.pcs.has(pitchClass(midi)) ? 1 : 0);
+const prScaleRank = (midi, info) => {
+  if (!info) return null;
+  if (info.tuned) {
+    const hit = prTuningPitchAt(midi, info);
+    return !hit ? 0 : hit.step === 0 ? 2 : 1;
+  }
+  return pitchClass(midi) === info.tonic ? 2 : info.pcs.has(pitchClass(midi)) ? 1 : 0;
+};
+
+/** The tuning pitch at `midi` (within a thousandth of a semitone - what roll data keeps), or null. */
+function prTuningPitchAt(midi, info) {
+  const ps = info.pitches;
+  let lo = 0, hi = ps.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (ps[mid].midi < midi - 1e-3) lo = mid + 1;
+    else hi = mid;
+  }
+  return ps[lo] && Math.abs(ps[lo].midi - midi) <= 1e-3 ? ps[lo] : null;
+}
 
 // How strongly the accent tints a lane / a piano key at each rank. The grid stays faint (notes
 // have to read on top of it); the keyboard can afford to be bolder.
@@ -10082,7 +10144,19 @@ const PR_LANE_TINT = [0, 0.07, 0.18]; // out (unused - dimmed instead), in key, 
 const PR_KEY_TINT = [0, 0.26, 0.62];
 
 /** row value -> lane index. Off-lane rows (a note mid-drag) resolve to the nearest lane below. */
-const prPosOf = (midi, m) => (m.lanes ? m.laneOf[Math.min(127, Math.max(0, Math.round(midi)))] : midi);
+const prPosOf = (midi, m) => {
+  if (!m.lanes) return midi;
+  if (!m.exactLanes) return m.laneOf[Math.min(127, Math.max(0, Math.round(midi)))];
+  // Lanes between the keys (a tuning): the nearest lane by pitch.
+  const ls = m.lanes;
+  let lo = 0, hi = ls.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (ls[mid] < midi) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo > 0 && midi - ls[lo - 1] < ls[lo] - midi ? lo - 1 : lo;
+};
 
 /** lane index -> row value, clamped to the ends of the axis. */
 const prMidiOf = (pos, m) =>
@@ -12646,11 +12720,12 @@ function prMetrics() {
       laneOf[midi] = i;
     }
   }
+  const exactLanes = !!lanes && lanes.some((v) => !Number.isInteger(v));
   const laneMax = (lanes ? lanes.length : 128) - 1;
   // Clamp the pitch window the same way scrollCells is clamped, so toggling fold (or deleting the
   // notes that were holding a lane open) can't leave the view parked past the end of the axis.
   prState.pitchTop = Math.max(Math.min(rows - 1, laneMax), Math.min(laneMax, prState.pitchTop));
-  return { W: prW, H: PR_CH, gridTop: PR_TOPBAR, gridH: PR_GRIDH, laneTop: PR_TOPBAR + PR_GRIDH, laneH: PR_LANEH, gridW, cols, minCell, cellW, rowH, rows, vzoom, visibleCells, maxScroll, scroll, lanes, laneOf, laneMax, bottomPos: prState.pitchTop - rows };
+  return { W: prW, H: PR_CH, gridTop: PR_TOPBAR, gridH: PR_GRIDH, laneTop: PR_TOPBAR + PR_GRIDH, laneH: PR_LANEH, gridW, cols, minCell, cellW, rowH, rows, vzoom, visibleCells, maxScroll, scroll, lanes, laneOf, exactLanes, laneMax, bottomPos: prState.pitchTop - rows };
 }
 
 const prCellToX = (cell, m) => PR_GUTTER + (cell - m.scroll) * m.cellW;
@@ -12789,6 +12864,44 @@ function drawPianoKeys(ctx, col, m, info) {
   }
   ctx.restore();
 
+  ctx.strokeStyle = col('--border-strong');
+  ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(PR_GUTTER + 0.5, 0); ctx.lineTo(PR_GUTTER + 0.5, H); ctx.stroke();
+}
+
+// A tuning's gutter, in place of the keyboard: one row per pitch of the tuning, numbered by its step
+// within the period, the root named (with its octave) and tinted hardest - the job the C labels do on
+// the piano. A pitch drawn off the tuning keeps its lane, named by its nearest key and cents, dimmed.
+function drawTuningRows(ctx, col, m, info) {
+  const { H, gridTop, rowH, laneTop } = m;
+  const accent = col('--accent');
+  ctx.textBaseline = 'middle';
+  ctx.textAlign = 'right';
+  ctx.fillStyle = col('--bg-panel');
+  ctx.fillRect(0, gridTop, PR_GUTTER, laneTop - gridTop);
+  ctx.save();
+  ctx.beginPath(); ctx.rect(0, gridTop, PR_GUTTER, laneTop - gridTop); ctx.clip();
+  for (let p = Math.ceil(prState.pitchTop); p >= Math.floor(prState.pitchTop - m.rows) - 1; p--) {
+    if (p < 0 || p > m.laneMax) continue;
+    const M = prMidiOf(p, m);
+    const hit = prTuningPitchAt(M, info);
+    const y = prPosToY(p, m);
+    if (hit) {
+      ctx.fillStyle = accent;
+      ctx.globalAlpha = PR_KEY_TINT[hit.step === 0 ? 2 : 1] * 0.5;
+      ctx.fillRect(0, y + 1, PR_GUTTER, rowH - 1);
+      ctx.globalAlpha = 1;
+    }
+    ctx.strokeStyle = col('--border');
+    ctx.lineWidth = hit?.step === 0 ? 1.2 : 0.5;
+    ctx.beginPath(); ctx.moveTo(0, y + rowH); ctx.lineTo(PR_GUTTER, y + rowH); ctx.stroke();
+    if (rowH < 7) continue; // too thin to label; the tint and the root's line still count the rows
+    ctx.font = `${hit?.step === 0 ? '600 ' : ''}9px ui-monospace, SFMono-Regular, Menlo, monospace`;
+    ctx.fillStyle = hit ? col('--text') : col('--text-dim');
+    const label = !hit ? midiName(M) : hit.step === 0 ? midiName(Math.round(M)) : String(hit.step);
+    ctx.fillText(label, PR_GUTTER - 5, y + rowH / 2 + 0.5);
+  }
+  ctx.restore();
   ctx.strokeStyle = col('--border-strong');
   ctx.lineWidth = 1;
   ctx.beginPath(); ctx.moveTo(PR_GUTTER + 0.5, 0); ctx.lineTo(PR_GUTTER + 0.5, H); ctx.stroke();
@@ -14027,7 +14140,7 @@ function prHarmonyTransformItems(items, targets, scale, at) {
     }));
     // Melodize's presets are just settings of the shape/keep dials; dragging either away from
     // the picked preset drops the pick back to 'none', the name of the custom mix.
-    const size = notesMod?.scalePitchClasses?.(scale)?.length ?? 7;
+    const size = notesMod?.scaleSize?.(scale) ?? 7;
     const ds = targets.map((nt) => notesMod.midiToDegree(nt.midi, scale));
     const degSpan = Math.max(...ds) - Math.min(...ds);
     const PRESETS = { 'new melody': { shape: 0, keep: 0 }, 'same shape': { shape: 1, keep: 0 }, mutate: { shape: 0, keep: 0.65 } };
@@ -14515,7 +14628,7 @@ function prNatCells(nt) {
   if (!entry?.duration || !prState) return null;
   const cycles = prFitCycles(prState.chain?.fit ?? null, entry.duration);
   if (!cycles) return null;
-  const speed = Math.abs(prState.chain?.speed ?? 1) * 2 ** ((Math.round(nt.midi) - 60) / 12);
+  const speed = Math.abs(prState.chain?.speed ?? 1) * 2 ** ((nt.midi - 60) / 12);
   if (!(speed > 0)) return null; // .speed(0) never gets anywhere, so it has no length either
   const stretch = prState.chain?.stretch ?? 1;
   if (!(stretch > 0)) return null;
@@ -15282,6 +15395,7 @@ function drawPianoroll() {
   drawLoopBar(ctx, col, m);
   // last, so the gutter overlays the grid's left edge cleanly
   if (index) drawIndexRows(ctx, col, m);
+  else if (info?.tuned) drawTuningRows(ctx, col, m, info);
   else drawPianoKeys(ctx, col, m, info);
 }
 
@@ -17170,7 +17284,11 @@ recBtn.addEventListener('click', () => (recState ? cancelMidiRecord(true) : star
 /** The quantize the rec options ask for: slots per cycle, 0 = off. */
 const recQuantize = () => Number(recGrid.value) || 0;
 
+let recStarting = false; // a second click before the first start answers would arm twice
+
 async function startMidiRecord() {
+  if (recStarting) return;
+  recStarting = true;
   recPanel.classList.add('hidden');
   try {
     recState = await api('POST', '/api/midiRecord/start', {
@@ -17178,6 +17296,7 @@ async function startMidiRecord() {
       grid: recQuantize(),
     });
     takeClocks(recState);
+    if (recPollTimer) clearInterval(recPollTimer); // never two pollers on one take
     recPollTimer = setInterval(pollMidiRecord, REC_POLL_MS);
     prRecGhosts();
     logLine(
@@ -17186,6 +17305,8 @@ async function startMidiRecord() {
   } catch (e) {
     recState = null;
     logLine(e.message ?? String(e), true);
+  } finally {
+    recStarting = false;
   }
 }
 
@@ -19786,7 +19907,8 @@ function applyServerLoad(load) {
 }
 
 async function refreshStatus() {
-  const { loaded, error, scale, groove, scan, load } = await api('GET', '/api/status');
+  const { loaded, error, scale, groove, scan, load, tunings } = await api('GET', '/api/status');
+  registerTunings(tunings);
   setPatchScale(scale); // the prebake may have called setscale() before anything was evaluated
   setPatchGroove(groove); // ...and setgroove(), which it may also have called
   applyScanState(scan);
@@ -20020,6 +20142,7 @@ async function evaluate(start, { byHand = false } = {}) {
     if (byHand) replayRecord('a', code, start, currentSavedName); // a moment of the night (see replays)
     transport = result.transport ?? { cps: result.cps ?? transport.cps, baseSec: 0, baseCycle: 0, paused: !start };
     if (result.deckTransport) deckTransports = result.deckTransport;
+    registerTunings(result.tunings);
     setPatchScale(result.scale); // a setscale() in the buffer re-colors (and re-folds) the roll
     setPatchGroove(result.groove ?? null); // ...and a setgroove() is the feel every quiet track plays by
     // The arrangement's song clock, for the painter's playhead - but only when the painter is on
@@ -22021,7 +22144,10 @@ wipRetentionSelect.addEventListener('change', async () => {
       // now, and "sessions older than 3 months" means nothing until you know it is 271 of them.
       const { preview } = await api('GET', `/api/patterns/wip/retention?months=${months}`);
       const ok = preview.sessions === 0
-        || confirm(`delete ${sessionCost(preview.sessions, preview.bytes)} older than ${months} month${months === 1 ? '' : 's'}?\n\nsaved patterns are not touched - only unnamed sessions. this keeps applying as sessions age.`);
+        || await askDialog(`Delete ${sessionCost(preview.sessions, preview.bytes)} older than ${months} month${months === 1 ? '' : 's'}? Saved patterns are not touched, only unnamed sessions. This keeps applying as sessions age.`, [
+          { label: 'cancel', value: false },
+          { label: 'delete', value: true, primary: true },
+        ]);
       if (!ok) return refreshWipRetention(); // put the select back to the policy in force
     }
     const res = await api('POST', '/api/patterns/wip/retention', { months });
@@ -23568,11 +23694,13 @@ function packRenderTransport() {
 // The rows that ARE the playing file light up, in both lists, without redrawing them.
 function packMarkPlaying() {
   for (const box of [packEntriesEl, packBrowseList]) {
+    // The list is built once per box and indexed by key: built once per ROW it was quadratic,
+    // and a few thousand entries made every click in the panel a visible pause.
+    const byKey = new Map(packRows(box === packEntriesEl ? 'entries' : 'browse').map((r) => [String(r.key), r]));
     for (const el of box.children) {
       const key = el.dataset.key;
       if (key == null) continue;
-      const rows = box === packEntriesEl ? packRows('entries') : packRows('browse');
-      const row = rows.find((r) => String(r.key) === key);
+      const row = byKey.get(key);
       el.classList.toggle('playing', !!row && row.abs === packPlayer.abs);
     }
   }
@@ -26988,26 +27116,33 @@ function setPrebakeNote(text, isError = false) {
   prebakeNote.classList.toggle('error', isError);
 }
 
+// Whether the editor holds what is on disk. A load that failed (the server mid-restart) leaves
+// an empty buffer, and saving THAT would wipe the file - so until a load succeeds, save refuses.
+let prebakeLoaded = false;
+
 async function openPrebake() {
   const editor = ensurePrebakeCM();
   setPrebakeNote('loading…');
   try {
     const { code } = await api('GET', '/api/prebake');
     editor.setValue(code ?? '');
+    prebakeLoaded = true;
   } catch (e) {
+    prebakeLoaded = false;
     logLine(e.message ?? String(e), true);
   }
   prebakeBackdrop.classList.remove('hidden');
   editor.refresh(); // it was laid out while hidden - size it now that it's visible
   editor.focus();
   editor.setCursor(editor.lineCount(), 0);
-  setPrebakeNote(PREBAKE_HINT);
+  prebakeSaveBtn.disabled = !prebakeLoaded;
+  setPrebakeNote(prebakeLoaded ? PREBAKE_HINT : 'could not load the file - close and reopen to try again', !prebakeLoaded);
 }
 
 function closePrebake() { prebakeBackdrop.classList.add('hidden'); }
 
 async function savePrebake() {
-  if (!prebakeCM) return;
+  if (!prebakeCM || !prebakeLoaded) return;
   prebakeSaveBtn.disabled = true;
   setPrebakeNote('saving…');
   try {
@@ -27417,7 +27552,11 @@ async function keepWipFile(entry) {
 }
 
 async function deleteWipFile(entry) {
-  if (!confirm(`delete the session "${entry.label}"?`)) return;
+  const go = await askDialog(`Delete the session "${entry.label}"?`, [
+    { label: 'cancel', value: false },
+    { label: 'delete', value: true, primary: true },
+  ]);
+  if (!go) return;
   try {
     await api('POST', '/api/patterns/wip/delete', { id: entry.id });
     logLine(`deleted session "${entry.label}"`);
@@ -27447,7 +27586,11 @@ async function renamePatternFile(name) {
 }
 
 async function deletePatternFile(name) {
-  if (!confirm(`delete pattern "${name}"?`)) return;
+  const go = await askDialog(`Delete the pattern "${name}"?`, [
+    { label: 'cancel', value: false },
+    { label: 'delete', value: true, primary: true },
+  ]);
+  if (!go) return;
   try {
     await api('POST', '/api/patterns/delete', { name });
     // Deleting the pattern you have open cuts the buffer loose rather than leaving save pointed at
@@ -28510,8 +28653,8 @@ function activeCM() {
   return lastFocusedCM === deckBCM && deckBIsCode() ? deckBCM : cm;
 }
 
-// editor: a thin, offset-based facade over the focused CodeMirror instance, close to Strudel's
-// `repl` so ports read the same. Offsets are character indices into the whole document. Every
+// editor: a thin, offset-based facade over the focused CodeMirror instance, also reachable as
+// `repl`. Offsets are character indices into the whole document. Every
 // method re-resolves the editor rather than closing over one, so the same handle scripts deck A
 // or deck B depending on where the gesture came from.
 const editor = {
@@ -28598,7 +28741,7 @@ function prebakeScope() {
   const api = {
     hotkey: (combo, handler) => addHotkey(userHotkeys, combo, handler, 'user'),
     editor,
-    repl: editor, // alias so Strudel-style ports read unchanged
+    repl: editor, // the same facade under its other common name
     prompt: (msg, def) => Promise.resolve(window.prompt(msg, def == null ? '' : String(def))),
     alert: (msg) => window.alert(msg),
     log: (msg) => logLine(String(msg)),
@@ -29651,6 +29794,8 @@ function makeSongPane(deck) {
     ctlRender();
     if (!P.song) {
       P.song = { path: sb.path, title: sb.title, bpm: sb.bpm ?? null };
+      onsets = []; // adopted from the server, like a load: the old song's hits must not pull on it
+      detectSaid = null;
       if (deck === 'b') {
         deckBFileName = null;
         if (deckBCM) {
@@ -29719,6 +29864,8 @@ function makeSongPane(deck) {
     P.close();
     P.song = null;
     P.mirror = null;
+    onsets = []; // the next song starts with no magnet until its own analysis lands
+    detectSaid = null;
   };
 
   function rafStart() {
@@ -30064,7 +30211,16 @@ function makeSongPane(deck) {
   bpmEl.addEventListener('change', () => {
     if (!P.song) return;
     const v = bpmEl.value.trim();
-    metaPost({ bpm: v === '' ? null : Number(v) });
+    const bpm = v === '' ? null : Number(v);
+    // A typo is not a tempo. NaN would travel as JSON null, which the server reads as "clear":
+    // bpm gone, sync off, beatgrid with it - mid-set, from one mistyped digit.
+    if (bpm != null && !(Number.isFinite(bpm) && bpm >= 20 && bpm <= 400)) {
+      logLine(`${D} bpm must be 20..400 - kept ${P.mirror?.bpm ?? P.song.bpm ?? 'the detected tempo'}`, true);
+      ctlRender(); // puts the box back to what the mirror says
+      bpmEl.blur();
+      return;
+    }
+    metaPost({ bpm });
     bpmEl.blur();
   });
   byId('songAnchor').addEventListener('click', () => {
@@ -31019,6 +31175,7 @@ async function evalDeckB(start, how) {
     const result = await pending;
     if (byHand) replayRecord('b', code, start, deckBFileName);
     takeClocks(result);
+    registerTunings(result.tunings);
     setPatchScale(result.scale, 'b'); // deck B's own key and feel, for a roll opened on it
     setPatchGroove(result.groove ?? null, 'b');
     if (arDeck === 'b') arSetClock(result.arrange ?? null); // deck B's own song clock, for the playhead
@@ -35049,8 +35206,12 @@ function orgPlaylistMenu(p, x, y) {
         saveLibraryDoc();
         orgRender();
       }],
-      ['delete', () => {
-        if (!confirm(`Delete playlist "${p.name}"? The songs themselves stay.`)) return;
+      ['delete', async () => {
+        const go = await askDialog(`Delete the playlist "${p.name}"? The songs themselves stay.`, [
+          { label: 'cancel', value: false },
+          { label: 'delete', value: true, primary: true },
+        ]);
+        if (!go) return;
         libDoc.playlists = libDoc.playlists.filter((x) => x.id !== p.id);
         if (orgLastList === p.id) orgLastList = null;
         if (orgSrc.kind === 'playlist' && orgSrc.id === p.id) orgSrc = { kind: 'livecode', folder: '' };
@@ -35169,7 +35330,11 @@ async function orgForgetMissing() {
   const warn = `Forget ${gone.length} track${gone.length === 1 ? '' : 's'} whose files are gone?`
     + (inSets.length ? `\n\n${inSets.length} playlist${inSets.length === 1 ? '' : 's'} play some of them (${inSets.map((p) => p.name).join(', ')}) and will lose those slots.` : '')
     + '\n\nRatings and corrections on them go too. The files on disk are untouched.';
-  if (!confirm(warn)) return;
+  const go = await askDialog(warn, [
+    { label: 'cancel', value: false },
+    { label: 'forget', value: true, primary: true },
+  ]);
+  if (!go) return;
   try {
     await flushLibraryDoc();
     const { library, forgot } = await api('POST', '/api/library/forget', { ids: [...ids] });
@@ -35224,7 +35389,11 @@ async function orgForgetTracks(rows) {
   const warn = inSets.length
     ? `Forget ${what}? ${ids.length === 1 ? 'It is' : 'They are'} in ${inSets.length} playlist${inSets.length === 1 ? '' : 's'} (${inSets.map((p) => p.name).join(', ')}), and will be taken out of ${inSets.length === 1 ? 'it' : 'them'} too.\n\nThe file on disk is untouched.`
     : `Forget ${what}? The file on disk is untouched.`;
-  if (!confirm(warn)) return;
+  const go = await askDialog(warn, [
+    { label: 'cancel', value: false },
+    { label: 'forget', value: true, primary: true },
+  ]);
+  if (!go) return;
   try {
     await flushLibraryDoc();
     const { library } = await api('POST', '/api/library/forget', { ids });
@@ -37027,10 +37196,15 @@ async function setReplayKept(id, kept) {
 }
 
 async function deleteReplay(r) {
-  if (!confirm(`delete the replay of ${replayWhen(r.started)}?${r.kept ? '\n\nit is starred.' : ''}`)) return;
+  const go = await askDialog(`Delete the replay of ${replayWhen(r.started)}?${r.kept ? ' It is starred.' : ''}`, [
+    { label: 'cancel', value: false },
+    { label: 'delete', value: true, primary: true },
+  ]);
+  if (!go) return;
   try {
-    if (replayView?.id === r.id) closeReplay();
     await api('POST', '/api/replays/delete', { id: r.id });
+    if (replayView?.id === r.id) closeReplay(); // after the delete: a failed one leaves it open
+
     logLine(`deleted the replay of ${replayWhen(r.started)}`);
     refreshReplays();
   } catch (e) {
@@ -37373,7 +37547,10 @@ replayRetentionSelect.addEventListener('change', async () => {
     if (days > 0) {
       const { preview } = await api('GET', `/api/replays/retention?days=${days}`);
       const ok = preview.replays === 0
-        || confirm(`delete ${replayCost(preview.replays, preview.bytes)} older than ${days} day${days === 1 ? '' : 's'}?\n\nstarred replays are not touched. this keeps applying as replays age.`);
+        || await askDialog(`Delete ${replayCost(preview.replays, preview.bytes)} older than ${days} day${days === 1 ? '' : 's'}? Starred replays are not touched. This keeps applying as replays age.`, [
+          { label: 'cancel', value: false },
+          { label: 'delete', value: true, primary: true },
+        ]);
       if (!ok) return refreshReplayRetention();
     }
     const res = await api('POST', '/api/replays/retention', { days });

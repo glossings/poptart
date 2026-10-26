@@ -70,6 +70,24 @@ test('a synth source fans out the pitch it played', () => {
   ]);
 });
 
+// A fractional note (a tuning, a fractional degree) reaches the track's own instrument as written -
+// sclang plays it exactly on poptart's devices and rounds for a plugin - while every MIDI route
+// takes the nearest key (2026-10-25). On and off carry the same value, so they always match.
+test('a fractional note plays as written on its own track and fans out as the nearest key', () => {
+  const { e, sent } = engine();
+  e.setInputSource('sub', 'midi', 'lead');
+  e.noteOn('lead', 62.4, 0.7, 0.25);
+  e.noteOff('lead', 62.4, 0.5);
+  assert.deepStrictEqual(notes(sent).filter(([, id]) => id === 'lead'), [
+    ['/poptart/noteOn', 'lead', 62.4, 0.7, 0.25],
+    ['/poptart/noteOff', 'lead', 62.4, 0.5],
+  ]);
+  assert.deepStrictEqual(notes(sent).filter(([, id]) => id === 'sub'), [
+    ['/poptart/noteOn', 'sub', 62, 0.7, 0.25],
+    ['/poptart/noteOff', 'sub', 62, 0.5],
+  ]);
+});
+
 test('the sample event\'s own pitch is what the route plays', () => {
   const { e, sent } = engine();
   e.setInputSource('sub', 'midi', 'kick');

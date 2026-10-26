@@ -12,8 +12,8 @@
 //
 //  - Note edges: if the top-level pattern has known step boundaries (mini-notation-derived),
 //    we know exact onset/offset times ahead of playback, the same "compute deadlines slightly
-//    ahead of the audio clock" lookahead model Tidal/SuperDirt use - just operating on our own
-//    plain step objects instead of Strudel Haps. Sampler patterns (sig.sampler set) go through
+//    ahead of the audio clock" lookahead model - operating on plain step objects. Sampler
+//    patterns (sig.sampler set) go through
 //    the same walk but emit playSample events (config signals sampled at each onset) instead of
 //    noteOn/noteOff pairs.
 //  - Parameter modulation: a control assigned one whole modulator (an `lfoIR`/`envIR`/`ccIR`
@@ -26,7 +26,7 @@
 
 import { defScopeOf, withDefDeck } from './rolls.mjs';
 import { sampleBound, CHANNEL_DEFAULTS, GRAIN_CHANNELS, MAX_FX_SLOTS,DEFAULT_BEND_RANGE, bendRangeWarning, LOOP_MODES, loopModeAt, channelAt, soundingEnd, timeShift, grooveVelScale, endEdgeStep, warnPattern, lfoRateHz, lfoPhaseCount, lfoShapes, resolvePreset, withNoteGate, withEventSpan, noteGateFromGrid } from './signal.mjs';
-import { scalePitchClasses } from './notes.mjs';
+import { scalePitchClasses, parseScaleName, degreeToMidi, quantizeToScale } from './notes.mjs';
 import { songSteps, stepsUnderShift, withClipShift } from './arrange.mjs';
 import { sliceSetIsEmpty } from './slices.mjs';
 import { resolveInputChannels } from './audio-inputs.mjs';
@@ -1570,7 +1570,9 @@ export class Scheduler {
     const ops = pitchOps ?? [];
     if (ops.length === 0) return { pcs: null, transpose: 0, noteMap: null };
     const folded = foldPitchOps(ops);
-    if (folded) {
+    // A tuning can't fold: its pitches sit between the keys, which the engine-side quantize (whole
+    // keys, pitch classes) has no way to say. The per-note map plays it instead - see _buildNoteMap.
+    if (folded && !(folded.scaleName && parseScaleName(folded.scaleName).tuned)) {
       return { pcs: folded.scaleName ? scalePitchClasses(folded.scaleName) : null, transpose: folded.transpose, noteMap: null };
     }
     return { pcs: null, transpose: 0, noteMap: this._buildNoteMap(ops) };
@@ -1587,10 +1589,27 @@ export class Scheduler {
   // it, because a held key is one gesture, not a grid). A `,`-stack in an operand reads as one of
   // its layers rather than fanning the note into a chord.
   _buildNoteMap(pitchOps) {
-    const resolved = pitchOps.map((e) => (e.op === 'scale' ? { pcs: scalePitchClasses(e.name) ?? [] } : e));
+    // A 12-tone scale snaps each key to its nearest pitch class. A TUNING maps keys to steps instead:
+    // the root's key plays the root and each key up plays the next step - a keyboard has 12 keys an
+    // octave and 31-EDO has 31 steps, so snapping would leave most of the tuning out of reach - unless
+    // the scale asked for "nearest", which snaps each key to the tuning's nearest pitch.
+    const resolved = pitchOps.map((e) => {
+      if (e.op !== 'scale') return e;
+      const tuning = parseScaleName(e.name);
+      if (!tuning.tuned) return { pcs: scalePitchClasses(e.name) ?? [] };
+      return e.keys === 'nearest' ? { nearest: e.name } : { tuned: e.name, rootKey: Math.round(tuning.rootMidi) };
+    });
     return (noteIn, sec) => this._readAt(this.transport.cycleAt(sec), (cycle) => {
       let v = noteIn;
       for (const e of resolved) {
+        if (e.tuned) {
+          v = degreeToMidi(Math.round(v) - e.rootKey, e.tuned);
+          continue;
+        }
+        if (e.nearest) { // .scale(tuning, "nearest"): the key's own pitch, snapped into the tuning
+          v = quantizeToScale(v, e.nearest);
+          continue;
+        }
         if (e.pcs) {
           v = quantizeToPcs(Math.round(v), e.pcs);
           continue;
@@ -1599,7 +1618,9 @@ export class Scheduler {
         if (b == null) return null;
         v = e.fn(v, Number(b));
       }
-      return Number.isFinite(v) ? Math.min(127, Math.max(0, Math.round(v))) : null;
+      // Kept to a thousandth of a semitone, as roll data is: poptart's own instruments play a pitch
+      // between the keys exactly, and the engine rounds it for a plugin.
+      return Number.isFinite(v) ? Math.min(127, Math.max(0, Math.round(v * 1000) / 1000)) : null;
     });
   }
 
@@ -1679,7 +1700,7 @@ export class Scheduler {
         const kind = this.pattern.samplerKind ?? 'pack';
         let pack = String(step.value);
         if (kind === 'pack' || kind === 'named') {
-          // Strudel shorthand: s("bd:4") = s("bd").i(4). An explicit .i() wins over the suffix.
+          // Index shorthand: s("bd:4") = s("bd").i(4). An explicit .i() wins over the suffix.
           const m = /^(.+):(-?\d+)$/.exec(pack);
           if (m) {
             pack = m[1];

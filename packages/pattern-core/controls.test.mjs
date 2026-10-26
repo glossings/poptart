@@ -1,4 +1,4 @@
-// Sampler controls as top-level builders - Strudel's "control patterns". `speed("-1")` names the
+// Sampler controls as top-level builders - "control patterns". `speed("-1")` names the
 // speed CHANNEL rather than a value stream, so a combinator handed a whole pattern can still aim at
 // one channel of it: x.mul(speed("-1")). Pure pattern math - no scheduler/engine boot.
 
@@ -85,7 +85,7 @@ test('arithmetic on a sampler pattern repitches instead of mangling the pack nam
   const up = s('rave').add(7);
   assert.equal(cfgAt(up, 'note', 0), 67, 'unset note is 60 ("c3", as recorded), so +7 = 67');
   assert.deepEqual(up.stepsForCycle(0).map((x) => x.value), ['rave'], 'the pack name survives');
-  // The same thing said with a note() operand, Strudel's combinator idiom.
+  // The same thing said with a note() operand, the combinator idiom.
   assert.equal(cfgAt(s('rave').add(note(7)), 'note', 0), 67);
   // An existing repitch is the left operand.
   assert.equal(cfgAt(s('rave').note(36).add(12), 'note', 0), 48);

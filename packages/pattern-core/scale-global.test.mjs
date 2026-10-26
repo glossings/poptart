@@ -94,3 +94,17 @@ test('midiToDegree inverts degreeToMidi, and rounds an out-of-key note to the ne
   // eb4 (75) in C major sits between d4 (74) and e4 (76); the lower one wins the tie.
   assert.equal(degreeToMidi(midiToDegree(75, 'c4 major'), 'c4 major'), 74);
 });
+
+// A fractional degree used to index the scale at a fraction and come back NaN - a silent note on
+// every step but 0 in n("<0 1 2 3 9>*8").mul(1.2).sc() (2026-10-25). It now lands that far between
+// its neighbors; the engine rounds the result for a plugin.
+test('a fractional degree lands between its neighbors, across octaves and below zero', () => {
+  // c3 is MIDI 60 in poptart.
+  assert.equal(degreeToMidi(1.5, 'c3 major'), 63); // halfway from d3 (62) to e3 (64)
+  assert.ok(Math.abs(degreeToMidi(1.2, 'c3 major') - 62.4) < 1e-9);
+  assert.equal(degreeToMidi(6.5, 'c3 major'), 71.5); // b3 to the next octave's c4
+  assert.equal(degreeToMidi(-0.5, 'c3 major'), 59.5); // b2 to c3
+  assert.equal(degreeToMidi(2, 'c3 major'), 64, 'whole degrees are unchanged');
+  assert.ok(Number.isNaN(degreeToMidi(Number('x'), 'c3 major')));
+  assert.ok(values(n('0 1.2 2.4').scale('c3 major')).every(Number.isFinite), 'no step comes back NaN');
+});

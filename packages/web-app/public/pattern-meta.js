@@ -1,6 +1,6 @@
 'use strict';
 
-// Pattern metadata - Strudel-style `@key value` tags a pattern carries in its own comments:
+// Pattern metadata - `@key value` tags a pattern carries in its own comments:
 //
 //   // @title kick drift
 //   // @by aria  @tags techno, generative

@@ -179,9 +179,7 @@ const DEFAULT_OUTPUT_CHANNELS = 2;
  * an exotic one. An interface's spare pairs are real - CoreAudio reports them, scsynth will happily
  * write to them - but they are usually back-panel jacks or SPDIF with nothing plugged in, so
  * addressing them by default means .o(2) is silence on the very hardware that has the most outputs.
- * Stereo by default, more when you say so. (Strudel arrives at the same answer from the other side:
- * its orbits only become channel assignments once you tick "Multi Channel Orbits", which is off by
- * default - see the README.)
+ * Stereo by default, more when you say so.
  *
  * The cap is clamped rather than validated so a device change can never strand playback: pick a
  * 6-channel interface, set 6, go back to the laptop speakers, and this quietly means 2 again -

@@ -15,12 +15,13 @@
 // midiToDegree/degreeToMidi; a note that isn't in the key takes its nearest degree and comes out
 // in key, which is the honest reading of "invert this melody in C major".
 
-import { degreeToMidi, midiToDegree, quantizeToScale, scalePitchClasses } from './notes.mjs';
+import { degreeToMidi, midiToDegree, quantizeToScale, scaleSize } from './notes.mjs';
 
 const MAX_NUDGE = 0.5; // mirrors pianoroll.mjs's PIANOROLL_MAX_NUDGE
 const MIN_LEN = 0.01; // mirrors pianoroll.mjs's PIANOROLL_MIN_LEN - a length is any number of cells above it
 const clampNudge = (v) => Math.min(MAX_NUDGE, Math.max(-MAX_NUDGE, v));
-const clampMidi = (m) => Math.min(127, Math.max(0, Math.round(m)));
+// To a thousandth of a semitone, as roll data keeps it: a tuning's pitches sit between the keys.
+const clampMidi = (m) => Math.min(127, Math.max(0, Math.round(m * 1000) / 1000));
 const clampVel = (v) => Math.min(1, Math.max(0, v));
 const clampLen = (v) => (Number.isFinite(v) && v > 0 ? Math.max(MIN_LEN, v) : 1);
 const noteNudge = (nt) => (Number.isFinite(nt.nudge) ? clampNudge(nt.nudge) : 0);
@@ -550,7 +551,7 @@ export function arpeggiate(notes, { rate = 1, direction = 'up', seed = 1 } = {})
 export function melodize(notes, { scale, seed = 1, keep = 0, shape = 0, range = null, offset = 0, grid = 16 } = {}) {
   if (!notes.length) return [];
   const rand = seededRandom(seed);
-  const size = scalePitchClasses(scale).length || 7;
+  const size = scaleSize(scale) || 7;
   const triad = size >= 6 ? [0, 2, 4] : null; // in a pentatonic everything is a chord tone already
   const ordered = notes.map((nt, i) => [nt, i]).sort((a, b) => byTime(a[0], b[0]));
   const dice = ordered.map(() => [rand(), rand(), rand(), rand(), rand()]);

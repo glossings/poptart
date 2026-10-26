@@ -1,4 +1,4 @@
-// Strudel-style pattern labels: split editor code into named blocks, one track each.
+// Pattern labels: split editor code into named blocks, one track each.
 //
 //   $: n("0 2 3")...            anonymous pattern (auto-named $1, $2, ... by position)
 //   bass: n("0 2 3")...         named pattern - the name becomes the engine track id

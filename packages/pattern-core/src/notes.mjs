@@ -5,8 +5,8 @@ const NOTE_LETTER_SEMITONES = { c: 0, d: 2, e: 4, f: 5, g: 7, a: 9, b: 11 };
 
 // MIDI convention used throughout this package: c3 = 60. This is the naming most plugin key
 // displays use, so a note name written here reads the same on the synth's own keyboard - that
-// match is the whole reason for the choice. It differs from Tidal (c5 = 60) and from Strudel
-// (c4 = 60), so note names copied from those sound two octaves / one octave off respectively.
+// match is the whole reason for the choice. Other conventions put c4 or c5 at 60, so note names
+// copied from them sound an octave or two off.
 // Bare MIDI numbers are unaffected either way, and most of a pattern's pitch data is numbers.
 const NOTE_NAME_RE = /^([a-gA-G])([#sSbf]*)(-?\d+)?$/;
 
@@ -63,28 +63,152 @@ const SCALE_ALIASES = {
   melodicminor: 'melodicMinor',
 };
 
+// ---------------------------------------------------------------------------------------------
+// Tunings. A scale is a root plus `intervals` - each degree's distance above the root in
+// SEMITONES - and a `period`, the interval it repeats at (12, an octave, unless the tuning says
+// otherwise). For the named modes above both are whole numbers; a tuning makes them fractional,
+// and everything downstream (degrees, chords, quantizing) reads them the same way, so a degree in
+// 31-EDO comes out as a fractional MIDI note the devices play exactly. What a scale name can be:
+//
+//   "c3 minor"                        a mode (the table above)
+//   "c3 31edo"                        every step of an equal division of the octave
+//   "c3 31edo major"                  a mode of it: each of the mode's steps at the nearest EDO step
+//                                     (in 31-EDO that is meantone major)
+//   "c3 31edo 5 5 3 5 5 5 3"          a mode of it written as step counts
+//   "c3 9/8 5/4 4/3 3/2 5/3 15/8 2/1" a tuning listed as a Scala file lists it: ratios ("5/4", or
+//                                     a whole number "2" for 2/1) or cents (a number with a ".",
+//                                     "386.3"), the unison left out, the last entry the period
+//   "c3 mytuning" / "c3 mytuning.scl" a tuning registered by name (registerTuning - the desktop
+//                                     host registers the .scl files a buffer names)
+//
+// The root takes its usual 12-tone pitch: c3 is MIDI 60 in every tuning.
+// ---------------------------------------------------------------------------------------------
+
+const TUNINGS = new Map(); // registered by name: name (lower case, ".scl" dropped) -> { intervals, period }
+
+const tuningKey = (name) => String(name).trim().toLowerCase().replace(/\.scl$/, '');
+
+/** One Scala pitch line's value in semitones: cents if it has a ".", else a ratio (or n meaning n/1). */
+function scalaPitch(token) {
+  const t = String(token).trim();
+  if (t.includes('.')) {
+    const cents = Number(t);
+    return Number.isFinite(cents) ? cents / 100 : null;
+  }
+  const m = /^(\d+)(?:\/(\d+))?$/.exec(t);
+  if (!m) return null;
+  const ratio = Number(m[1]) / (m[2] === undefined ? 1 : Number(m[2]));
+  return ratio > 0 ? 12 * Math.log2(ratio) : null;
+}
+
+const isScalaPitch = (token) => /^-?\d*\.\d*$/.test(token) || /^\d+(\/\d+)?$/.test(token);
+
+/** A pitch list in Scala order (no unison, last = period) -> { intervals, period }. */
+function tuningFromPitches(pitches, what) {
+  const values = pitches.map(scalaPitch);
+  if (values.some((v) => v == null)) throw new Error(`[notes] ${what}: every pitch must be a ratio like 5/4 or cents like 386.3`);
+  // A leading unison (1/1, 0.0) is tolerated: Scala leaves it out, people often write it in.
+  if (values.length > 1 && Math.abs(values[0]) < 1e-9) values.shift();
+  if (!values.length) throw new Error(`[notes] ${what}: a tuning needs at least its period, e.g. 2/1`);
+  const period = values[values.length - 1];
+  if (!(period > 0)) throw new Error(`[notes] ${what}: the last pitch is the period and must be above the root`);
+  const intervals = [0, ...values.slice(0, -1)];
+  if (intervals.some((iv, i) => i > 0 && !(iv > intervals[i - 1] && iv < period))) {
+    // The usual cause: cents written without a ".", which Scala reads as a ratio (702 is 702/1).
+    const bare = pitches.find((p) => /^\d+$/.test(String(p).trim()) && Number(p) > 16);
+    const hint = bare ? ` - "${bare}" reads as the ratio ${bare}/1; for cents write ${bare}.0` : '';
+    throw new Error(`[notes] ${what}: pitches must rise, and stay below the period (the last one)${hint}`);
+  }
+  return { intervals, period };
+}
+
 /**
- * Parses a scale name like "F minor", "F:minor", "c4 major", "d dorian" into
- * `{ rootMidi, intervals }`. A bare mode name with no root (e.g. "minor") defaults to root C.
- * Root octave defaults to 5 (so root MIDI matches this module's note-name convention).
+ * Parses the text of a Scala .scl file into `{ description, intervals, period }`: `!` lines are
+ * comments, the first other line the description, the next the pitch count, then one pitch per
+ * line (anything after its first word is ignored, as the format says).
+ */
+export function parseScala(text, name = 'tuning') {
+  const lines = String(text).split(/\r?\n/).filter((l) => !/^\s*!/.test(l));
+  if (lines.length < 2) throw new Error(`[notes] ${name}: not a Scala file - it needs a description line and a count`);
+  const description = lines[0].trim();
+  const count = Number(lines[1].trim().split(/\s+/)[0]);
+  if (!Number.isInteger(count) || count < 1) throw new Error(`[notes] ${name}: the second line must be the number of pitches`);
+  const pitches = lines.slice(2).map((l) => l.trim().split(/\s+/)[0]).filter(Boolean).slice(0, count);
+  if (pitches.length < count) throw new Error(`[notes] ${name}: says ${count} pitches but lists ${pitches.length}`);
+  return { description, ...tuningFromPitches(pitches, name) };
+}
+
+/** Registers a tuning under `name` - Scala text, or { intervals, period } - for scale names to use. */
+export function registerTuning(name, tuning) {
+  const parsed = typeof tuning === 'string' ? parseScala(tuning, name) : tuning;
+  TUNINGS.set(tuningKey(name), { intervals: [...parsed.intervals], period: parsed.period });
+  return parsed;
+}
+
+/** The named tunings a scale name may use (for completions). */
+export function tuningNames() {
+  return [...TUNINGS.keys()];
+}
+
+/** Every registered tuning as data - what the host hands the editor, which parses scale names too. */
+export function registeredTunings() {
+  return [...TUNINGS].map(([name, { intervals, period }]) => ({ name, intervals: [...intervals], period }));
+}
+
+// "31edo", "31-edo", "31et", "31tet" -> 31.
+const EDO_RE = /^(\d+)-?(?:edo|tet|et)$/i;
+
+/** The mode word(s) after the root -> { intervals, period }, or null for an unknown word. */
+function resolveMode(words, scaleName) {
+  const [first, ...rest] = words;
+  const edo = EDO_RE.exec(first ?? '');
+  if (edo) {
+    const n = Number(edo[1]);
+    if (!(n >= 1 && n <= 1200)) throw new Error(`[notes] "${first}" - an EDO needs between 1 and 1200 steps (in "${scaleName}")`);
+    const step = 12 / n;
+    if (!rest.length) return { intervals: Array.from({ length: n }, (_, i) => i * step), period: 12 };
+    if (rest.every((w) => /^\d+$/.test(w))) {
+      const sizes = rest.map(Number);
+      const total = sizes.reduce((a, b) => a + b, 0);
+      if (total !== n) throw new Error(`[notes] the steps ${rest.join(' ')} add up to ${total}, not ${n} (in "${scaleName}")`);
+      const intervals = [0];
+      for (const size of sizes.slice(0, -1)) intervals.push(intervals[intervals.length - 1] + size * step);
+      return { intervals, period: 12 };
+    }
+    const mode = resolveMode(rest, scaleName);
+    if (!mode || mode.period !== 12) return null;
+    const steps = [...new Set(mode.intervals.map((iv) => Math.round(iv / step)))];
+    return { intervals: steps.map((k) => k * step), period: 12 };
+  }
+  if (words.length > 1 || isScalaPitch(first ?? '')) {
+    if (!words.every(isScalaPitch)) return null;
+    return tuningFromPitches(words, `"${scaleName}"`);
+  }
+  const key = (first ?? '').toLowerCase().replace(/[^a-z]/g, '');
+  const intervals = SCALE_INTERVALS[SCALE_ALIASES[key] ?? key];
+  if (intervals) return { intervals, period: 12 };
+  return TUNINGS.get(tuningKey(first ?? '')) ?? null;
+}
+
+/**
+ * Parses a scale name - a root and a mode or tuning, see Tunings above - into
+ * `{ rootMidi, intervals, period, tuned }`. A name with no root ("minor", "31edo") is rooted on C.
+ * The root octave defaults to 3 (c3 = 60). `tuned` is true when any interval is off the 12-tone
+ * grid, which is when 12-tone-only views (key signatures, pitch classes) have to approximate.
  */
 export function parseScaleName(scaleName) {
-  const cleaned = String(scaleName).trim().replace(/:/g, ' ');
-  const parts = cleaned.split(/\s+/).filter(Boolean);
+  const parts = String(scaleName).trim().replace(/:/g, ' ').split(/\s+/).filter(Boolean);
+  const hasRoot = parts.length >= 2 && NOTE_NAME_RE.test(parts[0]);
+  const rootPart = hasRoot ? parts[0] : 'c';
+  const words = hasRoot ? parts.slice(1) : parts;
+  if (!words.length) throw new Error(`[notes] "${scaleName}" names no scale`);
 
-  let rootPart = 'c';
-  let modePart;
-  if (parts.length >= 2) {
-    [rootPart, modePart] = parts;
-  } else {
-    modePart = parts[0];
-  }
-
-  const modeKey = modePart.toLowerCase().replace(/[^a-z]/g, '');
-  const resolvedMode = SCALE_ALIASES[modeKey] ?? modeKey;
-  const intervals = SCALE_INTERVALS[resolvedMode];
-  if (!intervals) {
-    throw new Error(`[notes] unknown scale "${modePart}" (in "${scaleName}")`);
+  const mode = resolveMode(words, scaleName);
+  if (!mode) {
+    if (/\.scl$/i.test(words[0])) {
+      throw new Error(`[notes] the tuning file "${words[0]}" isn't loaded - check the name, and that the file exists (in "${scaleName}")`);
+    }
+    throw new Error(`[notes] unknown scale "${words.join(' ')}" (in "${scaleName}")`);
   }
 
   const rootMidi = noteToMidi(/\d/.test(rootPart) ? rootPart : `${rootPart}3`);
@@ -92,7 +216,14 @@ export function parseScaleName(scaleName) {
     throw new Error(`[notes] unrecognized scale root "${rootPart}" (in "${scaleName}")`);
   }
 
-  return { rootMidi, intervals };
+  const { intervals, period } = mode;
+  const tuned = period !== 12 || intervals.some((iv) => !Number.isInteger(iv));
+  return { rootMidi, intervals, period, tuned };
+}
+
+/** How many degrees one period of `scaleName` has (7 for a diatonic mode, 31 for "31edo"). */
+export function scaleSize(scaleName) {
+  return parseScaleName(scaleName).intervals.length;
 }
 
 /** The octave a scale name with no octave of its own sits in (this module's c3 = 60 convention). */
@@ -105,12 +236,14 @@ export const DEFAULT_SCALE_OCTAVE = 3;
  */
 export function scaleParts(scaleName) {
   const parts = String(scaleName).trim().replace(/:/g, ' ').split(/\s+/).filter(Boolean);
-  const [rootPart, modePart] = parts.length >= 2 ? parts : ['c', parts[0] ?? ''];
+  const hasRoot = parts.length >= 2 && NOTE_NAME_RE.test(parts[0]);
+  const rootPart = hasRoot ? parts[0] : 'c';
   const m = NOTE_NAME_RE.exec(rootPart);
   return {
     root: m ? `${m[1]}${m[2]}` : rootPart,
     octave: m && m[3] !== undefined ? Number(m[3]) : null,
-    mode: modePart,
+    // Everything after the root: a tuning's mode can be several words ("31edo major").
+    mode: (hasRoot ? parts.slice(1) : parts).join(' '),
   };
 }
 
@@ -154,9 +287,11 @@ export function globalScale() {
 }
 
 /** The scale's allowed pitch classes (0-11, sorted) - what live-note quantization snaps to. */
+// In a tuning off the 12-tone grid these are approximate - each degree's nearest pitch class - since
+// a pitch class is a 12-tone idea; live MIDI keys, the one thing still quantized by them, are too.
 export function scalePitchClasses(scaleName) {
   const { rootMidi, intervals } = parseScaleName(scaleName);
-  return [...new Set(intervals.map((iv) => (((rootMidi + iv) % 12) + 12) % 12))].sort((a, b) => a - b);
+  return [...new Set(intervals.map((iv) => (((Math.round(rootMidi + iv) % 12) + 12) % 12)))].sort((a, b) => a - b);
 }
 
 /**
@@ -168,6 +303,8 @@ export function scalePitchClasses(scaleName) {
  * kept here so pattern notes and live notes snap identically.
  */
 export function quantizeToScale(midi, scaleName) {
+  // A tuning: the nearest of its own pitches, measured exactly (ties downward, as below).
+  if (parseScaleName(scaleName).tuned) return degreeToMidi(midiToDegree(midi, scaleName), scaleName);
   const pcs = scalePitchClasses(scaleName);
   if (!pcs.length) return midi;
   const note = Math.round(midi);
@@ -178,13 +315,20 @@ export function quantizeToScale(midi, scaleName) {
   return note;
 }
 
-/** Converts a scale-degree number (can be negative, or beyond the scale length) to a MIDI note. */
+/**
+ * Converts a scale-degree number (can be negative, or beyond the scale length) to a MIDI note. A
+ * fractional degree lands that far between its two neighbors - 1.5 in C major is halfway from d to
+ * e - so the result is a fractional MIDI note, which the scheduler rounds for a plugin. A
+ * non-number is NaN rather than a wrong note.
+ */
 export function degreeToMidi(degree, scaleName) {
-  const { rootMidi, intervals } = parseScaleName(scaleName);
+  const { rootMidi, intervals, period } = parseScaleName(scaleName);
   const len = intervals.length;
-  const octaveOffset = Math.floor(degree / len);
-  const indexInScale = ((degree % len) + len) % len;
-  return rootMidi + intervals[indexInScale] + 12 * octaveOffset;
+  const at = (d) => rootMidi + intervals[((d % len) + len) % len] + period * Math.floor(d / len);
+  if (!Number.isFinite(degree)) return NaN;
+  const base = Math.floor(degree);
+  const frac = degree - base;
+  return frac === 0 ? at(base) : at(base) + (at(base + 1) - at(base)) * frac;
 }
 
 /**
@@ -194,17 +338,18 @@ export function degreeToMidi(degree, scaleName) {
  * way quantizes. This is what lets a drawn roll be written out as `n(...)` degrees.
  */
 export function midiToDegree(midi, scaleName) {
-  const { rootMidi, intervals } = parseScaleName(scaleName);
+  const { rootMidi, intervals, period, tuned } = parseScaleName(scaleName);
   const len = intervals.length;
-  const note = Math.round(midi);
-  const at = (d) => rootMidi + intervals[((d % len) + len) % len] + 12 * Math.floor(d / len);
-  // Degrees rise monotonically with pitch, so the answer is within an octave of this estimate.
-  const guess = Math.round(((note - rootMidi) / 12) * len);
+  // A 12-tone scale reads MIDI keys; a tuning reads the pitch exactly, since its steps fall between keys.
+  const note = tuned ? Number(midi) : Math.round(midi);
+  const at = (d) => rootMidi + intervals[((d % len) + len) % len] + period * Math.floor(d / len);
+  // Degrees rise monotonically with pitch, so the answer is within a period of this estimate.
+  const guess = Math.round(((note - rootMidi) / period) * len);
   let best = guess;
   let bestDist = Infinity;
   for (let d = guess - len - 1; d <= guess + len + 1; d++) {
     const dist = Math.abs(at(d) - note);
-    if (dist < bestDist) { best = d; bestDist = dist; } // strict: a tie keeps the lower degree
+    if (dist < bestDist - 1e-9) { best = d; bestDist = dist; } // strict: a tie keeps the lower degree
   }
   return best;
 }

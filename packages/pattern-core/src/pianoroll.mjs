@@ -10,7 +10,8 @@
 //           drawn grayed out, still movable, still holding its lane against the overlap rule - but
 //           it never sounds and it isn't converted to mini-notation. Unmuting it is one keypress,
 //           which is the point of keeping it in the string rather than deleting it.
-//   midi  - MIDI note number, 0..127 (this package's c3 = 60 convention)
+//   midi  - MIDI note number, 0..127 (this package's c3 = 60 convention). Whole on the 12 keys; a
+//           tuning's pitches fall between them and are kept to a thousandth of a semitone ("63.863")
 //   index - optional sample index, >= 0 (omitted when 0, the default): which file of the pack this
 //           event plays, the `i` channel. EVERY event has both a pitch and an index - they are two
 //           channels of one event, not two kinds of event - and the roll's mode only says which of
@@ -236,7 +237,7 @@ export function pianoRollEventAt(row, mode) {
   const field = PIANOROLL_ROW_FIELD[normalizePianoRollMode(mode)];
   const at = Math.max(0, Math.round(row));
   return {
-    midi: field === 'midi' ? clampInt(row, 0, 127) : PIANOROLL_DEFAULT_NOTE,
+    midi: field === 'midi' ? clampPitch(row) : PIANOROLL_DEFAULT_NOTE,
     index: field === 'index' ? at : PIANOROLL_DEFAULT_INDEX,
     slice: field === 'slice' ? at : PIANOROLL_DEFAULT_SLICE,
   };
@@ -281,7 +282,7 @@ export function parsePianoRoll(str) {
       throw new Error(`[pianoroll] non-numeric slice in note "${tok}"`);
     }
     return {
-      midi: clampInt(midi, 0, 127),
+      midi: clampPitch(midi),
       index: Math.max(0, Math.round(index)),
       slice: slice === null ? null : Math.max(0, Math.round(slice)),
       start: Math.round(start), // may be negative - count-in material sits before cell 0
@@ -302,9 +303,9 @@ export function serializePianoRoll(notes) {
       const index = noteIndex(nt);
       const slice = noteSlice(nt);
       // The index holds the slice's place, so an event that chops writes it whatever it is.
-      const pitch = slice !== null ? `${Math.round(nt.midi)}:${index}:${slice}`
-        : index === PIANOROLL_DEFAULT_INDEX ? `${Math.round(nt.midi)}`
-          : `${Math.round(nt.midi)}:${index}`;
+      const pitch = slice !== null ? `${pitchText(nt.midi)}:${index}:${slice}`
+        : index === PIANOROLL_DEFAULT_INDEX ? pitchText(nt.midi)
+          : `${pitchText(nt.midi)}:${index}`;
       let s = `${nt.mute ? '!' : ''}${pitch},${Math.round(nt.start)},${fmt(clampLen(nt.len))}`;
       // Positional fields, so each one holds open the slots before it: a nudge writes vel and prob
       // whatever they are, and a sub-unity prob writes vel even when it's 1.
@@ -417,7 +418,7 @@ function resolveLanes(notes) {
 
   const lanes = new Map();
   notes.forEach((nt, i) => {
-    const key = `${Math.round(nt.midi)}:${noteIndex(nt)}:${noteSlice(nt)}`;
+    const key = `${pitchText(nt.midi)}:${noteIndex(nt)}:${noteSlice(nt)}`;
     if (!lanes.has(key)) lanes.set(key, []);
     lanes.get(key).push({ nt, i });
   });
@@ -636,7 +637,7 @@ export function pianoRollToMini(allNotes, { grid, len, start = 0, indent = '', s
   for (const nt of notes) onsets[nt.start - from].push(nt);
   const anyVel = notes.some((nt) => nt.vel < 1);
   const anyClip = notes.some((nt) => nt.len !== 1);
-  const anyNote = notes.some((nt) => Math.round(nt.midi) !== PIANOROLL_DEFAULT_NOTE);
+  const anyNote = notes.some((nt) => nt.midi !== PIANOROLL_DEFAULT_NOTE);
   const anyIndex = notes.some((nt) => noteIndex(nt) !== PIANOROLL_DEFAULT_INDEX);
   const anySlice = notes.some((nt) => noteSlice(nt) !== null);
   const anyNudge = notes.some((nt) => noteNudge(nt) !== 0);
@@ -657,7 +658,7 @@ export function pianoRollToMini(allNotes, { grid, len, start = 0, indent = '', s
     ...(anyNudge ? ['nudge'] : []),
   ];
 
-  const pitchStr = (nt) => String(keyed ? midiToDegree(nt.midi, keyed) : Math.round(nt.midi));
+  const pitchStr = (nt) => (keyed ? String(midiToDegree(nt.midi, keyed)) : pitchText(nt.midi));
   const fieldStr = (nt, f) => {
     if (f === pitchField) return pitchStr(nt);
     if (f === 'i') return String(noteIndex(nt));
@@ -900,7 +901,7 @@ export function sliceNotesFor(sources, { marks, cycles, grid, start = 0, maxGrid
       if (taken.has(cell)) { dropped++; return; } // too fine for this grid even at maxGrid
       taken.add(cell);
       made.push({
-        midi: clampInt(run.nt.midi, 0, 127),
+        midi: clampPitch(run.nt.midi),
         index: noteIndex(run.nt),
         slice: h.slice,
         start: cell,
@@ -964,6 +965,13 @@ function fmtNudge(v) {
 function clampInt(v, lo, hi) {
   return Math.min(hi, Math.max(lo, Math.round(v)));
 }
+
+// A pitch: clamped to the MIDI range and kept to a thousandth of a semitone, so a tuning's pitches
+// (between the keys) survive the round trip through the string, and a whole note stays whole.
+function clampPitch(v) {
+  return Math.min(127, Math.max(0, Math.round(Number(v) * 1000) / 1000));
+}
+const pitchText = (midi) => String(clampPitch(midi));
 
 function clamp01(v) {
   return Math.min(1, Math.max(0, v));

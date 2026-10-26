@@ -28,7 +28,10 @@ const { parseMeta, displayLabel, patternPathProblem } = require('./public/patter
 const PATTERNS_DIR = process.env.POPTART_PATTERNS_DIR || path.join(poptartHome(), 'patterns');
 const WIP_DIR = path.join(PATTERNS_DIR, 'wip');
 
-// Don't slurp something enormous that wandered into the folder just to search it.
+// How much of a file the index reads. Everything it wants - the @ header, the setbpm, a label to
+// borrow - sits near the top, and a save with its plugin state inline is routinely megabytes, so
+// the HEAD is read rather than the file skipped: skipped, every such song listed as a bare file
+// name with no title or tempo, and the browser's tempo filter could not see it.
 const MAX_INDEXED_BYTES = 512 * 1024;
 
 // A name is used as its path under patterns/ directly, so it may name folders ("techno/stomper")
@@ -94,12 +97,17 @@ function nativeBpmOf(code) {
   return SETBPM_CALL_RE.test(src) ? null : DEFAULT_BPM;
 }
 
-function readIfSmall(file) {
+function readHead(file) {
+  let fd = null;
   try {
-    if (fs.statSync(file).size > MAX_INDEXED_BYTES) return '';
-    return fs.readFileSync(file, 'utf8');
+    fd = fs.openSync(file, 'r');
+    const buf = Buffer.allocUnsafe(MAX_INDEXED_BYTES);
+    const n = fs.readSync(fd, buf, 0, MAX_INDEXED_BYTES, 0);
+    return buf.toString('utf8', 0, n);
   } catch {
     return '';
+  } finally {
+    if (fd != null) fs.closeSync(fd);
   }
 }
 
@@ -108,7 +116,7 @@ function readIfSmall(file) {
 // `label` is what the row says: see displayLabel for the order it's worked out in - a saved
 // pattern is called what the user named it, a nameless session borrows a label from its code.
 function indexEntry({ kind, name, id, file, displayName, fallbackLabel, borrowBlockLabel }) {
-  const code = readIfSmall(file);
+  const code = readHead(file);
   const meta = parseMeta(code);
   let mtime = 0;
   try {

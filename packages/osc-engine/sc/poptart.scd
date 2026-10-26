@@ -191,7 +191,7 @@ var awaitTrack, awaitLoaded, reclaimStuckTrack, resolvePlugin, resolveParamIndex
 var pluginOpenLock, openQueued, slotKindGuard;
 var destroyTrack, buildTrack;
 var slotKey, slotLive, waitForLoad, flushNotes, clearPending;
-var hushTrack, clearMidiRoute, markSounding;
+var hushTrack, clearMidiRoute, markSounding, noteKey;
 var beginSelfLoad, endSelfLoad, selfLoading;
 var midiInitialized = false, midiWarned = IdentitySet.new;
 var midiEnable, midiNameForUid, midiSourceFor, midiWarnMissing, midiRefreshSources, midiConnected;
@@ -2897,6 +2897,14 @@ markSounding = { |track, slot, note, offAt|
     };
 };
 
+// The note an instrument slot is handed. Notes arrive as written - 62.4 is a quarter-tone and a
+// bit above d3 - and poptart's own devices play them exactly; a plugin takes MIDI, so it gets the
+// nearest key. Every note-on, note-off and hush below goes through this, so an off always names
+// the same key its on did.
+noteKey = { |ctl, note|
+    if (ctl.midi.class.name == \PoptartDeviceMIDIProxy) { note.asFloat } { note.round.asInteger }
+};
+
 // Note events also gate any env modulators on the track (in the same timestamped bundle, so
 // envelope attacks line up sample-accurately with their notes). The gate follows a held-note
 // count: opens on the first held note, closes (release phase) when the last one ends. The
@@ -2905,7 +2913,7 @@ markSounding = { |track, slot, note, offAt|
 // steps in order), with one known imperfection: for *overlapping different-length* notes the
 // release can start at the first note's end. Fine for the arps/chords this is built for.
 OSCdef(\poptartNoteOn, { |msg|
-    var key = msg[1].asSymbol, note = msg[2].asInteger;
+    var key = msg[1].asSymbol, note = msg[2].asFloat;
     var veloc = msg[3].asFloat, latency = msg[4].asFloat;
     var track = tracks[key];
     var ctl = if (track.isKindOf(Event)) { track[\controllers][0] };
@@ -2913,7 +2921,7 @@ OSCdef(\poptartNoteOn, { |msg|
     if (ctl.notNil) {
         fire = { |lat|
             bundleNow.(lat, {
-                if (slotLive.(track, 0)) { ctl.midi.noteOn(0, note, (veloc * 127).round.asInteger) };
+                if (slotLive.(track, 0)) { ctl.midi.noteOn(0, noteKey.(ctl, note), (veloc * 127).round.asInteger) };
                 track[\envs].do { |e| e[\synth].set(\gate, 1) };
                 // note-synced lfo() shapes: reset/replay on every note onset - and this is where a
                 // patterned shape's swap actually happens in those modes, just before the trigger, so
@@ -2934,14 +2942,14 @@ OSCdef(\poptartNoteOn, { |msg|
 }, '/poptart/noteOn');
 
 OSCdef(\poptartNoteOff, { |msg|
-    var key = msg[1].asSymbol, note = msg[2].asInteger, latency = msg[3].asFloat;
+    var key = msg[1].asSymbol, note = msg[2].asFloat, latency = msg[3].asFloat;
     var track = tracks[key];
     var ctl = if (track.isKindOf(Event)) { track[\controllers][0] };
     var fire;
     if (ctl.notNil) {
         fire = { |lat|
             bundleNow.(lat, {
-                if (slotLive.(track, 0)) { ctl.midi.noteOff(0, note, 0) };
+                if (slotLive.(track, 0)) { ctl.midi.noteOff(0, noteKey.(ctl, note), 0) };
                 if (track[\held] == 0) { track[\envs].do { |e| e[\synth].set(\gate, 0) } };
             });
         };
@@ -2977,7 +2985,7 @@ hushTrack = { |key, again|
                 // Only a slot with a plugin in it: a controller kept for reuse after its plugin
                 // closed, or one whose open failed, would answer each of these with a warning.
                 if (ctl.notNil and: { slotLive.(t, slot) }) {
-                    notes[slot].do { |note| ctl.midi.noteOff(0, note, 0) };
+                    notes[slot].do { |note| ctl.midi.noteOff(0, noteKey.(ctl, note), 0) };
                     if (ctl.info.notNil and: { ctl.info.sdkVersion.asString.find("VST 3").isNil }) {
                         ctl.midi.allNotesOff(0);
                     };
@@ -3014,23 +3022,23 @@ OSCdef(\poptartHush, { |msg|
 // this stream isn't). Slot 0 is the instrument, 1..n the effects. A note-off matches the same
 // slot + pitch, so a ducker sees a gate exactly as long as the triggering step.
 OSCdef(\poptartNoteOnSlot, { |msg|
-    var key = msg[1].asSymbol, slot = msg[2].asInteger, note = msg[3].asInteger;
+    var key = msg[1].asSymbol, slot = msg[2].asInteger, note = msg[3].asFloat;
     var veloc = msg[4].asFloat, latency = msg[5].asFloat;
     var track = tracks[key];
     var ctl = if (track.isKindOf(Event)) { track[\controllers][slot] };
     if (ctl.notNil) {
-        var fire = { |lat| bundleNow.(lat, { if (slotLive.(track, slot)) { ctl.midi.noteOn(0, note, (veloc * 127).round.asInteger.clip(1, 127)) } }) };
+        var fire = { |lat| bundleNow.(lat, { if (slotLive.(track, slot)) { ctl.midi.noteOn(0, noteKey.(ctl, note), (veloc * 127).round.asInteger.clip(1, 127)) } }) };
         markSounding.(track, slot, note, inf);
         if (waitForLoad.(key, slot, Main.elapsedTime + latency, fire).not) { fire.(latency) };
     };
 }, '/poptart/noteOnSlot');
 
 OSCdef(\poptartNoteOffSlot, { |msg|
-    var key = msg[1].asSymbol, slot = msg[2].asInteger, note = msg[3].asInteger, latency = msg[4].asFloat;
+    var key = msg[1].asSymbol, slot = msg[2].asInteger, note = msg[3].asFloat, latency = msg[4].asFloat;
     var track = tracks[key];
     var ctl = if (track.isKindOf(Event)) { track[\controllers][slot] };
     if (ctl.notNil) {
-        var fire = { |lat| bundleNow.(lat, { if (slotLive.(track, slot)) { ctl.midi.noteOff(0, note, 0) } }) };
+        var fire = { |lat| bundleNow.(lat, { if (slotLive.(track, slot)) { ctl.midi.noteOff(0, noteKey.(ctl, note), 0) } }) };
         markSounding.(track, slot, note, Main.elapsedTime + latency);
         if (waitForLoad.(key, slot, Main.elapsedTime + latency, fire).not) { fire.(latency) };
     };

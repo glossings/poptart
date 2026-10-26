@@ -58,7 +58,7 @@ var tracks = IdentityDictionary.new, noteQueues = IdentityDictionary.new, maxSlo
 var nodeGoneSaid = IdentitySet.new, nodeOwns = { |nodeID, what| }, deadNodes = IdentitySet.new; // the engine's node bookkeeping (see nodeOwns in sc/poptart.scd) - inert here
 var slotKey = { |key, slot| (key ++ "_" ++ slot).asSymbol };
 var bundleNow = { |latency, func| func.value };
-var hushTrack, markSounding, slotLive;
+var hushTrack, markSounding, slotLive, noteKey;
 // Slot 0 holds one note with no end known yet, one ending in five seconds and one that ended a
 // second ago - the first two are what a hush has to release.
 var mk = { |name, id, sdk = "VST 2.4"| (
@@ -79,6 +79,7 @@ var mk = { |name, id, sdk = "VST 2.4"| (
 ) };
 srv.addr = (addr: 1, isLocal: true, hostname: "127.0.0.1", ip: "127.0.0.1", port: 57999,
     sendMsg: { |self ...msg| ("NSET<" ++ msg[1] ++ ">" ++ msg[2] ++ "," ++ msg[3]).postln });
+${extractClosure('noteKey')}
 ${extractClosure('hushTrack')}
 ${extractClosure('markSounding')}
 ${extractSlotLive()}

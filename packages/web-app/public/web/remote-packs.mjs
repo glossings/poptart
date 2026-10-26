@@ -7,8 +7,8 @@
 // after the repository. Two folders that would take the same name (`808/kicks`, `909/kicks`) are
 // told apart by as much of their path as it takes: `808_kicks`, `909_kicks`.
 //
-// A repository that already describes its packs in a `strudel.json` at its top is read that way
-// instead - its names, its files, its base URL - because somebody wrote that file to say exactly
+// A repository that already describes its packs in a manifest at its top (MANIFEST_NAME) is read
+// that way instead - its names, its files, its base URL - because somebody wrote that file to say exactly
 // what their packs are.
 //
 // What can follow the name:
@@ -16,8 +16,10 @@
 //   samples("user/repo@v2")               a branch, tag or commit
 //   samples("user/repo/drums/808")        only what is under that folder
 //   samples("github:user/repo"), samples("https://github.com/user/repo/tree/main/drums")
-// and a URL ending in .json is read as a strudel.json wherever it is served from.
+// and a URL ending in .json is read as a manifest wherever it is served from.
 //
+// The file name sample repositories use for their pack manifest.
+const MANIFEST_NAME = 'strudel.json';
 // Pinned to the commit it resolved to. Every file is fetched by commit, never by branch, so a
 // pack cannot change underneath a song halfway through loading, and a file once downloaded is
 // kept for good (samples.mjs caches the bytes; a commit's files never change). The listing is
@@ -94,7 +96,7 @@ export function packName(text) {
 
 const natural = new Intl.Collator('en', { numeric: true, sensitivity: 'base' });
 
-/** Scientific pitch, c4 = 60 - how a strudel.json names the note a sample was recorded at. */
+/** Scientific pitch, c4 = 60 - how a manifest names the note a sample was recorded at. */
 export function noteNameToMidi(name) {
   const m = /^([a-g])(#|s|b|f)?(-?\d+)$/i.exec(String(name).trim());
   if (!m) return null;
@@ -141,11 +143,11 @@ export function packsFromTree(paths, { under = '', rootName }) {
 }
 
 /**
- * A strudel.json's packs: [{ name, files: [{ file, rootNote }] }], each file as written (relative
+ * A manifest's packs: [{ name, files: [{ file, rootNote }] }], each file as written (relative
  * to the base, or a URL of its own), and the base the relative ones hang off.
  */
-export function packsFromStrudelJson(data, jsonUrl) {
-  if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('the strudel.json is not an object of packs');
+export function packsFromManifest(data, jsonUrl) {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error(`the ${MANIFEST_NAME} is not an object of packs`);
   const base = typeof data._base === 'string' && data._base ? data._base : jsonUrl.replace(/[^/]*$/, '');
   const packs = [];
   for (const [key, value] of Object.entries(data)) {
@@ -165,7 +167,7 @@ export function packsFromStrudelJson(data, jsonUrl) {
   return { base, packs };
 }
 
-/** A strudel.json's base, as an https URL - a `github:` one resolved, a branch pinned to `sha`. */
+/** A manifest's base, as an https URL - a `github:` one resolved, a branch pinned to `sha`. */
 export function resolveBase(base, { owner, repo, sha } = {}) {
   let url = String(base);
   const gh = /^github:([^/]+)\/([^/]+)(?:\/(.*))?$/i.exec(url);
@@ -176,7 +178,7 @@ export function resolveBase(base, { owner, repo, sha } = {}) {
     url = `https://raw.githubusercontent.com/${o}/${r}/${ref}/${segs.join('/')}`;
   }
   url = url.replace(/^http:/i, 'https:');
-  if (!/^https:\/\//i.test(url)) throw new Error(`the strudel.json's _base is not a web address (${base})`);
+  if (!/^https:\/\//i.test(url)) throw new Error(`the ${MANIFEST_NAME}'s _base is not a web address (${base})`);
   if (!url.endsWith('/')) url += '/';
   // The same repository by branch: by commit instead, so the files are the listing's files.
   if (owner && sha) {
@@ -210,7 +212,7 @@ async function getJson(fetchImpl, url, what) {
 export async function readSource(src, { fetchImpl }) {
   if (src.kind === 'json') {
     const data = await getJson(fetchImpl, src.url, src.url);
-    const { base, packs } = packsFromStrudelJson(data, src.url);
+    const { base, packs } = packsFromManifest(data, src.url);
     const resolved = resolveBase(base);
     return { key: sourceKey(src), sha: null, packs: packs.map((p) => ({ ...p, base: resolved })) };
   }
@@ -225,11 +227,11 @@ export async function readSource(src, { fetchImpl }) {
   const paths = (tree?.tree ?? []).filter((e) => e.type === 'blob' && typeof e.path === 'string').map((e) => e.path);
   const raw = `https://raw.githubusercontent.com/${owner}/${repo}/${sha}/`;
 
-  const jsonPath = path ? `${path}/strudel.json` : 'strudel.json';
+  const jsonPath = path ? `${path}/${MANIFEST_NAME}` : MANIFEST_NAME;
   if (paths.includes(jsonPath)) {
     const jsonUrl = raw + encodePath(jsonPath);
-    const data = await getJson(fetchImpl, jsonUrl, `${label}'s strudel.json`);
-    const { base, packs } = packsFromStrudelJson(data, jsonUrl);
+    const data = await getJson(fetchImpl, jsonUrl, `${label}'s ${MANIFEST_NAME}`);
+    const { base, packs } = packsFromManifest(data, jsonUrl);
     const resolved = resolveBase(base, { owner, repo, sha });
     return { key: sourceKey(src), sha, packs: packs.map((p) => ({ ...p, base: resolved })), truncated: !!tree.truncated };
   }

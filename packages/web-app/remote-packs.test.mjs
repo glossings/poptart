@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 
 import { memoryStore } from './public/web/kv.mjs';
 import {
-  parseSource, packsFromTree, packsFromStrudelJson, resolveBase, noteNameToMidi, sourcesIn,
+  parseSource, packsFromTree, packsFromManifest, resolveBase, noteNameToMidi, sourcesIn,
   readSource, createRemotePacks, LISTING_TTL_MS,
 } from './public/web/remote-packs.mjs';
 
@@ -43,7 +43,7 @@ test('the ways of naming a repository', () => {
   assert.deepEqual(parseSource('https://github.com/someone/kit'), gh('someone', 'kit'));
   assert.deepEqual(parseSource('https://github.com/someone/kit.git'), gh('someone', 'kit'));
   assert.deepEqual(parseSource('https://github.com/someone/kit/tree/main/drums'), gh('someone', 'kit', 'main', 'drums'));
-  assert.deepEqual(parseSource('https://example.com/packs/strudel.json'), { kind: 'json', url: 'https://example.com/packs/strudel.json' });
+  assert.deepEqual(parseSource('https://example.com/packs/kit.json'), { kind: 'json', url: 'https://example.com/packs/kit.json' });
   for (const bad of ['', 'kit', 'someone/kit/../x', 'ftp://x/y', 'some one/kit']) assert.equal(parseSource(bad), null, bad);
 });
 
@@ -70,13 +70,13 @@ test('a folder keeps only what is under it, named relative to it', () => {
   assert.deepEqual(packs, [{ name: 'bd', files: ['drums/bd/1.wav'] }, { name: 'drums', files: ['drums/2.wav'] }]);
 });
 
-test('a strudel.json is read as written: lists, single files, pitched maps', () => {
-  const { base, packs } = packsFromStrudelJson({
+test('a pack manifest is read as written: lists, single files, pitched maps', () => {
+  const { base, packs } = packsFromManifest({
     _base: 'https://example.com/s/',
     bd: ['bd/1.wav', 'bd/2.wav'],
     stab: 'stab.wav',
     Piano: { c4: 'p/c4.mp3', a2: 'p/a2.mp3', 'f#3': 'p/fs3.mp3' },
-  }, 'https://example.com/strudel.json');
+  }, 'https://example.com/kit.json');
   assert.equal(base, 'https://example.com/s/');
   assert.deepEqual(packs, [
     { name: 'bd', files: [{ file: 'bd/1.wav', rootNote: null }, { file: 'bd/2.wav', rootNote: null }] },
@@ -88,7 +88,7 @@ test('a strudel.json is read as written: lists, single files, pitched maps', () 
   assert.equal(noteNameToMidi('h2'), null);
 });
 
-test('a strudel.json base: github: resolved, the same repository pinned to the commit, http refused', () => {
+test('a pack manifest base: github: resolved, the same repository pinned to the commit, http refused', () => {
   assert.equal(resolveBase('github:someone/kit/main/samples'), 'https://raw.githubusercontent.com/someone/kit/main/samples/');
   assert.equal(
     resolveBase('https://raw.githubusercontent.com/someone/kit/main/', { owner: 'someone', repo: 'kit', sha: SHA }),
@@ -112,7 +112,7 @@ test('samples() calls are found in code, not in comments or strings', () => {
   assert.deepEqual(sourcesIn(code), [{ source: 'someone/kit', prefix: null }, { source: 'other/kit@v1', prefix: null }, { source: 'tpl/repo', prefix: null }]);
 });
 
-test('a repository without a strudel.json is read by folder, pinned to its commit', async () => {
+test('a repository without a pack manifest is read by folder, pinned to its commit', async () => {
   const { fetchImpl } = fakeGitHub({ 'bd/a b.wav': '', 'bd/b.wav': '', 'notes.txt': '' });
   const listing = await readSource(parseSource('someone/kit'), { fetchImpl });
   assert.equal(listing.sha, SHA);
@@ -133,7 +133,7 @@ test('a file is fetched by its name, whatever characters are in it', async () =>
   assert.equal(urlFor('bd', manifest.files[0].file), `https://raw.githubusercontent.com/someone/kit/${SHA}/bd/100%25%20kick%20%231.wav`);
 });
 
-test('a repository with a strudel.json is read from it', async () => {
+test('a repository with a pack manifest is read from it', async () => {
   const { fetchImpl } = fakeGitHub({
     'strudel.json': { _base: 'https://raw.githubusercontent.com/someone/kit/main/', hh: ['h/1.wav'] },
     'h/1.wav': '',

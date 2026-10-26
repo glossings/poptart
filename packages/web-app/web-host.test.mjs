@@ -400,13 +400,20 @@ test('running off the end of an arrangement is reported as ended, so the editor 
 
 test('the playlists are kept in the desktop shape, and a write answers with what was kept', async () => {
   const rig = makeHost();
-  assert.deepEqual(await rig.host.call('GET', '/api/library'), { version: 1, playlists: [], active: null });
+  // Every field the editor reads is present, empty: the organize window counts `tracks`, files
+  // sets under `folder` and stars saves in `saves`, and a document missing any of them took the
+  // window down on the web build.
+  assert.deepEqual(await rig.host.call('GET', '/api/library'), { version: 2, tracks: [], playlists: [], active: null, saves: {} });
   const kept = await rig.host.call('POST', '/api/library', {
-    playlists: [{ id: 'p1', name: 'set', items: ['song', { kind: 'file', path: '/x.wav', bpm: 128 }, { junk: 1 }] }],
+    playlists: [{ id: 'p1', name: 'set', folder: ' club / 2026 ', items: ['song', { kind: 'file', path: '/x.wav', bpm: 128 }, { junk: 1 }] }],
     active: 'p1',
+    saves: { song: { rating: 4 }, other: { rating: 9 } },
   });
   assert.deepEqual(kept.playlists[0].items, ['song', { kind: 'file', path: '/x.wav', bpm: 128 }]);
+  assert.equal(kept.playlists[0].folder, 'club/2026');
   assert.equal(kept.active, 'p1');
+  assert.deepEqual(kept.saves, { song: { rating: 4 } }); // a star out of range is no star
+  assert.deepEqual(kept.tracks, []); // the collection is the disk's, and the browser has none
   assert.deepEqual(await rig.host.call('GET', '/api/library'), kept);
 });
 

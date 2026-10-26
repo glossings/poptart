@@ -1,6 +1,6 @@
 export { Sig, Signal, n, note, mini, s, se, sr, sp, say, synth, sine, saw, isaw, tri, square, rand, perlin, lfo, env, dur, midicc, midikeys, osc, macro, fxknob, choose, cat, seq, irand, resetRandomSeeds, midi, audio, input, group, copy, pcopy, setCopyResolver, clips, setClipsOwner, setClipsResolver, clipsOwnerNow, pianoroll, _roll, liveRoll, _shape, _preset, _pack, _slices, liveSlices, _auto, liveAuto, auto, _groove, liveGroove, grooveText, setGlobalGroove, globalGroove, restoreGlobalGroove } from './signal.mjs';
 export { normalizeSlicePositions, parseSlicePositions, serializeSlicePositions, normalizeSliceSet, normalizeSliceEntry, normalizeSliceFit, sliceSetIsEmpty, slicePositionsFor, sliceEntryFor, sliceSetKeys, parseSliceSet, serializeSliceSet, SLICE_DECIMALS } from './slices.mjs';
-// Controls as top-level builders (Strudel's control patterns) - the method form of each still lives
+// Controls as top-level builders (control patterns) - the method form of each still lives
 // on Sig; these are what let a combinator aim at one channel, x.mul(speed("-1")) / x.mul(clip(2)).
 export { i, begin, end, loop, loopwrap, loopdir, speed, flip, stretch, fit, slice, splice, splicemode, attack, decay, sustain, release, envscale, grain, vel, clip, nudge, swing, swinggrid, swingvel, SAMPLER_CONTROL_NAMES } from './signal.mjs';
 // The binops as top-level builders - a layer piece's own verb: .set(note(30), add(note(12))).
@@ -13,7 +13,7 @@ export { setAudioInputLayout, audioInputLayout, audioInputChannelCount, resolveI
 export { setMacro, macroValue, MACRO_COUNT } from './macros.mjs';
 export { setFxKnob, fxKnobValue, FX_KNOB_COUNT } from './fxknobs.mjs';
 export { Scheduler, Transport, DeckClock, setEventLogger } from './scheduler.mjs';
-export { parseScaleName, degreeToMidi, midiToDegree, noteToMidi } from './notes.mjs';
+export { parseScaleName, degreeToMidi, midiToDegree, noteToMidi, registerTuning, registeredTunings, parseScala, scaleSize, tuningNames } from './notes.mjs';
 export { setGlobalScale, globalScale, scaleAtOctave, scaleParts, DEFAULT_SCALE, DEFAULT_SCALE_OCTAVE } from './notes.mjs';
 export { recordingToMini, UNQUANTIZED_GRID, recordingToRoll, captureWindow, recordStartCycle, UNQUANTIZED_ROLL_GRID } from './record.mjs';
 export { parseMidiFile, midiFileToLanes, midiLanesToPianoroll, pickGrid, detectKey, GRID_CANDIDATES, BEATS_PER_CYCLE } from './midifile.mjs';

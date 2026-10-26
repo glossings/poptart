@@ -10,7 +10,7 @@
 // so plain Number integers are enough - no BigInt. Every result is reduced to lowest terms.
 //
 // This file is dependency-free and runs in both Node and the browser (served at /pattern-core/),
-// mirroring mini.mjs. See [[strudel-parity-userland]]; this is our slice of Strudel's Fraction.
+// mirroring mini.mjs. Only the slice of rational arithmetic the time math here needs.
 
 function gcd(a, b) {
   a = a < 0 ? -a : a;

@@ -533,6 +533,7 @@ export function createHost({
       loaded: true,
       error: null,
       scale: patternCore.globalScale(),
+      tunings: patternCore.registeredTunings?.() ?? [], // none are read from files here; registered ones still travel
       groove: patternCore.globalGroove()
         ? { shape: patternCore.globalGroove().text, depth: patternCore.globalGroove().depth }
         : null,

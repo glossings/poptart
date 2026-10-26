@@ -9,11 +9,10 @@ structural decision changes.
 
 ## What poptart is
 
-A livecoding environment that plays **real VST/VST3 plugins** from terse, Strudel-style patterns.
+A livecoding environment that plays **real VST/VST3 plugins** from terse mini-notation patterns.
 You write patterns in a browser editor; the system plays and continuously modulates actual plugin
 instruments and effects, with LFOs and per-note envelopes running sample-accurately in the audio
-engine. There is no Strudel/Tidal dependency — the pattern language is its own small
-implementation.
+engine. The pattern language is its own small implementation, with no outside pattern library.
 
 ## The package split
 

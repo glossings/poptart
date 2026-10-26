@@ -1,7 +1,7 @@
 // The method forms .s()/.se()/.sr() as the editor actually calls them. The transpile wraps every
 // pattern-position string in mini(), so .s("bd") reaches _asSampler as a one-atom Sig, not a
 // string - accepting a Sig (sampled at each onset, the notes owning the structure) is what makes
-// the documented note("c e g").s("rave") work in the editor at all, and it's also the Strudel
+// the documented note("c e g").s("rave") work in the editor at all, and it's also the method
 // spelling note("c").s("<bd sd>"). Each step's own pitch rides as its repitch note (step.cfg.note)
 // so a drawn pianoroll() chord keeps per-note pitch through the conversion.
 

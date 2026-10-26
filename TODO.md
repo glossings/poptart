@@ -5,41 +5,27 @@ no completion notes.
 
 ---
 
-[ ] Gain staging, the full version. A -15 dB code-deck pad was built, tried and taken out the
-    same night (preferred without; it lives in this file's history if wanted). If a stopgap
-    comes back it must be mode-independent - padding only inside dj mode makes toggling the
-    desk jump a playing code deck 15 dB (and complete-mix's neutralizeMix pushes deck:1, which
-    strips any pad from a promoted track) - and the cue tap sits before the `deck` gain, so a
-    deck-gain pad never reaches the headphones. The master peak readout and its over
-    light are in (\poptart_master; the desk's center and the mixer's header). A master clip
-    at 0 dBFS was considered with them and left out: scsynth already clips at +2 dB on macOS
-    (ServerOptions.safetyClipThreshold, default 1.26; nothing on other platforms), and what
-    lies between 0 and that survives wherever the output is not a converter at full volume
-    (another app through a virtual device, a system volume applied in software), so clipping
-    at 0 would take away something that is sometimes there. What is left, in order:
+[ ] Gain staging. A pad, if one comes back, must not depend on DJ mode: padding only there makes
+    toggling the desk jump a playing code deck, and neutralizeMix (deck:1) strips it from a
+    promoted track. The cue tap sits before the `deck` gain, so a deck-gain pad never reaches the
+    headphones. No master clip at 0 dBFS: scsynth already clips at about +2 dB on macOS
+    (ServerOptions.safetyClipThreshold, 1.26), and the range above 0 survives wherever the output
+    is not a converter at full volume. Remaining:
 
-    1. setgain() - a song-level master gain, one line beside setbpm (HOST_BUILDERS). Applied
-       once per audible path at the DJ-stage input (the `live =` line, BEFORE the cue tap, so
-       headphones hear it too; never on sends, or bus paths get it squared - the same
-       exactly-once rule the crossfader's `deck` gain follows). Scalar 0..4, linear like
-       postgain. A song that declares setgain supersedes MIX_CODE_DECK_PAD - they must never
-       stack - and when every song declares one, the pad constant goes.
+    1. setgain() - a song-level master gain beside setbpm (HOST_BUILDERS), applied once per
+       audible path at the DJ-stage input: before the cue tap, so the headphones hear it, and
+       never on sends, which would square it on bus paths (the rule the `deck` gain follows).
+       Scalar 0..4, linear like postgain.
 
-    2. setgain(0.178) written into the saved songs and the sketches folder (never wip/),
-       idempotent, inserted at the top by the leading-comment block; then each song
-       micro-adjusted by ear against the clip light. Peak-normalizing by measurement was
-       considered and rejected: rendering plugin-heavy songs headless is where NI licensing
-       segfaults scsynth, and matched peaks don't match loudness anyway (crest factor).
-       Target sits ~1 dB under full scale - true inter-sample peaks overshoot sample peaks in
-       reconstruction.
+    2. setgain written into the saved songs (never wip/), idempotent, at the top below the
+       leading comments, then each song set by ear against the clip light. Not by measured
+       peak normalization: headless renders of plugin songs segfault on NI licensing, and
+       matched peaks don't match loudness. Target about 1 dB under full scale, for inter-sample
+       peaks.
 
-    3. A note in the sketches folder's working doc: the clip exists, and songs converted from
-       Strudel land hot and want ~-15 dB of setgain from the start.
-
-    A whole-song master bus was considered and rejected (tracks pick their own output pairs via
-    .o(n); the desk is an overlay that re-routes nothing). For per-song master processing the
-    userland answer is a top-level group() - a hand-built master bus - which composes with
-    setgain: members' direct paths are silent, so the gain still lands once.
+    No whole-song master bus: tracks pick their own output pairs with .o(n), and the desk
+    re-routes nothing. Per-song master processing is a top-level group(), which composes with
+    setgain - members' direct paths are silent, so the gain still lands once.
 
 ---
 
@@ -674,9 +660,7 @@ no completion notes.
     forwards to Node as a (tempo, beat at a moment) report and rebases the transport with
     Transport#setCps for tempo and a phase shift for beat - the same follower Link already
     has (server.js's applyLinkReport over link-sync.js; a MIDI clock report can feed it as a
-    second source). poptart always follows here (the 150 ms lookahead is fine for that). Strudel
-    can't do either (browser, no clock sender in its midi package), so Strudel -> poptart stays
-    a live note feed.
+    second source). poptart always follows here (the 150 ms lookahead is fine for that).
 
 [ ] Link on Linux/Windows: the session peer is the poptart-link helper
     (packages/osc-engine/native/link/) and only the macOS universal binary is built and

@@ -249,13 +249,13 @@ const API_DOCS = {
   samples: {
     kind: 'builder',
     sig: 'samples(repo, prefix?)',
-    desc: 'Reads sample packs from a public GitHub repository: one pack per folder of audio files, named after the folder, files in name order. "user/repo@branch" picks a branch, tag or commit; a path after the repository keeps only that folder; a strudel.json at the top is read instead when present. The optional prefix goes in front of every pack name. Works in the prebake too. Browser build only.',
+    desc: 'Reads sample packs from a public GitHub repository: one pack per folder of audio files, named after the folder, files in name order. "user/repo@branch" picks a branch, tag or commit; a path after the repository keeps only that folder; a pack manifest at the top is read instead when present. The optional prefix goes in front of every pack name. Works in the prebake too. Browser build only.',
     eg: 'samples("tidalcycles/dirt-samples", "dirt")',
   },
   setscale: {
     kind: 'builder',
     sig: 'setscale(name)',
-    desc: 'Sets the key that .sc() uses, as "<root> <mode>". If there is more than one, the last in the buffer applies everywhere.',
+    desc: 'Sets the key that .sc() uses, as "<root> <mode>"; the mode can be any tuning .scale() takes ("31edo major", "9/8 5/4 3/2 2/1", "mytuning.scl"). If there is more than one, the last in the buffer applies everywhere.',
     eg: 'setscale("F minor")',
   },
   setgroove: {
@@ -291,14 +291,20 @@ const API_DOCS = {
   },
   scale: {
     kind: 'method',
-    sig: 'scale(name)',
-    desc: 'Maps scale degrees to notes in a scale ("<root> <mode>"), or snaps note pitches into it. Also applies to incoming MIDI notes.',
+    sig: 'scale(name, keys)',
+    desc: 'Maps scale degrees to notes in a scale ("<root> <mode>"), or snaps note pitches to its nearest pitch. Also applies to incoming MIDI notes; in a tuning, each key plays the next step up from the root, or with keys "nearest" the tuning\'s pitch nearest the key. The mode can be a tuning: "31edo" (every step), "31edo major" (the mode at its nearest steps), "31edo 5 5 3 5 5 5 3" (step counts), ratios or cents in Scala order with the period last ("9/8 5/4 3/2 2/1", "386.3 702.0 1200.0"), or a Scala file ("mytuning.scl", read from the tunings folder or a path; desktop only).',
     eg: '.scale("F minor")',
+  },
+  ji: {
+    kind: 'method',
+    sig: 'ji(reference, limit)',
+    desc: 'Retunes notes to just intonation. With no reference, each chord is tuned in pure ratios to its own lowest note, which stays put; single notes are left alone. With a reference note (patternable) every note is tuned to it. limit is 5 (default) or 7, which uses 7/4 for the minor seventh and 7/5 for the tritone.',
+    eg: 'note("<[c3,e3,g3] [f3,a3,c4]>").ji()',
   },
   sc: {
     kind: 'method',
-    sig: 'sc(octave)',
-    desc: 'Maps scale degrees to notes in the key set by setscale(). The optional octave places the scale\'s root, and can be patterned.',
+    sig: 'sc(octave, keys)',
+    desc: 'Maps scale degrees to notes in the key set by setscale(). The optional octave places the scale\'s root, and can be patterned. keys is as in .scale(); .sc("nearest") sets it alone.',
     eg: 'n("0 2 4").sc(3)',
   },
   gain: { kind: 'method', sig: 'gain(value)', desc: 'The track\'s input level, before its effects - lower values drive compressors, saturation and reverbs less. 1 is unity. Several .gain() calls multiply together.', eg: '.gain(0.5).gain(env())' },

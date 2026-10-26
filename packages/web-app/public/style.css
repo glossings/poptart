@@ -186,6 +186,24 @@ select:hover {
   border-color: var(--border-strong);
 }
 
+/* A control that cannot be used says so wherever it is: dimmed, no hover, no press. A panel with
+   its own idea of disabled (the deck heads, the roll's head, the menus) still overrides this. */
+button:disabled,
+select:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+button:disabled:hover,
+select:disabled:hover {
+  background-color: var(--bg-panel);
+  border-color: var(--border);
+}
+
+button:disabled:active {
+  transform: none;
+}
+
 /* Text-shaped inputs carry the theme everywhere - the stock white box with black text was
    what every unscoped field (a bpm box, the ramp seconds) fell back to. :where() keeps this at
    zero specificity, so a panel's own tighter rule (mono digits, a width) still wins. */
@@ -399,6 +417,13 @@ aside {
 }
 
 .tab-body.hidden {
+  display: none;
+}
+
+/* The sidebar's own sections and buttons - the browser-only backup store, the desktop-only
+   folders, the share button. The file has no global .hidden (an ID's display rule would outrank
+   it, see #fxEdModal); this is the sidebar's, and it outranks `button.small`. */
+#sidebar .hidden {
   display: none;
 }
 
@@ -1264,7 +1289,7 @@ footer#console {
 }
 
 /* the mini-notation atom currently sounding (see client.js's highlight ticker) - a plain
-   box around the element, Strudel-style ("white" = the theme's text color, so it stays
+   box around the element ("white" = the theme's text color, so it stays
    visible on light themes too) */
 .cm-playing {
   box-shadow: 0 0 0 1.5px var(--text);
@@ -1410,7 +1435,7 @@ li.CodeMirror-hint-active {
 .theme-panel {
   position: fixed;
   top: 52px;
-  right: 336px;
+  right: calc(var(--sidebar-w) + 16px); /* it stops where the sidebar begins, collapsed or not */
   width: 250px;
   max-height: calc(100vh - 80px);
   display: flex;
@@ -5872,6 +5897,7 @@ body.mix-on #deckAHead .deck-live-ctl.hidden {
   margin: 0 0 14px;
   font-size: 13px;
   line-height: 1.45;
+  white-space: pre-line; /* a question with two parts (what goes, what stays) keeps its break */
 }
 .ask-row {
   display: flex;

@@ -1,6 +1,6 @@
-// A small, self-contained mini-notation parser/interpreter - deliberately NOT a dependency on
-// @strudel/mini, so this package never touches Strudel's Pattern/Hap object model (see
-// ARCHITECTURE.md). It supports the common, high-value subset of Tidal/Strudel mini-notation:
+// A small, self-contained mini-notation parser/interpreter, with no outside pattern library and
+// no outside event object model (see ARCHITECTURE.md). It supports the common, high-value subset
+// of mini-notation:
 //
 //   "0 2 3"        sequence (each token gets an equal slice of the cycle)
 //   "~"            rest (no event for that slice)
@@ -75,7 +75,7 @@
 // thing): polymeter `{a b, c d}` and dot-groups `a . b c`.
 //
 // The whole interpreter works in terms of one function: getStepsForCycle(ast, cycleNumber),
-// which returns this cycle's flat step list as plain objects - never anything Strudel-shaped.
+// which returns this cycle's flat step list as plain objects.
 //
 // The dependencies are two of our own dependency-free files: frac.mjs for exact rational time (so a
 // fractional onset draws the same coin however its float was computed - see rngAtPos below), and
@@ -1068,7 +1068,7 @@ function astToSteps(node, cycle, salt = 0) {
       const pick = picks[idx];
       const offset = pos - acc; // which cycle of the pick's span we're in
       // The chosen item sees its own cycle count ("how many times have I been picked"), not the
-      // outer cycle - Strudel's slowcat semantics. This is what makes a nested alternation like
+      // outer cycle - the usual alternation semantics. This is what makes a nested alternation like
       // "<0 2 3 <5 7>>" step 5,7,5,7 on successive picks: the inner alt is picked at outer
       // cycles 3,7,11,... which all have the same parity, so passing `cycle` through unchanged
       // would pin it to one value forever.
@@ -1089,7 +1089,17 @@ function astToSteps(node, cycle, salt = 0) {
     case 'fast': {
       const out = [];
       for (const w of rateWindows(node.amount, cycle)) {
-        const n = Math.max(1, Math.round(w.rate));
+        if (!(w.rate > 0)) continue; // "a*0" plays nothing, as fast(0) does
+        const n = Math.round(w.rate);
+        if (Math.abs(w.rate - n) > RATE_EPS) {
+          // A fractional rate: "a*1.5" is three onsets over two cycles, not "a*2". The whole
+          // number case below is the same arithmetic without the float, so it stays exact.
+          for (const s of warpedSteps(node.item, cycle, w.rate, salt)) {
+            if (s.start < w.start - RATE_EPS || s.start >= w.end - RATE_EPS) continue;
+            out.push(withArgLocs(s, w.locs));
+          }
+          continue;
+        }
         for (let i = 0; i < n; i++) {
           const innerCycle = cycle * n + i;
           for (const s of astToSteps(node.item, innerCycle, salt)) {
@@ -1105,7 +1115,16 @@ function astToSteps(node, cycle, salt = 0) {
     case 'slow': {
       const out = [];
       for (const w of rateWindows(node.amount, cycle)) {
-        const n = Math.max(1, Math.round(w.rate));
+        if (!(w.rate > 0)) continue; // "a/0" plays nothing, as slow(0) does
+        const n = Math.round(w.rate);
+        if (Math.abs(w.rate - n) > RATE_EPS) {
+          // "a/1.5" is fast by two thirds - the same warp, inverted.
+          for (const s of warpedSteps(node.item, cycle, 1 / w.rate, salt)) {
+            if (s.start < w.start - RATE_EPS || s.start >= w.end - RATE_EPS) continue;
+            out.push(withArgLocs(s, w.locs));
+          }
+          continue;
+        }
         const innerCycle = Math.floor(cycle / n);
         const phase = ((cycle % n) + n) % n;
         for (const s of clipAndRescale(astToSteps(node.item, innerCycle, salt), phase / n, (phase + 1) / n)) {
@@ -1215,11 +1234,31 @@ function applyArith(op, a, b) {
 // A plain number - or a pattern producing one whole-cycle value, like "<2 3>" - is a single
 // full-cycle window, the classic case. A cycle-internal rate pattern ("a*[1 2]") yields one
 // window per rate step: within each window the item plays sped/slowed by that window's rate,
-// and only events whose ONSET lands inside the window sound (Tidal's patterned-rate semantics -
+// and only events whose ONSET lands inside the window sound (the usual patterned-rate semantics -
 // the sped-up pattern is laid over the whole cycle and each window shows its own slice of it).
 // A rest in the rate pattern is a window with no rate: nothing plays there. The epsilon keeps
 // float error at window boundaries from dropping or double-placing a boundary onset.
 const RATE_EPS = 1e-9;
+
+// `item` sped up by a non-integer factor `f`, as this cycle sees it: the source cycles that map
+// into it, each step's edges divided by the rate, and the cycle's own edges read with the same
+// tolerance warpSteps gives them (see its note on the seventh of twelve steps). An onset that
+// falls before the cycle but sounds into it arrives as a `cont` tail from 0, like a tie.
+function warpedSteps(item, cycle, f, salt) {
+  const lo = cycle * f;
+  const hi = (cycle + 1) * f;
+  const out = [];
+  for (let src = Math.floor(lo) - 1; src < Math.ceil(hi) + 1; src++) {
+    for (const s of astToSteps(item, src, salt)) {
+      const start = (src + s.start) / f - cycle;
+      const end = (src + s.end) / f - cycle;
+      if (end <= RATE_EPS || start >= 1 - RATE_EPS) continue;
+      if (start < -RATE_EPS) out.push({ ...s, start: 0, end, cont: true });
+      else out.push({ ...s, start: Math.max(0, start), end });
+    }
+  }
+  return out.sort((a, b) => a.start - b.start);
+}
 
 // Two step edges landing on the same instant must not produce a zero-width event between them (a
 // euclid hit boundary meeting an item boundary, say) - see the euclid case.
@@ -1280,7 +1319,7 @@ function clipAndRescale(steps, a, b) {
 /**
  * Equally-spaced Euclidean rhythm via the floor-division method (matches the canonical
  * Bjorklund result for common cases like (3,8)/(5,8)/(4,9), but is a simpler approximation
- * that may place hits at a different rotation than Tidal's exact recursive algorithm for some
+ * that may place hits at a different rotation than the exact recursive algorithm for some
  * less common pulse/step combinations - flagged here rather than glossed over).
  */
 function bjorklund(pulses, steps) {

@@ -3,7 +3,7 @@
 // A step emitted by a Sig carries the `loc` (source span) of the mini-notation atom it came from
 // - but that span is relative to the bare mini string, and the string sits somewhere inside the
 // editor buffer. To highlight the right characters we need spans relative to the DOCUMENT. The
-// robust way (Strudel does the same via its transpiler) is to hand each mini string its own source
+// robust way is to hand each mini string its own source
 // offset at eval time: we rewrite every pattern-position string literal `"…"` in a block into
 // `mini("…", START)`, where START is the offset of the string's first content character within the
 // block. `mini(str, offset)` adds that offset to every atom span (see parseMini), so the emitted
@@ -19,7 +19,7 @@
 // untouched. Kept dependency-free: pattern-core takes no parser dependency, and the scan mirrors
 // labels.mjs's string/comment/template-aware style.
 //
-// Two escape hatches keep a literal plain, as in Strudel: a SINGLE-quoted string is never wrapped
+// Two escape hatches keep a literal plain: a SINGLE-quoted string is never wrapped
 // (`.join(',')`, `.split(' ')` in a helper), and neither is anything between a `// mini-off` and a
 // `// mini-on` comment (or `/* mini-off */` … `/* mini-on */`; an unclosed mini-off runs to the end
 // of the buffer). A builder still reads a plain string as mini notation when it is handed one -
@@ -147,8 +147,8 @@ const METHOD_NAME_ARG_CALLS = new Set(['se', 'sr']);
 // Is a string literal here used as a mini-notation pattern (vs a plugin/scale/param-name lookup)?
 // Truthy for a pattern: `true`, or `'speech'` for say()'s text, which parses in speech mode.
 // `before` is the code up to the opening quote, `after` the code from just past the closing quote.
-// In argument position the default is "pattern" (as in Strudel, where mini notation is what a
-// string in a pattern expression means) and NAME_ARG_CALLS is what pulls a literal back out:
+// In argument position the default is "pattern" (mini notation is what a string in a pattern
+// expression means) and NAME_ARG_CALLS is what pulls a literal back out:
 //   - a first argument, to a builder or a chain method - n("0 1"), .speed("2 1"), choose("1", "-1"),
 //     including the option in a [option, weight] pair
 //   - a later argument - .param("Filter Freq", "0.2 0.8") - unless the call is name-only

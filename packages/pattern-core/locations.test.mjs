@@ -429,7 +429,7 @@ test('a pattern of NAMES is tagged for highlighting; the drawn data beside it is
 
 test('injectLocations leaves where samples() reads from alone: a repository, a URL', () => {
   assert.equal(injectLocations('samples("tidalcycles/dirt-samples")', 0), 'samples("tidalcycles/dirt-samples")');
-  assert.equal(injectLocations("samples('https://example.com/strudel.json')", 0), "samples('https://example.com/strudel.json')");
+  assert.equal(injectLocations("samples('https://example.com/packs.json')", 0), "samples('https://example.com/packs.json')");
 });
 
 test('injectLocations leaves a groove definition alone, and judges swing\'s shape by what it says', () => {

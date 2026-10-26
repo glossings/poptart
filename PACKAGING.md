@@ -1,8 +1,8 @@
 # Packaging plan
 
 How poptart gets from "clone the repo and read the Troubleshooting section" to "download a dmg
-and double-click". Staged so each step ships value on its own; Sonic Pi (which bundles a full
-SuperCollider inside its app) is the existence proof for the end state.
+and double-click". Staged so each step ships value on its own; bundling a full SuperCollider
+inside an app is known to work.
 
 ## Where the install pain actually is
 
@@ -162,8 +162,8 @@ Extensions destination are threaded through `index.js` and `setup.js`.
 
 ## Stage 2 (in progress) — the dmg: Electron
 
-The "double-click and you're livecoding" build. No research risk — Sonic Pi has proven every
-piece — but real distribution mechanics.
+The "double-click and you're livecoding" build. No research risk - every piece is known to
+work - but real distribution mechanics.
 
 **What exists** (`packages/desktop/`): the shell itself. `main.js` makes sure there is a
 SuperCollider, starts `packages/web-app/server.js` unchanged as a child process on a free

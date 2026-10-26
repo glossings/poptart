@@ -3,10 +3,9 @@
 // difference is whether it has known step boundaries (so the scheduler can trigger exact
 // note-on/off edges instead of just sampling) or not (a smooth signal, sampled continuously).
 //
-// This replaces an earlier draft that tried to reuse Strudel's Pattern/Hap classes directly -
-// that meant reconciling two different "continuous vs discrete" models and dragging in
-// @strudel/core's whole object system for what is conceptually just "a value that changes
-// over time, sometimes with edges." Everything below is plain data + closures.
+// A pattern here is conceptually just "a value that changes over time, sometimes with edges", so
+// it is modeled as exactly that - plain data + closures, with no event object system and no
+// separate continuous and discrete models to reconcile.
 
 import { parseMini, getStepsForCycle, warpSteps, stepLocs } from './mini.mjs';
 import {
@@ -24,7 +23,7 @@ import { latestOsc, registerOscAddress, normalizeOscAddress } from './osc.mjs';
 import { macroValue, assertMacroIndex } from './macros.mjs';
 import { fxKnobValue, assertFxKnobIndex } from './fxknobs.mjs';
 import { Frac } from './frac.mjs';
-import { chordIntervals, chordExtension, invertVoices, spreadVoices, voicingVoices, leadVoices, VOICING_NAMES } from './harmony.mjs';
+import { chordIntervals, chordExtension, invertVoices, spreadVoices, voicingVoices, leadVoices, VOICING_NAMES, justVoices, JI_LIMITS } from './harmony.mjs';
 
 /**
  * @typedef {Object} Step
@@ -448,9 +447,19 @@ export class Sig {
    * quantizes-or-converts by that signal's kind exactly as above. On a live midikeys() route it
    * also tags the route with the scale so incoming live notes are quantized engine-side (see the
    * scheduler's setMidiNotes call and the engine's midiRoute).
+   *
+   * `keys` says what incoming MIDI keys do in a TUNING (a 12-tone scale always snaps): "steps", the
+   * default, plays the next step of the tuning on each key from the root's key up, so a keyboard
+   * reaches every step; "nearest" snaps each key to the tuning's nearest pitch instead, so a key
+   * plays (close to) the pitch printed on it. A pattern's own notes always snap to the nearest.
    */
-  scale(scaleName) {
+  scale(scaleName, keys = 'steps') {
     parseScaleName(scaleName); // validate now - a live-keys-only chain never samples, so a bad name would otherwise stay silent
+    keys = literalWord(keys); // a "nearest" literal arrives wrapped by the editor's mini() transpile
+    if (keys !== 'steps' && keys !== 'nearest') {
+      warnUser(`[signal] .scale(${JSON.stringify(scaleName)}, ${JSON.stringify(keys)}) - live keys in a tuning are "steps" or "nearest". Using "steps".`);
+      keys = 'steps';
+    }
     const mapFor = (kind) =>
       kind === 'note'
         ? (v) => quantizeToScale(Number(v), scaleName)
@@ -480,10 +489,10 @@ export class Sig {
     // `.scale("c minor").add(1)` quantizes then shifts, `.add(1).scale("c minor")` the reverse -
     // exactly as the same chain would read on an ordinary pattern (see Scheduler#_buildNoteMap).
     if (this.midiNotes) {
-      out = out._clone({ midiNotes: { ...this.midiNotes, scale: scaleName, pitchOps: [...(this.midiNotes.pitchOps ?? []), { op: 'scale', name: scaleName }] } });
+      out = out._clone({ midiNotes: { ...this.midiNotes, scale: scaleName, pitchOps: [...(this.midiNotes.pitchOps ?? []), { op: 'scale', name: scaleName, keys }] } });
     }
     if (this.inputSource?.io === 'midi') {
-      out = out._clone({ inputSource: { ...this.inputSource, scale: scaleName, pitchOps: [...(this.inputSource.pitchOps ?? []), { op: 'scale', name: scaleName }] } });
+      out = out._clone({ inputSource: { ...this.inputSource, scale: scaleName, pitchOps: [...(this.inputSource.pitchOps ?? []), { op: 'scale', name: scaleName, keys }] } });
     }
     out.pitchKind = 'note'; // the result now holds absolute MIDI notes, whichever way we got here
     out.scaleName = scaleName; // ...and remembers the key, for .add(n(...)) downstream
@@ -503,19 +512,27 @@ export class Sig {
    * A PATTERNED octave - `.sc("<3 4>")` - can't name a scale, so it becomes what it means
    * musically instead: the scale at its own root, transposed by whole octaves per cycle.
    */
-  sc(octave) {
+  sc(octave, keys = 'steps') {
     let name = globalScale();
     if (!name) {
       warnUser(NO_GLOBAL_SCALE);
       name = DEFAULT_SCALE;
     }
-    if (octave === undefined || octave === null) return this.scale(name);
+    // `keys` is .scale()'s: what live MIDI keys do in a tuning. Given alone, `.sc("nearest")`, it
+    // stands where the octave would.
+    keys = literalWord(keys);
+    const word = literalWord(octave);
+    if (word === 'steps' || word === 'nearest') {
+      keys = word;
+      octave = undefined;
+    }
+    if (octave === undefined || octave === null) return this.scale(name, keys);
     // A `"3"` literal in pattern position arrives as a constant Sig (the editor's mini() transpile),
     // so read through to the constant rather than NaN-ing on the object.
     const fixed = octave instanceof Sig ? octave.constVal : octave;
-    if (fixed !== undefined && Number.isFinite(Number(fixed))) return this.scale(scaleAtOctave(name, Number(fixed)));
+    if (fixed !== undefined && Number.isFinite(Number(fixed))) return this.scale(scaleAtOctave(name, Number(fixed)), keys);
     const base = scaleParts(name).octave ?? DEFAULT_SCALE_OCTAVE;
-    return this.scale(name).add(toSignal(octave).mapValue((v) => (Number(v) - base) * 12));
+    return this.scale(name, keys).add(toSignal(octave).mapValue((v) => (Number(v) - base) * 12));
   }
 
   /**
@@ -1151,7 +1168,7 @@ export class Sig {
     const over = shape ? null : constOutOfRange(sig, MAX_SWING);
     if (over !== null) {
       // A whole number that far out is almost always a subdivision written where the amount goes -
-      // Strudel's swing() takes the grid alone - so that reading gets its own line, with the number
+      // a swing that takes the grid alone is a common habit - so that reading gets its own line, with the number
       // put back where it belongs. Anything else is just an amount past the stops.
       warnUser(Number.isInteger(over) && over >= 2
         ? `[signal] .swing(${over}) reads as an amount of ${over} slots - clamping to ${MAX_SWING}. The AMOUNT comes first and the grid is the second argument: .swing(1/3, ${over}) puts a triplet shuffle on a ${over}-per-cycle grid.`
@@ -2078,7 +2095,7 @@ export class Sig {
    * Naked `.hold()` (no argument) discretizes the signal against its OWN structure: if it already
    * has a step grid (a pattern), it re-samples the value at each of its onsets; if it's a bare
    * continuous signal (rand()/sine()/a cc), it takes one value per cycle at the cycle boundary -
-   * the universal "freeze this continuous thing into strudel-cycle updates" operator.
+   * the universal "freeze this continuous thing into once-per-cycle updates" operator.
    */
   hold(trig) {
     const truthy = gateOn; // a trigger pattern is a gate, like .mask()/.struct()'s
@@ -2149,8 +2166,8 @@ export class Sig {
   }
 
   /**
-   * `.seg(8)` - re-reads this pattern on an even grid of n steps per cycle, Strudel's
-   * `segment`/`seg`. Each step is a fresh event holding whatever this pattern is worth at that
+   * `.seg(8)` - re-reads this pattern on an even grid of n steps per cycle (also spelled
+   * `segment`). Each step is a fresh event holding whatever this pattern is worth at that
    * instant, so it's the operator that gives a *structureless* signal structure: `rand().seg(8)`
    * is eighth-note stepped random, `s("breaks:19").fit().begin(irand(8).seg(8).div(8))` fires
    * eight random slice starts per bar, and `s("breaks:19").fit().seg(16)` chops the break itself
@@ -2168,14 +2185,14 @@ export class Sig {
     return this.hold(segTrigger(n));
   }
 
-  /** Strudel spells `.seg()` both ways; so do we. */
+  /** The long spelling of `.seg()`. */
   segment(n) {
     return this.seg(n);
   }
 
   /**
-   * Loops a band of cycles forever: `.rib(14, 2)` plays cycles 14 and 15 over and over (Strudel's
-   * `ribbon`). A query for cycle position `c` is remapped to `time + ((c - time) mod length)` -
+   * Loops a band of cycles forever: `.rib(14, 2)` plays cycles 14 and 15 over and over (a
+   * ribbon). A query for cycle position `c` is remapped to `time + ((c - time) mod length)` -
    * exact via Frac, so a moment reached two different ways samples identically (deterministic
    * randoms stay put). Handy for freezing a good couple of bars, or looping a short window of a
    * deterministic random signal - `irand(8).rib(0, 2)` is a repeating 2-cycle random melody.
@@ -2312,14 +2329,14 @@ export class Sig {
   }
 
   // -------------------------------------------------------------------------------------------
-  // Randomised / structural combinators (Strudel ports). Each rebuilds the step grid and routes
+  // Randomised / structural combinators. Each rebuilds the step grid and routes
   // sample() through it (sampleViaSteps), so the two stay in lock-step; randomness is a
   // deterministic hash of cycle+onset (rng2), so re-queries and the highlighter always agree.
   // -------------------------------------------------------------------------------------------
 
   /**
    * Randomly drops notes: `.degrade(0.3)` silences each event with 30% probability (default
-   * 0.5, Strudel's `.degradeBy`). The choice is deterministic per cycle+onset, so the scheduler
+   * 0.5). The choice is deterministic per cycle+onset, so the scheduler
    * and the editor's highlighter agree and a bar replays the same each time it comes round. The
    * mini-notation `?` postfix (`"4?0.3"`) is the same operation written inside a pattern string.
    * Independent .degrade()s decorrelate on their own (each takes its own build-time seed, like
@@ -2348,7 +2365,7 @@ export class Sig {
   }
 
   /**
-   * Gates this pattern with a boolean one WITHOUT touching its rhythm (Strudel's `mask`): an event
+   * Gates this pattern with a boolean one WITHOUT touching its rhythm (a mask): an event
    * whose onset falls where the mask is off becomes a rest, and one still ringing when the mask
    * closes stops there. Nothing retriggers and nothing is subdivided - which is the whole
    * difference from gating with a control, since `.vel("1 1 ~ 1")` cuts the events it covers into
@@ -2389,7 +2406,7 @@ export class Sig {
   }
 
   /**
-   * Takes the RHYTHM from a boolean pattern and the values from this one (Strudel's `struct`): every
+   * Takes the RHYTHM from a boolean pattern and the values from this one (a struct): every
    * `on` step fires a fresh event carrying whatever this pattern is worth at that instant, and every
    * off step is a silence. The mirror image of `.mask()`, which keeps this pattern's own rhythm and
    * only gates it.
@@ -2458,7 +2475,7 @@ export class Sig {
   }
 
   /**
-   * Subdivides each event into `reps` retriggers (Strudel's `ply`). The optional second argument
+   * Subdivides each event into `reps` retriggers (a ply). The optional second argument
    * `(x, n) => signal` transforms the value on each repetition - `n` is the repetition index
    * (0..reps-1) and `x` is this whole signal - so `n("0 2").ply(3, (x, n) => x.add(n * 12))`
    * plays each degree three times, climbing an octave per hit. Omit it for a plain retrigger
@@ -2793,6 +2810,32 @@ export class Sig {
   }
 
   /**
+   * Just intonation: retunes notes to pure ratios. With no argument each chord is tuned to its own
+   * lowest note, which stays where it is - a major triad becomes 4:5:6, chord by chord, with no
+   * drift - and a single note is left alone. With a reference note (`.ji("c3")`, patternable, read at
+   * each onset) every note is tuned to that tonic instead. `limit` 5 (the default) uses 5-limit
+   * ratios; 7 adds the harmonic seventh (7/4) and the 7/5 tritone. The notes come out between the
+   * keys, which poptart's own instruments play exactly and a plugin plays at the nearest key.
+   */
+  ji(reference = null, limit = 5) {
+    const refusal = this._chordRefusal('ji', 'note("[c3,e3,g3]").ji()');
+    if (refusal) return refusal;
+    if (!JI_LIMITS.includes(Number(limit))) {
+      warnUser(`[signal] .ji(..., ${JSON.stringify(limit)}) - the limit is ${JI_LIMITS.join(' or ')}. Using 5.`);
+      limit = 5;
+    }
+    const refSig = reference === undefined || reference === null ? null : toSignal(reference);
+    return this._revoiced((g, midis, at) => {
+      if (!refSig) return midis.length < 2 ? midis : justVoices(midis, null, limit);
+      const ev = chordArgAt(refSig, at);
+      const ref = ev.value == null ? NaN : stepMidi(ev.value);
+      if (!Number.isFinite(ref)) return midis;
+      g.locs = ev.locs;
+      return justVoices(midis, ref, limit);
+    });
+  }
+
+  /**
    * Widens each chord by octaves from the middle out: the lowest and highest notes move `amount`
    * octaves apart from the middle and the notes between move in proportion, rounded to whole
    * octaves, so the chord keeps its notes. A negative amount narrows. Patternable, read at each
@@ -3039,7 +3082,7 @@ export class Sig {
     return this._clone({ sampler: { ...this.sampler, [key]: sig }, stepsForCycle });
   }
 
-  /** Which sample of the pack to play, 0-based (wraps past the end). Strudel calls this `n`. */
+  /** Which sample of the pack to play, 0-based (wraps past the end). */
   i(v) { return this._samplerOpt('i', 'index', toSignal(v)); }
   /** Playback start position within the sample, 0..1. */
   begin(v) { return this._samplerOpt('begin', 'begin', toSignal(v)); }
@@ -3116,7 +3159,7 @@ export class Sig {
   /**
    * `.slice()`, with each chop fitted to ITS OWN event: `.splice("<0 1 2>*8")` plays those three
    * slices as 8th notes whatever their natural lengths. How it fits is `.splicemode()` - repitch
-   * (the default: rate bends, pitch follows, Tidal's splice) or stretch (granular, pitch holds) -
+   * (the default: rate bends, pitch follows, a classic splice) or stretch (granular, pitch holds) -
    * and the mode can ride along as the second argument: `.splice("0 1 2 3", "stretch")`.
    *
    * It fits the WINDOW in force, so bare `.splice()` (no slice of its own) fits whatever
@@ -3134,7 +3177,7 @@ export class Sig {
    * How `.splice()` fits a chop to its event, as a mode number (bare `.splicemode()` means 1):
    *
    *   0 "repitch" (default) - bend the playback rate so the chop lasts the event; pitch follows,
-   *                           the way .fit() repitches. Tidal/Strudel's splice.
+   *                           the way .fit() repitches - the classic splice.
    *   1 "stretch"           - granular timestretch to the event's length; pitch holds. Best on
    *                           rhythmic material, like .stretch() itself.
    *
@@ -3377,7 +3420,7 @@ export class Sig {
   }
 
   /**
-   * Destructures multi-field tokens into separate note/velocity/duration controls, Strudel-style:
+   * Destructures multi-field tokens into separate note/velocity/duration controls:
    * `"<36:1:4 ~ 47:0.5:3 ~>*8".as("note:vel:clip")`. Each token's fields are split on ":" and
    * read in the order the spec names them. The pitch fields are `note` (MIDI number or note name)
    * and `n` (scale degree - map it with .scale() afterwards); every other field is a CONTROL, by
@@ -3540,7 +3583,7 @@ export class Sig {
     if (this.ctl) return this._fromHeadCtl((trigger) => trigger._asSampler(method, value, kind, expected));
     // A Sig argument is a patterned source name - both what the editor's transpile hands us for
     // ANY string (it wraps every pattern-position literal in mini(), so .s("bd") arrives as a
-    // one-atom Sig) and the Strudel spelling note("c e g").s("<bd sd>"). It's sampled at each
+    // one-atom Sig) and the method spelling note("c e g").s("<bd sd>"). It's sampled at each
     // onset: the notes own the structure, the name pattern adds no triggers of its own.
     const nameSig = value instanceof Sig ? value : null;
     if (!nameSig && (typeof value !== 'string' || !value.trim())) {
@@ -3725,8 +3768,8 @@ export class Sig {
  * The signal type itself, as userland sees it. Two uses:
  *
  *   Signal(1)                       // constant signal (also takes a mini string or a Sig)
- *   Signal.prototype.co = function (num) {   // extend the language, Strudel's
- *     return this.o(num).gain(...);          // Pattern.prototype idiom - every pattern,
+ *   Signal.prototype.co = function (num) {   // extend the language through the
+ *     return this.o(num).gain(...);          // prototype - every pattern,
  *   };                                       // LFO, and mini string picks the method up
  *
  * It's a plain callable (no `new` needed) sharing `Sig`'s prototype, so `instanceof Signal`
@@ -5674,7 +5717,7 @@ export function n(value) {
 
 /**
  * Sampler pattern - values are sample-pack names (folders under the samples directory), one
- * event per step: `s("bd hh bd hh")`. A `:n` suffix picks the pack's nth file, strudel-style:
+ * event per step: `s("bd hh bd hh")`. A `:n` suffix picks the pack's nth file:
  * `s("bd:4")` = `s("bd").i(4)` (an explicit .i() overrides the suffix). Configure with
  * .i()/.begin()/.end()/.loop()/.speed()/.flip()/.stretch()/.fit()/.slice()/.attack()/.decay()/
  * .sustain()/.release()/.envscale() (or .adsr()); route through effects with .fx()/.param() as usual.
@@ -5744,6 +5787,15 @@ export function say(text, voice) {
   return samplerPattern('say', withVoice(src, voice), 'say');
 }
 
+// A one-word literal the editor's mini() transpile wrapped into a pattern ("nearest" in
+// `.scale(name, "nearest")`): the word itself, or the value as given when it is anything else.
+function literalWord(v) {
+  if (!(v instanceof Sig)) return v;
+  if (v.constVal !== undefined) return v.constVal;
+  const steps = v.stepsForCycle?.(0) ?? [];
+  return steps.length === 1 && steps[0].start === 0 && steps[0].end === 1 && typeof steps[0].value === 'string' ? steps[0].value : v;
+}
+
 // say()'s text, parsed as mini notation in speech mode (see tokenizeSpeech in mini.mjs). A string
 // in pattern position never gets here - the location transpile hands it over as
 // mini(text, offset, 'speech'), which parses the same way and highlights - so this is the path for
@@ -5805,7 +5857,7 @@ function samplerPattern(builder, value, kind) {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Sampler controls as top-level builders (Strudel's "control patterns")
+// Sampler controls as top-level builders ("control patterns")
 // ---------------------------------------------------------------------------------------------
 
 // What a note-less synth("X") plays: MIDI 60 - one whole-cycle note per cycle. It is also the
@@ -5877,7 +5929,7 @@ function bareSig(sig) {
 }
 
 /**
- * The control methods, also available as TOP-LEVEL builders - Strudel's control patterns.
+ * The control methods, also available as TOP-LEVEL builders - control patterns.
  * `speed("-1")` isn't a pattern whose values are -1; it's the *speed channel* carrying -1. On its
  * own that's just the longer way to write `s("bd").speed("-1")`, but as an OPERAND it lets a
  * combinator reach into one channel of a pattern it was handed, exactly as `x.add(note(3))`

@@ -116,7 +116,7 @@ test('an out-of-range constant clamps, and says so', () => {
   });
   assert.equal(said.length, 2, 'one line each, and nothing on the console');
   assert.match(said[0], /more than half a step/);
-  assert.match(said[1], /AMOUNT comes first/, 'the Strudel habit swing(4) gets told what to write');
+  assert.match(said[1], /AMOUNT comes first/, 'the grid-only habit swing(4) gets told what to write');
   assert.match(said[1], /\.swing\(1\/3, 4\)/, 'and the number it passed is offered as the grid');
 });
 

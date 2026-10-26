@@ -1716,7 +1716,15 @@ function songMultNext(deck) {
 function songUnload(deck) {
   const s = songDecks[deck];
   if (!s) return;
+  // Every timer the song armed goes with it, and the record is marked stopped so a callback
+  // already in flight bails. Left running, a performance loop's wrap fired a lap later and
+  // seeked whatever song the deck key had since been pointed at (a completed mix promotes deck
+  // B's song onto deck A's key) to the OLD song's loop start.
   if (s.endTimer) clearTimeout(s.endTimer);
+  if (s.loopTimer) clearTimeout(s.loopTimer);
+  if (s.loopApplyTimer) clearTimeout(s.loopApplyTimer);
+  s.endTimer = s.loopTimer = s.loopApplyTimer = null;
+  s.playing = false;
   songDecks[deck] = null;
   deckClockApply(deck); // the deck's clock answers to its own SYNC button again
   songHandGridOver(deck); // the grid goes with the song - to the other deck, or to nobody
@@ -4639,7 +4647,7 @@ async function init() {
   }
 }
 
-// Strudel-flavored ergonomics: let mini-notation strings be used directly as patterns in
+// Let mini-notation strings be used directly as patterns in
 // evaluated code - `"0 0.5 1 0.3".gte(0.5)`, `"0 3 5".add(12)`, `"200 800".range(...)`. Each
 // method wraps the string in mini() and delegates. This deliberately shadows the dead Annex-B
 // legacy String methods where names collide (.sub's "<sub>…</sub>" wrapper, nothing of value).
@@ -4750,6 +4758,35 @@ const SCALE_BLOCK = Object.freeze({ poptartScaleBlock: true });
 function setscale(name) {
   patternCore.setGlobalScale(name);
   return SCALE_BLOCK;
+}
+
+// Scala tuning files a buffer names ("c3 mytuning.scl" in a setscale or .scale), read and registered
+// before the buffer is evaluated, since a pattern resolves its scale synchronously as it is built.
+// A name is a path - absolute, ~/..., or relative to the tunings folder in poptart's home -
+// referenced where it lives, never copied. Read again only when the file changes.
+const TUNINGS_DIR = process.env.POPTART_TUNINGS_DIR || path.join(poptartHome(), 'tunings');
+const tuningFiles = new Map(); // name as written -> { file, mtimeMs }
+function registerBufferTunings(code) {
+  const names = new Set(String(code).match(/[^\s"'`:]+\.scl\b/gi) ?? []);
+  for (const name of names) {
+    const file = name.startsWith('~/') ? path.join(os.homedir(), name.slice(2))
+      : path.isAbsolute(name) ? name : path.join(TUNINGS_DIR, name);
+    let stat;
+    try {
+      stat = fs.statSync(file);
+    } catch {
+      console.warn(`[poptart] tuning "${name}" not found - looked for ${file}`);
+      continue;
+    }
+    const seen = tuningFiles.get(name);
+    if (seen && seen.file === file && seen.mtimeMs === stat.mtimeMs) continue;
+    try {
+      patternCore.registerTuning(name, fs.readFileSync(file, 'utf8'));
+      tuningFiles.set(name, { file, mtimeMs: stat.mtimeMs });
+    } catch (err) {
+      console.warn(`[poptart] tuning "${name}" could not be read: ${err.message}`);
+    }
+  }
 }
 
 // The setgroove equivalent of TEMPO_BLOCK.
@@ -5106,6 +5143,9 @@ function runPrebake() {
   // prebake (the browser saved the file) replaces the layer wholesale, the same as prebakeDefs.
   patternCore.setRollLayer('prebake');
   patternCore.clearRolls('prebake');
+  // A prebake can name .scl tunings too (a setscale there, or a helper's .scale) - read them before
+  // it runs, as a buffer's are before an evaluation.
+  for (const src of sources) registerBufferTunings(src.code);
   try {
     for (const src of sources) {
       for (const b of patternCore.splitLabeledBlocks(src.code)) {
@@ -7220,6 +7260,7 @@ const routes = {
       loaded: !!engine,
       error: engineError,
       scale: patternCore ? patternCore.globalScale() : null,
+      tunings: patternCore ? patternCore.registeredTunings() : [], // the .scl files scale names may use, for the editor's own parse
       groove: patternCore ? grooveReport(patternCore.globalGroove()) : null,
       scan: engine?.scanStatus ? engine.scanStatus() : null,
       // How full the audio server is. Here for the same reason the scan is: the editor already
@@ -7667,6 +7708,7 @@ const routes = {
     // deck's previous scale instead is how one track's key used to leak into the next - a
     // song without a setscale must play in the default key, not whatever the last song left.
     patternCore.setGlobalScale(null);
+    registerBufferTunings(body.code ?? '');
     // ...and no feel either: the buffer's own setgroove is the only thing that sets one, for the
     // same reason (see the groove hoist below).
     patternCore.setGlobalGroove(null);
@@ -7767,8 +7809,8 @@ const routes = {
         try {
           const value = hoisted.has(b) ? hoisted.get(b) : evalAsBlock(b, () => evalBlock(b.code, b.start));
           // Only an explicitly *named* block promises sound. Anything anonymous (bare code
-          // outside labels, or `$:`) that doesn't produce a pattern is a setup block, Strudel-
-          // style: declarations shared with the blocks below (const kb = midikeys("...")),
+          // outside labels, or `$:`) that doesn't produce a pattern is a setup block:
+          // declarations shared with the blocks below (const kb = midikeys("...")),
           // language extensions (Signal.prototype.co = ...), one-off side effects - whatever
           // it evaluated to is simply not played. (A pattern is dry-run below, not here.)
           const isPattern = value instanceof patternCore.Sig;
@@ -8230,6 +8272,7 @@ const routes = {
         transport: transport.snapshot(),
         deckTransport: deckClockBody(),
         scale: deckScale, // what setscale() left in force for this deck - the piano roll colors by it
+        tunings: patternCore.registeredTunings(), // ...and the .scl tunings it may name, which only the server can read
         groove: grooveReport(deckGroove), // ...and the feel it left, which the editor's groove control shows
         arrange: arrangeClocks[deck]?.snapshot() ?? null, // the song clock the painter's playhead runs
         deck,

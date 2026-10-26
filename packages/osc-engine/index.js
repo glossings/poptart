@@ -1977,17 +1977,18 @@ class OscEngine {
   // between Node and sclang required. A negative latency (deadline already passed - e.g. a
   // slow tick) is clamped to 0 (fire immediately) rather than sent negative, since
   // Server:sendBundle treats negative latency as "now" inconsistently across versions.
-  // The scheduler hands over fractional notes as they were written; everything here is MIDI -
-  // a plugin, a device route, a MIDI output - so the note is rounded to a key on the way in.
+  // The scheduler hands over fractional notes as they were written (a tuning, a fractional
+  // degree), and the track's own instrument gets them that way: poptart's devices play them
+  // exactly, and sclang rounds for a plugin (see noteKey in poptart.scd). The MIDI fan-out - other
+  // tracks' routes, MIDI outputs - is MIDI, so it takes the nearest key. On and off are sent the
+  // same way, so a device matches an off to its on exactly.
   noteOn(trackId, note, velocity, targetTime) {
-    const key = Math.round(note);
-    this._send('/poptart/noteOn', [trackId, key, velocity, this._latency(targetTime)]);
-    this._fanoutMidi(trackId, key, velocity, targetTime, true);
+    this._send('/poptart/noteOn', [trackId, note, velocity, this._latency(targetTime)]);
+    this._fanoutMidi(trackId, Math.round(note), velocity, targetTime, true);
   }
   noteOff(trackId, note, targetTime) {
-    const key = Math.round(note);
-    this._send('/poptart/noteOff', [trackId, key, this._latency(targetTime)]);
-    this._fanoutMidi(trackId, key, 0, targetTime, false);
+    this._send('/poptart/noteOff', [trackId, note, this._latency(targetTime)]);
+    this._fanoutMidi(trackId, Math.round(note), 0, targetTime, false);
   }
   setParam(trackId, slotIndex, paramName, value, targetTime) {
     // One of poptart's own devices resolves the argument the way the browser does: an enum takes
