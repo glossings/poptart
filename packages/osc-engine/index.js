@@ -1213,11 +1213,16 @@ class OscEngine {
     let shapes = null;
     for (const [held, one] of this._deviceFiles) {
       if (!held.startsWith(`${key}|`)) continue;
-      const control = held.slice(key.length + 1);
-      files[control] = {};
-      for (const [ref, index] of one.byRef) files[control][index] = ref;
-      // A named curve is filed under its name and its points; the window prints the name.
-      for (const [name, index] of one.named ?? []) files[control][index] = name;
+      // Filed by control, or by the bank several controls share - in which case every one of them
+      // can play what is in it, and every one lists it.
+      const store = held.slice(key.length + 1);
+      const controls = (device.params ?? []).filter((p) => (p.bank ?? p.id) === store).map((p) => p.id);
+      for (const control of controls.length ? controls : [store]) {
+        files[control] = {};
+        for (const [ref, index] of one.byRef) files[control][index] = ref;
+        // A named curve is filed under its name and its points; the window prints the name.
+        for (const [name, index] of one.named ?? []) files[control][index] = name;
+      }
       if (one.tables) shapes = { ...(shapes ?? {}), ...one.tables };
     }
     return {
@@ -2091,7 +2096,8 @@ class OscEngine {
    * UGen copies the samples out of that buffer on its own non-realtime thread.
    */
   _loadDeviceSample(trackId, slotIndex, device, control, ref, targetTime) {
-    const key = `${trackId}:${slotIndex}|${control.id}`;
+    // Controls that load into one store (a `bank`) hand its slots out between them.
+    const key = `${trackId}:${slotIndex}|${control.bank ?? control.id}`;
     let held = this._deviceFiles.get(key);
     if (!held) {
       held = { byRef: new Map(), loaded: 0 };
@@ -2164,7 +2170,8 @@ class OscEngine {
       this._warnOnce('device-shape-reader', '[poptart] this build cannot read drawn shapes, so a curve cannot be set here');
       return;
     }
-    const key = `${trackId}:${slotIndex}|${control.id}`;
+    // Controls that load into one store (a `bank`) hand its slots out between them.
+    const key = `${trackId}:${slotIndex}|${control.bank ?? control.id}`;
     let held = this._deviceFiles.get(key);
     if (!held) {
       held = { byRef: new Map(), loaded: 0 };

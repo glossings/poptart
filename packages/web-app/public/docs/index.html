@@ -17,7 +17,7 @@
         <header class="chapter-head">
           <p class="kicker">The guide</p>
           <h1>poptart</h1>
-          <p class="lede" data-build="desktop">Write short patterns; poptart plays them on your own VST/VST3 instruments and effects, and turns any of their knobs while it plays.</p>
+          <p class="lede" data-build="desktop">Write short patterns; poptart plays them on its own synths, samplers and effects, or on your VST/VST3 plugins, and turns any of their knobs while it plays.</p>
           <p class="lede" data-build="web">Write short patterns; poptart plays them on synths, samplers and effects built into this page. Nothing to install.</p>
         </header>
 
@@ -30,16 +30,13 @@
         <p>
           A line that starts with a name and a colon is a <strong>track</strong>. Evaluate the buffer with
           <strong>{mod+enter}</strong> and every track plays; <strong>{mod+.}</strong> stops.
-          <span data-build="web">Every example in this guide is the real editor: press <strong>▶ play</strong>, click into the code to change it, and double-click a name like <code>pianoroll</code>, <code>lfo</code> or <code>synth</code> to open its editor.</span>
+          Every example in this guide is the real editor: press <strong>▶ play</strong>, click into the code to change it, and double-click a name like <code>pianoroll</code>, <code>lfo</code> or <code>synth</code> to open its editor.
+          <span data-build="desktop">The examples play in this browser, on the same devices the app has, so they never touch what the app is playing; <strong>copy</strong> takes one to the app.</span>
         </p>
-        <pre data-run data-build="web"><code>kick: s("pt_kit:0*4").postgain(0.3)
+        <pre data-run><code>kick: s("pt_kit:0*4").postgain(0.3)
 hats: s("pt_kit:4*8").vel("1 .5").postgain(0.3)
 bass: note("c2 c2 eb2 g1").synth("Wavetable")
   .fx("Filter").param("Cutoff", sine(0.25).range(0.3, 0.7)).postgain(0.3)</code></pre>
-        <pre data-build="desktop"><code>kick: s("bd*4")
-hats: s("hh*8").vel("1 .5")
-bass: note("c2 c2 eb2 g1").synth("Serum 2")
-  .param("Filter 1 Freq", sine(0.25).range(300, 3000))</code></pre>
         <p>
           Change a number and evaluate again: the new version takes over without a gap. That is the whole
           workflow.

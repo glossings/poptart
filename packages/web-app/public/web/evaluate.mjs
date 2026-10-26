@@ -296,7 +296,7 @@ export function createEvaluator({ patternCore, engine, transport, prebakeDefs = 
 
       evaluated = blocks.map((b) => {
         try {
-          patternCore.setClipsOwner?.(b.label);
+          patternCore.setClipsOwner?.('a', b.label);
           const value = hoisted.has(b) ? hoisted.get(b) : evalBlock(b.code, b.start);
           const isPattern = value instanceof patternCore.Sig;
           const setupValue = value === TEMPO_BLOCK || value === SCALE_BLOCK || value === GROOVE_BLOCK || value?.poptartArrangeBlock;

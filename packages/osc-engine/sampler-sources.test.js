@@ -179,3 +179,20 @@ test('an entry carries that sample\'s fit beside its markers, and only that samp
   assert.deepStrictEqual(sliceEntryFor({ 'breaks/amen.wav': { fit: 'auto' } }, amen), { marks: null, fit: 'auto' });
   assert.strictEqual(sliceEntryFor({ 'breaks/amen.wav': { fit: 0 } }, amen), null);
 });
+
+test('a pack poptart ships plays where the library has none of that name', () => {
+  const { setBuiltInPacksRoot } = require('./samples.js');
+  const BUILT_IN = fs.mkdtempSync(path.join(os.tmpdir(), 'poptart-builtin-'));
+  put(BUILT_IN, 'pt_kit/kick.wav');
+  put(BUILT_IN, 'pt_keys/bell.wav');
+  put(SAMPLES, 'pt_keys/mine.wav');
+  setBuiltInPacksRoot(BUILT_IN);
+  try {
+    assert.deepStrictEqual(engine()._resolveSource('pt_kit').paths, [path.join(BUILT_IN, 'pt_kit', 'kick.wav')]);
+    assert.deepStrictEqual(engine()._resolveSource('pt_keys').paths, [path.join(SAMPLES, 'pt_keys', 'mine.wav')], 'the library comes first');
+    assert.strictEqual(engine()._resolveSource('../pt_kit').paths, null, 'a name, not a path');
+  } finally {
+    setBuiltInPacksRoot(null);
+  }
+  assert.strictEqual(engine()._resolveSource('pt_kit').paths, null);
+});

@@ -39,9 +39,10 @@ export function runnableExamples(html) {
   return out;
 }
 
-// A name the engine does not know is reported this way (web-audio-engine.mjs); anything else it
-// says - a pack still loading, say - is not the example's fault.
-const BROKEN = /there is no device called|has no parameter called/;
+// A name the engine does not know is reported this way (web-audio-engine.mjs), and so is an option
+// a list control does not have (an option name with a space, double-quoted, arrives as two words);
+// anything else it says - a pack still loading, say - is not the example's fault.
+const BROKEN = /there is no device called|has no parameter called|cannot take/;
 
 async function play(code) {
   const ctx = new FakeAudioContext();
@@ -70,6 +71,8 @@ test('the guide has playable examples', () => {
 test('the check catches a device or a control the browser build does not have', async () => {
   assert.equal((await play('a: note("c3").synth("NoSuchSynth")')).length, 1);
   assert.equal((await play('a: note("c3").synth("Wavetable").param("No Such Control", 0.5)')).length, 1);
+  assert.equal((await play('a: note("c3").synth("Rings").param("Model", "Sympathetic String")')).length, 1);
+  assert.deepEqual(await play('a: note("c3").synth("Rings").param("Model", "\'Sympathetic String\'")'), []);
 });
 
 for (const { name, html } of pages) {
@@ -138,4 +141,43 @@ test('an example used in the guide is the app, embedded: isolated, and out of th
   assert.ok(!/offsetParent\)/.test(body('embedPanelOpen')));
   // ...and it is not measured: sized by the window, a panel would chase a frame grown to fit it.
   assert.ok(!/offsetHeight|scrollHeight/.test(body('embedPanelOpen')));
+});
+
+// ---- the examples on the desktop -----------------------------------------------------------------
+
+test('on the desktop an example is the browser build too, served by the desktop server', () => {
+  const server = fs.readFileSync(path.join(here, 'server.js'), 'utf8');
+  const docs = fs.readFileSync(path.join(docsDir, 'docs.js'), 'utf8');
+  const boot = fs.readFileSync(path.join(here, 'public', 'web', 'boot.mjs'), 'utf8');
+  assert.match(docs, /^ {2}setUpExamples\(\);$/m, 'examples play in both builds');
+  // `/?embed` is index.html with the in-page host booted in front of the editor, so an example
+  // plays on that page's own engine and never on the one the desktop's window is using.
+  assert.match(server, /if \(urlPath === '\/index\.html' && \/\(\^\|&\)embed\\b\/\.test\(query\)\) return serveEmbed\(res\);/);
+  const serveEmbed = server.slice(server.indexOf('async function serveEmbed('), server.indexOf('\nfunction serveStatic('));
+  assert.match(serveEmbed, /injectBoot\(html\)/);
+  // ...and every path that host loads from is served, from a folder that is there.
+  const paths = boot.slice(boot.indexOf('export const PATHS'), boot.indexOf('});', boot.indexOf('export const PATHS')));
+  const wanted = [...paths.matchAll(/'(\/[^']+)'/g)].map((m) => m[1]);
+  assert.ok(wanted.length >= 5);
+  const prefixes = [...server.matchAll(/\{ prefix: '([^']+)'/g)].map((m) => m[1]);
+  for (const url of wanted) {
+    assert.ok(prefixes.some((p) => `${url}/`.startsWith(p)), `${url} is served on the desktop`);
+  }
+  const packages = path.resolve(here, '..');
+  for (const dir of ['web-engine/src', 'web-engine/public/worklets', 'web-engine/public/packs', 'web-engine/public/devices', 'osc-engine/sample-map-core.mjs']) {
+    assert.ok(fs.existsSync(path.join(packages, dir)), `${dir} is there to serve`);
+  }
+  // A module the page's host imports from beside itself that is NOT in public/web is one the web
+  // build puts there (pinned-defs.js), and the desktop has to serve it at the same path.
+  const webDir = path.join(here, 'public', 'web');
+  for (const file of fs.readdirSync(webDir).filter((f) => f.endsWith('.mjs'))) {
+    const src = fs.readFileSync(path.join(webDir, file), 'utf8');
+    for (const [, name] of src.matchAll(/(?:from\s+|import\()\s*'\.\/([^'/]+)'/g)) {
+      if (fs.existsSync(path.join(webDir, name))) continue;
+      assert.match(server, new RegExp(`prefix: '/web/', root: __dirname, only: \\[[^\\]]*'${name.replace('.', '\\.')}'`),
+        `/web/${name} (imported by ${file}) is served on the desktop`);
+    }
+  }
+  // A frame cannot reach the desktop's own window, so "open" copies the code there instead.
+  assert.match(docs, /isWeb \? 'open ↗' : 'copy'/);
 });

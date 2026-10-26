@@ -446,6 +446,8 @@ export function catalogJson(devices) {
       ...(p.takes ? { takes: p.takes } : {}),
       ...(p.capacity ? { capacity: p.capacity } : {}),
       ...(p.sampleAs ? { sampleAs: p.sampleAs } : {}),
+      // Controls sharing one store of files, which hand out its slots between them.
+      ...(p.bank ? { bank: p.bank } : {}),
     })),
   });
   const sorted = [...devices].sort((a, b) => a.id.localeCompare(b.id));

@@ -212,6 +212,10 @@ function defineParam(deviceId, spec, seen) {
     fail(deviceId, `param "${id}": step must be a positive number`);
   }
 
+  // Controls that take files into ONE store name it the same: the Wavetable's two oscillators read
+  // one bank of tables, so a table loaded for either is in a slot neither can take for another.
+  const bank = spec.bank == null ? null : String(spec.bank);
+  if (bank !== null && !takes) fail(deviceId, `param "${id}": only a control that takes a file or a curve has a bank`);
   const amp = spec.amp ?? null;
   if (amp !== null && !AMP_STAGES.has(amp)) fail(deviceId, `param "${id}" has unknown amp stage "${amp}"`);
 
@@ -239,6 +243,7 @@ function defineParam(deviceId, spec, seen) {
     capacity,
     takes,
     sampleAs,
+    bank,
     amp,
     group: String(spec.group ?? '').trim() || null,
     description: String(spec.description ?? '').trim() || null,
@@ -2623,7 +2628,7 @@ function oscParams(n, group, levelDefault) {
   const p = `osc${n}`;
   return [
     { id: `${p}.level`, name: `Osc ${n} Level`, min: 0, max: 1, default: levelDefault, group },
-    { id: `${p}.table`, name: `Osc ${n} Table`, default: 0, options: [...TABLE_NAMES], capacity: TABLE_SLOTS, takes: 'sample', sampleAs: 'wavetable', rate: 'k', group,
+    { id: `${p}.table`, name: `Osc ${n} Table`, default: 0, options: [...TABLE_NAMES], capacity: TABLE_SLOTS, takes: 'sample', sampleAs: 'wavetable', bank: 'tables', rate: 'k', group,
       description: 'Which stack of waveforms this oscillator reads. Name a sample to load a file as a table.' },
     { id: `${p}.position`, name: `Osc ${n} Position`, min: 0, max: 1, default: 0, group,
       description: 'Where in the table stack this oscillator reads. Sweeping it morphs one waveform into the next.' },

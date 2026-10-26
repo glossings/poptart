@@ -11,7 +11,7 @@ const { poptartHome, describeHome } = require('@poptart/osc-engine/home');
 const fs = require('node:fs');
 const os = require('node:os');
 const { MappedEngine, toRealWorld } = require('./param-mapping');
-const { blockReason, isLoopbackHostname } = require('./request-guard');
+const { blockReason, isLoopbackHostname, embedRefusal } = require('./request-guard');
 const { preferVst3 } = require('./plugin-filter');
 const { deviceRows, deviceParamRows, nativeDevice } = require('@poptart/osc-engine/native-devices');
 const { SNAPSHOT_DIR, putSnapshot, getSnapshot, pruneSnapshots } = require('./snapshots');
@@ -44,6 +44,10 @@ const MIME_TYPES = {
   '.svg': 'image/svg+xml',
   '.png': 'image/png',
   '.webp': 'image/webp',
+  // The browser engine's files, for the guide's examples (see serveEmbed).
+  '.json': 'application/json; charset=utf-8',
+  '.wasm': 'application/wasm',
+  '.wav': 'audio/wav',
 };
 
 // CodeMirror (v5: plain script files, no build step) is served under /vendor/codemirror/
@@ -3948,6 +3952,9 @@ function headphonesState() {
 // Apply the persisted sample-library folder to the engine's samples module (env var still wins
 // - see samples.js). Chosen in the "settings" tab; null/absent means the default ~/.poptart/samples.
 require('@poptart/osc-engine/samples').setSamplesRoot(settings.samplesDir ?? null);
+// The packs poptart ships (pt_kit, pt_keys) are web-engine's, the files the browser build plays,
+// so a pattern written for either build plays its samples on both.
+require('@poptart/osc-engine/samples').setBuiltInPacksRoot(path.join(__dirname, '..', 'web-engine', 'public', 'packs'));
 
 // The sample map (similarity map of the folders in settings.mapSources - see sample-map-api.js).
 // Its routes join the table below; the index itself loads and refreshes once the server is up.
@@ -10566,23 +10573,59 @@ async function getParamsWhenLoaded(trackId, slot, { tries = 30, delayMs = 500 } 
 // Plumbing: static file serving + JSON body parsing + route dispatch.
 // ---------------------------------------------------------------------------------------------
 
+// The browser engine is served too, at the paths the web build gives it (build-web.mjs), for the
+// guide's examples: see serveEmbed.
+const WEB_ENGINE_PUBLIC = path.join(WEB_ENGINE_SRC, '..', 'public');
+const OSC_ENGINE_DIR = path.dirname(require.resolve('@poptart/osc-engine/package.json'));
+
 const STATIC_ROOTS = [
   { prefix: '/vendor/codemirror/', root: CODEMIRROR_DIR },
   { prefix: '/pattern-core/', root: PATTERN_CORE_SRC_DIR },
+  { prefix: '/web-engine/src/', root: WEB_ENGINE_SRC },
+  { prefix: '/web-engine/worklets/', root: path.join(WEB_ENGINE_PUBLIC, 'worklets') },
+  { prefix: '/web-engine/packs/', root: path.join(WEB_ENGINE_PUBLIC, 'packs') },
+  { prefix: '/web-engine/devices/', root: path.join(WEB_ENGINE_PUBLIC, 'devices') },
+  // The one module of osc-engine both builds share; the rest of that package stays private.
+  { prefix: '/osc-engine/', root: OSC_ENGINE_DIR, only: ['sample-map-core.mjs'] },
+  // The ★ library's file format, which the page's host imports from beside itself (build-web.mjs).
+  { prefix: '/web/', root: __dirname, only: ['pinned-defs.js'] },
 ];
 
 function resolveStaticPath(urlPath) {
-  const entry = STATIC_ROOTS.find((e) => urlPath.startsWith(e.prefix));
+  // An entry that names its files covers only those: `/web/pinned-defs.js` comes from beside the
+  // server, and the rest of `/web/` from the public folder as usual.
+  const entry = STATIC_ROOTS.find((e) => urlPath.startsWith(e.prefix)
+    && (!e.only || e.only.includes(urlPath.slice(e.prefix.length))));
   const root = entry?.root ?? PUBLIC_DIR;
   const rel = entry ? urlPath.slice(entry.prefix.length) : urlPath;
   const filePath = path.join(root, rel);
   return filePath.startsWith(root) ? filePath : null;
 }
 
+// A playable example in the guide is the app at `/?embed`. On this server that page is the
+// BROWSER build - the editor with the in-page host and engine booted in front of it, exactly as
+// build-web.mjs makes it - rather than one more editor on this server's engine. The guide opens
+// in the user's own browser, and an example there plays on that page's own engine with the same
+// devices under the same names, so it can never stop, replace or tear down a track the main
+// window is playing; its writes are refused besides (request-guard.js's embedRefusal).
+let webBuildKit = null;
+async function serveEmbed(res) {
+  try {
+    webBuildKit ??= import('./build-web.mjs');
+    const { injectBoot } = await webBuildKit;
+    const html = await fs.promises.readFile(path.join(PUBLIC_DIR, 'index.html'), 'utf8');
+    res.writeHead(200, { 'Content-Type': MIME_TYPES['.html'], 'Cache-Control': 'no-cache' });
+    res.end(injectBoot(html));
+  } catch (err) {
+    res.writeHead(500).end(`could not build the example page: ${err?.message ?? err}`);
+  }
+}
+
 function serveStatic(req, res) {
   // A folder is its index.html - the guide lives at /docs/.
-  const bare = req.url.split('?')[0];
+  const [bare, query = ''] = req.url.split('#')[0].split('?');
   const urlPath = bare.endsWith('/') ? `${bare}index.html` : bare;
+  if (urlPath === '/index.html' && /(^|&)embed\b/.test(query)) return serveEmbed(res);
   const filePath = resolveStaticPath(urlPath);
 
   if (!filePath) {
@@ -10762,6 +10805,12 @@ function readJsonBody(req) {
 }
 
 const server = http.createServer(async (req, res) => {
+  const embedded = embedRefusal({ method: req.method, refererHeader: req.headers.referer });
+  if (embedded) {
+    res.writeHead(403, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: embedded }));
+    return;
+  }
   if (LOOPBACK_ONLY) {
     const refusal = blockReason({
       method: req.method,

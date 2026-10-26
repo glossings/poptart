@@ -118,16 +118,16 @@ test('web-app and desktop keep their places; the libraries go where their names 
   assert.ok(!has('packages/pattern-core'));
 });
 
-test('the browser engine ships its sources and nothing else: web-app draws device windows with them', () => {
+test('the browser engine ships its sources and its built files, not its build scripts', () => {
   // One of poptart's own devices has no editor window of its own, so web-app generates one from
-  // web-engine's panel.mjs (server.js's device-window section). Only what that reads ships: the
-  // worklets, the wasm binaries and the rendered sample packs are the web build's, and this app
-  // plays none of them - they are also the bulk of that package.
+  // web-engine's panel.mjs (server.js's device-window section). The guide's examples are the
+  // browser build, served by web-app (server.js's serveEmbed), so they need the worklets, the
+  // wasm binaries and the rendered sample packs too.
   const { has } = run(fakeRepo());
   assert.ok(has('packages/web-engine/src/panel.mjs'), 'the window generator');
   assert.ok(has('packages/web-engine/package.json'));
   assert.ok(!has('packages/web-engine/src/panel.test.mjs'), 'tests stay behind here as everywhere');
-  assert.ok(!has('packages/web-engine/public'), 'megabytes of wasm and sample packs this app never plays');
+  assert.ok(has('packages/web-engine/public/devices/Plaits.wasm'), 'what the guide\'s examples play on');
   assert.ok(!has('packages/web-engine/build'), 'nor the scripts that built them');
 });
 

@@ -25,17 +25,13 @@
           <code>Signal.prototype</code> is shared by every pattern, LFO and string. Add a method and all of
           them have it. Arguments stay patterns when you pass them on:
         </p>
-        <pre data-run data-build="web"><code>Signal.prototype.dub = function (feedback = 0.5) {
+        <pre data-run><code>Signal.prototype.dub = function (feedback = 0.5) {
   return this.fx("Delay").param("Sync", "1/8.").param("Feedback", feedback)
     .fx("Reverb");
 };
 
-chords: note("&lt;[c3,eb3,g3] [bb2,d3,f3]&gt;").synth("Wavetable").dub("&lt;0.3 0.7&gt;")</code></pre>
-        <pre data-build="desktop"><code>Signal.prototype.acid = function (reso = 0.8) {
-  return this.param("Filter 1 Freq", 0.3).param("Filter 1 Reso", reso);
-};
-
-bass: note("c2*8").synth("Serum 2").acid("&lt;0.6 0.9&gt;")</code></pre>
+chords: note("&lt;[c3,eb3,g3] [bb2,d3,f3]&gt;").synth("Wavetable").dub("&lt;0.3 0.7&gt;")
+  .postgain(1)</code></pre>
         <p>
           A method definition is setup: put it on its own line at column 0, or in the
           <a href="#prebake">prebake</a> to have it everywhere. <code>noteToMidi("c4")</code>,
@@ -49,26 +45,20 @@ bass: note("c2*8").synth("Serum 2").acid("&lt;0.6 0.9&gt;")</code></pre>
           and it lights up as it plays. A string in <strong>single quotes</strong> is plain text. Use single
           quotes for the strings your own code works on:
         </p>
-        <pre data-run data-build="web"><code>const degrees = [0, 3, 7, 10, 12, 10, 7, 3];
-lead: n(degrees.join(' ')).scale("C minor").synth("FM")</code></pre>
+        <pre data-run><code>const degrees = [0, 3, 7, 10, 12, 10, 7, 3];
+lead: n(degrees.join(' ')).scale("C minor").synth("FM").postgain(1)</code></pre>
         <p>
           With <code>.join(" ")</code> the separator would itself be a pattern, not a space. The same goes
           for your own functions: <code>chord("c3")</code> hands <code>chord</code> a pattern, and
           <code>chord('c3')</code> hands it the text.
         </p>
         <p>For a whole block of helper code, switch mini-notation off and on again:</p>
-        <pre data-run data-build="web"><code>// mini-off
+        <pre data-run><code>// mini-off
 const chord = (root, ...steps) =&gt; note(
   steps.map((s) =&gt; noteToMidi(root) + s).join(","));
 // mini-on
 
 pad: chord('c3', 0, 4, 7, 11).synth("FM").postgain(0.7)</code></pre>
-        <pre data-build="desktop"><code>// mini-off
-const chord = (root, ...steps) =&gt; note(
-  steps.map((s) =&gt; noteToMidi(root) + s).join(","));
-// mini-on
-
-pad: chord('c3', 0, 4, 7, 11).synth("Serum 2")</code></pre>
         <p>A <code>mini-off</code> with no <code>mini-on</code> runs to the end of the buffer.</p>
 
         <h2 id="fmap">Values: <code>fmap</code></h2>
@@ -76,13 +66,14 @@ pad: chord('c3', 0, 4, 7, 11).synth("Serum 2")</code></pre>
           <code>.fmap(fn)</code> passes every value through your function and leaves the timing alone. The
           value is what the pattern holds: a note, a degree, a pack name, a number.
         </p>
-        <pre data-run data-build="web"><code>// keep a wandering line inside one octave
+        <pre data-run><code>// keep a wandering line inside one octave
 Signal.prototype.fold = function (lo = 60, hi = 72) {
   const span = hi - lo;
   return this.fmap((m) =&gt; lo + ((((m - lo) % span) + span) % span));
 };
 
-lead: n(irand(24).seg(8)).scale("C minor").fold(60, 72).synth("Wavetable")</code></pre>
+lead: n(irand(24).seg(8)).scale("C minor").fold(60, 72).synth("Wavetable")
+  .postgain(0.5)</code></pre>
 
         <h2 id="events">Events: <code>events</code></h2>
         <p>
@@ -96,7 +87,7 @@ lead: n(irand(24).seg(8)).scale("C minor").fold(60, 72).synth("Wavetable")</code
           them, copy them (<code>{ ...e, start: e.start + 0.5 }</code> keeps everything else), or make new
           ones from <code>start</code>, <code>end</code> and <code>value</code>.
         </p>
-        <pre data-run data-build="web"><code>// a little looseness: timing and velocity
+        <pre data-run><code>// a little looseness: timing and velocity
 Signal.prototype.humanize = function (amount = 0.01) {
   return this.events((es) =&gt; es.map((e) =&gt; ({
     ...e,

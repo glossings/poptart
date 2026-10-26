@@ -43,7 +43,7 @@ function oscParams(n, group, levelDefault) {
   const p = `osc${n}`;
   return [
     { id: `${p}.level`, name: `Osc ${n} Level`, min: 0, max: 1, default: levelDefault, group },
-    { id: `${p}.table`, name: `Osc ${n} Table`, default: 0, options: [...TABLE_NAMES], capacity: TABLE_SLOTS, takes: 'sample', sampleAs: 'wavetable', rate: 'k', group,
+    { id: `${p}.table`, name: `Osc ${n} Table`, default: 0, options: [...TABLE_NAMES], capacity: TABLE_SLOTS, takes: 'sample', sampleAs: 'wavetable', bank: 'tables', rate: 'k', group,
       description: 'Which stack of waveforms this oscillator reads. Name a sample to load a file as a table.' },
     { id: `${p}.position`, name: `Osc ${n} Position`, min: 0, max: 1, default: 0, group,
       description: 'Where in the table stack this oscillator reads. Sweeping it morphs one waveform into the next.' },

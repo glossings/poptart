@@ -732,3 +732,19 @@ test('deviceLive asks sclang and resolves with the answer, or with null when non
   // Nothing in the slot: nothing asked.
   assert.strictEqual(await e.deviceLive('t', 3), null);
 });
+
+test('the two oscillators load into one bank of tables, so their files take different slots', () => {
+  const { e, sent } = withPack();
+  e.loadInstrument('lead', 'Wavetable');
+  e.setParam('lead', 0, 'Osc 1 Table', 'break:0');
+  e.setParam('lead', 0, 'Osc 2 Table', 'break:1');
+  const slots = sampleSends(sent).map((args) => args[3]);
+  assert.equal(slots.length, 2);
+  assert.notEqual(slots[0], slots[1], 'each file has a table of its own');
+  // Either oscillator can play either, so the window lists both under both.
+  const { files } = e.deviceSlot('lead', 0);
+  for (const id of ['osc1.table', 'osc2.table']) {
+    assert.equal(files[id][slots[0]], 'break:0');
+    assert.equal(files[id][slots[1]], 'break:1');
+  }
+});

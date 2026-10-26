@@ -21,9 +21,16 @@
         </header>
 
         <h2 id="arithmetic">Arithmetic</h2>
-        <pre><code>note("c3 e3 g3").add(12)                   // up an octave
-n("0 2 4").add("&lt;0 7&gt;").scale("C major")   // transpose every other cycle
-pianoroll("lead").sc().add(n("&lt;0 2 -1&gt;"))   // move by scale steps</code></pre>
+        <pre data-run><code>setscale("C major")
+
+up: note("c3 e3 g3").add(12)                     // up an octave
+  .synth("FM").postgain(0.25)
+turn: n("0 2 4").add("&lt;0 7&gt;").scale("C major")   // transpose every other cycle
+  .synth("Wavetable").postgain(0.25)
+steps: pianoroll("lead").sc().add(n("&lt;0 2 -1&gt;"))  // move by scale steps
+  .synth("Wavetable").postgain(0.3)
+
+_roll("lead", "48,0,8 52,8,4 55,12,4", { grid: 16, len: 16 })</code></pre>
         <p>
           A number moves notes in semitones; an <code>n()</code> moves them in <strong>scale steps</strong>, in
           the key they were last mapped through (else the <code>setscale</code> key). A note outside the key
@@ -88,7 +95,7 @@ pianoroll("lead").sc().add(n("&lt;0 2 -1&gt;"))   // move by scale steps</code><
           <div class="row">note("[c3,e3,g3]").arp("0 1 2 1")</div>
           <div class="row">note("c3 e3").ply(3)</div>
         </figure>
-        <pre data-run data-build="web"><code>arp: note("&lt;[c3,eb3,g3] [ab2,c3,eb3] [bb2,d3,f3] [g2,bb2,d3]&gt;")
+        <pre data-run><code>arp: note("&lt;[c3,eb3,g3] [ab2,c3,eb3] [bb2,d3,f3] [g2,bb2,d3]&gt;")
   .arp("0 1 2 3 2 1 0 1")
   .when("&lt;0 0 0 1&gt;", (x) =&gt; x.add(12))   // every fourth bar up an octave
   .echo(2, 3/16, (x) =&gt; x.vel(0.4))       // two quieter repeats, 3/16 apart

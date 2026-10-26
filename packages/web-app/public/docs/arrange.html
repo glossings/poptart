@@ -36,6 +36,19 @@
           <li>A track you add later arrives filled, so arranging never quietly drops a part.</li>
           <li>The song ends at the end of its last clip (the dashed line), and playback stops there.</li>
         </ul>
+        <p>
+          What you paint is written into the code as one <code>_arrange(…)</code> line at the foot of the
+          buffer, which folds away. This is the song in the picture above:
+        </p>
+        <pre data-run><code>setscale("C minor")
+
+keys: n("&lt;0 5 3 4&gt;").sc(3).chord(7).synth("Wavetable").postgain(0.25)
+hats: s("pt_kit:4*8").vel("1 .5").postgain(0.3)
+kick: s("pt_kit:0*4").postgain(0.3)
+bass: n("&lt;0 5 3 4&gt;").sc(1).ply(4).synth("Wavetable")
+  .fx("Filter").param("Mode", "ladder").param("Cutoff", 0.4).postgain(0.4)
+
+_arrange("keys,0,16 hats,2,14,o2 kick,4,12,o4 bass,8,8,o8", { tracks: ["keys", "hats", "kick", "bass"], loops: [["song", 0, 16]] })</code></pre>
         <table>
           <tr><th>To</th><th>Do</th></tr>
           <tr><td>move · duplicate</td><td>drag a clip's title · {alt}-drag it (onto another row to give it to that track)</td></tr>
@@ -66,8 +79,12 @@
           holds its own, and double-clicking one draws in it. Copies share their notes until you choose
           <strong>make unique</strong> in the clip's menu.
         </p>
-        <pre data-build="web"><code>lead: clips().synth("Wavetable")</code></pre>
-        <pre data-build="desktop"><code>lead: clips().synth("Serum 2")</code></pre>
+        <pre data-run><code>lead: clips().synth("Wavetable")
+  .fx("Delay").param("Sync", "1/8.").postgain(0.8)
+
+_arrange("lead,0,2,rup lead,2,2,rdown lead,4,2,rup lead,6,2,rdown", { tracks: ["lead"], loops: [["song", 0, 8]] })
+_roll("up", "60,0,4 63,4,4 67,8,4 70,12,4", { grid: 16, len: 16 })
+_roll("down", "72,0,4 70,4,4 67,8,4 63,12,4", { grid: 16, len: 16 })</code></pre>
 
         <h2 id="loops">Loop regions</h2>
         <p>
@@ -87,8 +104,11 @@
           <code>auto("sweep")</code> is a lane drawn against the song's bars, readable anywhere a signal
           goes. Double-click <code>auto</code> to draw it under the clips.
         </p>
-        <pre data-run data-build="web"><code>pad: note("&lt;[c3,eb3,g3] [ab2,c3,eb3]&gt;").synth("Wavetable")
-  .fx("Filter").param("Cutoff", auto("sweep").range(0.2, 0.8)).postgain(0.7)</code></pre>
+        <pre data-run><code>pad: note("&lt;[c3,eb3,g3] [ab2,c3,eb3]&gt;").synth("Wavetable")
+  .fx("Filter").param("Cutoff", auto("sweep").range(0.2, 0.8)).postgain(0.5)
+
+_arrange("pad,0,8", { tracks: ["pad"], loops: [["song", 0, 8]] })
+_auto("sweep", "0,0 6,1,-2 8,0")</code></pre>
         <p>
           The <strong>lane</strong> box names the lane you are drawing on: type to rename, <strong>▾</strong>
           to search or create. Pin several to read them against each other; a span copied from one lane
@@ -100,16 +120,11 @@
           Select some tracks and press <strong>{mod+g}</strong>. They are wrapped in a group, which mixes
           them into one channel:
         </p>
-        <pre data-run data-build="web"><code>drums: group({
+        <pre data-run><code>drums: group({
   kick: s("pt_kit:0*4")
   snare: s("~ pt_kit:1 ~ pt_kit:1")
   hats: s("pt_kit:4*8").vel("1 .5")
 }).fx("Reverb").param("Mix", 0.15).postgain(0.4)</code></pre>
-        <pre data-build="desktop"><code>drums: group({
-  kick: s("bd*4")
-  snare: s("~ sd ~ sd")
-  hats: s("hh*8").vel("1 .5")
-}).postgain(0.8)</code></pre>
         <ul>
           <li>The braces <em>are</em> the membership: where a track is written is where it belongs.</li>
           <li>An <code>.fx()</code>, <code>.postgain()</code> or <code>.bus()</code> on the group applies to all of it, and the mixer shows it as one strip that unfolds.</li>

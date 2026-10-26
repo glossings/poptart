@@ -52,4 +52,19 @@ function blockReason({ method, hostHeader, originHeader }) {
   return null;
 }
 
-module.exports = { blockReason, isLoopbackHostname };
+// A playable example in the guide (`/?embed`, see docs/docs.js) is the browser build: it runs its
+// own engine in the page and has no reason to write to this server. Refusing its writes keeps an
+// example from ever reaching the engine the main window is playing, whatever the page asks for.
+// The frame's address arrives as the Referer, without its `#` (where the example's code is).
+function embedRefusal({ method, refererHeader }) {
+  if (method !== 'POST' || !refererHeader) return null;
+  let search = '';
+  try {
+    search = new URL(refererHeader).search;
+  } catch {
+    return null;
+  }
+  return /[?&]embed\b/.test(search) ? 'refused: an example in the guide plays in its own page, not on this engine' : null;
+}
+
+module.exports = { blockReason, isLoopbackHostname, embedRefusal };

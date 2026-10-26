@@ -1067,16 +1067,25 @@ export class WebAudioEngine {
   _spareOption(filled, param, name) {
     const first = param.options.length;
     const capacity = param.capacity;
-    const extras = (filled.extras[param.id] ??= {});
+    // Every control that loads into the same store (its bank - the Wavetable's two oscillators
+    // read one set of tables) shares that store's slots, and lists what is in them.
+    const bank = param.bank ?? param.id;
+    const sharing = filled.descriptor.params.filter((p) => (p.bank ?? p.id) === bank);
+    const extrasOf = (p) => (filled.extras[p.id] ??= {});
     let optionIndex = -1;
-    for (let i = first; i < capacity; i++) if (extras[i] === undefined) { optionIndex = i; break; }
-    if (optionIndex < 0) {
-      optionIndex = first + ((filled.loadedCount ?? 0) % Math.max(1, capacity - first));
-      for (const [other, at] of filled.loaded) if (at === optionIndex) filled.loaded.delete(other);
+    for (let i = first; i < capacity; i++) {
+      if (!sharing.some((p) => extrasOf(p)[i] !== undefined)) { optionIndex = i; break; }
     }
-    filled.loadedCount = (filled.loadedCount ?? 0) + 1;
+    filled.bankLoads ??= {};
+    if (optionIndex < 0) {
+      optionIndex = first + ((filled.bankLoads[bank] ?? 0) % Math.max(1, capacity - first));
+      for (const [other, at] of filled.loaded) {
+        if (at === optionIndex && sharing.some((p) => extrasOf(p)[at] === other)) filled.loaded.delete(other);
+      }
+    }
+    filled.bankLoads[bank] = (filled.bankLoads[bank] ?? 0) + 1;
     filled.loaded.set(name, optionIndex);
-    extras[optionIndex] = name;
+    for (const p of sharing) extrasOf(p)[optionIndex] = name;
     return optionIndex;
   }
 

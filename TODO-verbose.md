@@ -704,3 +704,12 @@ entry here when its TODO.md line goes.
     can HEAR and is probably a day; the modulated-knob follow (2) is half a day and immediately
     visible; the `.preset()` round trip may cost nothing but a test; then the rest of (5), then the live
     figures.
+
+[ ] Per-control slot limits for files and curves. A control that takes a file or a drawn curve has a
+    fixed number of option slots, its descriptor's `capacity`: 8 drawn curves on Distort's mode and
+    Granular's window, 32 files on Granular's sample and the Convolver's impulse response, and the
+    Wavetable's table bank. Past that, the oldest loaded one is replaced, on both engines. What a
+    device holds behind those slots is unbounded (PoptartDevice.cpp keeps lists). The catch in
+    lifting the slot count: an option is a position on the control's 0..1 range, so a count that
+    grows moves what saved positions, `{ state }` captures and automation point at. Wants a way to
+    address a loaded file or curve that doesn't depend on how many there are.

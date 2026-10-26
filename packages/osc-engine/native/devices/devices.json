@@ -6954,7 +6954,8 @@
           ],
           "takes": "sample",
           "capacity": 64,
-          "sampleAs": "wavetable"
+          "sampleAs": "wavetable",
+          "bank": "tables"
         },
         {
           "id": "osc1.position",
@@ -7178,7 +7179,8 @@
           ],
           "takes": "sample",
           "capacity": 64,
-          "sampleAs": "wavetable"
+          "sampleAs": "wavetable",
+          "bank": "tables"
         },
         {
           "id": "osc2.position",

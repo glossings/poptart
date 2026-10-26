@@ -43,12 +43,12 @@ const LAYOUT = [
   { from: 'packages/web-app', to: 'packages/web-app', workspace: true },
   { from: 'packages/osc-engine', to: 'node_modules/@poptart/osc-engine', workspace: true, byName: true },
   { from: 'packages/pattern-core', to: 'node_modules/@poptart/pattern-core', workspace: true, byName: true },
-  // The browser engine, for its device-window generator alone: web-app draws the window of one
-  // of poptart's own devices from the same module the web build draws it from (see server.js's
-  // device-window section), rather than keeping a second copy of what a panel looks like. Its
-  // sources only - the worklets, the wasm binaries and the rendered sample packs belong to the
-  // web build, and this app plays none of them.
-  { from: 'packages/web-engine', to: 'packages/web-engine', include: /^(package\.json|src\/)/ },
+  // The browser engine, for two things. web-app draws the window of one of poptart's own devices
+  // from the same module the web build draws it from (see server.js's device-window section),
+  // rather than keeping a second copy of what a panel looks like. And the guide's examples are
+  // the browser build, served by web-app (server.js's serveEmbed), which plays them on the
+  // worklets, wasm binaries and sample packs in public/. The scripts that built those stay behind.
+  { from: 'packages/web-engine', to: 'packages/web-engine', include: /^(package\.json|src\/|public\/)/ },
   { from: 'mappings', to: 'mappings' },
   { from: 'LICENSE', to: 'LICENSE' },
 ];

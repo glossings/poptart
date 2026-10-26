@@ -25,11 +25,9 @@
           The buffer is split into <strong>blocks</strong>. A block that starts with <code>name:</code> is a
           track; lines that continue it (a <code>.fx(…)</code> on the next line) belong to it.
         </p>
-        <pre data-run data-build="web"><code>bass: note("c2 c2 g1 a1").synth("Wavetable")
+        <pre data-run><code>bass: note("c2 c2 g1 a1").synth("Wavetable")
   .fx("Filter").param("Cutoff", 0.45).postgain(0.45)
-drums: s("pt_kit:0*4, ~ pt_kit:4 ~ pt_kit:4").postgain(0.45)</code></pre>
-        <pre data-build="desktop"><code>bass: note("c2 c2 g1 a1").synth("Serum 2")
-drums: s("bd*4, ~ hh ~ hh")</code></pre>
+drums: s("pt_kit:0*4, ~ pt_kit:4 ~ pt_kit:4").postgain(0.4)</code></pre>
         <table>
           <tr><th>Write</th><th>Means</th></tr>
           <tr><td><code>bass:</code></td><td>a track called bass</td></tr>
@@ -58,15 +56,15 @@ drums: s("bd*4, ~ hh ~ hh")</code></pre>
           methods work on both, so <code>.add()</code>, <code>.range()</code> and <code>.when()</code> don't
           care which they are given.
         </p>
-        <pre data-run data-build="web"><code>keys: n("0 2 4 &lt;6 7&gt;").scale("C minor").synth("Wavetable")   // a melody: edges
+        <pre data-run><code>keys: n("0 2 4 &lt;6 7&gt;").scale("C minor").synth("Wavetable")   // a melody: edges
   .fx("Filter").param("Cutoff", sine(0.25).range(0.3, 0.8))   // an LFO: smooth
-  .fx("Reverb")</code></pre>
+  .fx("Reverb").postgain(0.5)</code></pre>
 
         <h2 id="panels">The panels</h2>
         <table>
           <tr><th>Tab</th><th>Has</th></tr>
           <tr><td><strong>session</strong></td><td>the live tracks and their devices, and eight macro knobs</td></tr>
-          <tr data-build="desktop"><td><strong>sounds</strong></td><td>your plugins (with <strong>rescan</strong>), the parameters of each track's chain, your sample packs</td></tr>
+          <tr data-build="desktop"><td><strong>sounds</strong></td><td>the built-in devices and your plugins (with <strong>rescan</strong>), the parameters of each track's chain, the sample packs</td></tr>
           <tr data-build="web"><td><strong>sounds</strong></td><td>the built-in devices, the parameters of each track's chain, the sample packs</td></tr>
           <tr><td><strong>files</strong></td><td>saved patterns and the autosaved work in progress<span data-build="web">, links to share them, and a backup of everything this browser keeps</span></td></tr>
           <tr data-build="desktop"><td><strong>settings</strong></td><td>audio device, sample folder, editor options, the startup prebake</td></tr>

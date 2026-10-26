@@ -1216,3 +1216,25 @@ test('.decay() and the rest on a synth set its own amp envelope, in seconds', ()
   engine.setParam('t1', 0, '@amp.decay', 0.4, 0);
   assert.equal(warnings.filter((w) => /has no amp envelope decay/.test(w)).length, 1, 'a device without one says so once');
 });
+
+test('the two oscillators load into one bank of tables, so their files take different slots', () => {
+  const samples = {
+    indexOf: (pack, key) => (pack === 'files' ? ['kick', 'snare'].indexOf(key) : null),
+    bytes: async () => null,
+    get: (pack, index) => (pack === 'files' && index >= 0 ? { buffer: fakeBuffer(4096) } : null),
+  };
+  const { engine } = makeEngine({ samples });
+  engine.createTrack('t1');
+  engine.loadInstrument('t1', 'Wavetable');
+  engine.setParam('t1', 0, 'Osc 1 Table', 'files:kick', 0);
+  engine.setParam('t1', 0, 'Osc 2 Table', 'files:snare', 0);
+  const slot = engine.tracks.get('t1').slots.get(0);
+  const one = slot.values['osc1.table'];
+  const two = slot.values['osc2.table'];
+  assert.notEqual(one, two, 'each file has a table of its own');
+  // Either oscillator can play either, so both list both.
+  for (const id of ['osc1.table', 'osc2.table']) {
+    assert.equal(slot.extras[id][one], 'files:kick');
+    assert.equal(slot.extras[id][two], 'files:snare');
+  }
+});

@@ -24,8 +24,11 @@
           <img src="/docs/img/pianoroll.png" width="802" height="567" alt="The piano roll: a keyboard down the left, a melody of eight notes on a sixteenth-note grid, and a value lane along the bottom." />
           <figcaption>Every stroke is written back into the code and played straight away.</figcaption>
         </figure>
-        <pre data-build="web"><code>lead: pianoroll().synth("Wavetable")   // double-click the word pianoroll</code></pre>
-        <pre data-build="desktop"><code>lead: pianoroll().synth("Serum 2")   // double-click the word pianoroll</code></pre>
+        <pre data-run><code>// double-click the word pianoroll
+lead: pianoroll("lead").synth("Wavetable")
+  .fx("Delay").param("Sync", "1/8.").postgain(0.8)
+
+_roll("lead", "60,0,3 63,4,2 67,6,2 70,8,4 68,12,2 67,14,2", { grid: 16, len: 16 })</code></pre>
         <p>
           Double-click <code>pianoroll</code> and the grid opens over the editor. Rolls are named (a bare
           <code>pianoroll()</code> takes its track's name), their notes are kept in a folded block at the
@@ -76,9 +79,12 @@
         <p>
           Every note has a pitch, a <strong>file index</strong> and a <strong>slice</strong>, and the
           <strong>note / index / slice</strong> button picks which the rows show. On index, the rows are
-          the pack's files, so <code data-build="web">pianoroll("beat").s("pt_kit")</code><code data-build="desktop">pianoroll("beat").s("bd")</code>
+          the pack's files, so <code>pianoroll("beat").s("pt_kit")</code>
           is a drum sequencer. On slice, the rows are the chops of the note's file.
         </p>
+        <pre data-run><code>beat: pianoroll("beat").s("pt_kit").postgain(0.5)
+
+_roll("beat", "60:0,0,2 60:4,2,2 60:1,4,2 60:4,6,2 60:0,8,2 60:0,10,2 60:4,10,2,0.6 60:1,12,2 60:5,14,2,0.7", { grid: 16, len: 16, mode: "index" })</code></pre>
         <p>
           <strong>Slice to notes</strong>: draw one long note over a break, right-click it, and it becomes
           one note per chop, each where its chop falls. Now the break is a rhythm you can rearrange.
@@ -93,9 +99,9 @@
             <code>note()</code>: <code>.scale()</code>, <code>.add()</code> and the rest.
           </p>
         </details>
-        <pre data-run data-build="web"><code>lead: pianoroll("60,0,4 63,4,4 67,8,4 70,12,2 72,14,2", { grid: 16 })
+        <pre data-run><code>lead: pianoroll("60,0,4 63,4,4 67,8,4 70,12,2 72,14,2", { grid: 16 })
   .synth("Wavetable")
-  .fx("Delay").param("Sync", "1/8.")</code></pre>
+  .fx("Delay").param("Sync", "1/8.").postgain(0.8)</code></pre>
       </main>
     </div>
     <!-- The chapter list, the pager, chords written for this platform, colored and playable code,

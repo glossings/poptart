@@ -35,9 +35,16 @@ function samplesRoot() {
   return path.join(poptartHome(), 'samples');
 }
 
-/** Absolute paths of a pack's audio files in filename order, or null if the folder is missing. */
-function listPackFiles(pack) {
-  const dir = path.join(samplesRoot(), String(pack));
+// The packs that ship with poptart (pt_kit, pt_keys: web-engine's rendered packs, the same files
+// the browser build plays), set by the host. A pack of that name in the library comes first, so
+// the built-in ones only fill in where the library has nothing.
+let builtInRoot = null;
+
+function setBuiltInPacksRoot(dir) {
+  builtInRoot = dir ? String(dir) : null;
+}
+
+function readPackDir(dir) {
   let names;
   try {
     names = fs.readdirSync(dir);
@@ -48,6 +55,14 @@ function listPackFiles(pack) {
     .filter((f) => AUDIO_EXTS.has(path.extname(f).toLowerCase()))
     .sort()
     .map((f) => path.join(dir, f));
+}
+
+/** Absolute paths of a pack's audio files in filename order, or null if the folder is missing. */
+function listPackFiles(pack) {
+  const name = String(pack);
+  const own = readPackDir(path.join(samplesRoot(), name));
+  if (own || !builtInRoot || name.includes('/') || name.includes('\\') || name.startsWith('.')) return own;
+  return readPackDir(path.join(builtInRoot, name));
 }
 
 /**
@@ -443,6 +458,7 @@ function detectSlices(filePath, opts = {}) {
 module.exports = {
   samplesRoot,
   setSamplesRoot,
+  setBuiltInPacksRoot,
   listPackFiles,
   resolveSampleFile,
   expandPackEntries,

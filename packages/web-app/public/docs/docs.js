@@ -4,16 +4,20 @@
 //
 // It builds the chapter list and the previous/next links from CHAPTERS (so a page is only its own
 // content), writes every {mod+s} / {app+a} chord for the platform reading the page, colors every
-// code block with the editor's own mode, draws the pattern timelines, and - in the browser build -
-// turns the playable examples into small editors with a play button.
+// code block with the editor's own mode, draws the pattern timelines, and turns the playable
+// examples into small editors with a play button.
 //
 // In the browser build every page's <html> carries class "web" (see build-web.mjs), which shows
-// the `data-build="web"` passages and hides the desktop's, and a playable example becomes the app
-// itself when it is used (see setUpExamples); "open" hands it to the app in a tab as a share link.
+// the `data-build="web"` passages and hides the desktop's. A playable example becomes the app
+// itself when it is used (see setUpExamples). In both builds that app is the browser build, with
+// its own engine in the frame: the desktop's server serves it for the guide (server.js's
+// serveEmbed), so an example never plays on the engine the desktop's own window is using. "open"
+// hands an example to the app in a tab as a share link; on the desktop, where the app is its own
+// window, "copy" puts the code on the clipboard instead.
 //
 // Markup, for whoever writes a chapter:
 //   <pre><code>…</code></pre>              highlighted, in both builds
-//   <pre data-run><code>…</code></pre>     a complete buffer, playable in the browser build
+//   <pre data-run><code>…</code></pre>     a complete buffer, playable in both builds
 //   data-build="desktop" / "web"            on any element: shown in that build only
 //   <figure class="timeline" data-cycles="2">
 //     <div class="row">note("c3 e3").add("0 7")</div>
@@ -93,7 +97,9 @@ if (typeof document !== 'undefined') (function () {
     a.lastChild.textContent = c.title;
     nav.append(a);
     if (i !== at) return;
-    const heads = [...document.querySelectorAll('main h2[id]')];
+    // A heading in the other build's passage is hidden, and so left out of the list.
+    const heads = [...document.querySelectorAll('main h2[id]')]
+      .filter((h) => !h.closest(`[data-build="${isWeb ? 'desktop' : 'web'}"]`));
     if (!heads.length) return;
     const toc = document.createElement('ul');
     toc.className = 'toc';
@@ -175,13 +181,13 @@ if (typeof document !== 'undefined') (function () {
   }
 
   for (const pre of document.querySelectorAll('pre')) {
-    if (pre.hasAttribute('data-run') && isWeb) continue; // setUpExamples highlights these
+    if (pre.hasAttribute('data-run')) continue; // setUpExamples highlights these
     const code = pre.querySelector('code') ?? pre;
     highlight(code, code.textContent.replace(/\n$/, ''));
   }
 
   drawTimelines().catch((err) => console.error('[docs] timelines:', err));
-  if (isWeb) setUpExamples();
+  setUpExamples();
 
   // ---- timelines -------------------------------------------------------------------------------
   // Each row's expression is built with the real pattern-core and drawn from the events it makes,
@@ -297,7 +303,7 @@ if (typeof document !== 'undefined') (function () {
     }
   }
 
-  // ---- playing (browser build) -----------------------------------------------------------------
+  // ---- playing ---------------------------------------------------------------------------------
 
   function setUpExamples() {
     // A playable example is its highlighted code with a ▶ play and an open ↗ under it, until it is
@@ -413,8 +419,8 @@ if (typeof document !== 'undefined') (function () {
       button.title = `${chordLabel('mod+enter')} in the code plays it, ${chordLabel('mod+.')} stops`;
       const open = document.createElement('button');
       open.type = 'button';
-      open.textContent = 'open ↗';
-      open.title = 'open this example in poptart';
+      open.textContent = isWeb ? 'open ↗' : 'copy';
+      open.title = isWeb ? 'open this example in poptart' : 'copy this example, to paste into poptart';
       const status = document.createElement('span');
       status.className = 'example-status';
       bar.append(button, open, status);
@@ -446,6 +452,16 @@ if (typeof document !== 'undefined') (function () {
         use(example, { type: 'poptart-embed-open', at: offsetAt(example, e) });
       });
       open.addEventListener('click', async () => {
+        if (!isWeb) {
+          // The app is the desktop's own window, which a page in the browser cannot reach.
+          try {
+            await navigator.clipboard.writeText(currentCode(example));
+            example.status.textContent = 'copied';
+          } catch {
+            example.status.textContent = 'could not copy';
+          }
+          return;
+        }
         const { encodeShareHash } = await import('/web/share-link.mjs');
         window.open(`/#${await encodeShareHash(currentCode(example))}`, '_blank', 'noopener');
       });

@@ -212,6 +212,10 @@ function defineParam(deviceId, spec, seen) {
     fail(deviceId, `param "${id}": step must be a positive number`);
   }
 
+  // Controls that take files into ONE store name it the same: the Wavetable's two oscillators read
+  // one bank of tables, so a table loaded for either is in a slot neither can take for another.
+  const bank = spec.bank == null ? null : String(spec.bank);
+  if (bank !== null && !takes) fail(deviceId, `param "${id}": only a control that takes a file or a curve has a bank`);
   const amp = spec.amp ?? null;
   if (amp !== null && !AMP_STAGES.has(amp)) fail(deviceId, `param "${id}" has unknown amp stage "${amp}"`);
 
@@ -239,6 +243,7 @@ function defineParam(deviceId, spec, seen) {
     capacity,
     takes,
     sampleAs,
+    bank,
     amp,
     group: String(spec.group ?? '').trim() || null,
     description: String(spec.description ?? '').trim() || null,

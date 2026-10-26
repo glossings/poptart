@@ -38,7 +38,7 @@
           <tr><td><code>note("c4 e4")</code> · <code>n("0 2").scale("F minor")</code> · <code>.sc(3)</code></td><td>notes (c3 = 60) · degrees in a scale · in the <code>setscale</code> key</td></tr>
           <tr><td><code>pianoroll("name")</code> · <code>clips()</code></td><td>drawn notes · notes drawn in the arrangement's clips</td></tr>
           <tr data-build="web"><td><code>s("pt_kit:0")</code> · <code>s("files:a.wav")</code> · <code>sr("take")</code> · <code>sp("kit")</code> · <code>samples("user/repo")</code></td><td>a pack · a file you dropped · a bounce · your own kit · packs from GitHub</td></tr>
-          <tr data-build="desktop"><td><code>s("bd")</code> · <code>se('a/b.wav')</code> · <code>sr("take")</code> · <code>sp("kit")</code></td><td>a pack · one file · a bounce · your own kit</td></tr>
+          <tr data-build="desktop"><td><code>s("pt_kit:0")</code> · <code>se('a/b.wav')</code> · <code>sr("take")</code> · <code>sp("kit")</code></td><td>a pack · one file · a bounce · your own kit</td></tr>
           <tr><td><code>synth("…")</code></td><td>an instrument on its own (plays C3)</td></tr>
           <tr><td><code>midikeys("…")(ch)</code> · <code>midi("…")</code> · <code>audio("…")</code> · <code>input(1)</code></td><td>a MIDI keyboard · MIDI from a device or track · a track or bus · a hardware input</td></tr>
           <tr><td><code>group({ … })</code> · <code>copy("t")</code> · <code>pcopy("t")</code></td><td>a mixdown of tracks · a whole track again · its notes only</td></tr>
@@ -63,7 +63,7 @@
 
         <h2 id="modulators">Modulators</h2>
         <table>
-          <tr><td><code>sine saw isaw tri square rand perlin</code></td><td>LFOs, 0..1; rate in cycles or <code>"0.5hz"</code></td></tr>
+          <tr><td><code>sine saw isaw tri square rand perlin</code></td><td>LFOs, 0..1; rate in cycles or <code>'0.5hz'</code></td></tr>
           <tr><td><code>lfo("shape", { rate, mode })</code> · <code>env({ attack, decay, sustain, release })</code></td><td>drawn shape · envelope per note (seconds)</td></tr>
           <tr><td><code>macro1…8</code> · <code>midicc("…")(cc)</code> · <code>auto("lane")</code><span data-build="desktop"> · <code>osc("/addr")</code></span></td><td>knobs · automation</td></tr>
           <tr><td><code>.range(lo, hi)</code> · <code>dur()</code></td><td>rescale · the note's length in seconds</td></tr>

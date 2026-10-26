@@ -32,6 +32,9 @@
           <tr><td><code>.o(n)</code></td><td>output pair: <code>.o(2)</code> is channels 3/4 (raise <em>output channels</em> in settings)</td></tr>
         </table>
         <p>Several <code>.gain()</code> or <code>.postgain()</code> calls multiply, so <code>.gain(0.5).gain(env())</code> is a level times an envelope.</p>
+        <pre data-run><code>pad: note("&lt;[c3,eb3,g3] [bb2,d3,f3]&gt;").synth("Wavetable").fx("Chorus")
+  .width(2).bassmono(200).postgain(0.35)
+bell: s("pt_keys:1").note("&lt;g4 bb4 c5 d5&gt;*2").pan("-0.6 0.6").postgain(0.3)</code></pre>
 
         <h2 id="buses">Buses</h2>
         <p>
@@ -40,43 +43,30 @@
           <code>.bsend()</code> does both at once. Both arguments pattern, so
           <code>.bus("&lt;verb delay&gt;")</code> re-routes as it goes.
         </p>
-        <pre data-run data-build="web"><code>pad: note("c3 e3 g3").synth("Wavetable")
+        <pre data-run><code>pad: note("c3 e3 g3").synth("Wavetable")
   .width(0.6)
   .pan("&lt;-0.5 0.5&gt;")
-  .bus("space", 0.3)
+  .bus("space", 0.3).postgain(0.5)
 
-verb: audio("space").fx("Reverb").param("Mix", 1)</code></pre>
-        <pre data-build="desktop"><code>pad: note("c3 e3 g3").synth("Diva")
-  .pan(sine(0.2).range(-1, 1))
-  .bus("space", 0.3)
-
-verb: audio("space").fx("ValhallaRoom")</code></pre>
+verb: audio("space").fx("Reverb").param("Mix", 1).postgain(0.8)</code></pre>
 
         <h2 id="routing">Sources and sidechains</h2>
         <p>
           <code>midi()</code> and <code>audio()</code> do two things, depending on where they are written.
           <strong>At the head</strong> of a track they are its source:
         </p>
-        <pre data-build="web"><code>midi("KeyStep").synth("Wavetable")   // play from a MIDI device
+        <pre><code>midi("KeyStep").synth("Wavetable")   // play from a MIDI device
 audio("drums").fx("Reverb")         // another track through a reverb
 input(1).fx("Overdrive")            // a microphone or interface input</code></pre>
-        <pre data-build="desktop"><code>midi("KeyStep 32").synth("Serum 2")  // play from a MIDI device
-audio("drums").fx("ValhallaRoom")   // another track through a reverb
-input(3).fx("Amp Room")             // a hardware input (two channels = stereo)</code></pre>
         <p>
           <strong>After an <code>.fx()</code></strong> they feed that effect: <code>.midi("kick")</code>
           replays kick's notes into it, and <code>.audio("kick")</code> feeds kick's audio into its sidechain.
         </p>
-        <pre data-run data-build="web"><code>kick: s("pt_kit:0*4").postgain(0.3)
+        <pre data-run><code>kick: s("pt_kit:0*4").postgain(0.3)
 // the ducker dips on each of kick's notes
 bass: note("c2*8").synth("Wavetable").fx("Ducker").midi("kick").postgain(0.3)
 // the compressor listens to kick's audio
 pad: note("[c3,eb3,g3]").synth("Wavetable").fx("Compressor").audio("kick").postgain(0.3)</code></pre>
-        <pre data-build="desktop"><code>kick: s("bd*4")
-// duck to kick's notes
-bass: note("c2*8").synth("Serum 2").fx("Kickstart").midi("kick")
-// sidechain from kick's audio
-pad: note("c3").synth("Diva").fx("Pro-C 2").audio("kick")</code></pre>
         <p>
           A name means a track first, then any device whose name contains it. Force one with
           <code>"track:kick"</code> or <code>"dev:KeyStep"</code>. For a trigger with no track of its own,

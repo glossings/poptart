@@ -25,22 +25,16 @@
           <code>.synth("…")</code> loads an instrument; each <code>.fx("…")</code> adds an effect after it.
           A chain holds up to twenty effects.
         </p>
-        <pre data-run data-build="web"><code>lead: note("c4 e4 g4 b4")
+        <pre data-run><code>lead: note("c4 e4 g4 b4")
   .synth("Wavetable")
   .fx("Chorus")
-  .fx("Delay")</code></pre>
-        <pre data-build="desktop"><code>lead: note("c4 e4 g4 b4")
-  .synth("Serum 2")
-  .fx("ValhallaDelay")
-  .fx("Pro-Q 3")</code></pre>
-        <p data-build="desktop">
-          The names are your plugins' own. This guide uses <code>"Serum 2"</code>, <code>"Diva"</code> and
-          so on as stand-ins: <strong>use plugins you have</strong>. The sounds tab lists them (press
-          <strong>rescan</strong> after installing one; click a name to copy it), and names autocomplete
-          inside the quotes.
+  .fx("Delay").postgain(1)</code></pre>
+        <p>
+          These devices are built in<span data-build="desktop">, the same as in the browser build</span>.
+          The sounds tab lists them, and names autocomplete inside the quotes.
+          <span data-build="desktop">Your VST/VST3 plugins load the same way (<a href="#plugins">below</a>).</span>
         </p>
-        <p data-build="web">Every device is built into the page. The sounds tab lists them, and names autocomplete inside the quotes.</p>
-        <table data-build="web">
+        <table>
           <tr><th>Instruments</th><th></th></tr>
           <tr><td><code>Wavetable</code></td><td>two wavetable oscillators with warping, a sub and noise</td></tr>
           <tr><td><code>FM</code></td><td>eight operators, each able to modulate every other</td></tr>
@@ -51,7 +45,7 @@
           <tr><td><code>Rings</code></td><td>a resonator struck by its own exciter</td></tr>
           <tr><td><code>Elements</code></td><td>a modal resonator played by a bow, a breath and a mallet (monophonic)</td></tr>
         </table>
-        <table data-build="web">
+        <table>
           <tr><th>Effects</th><th></th></tr>
           <tr><td><code>Filter</code> · <code>EQ</code> · <code>LPG</code></td><td>multimode filter · four-band equalizer · low-pass gate, struck by notes routed in with <code>.midi()</code></td></tr>
           <tr><td><code>Distort</code> · <code>Overdrive</code> · <code>Crush</code></td><td>waveshaping, with curves you draw as named shapes · band-limited drive · bits and rate</td></tr>
@@ -62,6 +56,14 @@
           <tr><td><code>Clouds</code> · <code>FreqShift</code></td><td>granular processing · frequency shifting</td></tr>
           <tr><td><code>Shift</code> · <code>Voice</code></td><td>pitch and formant shifting: chords and whole mixes · one voice or line, with less delay</td></tr>
         </table>
+        <pre data-run><code>setscale("E minor")
+
+bells: n("0 4 7 &lt;9 11&gt;").sc(4).synth("Rings")
+  .param("Model", "'Sympathetic String'").param("Brightness", 0.6)
+  .fx("GrainEcho").postgain(0.6)
+pulse: note("e1*8").synth("Braids").param("Shape", "'Saw Sub'")
+  .fx("Filter").param("Mode", "ladder").param("Cutoff", saw(0.5).range(0.25, 0.55))
+  .fx("Overdrive").postgain(0.3)</code></pre>
 
         <h2 id="params">Controls</h2>
         <p>
@@ -69,24 +71,18 @@
           by the name its panel shows. The value can be a number, a pattern, or anything that moves
           (<a href="/docs/modulation.html">next chapter</a>).
         </p>
-        <pre data-run data-build="web"><code>keys: n("0 2 4 &lt;5 7&gt;").scale("D dorian").synth("Plaits")
+        <pre data-run><code>keys: n("0 2 4 &lt;5 7&gt;").scale("D dorian").synth("Plaits")
   .param("Engine", "Chord")
   .param("Timbre", sine(0.2))
-  .fx("Reverb").param("Mix", 0.35).postgain(0.6)</code></pre>
-        <pre data-build="desktop"><code>.param("Filter 1 On", 1)
-.param("Filter 1 Freq", 0.6)</code></pre>
-        <p data-build="web">
+  .fx("Reverb").param("Mix", 0.35).postgain(0.45)</code></pre>
+        <p>
           Every value is a <strong>0..1 position</strong> on the control, and the device maps it to its real
           range (Cutoff runs 20 Hz to 20 kHz, so 0.5 is about 630 Hz). A list control takes its option's
-          name (<code>"ladder"</code>) or index; a switch takes 0 or 1. So an LFO or a macro drives any
+          name (<code>"ladder"</code>, or <code>"'Saw Sub'"</code> for a name with a space in it) or
+          index; a switch takes 0 or 1. So an LFO or a macro drives any
           control as it is.
         </p>
-        <p data-build="desktop">
-          Values are 0..1 unless a mapping file in <code>mappings/*.json</code> gives them real units (one
-          ships for Serum 2, so its cutoff takes Hertz). When a plugin reuses a name, <code>"Frequency#95"</code>
-          picks one by index; autocomplete shows that form where names collide.
-        </p>
-        <figure class="shot framed narrow" data-build="web">
+        <figure class="shot framed narrow">
           <img src="/docs/img/sounds-tab.png" width="320" height="711" alt="The sounds tab: the bass track's Wavetable controls listed with their values, then the devices and the sample packs." />
         </figure>
         <p>
@@ -104,37 +100,68 @@
           with none, to wherever the control was before. A <code>.param()</code> after the <code>.when()</code>
           wins over it, as a later call always does.
         </p>
-        <pre data-run data-build="web"><code>keys: n("0 2 4 &lt;5 7&gt;").scale("D dorian").synth("FM")
+        <pre data-run><code>keys: n("0 2 4 &lt;5 7&gt;").scale("D dorian").synth("FM")
   .fx("Filter", { label: "lo" }).param("Cutoff", 0.35)
   .fx("Delay").wet(0)
-  .when("&lt;0 1&gt;", x =&gt; x.param("lo", "Cutoff", 0.7).wet("Delay", 0.5))</code></pre>
+  .when("&lt;0 1&gt;", x =&gt; x.param("lo", "Cutoff", 0.7).wet("Delay", 0.5))
+  .postgain(1)</code></pre>
         <p>
           <code>.wet(v)</code> after a device blends it with what goes into it: 0 bypasses, 1 (the default) is
           fully processed. It takes a signal, so an effect can fade in over a song.
         </p>
 
         <h2 id="presets">Presets</h2>
-        <figure class="shot" data-build="web">
+        <figure class="shot">
           <img src="/docs/img/device-wavetable.png" width="944" height="764" alt="The Wavetable device panel: two oscillators with their wavetables, a sub and noise, and an amplitude envelope." />
           <figcaption>Double-click <code>synth</code> or <code>fx</code> to open a device's panel.</figcaption>
         </figure>
         <p>
-          Double-click the <code>synth</code> or <code>fx</code> name to open the
-          <span data-build="desktop">plugin's own window</span><span data-build="web">device's panel</span>.
-          Change anything there and the whole state is captured into the code as a named preset: the call
-          gains <code>.preset("lead")</code>, and the preset is kept in a folded block at the foot of the
-          buffer. There is nothing to press, and the song sounds the same when it is next opened.
+          Double-click the <code>synth</code> or <code>fx</code> name to open the device's panel<span data-build="desktop">
+          (a plugin's own window, for a plugin)</span>. Change anything there and the whole state is captured
+          into the code as a named preset: the call gains <code>.preset("lead")</code>, and the preset is
+          kept in a folded <code>_preset(…)</code> line at the foot of the buffer. There is nothing to press,
+          and the song sounds the same when it is next opened.
         </p>
-        <pre data-build="web"><code>// a different preset each cycle
-lead: note("c4 e4 g4").synth("Wavetable").preset("&lt;lead growl&gt;")</code></pre>
-        <pre data-build="desktop"><code>// a different preset each cycle
-lead: note("c4 e4 g4").synth("Serum 2").preset("&lt;lead growl&gt;")</code></pre>
+        <pre data-run><code>// a different preset each cycle
+lead: note("c4 e4 g4 [b4 c5]").synth("Wavetable").preset("&lt;soft buzz&gt;")
+  .postgain(0.5)
+
+_preset("soft", "Wavetable", "eyJkZXZpY2UiOiJXYXZldGFibGUiLCJ2ZXJzaW9uIjoxLCJwYXJhbXMiOnsib3NjMS50YWJsZSI6OCwib3NjMS5wb3NpdGlvbiI6MC4zNSwiYW1wZW52LmF0dGFjayI6MC4wNiwiYW1wZW52LnJlbGVhc2UiOjAuNSwic3ViLmxldmVsIjowLjN9LCJmaWxlcyI6e319")
+_preset("buzz", "Wavetable", "eyJkZXZpY2UiOiJXYXZldGFibGUiLCJ2ZXJzaW9uIjoxLCJwYXJhbXMiOnsib3NjMS50YWJsZSI6NCwib3NjMS5wb3NpdGlvbiI6MC42LCJvc2MxLnVuaXNvbiI6NCwib3NjMS5kZXR1bmUiOjMwLCJhbXBlbnYuYXR0YWNrIjowLjAwNSwiYW1wZW52LmRlY2F5IjowLjI1LCJhbXBlbnYuc3VzdGFpbiI6MC40LCJhbXBlbnYucmVsZWFzZSI6MC4xNX0sImZpbGVzIjp7fX0=")</code></pre>
         <p>
           Preset names pattern like anything else. Double-click <code>preset</code> to pick, make, copy
           and tweak them.
           <span data-build="desktop"><strong>export</strong> hands someone one file that plays exactly what you hear; <strong>link</strong> copies the patch without its presets.</span>
           <span data-build="web">A share link carries the presets with the code.</span>
+          A device's preset opens the same in the browser build and the desktop app.
         </p>
+
+        <section data-build="desktop">
+          <h2 id="plugins">Your plugins</h2>
+          <p>
+            Any VST/VST3 instrument or effect you have installed loads by its own name, in the same places a
+            device does. This guide uses <code>"Serum 2"</code>, <code>"Diva"</code> and so on as stand-ins:
+            <strong>use plugins you have</strong>. The sounds tab lists them (press <strong>rescan</strong>
+            after installing one; click a name to copy it), and names autocomplete inside the quotes.
+          </p>
+          <pre><code>lead: note("c4 e4 g4 b4")
+  .synth("Serum 2")
+  .fx("ValhallaDelay")
+  .fx("Pro-Q 3")</code></pre>
+          <p>
+            Double-click the name to open the plugin's own window. What you change there is captured into a
+            <code>.preset()</code>, as with a device.
+          </p>
+          <pre><code>.param("Filter 1 On", 1)
+.param("Filter 1 Freq", 0.6)
+.param("Frequency#95", 0.3)   // the control at index 95, where two share a name</code></pre>
+          <p>
+            A plugin's values are 0..1 unless a mapping file in <code>mappings/*.json</code> gives them real
+            units (one ships for Serum 2, so its cutoff takes Hertz:
+            <code>.param("Filter 1 Freq", sine(0.3).range(200, 5000))</code>). When a plugin reuses a name,
+            <code>"Frequency#95"</code> picks one by index; autocomplete shows that form where names collide.
+          </p>
+        </section>
       </main>
     </div>
     <!-- The chapter list, the pager, chords written for this platform, colored and playable code,

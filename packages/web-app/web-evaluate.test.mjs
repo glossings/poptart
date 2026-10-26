@@ -303,6 +303,23 @@ test('with an arrangement in the buffer, a track with no clips of its own falls 
   shutdown(rig);
 });
 
+test('a clips() track plays the roll its clip names', () => {
+  const rig = makeRig();
+  const code = [
+    'lead: clips().synth("Wavetable")',
+    '',
+    '_arrange("lead,0,2,rup")',
+    '_roll("up", "60,0,4 64,4,4", { grid: 8, len: 8 })',
+  ].join('\n');
+  try {
+    rig.evaluator.evaluate(code);
+    const notes = rig.evaluator.schedulers.get('lead').pattern.stepsForCycle(0).map((st) => st.value);
+    assert.deepEqual(notes, [60, 64], 'the clip is on the track\'s own row, so its roll plays');
+  } finally {
+    shutdown(rig);
+  }
+});
+
 test('a clip naming a block that is not there is worth a line', () => {
   const rig = makeRig();
   const result = rig.evaluator.evaluate('kick: s("bd*4")\n\n_arrange("ghost,0,4")');

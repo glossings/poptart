@@ -60,7 +60,7 @@
           They nest: <code>"&lt;[0 2] [3 5]&gt;*2"</code> does what it looks like. Any number in them can
           be a pattern too, like <code>a*&lt;2 3&gt;</code> or <code>a.e(&lt;3 5&gt;,8)</code>.
         </p>
-        <pre data-run data-build="web"><code>kick: s("pt_kit:0 [~ pt_kit:0] ~ pt_kit:0").postgain(0.2)
+        <pre data-run><code>kick: s("pt_kit:0 [~ pt_kit:0] ~ pt_kit:0").postgain(0.2)
 snare: s("~ pt_kit:1 ~ &lt;pt_kit:1 [pt_kit:1 pt_kit:3]&gt;").postgain(0.2)
 hat: s("pt_kit:4*8?0.2, ~ pt_kit:5").postgain(0.2)
 rim: s("pt_kit:2.e(3,8)").vel(0.6).postgain(0.2)</code></pre>

@@ -7,7 +7,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
 
-const { blockReason, isLoopbackHostname } = require('./request-guard.js');
+const { blockReason, isLoopbackHostname, embedRefusal } = require('./request-guard.js');
 
 const ok = (req) => assert.strictEqual(blockReason(req), null, JSON.stringify(req));
 const blocked = (req) => assert.match(blockReason(req) ?? '', /refused/, JSON.stringify(req));
@@ -56,4 +56,16 @@ test('isLoopbackHostname decides the POPTART_HOST strictness switch', () => {
   assert.strictEqual(isLoopbackHostname('::1'), true);
   assert.strictEqual(isLoopbackHostname('0.0.0.0'), false);
   assert.strictEqual(isLoopbackHostname('192.168.1.20'), false);
+});
+
+test('an example in the guide cannot write to the engine', () => {
+  const refused = (req) => assert.match(embedRefusal(req) ?? '', /refused/, JSON.stringify(req));
+  const passes = (req) => assert.strictEqual(embedRefusal(req), null, JSON.stringify(req));
+  refused({ method: 'POST', refererHeader: 'http://127.0.0.1:3000/?embed' });
+  refused({ method: 'POST', refererHeader: 'http://localhost:3000/index.html?x=1&embed' });
+  passes({ method: 'GET', refererHeader: 'http://127.0.0.1:3000/?embed' }); // its files
+  passes({ method: 'POST', refererHeader: 'http://127.0.0.1:3000/' }); // the app itself
+  passes({ method: 'POST', refererHeader: 'http://127.0.0.1:3000/docs/arrange.html' });
+  passes({ method: 'POST', refererHeader: 'http://127.0.0.1:3000/?embedded' });
+  passes({ method: 'POST' }); // curl
 });

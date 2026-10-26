@@ -26,10 +26,11 @@
           <tr><td><code>midikeys("KeyStep")(1)</code></td><td>a MIDI keyboard on channel 1 (any part of the device's name): notes, velocity, bend, aftertouch<span data-build="desktop">, played by the audio engine directly, with no scheduling delay</span><span data-build="web">, through Web MIDI (Chrome, Edge, Firefox)</span></td></tr>
           <tr><td>the piano roll's <strong>⌨</strong></td><td>your typing keyboard: the home row is the white keys, the row above the black; <kbd>z</kbd>/<kbd>x</kbd> octave, <kbd>c</kbd>/<kbd>v</kbd> velocity</td></tr>
         </table>
-        <pre data-build="web"><code>// double-click pianoroll, press ⌨, play
-keys: pianoroll().synth("Wavetable").scale("F minor")</code></pre>
-        <pre data-build="desktop"><code>// double-click pianoroll, press ⌨, play
-keys: pianoroll().synth("Serum 2").scale("F minor")</code></pre>
+        <pre data-run><code>// double-click pianoroll, press ⌨, play
+keys: pianoroll("keys").synth("Wavetable").scale("F minor").postgain(0.4)
+beat: s("pt_kit:0*4, ~ pt_kit:4 ~ pt_kit:4").postgain(0.3)
+
+_roll("keys", "", { grid: 16, len: 16 })</code></pre>
         <p>
           Live notes start <code>env()</code> envelopes and note-synced LFOs like written ones, and
           <code>.scale()</code> snaps them into the key. Pitch changes such as <code>.add(12)</code> apply to
@@ -41,11 +42,8 @@ keys: pianoroll().synth("Serum 2").scale("F minor")</code></pre>
           Written <em>after</em> something, <code>.pianoroll()</code> adds a roll under it instead of
           replacing it, so you can draw while you hear what's already there:
         </p>
-        <pre data-build="web"><code>const kb = midikeys("KeyStep")
+        <pre><code>const kb = midikeys("KeyStep")
 keys: kb(1).pianoroll().synth("Wavetable")   // play live over a drawn part
-riff: n("&lt;0 1 2&gt;").sc(3).pianoroll()       // draw a counter-line under a pattern</code></pre>
-        <pre data-build="desktop"><code>const kb = midikeys("KeyStep")
-keys: kb(1).pianoroll().synth("Serum 2")     // play live over a drawn part
 riff: n("&lt;0 1 2&gt;").sc(3).pianoroll()       // draw a counter-line under a pattern</code></pre>
 
         <h2 id="recording">Recording a take</h2>
