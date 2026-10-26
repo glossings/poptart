@@ -83,6 +83,7 @@ export class VoiceParams {
     this.envAttackCurve = -4; this.envDecayCurve = -4; this.envReleaseCurve = -4; this.envScale = 1;
 
     this.glide = 0;
+    this.glideMode = 0; // 0 legato (from a voice still sounding), 1 always - see WavetableSynth
     this.level = 0.7;
     // Pitch bend in semitones, on every voice at once - the track's .bend(), not a knob.
     this.bend = 0;
@@ -131,6 +132,7 @@ export class WavetableVoice {
     this.velocity = 1;
     this.age = 0;            // bumped by the synth so the oldest voice can be found
     this.releasing = false;
+    this.holds = 0;          // note-ons on `note` still waiting for their offs (see WavetableSynth)
     this.targetHz = A4_HZ;
     this.currentHz = A4_HZ;
 
@@ -187,6 +189,7 @@ export class WavetableVoice {
     this.ampEnv.reset();
     this.note = -1;
     this.releasing = false;
+    this.holds = 0;
   }
 
   setTables(table1, table2, subTable) {

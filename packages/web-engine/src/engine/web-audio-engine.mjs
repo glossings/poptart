@@ -2108,6 +2108,11 @@ export class WebAudioEngine {
     // Routed onward as an on/off pair, whether or not this sample has loaded yet: a kick keys a
     // ducker by being scheduled, not by being heard.
     if (this.midiRoutes.size && (cfg.vel ?? 1) > 0) this.midiRoutes.sampleEvent(trackId, cfg.vel ?? 1, onsetSec, offsetSec, cfg.note ?? null);
+    // Spoken text (say()) is rendered by the desktop's system voices, which a browser can't reach.
+    if (typeof packId === 'string' && packId.startsWith('say:')) {
+      this._warnOnce('say', '[web-engine] say() plays in the desktop app only - the browser has no way to render the system voices into a sample.');
+      return { skipped: 'say() is desktop only' };
+    }
     // A recording, by name: sr("bass") arrives as rec:bass.
     const isRec = typeof packId === 'string' && packId.startsWith('rec:');
     const got = isRec

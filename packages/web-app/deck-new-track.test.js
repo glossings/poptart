@@ -77,9 +77,12 @@ test('a playing deck is left alone, and says why', async () => {
   assert.equal(r.deckB.value, 'kick: s("bd*4")');
 });
 
-test('both deck heads carry the button, beside the song picker', () => {
-  assert.match(HTML, /id="deckASong"[^\n]*\n\s*<button id="deckANew" class="small deck-only"[^>]*>＋ new<\/button>/);
-  assert.match(HTML, /id="deckBSong"[^\n]*\n\s*<button id="deckBNew" class="small"[^>]*>＋ new<\/button>/);
-  assert.match(CLIENT, /getElementById\('deckBNew'\)\.addEventListener\('click', \(\) => newDeckTrack\('b'\)\)/);
-  assert.match(CLIENT, /getElementById\('deckANew'\)\.addEventListener\('click', \(\) => newDeckTrack\('a'\)\)/);
+test('organize carries the button, on the livecode list, for the deck it is picking for', () => {
+  // Off the deck heads: they ran out of room, and a new track is a choice of what is on the deck,
+  // which is organize's job.
+  assert.doesNotMatch(HTML, /id="deck[AB]New"/);
+  assert.match(CLIENT, /<button id="orgNewLive" class="small hidden"/);
+  assert.match(CLIENT, /newLive\.classList\.toggle\('hidden', !\(mixModeOn && orgSrc\.kind === 'livecode'\)\)/);
+  assert.match(CLIENT, /const deck = orgNewLiveDeck\(\);\s*closeOrganize\(\);\s*newDeckTrack\(deck\);/);
+  assert.match(CLIENT, /return orgForDeck \?\? djActiveDeck \?\? 'a';/);
 });

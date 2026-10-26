@@ -203,7 +203,7 @@ test('the header carries DJ mode alone, as a plain lit button', () => {
   assert.match(SRC, /getElementById\('viewDjBtn'\)\.addEventListener\('click', \(\) => toggleMixMode\(\)\)/);
   assert.match(CSS, /#viewDjBtn\.active \{/);
   // toggleMixMode already went both ways; the button is now simply that toggle
-  assert.match(grab('toggleMixMode'), /if \(mixModeOn\) exitDjMode\('restore'\);\n\s+else openMixMode\(\);/);
+  assert.match(grab('toggleMixMode'), /if \(!mixModeOn\) openMixMode\(\);\n\s+else exitDjMode\(djExitKeep\(\)\);/);
 });
 
 test('deck A\'s head is always on screen; only its DECK chrome waits for DJ mode', () => {
@@ -211,7 +211,8 @@ test('deck A\'s head is always on screen; only its DECK chrome waits for DJ mode
   // ...and revealed centered: inline-flex ignores the buttons' text-align, so without the justify
   // rule deck A's play button sat left-aligned while deck B's sat centered.
   assert.match(CSS, /body\.mix-on #deckAHead \.deck-only \{\n\s*display: inline-flex;\n\s*align-items: center;\n\s*justify-content: center;\n\}/);
-  assert.match(CSS, /body\.mix-on #deckAHead \.deck-song \{\n\s*justify-content: flex-start;\n\}/, 'the song title still reads like a menu');
+  // ...except the song title, a block so a long one ends in "…" like deck B's instead of clipping.
+  assert.match(CSS, /body\.mix-on #deckAHead \.deck-song \{\n\s*display: block;\n\}/, 'the song title still reads like a menu');
   assert.ok(!/#deckAHead \{\n\s*display: none;/.test(CSS), 'the head itself is no longer hidden');
   // ...so the pane stacks head-over-editor whether or not there are two decks
   assert.match(CSS, /#editorPane \{[\s\S]{0,300}flex-direction: column;/);
@@ -261,4 +262,14 @@ test('dropping deck B asks in the app\'s own dialog, naming both outcomes', () =
   assert.match(exit, /\{ label: 'stay in DJ mode', value: false \}/);
   assert.match(exit, /\{ label: 'leave, drop deck B', value: true, primary: true \}/);
   assert.ok(!/confirm\('Leave DJ mode/.test(SRC), 'the browser dialog is gone');
+});
+
+test('leaving DJ mode lands on the focused deck when it has something to land on', () => {
+  // eslint-disable-next-line no-new-func
+  const keep = (active, { song = null, code = '' } = {}) => new Function('djActiveDeck', 'songPanes', 'deckBCM',
+    `${grab('djExitKeep')}; return djExitKeep();`)(active, { b: { song } }, { getValue: () => code });
+  assert.equal(keep('a', { code: 'x: s("bd")' }), 'restore', 'deck A focused: the restore, as before');
+  assert.equal(keep('b', { code: 'x: s("bd")' }), 'b', 'deck B focused with code: promoted');
+  assert.equal(keep('b', { song: { title: 'rola' } }), 'b', 'deck B focused with a file: exitDjMode explains why it cannot');
+  assert.equal(keep('b', { code: '   ' }), 'restore', 'an empty deck B has nothing to land on');
 });

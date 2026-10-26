@@ -38,7 +38,9 @@ function extractBuildTrackDef() {
   const src = fs.readFileSync(SCD, 'utf8');
   const m = src.match(/^buildTrackDef = \{ \|key\|[\s\S]*?^\};$/m);
   assert.ok(m, 'could not find buildTrackDef in sc/poptart.scd');
-  return m[0];
+  const iso = src.match(/^djIsolator = \{[\s\S]*?^\};$/m);
+  assert.ok(iso, 'could not find djIsolator in sc/poptart.scd');
+  return `${iso[0]}\n${m[0]}`;
 }
 
 test('the strip is unity at center and constant-power everywhere', (t) => {
@@ -55,7 +57,7 @@ test('the strip is unity at center and constant-power everywhere', (t) => {
     [0.0, ${JSON.stringify(['/s_new', 'poptart_track_t', 2000 + i, 1, 0, ...args])}],`;
     }).join('\n');
     const script = `(
-var playChannels = ${POSITIONS.length * 2}, server, maxSlots = 21, trackDefName, bendPollHz = 100, cueOffset, deckMeterBus, buildTrackDef;
+var playChannels = ${POSITIONS.length * 2}, server, maxSlots = 21, trackDefName, bendPollHz = 100, cueOffset, deckMeterBus, buildTrackDef, djIsolator;
 var stripDef, dcDef;
 ${fs.existsSync(scsynth) ? `Score.program = ${JSON.stringify(scsynth)}.quote;` : ''}
 server = (options: (numOutputBusChannels: ${POSITIONS.length * 2}));

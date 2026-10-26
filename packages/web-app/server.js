@@ -1878,7 +1878,9 @@ const MIX_MIDI_GLOBAL_HOLD = ['fxhold'];
 // the switch cycled the unit onto whatever came next instead of the deck printed on the switch.
 // These are that switch - one target per position, each saying absolutely where the unit goes.
 const MIX_MIDI_FX_POS = { fxassigna: 'a', fxassignb: 'b', fxassignab: 'ab' };
-const MIX_MIDI_GLOBAL = new Set(['xf', 'fxknob', ...MIX_MIDI_BROWSE_KNOBS, ...MIX_MIDI_GLOBAL_PRESS,
+// The headphone section's two knobs, shared by both decks like the crossfader (see headphonesSet).
+const MIX_MIDI_PHONES_KNOBS = ['hplevel', 'hpmix'];
+const MIX_MIDI_GLOBAL = new Set(['xf', 'fxknob', ...MIX_MIDI_PHONES_KNOBS, ...MIX_MIDI_BROWSE_KNOBS, ...MIX_MIDI_GLOBAL_PRESS,
   ...MIX_MIDI_GLOBAL_HOLD, ...Object.keys(MIX_MIDI_FX_POS)]);
 const MIX_MIDI_TARGETS = new Set([...MIX_MIDI_GLOBAL,
   ...['a', 'b'].flatMap((d) => MIX_MIDI_DECK_CTLS.map((c) => `${d}:${c}`))]);
@@ -2266,6 +2268,10 @@ function mixMidiApply(target, value) {
     // The FX unit's deck-less controls. The pads share the deck pads' edge detection.
     if (target === 'fxknob') {
       mixFxSet({ knob: value });
+      return;
+    }
+    if (target === 'hplevel' || target === 'hpmix') {
+      headphonesSet(target === 'hplevel' ? { level: value } : { mix: value });
       return;
     }
     // The browse knobs - the songs, and the sidebar under shift. Forwarded as a signed tick
@@ -2715,6 +2721,8 @@ function mixDeskBody() {
     live: Object.fromEntries(['a', 'b'].map((d) => [d, { sync: deckLive[d].sync, nudge: deckLive[d].nudge }])),
     xf: mixState.xf,
     faders: { ...mixState.faders },
+    // ...and whether there is a cue pair for them to act on (a boot-time choice - see settings).
+    headphones: headphonesState(),
     cue: activeCue ? { name: activeCue.name } : null,
     midi: settings.mixMidi ?? {},
     neutral: DJ_NEUTRAL,
@@ -3896,6 +3904,39 @@ function saveSettings() {
 
 const settings = loadSettings();
 
+// --- the headphone section: level and cue/main mix ---------------------------------------------
+//
+// A hardware desk's two headphone knobs, applied by the engine's last node (\poptart_headphones):
+// `level` the volume, `mix` from the cued decks alone (0) to the main mix alone (1). They belong to
+// whoever wears the headphones rather than to a song, so they are SETTINGS - kept across restarts
+// and never reset by an eject - and they reach the engine on every boot (see wireEngine). The
+// defaults are what the cue pair played before the knobs existed: full level, cue only.
+const headphones = {
+  level: Number.isFinite(settings.headphones?.level) ? settings.headphones.level : 1,
+  mix: Number.isFinite(settings.headphones?.mix) ? settings.headphones.mix : 0,
+};
+let headphonesSaveTimer = null;
+
+function headphonesSet({ level, mix } = {}) {
+  const clamp = (v) => Math.min(1, Math.max(0, Number(v)));
+  if (level !== undefined && Number.isFinite(Number(level))) headphones.level = clamp(level);
+  if (mix !== undefined && Number.isFinite(Number(mix))) headphones.mix = clamp(mix);
+  try { engine?.setHeadphones(headphones.level, headphones.mix); } catch { /* engine between restarts */ }
+  // A knob being turned is dozens of these a second; the file only needs where it came to rest.
+  clearTimeout(headphonesSaveTimer);
+  headphonesSaveTimer = setTimeout(() => {
+    settings.headphones = { ...headphones };
+    saveSettings();
+  }, 500);
+  mixNotify();
+  return headphonesState();
+}
+
+/** What the knobs show: both values, and whether a cue pair is there for them to act on. */
+function headphonesState() {
+  return { ...headphones, cuePair: engine?.cueOffset != null };
+}
+
 // Apply the persisted sample-library folder to the engine's samples module (env var still wins
 // - see samples.js). Chosen in the "settings" tab; null/absent means the default ~/.poptart/samples.
 require('@poptart/osc-engine/samples').setSamplesRoot(settings.samplesDir ?? null);
@@ -4513,6 +4554,8 @@ function wireEngine() {
   // An engine restart mid-DJ-session: the strip's SSE clients are still connected (EventSource
   // rides out the gap), so the fresh engine's readers must be re-armed here.
   if (mixEventClients.size) engine.deckMeters(true);
+  // The headphone knobs are the listener's, not the engine's: a fresh one gets them back.
+  engine.setHeadphones(headphones.level, headphones.mix);
   // Which input channels input() can address, and what a device-relative input("name", n) resolves
   // against. Only the booted device has any, so this is re-fed on every start (a device change is
   // an engine restart) - a pattern written before the change picks up the new offsets on re-eval.
@@ -4655,7 +4698,7 @@ function syncUserStringMethods() {
   }
 }
 
-const BUILDER_NAMES = ['Signal', 'n', 'note', 'mini', 's', 'se', 'sr', 'sp', 'synth', 'sine', 'saw', 'isaw', 'tri', 'square', 'rand', 'perlin', 'lfo', 'env', 'dur', 'midicc', 'midikeys', 'osc', 'macro', 'choose', 'cat', 'seq', 'irand', 'midi', 'audio', 'input', 'group', 'copy', 'pcopy', 'pianoroll', 'clips', 'auto',
+const BUILDER_NAMES = ['Signal', 'n', 'note', 'mini', 's', 'se', 'sr', 'sp', 'say', 'synth', 'sine', 'saw', 'isaw', 'tri', 'square', 'rand', 'perlin', 'lfo', 'env', 'dur', 'midicc', 'midikeys', 'osc', 'macro', 'choose', 'cat', 'seq', 'irand', 'midi', 'audio', 'input', 'group', 'copy', 'pcopy', 'pianoroll', 'clips', 'auto',
   // Every control method also as a top-level control builder - speed("-1"), begin(0.5), clip(2) -
   // so a combinator can aim at one channel of a pattern it was handed: x.mul(speed("-1")).
   'i', 'begin', 'end', 'loop', 'loopwrap', 'loopdir', 'speed', 'flip', 'stretch', 'fit', 'slice', 'splice', 'splicemode', 'attack', 'decay', 'sustain', 'release', 'envscale', 'grain', 'vel', 'clip', 'nudge', 'swing', 'swinggrid', 'swingvel',
@@ -5263,7 +5306,25 @@ function sampleRefFiles(ref) {
   if (ref.startsWith('sp:')) return expandPackEntries(patternCore?.lookupPack(ref.slice(3))?.files ?? []);
   if (ref.startsWith('file:')) return [resolveSampleFile(ref.slice(5))].filter(Boolean);
   if (ref.startsWith('rec:')) return [resolveRecording(ref.slice(4))].filter(Boolean);
+  if (ref.startsWith('say:')) return [require('@poptart/osc-engine/tts').cachedSpeech(ref.slice(4))].filter(Boolean);
   return listPackFiles(ref);
+}
+
+// say() renders each phrase the first time it is asked for, and the engine asks at the phrase's
+// first event - which then plays silent while the render runs. Rendering what the next few cycles
+// say as soon as they are evaluated gets most of that done before the clock reaches it. One at a
+// time, so a block of fifty new words is fifty quick spawns in a row rather than fifty at once.
+// A failure is left for the engine to report, since it will hit the same one at the event.
+function warmSpeech(built) {
+  const { renderSpeech, speechAvailable } = require('@poptart/osc-engine/tts');
+  if (!speechAvailable()) return;
+  const values = new Set();
+  for (const b of built) {
+    if (b.sig.samplerKind !== 'say') continue;
+    for (const { ref } of patternCore.sampleSourcesOf(b.sig, { cycles: 8, max: 64 })) values.add(ref.slice(4));
+  }
+  let chain = Promise.resolve();
+  for (const value of values) chain = chain.then(() => renderSpeech(value).catch(() => {}));
 }
 
 // Header reads, by path, kept while the file is unchanged - a track list redrawn on every eval
@@ -7796,6 +7857,7 @@ const routes = {
     // signal.mjs's isDef). Anything derived from one (`roll(0, "…").synth(…)`) has lost the mark
     // and plays as normal.
     const built = evaluated.filter((b) => b.sig instanceof patternCore.Sig && !b.sig.isDef);
+    warmSpeech(built);
 
     // Groups: a block headed by group({...}) reads the bus named after it, and every track written
     // inside its braces sends there (see pattern-core's groups.mjs). The tree IS the structure the
@@ -9308,6 +9370,10 @@ const routes = {
   // The DJ FX unit's live controls. Body, all optional: { chain (a chain's name, or null to
   // clear the unit), on, held, knob (0..1 - the chain's `fx1`), assign ('a'|'ab'|'b'),
   // editor (a 1-based slot, or true for the first: opens that plugin's own window) }.
+  // The headphone section: { level?, mix? }, each 0..1 (see headphonesSet). Answers with both.
+  'POST /api/mix/headphones': async (body) => ({ status: 200, body: headphonesSet(body ?? {}) }),
+  'GET /api/mix/headphones': async () => ({ status: 200, body: headphonesState() }),
+
   'POST /api/mix/fx': async (body) => {
     if (body.chain !== undefined && body.chain !== mixState.fx.chain) await fxLoadChain(body.chain);
     const out = mixFxSet(body);

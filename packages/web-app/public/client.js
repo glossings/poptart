@@ -576,8 +576,10 @@ function mainEditorKeys() {
     ...hotkeyCMKeys({
       play: () => evaluate(true, { byHand: true }),
       stop: () => doStop('a'), // in DJ mode: this pane's deck only; otherwise a full stop
-      save: () => savePatternFile(),
-      saveAs: () => savePatternFileAs(),
+      // The focused deck's, which is this one unless a click on deck B's pane moved the ring
+      // without taking the cursor out of here (see saveFocusedDeck).
+      save: () => saveFocusedDeck(),
+      saveAs: () => saveFocusedDeck(true),
       // The arrangement, never mod+A - select-all is select-all. This pane is deck A, so the chord
       // here is deck A's arrangement (deck B's editor has its own).
       arrange: () => (arState && arDeck === 'a' ? closeArrangeEditor() : openArrangePainter('a')),
@@ -617,6 +619,10 @@ const cmOfDeck = (deck) => (deck === 'b' && deckBCM ? deckBCM : cm);
 // The server's name for a track of `ed`'s deck: deck B's are keyed "b:<label>", exactly as the
 // highlighter and the plugin windows already address them, and deck A's are the bare label.
 const deckTrackId = (ed, label) => (label == null ? null : deckOfCM(ed) === 'b' ? `b:${label}` : label);
+// ...and for a block (or anything carrying its { label, monitored }): a monitored block (`M`)
+// plays as a track of its own, "<label>~M", beside any unmarked block of the same name, so its
+// plugins, presets and params live there and not under the plain label.
+const blockTrackId = (ed, block) => (block?.label == null ? null : deckTrackId(ed, block.monitored ? `${block.label}${groupsMod?.MONITOR_SUFFIX ?? '~M'}` : block.label));
 // ...and back: the editor a server track id's code is in, and its label there. What the engine
 // hands back about a track - a plugin captured, a knob moved under conf, a slot held - comes keyed
 // this way, and the write it asks for belongs in that deck's buffer under the bare label.
@@ -740,10 +746,7 @@ document.addEventListener('keydown', (e) => {
     else openArrangePainter();
   } else if (action === 'save' || action === 'saveAs') {
     e.preventDefault(); // the browser's own "save page" is never what's wanted here
-    // The deck you are working in (see activeCM): deck B's buffer is a pattern file of its own.
-    if (activeCM() === deckBCM) saveDeckBFile(action === 'saveAs');
-    else if (action === 'saveAs') savePatternFileAs();
-    else savePatternFile();
+    saveFocusedDeck(action === 'saveAs');
   } else if (action === 'dj' && !arKeyInField()) {
     e.preventDefault();
     toggleMixMode(); // the performance mixer's split (see the mix section at the foot of this file)
@@ -2173,7 +2176,7 @@ function trackKeyAt(ed, idx) {
     .filter((b) => b.kind !== 'bare' && idx >= b.start && idx <= b.end)
     .sort((x, y) => (y.depth ?? 0) - (x.depth ?? 0))[0];
   if (!hit) return null;
-  return deckTrackId(ed, hit.monitored ? `${hit.label}${groupsMod?.MONITOR_SUFFIX ?? '~M'}` : hit.label);
+  return blockTrackId(ed, hit);
 }
 
 // Everything that shows which track conf is on: the sidebar's buttons and the label in the code.
@@ -2549,7 +2552,7 @@ function paramHints(cur, typed, textBefore, editor, target = null) {
     : (sinceBlockStart.match(/\.fx\s*\(/g) ?? []).length;
   // This track's slot; failing that, whatever is loaded at that slot anywhere. The track as the
   // server names it, so deck B's `lead` is "b:lead" and not deck A's track of the same name.
-  const track = block ? deckTrackId(editor, block.label) : null;
+  const track = block ? blockTrackId(editor, block) : null;
   const entry =
     (block && chainSlots.find((s) => s.track === track && s.slot === slot)) ??
     chainSlots.find((s) => s.slot === slot);
@@ -3392,7 +3395,7 @@ function openWidgetAt(code, idx, ed = cm) {
   }
   const chain = findChainHandleAt(code, idx);
   if (chain) {
-    showPluginEditor(deckTrackId(ed, chain.label), chain.slot);
+    showPluginEditor(blockTrackId(ed, chain), chain.slot);
     return true;
   }
   return false;
@@ -3435,7 +3438,7 @@ function findChainHandleAt(code, idx) {
   while ((m = re.exec(code)) && m.index < block.end) {
     if (!isCode(m.index)) continue; // commented-out calls aren't in the chain, so they hold no slot
     const slot = m[1] === 'synth' ? 0 : ++fxSeen;
-    if (idx >= m.index && idx <= m.index + m[1].length) return { label: block.label, slot };
+    if (idx >= m.index && idx <= m.index + m[1].length) return { label: block.label, monitored: !!block.monitored, slot };
   }
   return null;
 }
@@ -7251,7 +7254,7 @@ function chainBefore(code, idx) {
     const labelLit = /\blabel\s*:\s*(["'])((?:\\.|(?!\1).)*)\1/.exec(rest);
     // A synth() replaces the instrument, so a second one takes slot 0 over rather than adding one.
     if (slot === 0) for (let i = found.length - 1; i >= 0; i--) if (found[i].slot === 0) found.splice(i, 1);
-    found.push({ label: block.label, slot, plugin: idLiteralValue(lit.trim()), name: labelLit ? labelLit[2].trim() : null });
+    found.push({ label: block.label, monitored: !!block.monitored, slot, plugin: idLiteralValue(lit.trim()), name: labelLit ? labelLit[2].trim() : null });
   }
   return found.sort((a, b) => a.slot - b.slot);
 }
@@ -7382,7 +7385,7 @@ function openPresetFromCall(call, code, ed = cm) {
 function presetHold(id) {
   const target = presetTarget();
   // Held by the server's name for the track: a deck B track's is "b:<label>" (see deckTrackId).
-  const at = target ? { label: deckTrackId(presetCM, target.label), slot: target.slot } : null;
+  const at = target ? { label: blockTrackId(presetCM, target), slot: target.slot } : null;
   const was = presetState?.held ?? null;
   // Release the old slot first when the panel has moved to a different one, or the abandoned slot
   // would stay frozen with no panel left to unfreeze it.
@@ -19854,7 +19857,7 @@ function renderTracks(result) {
         uiBtn.className = 'small';
         uiBtn.textContent = 'ui';
         uiBtn.title = "open the plugin's own window (this slot holds its preset until you click back in the code)";
-        uiBtn.onclick = () => showPluginEditor(t.label, slot);
+        uiBtn.onclick = () => showPluginEditor(t.key ?? t.label, slot); // a monitored track's key is "<label>~M"
         row.appendChild(uiBtn);
       }
       trackInfo.appendChild(row);
@@ -28682,8 +28685,8 @@ function deckBEditorKeys() {
     ...hotkeyCMKeys({
       play: () => evalDeckB(true, { byHand: true }),
       stop: () => doStop('b'), // this pane's deck only; deck A plays on
-      save: () => saveDeckBFile(),
-      saveAs: () => saveDeckBFile(true),
+      save: () => saveFocusedDeck(),
+      saveAs: () => saveFocusedDeck(true),
       // ...and the arrangement chord from this pane is THIS deck's arrangement - the painter
       // moves into deck B's half rather than taking the page (see openArrangePainter).
       arrange: () => (arState && arDeck === 'b' ? closeArrangeEditor() : openArrangePainter('b')),
@@ -28720,9 +28723,18 @@ function mixPost(throttleKey, body) {
   }, 50);
 }
 
+// Leaving lands on the deck you are working on: the focused one (djActiveDeck). Deck B focused
+// with something on it is promoted to the main editor; deck A focused, or a deck B with nothing
+// on it to land on, is the restore (see exitDjMode).
 function toggleMixMode() {
-  if (mixModeOn) exitDjMode('restore');
-  else openMixMode();
+  if (!mixModeOn) openMixMode();
+  else exitDjMode(djExitKeep());
+}
+
+/** Which world leaving DJ mode keeps: the focused deck's, when it has anything to keep. */
+function djExitKeep() {
+  const bHolds = !!songPanes.b.song || !!deckBCM?.getValue().trim();
+  return djActiveDeck === 'b' && bHolds ? 'b' : 'restore';
 }
 
 // The app's own modal, one at a time: a backdrop over everything, esc or a click outside it
@@ -28983,7 +28995,31 @@ async function exitDjMode(keep = 'restore') {
       if (songPanes.b.song) {
         // The main editor can't hold a song file - promoting one is the complete-mix oddment
         // still in TODO.md. Until then the mix ends by exiting and letting the song play on.
-        logLine('deck B holds a song file - a file can\'t be kept as the main editor; stop it and leave DJ mode with restore');
+        logLine('deck B holds a song file - a file can\'t be kept as the main editor; focus deck A to leave DJ mode', true);
+        return;
+      }
+      if (!deckPlayingNow.b) {
+        // Nothing of deck B's is playing, so there is nothing to promote - just its code to carry
+        // over, stopped. Whatever deck A is playing stops with its deck, so a running deck A asks.
+        if (deckPlayingNow.a) {
+          const leave = await askDialog('Leave DJ mode on deck B? Deck A is playing and stops.', [
+            { label: 'stay in DJ mode', value: false },
+            { label: 'leave, stop deck A', value: true, primary: true },
+          ]);
+          if (!leave) return;
+        }
+        const code = deckBCM.getValue();
+        const name = deckBFileName;
+        await api('POST', '/api/mix/eject'); // deck B gone, desk reset
+        await api('POST', '/api/mix/clear', { deck: 'a' });
+        clearPatternRegions('a');
+        clearPatternRegions('b');
+        closePanelsOn(deckBCM);
+        cm.setValue(code);
+        forgetExpandedFolds();
+        setCurrentSavedName(name);
+        logLine(`DJ mode off - "${name ?? 'deck B'}" is in the editor (stopped - play it when ready)`);
+        finishDjExit();
         return;
       }
       const res = await api('POST', '/api/mix/complete');
@@ -30436,11 +30472,15 @@ function djLiveWaveStop() {
 // re-measure themselves every frame (songSizeCanvas), so the reflow needs no extra plumbing.
 const MIX_STACK_KEY = 'poptartMixStacked';
 let mixStacked = localStorage.getItem(MIX_STACK_KEY) === '1';
+// The deck alone full-screen, or null - see djSetZoom. Declared here, ahead of the stack and the
+// region sizes, because both read it and both run as the page loads.
+let djZoomedDeck = null;
 function applyMixStack() {
   // Only ever engaged inside DJ mode: outside it the stack is empty and hidden and the canvases
   // live in their panes - a page reloaded with the preference set must not come up with a
   // blank region holding two canvases beside the editor (which is exactly what it did).
-  const on = mixStacked && mixModeOn;
+  // ...nor while one deck is full-screen, which is the deck alone (see djSetZoom).
+  const on = mixStacked && mixModeOn && !djZoomedDeck;
   document.body.classList.toggle('mix-stacked', on);
   document.getElementById('mixStack').classList.toggle('on', mixStacked);
   const stack = document.getElementById('songStack');
@@ -30582,6 +30622,17 @@ function djApplyRegionSizes(save) {
     if (save) localStorage.setItem(DJ_REGION_KEY, JSON.stringify(djRegions));
     return;
   }
+  // One deck full-screen: the decks take everything, and the folds and sizes stay as they were
+  // for when the zoom closes - none of this is saved, and nothing stored is rewritten.
+  if (djZoomedDeck) {
+    root.style.setProperty('--dj-row-stack', 'auto');
+    root.style.setProperty('--dj-row-decks', 'minmax(0, 1fr)');
+    root.style.setProperty('--dj-row-main', 'minmax(0, 1fr)');
+    root.style.setProperty('--dj-row-strip', 'auto');
+    root.style.setProperty('--dj-strip-h', 'auto');
+    for (const cls of ['dj-stack-min', 'dj-decks-min', 'dj-strip-min']) document.body.classList.remove(cls);
+    return;
+  }
   const stacked = djStacked();
   const stackMin = stacked && djRegions.stackMin;
   const { decksMin, stripMin } = djRegions;
@@ -30719,13 +30770,15 @@ window.addEventListener('resize', () => djApplyRegionSizes()); // re-cap, never 
 // neither deck), and the pane wears an accent ring so which one is armed is never a guess.
 // Deck A outside DJ mode, always - there is no other deck to mean.
 let djActiveDeck = 'a';
-// One deck full-screen (its ⤢, or the deckZoom chord): the other deck's pane steps out and this
-// one takes both columns, for reading the code from across the room mid-set. The hidden deck
-// plays on; the waveforms and the mixer stay (they fold on their own rails). While one deck is
-// alone it is the armed one and stays so - the keys must never play a deck you cannot see, so
-// the automatic hand-overs (djFocusOnPlay) wait until both decks are back. Never stored: a
-// reload, or leaving DJ mode, comes back to the pair.
-let djZoomedDeck = null;
+// One deck full-screen (its ⤢, or the deckZoom chord): the deck and nothing else, the way a
+// session outside DJ mode looks - the other deck's pane, the stacked waveforms and the mixer all
+// step out (body.dj-zoomed), and this one takes the whole page. A deck holding a file has its
+// waveform back in its own pane for the while, as it is outside DJ mode. The hidden deck plays
+// on, and the desk is exactly where it was: closing the zoom brings every region back at the
+// size and fold it had. While one deck is alone it is the armed one and stays so - the keys must
+// never play a deck you cannot see, so the automatic hand-overs (djFocusOnPlay) wait until both
+// decks are back. Never stored: a reload, or leaving DJ mode, comes back to the pair.
+// (djZoomedDeck itself is declared with the stack, which reads it before this point is reached.)
 
 function djSetActiveDeck(deck) {
   if (djZoomedDeck && mixModeOn) deck = djZoomedDeck;
@@ -30749,7 +30802,10 @@ function djSetZoom(deck) {
     btn.title = alone ? 'back to both decks' : 'full-screen this deck';
     btn.classList.toggle('on', alone);
   }
+  document.body.classList.toggle('dj-zoomed', !!djZoomedDeck);
   if (djZoomedDeck) djSetActiveDeck(djZoomedDeck);
+  applyMixStack(); // the stack steps out with the zoom, and the waveforms go home to their panes
+  djApplyRegionSizes(false);
   djRegionsReflow();
 }
 /** The chord: the armed deck full-screen, or both decks back. */
@@ -30879,6 +30935,24 @@ function songLoadLine(deck, res, title) {
  * for one. Deck B is a livecode deck like the other, and what is written into it while it plays
  * is work worth keeping in its own file.
  */
+/**
+ * The save chord: the deck you are working on. In DJ mode that is the FOCUSED deck - the one
+ * wearing the ring (djActiveDeck), which a click anywhere in its pane claims, its head and its
+ * waveform included - rather than whichever editor last had the cursor, which a click on the
+ * other deck's head does not move. Deck B's buffer is a pattern file of its own. A deck playing
+ * a song file has no code to save, and says so rather than saving the other deck's.
+ */
+function saveFocusedDeck(as = false) {
+  const deck = mixModeOn ? djActiveDeck : (activeCM() === deckBCM ? 'b' : 'a');
+  if (mixModeOn && songPanes[deck].song) {
+    logLine(`deck ${deck.toUpperCase()} is playing a song file - there is no code on it to save`);
+    return;
+  }
+  if (deck === 'b') saveDeckBFile(as);
+  else if (as) savePatternFileAs();
+  else savePatternFile();
+}
+
 async function saveDeckBFile(as = false) {
   if (!deckBCM || songPanes.b.song) return; // a song file's pane holds a descriptor card, not code
   let name = deckBFileName;
@@ -31369,6 +31443,7 @@ function mixSyncValues(state) {
   // last eval's setbpm() had baked in.
   takeClocks(state);
   mixFxRender(state.fx);
+  phonesRender(state.headphones);
   songPaneSync(state);
   deckHeadRender(state);
 }
@@ -31493,10 +31568,9 @@ for (const deck of ['a', 'b']) {
   mixLearnAttach(fader, `${deck}:tempo`);
   mixLearnAttach(rangeBtn, `${deck}:temporange`);
 
-  // ...and the performance loop beside it: the button, and the two that resize it.
+  // ...and the performance loop beside it: one button that is also its own length knob, like a
+  // controller's loop encoder - press to loop, turn (scroll over it) to halve or double.
   const loopNow = document.getElementById(`deck${U}Loop`);
-  const halveBtn = document.getElementById(`deck${U}LoopHalve`);
-  const doubleBtn = document.getElementById(`deck${U}LoopDouble`);
   const post = (body, say) => api('POST', '/api/mix/loop', { deck, ...body })
     .then((r) => { deckLoopRender(deck, r); if (say) logLine(say(r)); })
     .catch((e) => logLine(e.message ?? String(e), true));
@@ -31506,11 +31580,29 @@ for (const deck of ['a', 'b']) {
       ? `deck ${U} looping ${deckLoopLabel(r.beats)}`
       : `deck ${U} loop out`));
   });
-  halveBtn.addEventListener('click', () => { if (!mixLearnArmed) post({ scale: 0.5 }); });
-  doubleBtn.addEventListener('click', () => { if (!mixLearnArmed) post({ scale: 2 }); });
+  // A trackpad sends a flick as dozens of small wheel events, so they are summed into detents: one
+  // step per DECK_LOOP_DETENT of travel, and no faster than one every DECK_LOOP_TURN_MS, or one
+  // flick would run the loop from 16 bars to 1/16 beat. Armed for learning, the turn names the
+  // halve/double target instead, so a controller's encoder or pads can still be bound to it.
+  let travel = 0;
+  let turnedAt = 0;
+  loopNow.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    const dy = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY;
+    if (mixLearnArmed) {
+      if (dy) mixLearnDo(`${deck}:${dy < 0 ? 'loopdouble' : 'loophalve'}`, e.altKey);
+      return;
+    }
+    travel += dy;
+    if (Math.abs(travel) < DECK_LOOP_DETENT) return;
+    const now = performance.now();
+    const up = travel < 0;
+    travel = 0;
+    if (now - turnedAt < DECK_LOOP_TURN_MS) return;
+    turnedAt = now;
+    post({ scale: up ? 2 : 0.5 });
+  }, { passive: false });
   mixLearnAttach(loopNow, `${deck}:loop`);
-  mixLearnAttach(halveBtn, `${deck}:loophalve`);
-  mixLearnAttach(doubleBtn, `${deck}:loopdouble`);
 
   // ...and the platter and SYNC of a deck playing CODE - the song pane's own row, for a deck with
   // no song pane (see server.js's deckClocks). The same routes and the same learn targets, so a
@@ -31611,13 +31703,16 @@ function deckLiveRender(deck, state) {
   el('NudgeUp').classList.toggle('held', live.nudge > 0);
 }
 
-// --- the deck's performance loop (the deck head's loop button and its two length buttons) -----
+// --- the deck's performance loop (the deck head's loop button, which is also its length knob) --
 //
 // Server state like the rest of the desk - the button only ever shows what the desk says, so a
 // learned pad and a click are the same gesture arriving by different roads. What the loop IS
 // depends on the deck (a clock hold for code, a scheduled wrap for a file); none of that is the
-// browser's business, which is why this end of it is three buttons and a label.
+// browser's business, which is why this end of it is one button and a label.
 const deckLoopNow = { a: { on: false, beats: 16 }, b: { on: false, beats: 16 } };
+// How a scroll over the loop button becomes length steps (see its wheel handler, with the tempo faders).
+const DECK_LOOP_DETENT = 30;
+const DECK_LOOP_TURN_MS = 140;
 
 /**
  * A loop length as a musician would say it. Bars where it is bars (a bar is a cycle, four beats);
@@ -31749,6 +31844,59 @@ document.getElementById('mixFxEdit').addEventListener('click', () => {
   openFxEditor(mixFxNow.chain);
 });
 mixLearnAttach(mixFxKnob, 'fxknob');
+
+// --- the headphones: level, and the cue/main blend (see server.js's headphonesSet) ---
+// Two knobs in the header, since what reaches the headphones is not only a DJ-mode question: a
+// track's M plays there too. Read once when the page opens; after that every change the page
+// makes is answered with the new values, and a learned MIDI knob's moves arrive over the desk's
+// push channel while it is open. Without a cue pair (no headphone output chosen in settings)
+// there is nothing for them to act on, so they dim; in the browser there is no cue at all, so
+// they are not shown.
+const phonesKnobs = {
+  level: mixMakeKnob('phonesLevel', 0, 1, 1,
+    'headphone level - drag up/down, double-click for full'),
+  mix: mixMakeKnob('phonesMix', 0, 1, 0,
+    'headphone mix - left hears only what is cued, right only the main mix, both in between; double-click for cue only'),
+};
+function phonesPost(body) {
+  api('POST', '/api/mix/headphones', body).then(phonesRender).catch((e) => logLine(e.message ?? String(e), true));
+}
+for (const [key, label] of [['level', 'phones'], ['mix', 'cue / main']]) {
+  const wrap = document.createElement('div');
+  wrap.className = 'phones-knob';
+  const lab = document.createElement('span');
+  lab.textContent = label;
+  wrap.append(phonesKnobs[key], lab);
+  document.getElementById('phonesCtl').appendChild(wrap);
+  const knob = phonesKnobs[key];
+  let timer = null;
+  knob.addEventListener('input', () => {
+    if (timer) return;
+    timer = setTimeout(() => {
+      timer = null;
+      phonesPost({ [key]: Number(knob.value) });
+    }, 50);
+  });
+  knob.addEventListener('dblclick', () => {
+    knob.value = key === 'level' ? 1 : 0;
+    phonesPost({ [key]: Number(knob.value) });
+  });
+  mixLearnAttach(knob, key === 'level' ? 'hplevel' : 'hpmix');
+}
+
+function phonesRender(hp) {
+  if (!hp) return;
+  const box = document.getElementById('phonesCtl');
+  box.classList.toggle('hidden', !!hp.unavailable);
+  for (const key of ['level', 'mix']) {
+    const knob = phonesKnobs[key];
+    if (!knob.classList.contains('dragging')) knob.value = hp[key];
+  }
+  // Dimmed only on a definite no: an answer that does not say (an older server) leaves them lit.
+  box.classList.toggle('off', hp.cuePair === false);
+  box.title = hp.cuePair === false ? 'no headphone output is set - choose one under settings → headphone cue' : '';
+}
+api('GET', '/api/mix/headphones').then(phonesRender).catch(() => { /* engine not up yet: the defaults stand */ });
 mixLearnAttach(mixFxOnEl, 'fxon', 'fxhold'); // shift+click binds the momentary pad
 mixLearnAttach(mixFxAssignEl, 'fxassign');
 mixLearnAttach(mixFxChainEl, 'fxnext', 'fxprev'); // the step pads; shift+click binds backward
@@ -32306,8 +32454,6 @@ for (const deck of ['a', 'b']) {
   }
 }
 document.getElementById('deckBSong').addEventListener('click', () => openOrganize('b'));
-document.getElementById('deckBNew').addEventListener('click', () => newDeckTrack('b'));
-document.getElementById('deckANew').addEventListener('click', () => newDeckTrack('a'));
 document.getElementById('deckBPlay').addEventListener('click', (e) => deckPlayPress('b', e.shiftKey));
 document.getElementById('deckBUpdate').addEventListener('click', () => evalDeckB(false, { byHand: true }));
 document.getElementById('deckASong').addEventListener('click', () => openOrganize('a'));
@@ -32629,6 +32775,11 @@ function closeOrganize() {
   orgForDeck = null;
   orgEditing = null; // a half-typed correction is dropped, not quietly kept
   orgMenu?.classList.add('hidden');
+  // ...and any audition still fetching or decoding: a whole song takes seconds to arrive (an aiff
+  // is converted server-side first), and one picked just before a load onto a deck used to start
+  // once the window was gone - playing out of the browser, past the desk, with nothing left on
+  // screen to stop it.
+  orgPlayer.gen++;
   orgPlayerStopSource();
   orgRenderTransport();
   orgEl?.classList.add('hidden');
@@ -32693,6 +32844,9 @@ const ORG_COLUMNS = {
     key: (r) => r.bpm ?? null,
   },
   key: { label: 'key', cls: 'org-c-key', text: (r) => r.musKey ?? '', key: (r) => (r.musKey ?? '').toLowerCase() },
+  // What a row IS: a livecode save or a track (a file). Only a set mixes the two, so that is the
+  // one source that shows it; sorting on it groups them.
+  type: { label: 'type', cls: 'org-c-type', text: (r) => (r.kind === 'saved' ? 'livecode' : 'track'), key: (r) => (r.kind === 'saved' ? 0 : 1) },
   rating: { label: 'rating', cls: 'org-c-rating', num: true, stars: true, text: (r) => (r.rating ? `${r.rating}` : ''), key: (r) => r.rating ?? null },
   // Where the file actually is. Shows the folder rather than the whole path - the file's own name
   // is already the name column, and repeating it costs the width that made this worth adding.
@@ -32727,8 +32881,8 @@ const ORG_VIEWS = {
     dir: -1,
   },
   playlist: {
-    cols: ['n', 'name', 'artist', 'bpm', 'key', 'rating'],
-    offer: ['n', 'name', 'artist', 'album', 'bpm', 'key', 'rating', 'path'],
+    cols: ['n', 'name', 'type', 'artist', 'bpm', 'key', 'rating'],
+    offer: ['n', 'name', 'type', 'artist', 'album', 'bpm', 'key', 'rating', 'path'],
     sort: 'n',
     dir: 1,
   },
@@ -34111,6 +34265,11 @@ function orgFillTagCell(td, row) {
   }
 }
 
+/** The deck organize's new-track button starts on: the one it was opened for, else the armed one. */
+function orgNewLiveDeck() {
+  return orgForDeck ?? djActiveDeck ?? 'a';
+}
+
 /** The bar over the table: where you are, and the actions that belong to this source. */
 function orgRenderBar() {
   const where = orgEl.querySelector('#orgWhere');
@@ -34129,6 +34288,11 @@ function orgRenderBar() {
   filtBtn.textContent = orgFiltLabel();
   filtBtn.title = orgFiltTitle();
   filtBtn.classList.toggle('on', orgFiltOn());
+
+  // A new livecode track belongs with the livecode list, on the deck this window is picking for.
+  const newLive = orgEl.querySelector('#orgNewLive');
+  newLive.classList.toggle('hidden', !(mixModeOn && orgSrc.kind === 'livecode'));
+  newLive.textContent = `＋ new on deck ${orgNewLiveDeck().toUpperCase()}`;
 
   const onDisk = orgSrc.kind === 'disk';
   up.classList.toggle('hidden', !onDisk && !(orgSrc.kind === 'livecode' && orgSrc.folder));
@@ -35105,6 +35269,7 @@ function buildOrganize() {
             <button id="orgRescan" class="small hidden">rescan tags</button>
             <button id="orgMeasure" class="small hidden">measure</button>
             <button id="orgImport" class="small hidden">import</button>
+            <button id="orgNewLive" class="small hidden" title="start a new livecode track on this deck: an empty buffer, with whatever the deck held cleared (the previous buffer stays under work in progress)"></button>
           </div>
           <div id="orgTableWrap">
             <table id="orgTable">
@@ -35173,6 +35338,11 @@ function buildOrganize() {
     orgFiltMenu(box.left, box.bottom + 2); // under the button, like a menu bar's
   });
   orgEl.querySelector('#orgImport').addEventListener('click', () => orgImportShown());
+  orgEl.querySelector('#orgNewLive').addEventListener('click', () => {
+    const deck = orgNewLiveDeck();
+    closeOrganize();
+    newDeckTrack(deck);
+  });
   orgEl.querySelector('#orgMeasure').addEventListener('click', () => {
     if (libAnalyzing) return orgAnalyzeStop();
     const picked = orgSelectedRows().filter((r) => r.trackId).map((r) => r.trackId);

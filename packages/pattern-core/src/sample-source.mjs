@@ -2,7 +2,7 @@
 // list names beside a chain like `s("psyhyp:9").fit()`, which has no instrument to show.
 //
 // Mirrors the scheduler's own dispatch (see Scheduler#_tick's sampler branch and _sampleConfigAt):
-// a bare name is a folder pack, "sp:" a named one, "file:"/"rec:" one exact file; the two packs take
+// a bare name is a folder pack, "sp:" a named one, "file:"/"rec:"/"say:" one exact file; the two packs take
 // an index suffix ("bd:4"), and an explicit .i() wins over it. Kept beside it rather than shared
 // because the scheduler's version is on the hot path and this one is not - a change to either
 // spelling has to be made in both.
@@ -52,7 +52,7 @@ export function sampleSourcesOf(sig, { cycles = 1, max = 8 } = {}) {
         }
         if (kind === 'named') ref = `sp:${ref}`;
       } else {
-        ref = `${kind === 'rec' ? 'rec' : 'file'}:${ref}`;
+        ref = `${kind === 'rec' || kind === 'say' ? kind : 'file'}:${ref}`;
       }
       index = Math.round(index ?? 0);
       let fit = null;

@@ -237,7 +237,9 @@ function formatSampleEvent(pack, cfg, info, eventCycles) {
   const speed = res.speed ?? cfg.speed ?? 1;
   const loop = res.loop ?? cfg.loop ?? 0;
   const stretch = res.stretch ?? cfg.stretch ?? 1;
-  const bits = [`s=${pack}`, `i=${num(idx)}`, `begin=${num(begin)}`, `end=${num(end)}`, `speed=${num(speed)}`];
+  // A spoken step's voice rides in front of its text behind a control character (see say()); a
+  // log line shows it as "voice:text", which is how it reads.
+  const bits = [`s=${String(pack).replace(/\u001f/g, ':')}`, `i=${num(idx)}`, `begin=${num(begin)}`, `end=${num(end)}`, `speed=${num(speed)}`];
   // An enum control, by name - the modes are half of what a loop (or a splice) sounds like, so a
   // bare "loop" would leave the line ambiguous. Named rather than numbered here: the engine
   // reports names, and a mode number in a log line says nothing on its own.
@@ -1671,7 +1673,7 @@ export class Scheduler {
         const cfg = withEventSpan({ onsetSec, endSec: offsetSec }, () => this._sampleConfigAt(step, gridSec, songStart));
         if (velocity !== undefined) cfg.vel = velocity; // scales the sample's gain; unset = engine default
         // What the engine resolves to files: a bare name is a pack (a folder), "sp:" a named
-        // pack (a _pack() definition), "file:"/"rec:" one exact file (se/sr). Only the two packs
+        // pack (a _pack() definition), "file:"/"rec:"/"say:" one exact file (se/sr/say). Only the two packs
         // take the index suffix - the other two address a single file, so a ":" in one of those
         // values belongs to the name.
         const kind = this.pattern.samplerKind ?? 'pack';
@@ -1685,7 +1687,7 @@ export class Scheduler {
           }
           if (kind === 'named') pack = `sp:${pack}`;
         } else {
-          pack = `${kind === 'rec' ? 'rec' : 'file'}:${pack}`;
+          pack = `${kind === 'rec' || kind === 'say' ? kind : 'file'}:${pack}`;
         }
         // The engine reports back what it resolved the config down to (fit -> rate, slice ->
         // window, and the window's length in seconds) - that's what .log() prints, since none

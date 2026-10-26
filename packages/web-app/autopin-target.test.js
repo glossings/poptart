@@ -172,11 +172,33 @@ test("a group's chain numbers around the tracks inside its braces", () => {
 test("double-clicking a group's own fx opens that group's slot", () => {
   const { findChainHandleAt } = api();
   const at = (needle) => findChainHandleAt(GROUPED, GROUPED.indexOf(needle) + 1);
-  assert.deepEqual(at('fx("FilterFreak1")'), { label: 'drums', slot: 1 });
-  assert.deepEqual(at('fx("Pro-L 2")'), { label: 'drums', slot: 2 });
-  assert.deepEqual(at('fx("Pro-C 2")'), { label: 'kick', slot: 1 });
-  assert.deepEqual(at('synth("Serum 2")'), { label: 'hats', slot: 0 });
-  assert.deepEqual(at('fx("Pro-Q 3")'), { label: 'hats', slot: 2 });
+  assert.deepEqual(at('fx("FilterFreak1")'), { label: 'drums', monitored: false, slot: 1 });
+  assert.deepEqual(at('fx("Pro-L 2")'), { label: 'drums', monitored: false, slot: 2 });
+  assert.deepEqual(at('fx("Pro-C 2")'), { label: 'kick', monitored: false, slot: 1 });
+  assert.deepEqual(at('synth("Serum 2")'), { label: 'hats', monitored: false, slot: 0 });
+  assert.deepEqual(at('fx("Pro-Q 3")'), { label: 'hats', monitored: false, slot: 2 });
+});
+
+test("double-clicking a monitored block's plugin opens the cued track's, not the room's", () => {
+  // `bassM:` plays as its own track, "bass~M", beside the unmarked `bass:` - so the window has to
+  // be asked for under that name, or it opens the other block's plugin (or none at all).
+  const { findChainHandleAt } = api();
+  const code = 'bass: note("c2").synth("Serum 2")\nbassM: note("c2").synth("Diva").fx("Pro-Q 3")\n';
+  const at = (needle) => findChainHandleAt(code, code.indexOf(needle) + 1);
+  assert.deepEqual(at('synth("Serum 2")'), { label: 'bass', monitored: false, slot: 0 });
+  assert.deepEqual(at('synth("Diva")'), { label: 'bass', monitored: true, slot: 0 });
+  assert.deepEqual(at('fx("Pro-Q 3")'), { label: 'bass', monitored: true, slot: 1 });
+});
+
+test('every block-to-track lookup names a monitored block by its cued track', () => {
+  const CLIENT = fs.readFileSync(path.join(__dirname, 'public', 'client.js'), 'utf8');
+  assert.match(CLIENT, /showPluginEditor\(blockTrackId\(ed, chain\), chain\.slot\)/, 'double-click on synth()/fx()');
+  assert.match(CLIENT, /uiBtn\.onclick = \(\) => showPluginEditor\(t\.key \?\? t\.label, slot\)/, "the track panel's ui button");
+  assert.match(CLIENT, /label: blockTrackId\(presetCM, target\)/, 'the preset panel hold');
+  assert.match(CLIENT, /const track = block \? blockTrackId\(editor, block\) : null;/, 'param completion');
+  for (const stale of ['deckTrackId(ed, chain.label)', 'deckTrackId(editor, block.label)', 'deckTrackId(presetCM, target.label)', 'showPluginEditor(t.label, slot)']) {
+    assert.ok(!CLIENT.includes(stale), `${stale} passes a block label straight through and loses its M`);
+  }
 });
 
 test('a capture follows its plugin when the chain was reordered before it was written', () => {

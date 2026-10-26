@@ -72,6 +72,7 @@ struct VoiceParams {
   double envAttackCurve = -4, envDecayCurve = -4, envReleaseCurve = -4, envScale = 1;
 
   double glide = 0;
+  int glideMode = 0;  // 0 legato (from a voice still sounding), 1 always - see Device
   double level = 0.7;
   /** Pitch bend in semitones, on every voice at once - the track's .bend(), not a knob. */
   double bend = 0;
@@ -89,6 +90,7 @@ struct Voice {
   double velocity = 1;
   long long age = 0;
   bool releasing = false;
+  int holds = 0;  // note-ons on `note` still waiting for their offs (see Device)
   double targetHz = 440;
   double currentHz = 440;
 
@@ -106,6 +108,7 @@ struct Voice {
     velocity = 1;
     age = 0;
     releasing = false;
+    holds = 0;
   }
 
   bool active() const { return ampEnv.active(); }
@@ -140,6 +143,7 @@ struct Voice {
     ampEnv.reset();
     note = -1;
     releasing = false;
+    holds = 0;
   }
 
   void setTables(const Table* t1, const Table* t2, const Table* subT) {
@@ -285,7 +289,10 @@ struct Device : pd_own::Device<ids::kCount, 2> {
   void pd_note_off(float note) {
     if (note < 0) {
       eventCount = 0;
-      for (auto& v : voices) if (v.active()) v.noteOff();
+      for (auto& v : voices) {
+        v.holds = 0;
+        if (v.active()) v.noteOff();
+      }
       return;
     }
     if (eventCount < 64) events[eventCount++] = { 0, note, 0 };
@@ -346,6 +353,7 @@ struct Device : pd_own::Device<ids::kCount, 2> {
     v.envScale = p[ids::env_scale];
 
     v.glide = p[ids::glide];
+    v.glideMode = static_cast<int>(jsRound(p[ids::glide_mode]));
     v.level = p[ids::level];
     voiceCount = static_cast<int>(clamp(jsRound(p[ids::voices]), 1.0, kMaxVoices));
   }
@@ -379,14 +387,81 @@ struct Device : pd_own::Device<ids::kCount, 2> {
     // Glide slides from whatever this voice was last playing, which is how a monophonic lead
     // with one voice glides between its notes.
     const double from = voice->active() && voice->note >= 0 ? midiToHz(voice->note) : -1;
+    play(voice, note, velocity, from);
+  }
+
+  /** Starts `note` on `voice`, counting it as one more hold when the voice already held it. */
+  void play(Voice* voice, double note, double velocity, double from) {
+    const int holds = voice->active() && voice->note == note && !voice->releasing ? voice->holds + 1 : 1;
     voice->setTables(tableFor(params.osc1Table), tableFor(params.osc2Table), &subTable());
     voice->age = clock++;
     seed = static_cast<unsigned int>(seed * 1664525u + 1013904223u);
     voice->noteOn(note, velocity, params, seed, from);
+    voice->holds = holds;
+  }
+
+  static bool contains(Voice* const* list, int n, const Voice* v) {
+    for (int i = 0; i < n; ++i) if (list[i] == v) return true;
+    return false;
+  }
+
+  /**
+   * Note-ons that start together (events[from, to)). Legato plays them in order, as they came.
+   * Always deals them as a set: a note already on a voice of its own pitch first, then the rest,
+   * each sliding from the nearest pitch nobody in the set has claimed. The browser's
+   * WavetableSynth#startNotes, step for step.
+   */
+  void startNotes(int from, int to) {
+    if (params.glideMode < 1) {
+      for (int i = from; i < to; ++i) startNote(events[i].note, events[i].velocity);
+      return;
+    }
+    const int limit = voiceCount;
+    Voice* claimed[kMaxVoices * 2 + 2];
+    int claimedCount = 0;
+    int later[64];
+    int laterCount = 0;
+    for (int i = from; i < to; ++i) {
+      Voice* own = nullptr;
+      for (int k = 0; k < limit && !own; ++k) {
+        Voice& v = voices[k];
+        if (v.note == events[i].note && !contains(claimed, claimedCount, &v)) own = &v;  // held, releasing or just quiet
+      }
+      if (!own) { later[laterCount++] = i; continue; }
+      claimed[claimedCount++] = own;
+      play(own, events[i].note, events[i].velocity, -1);
+    }
+    for (int j = 0; j < laterCount; ++j) {
+      const Event& e = events[later[j]];
+      Voice* source = nullptr;
+      double best = 1e300;
+      int sourceIndex = -1;
+      for (int k = 0; k < kMaxVoices; ++k) {
+        Voice& v = voices[k];
+        if (v.note < 0 || contains(claimed, claimedCount, &v)) continue;
+        bool pitchInSet = false;
+        for (int i = from; i < to; ++i) if (events[i].note == v.note) { pitchInSet = true; break; }
+        if (pitchInSet) continue;
+        const double d = std::fabs(v.note - e.note);
+        if (d < best) { best = d; source = &v; sourceIndex = k; }
+      }
+      const bool reuse = source && sourceIndex < limit && !(source->active() && !source->releasing);
+      Voice* voice = reuse ? source : allocate(e.note);
+      const double glideFrom = source ? midiToHz(source->note)
+                                      : (voice->active() && voice->note >= 0 ? midiToHz(voice->note) : -1);
+      if (source && claimedCount < kMaxVoices * 2 + 2) claimed[claimedCount++] = source;
+      if (claimedCount < kMaxVoices * 2 + 2) claimed[claimedCount++] = voice;
+      play(voice, e.note, e.velocity, glideFrom);
+    }
   }
 
   void stopNote(double note) {
-    for (auto& v : voices) if (v.active() && v.note == note && !v.releasing) v.noteOff();
+    for (auto& v : voices) {
+      if (!(v.active() && v.note == note && !v.releasing)) continue;
+      if (--v.holds > 0) continue;  // an earlier note on this pitch ending: a later one still holds it
+      v.holds = 0;
+      v.noteOff();
+    }
   }
 
   void pd_process(int frames) {
@@ -400,9 +475,13 @@ struct Device : pd_own::Device<ids::kCount, 2> {
       if (v.osc1.table != t1) v.osc1.setTable(t1);
       if (v.osc2.table != t2) v.osc2.setTable(t2);
     }
-    for (int i = 0; i < eventCount; ++i) {
-      if (events[i].kind == 1) startNote(events[i].note, events[i].velocity);
-      else stopNote(events[i].note);
+    for (int i = 0; i < eventCount;) {
+      if (events[i].kind != 1) { stopNote(events[i].note); ++i; continue; }
+      // A run of note-ons in one block is one set (a chord), started together.
+      int end = i + 1;
+      while (end < eventCount && events[end].kind == 1) ++end;
+      startNotes(i, end);
+      i = end;
     }
     eventCount = 0;
 

@@ -185,6 +185,7 @@ var trackTempo = IdentityDictionary.new;
 // the host clock's (see trackBeats).
 var trackPlace = IdentityDictionary.new, trackBeats;
 var jsonEscape, toJson, replyOk, replyErr, pluginList, runScan, trackDefName, buildTrackDef, channelDefault;
+var djIsolator; // the DJ stage's 3-band EQ (see its definition above buildTrackDef)
 var sharedTrackDef, trackDef, trackDefState; // the one track SynthDef this engine builds (see sharedTrackDef)
 var awaitTrack, awaitLoaded, reclaimStuckTrack, resolvePlugin, resolveParamIndex, watchPluginEdits;
 var pluginOpenLock, openQueued, slotKindGuard;
@@ -263,6 +264,10 @@ var deckMeterBus, deckMeterSynths;
 // reports the peak of all the hardware outputs summed together ('/poptart/masterLevel'). See
 // \poptart_master.
 var masterSynth;
+// The headphones: one synth after the master on an engine with a cue pair, and the level and
+// cue/main mix it plays at (see \poptart_headphones and '/poptart/headphones'). Unity and cue
+// only until Node says otherwise - what the cue pair always played before there were knobs.
+var headphoneSynth, headphoneLevel = 1, headphoneMix = 0;
 // makeBundle with a timestamp only when there is real lead - see the definition by the events
 // section.
 var bundleNow;
@@ -427,6 +432,35 @@ sharedTrackDef = {
     };
 };
 
+// The DJ stage's 3-band isolator EQ (see the DJ stage in the track def): `in` split into
+// low / mid / high by a Linkwitz-Riley crossover tree at 250 Hz and 2.5 kHz, each band scaled by
+// its gain (0 = a kill, 1 = unity, 2 = +6 dB), summed back.
+//
+// A TREE of LR4 crossovers, not a subtraction. The earlier isolator pulled the low and high
+// bands out with filters and took the mid as `in - low - high`, which sums back exactly at
+// neutral but nowhere else: the filters shift phase, so what the subtraction leaves is not the
+// band it names. With the low at 0, 50 Hz came out only -5 dB, 80 Hz -1 dB, and 150-300 Hz
+// BOOSTED by up to +4.3 dB - turning the bass all the way down kept the kick and added boom.
+// Cutting the highs boosted 2-5 kHz by +4 dB the same way.
+//
+// An LR4 low/high pair (two cascaded 2-pole Butterworths each) sums to an all-pass, so the
+// bands rebuild the input at flat magnitude and a band at 0 is gone. The low band also runs
+// through the 2.5 kHz crossover's all-pass (its LR4 pair, summed), so the three bands carry the
+// same phase and sum flat. At 0: 50 Hz -56 dB, 80 Hz -40 dB; nothing boosts anywhere.
+//
+// Flat, but phase-shifted, so at exact neutral the EQ is crossfaded OUT and an untouched track
+// is bit-exact. The 50ms crossfade dips around the crossovers for its duration, on the first
+// touch and on a reset.
+djIsolator = { |in, lo, mid, hi|
+    var xo = { |sig, f| [LPF.ar(LPF.ar(sig, f), f), HPF.ar(HPF.ar(sig, f), f)] };
+    var split = xo.(in, 250);
+    var upper = xo.(split[1], 2500);
+    var low = xo.(split[0], 2500).sum; // the 2.5 kHz all-pass, to keep the low in phase
+    var wet = (low * lo) + (upper[0] * mid) + (upper[1] * hi);
+    var on = ((lo - 1).abs + (mid - 1).abs + (hi - 1).abs) > 0.001;
+    LinXFade2.ar(in, wet, (on * 2 - 1).lag(0.05));
+};
+
 buildTrackDef = { |key|
     // .o(n)'s wraparound: pair indices past the last pair IN USE fold back onto real outputs.
     // In use, not merely allocated - wrapping at numOutputBusChannels sent .o(2) into the silent
@@ -458,7 +492,7 @@ buildTrackDef = { |key|
         var hasNativeDevices = \PoptartDevice.asClass.notNil;
         var scBuses = (1..maxSlots - 1).collect { |i| ("scBus" ++ i).asSymbol.kr(0) };
         var mid, side; // the channel strip's mid/side pair (see the width control below)
-        var live, djLow, djMid, djHigh, djLpf, djHpf, djWet, djv, djq; // the DJ stage (see below)
+        var live, djLpf, djHpf, djWet, djv, djq; // the DJ stage (see below)
         var fxAmt; // how far the DJ FX unit is switched in (see the insert below)
         // The channel's DJ fader, read out here because it applies to the named-bus SENDS as well
         // as to the direct output at the bottom - a post-fader send, the way a desk's are.
@@ -642,20 +676,13 @@ buildTrackDef = { |key|
         // via the slot -1 LFO/env path, neutral by default so a track sounds identical until a
         // mix session touches them.
         //
-        // The EQ is a subtraction isolator: lo and hi are pulled out with cascaded filters and
-        // the mid is what remains (live - lo - hi), so at neutral (1/1/1) the bands sum back to
-        // the input BIT-EXACTLY - no biquad coloration while nobody is mixing - and 0 is a true
-        // kill, which shelving EQs can't give. Crossovers fixed at 250 Hz / 2.5 kHz.
-        live = sig * trim.lag(0.08).clip(0, 4);
-        djLow = LPF.ar(LPF.ar(live, 250), 250);
-        djHigh = HPF.ar(HPF.ar(live, 2500), 2500);
-        djMid = live - djLow - djHigh;
+        // The EQ is djIsolator (see its definition): Linkwitz-Riley bands at 250 Hz / 2.5 kHz,
+        // 0 a true kill, crossfaded out at exact neutral so an untouched track is bit-exact.
         // Lags of 80ms+ here and below: these controls stream from the mix UI at ~20 values a
         // second, and a 20ms lag reproduced the steps (a stepped resonant cutoff reads as
         // tremolo). The lag must SPAN the posting gap, not just soften it.
-        live = (djLow * eqlo.lag(0.08).clip(0, 2))
-            + (djMid * eqmid.lag(0.08).clip(0, 2))
-            + (djHigh * eqhi.lag(0.08).clip(0, 2));
+        live = djIsolator.(sig * trim.lag(0.08).clip(0, 4),
+            eqlo.lag(0.08).clip(0, 2), eqmid.lag(0.08).clip(0, 2), eqhi.lag(0.08).clip(0, 2));
         // One-knob filter: `djf` 0 is untouched (crossfaded out below, so center is bit-exact),
         // negative sweeps a low-pass down from 18 kHz toward 20 Hz, positive sweeps a high-pass up
         // from 20 Hz toward 18 kHz - both exponential.
@@ -2007,6 +2034,33 @@ server.waitForBoot {
         };
         SendPeakRMS.kr(sum, 20, 3, '/poptart/masterLevel');
     }).add;
+    // The headphones: what the cue pair finally plays. Every track with its cue (or monitor) on
+    // has already summed itself into the cue pair this block (see the track def's cue tap); this
+    // is the last node there is, so it reads that sum back, blends in the main mix and sets the
+    // level, and REPLACES the pair with the result. The two knobs of a hardware desk's headphone
+    // section:
+    //
+    //   mix    0 = the cued decks only, 1 = the main mix only. Both are at full through the
+    //          middle, as on a hardware cue mix, so centered is the cue laid over the room.
+    //   level  the headphone volume, 0..1 on a squared law (the knob's travel reads as loudness),
+    //          1 = unity - nothing here can push the pair past what the tracks sent it.
+    //
+    // The main mix is every output but the cue pair, summed to one stereo pair the way the master
+    // meter sums it. Built only on an engine booted with a cue pair.
+    cueOffset !? {
+        SynthDef(\poptart_headphones, { |level = 1, mix = 0|
+            var chans = (0 .. server.options.numOutputBusChannels - 1).reject { |c|
+                (c == cueOffset) or: { c == (cueOffset + 1) }
+            };
+            var main = [chans.select(_.even), chans.select(_.odd)].collect { |side|
+                if (side.isEmpty) { DC.ar(0) } { Mix(side.collect { |c| In.ar(c, 1) }) }
+            };
+            var m = mix.lag(0.05).clip(0, 1);
+            var cueAmt = ((1 - m) * 2).min(1), mainAmt = (m * 2).min(1);
+            var amp = level.lag(0.05).clip(0, 1).squared;
+            ReplaceOut.ar(cueOffset, ((In.ar(cueOffset, 2) * cueAmt) + (main * mainAmt)) * amp);
+        }).add;
+    };
     // The bounce itself. Nothing but a DiskOut: everything about WHEN it runs is decided by the
     // timestamped bundles that start and free it (see the recordTrack OSCdef), so the file's
     // length is sample-accurate rather than however long the messages took to arrive.
@@ -2035,6 +2089,11 @@ server.waitForBoot {
     server.sync;
     // After recGroup, so it is the last node there is and reads what everything else wrote.
     masterSynth = Synth(\poptart_master, target: recGroup, addAction: \addAfter);
+    // ...and after that the headphones, which must hear every cue send and the finished mix.
+    cueOffset !? {
+        headphoneSynth = Synth(\poptart_headphones, [\level, headphoneLevel, \mix, headphoneMix],
+            target: masterSynth, addAction: \addAfter);
+    };
     // --- the server's pressure gauge ----------------------------------------------------------
     //
     // scsynth will say what it is holding if asked (/status), and nothing ever asked. So the only
@@ -5060,6 +5119,16 @@ OSCdef(\poptartMixMeters, { |msg|
         mixReconcile.();
     };
 }, '/poptart/mixMeters');
+
+// --- the headphone section: level and cue/main mix (see \poptart_headphones) ---
+//
+// [level, mix], both 0..1. Held as well as set, so a value that arrives before the synth exists
+// is what it starts with. Nothing to do on an engine with no cue pair.
+OSCdef(\poptartHeadphones, { |msg|
+    headphoneLevel = msg[1].asFloat;
+    headphoneMix = msg[2].asFloat;
+    headphoneSynth !? { |syn| syn.set(\level, headphoneLevel, \mix, headphoneMix) };
+}, '/poptart/headphones');
 
 // --- DJ deck meters (the strip's channel meters; see the deckMeterBus var declaration) ---
 //

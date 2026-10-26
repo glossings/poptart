@@ -284,6 +284,14 @@ function testSignal(frames, channels = 2, seed = 7, keyed = true) {
  */
 const LONG_RUN = { Voice: BLOCK * 240 };
 
+// Settings a device is always ALSO played at, on top of its defaults and the seeded draws: a
+// mode the draws may never land on, with whatever it depends on turned up. Each is the defaults
+// with these controls changed.
+const PINNED = {
+  // Always-glide, with a glide long enough to still be moving when the chords change.
+  Wavetable: [{ 'glide': 0.05, 'glide.mode': 1 }, { 'glide': 0.05, 'glide.mode': 0 }],
+};
+
 const SAMPLED = {
   Granular: { param: 'sample' },
   Convolver: { param: 'ir' },
@@ -462,6 +470,15 @@ function waysToPlay(device) {
       { frame: BLOCK * 4, note: 55, velocity: 0.5 },
       { frame: BLOCK * 14, note: 48, velocity: 0 },
     ] });
+    // Two chords that share notes, the first held over the start of the second - the shape that
+    // exercises a voice holding the same pitch twice, and a glide dealt across a chord change.
+    const chord = (frame, notes, velocity) => notes.map((note) => ({ frame, note, velocity }));
+    ways.push({ what: 'playing overlapping chords', keyed: null, notes: [
+      ...chord(0, [48, 52, 55, 59], 0.8),
+      ...chord(BLOCK * 4, [45, 48, 52, 55], 0.7),
+      ...chord(BLOCK * 6, [48, 52, 55, 59], 0),
+      ...chord(BLOCK * 12, [45, 48, 52, 55], 0),
+    ] });
     return ways;
   }
   if (device.sidechain) {
@@ -514,6 +531,9 @@ for (const one of devices.filter((d) => !STOCK_NODES.has(d.id))) {
       const runs = [['at its defaults', defaultValues(device)]];
       // And across the range: four settings from the same seeds every run.
       for (const seed of [11, 29, 97, 1234]) runs.push([`at setting ${seed}`, randomValues(device, seed)]);
+      for (const pin of PINNED[one.id] ?? []) {
+        runs.push([`at ${JSON.stringify(pin)}`, device.params.map((p) => (p.id in pin ? pin[p.id] : p.default))]);
+      }
 
       for (const [when, values] of runs) {
         // A chaotic device is compared sample for sample at a patch that is stable, and by its

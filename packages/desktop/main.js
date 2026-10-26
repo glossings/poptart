@@ -119,9 +119,10 @@ const runAction = { saveDiagnostics, showLogs };
 // Off macOS, Electron's default menu bar takes the whole alt family: alt on its own focuses it and
 // alt+F/E/V/W/H open its menus. alt is where poptart's own chords live on those platforms (see
 // public/chords.js), and alt+F inserts an effect - so the menu would eat it before the page saw the
-// key. Nothing in that default menu is reachable any other way except reload and devtools, and this
-// window has no use for either. macOS keeps its menu: the application menu is where cmd+Q and the
-// editing accelerators live there, and the app's chords are on ctrl anyway.
+// key. Nothing in that default menu is reachable any other way except reload and devtools; the
+// devtools are on F12 instead (see createWindow), and the window has no use for reload. macOS
+// keeps its menu: the application menu is where cmd+Q and the editing accelerators live there,
+// and the app's chords are on ctrl anyway.
 if (process.platform !== 'darwin') {
   Menu.setApplicationMenu(null);
 } else {
@@ -334,6 +335,15 @@ function createWindow() {
     win.on('enter-full-screen', syncFullScreenClass);
     win.on('leave-full-screen', syncFullScreenClass);
   }
+  // F12 opens and closes the developer tools, as in a browser - on every platform, since off macOS
+  // there is no menu to reach them from. Taken before the page sees the key; nothing in poptart
+  // binds F12.
+  win.webContents.on('before-input-event', (event, input) => {
+    if (input.type === 'keyDown' && input.key === 'F12') {
+      event.preventDefault();
+      win?.webContents.toggleDevTools();
+    }
+  });
   // The projector is a window of its own, so without this, closing poptart would leave it
   // standing on the wall - and window-all-closed would never fire, so the app would never quit.
   win.on('closed', () => {

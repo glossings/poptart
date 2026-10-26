@@ -21,6 +21,7 @@ const osc = require('osc');
 const { pidfilePath, reapOrphanedEngine, recordEnginePids, clearEnginePids, killIfOurs } = require('./orphans');
 const { samplesRoot, listPackFiles, resolveSampleFile, expandPackEntries, sliceEntryFor } = require('./samples');
 const { recordingsRoot, resolveRecording } = require('./recordings');
+const { speechRoot, cachedSpeech, renderSpeech, parseSpeech, voiceInstalled } = require('./tts');
 const { analyzeSlices } = require('./analysis');
 const { ensurePoptartExtension, ensureDeviceExtension, userExtensionsDir, sclangStartupFile } = require('./extensions');
 const {
@@ -1297,6 +1298,13 @@ class OscEngine {
     this._send('/poptart/deckMeters', [on ? 1 : 0]);
   }
 
+  // The headphone section (see \poptart_headphones): `level` the volume and `mix` cue (0) to
+  // main mix (1), both 0..1. Inert on an engine booted without a cue pair.
+  setHeadphones(level, mix) {
+    const clamp = (v, d) => (Number.isFinite(Number(v)) ? Math.min(1, Math.max(0, Number(v))) : d);
+    this._send('/poptart/headphones', [clamp(level, 1), clamp(mix, 0)]);
+  }
+
   /** The band centers onMixSpec frames are measured at, lowest first. */
   mixBandFreqs() {
     return [...MIX_BAND_FREQS];
@@ -1603,11 +1611,24 @@ class OscEngine {
    * front: a bare name is a PACK (s("bd") - a folder, addressed further by index), "sp:<id>" is a
    * NAMED pack (sp("kit") - a hand-picked list of files the host pushed via defineSamplePacks,
    * also addressed by index), "file:<rel>" is one exact file under the samples root (se()),
-   * "rec:<name>" is one bounce from the recordings folder (sr()). All four come back as a plain
-   * list of paths, so everything downstream - the buffer load, slices, begin/end, fit - is
-   * identical for all of them; a one-file source is just a pack of one, whose index wraps to 0.
+   * "rec:<name>" is one bounce from the recordings folder (sr()), "say:<voice:text>" one spoken
+   * phrase (say(), see tts.js). All five come back as a plain list of paths, so everything
+   * downstream - the buffer load, slices, begin/end, fit - is identical for all of them; a one-file
+   * source is just a pack of one, whose index wraps to 0. Speech nobody has rendered yet comes back
+   * as `render`, a promise of its one path, instead.
    */
   _resolveSource(ref) {
+    if (ref.startsWith('say:')) {
+      const value = ref.slice(4);
+      const { voice, text } = parseSpeech(value);
+      const what = `speech "${text}"${voice ? ` (voice ${voice})` : ''}`;
+      voiceInstalled(voice).then((ok) => {
+        if (!ok) this._warnOnce(`voice:${voice}`, `[poptart] say(): no voice called "${voice}" is installed - speaking with the default voice`);
+      });
+      const file = cachedSpeech(value);
+      if (file) return { paths: [file], what, where: speechRoot(), stable: false };
+      return { paths: null, render: renderSpeech(value).then((f) => [f]), what, where: speechRoot(), stable: false };
+    }
     if (ref.startsWith('sp:')) {
       const id = ref.slice(3);
       const entries = this._namedPacks.get(id);
@@ -1647,13 +1668,31 @@ class OscEngine {
     const entry = { status: 'loading', files: [], stable: true, triedAt: Date.now() };
     this._packs.set(ref, entry);
 
-    const { paths, what, where, stable } = this._resolveSource(ref);
+    const { paths, render, what, where, stable } = this._resolveSource(ref);
     entry.stable = stable;
+    if (render) {
+      render
+        .then((rendered) => this._loadPackFiles(ref, entry, rendered, what))
+        .catch((err) => {
+          // Not retried: an unknown voice or a machine without `say` stays that way, and a retry
+          // would be a fresh spawn every couple of seconds for as long as the pattern plays.
+          entry.status = 'error';
+          entry.stable = true;
+          this._warnOnce(`source:${ref}`, `[poptart] ${what} could not be rendered: ${err.message}`);
+        });
+      return entry;
+    }
     if (!paths || paths.length === 0) {
       entry.status = 'error';
       this._warnOnce(`source:${ref}`, `[poptart] ${what} not found (looked in ${where})`);
       return entry;
     }
+    this._loadPackFiles(ref, entry, paths, what);
+    return entry;
+  }
+
+  // The second half of _ensurePack: have sclang read a source's files into buffers.
+  _loadPackFiles(ref, entry, paths, what) {
 
     // The paths JSON can be far bigger than one UDP datagram (macOS caps sends at ~9KB and a
     // 700-file pack is ~70KB), so mirror the .scd's replyOk temp-file scheme in this direction
@@ -1692,7 +1731,6 @@ class OscEngine {
         entry.status = 'error';
         this._warnOnce(`source:${ref}`, `[poptart] ${what} failed to load: ${err.message}`);
       });
-    return entry;
   }
 
   /**

@@ -109,8 +109,9 @@ var bendPollHz = ${/var bendPollHz = (\d+)/.exec(SRC)[1]};
 var maxBusSends = 4;
 var deckMeterBus = Bus.control(server, 4);
 var trackDefName = { |key| ("poptart_track_" ++ key).asSymbol };
-var buildTrackDef, channelDefault, def;
+var buildTrackDef, djIsolator, channelDefault, def;
 server.options.numOutputBusChannels = 2;
+${extract('djIsolator')}
 ${extract('buildTrackDef')}
 ${extract('channelDefault')}
 def = buildTrackDef.(\\probe);

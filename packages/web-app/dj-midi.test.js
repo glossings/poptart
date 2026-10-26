@@ -32,7 +32,7 @@ const NAMES = ['mixMidiValue', 'mixMidiScrubDelta', 'mixMidiBrowseTicks', 'mixMi
   'mixMidiDrive', 'mixMidiButton', 'clockHeldByDesk'];
 const CONSTS = ['MIX_MIDI_KNOBS', 'MIX_MIDI_HOLD', 'MIX_MIDI_PRESS', 'MIX_MIDI_DECK_CTLS',
   'MIX_MIDI_BROWSE_PRESS', 'MIX_MIDI_BROWSE_KNOBS', 'MIX_MIDI_GLOBAL_PRESS',
-  'MIX_MIDI_GLOBAL_HOLD', 'MIX_MIDI_FX_POS',
+  'MIX_MIDI_GLOBAL_HOLD', 'MIX_MIDI_FX_POS', 'MIX_MIDI_PHONES_KNOBS',
   'MIX_MIDI_GLOBAL', 'MIX_MIDI_TARGETS', 'SONG_SCRUB_TICK_SEC', 'SONG_SEARCH_TICK_SEC',
   'FX_ASSIGNS', 'DECK_TEMPO_RANGES'];
 const DEPS = ['mixState', 'songDecks', 'songMasterDeck', 'mixMidiDown', 'applyMixTargets',
@@ -495,7 +495,7 @@ const LEARN_NAMES = ['mixMidiLearnable', 'midi14Partner', 'mixSwitchState', 'mix
   'mixMidiSwitchFinish', 'handleMixMidi'];
 const LEARN_CONSTS = ['MIX_MIDI_HOLD', 'MIX_MIDI_PRESS', 'MIX_MIDI_BROWSE_PRESS',
   'MIX_MIDI_BROWSE_KNOBS', 'MIX_MIDI_GLOBAL_PRESS',
-  'MIX_MIDI_GLOBAL_HOLD', 'MIX_MIDI_FX_POS', 'MIX_MIDI_GLOBAL', 'MIX_MIDI_BUTTONS',
+  'MIX_MIDI_GLOBAL_HOLD', 'MIX_MIDI_FX_POS', 'MIX_MIDI_PHONES_KNOBS', 'MIX_MIDI_GLOBAL', 'MIX_MIDI_BUTTONS',
   'midiKind', 'midiNum', 'midiSame', 'midiSay',
   'MIDI_14_WINDOW_MS', 'MIDI_14_LSB', 'midi14', 'midi14Warned', 'midi14Key', 'midi14IsCoarse', 'midi14IsFine',
   'MIX_SWITCH_SETTLE_MS', 'MIX_SWITCH_TIMEOUT_MS'];

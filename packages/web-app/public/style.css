@@ -71,6 +71,32 @@ header {
   border-bottom: 1px solid var(--border);
 }
 
+/* The headphone knobs (see phonesRender): the desk's knob, with its label beside it rather than
+   under, so the pair sits in the header's row without making it taller. Dimmed, but still
+   turnable and learnable, while no cue pair is booted. */
+.phones-ctl {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: none;
+}
+.phones-ctl.off {
+  opacity: 0.4;
+}
+.phones-ctl.hidden {
+  display: none;
+}
+.phones-knob {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.phones-knob > span {
+  font-size: 10px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
 .logo {
   width: 14px;
   height: 14px;
@@ -4728,6 +4754,14 @@ body.mix-on.mix-stacked.dj-zoom-b #deckBPane {
 body.mix-on.dj-zoom-b #deckBPane {
   border-left: 0; /* nothing to its left to divide it from */
 }
+/* ...and everything else of DJ mode with it, so a deck alone looks like a session outside it:
+   no mixer, no stacked waveforms, no seams or rails for regions that are not on the page. */
+body.mix-on.dj-zoomed #mixStrip,
+body.mix-on.dj-zoomed #songStack,
+body.mix-on.dj-zoomed .dj-rail,
+body.mix-on.dj-zoomed .dj-resize {
+  display: none;
+}
 
 /* ---------------------------------------------------- DJ mode: resizable regions
    Three stacked regions in DJ mode - waveforms, decks, mixer - with a drag handle on each seam.
@@ -4773,9 +4807,6 @@ body.mix-on #deckBPane.deck-active::after {
   border-radius: 3px;
   pointer-events: none; /* it sits over the editor - it must not eat a single click */
   z-index: 6; /* over CodeMirror's own layers and the song pane's canvases */
-}
-body.mix-on .deck-active .deck-b-title {
-  color: var(--accent);
 }
 /* the stack seam spans both deck columns - it divides the whole A+B region, not deck A's */
 body.mix-on.mix-stacked #djStackResize {
@@ -4846,15 +4877,56 @@ body.mix-on #deckAHead .deck-only {
   align-items: center;
   justify-content: center;
 }
-/* ...except the song title, which reads left-aligned like a menu (see .deck-song). */
+/* ...except the song title, which reads left-aligned like a menu and ends in "…" when it runs
+   long (see .deck-song) - a flex box would clip its text instead of ellipsizing it. */
 body.mix-on #deckAHead .deck-song {
-  justify-content: flex-start;
+  display: block;
 }
-#deckBHead .deck-b-title,
-#deckAHead .deck-b-title {
-  font-weight: 600;
-  color: var(--accent);
+/* Every control in a deck head keeps its own width; the song title is the one thing that gives
+   way, and the full-screen button sits at the far end whatever is left between. */
+#deckBHead > *,
+#deckAHead > * {
+  flex: none;
   white-space: nowrap;
+}
+#deckBHead > .deck-song,
+#deckAHead > .deck-song {
+  flex: 0 1 auto;
+  min-width: 48px;
+  max-width: 24em;
+}
+#deckBHead > .deck-zoom,
+#deckAHead > .deck-zoom {
+  margin-left: auto;
+}
+/* A deck too narrow for the title AND the controls - each deck is half a laptop screen - gives the
+   title a line of its own, sharing it only with the full-screen button, and the controls the line
+   under it. Asked of the deck's own width, not the window's, so a full-screened deck goes back to
+   one row. */
+body.mix-on #editorPane,
+body.mix-on #deckBPane {
+  container: deck / inline-size;
+}
+@container deck (max-width: 700px) {
+  #deckBHead,
+  #deckAHead {
+    flex-wrap: wrap;
+    row-gap: 4px;
+  }
+  #deckBHead > .deck-song,
+  #deckAHead > .deck-song {
+    order: -2;
+    flex-basis: calc(100% - 40px);
+    max-width: none;
+  }
+  #deckBHead > .deck-zoom,
+  #deckAHead > .deck-zoom {
+    order: -1;
+  }
+  #deckBHead > .deck-head-gap,
+  #deckAHead > .deck-head-gap {
+    display: none;
+  }
 }
 /* The set's queue bookkeeping - never shown (the song button below is the picker). */
 #deckAFile,
@@ -4907,8 +4979,8 @@ body.mix-on #deckAHead .deck-song {
   color: var(--accent);
   border-color: var(--accent);
 }
-/* The loop length, between its two buttons. Fixed width and tabular, because halving a loop under
-   the hand must not shove the buttons either side of it out from under the pointer. */
+/* The loop length, inside the loop button (scrolling over it halves or doubles). Fixed width and
+   tabular, because a length changing under the hand must not resize the button under the pointer. */
 .deck-loop-len {
   min-width: 52px;
   text-align: center;
@@ -6345,6 +6417,10 @@ input.org-edit {
 #orgTable thead th.org-c-bpm,
 #orgTable thead th.org-c-when {
   text-align: right;
+}
+.org-c-type {
+  width: 64px;
+  color: var(--text-dim);
 }
 .org-c-key {
   width: 48px;

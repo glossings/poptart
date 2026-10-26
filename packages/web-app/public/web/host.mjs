@@ -106,6 +106,7 @@ const REFUSALS = {
   'POST /api/mix/gateall': ['the DJ desk', 'it stays on the desktop'],
   'POST /api/mix/solo': ['the DJ desk', 'it stays on the desktop'],
   'POST /api/mix/swap': ['the DJ desk', 'it stays on the desktop'],
+  'POST /api/mix/headphones': ['the headphone cue', 'it stays on the desktop'],
   'POST /api/mix/clear': ['the DJ desk', 'it stays on the desktop'],
   'POST /api/mix/eject': ['the DJ desk', 'it stays on the desktop'],
   'POST /api/mix/complete': ['the DJ desk', 'it stays on the desktop'],
@@ -697,6 +698,8 @@ export function createHost({
     // the settings row is in the same page, and a row that logs an error as the tab opens is
     // a broken row. Answered as an empty picker, exactly as the clock's is with no MIDI.
     'GET /api/mix/feedback': async () => ({ destinations: [], selected: null, active: null, meters: false }),
+    // No headphone cue in the browser: the knobs are not shown.
+    'GET /api/mix/headphones': async () => ({ level: 1, mix: 0, cuePair: false, unavailable: true }),
     'POST /api/midiClock': async (body) => {
       if (!midi) throw new Unsupported('MIDI clock out', 'this browser has no MIDI');
       return midi.setClock(body?.device ?? null);

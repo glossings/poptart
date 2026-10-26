@@ -7239,6 +7239,25 @@
           "rate": "a"
         },
         {
+          "id": "glide.mode",
+          "name": "Glide Mode",
+          "min": 0,
+          "max": 1,
+          "default": 0,
+          "step": 1,
+          "curve": "lin",
+          "curveExp": 2,
+          "unit": "",
+          "ui": "enum",
+          "group": "Voice",
+          "rate": "k",
+          "options": [
+            "legato",
+            "always"
+          ],
+          "capacity": 2
+        },
+        {
           "id": "level",
           "name": "Level",
           "min": 0,

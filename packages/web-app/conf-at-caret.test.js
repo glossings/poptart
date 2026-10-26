@@ -33,7 +33,9 @@ test.before(async () => {
   deckB = { name: 'b' };
   const deckTrackId = (ed, label) => (ed === deckB ? `b:${label}` : label);
   // eslint-disable-next-line no-new-func
-  trackKeyAt = new Function('labelsMod', 'groupsMod', 'deckTrackId', `${grab(CLIENT, 'trackKeyAt')}; return trackKeyAt;`)(labelsMod, groupsMod, deckTrackId);
+  const blockTrackId = new Function('deckTrackId', 'groupsMod', `${/^const blockTrackId = [^\n]*;$/m.exec(CLIENT)[0]} return blockTrackId;`)(deckTrackId, groupsMod);
+  // eslint-disable-next-line no-new-func
+  trackKeyAt = new Function('labelsMod', 'groupsMod', 'blockTrackId', `${grab(CLIENT, 'trackKeyAt')}; return trackKeyAt;`)(labelsMod, groupsMod, blockTrackId);
 });
 
 const editor = (code, self = null) => Object.assign(self ?? {}, { getValue: () => code });

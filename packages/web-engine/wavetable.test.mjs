@@ -64,6 +64,7 @@ test('the modes and counts are the only k-rate controls; everything continuous c
   const kRate = WAVETABLE.params.filter((p) => p.rate === 'k').map((p) => p.id).sort();
   assert.deepEqual(kRate, [
     'env.acurve', 'env.dcurve', 'env.rcurve', 'env.scale',
+    'glide.mode',
     'osc1.octave', 'osc1.phaserand', 'osc1.table', 'osc1.unison', 'osc1.warpmode',
     'osc2.octave', 'osc2.phaserand', 'osc2.table', 'osc2.unison', 'osc2.warpmode',
     'sub.octave', 'sub.shape',
@@ -126,9 +127,86 @@ test('the note is the voice identity: a second on for the same pitch takes the s
   synth.queueNoteOn(64, 1, 0);
   render(synth, 256);
   assert.equal(synth.activeVoices, 1, 'the same pitch should not stack up voices');
+  // ...but it holds the pitch twice: each on has its own off, and the voice waits for the last.
   synth.queueNoteOff(64, 0);
   render(synth, 48000);
-  assert.equal(synth.activeVoices, 0, 'one off should release it');
+  assert.equal(synth.activeVoices, 1, 'the first off ends the first note, not the second');
+  synth.queueNoteOff(64, 0);
+  render(synth, 48000);
+  assert.equal(synth.activeVoices, 0, 'the second off releases it');
+  // A hush lets go of everything, however many ons a voice was holding.
+  synth.queueNoteOn(64, 1, 0);
+  synth.queueNoteOn(64, 1, 0);
+  render(synth, 256);
+  synth.allNotesOff();
+  render(synth, 48000);
+  assert.equal(synth.activeVoices, 0);
+});
+
+// The voices sounding and not releasing, by pitch.
+const held = (synth) => synth.voices.filter((v) => v.active && !v.releasing).map((v) => v.note).sort((a, b) => a - b);
+
+test('a chord held over the next one that shares its notes keeps the shared notes (the collapse, 2026-10-22)', () => {
+  // n("<0 -2>").sc().chord("7").clip(1.5): C E G B, then A C E G while the first still holds.
+  const synth = new WavetableSynth(SR);
+  synth.setParams(defaultValues(WAVETABLE));
+  for (const n of [60, 64, 67, 71]) synth.queueNoteOn(n, 1, 0);
+  render(synth, 1024);
+  for (const n of [57, 60, 64, 67]) synth.queueNoteOn(n, 1, 0);
+  render(synth, 1024);
+  for (const n of [60, 64, 67, 71]) synth.queueNoteOff(n, 0); // the first chord ends
+  render(synth, 1024);
+  assert.deepEqual(held(synth), [57, 60, 64, 67], 'the second chord is still whole');
+});
+
+test('legato glide slides only a note that takes over a sounding voice', () => {
+  const synth = new WavetableSynth(SR);
+  synth.setParams({ ...defaultValues(WAVETABLE), glide: 0.25 });
+  for (const n of [60, 64, 67, 71]) synth.queueNoteOn(n, 1, 0);
+  render(synth, 1024);
+  for (const n of [60, 64, 67, 71]) synth.queueNoteOff(n, 0);
+  for (const n of [57, 60, 64, 67]) synth.queueNoteOn(n, 1, 0);
+  render(synth, 128);
+  const a = synth.voices.find((v) => v.note === 57 && v.active && !v.releasing);
+  assert.equal(a.currentHz, midiToHz(57), 'with voices to spare, nothing slides');
+});
+
+test('always glide moves each changed note from its nearest old one, and leaves the shared notes put', () => {
+  const synth = new WavetableSynth(SR);
+  synth.setParams({ ...defaultValues(WAVETABLE), glide: 0.25, 'glide.mode': 1 });
+  for (const n of [60, 64, 67, 71]) synth.queueNoteOn(n, 1, 0);
+  render(synth, 1024);
+  for (const n of [60, 64, 67, 71]) synth.queueNoteOff(n, 0);
+  for (const n of [57, 60, 64, 67]) synth.queueNoteOn(n, 1, 0);
+  render(synth, 128);
+  const at = (note) => synth.voices.find((v) => v.note === note && v.active && !v.releasing);
+  // B slides down to A; the three notes the chords share start where they are.
+  assert.ok(at(57).currentHz > midiToHz(70), `A should start near B, not at ${at(57).currentHz.toFixed(1)} Hz`);
+  for (const n of [60, 64, 67]) assert.equal(at(n).currentHz, midiToHz(n), `${n} should not slide`);
+  assert.equal(synth.voices.filter((v) => v.active).length, 4, "B's voice became A's rather than ringing on");
+});
+
+test('always glide slides even when the old chord is still held, and from a note long finished', () => {
+  const synth = new WavetableSynth(SR);
+  synth.setParams({ ...defaultValues(WAVETABLE), glide: 0.25, 'glide.mode': 1 });
+  for (const n of [60, 64, 67, 71]) synth.queueNoteOn(n, 1, 0);
+  render(synth, 1024);
+  for (const n of [57, 60, 64, 67]) synth.queueNoteOn(n, 1, 0); // the first chord still held
+  render(synth, 128);
+  const a = synth.voices.find((v) => v.note === 57 && v.active);
+  assert.ok(a.currentHz > midiToHz(70), 'A slides in from the B still sounding');
+
+  // A single line, long after everything stopped: the next note still slides from the last.
+  const line = new WavetableSynth(SR);
+  line.setParams({ ...defaultValues(WAVETABLE), glide: 0.25, 'glide.mode': 1 });
+  line.queueNoteOn(60, 1, 0);
+  render(line, 1024);
+  line.queueNoteOff(60, 0);
+  render(line, SR);
+  line.queueNoteOn(67, 1, 0);
+  render(line, 128);
+  const g = line.voices.find((v) => v.note === 67 && v.active);
+  assert.ok(g.currentHz < midiToHz(61), 'G slides up from the C, a second later');
 });
 
 test('a chord plays every note at once, up to the voice count', () => {

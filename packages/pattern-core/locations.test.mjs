@@ -452,3 +452,11 @@ test('injectLocations leaves a groove definition alone, and judges swing\'s shap
   // ...and the AMOUNT in front of it is a pattern either way, name or not.
   assert.equal(injectLocations('.swing("<0 0.33>")', 0), '.swing(mini("<0 0.33>", 8))');
 });
+
+test("say()'s text is speech-mode mini; its voice stays a pattern, its method form plain text", () => {
+  // Speech mode keeps "i" a word and "i'm" an apostrophe (2026-10-22) while "~" and "<>" still work.
+  assert.equal(injectLocations('say("hi ~ i am glossing")'), "say(mini(\"hi ~ i am glossing\", 5, 'speech'))");
+  assert.equal(injectLocations('say("hey, i\'m here", "<Whisper Zarvox>")'),
+    "say(mini(\"hey, i'm here\", 5, 'speech'), mini(\"<Whisper Zarvox>\", 22))");
+  assert.equal(injectLocations('note("c3").say("hi there")'), 'note(mini("c3", 6)).say("hi there")');
+});

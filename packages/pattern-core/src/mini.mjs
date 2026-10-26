@@ -89,8 +89,8 @@ import { noteToMidi } from './notes.mjs';
 // sitting anywhere in the editor buffer (see web-app's location transpile). Only the highlight
 // spans move; decorrelating seeds (`?`/`|`, r/i/p) stay string-relative and untouched, so a
 // pattern degrades/chooses identically no matter where in the buffer it lives.
-export function parseMini(str, offset = 0) {
-  const tokens = tokenize(str);
+export function parseMini(str, offset = 0, { speech = false } = {}) {
+  const tokens = speech ? tokenizeSpeech(str) : tokenize(str);
   const { node, rest } = parseLayers(tokens, /* stopType */ null);
   if (rest.length > 0) {
     throw new Error(`[mini] unexpected token "${rest[0].text}" while parsing "${str}"`);
@@ -243,6 +243,82 @@ function tokenize(str) {
     const isSuffix = m[0][0] === ':' && prev && prev.end === i && (prev.type === '>' || prev.type === ']' || prev.type === ')');
     tokens.push({ type: isSuffix ? 'suffix' : 'atom', text: m[0], start: i, end: i + m[0].length });
     i += m[0].length;
+  }
+  return tokens;
+}
+
+// Speech mode (say()'s text): the same structure, read out of prose. Every word is a literal (a
+// quoted atom, so "i", "r" and "p" are words rather than functions and a "." is never a method),
+// and the characters prose uses for punctuation stay part of the word they touch:
+//   - "'" is an apostrophe ("i'm"), not a quote.
+//   - "," inside or at the end of a word is a comma ("hey, you"); only one starting a token - after
+//     a space or a bracket, "[hi , bye]" - stacks.
+//   - "* / ! ? @" are operators only with their operand glued on - "hi@3", "hey*2", "go*<2 3>",
+//     "ok?0.3", "yeah!3" - so "ok?" is a question and "and/or" one word. (Bare "a?" is therefore
+//     never the 50% drop it is in mini: write "a?0.5".)
+//   - "( )" belong to the word too ("(laughs)"), except in a glued function call - "i(1,10)" says a
+//     random number - and a euclid, "hi.e(3,8)" / "[a b].e(3,8)", whose parentheses read as mini.
+//   - "+", ":", "#", "&", accents and anything else that is not whitespace are word characters.
+// Kept as structure: "~" rests, "[ ]", "< >", "|", and "_" standing alone as a tie.
+const SPEECH_STRUCTURE = new Set(['[', ']', '<', '>', '~', '|']);
+const SPEECH_OPS = new Set(['*', '/', '!', '?', '@']);
+const SPEECH_CALL_RE = /^(r|i|p|round|floor|ceil)\(/;
+
+function tokenizeSpeech(str) {
+  const tokens = [];
+  const n = str.length;
+  const opAt = (k) => SPEECH_OPS.has(str[k]) && /^(\d|\.\d|[<[])/.test(str.slice(k + 1));
+  // The mini tokens of a parenthesized span starting at `open`, at their offsets in `str`.
+  const parens = (open) => {
+    let depth = 0;
+    for (let k = open; k < n; k++) {
+      if (str[k] === '(') depth++;
+      else if (str[k] === ')' && --depth === 0) {
+        for (const t of tokenize(str.slice(open, k + 1))) tokens.push({ ...t, start: t.start + open, end: t.end + open });
+        return k + 1;
+      }
+    }
+    throw new Error(`[mini] unclosed "(" in "${str}"`);
+  };
+  let i = 0;
+  while (i < n) {
+    const ch = str[i];
+    if (/\s/.test(ch)) {
+      i++;
+      continue;
+    }
+    if (SPEECH_STRUCTURE.has(ch) || ch === ',') {
+      tokens.push({ type: ch, text: ch, start: i, end: i + 1 });
+      i++;
+      continue;
+    }
+    if (opAt(i)) {
+      tokens.push({ type: ch, text: ch, start: i, end: i + 1 });
+      i++;
+      const num = /^(\d+(\.\d+)?|\.\d+)/.exec(str.slice(i));
+      if (num) {
+        tokens.push({ type: 'atom', text: num[0], start: i, end: i + num[0].length });
+        i += num[0].length;
+      }
+      continue;
+    }
+    if (str.startsWith('.e(', i)) {
+      tokens.push({ type: 'atom', text: '.e', start: i, end: i + 2 });
+      i = parens(i + 2);
+      continue;
+    }
+    const call = SPEECH_CALL_RE.exec(str.slice(i));
+    if (call) {
+      tokens.push({ type: 'atom', text: call[1], start: i, end: i + call[1].length });
+      i = parens(i + call[1].length);
+      continue;
+    }
+    const start = i;
+    while (i < n && !/\s/.test(str[i]) && !SPEECH_STRUCTURE.has(str[i]) && !opAt(i) && !str.startsWith('.e(', i)) i++;
+    const word = str.slice(start, i);
+    tokens.push(word === '_'
+      ? { type: 'atom', text: '_', start, end: i }
+      : { type: 'quoted', text: word, start, end: i });
   }
   return tokens;
 }

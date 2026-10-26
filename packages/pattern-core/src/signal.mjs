@@ -245,7 +245,7 @@ export class Sig {
     this.samplerPending = opts.samplerPending ?? null;
     // Which namespace this sampler's step values address: 'pack' (s - a folder, plus an index),
     // 'named' (sp - a _pack() definition, plus an index), 'file' (se - one exact path under the
-    // samples root), or 'rec' (sr - a bounce, by name). Held
+    // samples root), 'rec' (sr - a bounce, by name), or 'say' (say - spoken text). Held
     // OUTSIDE `sampler` on purpose: that object is walked generically wherever a pattern is
     // time-warped or condition-switched, and everything in it has to be a signal.
     this.samplerKind = opts.samplerKind ?? null;
@@ -3519,6 +3519,21 @@ export class Sig {
     return this._asSampler('sp', name, 'named', 'a pack name, e.g. note("c e g").sp("kit")');
   }
 
+  /**
+   * The method form of say() - play this pattern's notes with spoken text as the sound, each
+   * note's pitch repitching it: `note("c3 e3 g3").say("hi there", "Whisper")` says the whole
+   * phrase on every note. The text is literal, as say()'s is; a pattern of phrases is a pattern
+   * argument (`.say(mini("<hello goodbye>"))`), and the voice may be a pattern too.
+   */
+  say(text, voice) {
+    let src = text;
+    if (voice != null && text != null) {
+      const value = text instanceof Sig ? null : String(text).trim();
+      src = withVoice(text instanceof Sig ? text : new Sig(() => value, { stepsForCycle: () => [{ start: 0, end: 1, value }] }), voice);
+    }
+    return this._asSampler('say', src, 'say', 'some text to say, e.g. note("c e g").say("hello")');
+  }
+
   _asSampler(method, value, kind, expected) {
     // A control in head position - vel("1!4").s("bd") - is a channel plus a trigger grid, never a
     // pitch: without this its velocities would be read as the repitch note (see _fromHeadCtl).
@@ -3533,7 +3548,7 @@ export class Sig {
     }
     // A quoted-looking argument is the mini-string spelling leaking into the method form, where
     // the value is literal - fail loudly instead of hunting for a file whose name has quotes in it.
-    if (!nameSig && kind !== 'pack' && /^['"]|['"]$/.test(value.trim())) {
+    if (!nameSig && kind !== 'pack' && kind !== 'say' && /^['"]|['"]$/.test(value.trim())) {
       throw new Error(`[signal] .${method}() takes ${expected} - drop the quotes (they're only needed inside a ${method}("…") pattern)`);
     }
     const name = nameSig ? null : value.trim();
@@ -3682,7 +3697,7 @@ export class Sig {
       const stepsForCycle = crossMerge(this.stepsForCycle, noteSig, stampCfg('note'));
       return this._clone({ sampler: { ...this.sampler, note: noteSig }, stepsForCycle });
     }
-    const method = { pack: 's', file: 'se', rec: 'sr', named: 'sp' }[this.samplerKind] ?? 's';
+    const method = { pack: 's', file: 'se', rec: 'sr', named: 'sp', say: 'say' }[this.samplerKind] ?? 's';
     let out = noteSig._asSampler(method, this.samplerSrc, this.samplerKind, 'a sample source');
     for (const [key, v] of Object.entries(this.sampler)) {
       if (v == null || key === 'note') continue; // the new notes ARE the repitch now
@@ -5633,9 +5648,15 @@ function assertBuilderInput(builder, value) {
  * pattern literal "…" into mini("…", offset) (see pattern-core/locations.mjs). Omit it everywhere
  * else; the builders that take a Sig (n/note/s) thread these spans through unchanged.
  */
-export function mini(str, offset = 0) {
+// `mode` 'speech' is say()'s text (see tokenizeSpeech in mini.mjs): prose punctuation stays in
+// its words, and every value stays the string it was written as - "007" is said as written.
+export function mini(str, offset = 0, mode) {
   assertBuilderInput('mini', str);
   if (str instanceof Sig) return str;
+  if (mode === 'speech') {
+    const ast = parseMini(String(str), offset, { speech: true });
+    return new Sig(miniStepSampler(ast), { stepsForCycle: miniStepsForCycle(ast) });
+  }
   const ast = parseMini(String(str), offset);
   const valueFn = (v) => (Number.isNaN(Number(v)) ? v : Number(v));
   return new Sig(miniStepSampler(ast, valueFn), { stepsForCycle: miniStepsForCycle(ast, valueFn) });
@@ -5701,7 +5722,71 @@ export function sp(value) {
   return samplerPattern('sp', value, 'named');
 }
 
-// The four sampler sources differ only in how the engine turns a step's value into files (see
+/**
+ * Sampler pattern speaking text with the computer's own voices: `say("hey, i'm glossing?")` says
+ * one word per step, each rendered once and then played like any sample - .speed()/.fit()/
+ * .grain()/.slice() all apply.
+ *
+ * The text is mini notation read as SPEECH (see tokenizeSpeech in mini.mjs): rests, brackets,
+ * alternation, weights and ties work - `say("<hi@3 my name is@5 skrillex ~@10>")` - while prose
+ * punctuation stays in its word: "i'm", "hey,", "ok?" and "and/or" are words, and "i", "r" and
+ * "p" are words rather than functions. An operator needs its operand glued on ("hi*2", "ok?0.3").
+ * Or let notes carry it: `note("c3 e3").say("hi there")` says the whole phrase on each note.
+ *
+ * The second argument is the voice, by the name `say -v '?'` lists it under, and is a pattern like
+ * any other - `say("one two three four", "<Whisper Zarvox>")`; a name with a space is quoted,
+ * `"'Bad News'"`. No voice is the system's default one. Desktop only, on macOS.
+ */
+export function say(text, voice) {
+  const src = typeof text === 'string' ? sayWords(text) : text;
+  if (voice == null) return samplerPattern('say', src, 'say');
+  assertBuilderInput('say', src);
+  return samplerPattern('say', withVoice(src, voice), 'say');
+}
+
+// say()'s text, parsed as mini notation in speech mode (see tokenizeSpeech in mini.mjs). A string
+// in pattern position never gets here - the location transpile hands it over as
+// mini(text, offset, 'speech'), which parses the same way and highlights - so this is the path for
+// text built at runtime.
+function sayWords(text) {
+  if (!String(text).trim()) throw new Error('[signal] say() needs some text to say, e.g. say("hello there")');
+  return mini(String(text), 0, 'speech');
+}
+
+// What separates a step's voice from its text in the value the engine is handed (see
+// osc-engine/tts.js's parseSpeech): a character no typed text contains, so "3:30" stays a time.
+export const SAY_VOICE_SEP = '\u001f';
+
+// A text pattern whose steps carry their voice in front, read at each step's onset - so a voice
+// pattern adds no steps of its own.
+function withVoice(textSig, voice) {
+  const voiceSig = voice instanceof Sig ? voice : null;
+  const fixed = voiceSig ? null : String(voice).trim();
+  const tag = (v, at) => {
+    const s = String(v);
+    if (s.includes(SAY_VOICE_SEP)) return s;
+    const name = voiceSig ? readEvent(voiceSig, at).value : fixed;
+    return name == null || String(name).trim() === '' ? s : `${String(name).trim()}${SAY_VOICE_SEP}${s}`;
+  };
+  const stepsForCycle = textSig.stepsForCycle
+    ? (cycle) => textSig.stepsForCycle(cycle).map((s) => (s.value == null ? s : { ...s, value: tag(s.value, cycle + s.start) }))
+    : null;
+  const eventAt = textSig.eventAt
+    ? (cyclePos) => {
+        const ev = textSig.eventAt(cyclePos);
+        return ev.value == null ? ev : { value: tag(ev.value, cyclePos), locs: ev.locs };
+      }
+    : null;
+  return new Sig(
+    (t, cps, pos) => {
+      const v = textSig.sample(t, cps, pos);
+      return v == null ? null : tag(v, t);
+    },
+    { stepsForCycle, eventAt, ...textSig._meta() },
+  );
+}
+
+// The five sampler sources differ only in how the engine turns a step's value into files (see
 // OscEngine#_resolveSource); `kind` rides on Sig#samplerKind and the scheduler stamps it onto the
 // ref it sends.
 function samplerPattern(builder, value, kind) {

@@ -54,9 +54,10 @@ export function injectLocations(code, base = 0, { miniOff = [] } = {}) {
     // hand the paren scan a `)` to stop on, leaving this literal looking like a pattern.
     const before = masked.slice(0, lit.fullStart);
     const after = masked.slice(lit.fullEnd);
-    if (lit.hasInterp || !isPatternPosition(before, after, code.slice(lit.contentStart, lit.fullEnd - 1))) continue;
+    const position = lit.hasInterp ? false : isPatternPosition(before, after, code.slice(lit.contentStart, lit.fullEnd - 1));
+    if (!position) continue;
     out += code.slice(prev, lit.fullStart);
-    out += `mini(${code.slice(lit.fullStart, lit.fullEnd)}, ${base + lit.contentStart})`;
+    out += `mini(${code.slice(lit.fullStart, lit.fullEnd)}, ${base + lit.contentStart}${position === 'speech' ? ", 'speech'" : ''})`;
     prev = lit.fullEnd;
   }
   out += code.slice(prev);
@@ -91,6 +92,9 @@ function inRanges(ranges, at) {
 // and treats everything else as a pattern - a new builder (choose(), and whatever comes next)
 // highlights its arguments with no entry here. Add a call only when its string is a lookup key.
 const NAME_ARG_CALLS = new Set([
+  // say()'s METHOD form: .say("hi there") is one phrase, said on every note. The builder form is
+  // speech-mode mini (see isPatternPosition). The voice (the second argument) stays a pattern.
+  'say',
   'synth', 'fx', 'scale', 'setscale', 'setgroove', 'as', 'midi', 'audio', 'input', 'copy', 'pcopy', 'lfo', 'midicc', 'midikeys', 'osc', 'pianoroll',
   // `.bus("<reverb delay>")` / `.bsend(...)` are deliberately NOT here: a send's destination is a
   // pattern of names like `.preset()`'s, so its literal wants wrapping (and highlighting) too.
@@ -141,6 +145,7 @@ const NAME_ONLY_CALLS = new Set(['samples', 'synth', 'fx', 'lfo', 'pianoroll', '
 const METHOD_NAME_ARG_CALLS = new Set(['se', 'sr']);
 
 // Is a string literal here used as a mini-notation pattern (vs a plugin/scale/param-name lookup)?
+// Truthy for a pattern: `true`, or `'speech'` for say()'s text, which parses in speech mode.
 // `before` is the code up to the opening quote, `after` the code from just past the closing quote.
 // In argument position the default is "pattern" (as in Strudel, where mini notation is what a
 // string in a pattern expression means) and NAME_ARG_CALLS is what pulls a literal back out:
@@ -201,6 +206,14 @@ export function isPatternPosition(before, after, text = '') {
     // looksLikeShapeData.
     if (first[1] === 'pianoroll') return !!text.trim() && !looksLikeNoteString(text);
     if (first[1] === 'lfo' || first[1] === 'grainshape') return !!text.trim() && !looksLikeShapeData(text);
+    // say()'s text is mini notation read as speech (see tokenizeSpeech in mini.mjs), so it is
+    // wrapped as mini(text, offset, 'speech'): parsed the way say() parses it, and highlighted.
+    // Its method form, .say("hi there"), is one phrase said on every note - plain text.
+    if (first[1] === 'say') {
+      let j = before.length - near.length + first.index;
+      while (j > 0 && /\s/.test(before[j - 1])) j--;
+      return j > 0 && before[j - 1] === '.' ? false : 'speech';
+    }
     if (NAME_ARG_CALLS.has(first[1])) return false;
     // .wet(target, value) names a device first - the comma after the literal is what says this is
     // the two-argument form. A lone .wet("<1 0>") stays the value pattern it is.

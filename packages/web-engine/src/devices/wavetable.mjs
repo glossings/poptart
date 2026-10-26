@@ -104,6 +104,8 @@ export const WAVETABLE = defineDevice({
       description: 'Multiplies every envelope time at once.' },
 
     { id: 'glide', name: 'Glide', min: 0, max: 5, default: 0, unit: 's', curve: 'pow', curveExp: 3, group: 'Voice' },
+    { id: 'glide.mode', name: 'Glide Mode', default: 0, options: ['legato', 'always'], rate: 'k', group: 'Voice',
+      description: 'Legato slides only when a note takes over a voice that is still sounding. Always slides every note in from the nearest pitch last played, so a chord change moves each changed note to its new one.' },
     { id: 'level', name: 'Level', min: 0, max: 1, default: 0.7, group: 'Voice' },
     { id: 'voices', name: 'Voices', min: 1, max: MAX_VOICES, default: 8, step: 1, rate: 'k', ui: 'number', group: 'Voice' },
   ],
@@ -203,7 +205,7 @@ export const PARAM_FIELDS = Object.freeze({
   'ampenv.release': 'ampRelease',
 
   'env.acurve': 'envAttackCurve', 'env.dcurve': 'envDecayCurve', 'env.rcurve': 'envReleaseCurve', 'env.scale': 'envScale',
-  'glide': 'glide', 'level': 'level',
+  'glide': 'glide', 'glide.mode': 'glideMode', 'level': 'level',
 });
 
 /** The sub oscillator's own two-frame table: a sine and a square, band-limited like any other. */
@@ -238,7 +240,20 @@ export function tableFromSample(name, { channels = [], frameLength = null, mips 
  * Voice identity is the NOTE, because that is what the engine interface addresses: a note-off
  * names a pitch, not a voice, so the synth is responsible for matching it to whatever is
  * sounding. Two note-ons on the same pitch before an off means the second takes the first's
- * voice, which is the only reading that lets the single off that follows release both.
+ * voice - and the voice COUNTS them, letting go only at the last off. Every note the scheduler
+ * plays sends its own off, so a chord held over the next one that shares a pitch with it sends
+ * two: releasing at the first cut the later chord's note short at the earlier one's end, which
+ * is what turned overlapping chords into a single note (2026-10-22). A hush still releases
+ * everything, counted or not, so nothing can be left hanging on an off that never came.
+ *
+ * GLIDE has two modes. Legato (the original): a note slides from what its voice was playing,
+ * only when it takes over a voice still sounding - a lead with one voice, or a part that has run
+ * out of them. Always: every note slides in from the NEAREST pitch the synth last played that
+ * the new notes are not themselves reusing, whatever is still sounding. Notes that start
+ * together are dealt as a set: the ones already sounding (or just let go of) on their own pitch
+ * stay put first, then each of the rest slides from the nearest pitch left over - so a chord
+ * change moves only the notes that change, each to its nearest new note, which is the voice
+ * leading a polyphonic glide means.
  */
 export class WavetableSynth {
   constructor(sampleRate, tables = null) {
@@ -355,7 +370,10 @@ export class WavetableSynth {
   /** Releases everything, the way the host's hush does. */
   allNotesOff() {
     this.events.length = 0;
-    for (const v of this.voices) if (v.active) v.noteOff();
+    for (const v of this.voices) {
+      v.holds = 0;
+      if (v.active) v.noteOff();
+    }
   }
 
   get activeVoices() {
@@ -392,13 +410,67 @@ export class WavetableSynth {
     // Glide slides from whatever this voice was last playing, which is how a monophonic lead
     // with one voice glides between its notes.
     const from = voice.active && voice.note >= 0 ? midiToHz(voice.note) : null;
+    this._play(voice, note, velocity, from);
+  }
+
+  /** Starts `note` on `voice`, counting it as one more hold when the voice already held it. */
+  _play(voice, note, velocity, from) {
+    const holds = voice.active && voice.note === note && !voice.releasing ? voice.holds + 1 : 1;
     voice.setTables(this.tableFor(this.params.osc1Table), this.tableFor(this.params.osc2Table), this.subTable);
     voice.age = this.clock++;
     voice.noteOn(note, velocity, this.params, (this.seed = (this.seed * 1664525 + 1013904223) >>> 0), from);
+    voice.holds = holds;
+  }
+
+  /**
+   * Note-ons that start together. Legato plays them in order, as they came. Always deals them as
+   * a set (see the class comment): a note already on a voice of its own pitch first, then the
+   * rest, each sliding from the nearest pitch nobody in the set has claimed.
+   */
+  startNotes(ons) {
+    if (this.params.glideMode < 0.5) {
+      for (const e of ons) this.startNote(e.note, e.velocity);
+      return;
+    }
+    const limit = this.voiceCount;
+    const pitches = ons.map((e) => e.note);
+    const claimed = [];
+    const later = [];
+    for (const e of ons) {
+      let own = null;
+      for (let i = 0; i < limit && !own; i++) {
+        const v = this.voices[i];
+        if (v.note === e.note && !claimed.includes(v)) own = v; // held, releasing or just quiet
+      }
+      if (!own) { later.push(e); continue; }
+      claimed.push(own);
+      this._play(own, e.note, e.velocity, null);
+    }
+    for (const e of later) {
+      let source = null;
+      let best = Infinity;
+      for (const v of this.voices) {
+        if (v.note < 0 || claimed.includes(v) || pitches.includes(v.note)) continue;
+        const d = Math.abs(v.note - e.note);
+        if (d < best) { best = d; source = v; }
+      }
+      const index = source ? this.voices.indexOf(source) : -1;
+      const reuse = source && index < limit && !(source.active && !source.releasing);
+      const voice = reuse ? source : this.allocate(e.note);
+      const from = source ? midiToHz(source.note) : (voice.active && voice.note >= 0 ? midiToHz(voice.note) : null);
+      if (source) claimed.push(source);
+      claimed.push(voice);
+      this._play(voice, e.note, e.velocity, from);
+    }
   }
 
   stopNote(note) {
-    for (const v of this.voices) if (v.active && v.note === note && !v.releasing) v.noteOff();
+    for (const v of this.voices) {
+      if (!(v.active && v.note === note && !v.releasing)) continue;
+      if (--v.holds > 0) continue; // an earlier note on this pitch ending: a later one still holds it
+      v.holds = 0;
+      v.noteOff();
+    }
   }
 
   /**
@@ -428,8 +500,11 @@ export class WavetableSynth {
     while (at < count) {
       while (next < events.length && events[next].at <= at) {
         const e = events[next++];
-        if (e.kind === 1) this.startNote(e.note, e.velocity);
-        else this.stopNote(e.note);
+        if (e.kind !== 1) { this.stopNote(e.note); continue; }
+        // A run of note-ons at one instant is one set (a chord), started together.
+        const ons = [e];
+        while (next < events.length && events[next].at <= at && events[next].kind === 1) ons.push(events[next++]);
+        this.startNotes(ons);
       }
       const until = next < events.length ? Math.min(count, events[next].at) : count;
       const n = until - at;

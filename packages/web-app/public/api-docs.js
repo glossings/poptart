@@ -66,6 +66,12 @@ const API_DOCS = {
     desc: 'A sampler pattern over a pack whose files you chose by hand. Double-click the name to build or edit the pack; ":n" or .i(n) plays its nth file.',
     eg: 'sp("kit:0 kit:1 kit:0 kit:2")',
   },
+  say: {
+    kind: 'both',
+    sig: 'say(text, voice)',
+    desc: 'A sampler pattern that speaks text with a system voice, one word per step, each rendered once and then played as a sample. The text is mini-notation (~ rests, <>, [], @, _) with punctuation kept in its word, so i\'m, ok? and and/or are words; an operator needs its number attached (hi*2, ok?0.5). voice is a pattern of voice names. Desktop only, on macOS.',
+    eg: 'say("<hi@3 my name is@5 glossing ~@10>", "<Whisper Zarvox>")',
+  },
   record: {
     kind: 'method',
     sig: 'record({ cycles, name, wrapTail, normalize })',

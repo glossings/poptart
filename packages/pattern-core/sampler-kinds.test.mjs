@@ -7,7 +7,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { s, se, sr, sp, note, speed, mini } from './src/signal.mjs';
+import { s, se, sr, sp, say, note, speed, mini } from './src/signal.mjs';
 import { Scheduler } from './src/scheduler.mjs';
 
 function mockEngine() {
@@ -19,12 +19,12 @@ function mockEngine() {
   return { engine, callsTo: (method) => calls.filter((c) => c.method === method) };
 }
 
-// One tick's worth of the lookahead walk over cycle 0.
-function play(sig) {
+// The lookahead walk over the first `cycles` cycles (cycle 0 alone by default).
+function play(sig, cycles = 1) {
   const { engine, callsTo } = mockEngine();
   const sch = new Scheduler(engine, { trackId: 't', cps: 1 });
   sch.setPattern(sig);
-  sch._scheduleNoteEdges(0, 1);
+  sch._scheduleNoteEdges(0, cycles);
   return callsTo('playSample');
 }
 
@@ -126,4 +126,53 @@ test('the method form takes a literal path - only the builder parses mini', () =
 test('the builders take the same inputs s() does', () => {
   assert.throws(() => se({}), /takes a number, a mini-notation string, or a signal/);
   assert.throws(() => sr([]), /takes a number, a mini-notation string, or a signal/);
+});
+
+const US = '\u001f'; // between a spoken step's voice and its text
+
+test('say() reads its text as speech: prose punctuation stays in the word, mini structure still works', () => {
+  // "i", "r" and "p" are words, not mini's random functions (2026-10-22).
+  assert.deepEqual(refs(say('hi i am glossing')), ['say:hi', 'say:i', 'say:am', 'say:glossing']);
+  // Apostrophes, commas, a bare "?", a slash between words and a colon are all part of the word.
+  assert.deepEqual(refs(say("hey, i'm r p ok? and/or 3:30")), ['say:hey,', "say:i'm", 'say:r', 'say:p', 'say:ok?', 'say:and/or', 'say:3:30']);
+  assert.equal(cfgs(say('3:30'))[0].index, undefined, 'a colon is part of the text, never an index');
+  // ...and so is anything mini has no character for.
+  assert.deepEqual(refs(say('café (laughs) C++ & 007')), ['say:café', 'say:(laughs)', 'say:C++', 'say:&', 'say:007']);
+  assert.throws(() => say('   '), /needs some text/);
+  // "~" is a rest, not the word "tilde".
+  assert.deepEqual(refs(say('hi ~ there')), ['say:hi', 'say:there']);
+  // Operators with their operand glued on: weight, fast, replicate, a tie, a euclid.
+  assert.deepEqual(play(say('hi@3 there')).map((c) => c.args[3]), [0, 0.75]);
+  assert.deepEqual(refs(say('hi*2 yeah!2')), ['say:hi', 'say:hi', 'say:yeah', 'say:yeah']);
+  assert.deepEqual(play(say('hi _ _ bye')).map((c) => c.args[3]), [0, 0.75]);
+  assert.deepEqual(refs(say('hi.e(3,8)')), ['say:hi', 'say:hi', 'say:hi']);
+  // A spaced comma stacks; a glued one is a comma.
+  assert.deepEqual(refs(say('[hi , bye]')).sort(), ['say:bye', 'say:hi']);
+  // A glued function call is still one: i(1,10) says a random number.
+  assert.match(refs(say('i(1,10)'))[0], /^say:([1-9]|10)$/);
+  // Alternation with held items says each word once, at its onset.
+  assert.deepEqual(play(say('<hi@2 bye ~>'), 4).map((c) => [c.args[1], c.args[3]]), [['say:hi', 0], ['say:bye', 2]]);
+  // ...and a pattern argument is still a pattern.
+  assert.deepEqual(refs(say(mini('<hi bye>*2'))), ['say:hi', 'say:bye']);
+});
+
+test('say()\'s voice is a pattern read at each word', () => {
+  assert.deepEqual(refs(say('one two', 'Whisper')), [`say:Whisper${US}one`, `say:Whisper${US}two`]);
+  assert.deepEqual(refs(say('one two', mini('Whisper Zarvox'))), [`say:Whisper${US}one`, `say:Zarvox${US}two`]);
+  // A voice pattern adds no steps of its own: two voices over one word still say it once.
+  assert.deepEqual(refs(say('one', mini('Whisper Zarvox'))), [`say:Whisper${US}one`]);
+  assert.deepEqual(refs(say('one', mini("'Bad News'"))), [`say:Bad News${US}one`]);
+  // A colon in the text is not a voice.
+  assert.deepEqual(refs(say('3:30', 'Whisper')), [`say:Whisper${US}3:30`]);
+});
+
+test('say() keeps its kind through transforms, and its method form repitches', () => {
+  assert.deepEqual(refs(say('hi', 'Whisper').fast(2)), [`say:Whisper${US}hi`, `say:Whisper${US}hi`]);
+  assert.equal(say('hi').slow(2).samplerKind, 'say');
+  const played = play(note('c5 e5').say('hi', 'Whisper'));
+  assert.deepEqual(played.map((c) => c.args[1]), [`say:Whisper${US}hi`, `say:Whisper${US}hi`]);
+  assert.deepEqual(played.map((c) => c.args[2].note), [84, 88]);
+  assert.deepEqual(refs(note('c5').say(mini('<hi bye>'))), ['say:hi']);
+  // The method form says its whole literal phrase on every note, quotes and all.
+  assert.deepEqual(refs(note('c5').say("hi, i'm dreamin'")), ["say:hi, i'm dreamin'"]);
 });

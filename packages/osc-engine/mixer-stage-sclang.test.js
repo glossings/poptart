@@ -32,6 +32,14 @@ function extractTrackDef() {
   return m[0];
 }
 
+// Lift `djIsolator = { ... };` (the DJ stage's EQ, which the def calls) the same way.
+function extractDjIsolator() {
+  const src = fs.readFileSync(SCD, 'utf8');
+  const m = src.match(/^djIsolator = \{[\s\S]*?^\};$/m);
+  assert.ok(m, 'could not find the djIsolator closure in sc/poptart.scd');
+  return m[0];
+}
+
 // Lift `channelDefault = { ... };` the same way.
 function extractChannelDefault() {
   const src = fs.readFileSync(SCD, 'utf8');
@@ -96,7 +104,7 @@ function runSclang() {
   const script = `(
 var maxSlots = 8, numPairs = 2, key = "probe";
 var trackDefName = { |k| ("poptart_probe_" ++ k).asSymbol };
-var channelDefault, def;
+var channelDefault, djIsolator, def;
 var destroyTrack, awaitTrack, stopMixTap, unwireAudio, sidechainBySource, releaseBus, tracks, reorderTracks;
 var songs = IdentityDictionary.new; // the song decks' buffer registry, swept by destroyTrack
 var birthParse;
@@ -112,6 +120,7 @@ var statePending = IdentityDictionary.new, noteQueues = IdentityDictionary.new;
 var stateWaitMax = 0.3;
 var slotKey = { |k, slot| (k ++ "_" ++ slot).asSymbol };
 ${extractChannelDefault()}
+${extractDjIsolator()}
 // Building the def runs the whole UGen graph function client-side - no server needed; this is
 // where an undeclared var, a bad arg default, or a misused UGen throws. Pasted directly (like
 // resolve-plugin-sclang.test.js pastes its closure): on a machine without the VSTPlugin
@@ -230,19 +239,14 @@ test('the deck meter and the cue tap read the channel AFTER trim', () => {
     assert.ok(i > 0, `${what} not found in the track def - this test needs updating`);
     return i;
   };
-  const trim = at('live = sig * trim', 'the trim stage');
+  const trim = at('djIsolator.(sig * trim', 'the trim stage');
   const meter = at('deckMeterBus.index', 'the deck meter send');
   const cue = at('Out.ar(cueOffset', 'the headphone cue send');
   assert.ok(trim < meter, 'the deck meter is read BEFORE trim - it will show level on a dead channel');
   assert.ok(trim < cue, 'the headphone cue is taken before trim');
-
-  // ...and the EQ in between has to be built from the trimmed signal, not from the input again.
-  // Re-deriving a band from `sig` would reinstate the full-level signal downstream of trim and
-  // feed it straight to both taps, which is this same failure with no line out of order.
-  for (const band of ['djLow = ', 'djHigh = ', 'djMid = ']) {
-    const line = def.slice(def.indexOf(band), def.indexOf('\n', def.indexOf(band)));
-    assert.ok(!/\bsig\b/.test(line), `${band.trim()} is built from the untrimmed input: ${line.trim()}`);
-  }
+  // ...and the EQ is fed the trimmed signal in that same call: re-deriving the EQ from `sig`
+  // elsewhere would reinstate the full-level signal downstream of trim and feed it to both taps.
+  assert.strictEqual(def.split('djIsolator.(').length, 2, 'the EQ must be applied exactly once, to the trimmed signal');
 });
 
 test('...and both of them are read BEFORE the fader', () => {

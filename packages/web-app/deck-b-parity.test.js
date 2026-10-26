@@ -89,7 +89,7 @@ test('every panel is opened against the deck its handle was double-clicked in', 
     /openSliceEditorFromCall\(sliceCall, code, idx, ed\)/,
     /openEnvelopeAt\(code, idx, ed\)/,
     /openRecordPanel\(rec, ed\)/,
-    /showPluginEditor\(deckTrackId\(ed, chain\.label\), chain\.slot\)/,
+    /showPluginEditor\(blockTrackId\(ed, chain\), chain\.slot\)/,
   ]) assert.match(open, call);
   // An empty call is given its name in the deck it is in, and the handle reopened there.
   assert.equal((open.match(/Defs\.materialize\(ed\)/g) ?? []).length, 5);
@@ -159,15 +159,17 @@ function deckIds(withB = true) {
   const fns = new Function('cm', 'deckBCM', `
     ${grabConst('deckOfCM')}
     ${grabConst('cmOfDeck')}
+    const groupsMod = null;
     ${grabConst('deckTrackId')}
+    ${grabConst('blockTrackId')}
     ${grab('deckTrackParts')}
-    return { deckOfCM, cmOfDeck, deckTrackId, deckTrackParts };
+    return { deckOfCM, cmOfDeck, deckTrackId, blockTrackId, deckTrackParts };
   `)(cm, deckBCM);
   return { ...fns, cm, deckBCM };
 }
 
 test('deck B\'s tracks are "b:<label>" to the server, deck A\'s are the bare label', () => {
-  const { deckOfCM, cmOfDeck, deckTrackId, deckTrackParts, cm, deckBCM } = deckIds();
+  const { deckOfCM, cmOfDeck, deckTrackId, blockTrackId, deckTrackParts, cm, deckBCM } = deckIds();
   assert.equal(deckOfCM(cm), 'a');
   assert.equal(deckOfCM(deckBCM), 'b');
   assert.equal(deckOfCM(null), 'a', 'anything that is not deck B\'s pane is the main deck');
@@ -176,6 +178,10 @@ test('deck B\'s tracks are "b:<label>" to the server, deck A\'s are the bare lab
   assert.equal(deckTrackId(cm, 'lead'), 'lead');
   assert.equal(deckTrackId(deckBCM, 'lead'), 'b:lead');
   assert.equal(deckTrackId(deckBCM, null), null);
+  // ...and a monitored block is its cued track, "<label>~M", on either deck
+  assert.equal(blockTrackId(cm, { label: 'lead', monitored: true }), 'lead~M');
+  assert.equal(blockTrackId(deckBCM, { label: 'lead', monitored: true }), 'b:lead~M');
+  assert.equal(blockTrackId(deckBCM, { label: 'lead', monitored: false }), 'b:lead');
   // ...and back, which is how a capture or a recorded take finds the buffer it belongs in
   assert.deepEqual(deckTrackParts('b:lead'), { ed: deckBCM, label: 'lead' });
   assert.deepEqual(deckTrackParts('lead'), { ed: cm, label: 'lead' });
@@ -200,7 +206,7 @@ test('what the engine hands back about a track is written into that track\'s dec
   // ...and a held preset is kept off the highlighter in its own deck's document only
   assert.match(grab('inHeldRange'), /heldRanges\.some\(\(\[d, a, b\]\) => d === deck && from >= a && to <= b\)/);
   // ...and the preset panel holds its slot by the server's name for the track
-  assert.match(grab('presetHold'), /label: deckTrackId\(presetCM, target\.label\)/);
+  assert.match(grab('presetHold'), /label: blockTrackId\(presetCM, target\)/);
 });
 
 test('a capture into deck B is thawed by deck B\'s evaluation, not deck A\'s', () => {
@@ -490,8 +496,8 @@ test('deck B\'s editor has deck A\'s keys', () => {
   assert.match(SRC, /extraKeys: deckBEditorKeys\(\),/);
   const keys = grab('deckBEditorKeys');
   for (const key of [
-    /save: \(\) => saveDeckBFile\(\),/,
-    /saveAs: \(\) => saveDeckBFile\(true\),/,
+    /save: \(\) => saveFocusedDeck\(\),/,
+    /saveAs: \(\) => saveFocusedDeck\(true\),/,
     /'Shift-Alt-Down': \(ed\) => copyLines\(ed, 'down'\),/,
     /'Shift-Alt-Up': \(ed\) => copyLines\(ed, 'up'\),/,
     /'Alt-Up': 'swapLineUp',/,
@@ -500,7 +506,7 @@ test('deck B\'s editor has deck A\'s keys', () => {
     /group: \(ed\) => groupSelection\(ed\),/,
   ]) assert.match(keys, key);
   // ⌘S off the editor saves the deck being worked in
-  assert.match(SRC, /if \(activeCM\(\) === deckBCM\) saveDeckBFile\(action === 'saveAs'\);/);
+  assert.match(SRC, /saveFocusedDeck\(action === 'saveAs'\);/);
   assert.match(grab('saveDeckBFile'), /api\('POST', '\/api\/patterns\/save', \{ name, code: deckBCM\.getValue\(\) \}\)/);
   assert.match(grab('saveDeckBFile'), /deckBFileName = name;/);
 });
@@ -517,7 +523,7 @@ test('muted code dims, the menu offers the envelope, and drops land, on either d
   assert.match(grab('insertSnippet'), /refoldAll\(ed\);/);
   assert.match(grab('bounceBlockAtCursor'), /const ed = activeCM\(\);/);
   // ...and a parameter completes against the deck's own track, "b:lead" on deck B
-  assert.match(grab('paramHints'), /const track = block \? deckTrackId\(editor, block\.label\) : null;/);
+  assert.match(grab('paramHints'), /const track = block \? blockTrackId\(editor, block\) : null;/);
 });
 
 test('every panel open on deck B is put away when its buffer goes', () => {
@@ -531,4 +537,25 @@ test('every panel open on deck B is put away when its buffer goes', () => {
   assert.match(grab('closeMixMode'), /closePanelsOn\(deckBCM\);/);
   assert.match(grab('finishDjExit'), /closePanelsOn\(deckBCM\);[\s\S]{0,200}deckBCM\.setValue\(''\);/);
   assert.match(grab('exitDjMode'), /closePanelsOn\(deckBCM\);[^\n]*\n\s+cm\.setValue\(deckBCM\.getValue\(\)\);/);
+});
+
+test('the save chord saves the FOCUSED deck in DJ mode, not the one the cursor was last in', () => {
+  const calls = [];
+  // eslint-disable-next-line no-new-func
+  const run = ({ mix = true, active = 'a', cursorIn = 'a', song = {} }, as = false) => {
+    calls.length = 0;
+    const deckBCM = { name: 'b' };
+    new Function('mixModeOn', 'djActiveDeck', 'activeCM', 'deckBCM', 'songPanes', 'logLine', 'saveDeckBFile', 'savePatternFile', 'savePatternFileAs',
+      `${grab('saveFocusedDeck')}; saveFocusedDeck(${as});`)(
+      mix, active, () => (cursorIn === 'b' ? deckBCM : { name: 'a' }), deckBCM,
+      { a: { song: song.a ?? null }, b: { song: song.b ?? null } },
+      (m) => calls.push(`log ${m}`), (a) => calls.push(`B ${a}`), () => calls.push('A'), () => calls.push('A as'));
+    return [...calls];
+  };
+  assert.deepEqual(run({ active: 'b', cursorIn: 'a' }), ['B false'], "deck B's ring wins over deck A's cursor");
+  assert.deepEqual(run({ active: 'a', cursorIn: 'b' }), ['A'], "deck A's ring wins over deck B's cursor");
+  assert.deepEqual(run({ active: 'b' }, true), ['B true'], 'save-as goes to the same deck');
+  assert.deepEqual(run({ active: 'a' }, true), ['A as']);
+  assert.match(run({ active: 'b', song: { b: { title: 'rola' } } })[0], /^log deck B is playing a song file/);
+  assert.deepEqual(run({ mix: false, active: 'a', cursorIn: 'a' }), ['A'], 'off the desk there is one editor');
 });

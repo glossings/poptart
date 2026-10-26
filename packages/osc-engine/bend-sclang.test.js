@@ -116,8 +116,9 @@ var deckMeterBus = Bus.control(server, 4);
 // trackDefName is a one-liner in the source, so it is written out here rather than lifted: the
 // extractor matches closures that close on a line of their own.
 var trackDefName = { |key| ("poptart_track_" ++ key).asSymbol };
-var buildTrackDef, def;
+var buildTrackDef, djIsolator, def;
 server.options.numOutputBusChannels = 2;
+${extract('djIsolator')}
 ${extract('buildTrackDef')}
 def = buildTrackDef.(\\probe);
 ("BUILT<" ++ def.isKindOf(SynthDef) ++ ">").postln;

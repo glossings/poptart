@@ -22,7 +22,7 @@
  * documentation are built from: a name being importable is not the same as it being part of the
  * language, and the difference is the whole reason this list is written out.
  */
-export const BUILDER_NAMES = Object.freeze(['Signal', 'n', 'note', 'mini', 's', 'se', 'sr', 'sp', 'synth', 'sine', 'saw', 'isaw', 'tri', 'square', 'rand', 'perlin', 'lfo', 'env', 'dur', 'midicc', 'midikeys', 'osc', 'macro', 'choose', 'cat', 'seq', 'irand', 'midi', 'audio', 'input', 'group', 'copy', 'pcopy', 'pianoroll', 'clips', 'auto',
+export const BUILDER_NAMES = Object.freeze(['Signal', 'n', 'note', 'mini', 's', 'se', 'sr', 'sp', 'say', 'synth', 'sine', 'saw', 'isaw', 'tri', 'square', 'rand', 'perlin', 'lfo', 'env', 'dur', 'midicc', 'midikeys', 'osc', 'macro', 'choose', 'cat', 'seq', 'irand', 'midi', 'audio', 'input', 'group', 'copy', 'pcopy', 'pianoroll', 'clips', 'auto',
   'i', 'begin', 'end', 'loop', 'loopwrap', 'loopdir', 'speed', 'flip', 'stretch', 'fit', 'slice', 'splice', 'splicemode', 'attack', 'decay', 'sustain', 'release', 'envscale', 'grain', 'vel', 'clip', 'nudge', 'swing', 'swinggrid', 'swingvel',
   'add', 'sub', 'mul', 'div', 'mod', 'set',
   'noteToMidi', 'degreeToMidi', 'parseScaleName']);
