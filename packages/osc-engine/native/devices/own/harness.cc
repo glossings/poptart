@@ -9,7 +9,7 @@
 // Not shipped, not linked into the extension: this has a main().
 //
 //   harness <device> <sampleRate> <frames> <blockSize> [bpm] [-k 0|1] [-n frame:note:vel ...]
-//            [-S control:slot:rate:file ...]
+//            [-S control:slot:rate:file ...] [-A control:file ...]
 //
 // stdin, little-endian: the parameter values in REAL UNITS (the position-to-value conversion is
 // pd_denormalize's job and is tested separately), then the input as interleaved stereo floats.
@@ -23,6 +23,12 @@
 // which is the shape the host hands a device its frames in (see PoptartDevice.cpp's sample
 // stages). The host owns that memory for as long as the device plays it, so these vectors
 // outlive the run.
+//
+// `-A` is a control with a SIGNAL on it: `file` is one value per frame, in real units, raw 32-bit
+// floats. The run is then rendered a sample at a time with that control set from the file at
+// every sample, which is what PoptartDevice does while audio is patched onto a control (see
+// kPatchPiece there) - so the browser's processor, handed the same values as a block-long
+// array, should come out the same.
 
 #include <cstdio>
 #include <cstdlib>
@@ -36,6 +42,7 @@ namespace {
 
 struct Note { int frame; float note; float velocity; };
 struct Loaded { int param; int slot; double rate; std::vector<float> frames; };
+struct Moving { int param; std::vector<float> values; };
 
 /** Every float in a file, which is how the harness is handed a sample. */
 std::vector<float> readFloats(const char* path) {
@@ -63,6 +70,7 @@ int main(int argc, char** argv) {
 
   std::vector<Note> notes;
   std::vector<Loaded> samples;
+  std::vector<Moving> moving;
   int keyPatched = -1;
   for (int i = 5; i < argc; ++i) {
     if (std::strcmp(argv[i], "-S") == 0 && i + 1 < argc) {
@@ -76,6 +84,19 @@ int main(int argc, char** argv) {
           return 1;
         }
         samples.push_back(std::move(one));
+      }
+      continue;
+    }
+    if (std::strcmp(argv[i], "-A") == 0 && i + 1 < argc) {
+      int param = 0;
+      char file[1024] = { 0 };
+      if (std::sscanf(argv[++i], "%d:%1023s", &param, file) == 2) {
+        Moving one{ param, readFloats(file) };
+        if (one.values.empty()) {
+          std::fprintf(stderr, "harness: %s has no values in it\n", file);
+          return 1;
+        }
+        moving.push_back(std::move(one));
       }
       continue;
     }
@@ -122,9 +143,12 @@ int main(int argc, char** argv) {
   const int count = device->paramCount() < info->paramCount ? device->paramCount() : info->paramCount;
 
   size_t nextNote = 0;
-  for (int at = 0; at < frames; at += blockSize) {
+  // A control on a signal is rendered a sample at a time; notes still land where the block they
+  // fall in starts, as they do on the engine.
+  const int piece = moving.empty() ? blockSize : 1;
+  for (int at = 0; at < frames; at += piece) {
     int n = frames - at;
-    if (n > blockSize) n = blockSize;
+    if (n > piece) n = piece;
     if (n > stride) n = stride;
     // Notes land on a block boundary, as they do on the engine: the host plays a note at the
     // start of the block its onset falls in.
@@ -134,6 +158,11 @@ int main(int argc, char** argv) {
       else device->noteOff(one.note);
     }
     for (int i = 0; i < count; ++i) devParams[i] = params[static_cast<size_t>(i)];
+    for (const Moving& one : moving) {
+      if (one.param >= 0 && one.param < count) {
+        devParams[one.param] = one.values[static_cast<size_t>(at) < one.values.size() ? static_cast<size_t>(at) : one.values.size() - 1];
+      }
+    }
     device->transport(bpm, static_cast<double>(at) / sampleRate);
     device->keyPatched(keyPatched >= 0 ? keyPatched != 0 : inChannels >= 4);
     device->noteRoute(!notes.empty());

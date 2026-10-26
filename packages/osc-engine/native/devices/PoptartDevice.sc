@@ -232,6 +232,25 @@ PoptartDeviceController {
         this.sendMsg('/map', index.asInteger, bus.asBus.index.asInteger);
     }
 
+    /**
+     * An AUDIO bus onto a control, read by the UGen every sample: what an audio-rate envelope
+     * and a signal patched onto a parameter reach a native device through. The bus is a stereo
+     * pair, summed to mono; the control's position is gain * signal + offset, clamped to 0..1.
+     * A plugin has no such thing, which is how poptart.scd tells the two apart (respondsTo).
+     */
+    mapAudio { |index, bus, gain = 1, offset = 0|
+        this.sendMsg('/mapa', index.asInteger, bus.asBus.index.asInteger, gain.asFloat, offset.asFloat);
+    }
+
+    /**
+     * Takes a control off its audio bus. The only thing that does: `set`, `map` and `unmap` leave
+     * an audio patch alone (see PoptartDevice.cpp's setParam), so the control goes back to the
+     * last value set or the control bus mapped while it was patched.
+     */
+    unmapAudio { |index|
+        this.sendMsg('/mapa', index.asInteger, -1, 1.0, 0.0);
+    }
+
     unmap { |... indices|
         indices.isEmpty.if {
             this.sendMsg('/unmap', *(0..(info !? { |i| i.numParameters - 1 } ? 0)));

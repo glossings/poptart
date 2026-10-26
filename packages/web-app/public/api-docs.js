@@ -197,8 +197,8 @@ const API_DOCS = {
   },
   env: {
     kind: 'builder',
-    sig: 'env({ attack, decay, sustain, release, curve })',
-    desc: 'An ADSR envelope, triggered by the track\'s notes. attack, decay and release are in seconds; sustain is a level from 0 to 1. curve shapes each segment: negative is exponential, 0 is linear, positive bows outward.',
+    sig: 'env({ attack, decay, sustain, release, curve, retrigger })',
+    desc: 'An ADSR envelope, triggered by the track\'s notes. attack, decay and release are in seconds; sustain is a level from 0 to 1. curve shapes each segment: negative is exponential, 0 is linear, positive bows outward. With retrigger: true every note restarts the attack, including notes that overlap the one before.',
     eg: 'gain(env({ attack: 0.01, release: 0.3 }))',
   },
   dur: {
@@ -280,7 +280,7 @@ const API_DOCS = {
   param: {
     kind: 'method',
     sig: 'param(device?, name, value)',
-    desc: 'Sets a parameter of the last plugin in the chain, by the name the plugin gives it. Naming a device first sets that device\'s parameter wherever it sits: by its label, its plugin name, or "Name#2" for the second of that name. The value is a number, pattern or signal: the parameter\'s position from 0 to 1, or its real units where a mapping file gives the plugin some. An audio() handle as the value wires that track or bus onto the parameter at the sample rate (browser build).',
+    desc: 'Sets a parameter of the last plugin in the chain, by the name the plugin gives it. Naming a device first sets that device\'s parameter wherever it sits: by its label, its plugin name, or "Name#2" for the second of that name. The value is a number, pattern or signal: the parameter\'s position from 0 to 1, or its real units where a mapping file gives the plugin some. An audio() handle as the value wires that track or bus onto the parameter at the sample rate, on poptart\'s own devices; .mul() and .add() on the handle scale it into the parameter\'s 0 to 1 range.',
     eg: '.param("Filter 1 Freq", sine(0.2).range(300, 6000))',
   },
   preset: {

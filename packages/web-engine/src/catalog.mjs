@@ -13,6 +13,8 @@ import { createRegistry } from './registry.mjs';
 import { WAVETABLE } from './devices/wavetable.mjs';
 import { FMSYNTH } from './devices/fmsynth.mjs';
 import { GRANULAR } from './devices/granular.mjs';
+import { NOISE } from './devices/noise.mjs';
+import { LPG } from './devices/lpg.mjs';
 import { DISTORT } from './devices/distort.mjs';
 import { CRUSH } from './devices/crush.mjs';
 import { OVERDRIVE } from './devices/overdrive.mjs';
@@ -39,8 +41,8 @@ import { MUTABLE_DEVICES } from './devices/mutable.mjs';
 
 /** Every device, newest version of each. Ordered as the browser lists them. */
 export const DEVICES = Object.freeze([
-  WAVETABLE, FMSYNTH, GRANULAR,
-  FILTER, EQ, DISTORT, CRUSH, OVERDRIVE, COMPRESSOR, MULTIBAND, LIMITER, DUCKER,
+  WAVETABLE, FMSYNTH, GRANULAR, NOISE,
+  FILTER, EQ, LPG, DISTORT, CRUSH, OVERDRIVE, COMPRESSOR, MULTIBAND, LIMITER, DUCKER,
   DELAY, GRAINECHO, STUTTER, CHORUS, FLANGER, PHASER, FREQSHIFT, VOICE, REVERB, ...NODE_DEVICES,
   ...AIRWINDOWS_DEVICES, ...CLOUDSEED_DEVICES, ...STRETCH_DEVICES, ...MUTABLE_DEVICES,
 ]);

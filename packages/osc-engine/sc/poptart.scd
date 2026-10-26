@@ -213,6 +213,13 @@ var clockTicker, clockTickerStart, clockTickerStop, clockNextTick, midiClockSet,
 // several sinks (see acquireSourceFeed).
 var silentBus, trashBus, scArgsFor, scKey, wireAudio, unwireAudio, tellKeyPatched;
 var sidechainByTarget, sidechainBySource, sourceFeeds, acquireSourceFeed, releaseSourceFeed;
+// Audio patched onto a PARAMETER (`.param("Cutoff", audio("lfo"))`, '/poptart/connectParam'):
+// another track's output or a named bus, read every sample by one of poptart's own devices.
+// paramRoutes holds one entry per (track, slot, parameter); the routes are part of the node
+// order (trackLevels) exactly as a sidechain is, because the device reads the bus in the block
+// its source wrote it. A plugin cannot take one - VSTPlugin reads its parameters once a block -
+// so on a plugin's slot the route is held and warned about, and lands if a device takes the slot.
+var paramRoutes, paramRouteKey, wireParamRoute, unwireParamRoute, applyParamRoute, reassertParamRoute;
 // Named audio buses (Sig#bus / '/poptart/setBusOut'): a track can divert its output to a bus,
 // where any number of tracks sum, and another track reads the sum via the audio("name") head
 // source. acquire/releaseBus refcount the buses so they live exactly as long as some writer or
@@ -1004,6 +1011,133 @@ unwireAudio = { |targetKey, slot|
     };
 };
 
+paramRouteKey = { |targetKey, slot, name| (targetKey.asString ++ "#" ++ slot ++ "#" ++ name).asSymbol };
+
+// Puts a route onto the device in its slot, if that device can take one. Called when the route
+// is wired and again whenever a device opens into the slot (loadDevice), because a device that
+// takes the slot starts with every control on its own default (PoptartDevice.cpp's install).
+applyParamRoute = { |track, entry|
+    var slot = entry[\slot], ctl = track[\controllers][slot];
+    case
+    { ctl.isNil or: { track[\loaded][slot].isNil } } { nil } // not open yet: the open applies it
+    { ctl.respondsTo(\mapAudio).not } {
+        if (entry[\warned] != track[\loaded][slot]) {
+            entry[\warned] = track[\loaded][slot];
+            ("poptart: audio patched onto '" ++ entry[\name] ++ "' reaches poptart's own devices only - "
+                ++ track[\loaded][slot] ++ " is a plugin, so nothing is connected").warn;
+        };
+    }
+    {
+        var index = resolveParamIndex.(ctl.info, entry[\name]);
+        if (index.isNil) {
+            ("poptart: connectParam: " ++ track[\loaded][slot] ++ " has no parameter named '"
+                ++ entry[\name] ++ "'").warn;
+        } {
+            // A polled value the route replaced leaves a ramp behind; it goes now.
+            dropRamp.(entry[\targetKey], track, ("slot" ++ slot ++ "_" ++ entry[\name]).asSymbol);
+            entry[\index] = index;
+            ctl.mapAudio(index, entry[\bus], entry[\gain], entry[\offset]);
+        };
+    };
+};
+
+// After something else took a control off its audio bus (an audio-rate env() being cleared), the
+// route that is still wanted there goes back on.
+reassertParamRoute = { |key, track, slot, name|
+    paramRoutes[paramRouteKey.(key, slot, name)] !? { |entry| applyParamRoute.(track, entry) };
+};
+
+// Wire a track's output or a named bus onto a parameter. `rawName` resolves as a sidechain's
+// does (see wireAudio): a track first, a bus by that name otherwise, "bus:" to force a bus; a
+// track naming itself means the bus. Gain and offset ride on the route and are applied by the
+// UGen. Idempotent: a route already on the parameter is retired first.
+wireParamRoute = { |targetKey, slot, name, rawName, gain, offset|
+    var k = paramRouteKey.(targetKey, slot, name);
+    var token = Object.new;
+    unwireParamRoute.(targetKey, slot, name);
+    paramRoutes[k] = (pending: token, targetKey: targetKey, slot: slot, name: name);
+    fork {
+        var target = awaitTrack.(targetKey);
+        var str = rawName.asString;
+        var isBusPrefix = str.copyRange(0, 3) == "bus:";
+        var srcName = case
+            { isBusPrefix } { str.drop(4) }
+            { str.copyRange(0, 5) == "track:" } { str.drop(6) }
+            { str };
+        var nameKey = srcName.asSymbol;
+        var tries = 0, max = (5 / 0.05).asInteger, source, useBus, entry;
+        // Still the route this wiring was started for, and not one wired or dropped since.
+        var current = { (paramRoutes[k] ? ()).at(\pending) === token };
+        case
+        { target.isNil } {
+            ("poptart: connectParam: no track " ++ targetKey).warn;
+            if (current.()) { paramRoutes.removeAt(k) };
+        }
+        { str.copyRange(0, 3) == "dev:" } {
+            ("poptart: connectParam: a hardware input cannot be patched onto a parameter - route it "
+                ++ "to a track first").warn;
+            if (current.()) { paramRoutes.removeAt(k) };
+        }
+        {
+            while {
+                isBusPrefix.not
+                and: { ((nameKey != targetKey and: { tracks[nameKey].isKindOf(Event) })
+                    or: { namedBuses[nameKey].notNil }).not }
+                and: { tries < max }
+            } { 0.05.wait; tries = tries + 1 };
+            // Superseded or dropped while it waited for its source.
+            if (current.()) {
+                source = if (isBusPrefix or: { nameKey == targetKey }) { nil } { tracks[nameKey] };
+                useBus = isBusPrefix or: { source.isKindOf(Event).not and: { namedBuses[nameKey].notNil } };
+                entry = (targetKey: targetKey, slot: slot, name: name, gain: gain, offset: offset, source: nil, busName: nil);
+                case
+                { source.isKindOf(Event) } {
+                    entry[\bus] = acquireSourceFeed.(nameKey, source);
+                    entry[\source] = nameKey;
+                }
+                { useBus } {
+                    entry[\bus] = acquireBus.(srcName);
+                    entry[\busName] = srcName;
+                }
+                { true } { entry = nil };
+                if (entry.isNil) {
+                    paramRoutes.removeAt(k);
+                    ("poptart: connectParam: '" ++ srcName ++ "' is neither a track nor a bus").warn;
+                } {
+                    paramRoutes[k] = entry;
+                    reorderTracks.();
+                    applyParamRoute.(target, entry);
+                    ("poptart: patched " ++ srcName ++ " onto '" ++ name ++ "' of " ++ targetKey
+                        ++ " (slot " ++ slot ++ ")").postln;
+                };
+            };
+        };
+    };
+};
+
+// Undo one: the control goes back to the last value set on it (or to a native env() mapped while
+// it was patched), and the source's feed or the bus is released. No-op when nothing is patched.
+unwireParamRoute = { |targetKey, slot, name|
+    var k = paramRouteKey.(targetKey, slot, name);
+    var entry = paramRoutes.removeAt(k);
+    var track = tracks[targetKey];
+    if (entry.notNil and: { entry[\pending].isNil }) {
+        if (track.isKindOf(Event)) {
+            var ctl = track[\controllers][slot];
+            if (ctl.notNil and: { entry[\index].notNil } and: { ctl.respondsTo(\unmapAudio) }) {
+                ctl.unmapAudio(entry[\index]);
+                ctl.get(entry[\index], { |v| ctl.set(entry[\index], v) });
+                track[\envs][("slot" ++ slot ++ "_" ++ name).asSymbol] !? { |e|
+                    if (e[\audio] == true) { ctl.mapAudio(entry[\index], e[\bus], 1, 0) };
+                };
+            };
+        };
+        entry[\source] !? { |src| releaseSourceFeed.(src) };
+        entry[\busName] !? { |bn| releaseBus.(bn) };
+        reorderTracks.();
+    };
+};
+
 // How deep each track sits (key -> depth): 0 for one that reads no other track, else one past the
 // deepest thing routed into it - a source track, or the writers of a bus it reads. A feedback loop
 // (a: audio("b"), b: audio("a")) has no order that works; the edge that closes it is dropped and
@@ -1024,12 +1158,15 @@ trackLevels = {
             t[\fxBus] !? { |n| var b = n.asSymbol; writers[b] = (writers[b] ?? { [] }).add(k) };
         };
     };
-    sidechainByTarget.do { |e|
-        var deps = case
-            { e[\source].notNil } { [e[\source]] }
-            { e[\busName].notNil } { writers[e[\busName].asSymbol] ?? { [] } }
-            { [] };
-        upstream[e[\targetKey]] = (upstream[e[\targetKey]] ?? { [] }).addAll(deps);
+    // A sidechain and a parameter patch order the same way: whatever they read runs first.
+    [sidechainByTarget, paramRoutes].do { |routes|
+        routes.do { |e|
+            var deps = case
+                { e[\source].notNil } { [e[\source]] }
+                { e[\busName].notNil } { writers[e[\busName].asSymbol] ?? { [] } }
+                { [] };
+            upstream[e[\targetKey]] = (upstream[e[\targetKey]] ?? { [] }).addAll(deps);
+        };
     };
     levelOf = { |k, stack|
         levels[k] ?? {
@@ -1479,9 +1616,27 @@ server.waitForBoot {
     // envelope's current level on each new gate, so overlapping notes don't click. `curve`
     // shapes every segment (negative = scoop, 0 = linear, positive = bulge) and is a plain
     // control input into the Env, so a livecoding re-eval updates it in place.
-    SynthDef(\poptart_env, { |out, atk = 0.01, dec = 0.1, sus = 0.7, rel = 0.2, curve = -4, gate = 0, lo = 0, hi = 1|
-        var envSig = EnvGen.kr(Env.adsr(atk, dec, sus, rel, 1.0, curve), gate);
+    //
+    // `retrig` (env({ retrigger: true })) restarts the attack on EVERY note rather than only on
+    // the first of a run that overlaps: each note-on sends t_retrig, and while the gate is
+    // already open that closes it for one block and opens it again - EnvGen then climbs from the
+    // level it had reached. Only while it is already open, so the first note of a run is not held
+    // back the block.
+    SynthDef(\poptart_env, { |out, atk = 0.01, dec = 0.1, sus = 0.7, rel = 0.2, curve = -4, gate = 0, lo = 0, hi = 1, retrig = 0, t_retrig = 0|
+        var again = t_retrig * retrig * (Delay1.kr(gate) > 0);
+        var envSig = EnvGen.kr(Env.adsr(atk, dec, sus, rel, 1.0, curve), gate - again);
         Out.kr(out, lo + (envSig * (hi - lo)));
+    }).add;
+    // The same envelope at the sample rate, for a control on one of poptart's own devices: the
+    // device reads an audio bus mapped onto a control every sample (PoptartDevice's /mapa), so a
+    // two-millisecond attack is a two-millisecond ramp rather than one or two steps of a block.
+    // A retrigger drops the gate for one SAMPLE. Written to both sides of a stereo bus, which is
+    // the shape every audio patch onto a control has (the device sums the pair to mono).
+    SynthDef(\poptart_env_ar, { |out, atk = 0.01, dec = 0.1, sus = 0.7, rel = 0.2, curve = -4, gate = 0, lo = 0, hi = 1, retrig = 0, t_retrig = 0|
+        var again = Trig1.ar(t_retrig * retrig * (Delay1.kr(gate) > 0), SampleDur.ir);
+        var envSig = EnvGen.ar(Env.adsr(atk, dec, sus, rel, 1.0, curve), gate - again);
+        var v = lo + (envSig * (hi - lo));
+        Out.ar(out, [v, v]);
     }).add;
     // The writer behind every POLLED control (see rampTo / poptartSetParam). Node re-sends a
     // polled value every poll interval, and this glides the bus linearly from one value to the
@@ -2078,6 +2233,7 @@ server.waitForBoot {
     sidechainBySource = IdentityDictionary.new; // sourceKey (Symbol) -> [(targetKey:, slot:)] it feeds
     sourceFeeds = IdentityDictionary.new; // sourceKey (Symbol) -> (bus: Bus, refs: Int)
     namedBuses = IdentityDictionary.new; // busName (Symbol) -> (bus: Bus, refs: Int)
+    paramRoutes = IdentityDictionary.new; // paramRouteKey -> (targetKey:, slot:, name:, source:, busName:, bus:, gain:, offset:, index:)
     // Recorder taps read what the track synths wrote this block, so their group goes at the tail.
     recTaps = IdentityDictionary.new; // trackId (Symbol) -> (bus:, meter:, disk:, buf:, path:)
     // Mixer analysis synths share the tail group for the same read-after-write reason.
@@ -2312,6 +2468,9 @@ destroyTrack = { |key|
             // ...and every route OUT of it - one source may feed several sinks. Over a copy:
             // unwireAudio rewrites this very list as it goes.
             sidechainBySource[key] !? { |routes| routes.copy.do { |e| unwireAudio.(e[\targetKey], e[\slot]) } };
+            // Parameter patches the same way, into this track and out of it.
+            paramRoutes.values.select { |e| (e[\targetKey] == key) or: { e[\source] == key } }
+                .do { |e| unwireParamRoute.(e[\targetKey], e[\slot], e[\name]) };
             [track[\lfos], track[\envs], track[\ramps]].do { |dict|
                 dict.do { |e| e[\synth] !? { |s| s.free }; e[\bus] !? { |b| b.free } };
             };
@@ -2586,6 +2745,13 @@ OSCdef(\poptartLoadDevice, { |msg|
                             self.setTempo(trackTempo[key] ? currentTempo);
                             self.setTransportPos(trackBeats.(key));
                             tellKeyPatched.(track, slot, nil, key);
+                            // And anything patched onto its controls: the device starts with
+                            // every control on its own default, and a route outlives the device.
+                            paramRoutes.do { |e|
+                                if ((e[\targetKey] == key) and: { e[\slot] == slot } and: { e[\pending].isNil }) {
+                                    applyParamRoute.(track, e);
+                                };
+                            };
                             ("poptart: loaded device " ++ name ++ " in slot " ++ slot).postln;
                         } {
                             if (ok.not) {
@@ -2922,7 +3088,7 @@ OSCdef(\poptartNoteOn, { |msg|
         fire = { |lat|
             bundleNow.(lat, {
                 if (slotLive.(track, 0)) { ctl.midi.noteOn(0, noteKey.(ctl, note), (veloc * 127).round.asInteger) };
-                track[\envs].do { |e| e[\synth].set(\gate, 1) };
+                track[\envs].do { |e| e[\synth].set(\gate, 1, \t_retrig, 1) };
                 // note-synced lfo() shapes: reset/replay on every note onset - and this is where a
                 // patterned shape's swap actually happens in those modes, just before the trigger, so
                 // the note gets the new shape from its beginning rather than halfway through the old.
@@ -3645,13 +3811,19 @@ OSCdef(\poptartSetParamShape, { |msg|
 // Tier 2, envelope flavor: same bus+map mechanism as setParamLFO, but the modulator is an
 // EnvGen gated by the track's note events (see noteOn/noteOff above). Re-eval updates the
 // running synth's args in place - a mid-note livecoding edit doesn't cut the envelope off.
+//
+// On a control of one of poptart's own devices the envelope runs at the SAMPLE rate, on an audio
+// bus the device reads per sample (poptart_env_ar, PoptartDeviceController's mapAudio): a plugin
+// or a channel control is read once a block whatever drives it, so for those it stays a control
+// bus. An entry whose slot changed kind under it is rebuilt as the other kind.
 OSCdef(\poptartSetParamEnv, { |msg|
     var key = msg[1].asSymbol, slot = msg[2].asInteger, paramName = msg[3].asString;
     var atk = msg[4].asFloat, dec = msg[5].asFloat, sus = msg[6].asFloat, rel = msg[7].asFloat;
     var curve = msg[8].asFloat, lo = msg[9].asFloat, hi = msg[10].asFloat;
+    var retrig = (msg[11] ? 0).asInteger;
     fork {
         var track = awaitTrack.(key);
-        var isChannel, ctl, index, envKey, existing;
+        var isChannel, ctl, index, envKey, existing, atAudio;
         if (track.isNil) { ("poptart: setParamEnv: no track " ++ key).warn } {
             isChannel = slot == -1;
             if (isChannel.not and: { awaitLoaded.(track, slot).not }) {
@@ -3667,12 +3839,24 @@ OSCdef(\poptartSetParamEnv, { |msg|
                 } {
                     envKey = ("slot" ++ slot ++ "_" ++ paramName).asSymbol;
                     existing = track[\envs][envKey];
+                    atAudio = isChannel.not and: { ctl.respondsTo(\mapAudio) };
+                    if (existing.notNil and: { (existing[\audio] ? false) != atAudio }) {
+                        // A plugin swapped for a native device or back: the bus is the wrong kind
+                        // for what reads it now, so this envelope starts over on the right one.
+                        existing[\synth].free;
+                        existing[\bus].free;
+                        track[\envs].removeAt(envKey);
+                        existing = nil;
+                    };
                     // An entry outlives the plugin it was mapped onto (see setParamLFO): re-map the
                     // bus on every send, so a slot whose plugin was swapped - an open clears the
                     // UGen's mappings - still reaches it. On the same bus and index it is a no-op.
                     if (existing.notNil) {
                         existing[\index] = index;
-                        if (isChannel) { track[\synth].map(paramName.asSymbol, existing[\bus]) } { ctl.map(index, existing[\bus]) };
+                        case
+                        { isChannel } { track[\synth].map(paramName.asSymbol, existing[\bus]) }
+                        { atAudio } { ctl.mapAudio(index, existing[\bus], 1, 0) }
+                        { ctl.map(index, existing[\bus]) };
                     };
                     if (existing.isNil and: { isChannel.not } and: { (lo < 0) or: { hi > 1 } }) {
                         ("poptart: env range " ++ lo ++ ".." ++ hi ++ " for '" ++ paramName
@@ -3680,16 +3864,19 @@ OSCdef(\poptartSetParamEnv, { |msg|
                             + "use .range(0.2, 0.9)-style values until per-plugin calibration exists").warn;
                     };
                     if (existing.notNil) {
-                        existing[\synth].set(\atk, atk, \dec, dec, \sus, sus, \rel, rel, \curve, curve, \lo, lo, \hi, hi);
+                        existing[\synth].set(\atk, atk, \dec, dec, \sus, sus, \rel, rel, \curve, curve, \lo, lo, \hi, hi, \retrig, retrig);
                     } {
-                        var bus = Bus.control(server, 1);
-                        var envSynth = Synth(\poptart_env,
+                        var bus = if (atAudio) { Bus.audio(server, 2) } { Bus.control(server, 1) };
+                        var envSynth = Synth(if (atAudio) { \poptart_env_ar } { \poptart_env },
                             [\out, bus, \atk, atk, \dec, dec, \sus, sus, \rel, rel, \curve, curve, \lo, lo, \hi, hi,
-                             \gate, if (track[\held] > 0) { 1 } { 0 }],
+                             \retrig, retrig, \gate, if (track[\held] > 0) { 1 } { 0 }],
                             target: track[\group], addAction: \addToHead);
                         dropRamp.(key, track, envKey);
-                        if (isChannel) { track[\synth].map(paramName.asSymbol, bus) } { ctl.map(index, bus) };
-                        track[\envs][envKey] = (synth: envSynth, bus: bus, index: index);
+                        case
+                        { isChannel } { track[\synth].map(paramName.asSymbol, bus) }
+                        { atAudio } { ctl.mapAudio(index, bus, 1, 0) }
+                        { ctl.map(index, bus) };
+                        track[\envs][envKey] = (synth: envSynth, bus: bus, index: index, audio: atAudio);
                     };
                 };
             };
@@ -3705,12 +3892,18 @@ OSCdef(\poptartClearParamEnv, { |msg|
     var envKey = ("slot" ++ slot ++ "_" ++ paramName).asSymbol;
     var existing = if (track.isKindOf(Event)) { track[\envs][envKey] };
     if (existing.notNil) {
-        if (slot == -1) {
+        case
+        { slot == -1 } {
             track[\synth].map(paramName.asSymbol, -1);
             track[\synth].set(paramName.asSymbol, channelDefault.(paramName));
-        } {
-            track[\controllers][slot].unmap(existing[\index]);
-        };
+        }
+        { existing[\audio] == true } {
+            // An audio-rate envelope comes off the control's audio bus - and a route patched
+            // there since goes back on, whichever of the two messages arrived first.
+            track[\controllers][slot] !? { |ctl| if (ctl.respondsTo(\unmapAudio)) { ctl.unmapAudio(existing[\index]) } };
+            reassertParamRoute.(key, track, slot, paramName);
+        }
+        { track[\controllers][slot].unmap(existing[\index]) };
         track[\envs].removeAt(envKey);
         freeModulatorLater.(key, track[\group], existing[\synth], existing[\bus]);
     };
@@ -4078,7 +4271,7 @@ OSCdef(\poptartMidiRoute, { |msg|
                                 track[\held] = track[\held] + 1;
                                 sounding[rawKey] = note;
                                 ctl.midi.noteOn(chan, note, veloc);
-                                track[\envs].do { |e| e[\synth].set(\gate, 1) };
+                                track[\envs].do { |e| e[\synth].set(\gate, 1, \t_retrig, 1) };
                                 track[\lfos].do { |e|
                                     if ((e[\mode] == \retrigger) or: { e[\mode] == \envelope }) { e[\synth].set(\t_trig, 1) };
                                 };
@@ -4170,6 +4363,16 @@ OSCdef(\poptartInjectAudio, { |msg|
 OSCdef(\poptartClearAudioInject, { |msg|
     unwireAudio.(msg[1].asSymbol, msg[2].asInteger);
 }, '/poptart/clearAudioInject');
+
+// Audio patched onto a parameter (see paramRoutes): [trackId, slot, name, source, gain, offset].
+OSCdef(\poptartConnectParam, { |msg|
+    wireParamRoute.(msg[1].asSymbol, msg[2].asInteger, msg[3].asString, msg[4].asString,
+        (msg[5] ? 1).asFloat, (msg[6] ? 0).asFloat);
+}, '/poptart/connectParam');
+
+OSCdef(\poptartDisconnectParam, { |msg|
+    unwireParamRoute.(msg[1].asSymbol, msg[2].asInteger, msg[3].asString);
+}, '/poptart/disconnectParam');
 
 // Audio into a track's chain input (the audio() head source): same wiring, sink slot 0 (the
 // track's inBus, already mixed into its instrument slot).
@@ -4537,7 +4740,7 @@ OSCdef(\poptartPlaySample, { |msg|
             };
             synth = Synth(defName, args, target: track[\voices] ? track[\group], addAction: \addToHead);
             voiceBorn.(synth); // ...and the oldest one goes if the engine is already full
-            track[\envs].do { |e| e[\synth].set(\gate, 1) };
+            track[\envs].do { |e| e[\synth].set(\gate, 1, \t_retrig, 1) };
             track[\lfos].do { |e|
                 if ((e[\mode] == \retrigger) or: { e[\mode] == \envelope }) { e[\synth].set(\t_trig, 1) };
             };

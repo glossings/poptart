@@ -136,6 +136,22 @@ test('.fx("Ducker").midi("kick") plays the ducker from the kick\'s sampler event
   assert.ok(ducker.messages.some((m) => m.kind === 'noteRoute' && m.on === false));
 });
 
+test('a track\'s own notes strike the LPG on its own chain', () => {
+  // `lead: note(...).synth("Wavetable").fx("LPG").midi("lead")` - the route names the track it
+  // is on, and its notes reach both its instrument and the gate after it.
+  const { engine, warnings } = makeEngine();
+  engine.loadInstrument('lead', 'Wavetable');
+  engine.loadEffect('lead', 'LPG', 1);
+  engine.injectMidi('lead', 1, 'lead', null);
+  engine.noteOn('lead', 60, 0.7, 2);
+  engine.noteOff('lead', 60, 2.5);
+  const gate = slotNode(engine, 'lead', 1);
+  assert.ok(gate.messages.some((m) => m.kind === 'noteRoute' && m.on === true));
+  assert.deepEqual(notes(gate).map((m) => [m.kind, m.time]), [['noteOn', 2], ['noteOff', 2.5]]);
+  assert.equal(notes(instrumentOf(engine, 'lead')).length, 2, 'the instrument still plays them');
+  assert.deepEqual(warnings, []);
+});
+
 test('.midi() into an effect that is not played by notes says so by name', () => {
   const { engine, warnings } = makeEngine();
   engine.loadInstrument('keys', 'Wavetable');

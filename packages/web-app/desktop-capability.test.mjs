@@ -1,8 +1,9 @@
 // The desktop engine, the wrapper around it, and the scheduler driving both.
 //
-// The browser build added one thing the desktop engine cannot do - patching an audio signal onto
-// a plugin parameter - and the scheduler already knew how to refuse it: ask whether the engine
-// has `connectParam`, and if not, warn once and play everything else. What broke that was the
+// The browser build added one thing the desktop engine could not do at first - patching an audio
+// signal onto a parameter - and the scheduler already knew how to refuse it: ask whether the
+// engine has `connectParam`, and if not, warn once and play everything else. The desktop can now
+// (for poptart's own devices); the refusal path is still covered for an engine that cannot. What broke that was the
 // layer in between. `MappedEngine` forwards every method the scheduler calls, which is right for
 // the calls the scheduler makes outright and wrong for the ones it asks about first: the wrapper
 // answered yes on the engine's behalf, the scheduler wired the route, and the call landed on
@@ -55,18 +56,38 @@ const captureWarnings = () => {
   return { lines, restore: () => setPatternWarn(null) };
 };
 
-test('patching audio onto a parameter is the only thing the desktop engine cannot do', () => {
-  // If this list grows, the new entry needs the same treatment - either OscEngine learns it, or
-  // MappedEngine.OPTIONAL hides it - and until then the desktop throws where it should warn.
+test('the desktop engine has every call the scheduler makes, the optional ones included', () => {
+  // If this list grows, the new entry needs the same treatment it once had for patching audio
+  // onto a parameter - either OscEngine learns it, or MappedEngine.OPTIONAL hides it - and until
+  // then the desktop throws where it should warn.
   const { absent } = desktopShapedEngine();
-  assert.deepEqual(absent.sort(), ['connectParam', 'disconnectParam', 'paramRoutes']);
-  for (const name of absent) {
-    assert.ok(MappedEngine.OPTIONAL.includes(name), `${name} is missing from OPTIONAL`);
-  }
+  assert.deepEqual(absent.sort(), []);
 });
 
-test('a pattern that patches audio onto a parameter warns on the desktop, and does not throw', () => {
+test('a pattern that patches audio onto a parameter is wired on the desktop, not warned about', () => {
   const { engine } = desktopShapedEngine();
+  const calls = [];
+  engine.connectParam = (...a) => calls.push(a);
+  const mapped = new MappedEngine(engine);
+  assert.equal(typeof mapped.connectParam, 'function', 'the wrapper should pass the capability on');
+
+  const warnings = captureWarnings();
+  try {
+    const sched = new Scheduler(mapped, { trackId: '#1', label: 'lead' });
+    sched.setPattern(synth('Wavetable').param('Osc 1 Phase', audio('mod')));
+    assert.deepEqual(warnings.lines, [], 'an engine that can do it should not be warned about');
+  } finally {
+    warnings.restore();
+  }
+  assert.deepEqual(calls, [['#1', 0, 'Osc 1 Phase', 'mod', 1, 0]]);
+});
+
+test('an engine without the routing pair is still warned about once, and does not throw', () => {
+  // The refusal path stays: an engine that cannot patch says so and plays everything else.
+  const { engine } = desktopShapedEngine();
+  delete engine.connectParam;
+  delete engine.disconnectParam;
+  delete engine.paramRoutes;
   const mapped = new MappedEngine(engine);
   assert.equal(typeof mapped.connectParam, 'undefined', 'the wrapper must not claim it');
 

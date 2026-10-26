@@ -479,6 +479,10 @@ class OscEngine {
     // argument is resolved against (see setParam). Only this half knows: the scheduler sends a
     // name and a value and does not care what is hosting them, exactly as on the web.
     this._slotDevices = new Map();
+    // What is patched onto each track's parameters, as "slot:name" -> "source|gain|offset" - the
+    // scheduler's own spelling, which a fresh Scheduler reads back (paramRoutes) to find a route
+    // the new pattern dropped. The engine track outlives the Scheduler that wired it.
+    this._paramRoutes = new Map();
     // Where each of those devices' controls is sitting, as "trackId:slot" -> { paramId: 0..1 },
     // and what is driving any of them -> { paramId: 'lfo' | 'env' | 'cc' | 'osc' | 'pattern' }.
     //
@@ -1085,6 +1089,7 @@ class OscEngine {
     for (const key of this._slotDevices.keys()) {
       if (key.startsWith(`${trackId}:`)) this._forgetDevice(key);
     }
+    this._paramRoutes.delete(trackId);
     this._send('/poptart/destroyTrack', [trackId]);
   }
   loadInstrument(trackId, pluginId) {
@@ -2192,6 +2197,8 @@ class OscEngine {
       ir.curve ?? -4,
       ir.min,
       ir.max,
+      // Every note restarts the attack, not only the first of an overlapping run.
+      ir.retrigger ? 1 : 0,
     ]);
   }
   clearParamEnv(trackId, slotIndex, paramName) {
@@ -2412,6 +2419,29 @@ class OscEngine {
   }
   clearAudioInject(trackId, slot) {
     this._send('/poptart/clearAudioInject', [trackId, slot]);
+  }
+
+  // Audio patched onto a parameter (.param("Cutoff", audio("lfo"))): another track's output or a
+  // named bus, read every sample by one of poptart's own devices (PoptartDevice's /mapa). `gain`
+  // and `offset` are the .mul()/.add() on the handle, in the control's 0..1 positions; the device
+  // clamps the sum to that range. sclang resolves the source the way it resolves a sidechain's,
+  // orders the source ahead of this track, and puts the route back on whatever device takes the
+  // slot next. A plugin's parameter cannot take one (VSTPlugin reads its parameters a block at a
+  // time); sclang says so rather than connecting it.
+  connectParam(trackId, slot, name, source, gain = 1, offset = 0) {
+    if (!this._paramRoutes.has(trackId)) this._paramRoutes.set(trackId, new Map());
+    this._paramRoutes.get(trackId).set(`${slot}:${name}`, `${source}|${gain}|${offset}`);
+    this._noteDriver(trackId, slot, name, 'audio');
+    this._send('/poptart/connectParam', [trackId, slot, String(name), String(source), Number(gain), Number(offset)]);
+  }
+  disconnectParam(trackId, slot, name) {
+    this._paramRoutes.get(trackId)?.delete(`${slot}:${name}`);
+    this._noteDriver(trackId, slot, name, null);
+    this._send('/poptart/disconnectParam', [trackId, slot, String(name)]);
+  }
+  /** What is patched onto this track's parameters, as `"slot:name" -> "source|gain|offset"`. */
+  paramRoutes(trackId) {
+    return new Map(this._paramRoutes.get(trackId) ?? []);
   }
 
   // Inject MIDI into the plugin at `slot` from a named source (Sig#midi injector, named form). A

@@ -466,6 +466,22 @@ test('an envelope is gated by the notes, not by the clock', () => {
   assert.ok(cutoff.calls.some((c) => c.kind === 'ramp' && c.value === 200), 'and release to its floor');
 });
 
+test('an envelope that retriggers starts again on a note that overlaps the last, and one that does not, does not', () => {
+  const peaks = (retrigger) => {
+    const { engine } = makeEngine();
+    engine.createTrack('t1');
+    engine.loadInstrument('t1', 'Wavetable');
+    engine.loadEffect('t1', 'Filter', 1);
+    engine.setParamEnv('t1', 1, 'Cutoff', { attack: 0.01, decay: 0.1, sustain: 0.5, release: 0.2, min: 200, max: 5000, retrigger });
+    const cutoff = engine.tracks.get('t1').slots.get(1).built.params.cutoff;
+    engine.noteOn('t1', 60, 1, 0);
+    engine.noteOn('t1', 64, 1, 0.5);   // while 60 is still held
+    return cutoff.calls.filter((c) => c.kind === 'ramp' && c.value === 5000).length;
+  };
+  assert.equal(peaks(false), 1, 'a held gate is not opened twice');
+  assert.equal(peaks(true), 2, 'a retriggering one peaks on each note');
+});
+
 test('a control feed reaches every parameter watching it and nothing else', () => {
   const { engine } = makeEngine();
   engine.createTrack('t1');

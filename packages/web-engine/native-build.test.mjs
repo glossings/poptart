@@ -113,6 +113,7 @@ const DEVICES = [
     id: 'Thing',
     kind: 'synth',
     sidechain: false,
+    build: 'wasm',   // a ported module, which reads its controls once a block on both engines
     params: [
       { id: 'engine', name: 'Engine', min: 0, max: 23, default: 8, step: 1, curve: 'lin', curveExp: 1, ui: 'enum', group: 'Model', rate: 'k', options: ['a', 'b'] },
       { id: 'cutoff', name: 'Cutoff', min: 20, max: 20000, default: 2000, step: 0, curve: 'exp', curveExp: 1, ui: 'knob', group: '', rate: 'a', unit: 'Hz' },
@@ -139,12 +140,14 @@ test('the registry carries each control as the position it rests at, and the dev
   assert.ok(src.includes('extern "C" int pd_device_count() { return 3; }'));
   // An effect the descriptor says takes notes is marked as taking them, so the UGen passes a
   // routed track's notes on to it instead of dropping them for not being an instrument.
-  assert.ok(src.includes('{ "Dipper", 0, 1, 1, 1, kDipperParams, &pd_make_Dipper },'));
+  assert.ok(src.includes('{ "Dipper", 0, 1, 1, 1, 1, kDipperParams, &pd_make_Dipper },'));
   // An instrument (played by notes, no sidechain, two controls); and an effect that takes a
   // sidechain and no notes. The third column is whether notes reach it, which for an instrument
-  // is always yes and for an effect is yes only where the descriptor says so (the ducker).
-  assert.ok(src.includes('{ "Thing", 1, 1, 0, 2, kThingParams, &pd_make_Thing },'));
-  assert.ok(src.includes('{ "Crosser", 0, 0, 1, 1, kCrosserParams, &pd_make_Crosser },'));
+  // is always yes and for an effect is yes only where the descriptor says so (the ducker). The
+  // fifth is whether a control with audio patched onto it is fed per sample: yes for poptart's
+  // own devices, no for a ported module, which reads its controls once a block in the browser.
+  assert.ok(src.includes('{ "Thing", 1, 1, 0, 0, 2, kThingParams, &pd_make_Thing },'));
+  assert.ok(src.includes('{ "Crosser", 0, 0, 1, 1, 1, kCrosserParams, &pd_make_Crosser },'));
   // The default is written as a POSITION, because that is what the UGen holds a control at
   // until a pattern moves it: engine 8 of 0..23, and an exponential cutoff's 2000 Hz of
   // 20..20000, which is not at 10% of its travel.

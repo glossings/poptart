@@ -140,10 +140,11 @@ test('every call the scheduler feature-detects is one the desktop engine has, or
 });
 
 test('a capability the engine lacks is not advertised by the wrapper', () => {
-  // The desktop's shape: an engine with everything except the parameter-routing pair. Forwarding
-  // those unconditionally made `typeof engine.connectParam === 'function'` true on the wrapper,
-  // so the scheduler wired the route and the forward landed on undefined - a TypeError that took
-  // the evaluation down, where the scheduler's own answer is to warn once and keep playing.
+  // An engine with everything except the optional calls - the desktop's shape before it could
+  // patch audio onto a parameter. Forwarding those unconditionally made `typeof
+  // engine.connectParam === 'function'` true on the wrapper, so the scheduler wired the route and
+  // the forward landed on undefined - a TypeError that took the evaluation down, where the
+  // scheduler's own answer is to warn once and keep playing.
   const engine = {};
   for (const name of schedulerEngineCalls()) {
     if (!MappedEngine.OPTIONAL.includes(name)) engine[name] = () => {};

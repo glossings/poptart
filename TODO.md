@@ -883,29 +883,16 @@ no completion notes.
         already do (queueNoteOn's third argument). It is also why the ducker's note-triggered dip
         starts at a block edge where the browser's starts at the note's own onset.
 
-    (5) A control is read once per block rather than per sample. The browser reads every
-        continuous control per sample while a signal is moving it, which is what makes an `lfo()`
-        on a filter cutoff a sweep rather than a staircase (filter.mjs re-tunes per sample the
-        moment its cutoff is moving, and has a still-cutoff fast path beside it). A device here is
-        handed one value for the whole of scsynth's block - 256 frames, 5.3ms - because that is
-        how often a control bus changes. The ported modules behave that way on both engines.
-
-        Two things make it less bad than it sounds. Six of poptart's own devices already walk
-        their coefficients across the block rather than stepping them (the biquad's `glideTo`,
-        used by Filter, EQ, Distort, Crush, Delay, Overdrive and Multiband), so those do not
-        zipper today whatever the control rate is; and the real bottleneck is not the device but
-        the MODULATOR - a control bus changes once per block, so nothing downstream of a
-        `SinOsc.kr` can be finer than 5.3ms however often it is read.
-
-        There are two tiers to fixing it. The cheap one touches no device and does not change the
-        ABI: the UGen ALREADY follows a moving bend in 32-frame pieces (kBendPiece), so giving it
-        a few audio-rate control inputs, an `.ar` variant of the modulator defs writing to an
-        audio bus, and a re-fill of the parameter block per piece puts every control at 0.67ms -
-        eight times finer - for the price of one C++ file, the track def builder and a mapping
-        message. True per-sample parity is the other tier: the parameter block becomes a block per
-        a-rate control and each device reads it the way its own .mjs does, which is mechanical but
-        touches all of them (the parity test would catch each mistake, and the harness would then
-        be feeding moving controls, which it never has).
+    (5) Most controls are still read once per block. Audio patched onto a control
+        (`.param(name, audio("x"))`, the UGen's /mapa) and an env() on a native device's control
+        (poptart_env_ar on an audio bus) are read per sample now: while anything is patched the
+        UGen renders an own device one sample at a time (kPatchPiece), which the parity test
+        holds against the browser and audio-patch-sclang.test.js renders. A ported module reads a
+        patch at the block start, as it does in the browser. What is still a control bus, and so
+        a 5.3ms staircase: lfo(), midicc()/osc(), and polled values. The same route covers them -
+        an `.ar` twin of each modulator def writing a stereo audio bus, mapped with mapAudio, as
+        setParamEnv does - at the per-sample cost measured for kPatchPiece (about 1.5-2x for the
+        synths, far more for Distort, whose oversampler pays per call).
 
     (6) Live verification. Everything above is unit-tested and rendered offline through a real
         scsynth (native-device-sclang.test.js renders Plaits, a control change, Galactic's tail,
@@ -918,5 +905,5 @@ no completion notes.
 
     In value for effort, if this is picked up again: the note offset (4) is the only one anybody
     can HEAR and is probably a day; the modulated-knob follow (2) is half a day and immediately
-    visible; the `.preset()` round trip may cost nothing but a test; then the cheap tier of (5),
-    then the live figures, then per-sample controls.
+    visible; the `.preset()` round trip may cost nothing but a test; then the rest of (5), then the live
+    figures.

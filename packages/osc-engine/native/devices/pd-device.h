@@ -239,6 +239,13 @@ struct PdDeviceInfo {
   int isSynth;                  // 1 = played by notes, 0 = fed by a chain
   int takesNotes;               // 1 = notes reach it even though it is an effect (the ducker)
   int sidechain;                // 1 = the second input is another signal, not this track's right channel
+  /**
+   * 1 = the device reads a control a signal moves PER SAMPLE in the browser, so a control with
+   * audio patched onto it is fed per sample here too (PoptartDevice processes such a device in
+   * one-sample pieces while anything is patched). 0 = a ported module, which reads its controls
+   * once a block on both engines.
+   */
+  int perSample;
   int paramCount;
   const PdParamSpec* params;
   PdAny* (*make)();             // allocates: NON-REALTIME THREAD ONLY

@@ -7887,19 +7887,43 @@ function gateSegments(intervals) {
  * the JS reading of what poptart_env plays. Times are in seconds, so the tempo converts. A gate
  * reopening inside the previous release restarts the attack from the level the release had got
  * to, as EnvGen does, so overlapping and tightly repeated notes don't step.
+ *
+ * With `ir.retrigger`, every note's onset restarts the attack - from the level the envelope had
+ * reached, so it does not click - even while an earlier note still holds the gate open. The gate
+ * itself still closes only when the last note ends.
  */
 export function sampleEnvIR(ir, pos, cps = 1) {
   if (!noteGate) return 0;
-  const segs = gateSegments(noteGate.intervalsUpTo(pos));
+  const intervals = noteGate.intervalsUpTo(pos);
+  const segs = gateSegments(intervals);
   if (!segs.length) return 0;
   const secs = (cycles) => cycles / cps;
-  // Level reached at the end of segment i's sustain phase (or wherever `at` cuts it off), starting
-  // from the level `from`; and the level of segment i's release `at` some later position.
-  const holdLevel = (seg, from, at) => {
-    const dt = secs(at - seg[0]);
+  // The level `at` reaches when an attack started at `onset` from the level `from`.
+  const holdFrom = (onset, from, at) => {
+    const dt = secs(at - onset);
     if (dt < ir.attack) return from + (1 - from) * envCurve(dt / ir.attack, ir.curve);
     if (dt < ir.attack + ir.decay) return 1 + (ir.sustain - 1) * envCurve((dt - ir.attack) / ir.decay, ir.curve);
     return ir.sustain;
+  };
+  // Where a segment's attacks start: its first note only, or every note inside it.
+  const onsetsOf = (seg) => {
+    if (!ir.retrigger) return [seg[0]];
+    const starts = [];
+    for (const [start] of intervals) if (start >= seg[0] && start < seg[1] && start !== starts[starts.length - 1]) starts.push(start);
+    return starts.length ? starts : [seg[0]];
+  };
+  // Level reached at `at` inside a segment (up to its end), starting from the level `from`.
+  const holdLevel = (seg, from, at) => {
+    const onsets = onsetsOf(seg);
+    let level = from;
+    for (let k = 0; k < onsets.length; k++) {
+      if (k + 1 < onsets.length && onsets[k + 1] <= at) {
+        level = holdFrom(onsets[k], level, onsets[k + 1]);
+        continue;
+      }
+      return holdFrom(onsets[k], level, at);
+    }
+    return level;
   };
   const releaseLevel = (seg, from, at) => {
     const peak = holdLevel(seg, from, seg[1]);
@@ -7919,10 +7943,12 @@ export function sampleEnvIR(ir, pos, cps = 1) {
  * `env({ attack: 0.03, decay: 0.3, sustain: 0.2, release: 0.15, curve: -4 }).range(300, 6000)` -
  * times in seconds, sustain 0..1. `curve` shapes every segment (SuperCollider convention:
  * negative = exponential-ish scoop, 0 = linear, positive = bulge); also settable via .curve(c).
+ * `retrigger: true` restarts the attack on every note, not only on the first of a run that
+ * overlaps.
  */
 export function env(opts = {}) {
-  const { attack = 0.01, decay = 0.1, sustain = 0.7, release = 0.2, curve = -4 } = opts;
-  return withEnvIR({ attack, decay, sustain, release, curve, min: 0, max: 1 });
+  const { attack = 0.01, decay = 0.1, sustain = 0.7, release = 0.2, curve = -4, retrigger = false } = opts;
+  return withEnvIR({ attack, decay, sustain, release, curve, retrigger: retrigger === true, min: 0, max: 1 });
 }
 
 // ---------------------------------------------------------------------------------------------

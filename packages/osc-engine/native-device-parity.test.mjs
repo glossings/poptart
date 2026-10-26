@@ -46,6 +46,8 @@ import { DuckerProcessor } from '../web-engine/src/devices/ducker.mjs';
 import { FmSynth } from '../web-engine/src/devices/fmsynth.mjs';
 import { WavetableSynth } from '../web-engine/src/devices/wavetable.mjs';
 import { GranularSynth } from '../web-engine/src/devices/granular.mjs';
+import { NoiseSynth } from '../web-engine/src/devices/noise.mjs';
+import { LpgProcessor } from '../web-engine/src/devices/lpg.mjs';
 import { IR_NAMES, synthesizeImpulse } from '../web-engine/src/devices/builtins.mjs';
 import { Biquad, BIQUAD_TYPES } from '../web-engine/src/dsp/biquad.mjs';
 
@@ -79,6 +81,8 @@ const PROCESSORS = {
   FM: FmSynth,
   Wavetable: WavetableSynth,
   Granular: GranularSynth,
+  Noise: NoiseSynth,
+  LPG: LpgProcessor,
   // Convolver is deliberately not here: there is no JavaScript processor for it to be compared
   // against, because in the browser it IS a ConvolverNode. It has a test of its own at the end
   // of this file, against Chromium's documented behavior.
@@ -123,7 +127,7 @@ function buildHarness(devices) {
 }
 
 /** One device's output: the values in real units, the input, and what comes back. */
-function runNative(binary, { id, values, input, frames, notes = [], bpm = 120, keyed = null, samples = [] }) {
+function runNative(binary, { id, values, input, frames, notes = [], bpm = 120, keyed = null, samples = [], moving = [] }) {
   const stdin = Buffer.alloc(values.length * 4 + input.length * 4);
   for (let i = 0; i < values.length; i++) stdin.writeFloatLE(Math.fround(values[i]), i * 4);
   for (let i = 0; i < input.length; i++) stdin.writeFloatLE(input[i], values.length * 4 + i * 4);
@@ -131,6 +135,7 @@ function runNative(binary, { id, values, input, frames, notes = [], bpm = 120, k
   if (keyed !== null) args.push('-k', keyed ? '1' : '0');
   for (const one of samples) args.push('-S', `${one.param}:${one.slot}:${one.rate}:${one.file}`);
   for (const n of notes) args.push('-n', `${n.frame}:${n.note}:${n.velocity}`);
+  for (const one of moving) args.push('-A', `${one.param}:${one.file}`);
   const run = spawnSync(binary, args, { input: stdin, maxBuffer: 1 << 28 });
   assert.equal(run.status, 0, `${id}: the harness failed - ${run.stderr?.toString()}`);
   const out = new Float32Array(frames * 2);
@@ -290,6 +295,16 @@ const LONG_RUN = { Voice: BLOCK * 240 };
 const PINNED = {
   // Always-glide, with a glide long enough to still be moving when the chords change.
   Wavetable: [{ 'glide': 0.05, 'glide.mode': 1 }, { 'glide': 0.05, 'glide.mode': 0 }],
+  // Every color, filtered and narrowed so the tone and width paths run too, and the digital
+  // color's long sequence as well as its short one. The chaotic map is in the list on purpose:
+  // it is the color one bit of rounding would send somewhere else.
+  Noise: [
+    ...Array.from({ length: 10 }, (_, color) => ({ color, character: 0.7, tone: 3000, width: 0.4 })),
+    { color: 7, character: 0.2, pitch: 12 },
+    { color: 8, character: 0 },
+    { color: 9, character: 1, pitch: -12 },
+  ],
+  LPG: [{ mode: 1 }, { mode: 2, resonance: 0.8 }, { level: 0.4, decay: 0.05, resonance: 0.5 }],
 };
 
 const SAMPLED = {
@@ -553,6 +568,96 @@ for (const one of devices.filter((d) => !STOCK_NODES.has(d.id))) {
     // Two silences are identical, which would make this test pass for a device that does nothing
     // at all - so somewhere in all of that the device has to have made a sound.
     assert.ok(loudest > 1e-3, `${one.id}: the compiled device never put out anything (rms ${loudest})`);
+  });
+}
+
+// ---- a control with audio patched onto it ------------------------------------------------------
+//
+// `.param("Cutoff", audio("mod"))` moves a control every sample. The browser's processor is
+// handed a block-long array for it and reads it per sample; the UGen, while anything is patched,
+// renders the device one sample at a time with the control set from the bus at that sample
+// (kPatchPiece in PoptartDevice.cpp). The harness does the same with `-A`, so these say the two
+// still agree when a control is being swept at audio rate - a 300 Hz sine across most of its
+// range, which no per-block reading could follow.
+
+/** The control's position swept by a sine, as real values per frame. */
+function sweptValues(param, frames, hz = 300) {
+  return Float32Array.from({ length: frames }, (_, i) =>
+    Math.fround(denormalize(param, 0.5 + 0.3 * Math.sin((2 * Math.PI * hz * i) / SAMPLE_RATE))));
+}
+
+/** The browser's processor with one control swept, handed it as the worklet would: per block. */
+function runBrowserSwept(descriptor, { values, input, frames, notes, channels, sweptId, swept }) {
+  const params = {};
+  descriptor.params.forEach((p, i) => { params[p.id] = Math.fround(values[i]); });
+  const out = new Float32Array(frames * 2);
+  let nextNote = 0;
+  const synth = descriptor.kind === 'synth';
+  const dev = new PROCESSORS[descriptor.id](SAMPLE_RATE);
+  if (typeof dev.setTempo === 'function') dev.setTempo(120, 0);
+  const left = new Float32Array(BLOCK);
+  const right = new Float32Array(BLOCK);
+  const inputs = [new Float32Array(BLOCK), new Float32Array(BLOCK)];
+  for (let at = 0; at < frames; at += BLOCK) {
+    const n = Math.min(BLOCK, frames - at);
+    params[sweptId] = swept.subarray(at, at + n);
+    left.fill(0);
+    right.fill(0);
+    if (synth) {
+      dev.setParams(params);
+      dev.setBend(0);
+      while (nextNote < notes.length && notes[nextNote].frame < at + n) {
+        const one = notes[nextNote++];
+        if (one.velocity > 0) dev.queueNoteOn(one.note, one.velocity, 0);
+        else dev.queueNoteOff(one.note, 0);
+      }
+      dev.process(left, right, n);
+    } else {
+      for (let i = 0; i < n; i++) {
+        inputs[0][i] = input[(at + i) * channels];
+        inputs[1][i] = input[(at + i) * channels + 1];
+      }
+      dev.process(inputs, [left, right], n, params, null, at / SAMPLE_RATE);
+    }
+    for (let i = 0; i < n; i++) {
+      out[(at + i) * 2] = left[i];
+      out[(at + i) * 2 + 1] = right[i];
+    }
+  }
+  return out;
+}
+
+const PATCHED = [
+  { id: 'Filter', param: 'cutoff' },
+  { id: 'LPG', param: 'level' },
+  { id: 'Noise', param: 'tone' },
+  { id: 'Wavetable', param: 'osc1.phase' },
+];
+
+for (const { id, param } of PATCHED) {
+  test(`${id} follows audio patched onto ${param} the same on both engines`, { skip: compiler ? false : 'no clang++' }, () => {
+    const binary = buildHarness(devices);
+    const { device } = devices.find((d) => d.id === id);
+    const frames = BLOCK * 24;
+    const index = device.params.findIndex((p) => p.id === param);
+    const swept = sweptValues(device.params[index], frames);
+    const file = writeFile(path.join(WORK, `${id}-swept.f32`), swept);
+    const values = defaultValues(device);
+    const synth = device.kind === 'synth';
+    const notes = synth ? [{ frame: 0, note: 48, velocity: 0.9 }, { frame: BLOCK * 12, note: 48, velocity: 0 }] : [];
+    const channels = 2;
+    const input = synth ? new Float32Array(frames * channels) : testSignal(frames, channels);
+    const native = runNative(binary, { id, values, input, frames, notes, samples: [], keyed: null, moving: [{ param: index, file }] });
+    const browser = runBrowserSwept(device, { values, input, frames, notes, channels, sweptId: param, swept });
+    const { rmsA } = compare(id, `with ${param} swept at audio rate`, native, browser);
+    assert.ok(rmsA > 1e-3, `${id}: nothing came out`);
+    // And it has to be moving per sample, not per block: the same run with the control held at
+    // each block's first value comes out different.
+    const blocky = Float32Array.from(swept, (_, i) => swept[i - (i % BLOCK)]);
+    const held = runBrowserSwept(device, { values, input, frames, notes, channels, sweptId: param, swept: blocky });
+    let differs = 0;
+    for (let i = 0; i < held.length; i++) differs = Math.max(differs, Math.abs(held[i] - browser[i]));
+    assert.ok(differs > 1e-3, `${id}: sweeping ${param} per sample sounded no different from per block`);
   });
 }
 

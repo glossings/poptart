@@ -581,7 +581,8 @@ export class WebAudioEngine {
     this._markSounding(trackId, 0, note, Infinity);
     const held = this.held.get(trackId) ?? 0;
     this.held.set(trackId, held + 1);
-    if (held === 0) for (const env of this.envelopes.get(trackId)?.values() ?? []) env.gateOn(atTime);
+    // One that retriggers starts its attack again on every note, from wherever it had got to.
+    for (const env of this.envelopes.get(trackId)?.values() ?? []) if (held === 0 || env.ir?.retrigger) env.gateOn(atTime);
     for (const conn of this.modulators.get(trackId)?.values() ?? []) {
       if (conn instanceof LfoConnection) conn.gate(atTime);
     }

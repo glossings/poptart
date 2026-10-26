@@ -48,6 +48,8 @@ var server = srv;
 var maxSlots = 8;
 var tracks = IdentityDictionary.new;
 var sidechainByTarget = IdentityDictionary.new;
+// Parameter patches order tracks too (trackLevels reads them); none here.
+var paramRoutes = IdentityDictionary.new;
 var sidechainBySource = IdentityDictionary.new;
 var sourceFeeds = IdentityDictionary.new;
 var namedBuses = IdentityDictionary.new;

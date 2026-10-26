@@ -106,6 +106,7 @@ var maxSlots = 8, numPairs = 2, key = "probe";
 var trackDefName = { |k| ("poptart_probe_" ++ k).asSymbol };
 var channelDefault, djIsolator, def;
 var destroyTrack, awaitTrack, stopMixTap, unwireAudio, sidechainBySource, releaseBus, tracks, reorderTracks;
+var paramRoutes, unwireParamRoute; // audio patched onto parameters, which destroyTrack unwires
 var songs = IdentityDictionary.new; // the song decks' buffer registry, swept by destroyTrack
 var birthParse;
 var waitForLoad, flushNotes, clearPending, now, fired;

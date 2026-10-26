@@ -14,6 +14,7 @@
 import { WAVETABLE, WavetableSynth } from '../devices/wavetable.mjs';
 import { FMSYNTH, FmSynth } from '../devices/fmsynth.mjs';
 import { GRANULAR, GranularSynth } from '../devices/granular.mjs';
+import { NOISE, NoiseSynth } from '../devices/noise.mjs';
 import { sharedBuiltInTables } from '../dsp/tables.mjs';
 import { Reporter, bendOf, isDispose, offsetInBlock, parameterDescriptorsFor, realParams } from './shared.mjs';
 
@@ -108,6 +109,7 @@ const SYNTHS = [
   [WAVETABLE, () => new WavetableSynth(sampleRate)],
   [FMSYNTH, () => new FmSynth(sampleRate)],
   [GRANULAR, () => new GranularSynth(sampleRate)],
+  [NOISE, () => new NoiseSynth(sampleRate)],
 ];
 
 for (const [descriptor, make] of SYNTHS) {

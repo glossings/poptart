@@ -13,7 +13,7 @@
 //
 //   inputs:  [bend (kr), numMain, main0..., numSidechain, sidechain0...]
 //   outputs: numChannels audio channels
-//   unit commands: /open /close /set /map /unmap /noteOn /noteOff /allNotesOff
+//   unit commands: /open /close /set /map /mapa /unmap /noteOn /noteOff /allNotesOff
 //
 // which is what lets sc/poptart.scd treat a native device and a plugin as the same kind of thing
 // (see PoptartDeviceController in classes/PoptartDevice.sc): one `.set`, one `.map`, one
@@ -52,6 +52,18 @@ const int kMaxParams = 192;
 
 /** How many frames an instrument is given between bend updates while a bend is moving. */
 const int kBendPiece = 32;
+
+/**
+ * How many frames a device is given at a time while audio is patched onto one of its controls.
+ *
+ * One, because that is what patching audio onto a control MEANS: the browser's own devices read
+ * a moving control per sample, and phase modulation or a cutoff swept at audio rate is nothing
+ * else. The device's own `process` reads its controls once per call (the ABI), so a control that
+ * changes every sample needs a call every sample. Measured on the parity harness, that costs the
+ * synths about one and a half to two times their usual load and Distort - whose oversampler pays
+ * per call - far more; it is paid only while something is patched.
+ */
+const int kPatchPiece = 1;
 
 /**
  * How many loaded files one device may hold at once.
@@ -155,6 +167,9 @@ struct PoptartDevice : public SCUnit {
         for (int i = 0; i < kMaxParams; ++i) {
             mPosition[i] = 0.f;
             mBus[i] = -1;
+            mAudioBus[i] = -1;
+            mAudioGain[i] = 1.f;
+            mAudioOffset[i] = 0.f;
         }
         for (int i = 0; i < kMaxSamples; ++i) { mSamples[i] = LoadedSample(); mRetiringSamples[i] = nullptr; }
 
@@ -228,8 +243,10 @@ struct PoptartDevice : public SCUnit {
         mMaxBlock = device ? device->maxBlock() : 0;
         for (int i = 0; i < kMaxParams; ++i) {
             mBus[i] = -1;
+            mAudioBus[i] = -1;
             mPosition[i] = (info && i < info->paramCount) ? info->params[i].defaultPosition : 0.f;
         }
+        mAudioMapped = 0;
     }
 
     /**
@@ -294,6 +311,14 @@ struct PoptartDevice : public SCUnit {
         }
     }
 
+    /**
+     * The three ways a control is driven from a control bus or a value - and none of them takes
+     * it off an AUDIO patch, which only an explicit unpatch (/mapa with a bus of -1) or a new
+     * device in the slot does. A patch is the one driver that is wired once and then left alone,
+     * and the others arrive in timestamped bundles a lookahead ahead: a release of the value the
+     * pattern used to poll, landing just after the patch that replaced it, must not cut the patch.
+     * While a control is patched, what these set is where it goes back to when the patch goes.
+     */
     void setParam(int index, float position) {
         if (index < 0 || index >= kMaxParams) return;
         mPosition[index] = position;
@@ -303,6 +328,22 @@ struct PoptartDevice : public SCUnit {
     void mapParam(int index, int bus) {
         if (index < 0 || index >= kMaxParams) return;
         mBus[index] = bus;
+    }
+
+    /**
+     * An AUDIO bus onto a control, read every sample: another track's output, or an envelope
+     * running at the sample rate. `gain` and `offset` are the `.mul()` and `.add()` that rode in
+     * with it, applied here so a patch needs no synth of its own - the control's position is
+     * gain * signal + offset, clamped to 0..1, exactly what the browser's AudioParam makes of a
+     * connection (its own value zeroed, the signal summed to mono, the sum clamped to the range).
+     */
+    void mapAudio(int index, int bus, float gain, float offset) {
+        if (index < 0 || index >= kMaxParams) return;
+        if (bus < 0) { clearAudio(index); return; }
+        if (mAudioBus[index] < 0) ++mAudioMapped;
+        mAudioBus[index] = bus;
+        mAudioGain[index] = gain;
+        mAudioOffset[index] = offset;
     }
 
     void unmapParam(int index) {
@@ -360,11 +401,43 @@ private:
 
     /** This block's position for one control: whatever is driving it, or what it was set to. */
     float positionOf(int index) {
+        if (mAudioBus[index] >= 0) return audioPositionOf(index, 0);
         const int bus = mBus[index];
         if (bus < 0) return mPosition[index];
         const World* world = mWorld;
         if (bus >= (int)world->mNumControlBusChannels) return mPosition[index];
         return world->mControlBus[bus];
+    }
+
+    void clearAudio(int index) {
+        if (mAudioBus[index] >= 0) --mAudioMapped;
+        mAudioBus[index] = -1;
+    }
+
+    /**
+     * One sample of an audio bus, as the mono signal a control is patched to.
+     *
+     * A bus nothing wrote this block reads as silence rather than as whatever is left in it -
+     * scsynth does not clear a bus, it marks the block it was written in - and a track's output
+     * is a stereo pair, summed to mono the way the browser sums one into an AudioParam.
+     */
+    float audioSample(int bus, int offset) const {
+        const World* world = mWorld;
+        if (bus < 0 || bus >= (int)world->mNumAudioBusChannels) return 0.f;
+        const int length = world->mBufLength;
+        const int32 counter = world->mBufCounter;
+        const float left = world->mAudioBusTouched[bus] == counter ? world->mAudioBus[bus * length + offset] : 0.f;
+        const bool hasRight = bus + 1 < (int)world->mNumAudioBusChannels;
+        const float right = hasRight && world->mAudioBusTouched[bus + 1] == counter
+            ? world->mAudioBus[(bus + 1) * length + offset] : 0.f;
+        return 0.5f * (left + right);
+    }
+
+    /** A patched control's position at a sample of this block. */
+    float audioPositionOf(int index, int offset) const {
+        const float v = mAudioGain[index] * audioSample(mAudioBus[index], offset) + mAudioOffset[index];
+        if (!(v > 0.f)) return 0.f;   // and a NaN, which compares false either way
+        return v < 1.f ? v : 1.f;
     }
 
     void next(int inNumSamples) {
@@ -384,6 +457,14 @@ private:
         for (int i = 0; i < paramCount; ++i) {
             params[i] = pd_denormalize(mInfo->params[i], positionOf(i));
         }
+        // Which controls have audio patched onto them, for a device that reads them per sample.
+        // A ported module reads its controls once a block on both engines, so for one of those
+        // the block-start sample read above is already the whole story.
+        int patched[kMaxParams];
+        int patchedCount = 0;
+        if (mAudioMapped > 0 && mInfo->perSample) {
+            for (int i = 0; i < paramCount; ++i) if (mAudioBus[i] >= 0) patched[patchedCount++] = i;
+        }
 
         const bool isSynth = mInfo->isSynth != 0;
         const bool sidechained = mInfo->sidechain != 0;
@@ -401,6 +482,15 @@ private:
             // A moving bend is followed in short pieces so a vibrato is a curve and not a
             // staircase of blocks - the same BEND_PIECE the browser's host renders in.
             if (bendMoving && n > kBendPiece) n = kBendPiece;
+            // A control with audio patched onto it moves every sample, so the device is given
+            // one sample at a time with that control where the signal is at that sample.
+            if (patchedCount > 0) {
+                if (n > kPatchPiece) n = kPatchPiece;
+                for (int k = 0; k < patchedCount; ++k) {
+                    const int i = patched[k];
+                    params[i] = pd_denormalize(mInfo->params[i], audioPositionOf(i, at));
+                }
+            }
 
             if (isSynth) device->bend(bendMoving ? bendIn[at] : bendIn[0]);
             // What is routed into this slot. Said every block rather than on the change: the
@@ -513,6 +603,12 @@ private:
     int64 mTransportAtBlock = 0;
     float mPosition[kMaxParams];
     int mBus[kMaxParams];
+    /** The audio bus patched onto each control (-1 for none), and the scale and offset it rides in on. */
+    int mAudioBus[kMaxParams];
+    float mAudioGain[kMaxParams];
+    float mAudioOffset[kMaxParams];
+    /** How many controls have audio patched onto them, so a block with none pays nothing. */
+    int mAudioMapped = 0;
     /** One file this device holds: which control it is on, and the frames themselves. */
     struct LoadedSample {
         int param = -1;
@@ -670,6 +766,18 @@ void cmdMap(Unit* unit, sc_msg_iter* args) {
     }
 }
 
+/** /mapa <index> <bus> <gain> <offset> ... - audio buses onto controls, read per sample; a bus of -1 unpatches. */
+void cmdMapAudio(Unit* unit, sc_msg_iter* args) {
+    PoptartDevice* self = (PoptartDevice*)unit;
+    while (args->remain() >= 4) {
+        const int index = args->geti(-1);
+        const int bus = args->geti(-1);
+        const float gain = args->getf(1.f);
+        const float offset = args->getf(0.f);
+        self->mapAudio(index, bus, gain, offset);
+    }
+}
+
 void cmdUnmap(Unit* unit, sc_msg_iter* args) {
     PoptartDevice* self = (PoptartDevice*)unit;
     while (args->remain() >= 1) self->unmapParam(args->geti(-1));
@@ -822,6 +930,7 @@ PluginLoad(PoptartDeviceUGens) {
     DefineUnitCmd("PoptartDevice", "/close", cmdClose);
     DefineUnitCmd("PoptartDevice", "/set", cmdSet);
     DefineUnitCmd("PoptartDevice", "/map", cmdMap);
+    DefineUnitCmd("PoptartDevice", "/mapa", cmdMapAudio);
     DefineUnitCmd("PoptartDevice", "/unmap", cmdUnmap);
     DefineUnitCmd("PoptartDevice", "/noteOn", cmdNoteOn);
     DefineUnitCmd("PoptartDevice", "/noteOff", cmdNoteOff);

@@ -28,6 +28,7 @@ import { OVERDRIVE, OverdriveProcessor } from '../devices/overdrive.mjs';
 import { MULTIBAND, MultibandProcessor } from '../devices/multiband.mjs';
 import { STUTTER, StutterProcessor } from '../devices/stutter.mjs';
 import { GRAINECHO, GrainEchoProcessor } from '../devices/grainecho.mjs';
+import { LPG, LpgProcessor } from '../devices/lpg.mjs';
 import { RecorderTap } from '../devices/recorder.mjs';
 import { Reporter, isDispose, parameterDescriptorsFor, realParams } from './shared.mjs';
 
@@ -84,7 +85,7 @@ const EFFECTS = [
   [EQ, EqProcessor], [CHORUS, ChorusProcessor], [FLANGER, FlangerProcessor], [PHASER, PhaserProcessor],
   [DUCKER, DuckerProcessor], [OVERDRIVE, OverdriveProcessor], [MULTIBAND, MultibandProcessor],
   [STUTTER, StutterProcessor], [GRAINECHO, GrainEchoProcessor], [FREQSHIFT, FreqShiftProcessor],
-  [VOICE, VoiceProcessor],
+  [VOICE, VoiceProcessor], [LPG, LpgProcessor],
 ];
 
 for (const [descriptor, Impl] of EFFECTS) {

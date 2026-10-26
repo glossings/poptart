@@ -42,6 +42,8 @@ var srv = Server(\\poptartProbe, NetAddr("127.0.0.1", 57999));
 var server = srv;
 var tracks = IdentityDictionary.new;
 var sidechainByTarget = IdentityDictionary.new;
+// Parameter patches order tracks too (trackLevels reads them); none here.
+var paramRoutes = IdentityDictionary.new;
 var recGroup = Group.basicNew(srv);
 var levelGroups = [Group.basicNew(srv)];
 var trackLevels, reorderTracks;
