@@ -10,7 +10,7 @@
 // untouched one never does. Decodes land under a temp name and rename into place, so a crash
 // mid-convert can't leave a half-written file that later reads as a cache hit.
 //
-// Cache eviction is a known gap (see TODO.md's song oddments) - entries currently accumulate.
+// Cache eviction is a known gap (see TODO-verbose.md's song oddments) - entries currently accumulate.
 
 const crypto = require('node:crypto');
 const fs = require('node:fs');

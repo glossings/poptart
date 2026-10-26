@@ -20,7 +20,7 @@ const path = require('node:path');
 const { OscEngine } = require('./index.js');
 const {
   nativeDevice, nativeDevices, deviceParam, deviceParamArgs, deviceParamRows, deviceRows,
-  devicePositions, paramPosition, forgetNativeDevices, deviceStateText, readDeviceState,
+  devicePositions, paramPosition, forgetNativeDevices, deviceStateText, readDeviceState, readDeviceLive,
 } = require('./native-devices');
 
 const DESCRIPTOR = path.join(__dirname, '..', 'web-engine', 'src', 'descriptor.mjs');
@@ -342,7 +342,8 @@ test('a named file is loaded onto the control and the control is pointed at it',
   const paramIndex = device.params.findIndex((p) => p.id === 'sample');
   // The slot it lands in is the first past the options the descriptor ships with.
   const slot = control.options.length;
-  assert.deepStrictEqual(sampleSends(sent), [['cloud', 0, paramIndex, slot, 'break', 1]]);
+  // The last is the frame length a wavetable file declares: none, for a control that plays audio.
+  assert.deepStrictEqual(sampleSends(sent), [['cloud', 0, paramIndex, slot, 'break', 1, 0]]);
   // And the control now carries that slot as its value, so the next poll is a lookup.
   const [, , , position] = paramSends(sent).at(-1);
   assert.strictEqual(position, paramPosition(device, 'sample', slot));
@@ -553,7 +554,7 @@ test('a preset carries the files on its controls, and restoring one loads them',
   fresh.e.setPluginState('cloud', 0, text);
   await fresh.e._stateIdle();
   restoredProgram(fresh.sent);
-  assert.deepStrictEqual(sampleSends(fresh.sent).map((a) => a.slice(4)), [['break', 1]]);
+  assert.deepStrictEqual(sampleSends(fresh.sent).map((a) => a.slice(4, 6)), [['break', 1]]);
   assert.deepStrictEqual(fresh.e.deviceSlot('cloud', 0).files.sample, { [deviceParam(nativeDevice('Granular'), 'sample').options.length]: 'break:1' });
 });
 
@@ -574,4 +575,160 @@ test('a device\'s delay is the one the browser declares, and a slot reports it',
   e.loadEffect('t', 'Filter', 3);
   assert.deepStrictEqual(e.slotLatencies('t'), [0, 0.12, 0, 0]);
   assert.deepStrictEqual(e.slotLatencies('nobody'), []);
+});
+
+// --- what else a device is handed: a wavetable's frame length, a drawn curve -------------------
+
+test('a table file sends the frame length its header declares, read from the file itself', () => {
+  const { encodeWav } = require('./wav.js');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'poptart-wt-'));
+  const file = path.join(dir, 'table.wav');
+  const wav = encodeWav({ sampleRate: 48000, channels: 1, data: new Float32Array(512) });
+  const text = Buffer.from('<!>256 10000000 wavetable', 'latin1');
+  const head = Buffer.alloc(8);
+  head.write('clm ', 0, 'latin1');
+  head.writeUInt32LE(text.length, 4);
+  const out = Buffer.concat([wav.subarray(0, 12), head, text, Buffer.alloc(text.length & 1), wav.subarray(12)]);
+  out.writeUInt32LE(out.length - 8, 4);
+  fs.writeFileSync(file, out);
+  const { e, sent } = engine();
+  e._packs.set('wt', { status: 'ready', stable: true, files: [{ path: file, duration: 0.01, channels: 1 }] });
+  e.loadInstrument('lead', 'Wavetable');
+  e.setParam('lead', 0, 'osc1.table', 'wt:0');
+  const [one] = sampleSends(sent);
+  assert.strictEqual(one.at(-1), 256, 'the declared frame length rides on the message');
+  // A file that declares none says 0, which the device reads as the usual 2048.
+  e.setParam('lead', 0, 'osc2.table', 'wt:0');
+  fs.writeFileSync(file, wav);
+  e.setParam('lead', 0, 'osc1.table', 'wt:missing');
+  const { e: e2, sent: sent2 } = engine();
+  e2._packs.set('wt', { status: 'ready', stable: true, files: [{ path: file, duration: 0.01, channels: 1 }] });
+  e2.loadInstrument('lead', 'Wavetable');
+  e2.setParam('lead', 0, 'osc1.table', 'wt:0');
+  assert.strictEqual(sampleSends(sent2)[0].at(-1), 0);
+});
+
+/** An engine that can read drawn curves, with pattern-core's own shape functions. */
+async function withShapes() {
+  const core = await import('@poptart/pattern-core');
+  const made = engine();
+  const defined = new Map();
+  made.e.shapeReader = {
+    looksLikeShapeData: core.looksLikeShapeData,
+    parseShapePoints: core.parseShapePoints,
+    sampleShape: core.sampleShape,
+    lookupShape: (name) => defined.get(name) ?? null,
+  };
+  return { ...made, core, defined };
+}
+
+const shapeSends = (sent) => sent.filter((m) => m.addr === '/poptart/deviceShape').map((m) => m.args);
+
+test('a drawn curve is sampled as the browser samples it, sent as its points, and pointed at', async () => {
+  const { e, sent, core } = await withShapes();
+  e.loadEffect('t', 'Distort', 1);
+  e.setParam('t', 1, 'mode', '0,0 0.5,1 1,0');
+  const device = nativeDevice('Distort');
+  const slot = deviceParam(device, 'mode').options.length;
+  const [one] = shapeSends(sent);
+  assert.deepStrictEqual(one.slice(0, 4), ['t', 1, device.params.findIndex((p) => p.id === 'mode'), slot]);
+  const points = one.slice(4);
+  assert.strictEqual(points.length, 256, "the browser engine's SHAPE_POINTS");
+  const parsed = core.parseShapePoints('0,0 0.5,1 1,0');
+  points.forEach((v, i) => assert.strictEqual(v, core.sampleShape(parsed, i / 255)));
+  // The table first and the control second, so the device never plays the empty slot.
+  const shapeAt = sent.findIndex((m) => m.addr === '/poptart/deviceShape');
+  const setAt = sent.findIndex((m, i) => i > shapeAt && m.addr === '/poptart/setParam');
+  assert.ok(setAt > shapeAt);
+  assert.strictEqual(sent[setAt].args[3], paramPosition(device, 'mode', slot));
+  // A named option is still an option, not a curve.
+  e.setParam('t', 1, 'mode', 'fold');
+  assert.strictEqual(shapeSends(sent).length, 1);
+});
+
+test('a named curve keeps its slot when it is redrawn, and an evaluation resends it', async () => {
+  const { e, sent, defined } = await withShapes();
+  e.loadInstrument('g', 'Granular');
+  defined.set('swell', [{ x: 0, y: 0 }, { x: 1, y: 1 }]);
+  e.setParam('g', 0, 'window', 'swell');
+  const slot = deviceParam(nativeDevice('Granular'), 'window').options.length;
+  assert.strictEqual(shapeSends(sent).length, 1);
+  e.setParam('g', 0, 'window', 'swell');
+  assert.strictEqual(shapeSends(sent).length, 1, 'the same curve named again is a lookup');
+  // Redrawn: the next evaluation sends the new points into the slot it already holds, and does
+  // not move the control.
+  defined.set('swell', [{ x: 0, y: 1 }, { x: 1, y: 0 }]);
+  const params = paramSends(sent).length;
+  e.refreshNamedShapes();
+  const sends = shapeSends(sent);
+  assert.strictEqual(sends.length, 2);
+  assert.strictEqual(sends[1][3], slot);
+  assert.notDeepStrictEqual(sends[1].slice(4), sends[0].slice(4));
+  assert.strictEqual(paramSends(sent).length, params);
+  // And the window can name it and draw it.
+  assert.strictEqual(e.deviceSlot('g', 0).files.window[slot], 'swell');
+  assert.strictEqual(e.deviceSlot('g', 0).shapes[slot].points.length, 256);
+});
+
+test('an unknown curve warns and keeps playing, and so does a host with no shape reader', async () => {
+  const { e, sent, warned } = await withShapes();
+  e.loadInstrument('g', 'Granular');
+  e.setParam('g', 0, 'window', 'nobody-drew-this');
+  assert.strictEqual(shapeSends(sent).length, 0);
+  assert.match(warned.at(-1), /no shape called "nobody-drew-this"/);
+  const bare = engine();
+  bare.e.loadInstrument('g', 'Granular');
+  bare.e.setParam('g', 0, 'window', '0,0 1,1');
+  assert.match(bare.warned.at(-1), /cannot read drawn shapes/);
+});
+
+test('a preset carries a drawn curve by name, and restoring it draws it again', async () => {
+  const { e, defined } = await withShapes();
+  defined.set('grit', [{ x: 0, y: 0.2 }, { x: 1, y: 0.9 }]);
+  e.loadEffect('t', 'Distort', 1);
+  e.setParam('t', 1, 'mode', 'grit');
+  const text = await e.getPluginState('t', 1);
+  assert.strictEqual(decodeText(text).files.mode, 'grit');
+  const fresh = await withShapes();
+  fresh.defined.set('grit', defined.get('grit'));
+  fresh.e.loadEffect('t', 'Distort', 1);
+  fresh.e.setPluginState('t', 1, text);
+  await fresh.e._stateIdle();
+  assert.strictEqual(shapeSends(fresh.sent).length, 1);
+});
+
+// --- where a device's controls actually are -----------------------------------------------------
+
+test('a live answer is read back as positions by id and the device\'s own report', () => {
+  const granular = nativeDevice('Granular');
+  const n = granular.params.length;
+  const positions = Array.from({ length: n }, (_, i) => i / n);
+  const live = readDeviceLive(granular, [n, ...positions, 8, 0.1, 0.5, -0.2, 0.05, 0.3, 0.9, 0.4, -0.01]);
+  assert.strictEqual(live.positions[granular.params[3].id], positions[3]);
+  assert.deepStrictEqual(live.report, { grains: [[0.1, 0.5, -0.2, 0.05], [0.3, 0.9, 0.4, -0.01]] });
+  const distort = nativeDevice('Distort');
+  const m = distort.params.length;
+  assert.deepStrictEqual(readDeviceLive(distort, [m, ...new Array(m).fill(0), 2, -3, 0.5]).report, { meters: { autogain: -3, level: 0.5 } });
+  // A device with nothing to report, and no answer at all.
+  const filter = nativeDevice('Filter');
+  assert.strictEqual(readDeviceLive(filter, [filter.params.length, ...new Array(filter.params.length).fill(0.5), 0]).report, null);
+  assert.strictEqual(readDeviceLive(filter, [-1]), null);
+});
+
+test('deviceLive asks sclang and resolves with the answer, or with null when none comes', async () => {
+  const { e, sent } = engine();
+  e._port = {};
+  e.loadEffect('t', 'Filter', 1);
+  const asked = e.deviceLive('t', 1);
+  const ask = sent.find((m) => m.addr === '/poptart/deviceLive');
+  assert.deepStrictEqual(ask.args.slice(1), ['t', 1]);
+  const filter = nativeDevice('Filter');
+  e._handleMessage({
+    address: '/poptart/deviceLive.data',
+    args: [ask.args[0], filter.params.length, ...filter.params.map(() => 0.25), 0],
+  });
+  const live = await asked;
+  assert.strictEqual(live.positions[filter.params[0].id], 0.25);
+  // Nothing in the slot: nothing asked.
+  assert.strictEqual(await e.deviceLive('t', 3), null);
 });

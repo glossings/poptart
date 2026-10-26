@@ -62,6 +62,12 @@ function run() {
 var paramRoutes, paramRouteKey, wireParamRoute, unwireParamRoute, applyParamRoute, reassertParamRoute, trackLevels;
 var tracks, awaitTrack, namedBuses, sidechainByTarget, acquireSourceFeed, releaseSourceFeed, acquireBus, releaseBus;
 var reorderTracks, resolveParamIndex, dropRamp, feeds, released, buses, drops, native, plugin, say;
+// The expression half of the lifted section, and what it leans on - compiled here, exercised by
+// param-expr-sclang.test.js.
+var exprLeaf, busIndexOf, paramTarget, reassertAudioDrivers, awaitTarget, awaitLoaded, channelDefault;
+var exprDefs, exprKey, exprsOf, exprFeedsOf, exprFeed, exprFeedArgs, exprShape, exprConsts, exprInputs;
+var exprSynthDef, installExpr, clearExpr, exprQueue, reassertExprs, exprRun;
+var server, nodeOwns, freeModulatorLater;
 paramRoutes = IdentityDictionary.new;
 sidechainByTarget = IdentityDictionary.new;
 namedBuses = IdentityDictionary.new;

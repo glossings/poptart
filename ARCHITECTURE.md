@@ -142,11 +142,20 @@ The concrete engine implementation the scheduler drives. Bridges Node and audio.
   Audio takes a lowpass's Q in decibels. Its convolution (`own/dsp/convolve.h`) is a direct head
   of 128 taps with FFT partitions of growing size behind it, which is how Blink's own is
   arranged: zero latency, and a few hundred multiplies a sample for a response of any length.
-- A device may also be handed a FILE - a granulator's sample, a convolver's impulse response.
-  The frames come out of a buffer sclang has already read for the sample pack, are copied and
-  summed to one channel on the non-realtime thread, and the audio thread only swaps the pointer
-  in (`/sample` in `PoptartDevice.cpp`). The slot a file lands in is the browser's own rule, so
-  an index means the same file on both engines.
+- A device may also be handed a FILE - a granulator's sample, a convolver's impulse response, a
+  wavetable. The frames come out of a buffer sclang has already read for the sample pack and are
+  copied on the non-realtime thread in two layouts, summed to one channel and as the file's own
+  channels, and the audio thread only swaps the pointers in (`/sample` in `PoptartDevice.cpp`);
+  a wavetable's declared frame length rides along from the file's header. A DRAWN curve is sent
+  as its points (`/shape`). What a device has to build from either - a wavetable's pyramid, a
+  convolver's partitions - it builds through the ABI's work calls (`pd-device.h`), which cross
+  the same threads an open does, so nothing heavy runs on the audio thread. The slot a file or a
+  curve lands in is the browser's own rule, so an index means the same thing on both engines.
+- Notes land on their own sample: a unit command performed out of a timestamped bundle carries
+  World's `mSampleOffset`, and the UGen cuts its render there (or hands the offset to a device
+  that places notes itself). `/report` answers, by `SendNodeReply`, with each control as the
+  device last read it and the device's own report (`pd_report`), which is what a device window
+  follows a modulated control and a granulator's grains with.
 - `native-devices.js` — that catalog, and what a `.param()` argument means on one of these
   controls. The browser's rule, ported: an enum takes a label or an index, a toggle takes on and
   off, everything else takes the 0..1 position it already is.

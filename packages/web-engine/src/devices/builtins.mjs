@@ -119,7 +119,7 @@ export function synthesizeImpulse(ctx, name, seconds) {
 }
 
 /** The channels of a loaded file as a buffer at the context's rate, resampled if it must be. */
-function bufferFromChannels(ctx, { sampleRate, channels }) {
+export function bufferFromChannels(ctx, { sampleRate, channels }) {
   const ratio = sampleRate / ctx.sampleRate;
   const length = Math.max(1, Math.round(channels[0].length / ratio));
   const buffer = ctx.createBuffer(Math.min(2, channels.length), length, ctx.sampleRate);

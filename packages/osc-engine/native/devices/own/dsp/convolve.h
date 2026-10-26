@@ -190,13 +190,12 @@ struct Convolver {
    * Lays out the stages for a response of `length` taps, and transforms as much of it as can be
    * afforded where this is called from.
    *
-   * THE SMALL PARTITIONS ARE DONE HERE AND THE BIG ONES ARE NOT, because of where this is called
-   * from: a space changes when a knob moves, and a knob moves on the audio thread. Transforming
-   * a six-second response costs about ten milliseconds, which is four blocks' worth of deadline,
-   * so the partitions bigger than `kConvImmediate` are built a few per block afterwards (see
-   * `advance`). Everything up to the first few thousand taps - the early reflections, which is
-   * the part of a space anybody can hear the timing of - is right on the first block; the far
-   * tail of a long response fades in over the fifty milliseconds that follow, once.
+   * THE SMALL PARTITIONS ARE DONE HERE AND THE BIG ONES ARE NOT, so that this can be called from
+   * the audio thread: transforming a six-second response costs about ten milliseconds, which is
+   * four blocks' worth of deadline, and the partitions bigger than `kConvImmediate` can be built
+   * a few per block afterwards (see `advance`). The Convolver device calls it off the audio
+   * thread instead (own/convolver.cc's work calls) and `settle`s straight after, so a space
+   * arrives whole; the staging is here for a caller that has no such thread.
    */
   void prepare(const float* ir, int length) {
     taps = length > 0 ? length : 0;

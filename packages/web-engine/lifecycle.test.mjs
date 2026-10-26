@@ -105,17 +105,25 @@ test('a device that cannot be built costs that device, not the whole evaluation'
 
 // ---- connections onto parameters ----------------------------------------------------------
 
-test('destroying a track unpicks the signals patched onto its parameters', () => {
+// `.param(name, audio(source).mul(k).add(lfo()))`: the source as input 0, a modulator as input 1.
+const patchedPlus = (source, k = 1) => ({
+  k: 'op', op: 'add', a: [{ k: 'op', op: 'mul', a: [{ k: 'in', i: 0, rate: 'ar', source }, { k: 'const', v: k }] }, { k: 'in', i: 1, rate: 'kr' }],
+});
+
+test('destroying a track unpicks the expressions on its parameters', () => {
   const { engine } = makeEngine();
   engine.createTrack('mod');
   engine.createTrack('lead');
   engine.loadInstrument('lead', 'Wavetable');
-  engine.connectParam('lead', 0, 'Osc 1 Phase', 'mod', 2, 0.25);
-  const conn = engine.tracks.get('lead').paramConnections.get('0:Osc 1 Phase');
+  engine.setParamExpr('lead', 0, 'Osc 1 Phase', patchedPlus('mod', 2));
+  engine.setParam('lead', 0, '~1~Osc 1 Phase', 0.25, 0);
+  const rec = engine.exprs.get('lead').get('0:Osc 1 Phase');
+  const input = rec.inputs.get(1);
   engine.destroyTrack('lead');
   const modPanner = engine.tracks.get('mod').panner;
-  assert.equal(modPanner.outputs.includes(conn.scale), false, 'the source should no longer feed the gain');
-  assert.ok(conn.bias.stopped, 'and the constant carrying the offset should have been stopped');
+  assert.equal(modPanner.outputs.includes(rec.node), false, 'the source should no longer feed the node');
+  assert.ok(input.stopped, 'and the constant feeding input 1 should have been stopped');
+  assert.equal(engine.exprs.has('lead'), false);
 });
 
 test('swapping the device in a slot carries what was driving it onto the new device, by name', () => {
@@ -124,25 +132,27 @@ test('swapping the device in a slot carries what was driving it onto the new dev
   engine.createTrack('t1');
   engine.loadEffect('t1', 'Distort', 1);
   engine.setParamLFO('t1', 1, 'Mix', { shape: 'sine', rateHz: 1, min: 0, max: 1 });
-  engine.connectParam('t1', 1, 'Drive', 'mod', 2, 0.25);
+  engine.setParamExpr('t1', 1, 'Drive', patchedPlus('mod', 2));
   const oldLfo = engine.modulators.get('t1').get('1:Mix');
-  const oldConn = engine.tracks.get('t1').paramConnections.get('1:Drive');
+  const distortDrive = engine.tracks.get('t1').slots.get(1).built.node.parameters.get('drive');
+  const expr = engine.exprs.get('t1').get('1:Drive');
+  assert.ok(expr.node.outputs.includes(distortDrive));
 
   engine.loadEffect('t1', 'Reverb', 1);    // has a Mix, has no Drive
   const track = engine.tracks.get('t1');
   const reverb = track.slots.get(1);
   assert.equal(reverb.descriptor.id, 'Reverb');
 
-  // The old modulator and connection are gone from the graph, not merely from the maps.
+  // The old modulator and the expression's output are off the old device, not merely the maps.
   assert.ok(oldLfo.node === null || oldLfo.node.stopped, 'the old LFO source should have been stopped');
-  assert.equal(engine.tracks.get('mod').panner.outputs.includes(oldConn.scale), false, 'the old connection should be unpicked');
-  assert.ok(oldConn.bias.stopped, 'and its offset source stopped');
+  assert.equal(expr.node.outputs.includes(distortDrive), false, 'the expression should have let go of the old Drive');
 
-  // The LFO follows the name onto the new device; the connection has nowhere to go and says so.
+  // The LFO follows the name onto the new device; the expression has nowhere to go and says so.
   const carried = engine.modulators.get('t1').get('1:Mix');
   assert.ok(carried && carried !== oldLfo, 'the LFO should have been programmed again');
   assert.ok(carried.node.outputs.includes(reverb.built.node.parameters.get('mix')), 'onto the new device\'s Mix');
-  assert.equal(track.paramConnections.size, 0, 'a name the new device lacks is not connected to anything');
+  assert.equal(expr.target, null, 'a name the new device lacks is not connected to anything');
+  assert.equal(expr.node.outputs.length, 0);
   assert.deepEqual([...engine.drivenParams('t1', 1)], [['mix', 'an lfo']]);
 
   // And the new device's other parameters are ordinary again: nothing stale claims them.
@@ -385,16 +395,16 @@ test('a cleared midicc() leaves the last value it carried', () => {
   assert.ok(Math.abs(cutoff.value - 0.4) < 1e-9);
 });
 
-test('an unpatched signal hands the parameter back at its last set value', () => {
+test('a cleared expression hands the parameter back at its last set value', () => {
   const { ctx, engine } = makeEngine();
   engine.createTrack('mod');
   engine.createTrack('t1');
   engine.loadEffect('t1', 'Filter', 1);
   engine.setParam('t1', 1, 'Cutoff', 0.7, ctx.currentTime);
-  engine.connectParam('t1', 1, 'Cutoff', 'mod', 1, 0);
+  engine.setParamExpr('t1', 1, 'Cutoff', { k: 'in', i: 0, rate: 'ar', source: 'mod' });
   const cutoff = engine.tracks.get('t1').slots.get(1).built.params.cutoff;
   assert.equal(cutoff.value, 0);
-  engine.disconnectParam('t1', 1, 'Cutoff');
+  engine.clearParamExpr('t1', 1, 'Cutoff');
   assert.ok(Math.abs(cutoff.value - 0.7) < 1e-9, `back at 0.7, not ${cutoff.value}`);
 });
 

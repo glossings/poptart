@@ -186,6 +186,14 @@ const NOTE_GATED = new Set(['retrigger', 'envelope']);
  * place, phase and all. The seed is, here: a random shape is rendered from it, where the desktop's
  * noise has no seed to change.
  */
+/** Whether two drawn LFOs differ only in where their breakpoints are. */
+function redrawnOnly(a, b) {
+  if (a?.shape !== 'custom' || b?.shape !== 'custom') return false;
+  if ((a.mode ?? 'free') !== (b.mode ?? 'free') || (Number(a.glide) || 0) !== (Number(b.glide) || 0)) return false;
+  const count = (ir) => (Array.isArray(ir.shapes) ? ir.shapes.length : 1);
+  return count(a) === count(b);
+}
+
 export function lfoSpec(ir) {
   if (ir?.shape === 'custom') {
     const shapes = Array.isArray(ir.shapes) ? ir.shapes : [ir.points ?? []];
@@ -216,8 +224,12 @@ export class LfoConnection {
     this.node = null;
     this.buffer = null;
     this.values = null;
-    this.startedAt = 0;
+    this.startedAt = 0;       // the latest scheduled start (see segments)
     this.startPhase = 0;      // in LFO cycles, 0..cycles
+    // Every source still to play or playing, oldest first: { node, startedAt, startPhase, rateHz }.
+    // An anchor lands a lookahead ahead of the call, so the shape is on one segment now and on
+    // another from then on - and a patterned rate queues several of them, one per change.
+    this.segments = [];
     this.cycles = 1;
     this.current = 0;         // which of the drawn shapes is playing
     this.pending = null;      // a swap waiting for the next note, in the note-gated modes
@@ -268,14 +280,23 @@ export class LfoConnection {
   }
 
   /** How fast the buffer has to play for one of its cycles to take 1/rate seconds. */
-  _playbackRate() {
-    return (this.rateHz() * SHAPE_SAMPLES) / (this.ctx.sampleRate * this.cycles);
+  _playbackRate(rateHz = this.rateHz()) {
+    return (Math.max(0.0001, rateHz) * SHAPE_SAMPLES) / (this.ctx.sampleRate * this.cycles);
+  }
+
+  /** The segment playing at a time: the last one started by then, or the first one before any has. */
+  _segmentAt(time) {
+    let found = this.segments[0] ?? null;
+    for (const seg of this.segments) if (seg.startedAt <= time) found = seg;
+    return found;
   }
 
   /** Where this LFO's phase has reached, in cycles, at a time on the context's clock. */
   _phaseAt(time) {
-    const elapsed = Math.max(0, time - this.startedAt);
-    return this.startPhase + elapsed * this.rateHz();
+    const seg = this._segmentAt(time);
+    if (!seg) return this.startPhase;
+    const elapsed = Math.max(0, time - seg.startedAt);
+    return seg.startPhase + elapsed * Math.max(0.0001, seg.rateHz);
   }
 
   /** The value the shape is putting on the parameter at a time, read off the rendered buffer. */
@@ -318,9 +339,11 @@ export class LfoConnection {
    * from the swap. In the note-gated modes the swap waits for the next note instead, so a note is
    * never cut off halfway through one shape to finish on another.
    */
-  swapTo(index, atTime = null) {
+  swapTo(index, atTime = null, rateHz = null) {
     const shapes = this.ir?.shapes;
     if (!Array.isArray(shapes) || !shapes[index]) return;
+    // A patterned rate names the rate the new shape starts at (see anchor).
+    if (Number.isFinite(rateHz)) this.ir = { ...this.ir, rateHz };
     if (this.gated()) {
       this.pending = index === this.current ? null : index;
       return;
@@ -390,8 +413,11 @@ export class LfoConnection {
    * interval - turning the one modulator whose whole job is to be unpredictable into a loop. Nor
    * is one the notes play: its phase belongs to them.
    */
-  anchor(phase01, atTime) {
+  anchor(phase01, atTime, rateHz = null) {
     if (this.cycles > 1 || this.gated()) return;
+    // A patterned rate's changes come this way, each with the phase the scheduler's count has
+    // reached at it: the source started then runs at the new rate, the one before it keeps its own.
+    if (Number.isFinite(rateHz)) this.ir = { ...this.ir, rateHz };
     this.restart(phase01, atTime);
   }
 
@@ -401,9 +427,9 @@ export class LfoConnection {
    * every few seconds so it cannot drift away from the grid, and each anchor is a fresh start at
    * the phase the grid says it should be at.
    */
-  restart(phaseCycles, atTime) {
-    const when = Math.max(this.ctx.currentTime, atTime ?? this.ctx.currentTime);
-    const previous = this.node;
+  restart(phaseCycles, atTime, rateHz = this.rateHz()) {
+    const now = this.ctx.currentTime;
+    const when = Math.max(now, atTime ?? now);
     const node = this.ctx.createBufferSource();
     node.buffer = this.buffer;
     node.loop = true;
@@ -412,7 +438,7 @@ export class LfoConnection {
       node.loopStart = SHAPE_SAMPLES / this.ctx.sampleRate;
       node.loopEnd = (SHAPE_SAMPLES + 1) / this.ctx.sampleRate;
     }
-    node.playbackRate.value = this._playbackRate();
+    node.playbackRate.value = this._playbackRate(rateHz);
     node.connect(this.target);
     const span = this.cycles;
     // An envelope-mode pass is not wrapped: its end is where it stays.
@@ -420,29 +446,44 @@ export class LfoConnection {
       ? Math.min(1, Math.max(0, phaseCycles ?? 0))
       : (((phaseCycles ?? 0) % span) + span) % span;
     node.start(when, (phase / span) * (SHAPE_SAMPLES / this.ctx.sampleRate));
+    // A source due at or after this one is replaced by it and never plays; the one before plays
+    // on until this one takes over. The ones before that already stop where their successor starts.
+    const kept = [];
+    for (const seg of this.segments) {
+      if (seg.startedAt >= when) this._retire(seg.node, when);
+      else kept.push(seg);
+    }
+    if (kept.length) this._retire(kept[kept.length - 1].node, when);
+    kept.push({ node, startedAt: when, startPhase: phase, rateHz });
+    // Only the newest segment that has started by now still matters for reading the phase.
+    while (kept.length > 1 && kept[1].startedAt <= now) kept.shift();
+    this.segments = kept;
     this.node = node;
     this.startedAt = when;
     this.startPhase = phase;
-    if (previous) {
-      // The old source plays on until the new one takes over, and is unplugged only once it has
-      // stopped. Unplugging it here, at the time of the call, left the parameter with NOTHING on
-      // it for the whole lookahead - a hundred and fifty milliseconds at its intrinsic zero,
-      // which on a filter's cutoff is a drop to twenty hertz - every time the scheduler anchored
-      // the phase, which is every few seconds. An anchor that lands on the phase the LFO already
-      // has, which is the normal case, must be inaudible.
-      try { previous.stop(when); } catch { /* not started, or already stopped */ }
-      this.retiring.add(previous);
-      const unplug = () => {
-        this.retiring.delete(previous);
-        try { previous.disconnect(); } catch { /* already detached */ }
-      };
-      previous.onended = unplug;
-      // A source told to stop before it was started never fires `ended`; the timer is the
-      // fallback that guarantees nothing is left hanging off the parameter.
-      const timer = setTimeout(unplug, Math.max(0, when - this.ctx.currentTime) * 1000 + 250);
-      timer?.unref?.(); // a node test's process need not wait for it
-    }
     try { this.target.value = 0; } catch { /* a param that refuses a direct set */ }
+  }
+
+  /**
+   * Stops a source at a time and unplugs it once it has stopped. Unplugging it at the time of the
+   * call left the parameter with NOTHING on it for the whole lookahead - a hundred and fifty
+   * milliseconds at its intrinsic zero, which on a filter's cutoff is a drop to twenty hertz -
+   * every time the scheduler anchored the phase, which is every few seconds. An anchor that lands
+   * on the phase the LFO already has, which is the normal case, must be inaudible.
+   */
+  _retire(previous, when) {
+    if (!previous) return;
+    try { previous.stop(when); } catch { /* not started, or already stopped */ }
+    this.retiring.add(previous);
+    const unplug = () => {
+      this.retiring.delete(previous);
+      try { previous.disconnect(); } catch { /* already detached */ }
+    };
+    previous.onended = unplug;
+    // A source told to stop before it was started never fires `ended`; the timer is the
+    // fallback that guarantees nothing is left hanging off the parameter.
+    const timer = setTimeout(unplug, Math.max(0, when - this.ctx.currentTime) * 1000 + 250);
+    timer?.unref?.(); // a node test's process need not wait for it
   }
 
   /**
@@ -455,6 +496,23 @@ export class LfoConnection {
     const next = { ...this.ir, ...ir };
     // A re-send that names its drawing without the set of shapes is one drawing, not the old set.
     if (ir.points && !ir.shapes) delete next.shapes;
+    // A patterned rate is changed by its anchors, on the step; a re-send lands now and must not.
+    if (ir.rateFromAnchors && this.ir.rateHz != null) next.rateHz = this.ir.rateHz;
+    if (lfoSpec(next) !== this.spec && redrawnOnly(this.ir, next)) {
+      // The same drawings with their breakpoints moved - a shape being dragged in the editor, or
+      // the evaluation after it. Redrawn under the phase it has reached rather than started over,
+      // so a drag is heard as a change of shape and not as the LFO jumping back to its start.
+      const now = this.ctx.currentTime;
+      const phase = this._phaseAt(now);
+      const current = this._segmentAt(now);
+      const pending = this.segments.filter((seg) => seg.startedAt > now);
+      this.ir = next;
+      this.spec = lfoSpec(next);
+      this._render();
+      this.restart(this.mode() === 'envelope' ? Math.min(1, phase) : phase, now, current?.rateHz ?? this.rateHz());
+      for (const seg of pending) this.restart(seg.startPhase, seg.startedAt, seg.rateHz);
+      return;
+    }
     if (lfoSpec(next) !== this.spec) {
       this._rebuild(next);
       return;
@@ -470,23 +528,38 @@ export class LfoConnection {
     // time the LFO has been going, which moves the shape by more the longer the set has run.
     const now = this.ctx.currentTime;
     const phase = this._phaseAt(now);
+    const current = this._segmentAt(now);
+    const pending = this.segments.filter((seg) => seg.startedAt > now);
     this.ir = next;
     if (rangeChanged) {
       // A new range needs a new buffer, and a new buffer needs a new source - so the phase is
       // carried across by hand rather than being lost. It counts from the phase the shape
       // STARTED at as well as the time since: counting only the elapsed time would jump the
       // shape back by its start offset every time somebody swept a range bound, and a range
-      // bound is an ordinary signal the scheduler re-sends on every tick.
+      // bound is an ordinary signal the scheduler re-sends on every tick. Anchors still waiting
+      // in the lookahead are re-made on the new buffer: the restart now replaces them.
       this._render();
-      this.restart(phase, now);
+      const rateOf = (seg) => (rateChanged || !seg ? this.rateHz() : seg.rateHz);
+      this.restart(phase, now, rateOf(current));
+      for (const seg of pending) this.restart(seg.startPhase, seg.startedAt, rateOf(seg));
       return;
     }
-    if (this.node) {
-      this.startedAt = now;
-      this.startPhase = this.mode() === 'envelope'
+    // A new rate from now on, for every source: the one playing is re-based where it is, so its
+    // phase carries on, and the ones still to start take the rate too.
+    if (current && current.startedAt <= now) {
+      current.startedAt = now;
+      current.startPhase = this.mode() === 'envelope'
         ? Math.min(1, phase)
         : ((phase % this.cycles) + this.cycles) % this.cycles;
-      this.node.playbackRate.value = this._playbackRate();
+    }
+    for (const seg of this.segments) {
+      seg.rateHz = this.rateHz();
+      seg.node.playbackRate.value = this._playbackRate();
+    }
+    const latest = this.segments[this.segments.length - 1];
+    if (latest) {
+      this.startedAt = latest.startedAt;
+      this.startPhase = latest.startPhase;
     }
   }
 
@@ -510,12 +583,13 @@ export class LfoConnection {
   stop() {
     const now = this.ctx.currentTime;
     const value = this.valueAt(now);
-    const sources = [this.node, this.glide?.node, ...this.retiring].filter(Boolean);
+    const sources = [...new Set([this.node, ...this.segments.map((seg) => seg.node), this.glide?.node, ...this.retiring])].filter(Boolean);
     for (const node of sources) {
       try { node.stop(); } catch { /* never started */ }
       try { node.disconnect(); } catch { /* already detached */ }
     }
     this.retiring.clear();
+    this.segments = [];
     this.glide = null;
     this.node = null;
     try { this.target.value = value; } catch { /* a param that refuses a direct set */ }

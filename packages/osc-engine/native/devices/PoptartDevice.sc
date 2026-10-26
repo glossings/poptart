@@ -135,6 +135,8 @@ PoptartDeviceController {
     var <>deviceName;
     // The tempo and the beat the transport was last at, so either can be sent on its own.
     var tempo = 120, beatPos = 0;
+    // Numbers the /report answers so one can be told from the next.
+    var reportId = 0;
 
     *new { |synth, id, synthDef|
         var def = synthDef ?? { SynthDescLib.global.at(synth.defName).def };
@@ -342,10 +344,60 @@ PoptartDeviceController {
      * of it itself, on the non-realtime thread - so this is one small message however long the
      * file is, and the buffer goes on belonging to whoever allocated it.
      */
-    loadSample { |param, index, buffer|
+    loadSample { |param, index, buffer, frameLength = 0|
         buffer.notNil.if {
-            this.sendMsg('/sample', param.asInteger, index.asInteger, buffer.bufnum.asInteger);
+            // The frame length a wavetable file declares rides along, because a server buffer
+            // does not keep it - 0 is "the file said nothing".
+            this.sendMsg('/sample', param.asInteger, index.asInteger, buffer.bufnum.asInteger,
+                frameLength.asInteger);
         };
+    }
+
+    /**
+     * A drawn curve for a control that takes one: Distort's transfer curve, a grain window.
+     *
+     * The points themselves, already sampled by the engine the way the browser's engine samples
+     * a curve before posting it - a few hundred floats, which is one message and needs no buffer.
+     */
+    loadShape { |param, index, points|
+        (points.size > 0).if {
+            this.sendMsg('/shape', param.asInteger, index.asInteger, *points.collect(_.asFloat));
+        };
+    }
+
+    /**
+     * Where every control is as the DEVICE last read it, and what it says it is doing.
+     *
+     * Asked of the UGen rather than answered from here, because the positions recorded here are
+     * what was SENT: a control under a modulator is a bus mapped onto the UGen, and only the UGen
+     * knows where that has got to. The answer comes back by SendNodeReply, addressed like an
+     * open's; `action` is called with the positions (one per control, 0..1) and the device's own
+     * report as a flat array (empty for a device that reports nothing), or with nils if no answer
+     * comes - a device in a slot whose node has gone, say.
+     */
+    report { |action, timeout = 1|
+        var id, resp, answered = false;
+        reportId = (reportId + 1) % 16777216;
+        id = reportId;
+        resp = OSCFunc({ |msg|
+            // [address, node, ugen index, id, count, position..., reportCount, report...]
+            var count, positions, reportCount, report;
+            if (answered.not and: { msg[3].asInteger == id }) {
+                answered = true;
+                resp.free;
+                count = msg[4].asInteger;
+                positions = if (count > 0) { msg.copyRange(5, 4 + count) } { [] };
+                reportCount = (msg[5 + count] ? 0).asInteger;
+                report = if (reportCount > 0) { msg.copyRange(6 + count, 5 + count + reportCount) } { [] };
+                action.value(positions, report);
+            };
+        }, '/poptart/deviceReport', synth.server.addr, argTemplate: [synth.nodeID, synthIndex]);
+        SystemClock.sched(timeout, {
+            resp.free;
+            if (answered.not) { answered = true; action.value(nil, nil) };
+            nil
+        });
+        this.sendMsg('/report', id.asFloat);
     }
 
     sidechain { |patched = false|

@@ -14,6 +14,7 @@
 //   inputs:  [bend (kr), numMain, main0..., numSidechain, sidechain0...]
 //   outputs: numChannels audio channels
 //   unit commands: /open /close /set /map /mapa /unmap /noteOn /noteOff /allNotesOff
+//                  /sample /shape /report /sidechain /noteRoute /transport
 //
 // which is what lets sc/poptart.scd treat a native device and a plugin as the same kind of thing
 // (see PoptartDeviceController in classes/PoptartDevice.sc): one `.set`, one `.map`, one
@@ -24,7 +25,14 @@
 // so an open is an asynchronous command: the instance is built on the non-realtime thread, the
 // audio thread only swaps a pointer, and the device it swapped out is freed back on the
 // non-realtime thread. Everything else (a parameter, a note, a bend) is a plain call from the
-// audio thread, which is where the device's own `process` runs too.
+// audio thread, which is where the device's own `process` runs too - except what a device asks to
+// have built where it may take time (a wavetable's pyramid, a convolver's partitions), which goes
+// through the work round below, across the same threads an open does.
+//
+// NOTES LAND ON THEIR SAMPLE. A unit command is performed between blocks, but one that arrived
+// in a timestamped bundle is performed with World's mSampleOffset set to where in the coming
+// block its time falls - the number OffsetOut starts a voice at. A note keeps that offset, and
+// the block is rendered in two pieces either side of it.
 
 #include "SC_PlugIn.hpp"
 #include "SC_Graph.h"
@@ -75,6 +83,18 @@ const int kPatchPiece = 1;
  */
 const int kMaxSamples = 8;
 
+/**
+ * How many loaded curves one device may hold at once: the same rule as files, a few more than
+ * any device has drawn slots for (Distort has eight, Granular eight).
+ */
+const int kMaxShapes = 16;
+
+/** Notes waiting for their place in the coming block. More than this in one block play at its start. */
+const int kMaxNoteEvents = 64;
+
+/** The most floats one /report answer carries: every control's position and the device's own. */
+const int kMaxReport = 1024;
+
 /** Input offsets. Everything before the main signal count is fixed. */
 enum { kBendInput = 0, kNumMainInput = 1, kFirstMainInput = 2 };
 
@@ -101,6 +121,14 @@ struct DeviceSlot {
     std::atomic<int> generation{0};
     PoptartDevice* unit = nullptr;
     double sampleRate = 48000.0;
+    /**
+     * A work round in flight for the device in this slot (see WorkJob), from the block that
+     * asked until the non-realtime thread has freed what it swapped out. While it is set nothing
+     * may delete that device: a unit freed meanwhile leaves it here instead, and the round's last
+     * stage deletes it. Exchanged rather than read and written, so exactly one side does.
+     */
+    std::atomic<bool> workBusy{false};
+    std::atomic<PdAny*> orphan{nullptr};
 
     void retain() { refs.fetch_add(1); }
     void release() {
@@ -130,6 +158,7 @@ struct DeviceJob {
     PdAny* retired = nullptr;   // what stage 3 swapped out, for stage 4 to free
     /** The files the device it replaced was playing, which are nothing to the new one. */
     float* retiredSamples[kMaxSamples] = { nullptr };
+    float* retiredChannels[kMaxSamples] = { nullptr };
 };
 
 /**
@@ -149,10 +178,29 @@ struct SampleJob {
     int param = 0;
     int index = 0;
     int bufnum = -1;
-    float* frames = nullptr;    // what stage 2 read out, until stage 3 installs it
+    int frameLength = 0;        // a wavetable's declared frame length, 0 for none
+    float* mono = nullptr;      // what stage 2 read out, until stage 3 installs it
+    float* channels = nullptr;  // the same frames interleaved, or null for a mono file
     int count = 0;
+    int channelCount = 1;
     double sampleRate = 0.0;
     float* retired = nullptr;   // what stage 3 replaced, for stage 4 to free
+    float* retiredChannels = nullptr;
+};
+
+/**
+ * ONE round of work off the audio thread for one device (pd-device.h's work calls).
+ *
+ * The device it was asked for is the one it works on, whatever happens to the slot meanwhile: a
+ * device replaced mid-round is never told it finished (stage 3 checks it is still the one in the
+ * slot), and a device can only be freed after the round's last stage - by FIFO order for one
+ * retired by an open or a close (their freeing is queued behind this round's), and through the
+ * slot's `orphan` for one whose unit was freed outright.
+ */
+struct WorkJob {
+    DeviceSlot* slot = nullptr;
+    PdAny* device = nullptr;
+    bool finished = false;      // stage 3 swapped what was built in
 };
 
 struct PoptartDevice : public SCUnit {
@@ -171,7 +219,12 @@ struct PoptartDevice : public SCUnit {
             mAudioGain[i] = 1.f;
             mAudioOffset[i] = 0.f;
         }
-        for (int i = 0; i < kMaxSamples; ++i) { mSamples[i] = LoadedSample(); mRetiringSamples[i] = nullptr; }
+        for (int i = 0; i < kMaxSamples; ++i) {
+            mSamples[i] = LoadedSample();
+            mRetiringSamples[i] = nullptr;
+            mRetiringChannels[i] = nullptr;
+        }
+        for (int i = 0; i < kMaxShapes; ++i) mShapes[i] = LoadedShape();
 
         // Shared with every open this unit ever asks for, and outliving the unit if one is
         // still in flight when it goes.
@@ -188,18 +241,29 @@ struct PoptartDevice : public SCUnit {
     ~PoptartDevice() {
         mSlot->alive.store(false);
         mSlot->unit = nullptr;
-        mSlot->release();
         // Freed here, on the audio thread, deliberately: the alternative is handing it to a
         // non-realtime command that may outlive the World during a server quit, and a device
         // leaked at quit is a worse trade than a free. It is a free of memory already
         // untouched - no DSP, no page faults - and this is the same choice
         // native/rubberband/PoptartPitchShift.cpp makes for its shifter.
-        delete mDevice;
+        //
+        // UNLESS a work round is still running on it, on the other thread: then it is left to the
+        // round, whose last stage deletes it (WorkJob). If that stage finished between the two
+        // loads, the exchange says so and it is deleted here after all.
+        if (mDevice && mSlot->workBusy.load()) {
+            mSlot->orphan.store(mDevice);
+            if (!mSlot->workBusy.load()) delete mSlot->orphan.exchange(nullptr);
+        } else {
+            delete mDevice;
+        }
+        mSlot->release();
         // The files the device was playing, for the same reason and on the same terms.
         for (int i = 0; i < kMaxSamples; ++i) {
-            free(mSamples[i].frames);
+            freeSample(mSamples[i]);
             free(mRetiringSamples[i]);
+            free(mRetiringChannels[i]);
         }
+        for (int i = 0; i < kMaxShapes; ++i) if (mShapes[i].table) RTFree(mWorld, mShapes[i].table);
     }
 
     /**
@@ -226,10 +290,17 @@ struct PoptartDevice : public SCUnit {
         const bool sameDevice = info && info == mInfo;
         if (!sameDevice) {
             for (int i = 0; i < kMaxSamples; ++i) {
-                mRetiringSamples[i] = mSamples[i].frames;
+                mRetiringSamples[i] = mSamples[i].mono;
+                mRetiringChannels[i] = mSamples[i].channels;
                 mSamples[i] = LoadedSample();
             }
+            // The curves too - but they are small and were allocated here, so they go here.
+            for (int i = 0; i < kMaxShapes; ++i) {
+                if (mShapes[i].table) RTFree(mWorld, mShapes[i].table);
+                mShapes[i] = LoadedShape();
+            }
         }
+        mNoteCount = 0;
         mDevice = device;
         mInfo = info;
         // The device's own count AND the table's, whichever is smaller. They agree today, and
@@ -256,29 +327,63 @@ struct PoptartDevice : public SCUnit {
      * file as well: a device with two sample controls (an impulse response and a sample) holds
      * one for each, and a pattern that loaded two samples switches between them by index.
      */
-    float* installSample(int param, int index, float* frames, int count, double rate) {
+    void installSample(SampleJob* job) {
         LoadedSample* at = nullptr;
         for (int i = 0; i < kMaxSamples; ++i) {
-            if (mSamples[i].frames && mSamples[i].param == param && mSamples[i].index == index) { at = &mSamples[i]; break; }
+            if (mSamples[i].mono && mSamples[i].param == job->param && mSamples[i].index == job->index) { at = &mSamples[i]; break; }
         }
         // Not loaded yet: the first empty entry, or - with every entry taken - the oldest, which
         // is the same answer the browser's option list gives when it is full.
         if (!at) {
-            for (int i = 0; i < kMaxSamples; ++i) if (!mSamples[i].frames) { at = &mSamples[i]; break; }
+            for (int i = 0; i < kMaxSamples; ++i) if (!mSamples[i].mono) { at = &mSamples[i]; break; }
         }
         if (!at) {
             at = &mSamples[0];
             for (int i = 1; i < kMaxSamples; ++i) if (mSamples[i].age < at->age) at = &mSamples[i];
         }
-        float* old = at->frames;
-        at->param = param;
-        at->index = index;
-        at->frames = frames;
-        at->count = count;
-        at->sampleRate = rate;
+        job->retired = at->mono;
+        job->retiredChannels = at->channels;
+        at->param = job->param;
+        at->index = job->index;
+        at->mono = job->mono;
+        at->channels = job->channels;
+        at->count = job->count;
+        at->channelCount = job->channelCount;
+        at->frameLength = job->frameLength;
+        at->sampleRate = job->sampleRate;
         at->age = ++mSampleAge;
-        if (mDevice) mDevice->sample(param, index, frames, count, rate);
-        return old;
+        job->mono = nullptr;
+        job->channels = nullptr;
+        if (mDevice) mDevice->sample(at->param, at->index, at->file());
+    }
+
+    /**
+     * A drawn curve for a control. Audio thread, from the unit command itself: a curve is a few
+     * hundred floats, and the real-time allocator is the right size of tool for that. Kept, like
+     * a file, so a device reopened by an evaluation is handed it again on the way in.
+     */
+    void installShape(int param, int index, const float* points, int count) {
+        if (count <= 0) return;
+        float* copy = (float*)RTAlloc(mWorld, sizeof(float) * (size_t)count);
+        if (!copy) {
+            Print("PoptartDevice: no real-time memory for a curve of %d points\n", count);
+            return;
+        }
+        memcpy(copy, points, sizeof(float) * (size_t)count);
+        LoadedShape* at = nullptr;
+        for (int i = 0; i < kMaxShapes; ++i) {
+            if (mShapes[i].table && mShapes[i].param == param && mShapes[i].index == index) { at = &mShapes[i]; break; }
+        }
+        if (!at) for (int i = 0; i < kMaxShapes; ++i) if (!mShapes[i].table) { at = &mShapes[i]; break; }
+        if (!at) {
+            at = &mShapes[0];
+            for (int i = 1; i < kMaxShapes; ++i) if (mShapes[i].age < at->age) at = &mShapes[i];
+        }
+        float* old = at->table;
+        *at = LoadedShape{ param, index, copy, count, ++mSampleAge };
+        if (mDevice) mDevice->shape(param, index, copy, count);
+        // The device copied it or keeps the new pointer; either way nothing reads the old one.
+        if (old) RTFree(mWorld, old);
     }
 
     /**
@@ -292,7 +397,11 @@ struct PoptartDevice : public SCUnit {
         if (!mDevice) return;
         for (int i = 0; i < kMaxSamples; ++i) {
             const LoadedSample& one = mSamples[i];
-            if (one.frames) mDevice->sample(one.param, one.index, one.frames, one.count, one.sampleRate);
+            if (one.mono) mDevice->sample(one.param, one.index, one.file());
+        }
+        for (int i = 0; i < kMaxShapes; ++i) {
+            const LoadedShape& one = mShapes[i];
+            if (one.table) mDevice->shape(one.param, one.index, one.table, one.count);
         }
     }
 
@@ -303,11 +412,13 @@ struct PoptartDevice : public SCUnit {
         return old;
     }
 
-    /** And the files it was playing, into the caller's array. */
-    void takeRetiringSamples(float** into) {
+    /** And the files it was playing, into the caller's arrays. */
+    void takeRetiringSamples(float** into, float** channelsInto) {
         for (int i = 0; i < kMaxSamples; ++i) {
             into[i] = mRetiringSamples[i];
+            channelsInto[i] = mRetiringChannels[i];
             mRetiringSamples[i] = nullptr;
+            mRetiringChannels[i] = nullptr;
         }
     }
 
@@ -355,13 +466,57 @@ struct PoptartDevice : public SCUnit {
      * Notes reach an instrument, and the one effect that is played by them: the ducker, whose
      * dip starts on the notes of whatever track is routed into it.
      */
-    void noteOn(float note, float velocity) {
-        if (mDevice && mInfo && mInfo->takesNotes) mDevice->noteOn(note, velocity);
+    void noteOn(float note, float velocity) { queueNote(1, note, velocity); }
+    void noteOff(float note) { queueNote(0, note, 0.f); }
+
+    /**
+     * A note at its place in the coming block (World's mSampleOffset, which a command performed
+     * out of a timestamped bundle carries and anything else reads as 0). Every note off at once -
+     * a negative note - is not a moment but a reset, and goes straight through.
+     */
+    void queueNote(int kind, float note, float velocity) {
+        if (!mDevice || !mInfo || !mInfo->takesNotes) return;
+        if (kind == 0 && note < 0) {
+            mNoteCount = 0;
+            mDevice->noteOff(note);
+            return;
+        }
+        int offset = mWorld->mSampleOffset;
+        if (offset < 0) offset = 0;
+        if (offset >= mWorld->mBufLength) offset = mWorld->mBufLength - 1;
+        if (mNoteCount >= kMaxNoteEvents) {
+            if (kind == 1) mDevice->noteOn(note, velocity);
+            else mDevice->noteOff(note);
+            return;
+        }
+        // In time order, and in arrival order among notes at the same sample.
+        int at = mNoteCount++;
+        while (at > 0 && mNotes[at - 1].offset > offset) { mNotes[at] = mNotes[at - 1]; --at; }
+        mNotes[at] = NoteEvent{ offset, kind, note, velocity };
     }
 
-    void noteOff(float note) {
-        if (mDevice && mInfo && mInfo->takesNotes) mDevice->noteOff(note);
+    /**
+     * The control positions as the device last read them, and what it says it is doing: the
+     * answer to /report, sent back the way an open is announced. A modulated control is where its
+     * modulator has GOT TO, which nothing else in the engine can say - a modulator is a bus mapped
+     * onto this UGen's input, read by nobody else.
+     */
+    void report(float id) {
+        float* out = mReportBuf;
+        int n = 0;
+        out[n++] = id;
+        const int count = mDevice ? mParamCount : 0;
+        out[n++] = (float)count;
+        for (int i = 0; i < count && n < kMaxReport - 1; ++i) out[n++] = mSeen[i];
+        const int at = n++;
+        const int got = mDevice ? mDevice->report(out + n, kMaxReport - n) : 0;
+        out[at] = (float)got;
+        n += got;
+        SendNodeReply(&mParent->mNode, (int)mParentIndex, "/poptart/deviceReport", n, out);
     }
+
+    /** Starts a work round for the device, if it wants one and none is in flight. Audio thread. */
+    void maybeWork(PdAny* device);
 
     void setKeyPatched(bool on) { mKeyPatched = on; }
     void setNoteRoute(bool on) { mNoteRoute = on; }
@@ -379,6 +534,7 @@ struct PoptartDevice : public SCUnit {
 
     DeviceSlot* slot() { return mSlot; }
     const PdDeviceInfo* info() const { return mInfo; }
+    PdAny* device() const { return mDevice; }
 
 private:
     void silence(int frames) {
@@ -455,8 +611,12 @@ private:
         const int paramCount = mParamCount;
         float* params = device->params();
         for (int i = 0; i < paramCount; ++i) {
-            params[i] = pd_denormalize(mInfo->params[i], positionOf(i));
+            const float position = positionOf(i);
+            mSeen[i] = position;
+            params[i] = pd_denormalize(mInfo->params[i], position);
         }
+        // With this block's controls in place, the device may ask for something to be built.
+        maybeWork(device);
         // Which controls have audio patched onto them, for a device that reads them per sample.
         // A ported module reads its controls once a block on both engines, so for one of those
         // the block-start sample read above is already the whole story.
@@ -475,6 +635,8 @@ private:
         float* devOut = device->out();
         const int stride = device->maxBlock();
 
+        const bool placesNotes = device->takesNoteOffsets();
+        int nextNote = 0;
         int at = 0;
         while (at < inNumSamples) {
             int n = inNumSamples - at;
@@ -482,13 +644,33 @@ private:
             // A moving bend is followed in short pieces so a vibrato is a curve and not a
             // staircase of blocks - the same BEND_PIECE the browser's host renders in.
             if (bendMoving && n > kBendPiece) n = kBendPiece;
+            if (patchedCount > 0 && n > kPatchPiece) n = kPatchPiece;
+            if (placesNotes) {
+                // The device places them itself, inside the piece it is about to render.
+                while (nextNote < mNoteCount && mNotes[nextNote].offset < at + n) {
+                    const NoteEvent& e = mNotes[nextNote++];
+                    const int offset = e.offset > at ? e.offset - at : 0;
+                    if (e.kind == 1) device->noteOnAt(e.note, e.velocity, offset);
+                    else device->noteOffAt(e.note, offset);
+                }
+            } else {
+                // The notes due at this sample, then a piece only as far as the next one.
+                while (nextNote < mNoteCount && mNotes[nextNote].offset <= at) {
+                    const NoteEvent& e = mNotes[nextNote++];
+                    if (e.kind == 1) device->noteOn(e.note, e.velocity);
+                    else device->noteOff(e.note);
+                }
+                if (nextNote < mNoteCount && mNotes[nextNote].offset < at + n) n = mNotes[nextNote].offset - at;
+            }
             // A control with audio patched onto it moves every sample, so the device is given
             // one sample at a time with that control where the signal is at that sample.
             if (patchedCount > 0) {
                 if (n > kPatchPiece) n = kPatchPiece;
                 for (int k = 0; k < patchedCount; ++k) {
                     const int i = patched[k];
-                    params[i] = pd_denormalize(mInfo->params[i], audioPositionOf(i, at));
+                    const float position = audioPositionOf(i, at);
+                    mSeen[i] = position;
+                    params[i] = pd_denormalize(mInfo->params[i], position);
                 }
             }
 
@@ -510,6 +692,13 @@ private:
             }
             at += n;
         }
+        // Anything left (a note past the block, which a clamped offset cannot be) plays now.
+        for (; nextNote < mNoteCount; ++nextNote) {
+            const NoteEvent& e = mNotes[nextNote];
+            if (e.kind == 1) device->noteOn(e.note, e.velocity);
+            else device->noteOff(e.note);
+        }
+        mNoteCount = 0;
     }
 
     /**
@@ -613,14 +802,43 @@ private:
     struct LoadedSample {
         int param = -1;
         int index = -1;
-        float* frames = nullptr;   // malloc'd by the non-realtime thread, mono, the file's own rate
+        float* mono = nullptr;      // malloc'd by the non-realtime thread, the file's own rate
+        float* channels = nullptr;  // the same, interleaved; null for a mono file
         int count = 0;
+        int channelCount = 1;
+        int frameLength = 0;
         double sampleRate = 0.0;
-        int age = 0;               // which entry to take when they are all full
+        int age = 0;                // which entry to take when they are all full
+        PdSample file() const {
+            return PdSample{ mono, channels ? channels : mono, count, channels ? channelCount : 1, sampleRate, frameLength };
+        }
     };
+    static void freeSample(LoadedSample& one) {
+        free(one.mono);
+        free(one.channels);
+        one.mono = nullptr;
+        one.channels = nullptr;
+    }
     LoadedSample mSamples[kMaxSamples];
     float* mRetiringSamples[kMaxSamples] = { nullptr };
+    float* mRetiringChannels[kMaxSamples] = { nullptr };
     int mSampleAge = 0;
+    /** One drawn curve this device holds, in real-time memory. */
+    struct LoadedShape {
+        int param = -1;
+        int index = -1;
+        float* table = nullptr;
+        int count = 0;
+        int age = 0;
+    };
+    LoadedShape mShapes[kMaxShapes];
+    /** The notes for the coming block, soonest first. */
+    struct NoteEvent { int offset; int kind; float note; float velocity; };
+    NoteEvent mNotes[kMaxNoteEvents];
+    int mNoteCount = 0;
+    /** Each control's position as the device last read it, for /report. */
+    float mSeen[kMaxParams] = { 0 };
+    float mReportBuf[kMaxReport];
 };
 
 // ---- the open, across the threads it has to cross --------------------------------------------
@@ -668,7 +886,7 @@ bool openStage3(World* world, void* data) {
         slot->unit->install(job->info, job->made);
         job->made = nullptr;
         job->retired = slot->unit->takeRetiring();
-        slot->unit->takeRetiringSamples(job->retiredSamples);
+        slot->unit->takeRetiringSamples(job->retiredSamples, job->retiredChannels);
         // An evaluation reopens every slot in the chain, so a device arriving to find a file
         // already loaded for it is the ordinary path, not an edge case.
         slot->unit->resendSamples();
@@ -689,7 +907,9 @@ bool deviceStage4(World* world, void* data) {
     job->retired = nullptr;
     for (int i = 0; i < kMaxSamples; ++i) {
         free(job->retiredSamples[i]);   // the files that device was playing
+        free(job->retiredChannels[i]);
         job->retiredSamples[i] = nullptr;
+        job->retiredChannels[i] = nullptr;
     }
     return true;
 }
@@ -743,7 +963,7 @@ void cmdClose(Unit* unit, sc_msg_iter* args) {
     DeviceJob* job = claim(self);
     self->install(nullptr, nullptr);
     job->retired = self->takeRetiring();
-    self->takeRetiringSamples(job->retiredSamples);
+    self->takeRetiringSamples(job->retiredSamples, job->retiredChannels);
     ft->fDoAsynchronousCommand(unit->mWorld, nullptr, "PoptartDeviceClose", (void*)job,
                                closeNoop, closeNoop, deviceStage4, deviceCleanup, 0, nullptr);
 }
@@ -811,11 +1031,8 @@ void cmdTransport(Unit* unit, sc_msg_iter* args) {
 }
 
 /**
- * Non-realtime: read the file out of the server's buffer, summed to one channel.
- *
- * Summed the way the browser sums it (granular.mjs's loadSample: each channel divided by the
- * count and added in order), because the two have to agree sample for sample - that is what the
- * parity test holds them to.
+ * Non-realtime: read the file out of the server's buffer, in both the layouts a device may want
+ * (PdSample): summed to one channel, and - for a file with more than one - as it is.
  */
 bool sampleStage2(World* world, void* data) {
     SampleJob* job = (SampleJob*)data;
@@ -827,28 +1044,20 @@ bool sampleStage2(World* world, void* data) {
     // The non-realtime mirror, which is what an asynchronous command is allowed to read.
     const SndBuf* buf = World_GetNRTBuf(world, (uint32)job->bufnum);
     if (!buf || !buf->data || buf->frames <= 0 || buf->channels <= 0) return true;
-    float* frames = (float*)malloc(sizeof(float) * (size_t)buf->frames);
-    if (!frames) {
+    const int channels = buf->channels;
+    float* mono = (float*)malloc(sizeof(float) * (size_t)buf->frames);
+    float* interleaved = channels > 1 ? (float*)malloc(sizeof(float) * (size_t)buf->frames * channels) : nullptr;
+    if (!mono || (channels > 1 && !interleaved)) {
         Print("PoptartDevice: could not hold %d frames of sample\n", buf->frames);
+        free(mono);
+        free(interleaved);
         return true;
     }
-    const int channels = buf->channels;
-    if (channels == 1) {
-        memcpy(frames, buf->data, sizeof(float) * (size_t)buf->frames);
-    } else {
-        // Accumulated the way the browser accumulates it: each channel DIVIDED by the count (not
-        // multiplied by a reciprocal), added in channel order, and rounded to a float on every
-        // add - which is what `data[i] += c[i] / chans.length` on a Float32Array does. The
-        // arithmetic is the parity test's business, so it is copied rather than improved.
-        for (int i = 0; i < buf->frames; ++i) {
-            float sum = 0.f;
-            for (int c = 0; c < channels; ++c) {
-                sum = (float)((double)sum + (double)buf->data[i * channels + c] / (double)channels);
-            }
-            frames[i] = sum;
-        }
-    }
-    job->frames = frames;
+    pd_mono_sum(buf->data, buf->frames, channels, mono);
+    if (interleaved) memcpy(interleaved, buf->data, sizeof(float) * (size_t)buf->frames * channels);
+    job->mono = mono;
+    job->channels = interleaved;
+    job->channelCount = channels;
     job->count = buf->frames;
     job->sampleRate = buf->samplerate > 0.0 ? buf->samplerate : job->slot->sampleRate;
     return true;
@@ -859,9 +1068,8 @@ bool sampleStage3(World* world, void* data) {
     (void)world;
     SampleJob* job = (SampleJob*)data;
     DeviceSlot* slot = job->slot;
-    if (!slot->alive.load() || !slot->unit || !job->frames) return true;
-    job->retired = slot->unit->installSample(job->param, job->index, job->frames, job->count, job->sampleRate);
-    job->frames = nullptr;
+    if (!slot->alive.load() || !slot->unit || !job->mono) return true;
+    slot->unit->installSample(job);
     return true;
 }
 
@@ -869,10 +1077,11 @@ bool sampleStage3(World* world, void* data) {
 bool sampleStage4(World* world, void* data) {
     (void)world;
     SampleJob* job = (SampleJob*)data;
-    free(job->frames);    // read and never installed
-    free(job->retired);   // what the device was playing until stage 3
-    job->frames = nullptr;
-    job->retired = nullptr;
+    free(job->mono);              // read and never installed
+    free(job->channels);
+    free(job->retired);           // what the device was playing until stage 3
+    free(job->retiredChannels);
+    job->mono = job->channels = job->retired = job->retiredChannels = nullptr;
     return true;
 }
 
@@ -884,12 +1093,13 @@ void sampleCleanup(World* world, void* data) {
 }
 
 /**
- * /sample <control> <optionSlot> <bufnum> - audio thread.
+ * /sample <control> <optionSlot> <bufnum> [frameLength] - audio thread.
  *
  * The buffer is one sclang already read for a sample pack, so this never touches a file. The
  * generation an open claims is deliberately NOT bumped: a sample arriving must not cancel a
  * device that is still being built, and a device that arrives after its sample is handed it on
- * the way in (see openStage3).
+ * the way in (see openStage3). `frameLength` is the wavetable frame length the file declares,
+ * which a server buffer does not keep, so the engine's Node half reads it from the file's header.
  */
 void cmdSample(Unit* unit, sc_msg_iter* args) {
     PoptartDevice* self = (PoptartDevice*)unit;
@@ -899,8 +1109,90 @@ void cmdSample(Unit* unit, sc_msg_iter* args) {
     job->param = args->geti(-1);
     job->index = args->geti(0);
     job->bufnum = args->geti(-1);
+    job->frameLength = args->remain() > 0 ? args->geti(0) : 0;
     ft->fDoAsynchronousCommand(unit->mWorld, nullptr, "PoptartDeviceSample", (void*)job,
                                sampleStage2, sampleStage3, sampleStage4, sampleCleanup, 0, nullptr);
+}
+
+/**
+ * /shape <control> <optionSlot> <point> <point> ... - a drawn curve, the points outright.
+ *
+ * Small enough for one message and wanting no buffer, no pack and no file: the engine samples
+ * the curve exactly as the browser's engine does before posting it (SHAPE_POINTS), and the UGen
+ * hands it over on the spot.
+ */
+void cmdShape(Unit* unit, sc_msg_iter* args) {
+    PoptartDevice* self = (PoptartDevice*)unit;
+    const int param = args->geti(-1);
+    const int index = args->geti(0);
+    float points[4096];
+    int count = 0;
+    while (args->remain() > 0 && count < 4096) points[count++] = args->getf(0.f);
+    if (param < 0 || count == 0) return;
+    self->installShape(param, index, points, count);
+}
+
+/** /report <id> - where every control is and what the device is doing, by SendNodeReply. */
+void cmdReport(Unit* unit, sc_msg_iter* args) {
+    ((PoptartDevice*)unit)->report(args->getf(0.f));
+}
+
+// ---- work off the audio thread, for a device that asks --------------------------------------
+
+/** Non-realtime: the device builds what it asked for, from what it snapshotted. */
+bool workStage2(World* world, void* data) {
+    (void)world;
+    WorkJob* job = (WorkJob*)data;
+    job->device->work();
+    return true;
+}
+
+/** Audio thread: swapped in - if the device is still the one in the slot. */
+bool workStage3(World* world, void* data) {
+    (void)world;
+    WorkJob* job = (WorkJob*)data;
+    DeviceSlot* slot = job->slot;
+    if (slot->alive.load() && slot->unit && slot->unit->device() == job->device) {
+        job->device->workDone();
+        job->finished = true;
+    }
+    return true;
+}
+
+/**
+ * Non-realtime: what was swapped out is freed, and the round is over. A device whose unit was
+ * freed while this ran was left in the slot's `orphan` (see ~PoptartDevice), and goes now.
+ */
+bool workStage4(World* world, void* data) {
+    (void)world;
+    WorkJob* job = (WorkJob*)data;
+    DeviceSlot* slot = job->slot;
+    PdAny* orphan = slot->orphan.exchange(nullptr);
+    if (job->finished || orphan == job->device) job->device->workRelease();
+    slot->workBusy.store(false);
+    // Taken again after the flag is down: a unit freed between the two reads left it here.
+    if (!orphan) orphan = slot->orphan.exchange(nullptr);
+    delete orphan;
+    return true;
+}
+
+void workCleanup(World* world, void* data) {
+    (void)world;
+    WorkJob* job = (WorkJob*)data;
+    job->slot->release();
+    delete job;
+}
+
+void PoptartDevice::maybeWork(PdAny* device) {
+    if (mSlot->workBusy.load()) return;
+    if (!device->workWanted()) return;
+    mSlot->workBusy.store(true);
+    WorkJob* job = new WorkJob();
+    job->slot = mSlot;
+    job->device = device;
+    mSlot->retain();
+    ft->fDoAsynchronousCommand(mWorld, nullptr, "PoptartDeviceWork", (void*)job,
+                               workStage2, workStage3, workStage4, workCleanup, 0, nullptr);
 }
 
 void cmdNoteOn(Unit* unit, sc_msg_iter* args) {
@@ -939,4 +1231,6 @@ PluginLoad(PoptartDeviceUGens) {
     DefineUnitCmd("PoptartDevice", "/noteRoute", cmdNoteRoute);
     DefineUnitCmd("PoptartDevice", "/transport", cmdTransport);
     DefineUnitCmd("PoptartDevice", "/sample", cmdSample);
+    DefineUnitCmd("PoptartDevice", "/shape", cmdShape);
+    DefineUnitCmd("PoptartDevice", "/report", cmdReport);
 }

@@ -30,6 +30,7 @@ import { STUTTER, StutterProcessor } from '../devices/stutter.mjs';
 import { GRAINECHO, GrainEchoProcessor } from '../devices/grainecho.mjs';
 import { LPG, LpgProcessor } from '../devices/lpg.mjs';
 import { RecorderTap } from '../devices/recorder.mjs';
+import { compileExpr, exprConsts, exprInputCount, renderExpr } from '../dsp/expr.mjs';
 import { Reporter, isDispose, parameterDescriptorsFor, realParams } from './shared.mjs';
 
 class EffectProcessor extends AudioWorkletProcessor {
@@ -94,6 +95,37 @@ for (const [descriptor, Impl] of EFFECTS) {
     constructor(options) { super(options, descriptor, new Impl(sampleRate, 128)); }
   });
 }
+
+// A parameter expression (see dsp/expr.mjs): one per expression the engine installs, reading its
+// inputs as mono signals and writing the parameter's value every sample. New constants arrive
+// over the port and are taken in place; a new shape is a new node.
+registerProcessor('poptart-expr', class extends AudioWorkletProcessor {
+  constructor(options) {
+    super(options);
+    const tree = options?.processorOptions?.tree;
+    this.alive = true;
+    this.consts = exprConsts(tree);
+    try {
+      this.fn = compileExpr(tree, this.consts);
+    } catch {
+      this.fn = () => 0; // the engine compiled this tree before building the node, so it is known good
+    }
+    this.x = new Float64Array(exprInputCount(tree));
+    this.port.onmessage = (event) => {
+      if (isDispose(event.data)) { this.alive = false; return; }
+      const next = event.data?.consts;
+      if (!Array.isArray(next)) return;
+      for (let j = 0; j < next.length && j < this.consts.length; j++) this.consts[j] = Number(next[j]) || 0;
+    };
+  }
+
+  process(inputs, outputs) {
+    if (!this.alive) return false;
+    const out = outputs[0]?.[0];
+    if (out) renderExpr(this.fn, inputs, out, this.x);
+    return true;
+  }
+});
 
 // The recorder tap (see devices/recorder.mjs): not an effect, so no descriptor and no parameters,
 // but it lives in this file so that loading the effects loads it too.

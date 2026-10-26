@@ -35,6 +35,44 @@ function readWavRaw(filePath) {
   return decodeWavRaw(buf);
 }
 
+/**
+ * The wavetable frame length a WAV declares in its `clm ` chunk ("<!>2048 ..."), the spelling
+ * wavetable editors share - or 0 when it declares none, or the file is not a WAV.
+ *
+ * The browser's decodeWav reads the same chunk before cutting a file into frames; on the desktop
+ * the frames are read into a server buffer, which keeps none of the header, so the engine reads
+ * this much of the file itself. Only the chunk headers are read, never the samples.
+ */
+function wavFrameLength(filePath) {
+  let fd;
+  try {
+    fd = fs.openSync(filePath, 'r');
+    const head = Buffer.alloc(12);
+    if (fs.readSync(fd, head, 0, 12, 0) < 12) return 0;
+    if (head.toString('ascii', 0, 4) !== 'RIFF' || head.toString('ascii', 8, 12) !== 'WAVE') return 0;
+    const size = fs.fstatSync(fd).size;
+    const chunk = Buffer.alloc(8);
+    let at = 12;
+    while (at + 8 <= size) {
+      if (fs.readSync(fd, chunk, 0, 8, at) < 8) return 0;
+      const id = chunk.toString('ascii', 0, 4);
+      const length = chunk.readUInt32LE(4);
+      if (id === 'clm ') {
+        const text = Buffer.alloc(Math.min(length, 64));
+        fs.readSync(fd, text, 0, text.length, at + 8);
+        const m = /<!>(\d+)/.exec(text.toString('latin1'));
+        return m ? Number(m[1]) : 0;
+      }
+      at += 8 + length + (length & 1);
+    }
+    return 0;
+  } catch {
+    return 0;
+  } finally {
+    if (fd !== undefined) try { fs.closeSync(fd); } catch { /* already closed */ }
+  }
+}
+
 /** The buffer half of readWavRaw - separated so tests can drive it without touching the disk. */
 function decodeWavRaw(buf) {
   if (buf.length < 44 || buf.toString('ascii', 0, 4) !== 'RIFF' || buf.toString('ascii', 8, 12) !== 'WAVE') {
@@ -395,6 +433,7 @@ function normalizeBands(acc) {
 
 module.exports = {
   readWavRaw,
+  wavFrameLength,
   decodeWavRaw,
   encodeWav,
   writeWav,

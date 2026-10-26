@@ -233,8 +233,14 @@ test('both spellings survive .rate(), .fast() and the shape builders', () => {
   assert.equal(lfo('pluck', { rate: 2 }).fast(2).lfoIR.rateCycles, 4);
 });
 
-test('a nonsense rate says what the two spellings are', () => {
-  assert.throws(() => lfo('pluck', { rate: 'quickly' }), /number of cycles, or a string with the unit/);
+test('a nonsense rate says what the spellings are, and plays at the default rate', () => {
+  const seen = [];
+  setPatternWarn((m) => seen.push(m));
+  let ir;
+  try { ir = lfo('pluck', { rate: 'quickly' }).lfoIR; } finally { setPatternWarn(null); }
+  assert.match(seen.join('\n'), /number of cycles, a pattern of them, or a string with the unit/);
+  assert.equal(ir.rateCycles, 1);
+  assert.equal(ir.rateSig, undefined);
 });
 
 test('a synced modulator is re-sent when the tempo moves; a free one is not', () => {

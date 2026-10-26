@@ -22,7 +22,7 @@
 // that belongs to another name's tooltip goes there, not here.
 
 // The waveform LFOs share their rate/phase wording, so every entry says it in full.
-const LFO_RATE = 'rate is passes per cycle and follows the tempo; write it with a unit, like "0.5hz", for a fixed speed. Also accepts { rate, phase }.';
+const LFO_RATE = 'rate is passes per cycle and follows the tempo. It can be a pattern or signal, like "<1 2 4>": the phase carries on smoothly through each change. Write it with a unit, like "0.5hz", for a fixed speed. Also accepts { rate, phase }.';
 
 // The binops share their call-form wording the same way.
 const BINOP_FORMS = (v) =>
@@ -192,7 +192,7 @@ const API_DOCS = {
   lfo: {
     kind: 'builder',
     sig: 'lfo(shape, { rate, mode, phase, glide })',
-    desc: 'A modulator with a hand-drawn shape; double-click the name to open the shape editor. Shape names can be patterned: lfo("<pluck swell>"). rate is passes per cycle, or "0.5hz" for a fixed speed. mode is free (loops continuously), retrigger (restarts on each note) or envelope (plays once per note, then holds). glide smooths the change between patterned shapes, as a fraction of a pass.',
+    desc: 'A modulator with a hand-drawn shape; double-click the name to open the shape editor. Shape names can be patterned: lfo("<pluck swell>"). rate is passes per cycle, or a pattern of them like "<1 2>", or "0.5hz" for a fixed speed. mode is free (loops continuously), retrigger (restarts on each note) or envelope (plays once per note, then holds). glide smooths the change between patterned shapes, as a fraction of a pass.',
     eg: 'lfo("<pluck swell>", { rate: 0.3, glide: 0.2 }).range(200, 5000)',
   },
   env: {
@@ -280,7 +280,7 @@ const API_DOCS = {
   param: {
     kind: 'method',
     sig: 'param(device?, name, value)',
-    desc: 'Sets a parameter of the last plugin in the chain, by the name the plugin gives it. Naming a device first sets that device\'s parameter wherever it sits: by its label, its plugin name, or "Name#2" for the second of that name. The value is a number, pattern or signal: the parameter\'s position from 0 to 1, or its real units where a mapping file gives the plugin some. An audio() handle as the value wires that track or bus onto the parameter at the sample rate, on poptart\'s own devices; .mul() and .add() on the handle scale it into the parameter\'s 0 to 1 range.',
+    desc: 'Sets a parameter of the last plugin in the chain, by the name the plugin gives it. Naming a device first sets that device\'s parameter wherever it sits: by its label, its plugin name, or "Name#2" for the second of that name. The value is a number, pattern or signal: the parameter\'s position from 0 to 1, or its real units where a mapping file gives the plugin some. Arithmetic on audio() and modulators is worked out per sample: audio("lfo").mul(0.2).add(0.4) moves the parameter 0.2 either side of 0.4, and several sources add up. A plugin takes it once per audio block.',
     eg: '.param("Filter 1 Freq", sine(0.2).range(300, 6000))',
   },
   preset: {
@@ -371,10 +371,10 @@ const API_DOCS = {
   },
 
   // ----------------------------------------------------------------- shaping
-  range: { kind: 'method', sig: 'range(min, max)', desc: 'Rescales a 0 to 1 signal to run from min to max. Both bounds can be patterns or signals.', eg: '.range(200, 5000)' },
-  fast: { kind: 'method', sig: 'fast(factor)', desc: 'Speeds the pattern up by factor; a negative factor also reverses it. On a modulator, it multiplies the rate.', eg: '.fast("<1 2>")' },
+  range: { kind: 'method', sig: 'range(min, max)', desc: 'Rescales a signal to run from min to max: from 0 to 1, or from -1 to 1 for audio. Both bounds can be patterns or signals.', eg: '.range(200, 5000)' },
+  fast: { kind: 'method', sig: 'fast(factor)', desc: 'Speeds the pattern up by factor; a negative factor also reverses it. On a modulator, it multiplies the rate, and a patterned factor patterns the rate.', eg: '.fast("<1 2>")' },
   slow: { kind: 'method', sig: 'slow(factor)', desc: 'Slows the pattern down, stretching it over factor cycles; a negative factor also reverses it. On a modulator, it divides the rate.', eg: '.slow(4)' },
-  rate: { kind: 'method', sig: 'rate(rate)', desc: 'Sets a modulator\'s rate: passes per cycle, following the tempo, or a value with a unit, like "0.5hz", for a fixed speed.', eg: 'sine().rate(0.25)' },
+  rate: { kind: 'method', sig: 'rate(rate)', desc: 'Sets a modulator\'s rate: passes per cycle, following the tempo, or a value with a unit, like "0.5hz", for a fixed speed. Passes per cycle can be a pattern or signal: .rate("<1 2 4>").', eg: 'sine().rate(0.25)' },
   phase: { kind: 'method', sig: 'phase(offset)', desc: 'Shifts where a modulator starts, as a fraction of one pass: 0.25 starts a quarter of the way through.', eg: 'sine(0.5).phase(0.25)' },
   curve: { kind: 'method', sig: 'curve(c)', desc: 'Shapes an envelope\'s segments: negative is exponential, 0 is linear, positive bows outward.', eg: 'env().curve(-4)' },
   hold: {
@@ -512,17 +512,17 @@ const API_DOCS = {
   slice: { kind: 'both', sig: 'slice(n)', desc: 'Plays the nth slice of the sample, cut at its detected transients, wrapping past the last. WAV files only.', eg: '.slice(irand(8))' },
   splice: { kind: 'both', sig: 'splice(n, mode?)', desc: 'Plays the nth transient slice, fitted to the length of its event: splice("<0 1 2>*8") plays each slice as an eighth note. Fits by changing speed unless mode is "stretch". With no n, fits the current begin..end window. speed and note apply on top, and fit is ignored.', eg: '.splice("<0 1 2>*8")' },
   splicemode: { kind: 'both', sig: 'splicemode(mode)', desc: 'How splice fits a slice to its event: 0 or "repitch" changes speed and pitch together, 1 or "stretch" keeps the pitch. Values are rounded and wrap around, so any signal works.', eg: '.splice("0 1 2 3").splicemode("stretch")' },
-  attack: { kind: 'both', sig: 'attack(seconds)', desc: 'Sampler envelope attack time, in seconds: the fade in from silence at the start of each note.', eg: '.attack(0.005)' },
-  decay: { kind: 'both', sig: 'decay(seconds)', desc: 'Sampler envelope decay time, in seconds: the fall from full level to the sustain level.', eg: '.decay(0.3)' },
-  sustain: { kind: 'both', sig: 'sustain(level)', desc: 'Sampler envelope sustain level, from 0 to 1.', eg: '.sustain(0.5)' },
-  release: { kind: 'both', sig: 'release(seconds)', desc: 'Sampler envelope release time, in seconds: the fade out once the note ends. 0.05 where unset.', eg: '.release(0.1)' },
+  attack: { kind: 'both', sig: 'attack(seconds)', desc: 'Amp envelope attack time, in seconds: the fade in from silence at the start of each note. Sets the sampler\'s envelope, or a synth\'s own.', eg: '.attack(0.005)' },
+  decay: { kind: 'both', sig: 'decay(seconds)', desc: 'Amp envelope decay time, in seconds: the fall from full level to the sustain level. Sets the sampler\'s envelope, or a synth\'s own.', eg: '.decay(0.3)' },
+  sustain: { kind: 'both', sig: 'sustain(level)', desc: 'Amp envelope sustain level, from 0 to 1. Sets the sampler\'s envelope, or a synth\'s own.', eg: '.sustain(0.5)' },
+  release: { kind: 'both', sig: 'release(seconds)', desc: 'Amp envelope release time, in seconds: the fade out once the note ends. Sets the sampler\'s envelope (0.05 where unset), or a synth\'s own.', eg: '.release(0.1)' },
   grain: { kind: 'both', sig: 'grain(on)', desc: 'Plays the sample as a stream of short overlapping grains cut from around begin(), instead of one pass through it. Above 0.5 is on. The voice sounds for the length of its event and the sampler envelope shapes it as a whole. A begin() with no rhythm of its own, such as an LFO or rand(), is read by every grain as it starts.', eg: 's("pad").grain().begin(saw(0.25).range(0.2, 0.6))' },
   grainsize: { kind: 'method', sig: 'grainsize(seconds)', desc: 'Length of each grain, in seconds. Read as each grain starts, so a signal can change it within a note. Turns grain() on if nothing has set it.', eg: '.grainsize(0.08)' },
   grainrate: { kind: 'method', sig: 'grainrate(hz)', desc: 'Grains per second. The number of grains sounding at once is grainsize() times this. Turns grain() on if nothing has set it.', eg: '.grainrate(40)' },
   grainpan: { kind: 'method', sig: 'grainpan(position)', desc: 'Stereo position of each grain, from -1 (left) to 1 (right), read as the grain starts, so a fast signal places every grain separately. Applied before the track\'s effects. Turns grain() on if nothing has set it.', eg: '.grainpan(rand().range(-0.6, 0.6))' },
   grainshape: { kind: 'method', sig: 'grainshape(shape)', desc: 'The amplitude window of each grain: drawn breakpoints, the name of a shape, or a pattern of names read at each event. Without one, grains take a symmetric bell. Double-click the name to draw it. Turns grain() on if nothing has set it.', eg: '.grainshape("pluck")' },
-  envscale: { kind: 'both', sig: 'envscale(factor)', desc: 'Multiplies the sampler envelope\'s attack, decay and release times. Sustain is unchanged. Scaling by the note\'s length makes the envelope stretch with each note.', eg: '.attack(0.1).envscale(dur())' },
-  adsr: { kind: 'method', sig: 'adsr(a, d, s, r)', desc: 'Sets the sampler envelope in one call: attack, decay and release in seconds, sustain as a level from 0 to 1. Double-click the name to draw it over the sample.', eg: '.adsr(0.005, 0.2, 0.6, 0.1)' },
+  envscale: { kind: 'both', sig: 'envscale(factor)', desc: 'Multiplies the amp envelope\'s attack, decay and release times, on the sampler or a synth that has an envelope scale. Sustain is unchanged. Scaling by the note\'s length makes the envelope stretch with each note.', eg: '.attack(0.1).envscale(dur())' },
+  adsr: { kind: 'method', sig: 'adsr(a, d, s, r)', desc: 'Sets the amp envelope in one call, the sampler\'s or a synth\'s: attack, decay and release in seconds, sustain as a level from 0 to 1. Double-click the name to draw it over the sample.', eg: '.adsr(0.005, 0.2, 0.6, 0.1)' },
 
   // ----------------------------------------------------------------- debugging
   log: {

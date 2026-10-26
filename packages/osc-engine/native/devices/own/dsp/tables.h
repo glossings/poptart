@@ -87,43 +87,43 @@ inline std::vector<float> fromHarmonics(int length, int count, Amplitude amplitu
 }
 
 /**
- * The harmonic limit of each mip level, brightest first. The spacing is uneven on purpose: half
- * an octave apart down the bright end, one harmonic at a time up the dull end where one harmonic
- * either way is the difference between two audibly different timbres.
+ * The harmonic limit of each mip level, brightest first, for frames `frameLength` long. The
+ * spacing is uneven on purpose: half an octave apart down the bright end, one harmonic at a time
+ * up the dull end where one harmonic either way is the difference between two audibly different
+ * timbres.
+ *
+ * Computed rather than cached, and held by each table (Table::schedule): a table loaded from a
+ * file may have frames of any power-of-two length, it is built on the non-realtime thread, and a
+ * shared cache would be written there while the audio thread reads it.
  */
-inline const std::vector<int>& harmonicSchedule() {
-  static std::vector<int> schedule;
-  if (schedule.empty()) {
-    double h = kFrameLength / 2.0;
-    while (h > 8) {
-      const int keep = static_cast<int>(jsRound(h));
-      schedule.push_back(keep < 1 ? 1 : keep);
-      h /= M_SQRT2;
-    }
-    for (int k = 8; k >= 1; --k) schedule.push_back(k);
+inline std::vector<int> harmonicSchedule(int frameLength = kFrameLength) {
+  std::vector<int> schedule;
+  double h = frameLength / 2.0;
+  while (h > 8) {
+    const int keep = static_cast<int>(jsRound(h));
+    schedule.push_back(keep < 1 ? 1 : keep);
+    h /= M_SQRT2;
   }
+  for (int k = 8; k >= 1; --k) schedule.push_back(k);
   return schedule;
 }
 
 /** Harmonics kept at mip level L. */
-inline int harmonicsAtLevel(int level) {
-  const std::vector<int>& schedule = harmonicSchedule();
+inline int harmonicsAtLevel(const std::vector<int>& schedule, int level) {
   const int top = static_cast<int>(schedule.size()) - 1;
   const int l = level < 0 ? 0 : (level > top ? top : level);
   return schedule[static_cast<size_t>(l)];
 }
 
-inline int levelCount() { return static_cast<int>(harmonicSchedule().size()); }
-
 /**
  * How long a level's copy needs to be: four samples per harmonic, so reading it with
  * interpolation does not audibly dull it further.
  */
-inline int lengthAtLevel(int level) {
-  const int want = harmonicsAtLevel(level) * 4;
+inline int lengthAtLevel(const std::vector<int>& schedule, int frameLength, int level) {
+  const int want = harmonicsAtLevel(schedule, level) * 4;
   int len = 16;
-  while (len < want && len < kFrameLength) len *= 2;
-  return len < kFrameLength ? len : kFrameLength;
+  while (len < want && len < frameLength) len *= 2;
+  return len < frameLength ? len : frameLength;
 }
 
 /**
@@ -133,8 +133,7 @@ inline int lengthAtLevel(int level) {
  * copies the oscillator blends is already safe - and which moves continuously with the rate, so
  * a sweeping pitch hears a gradual change and never a step.
  */
-inline double mipLevelFor(double rate) {
-  const std::vector<int>& schedule = harmonicSchedule();
+inline double mipLevelFor(double rate, const std::vector<int>& schedule) {
   const int top = static_cast<int>(schedule.size()) - 1;
   const double r = std::fabs(rate);
   if (!(r > 0)) return 0;
@@ -154,7 +153,8 @@ inline double mipLevelFor(double rate) {
 /** One frame's band-limited copies, level 0 first (every harmonic) down to a sine. */
 inline std::vector<std::vector<float>> buildMipmaps(const std::vector<float>& frame) {
   const int n = static_cast<int>(frame.size());
-  const int levels = levelCount();
+  const std::vector<int> schedule = harmonicSchedule(n);
+  const int levels = static_cast<int>(schedule.size());
   std::vector<std::vector<float>> out(static_cast<size_t>(levels));
   // Level 0 is the frame itself rather than a round trip through the transform.
   out[0] = frame;
@@ -165,7 +165,7 @@ inline std::vector<std::vector<float>> buildMipmaps(const std::vector<float>& fr
   std::vector<double> re(static_cast<size_t>(n));
   std::vector<double> im(static_cast<size_t>(n));
   for (int l = 1; l < levels; ++l) {
-    int keep = harmonicsAtLevel(l);
+    int keep = harmonicsAtLevel(schedule, l);
     if (keep > n / 2 - 1) keep = n / 2 - 1;
     if (keep < 0) keep = 0;
     re = re0;
@@ -180,7 +180,7 @@ inline std::vector<std::vector<float>> buildMipmaps(const std::vector<float>& fr
       }
     }
     fft(re.data(), im.data(), n, true);
-    const int len = lengthAtLevel(l);
+    const int len = lengthAtLevel(schedule, n, l);
     std::vector<float> small(static_cast<size_t>(len));
     const int step = n / len;
     for (int i = 0; i < len; ++i) small[static_cast<size_t>(i)] = static_cast<float>(re[static_cast<size_t>(i * step)]);
@@ -195,6 +195,7 @@ struct Table {
   int length = kFrameLength;
   int frameCount = 0;
   int levels = 0;
+  std::vector<int> schedule;                            // the band limit of each level
   std::vector<std::vector<std::vector<float>>> mips;   // [frame][level][sample]
 };
 
@@ -203,10 +204,95 @@ inline Table buildTable(const char* name, const std::vector<std::vector<float>>&
   t.name = name;
   t.length = static_cast<int>(frames[0].size());
   t.frameCount = static_cast<int>(frames.size());
-  t.levels = levelCount();
+  t.schedule = harmonicSchedule(t.length);
+  t.levels = static_cast<int>(t.schedule.size());
   t.mips.reserve(frames.size());
   for (const auto& f : frames) t.mips.push_back(buildMipmaps(f));
   return t;
+}
+
+// ---- a table from a FILE ---------------------------------------------------------------------
+//
+// Translated from web-engine's src/dsp/wavfile.mjs (framesOf) and src/dsp/tables.mjs
+// (resampleFrame, powerOfTwoAtLeast), which is what the browser cuts a loaded file into frames
+// with before it builds the pyramid. The arithmetic is the browser's, rounding included: the
+// frames are Float32Arrays there, so every store is a float and every expression a double.
+
+/** The frame length wavetable editors assume when a file does not say. */
+constexpr int kDefaultFileFrameLength = 2048;
+
+/** The most frames one loaded table keeps. Past this a file is a sample, not a table. */
+constexpr int kMaxFileFrames = 256;
+
+/**
+ * Cuts a channel of samples into frames: a file shorter than one frame is a single cycle and is
+ * stretched to one frame; a longer one is cut every `frameLength` samples. The frames are then
+ * peak-normalized together, so a quiet export does not become a quiet oscillator.
+ */
+inline std::vector<std::vector<float>> framesOf(const float* samples, int count, int frameLength) {
+  const int n = frameLength > 4 ? frameLength : 4;
+  std::vector<std::vector<float>> frames;
+  if (count < n) {
+    std::vector<float> one(static_cast<size_t>(n), 0.f);
+    const int m = count;
+    if (m > 0) {
+      for (int i = 0; i < n; ++i) {
+        const double x = (static_cast<double>(i) / n) * m;
+        const int j = static_cast<int>(std::floor(x));
+        const double f = x - j;
+        const double a = samples[j % m];
+        const double b = samples[(j + 1) % m];
+        one[static_cast<size_t>(i)] = static_cast<float>(a + (b - a) * f);
+      }
+    }
+    frames.push_back(std::move(one));
+  } else {
+    const int total = count / n;
+    const int keep = total < kMaxFileFrames ? total : kMaxFileFrames;
+    for (int k = 0; k < keep; ++k) frames.emplace_back(samples + static_cast<size_t>(k) * n, samples + static_cast<size_t>(k + 1) * n);
+  }
+  double peak = 0;
+  for (const auto& f : frames) for (float v : f) peak = std::fmax(peak, std::fabs(static_cast<double>(v)));
+  if (peak > 0 && peak != 1) {
+    const double g = 1 / peak;
+    for (auto& f : frames) for (float& v : f) v = static_cast<float>(v * g);
+  }
+  return frames;
+}
+
+/** A frame at another length, read by linear interpolation. */
+inline std::vector<float> resampleFrame(const std::vector<float>& frame, int length) {
+  std::vector<float> out(static_cast<size_t>(length));
+  const int m = static_cast<int>(frame.size());
+  for (int i = 0; i < length; ++i) {
+    const double x = (static_cast<double>(i) / length) * m;
+    const int j = static_cast<int>(std::floor(x));
+    const double f = x - j;
+    const double a = frame[static_cast<size_t>(j % m)];
+    const double b = frame[static_cast<size_t>((j + 1) % m)];
+    out[static_cast<size_t>(i)] = static_cast<float>(a + (b - a) * f);
+  }
+  return out;
+}
+
+/** The power of two a frame length is rounded up to. */
+inline int powerOfTwoAtLeast(int n) {
+  int len = 4;
+  while (len < n) len *= 2;
+  return len;
+}
+
+/**
+ * A loaded file as a table: cut at the frame length it declared (or the usual one), each frame
+ * brought to a power of two, and the pyramid built for every frame. The browser's
+ * tableFromSample, step for step. NOT a real-time call - a table of 256 frames is 256 transforms
+ * of every level - which is why the Wavetable device builds one through the work calls.
+ */
+inline Table tableFromFile(const char* name, const float* mono, int count, int frameLength) {
+  std::vector<std::vector<float>> raw = framesOf(mono, count, frameLength > 0 ? frameLength : kDefaultFileFrameLength);
+  const int length = powerOfTwoAtLeast(static_cast<int>(raw[0].size()));
+  for (auto& f : raw) if (static_cast<int>(f.size()) != length) f = resampleFrame(f, length);
+  return buildTable(name, raw);
 }
 
 /** Peak-normalizes a frame to 1, leaving a silent frame alone. */

@@ -133,6 +133,47 @@ function readDeviceState(device, doc) {
 }
 
 /**
+ * A device's answer to /report, read back: where each control is, by id, and what the device says
+ * it is doing, in the shape the browser's processor reports it (its report()) - or null.
+ *
+ * `values` is what the UGen sent, past the request id: [count, position..., reportCount,
+ * report...] (PoptartDevice.cpp's report), with a count of -1 for no answer. The positions are
+ * the device's own reading of its controls, so a control a modulator is moving is where the
+ * modulator has got to. The report's layout is each device's own (its pd_report), and only the
+ * devices that have one are read here.
+ */
+function readDeviceLive(device, values) {
+  if (!Array.isArray(values) || !(values[0] >= 0)) return null;
+  const count = values[0];
+  const positions = {};
+  for (let i = 0; i < count && i < device.params.length; i++) {
+    const v = values[1 + i];
+    if (Number.isFinite(v)) positions[device.params[i].id] = v;
+  }
+  const reportCount = Number(values[1 + count]) || 0;
+  const raw = values.slice(2 + count, 2 + count + reportCount);
+  return { positions, report: readReport(device.id, raw) };
+}
+
+/** One device's pd_report floats, as the browser's processor reports the same thing. */
+function readReport(id, raw) {
+  if (!raw.length) return null;
+  switch (id) {
+    case 'Granular': {
+      // Four floats a grain: where it started and how far through its life it is, its pan, and
+      // the stretch of the file it plays (own/granular.cc's pd_report).
+      const grains = [];
+      for (let i = 0; i + 4 <= raw.length; i += 4) grains.push(raw.slice(i, i + 4));
+      return { grains };
+    }
+    case 'Distort':
+      return { meters: { autogain: raw[0], level: raw[1] } };
+    default:
+      return null;
+  }
+}
+
+/**
  * The devices in the shape the editor reads a PLUGIN row in: the list the plugin browser draws
  * and the list `synth("`/`fx("` completes against.
  *
@@ -287,6 +328,7 @@ module.exports = {
   deviceRows,
   deviceStateText,
   readDeviceState,
+  readDeviceLive,
   paramPosition,
   forgetNativeDevices,
 };

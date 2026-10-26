@@ -25,7 +25,7 @@
 //    own note grid (withNoteGate), which is what the engine gates the native one from too.
 
 import { defScopeOf, withDefDeck } from './rolls.mjs';
-import { sampleBound, CHANNEL_DEFAULTS, GRAIN_CHANNELS, MAX_FX_SLOTS,DEFAULT_BEND_RANGE, bendRangeWarning, LOOP_MODES, loopModeAt, channelAt, soundingEnd, timeShift, grooveVelScale, endEdgeStep, warnPattern, lfoRateHz, lfoPhaseCount, lfoShapes, resolvePreset, withNoteGate, withEventSpan, noteGateFromGrid } from './signal.mjs';
+import { sampleBound, CHANNEL_DEFAULTS, GRAIN_CHANNELS, MAX_FX_SLOTS,DEFAULT_BEND_RANGE, bendRangeWarning, LOOP_MODES, loopModeAt, channelAt, soundingEnd, timeShift, grooveVelScale, endEdgeStep, warnPattern, lfoRateHz, lfoPhaseCount, lfoShapes, resolvePreset, paramExpr, lfoRateChanges, withNoteGate, withEventSpan, noteGateFromGrid } from './signal.mjs';
 import { scalePitchClasses, parseScaleName, degreeToMidi, quantizeToScale } from './notes.mjs';
 import { songSteps, stepsUnderShift, withClipShift } from './arrange.mjs';
 import { sliceSetIsEmpty } from './slices.mjs';
@@ -185,9 +185,27 @@ function modulatorKind(sig) {
 // (rate, phase offset). Two IRs that agree here are the same oscillation, so a re-eval carrying
 // both leaves the modulator exactly where it was - the range is not part of it, since a bound
 // moving updates the running synth in place.
+// A patterned rate has no text to compare, so each one is its own key: an eval re-anchors it at
+// once, which costs one message and lands it on the same phase anyway (the count is a function of
+// position, not of history - see lfo-rate.mjs).
 function lfoPhaseKey(ir) {
   return JSON.stringify([ir.shape, ir.mode ?? null, ir.rateHz ?? null, ir.rateCycles ?? null,
+    ir.rateSig ? rateSigId(ir.rateSig) : null,
     ir.phaseCycles ?? null, ir.glide ?? null, ir.shape === 'custom' ? lfoShapes(ir) : null]);
+}
+
+const rateSigIds = new WeakMap();
+let nextRateSigId = 1;
+function rateSigId(sig) {
+  if (!rateSigIds.has(sig)) rateSigIds.set(sig, nextRateSigId++);
+  return rateSigIds.get(sig);
+}
+
+// Whether the scheduler pins this LFO's phase to the grid (see _anchorLFOs): noise has no phase to
+// pin, and a note-gated shape's phase belongs to its notes.
+function lfoAnchored(ir) {
+  if (!ir || ir.shape === 'rand' || ir.shape === 'perlin') return false;
+  return !(ir.shape === 'custom' && ir.mode != null && ir.mode !== 'free');
 }
 
 // Chain size, mirroring the engine (slot 0 = instrument, 1..MAX_CHAIN_SLOTS-1 = effects).
@@ -668,6 +686,15 @@ export class DeckClock extends Transport {
   }
 }
 
+/** The name an expression's input `i` is fed under, on the same slot as the control it belongs to. */
+export function leafName(i, name) {
+  return `~${i}~${name}`;
+}
+
+function exprHasAudio(node) {
+  return node.k === 'src' || (Array.isArray(node.a) && node.a.some(exprHasAudio));
+}
+
 export class Scheduler {
   constructor(engine, { cps = 0.5, trackId = 'default', label = null, transport = null, deck = 'a' } = {}) {
     this.engine = engine;
@@ -699,9 +726,11 @@ export class Scheduler {
     // never there, rather than parked wherever it was last sent.
     this._heldParams = new Set();
     this._sentAudioInjects = new Map(); // fx slot -> audioRouteKey last wired, for diffing and teardown
-    this._sentParamRoutes = new Map();  // "slot:name" -> route key last wired (see .param() connections)
-    this._adoptedParamRoutes = false;   // whether the routes the engine already held have been read in
-    this._warnedNoParamRoutes = false;  // the "this engine cannot patch audio into a parameter" warning, once
+    this._sentExprs = new Map();        // "slot:name" -> JSON of the expression last sent (see _expanded)
+    this._adoptedExprs = false;         // whether the expressions the engine already held have been read in
+    this._warnedNoExprs = false;        // the "this engine cannot evaluate expressions" warning, once
+    this._expandedFor = null;           // the pattern _expandedCache was worked out for
+    this._expandedCache = null;
     this._sentInputRoute = null; // audioRouteKey of the head audio input last wired (null: none, or MIDI)
     this._prevMidiInjectSlots = new Set(); // fx slots the previous pattern MIDI-injected (named sources)
     this._prevInputSource = null; // live head input (midi()/audio() source) the previous pattern held
@@ -898,6 +927,58 @@ export class Scheduler {
       ...Object.values(sig.paramSignals).map(({ slot, name, sig: s }) => ({ slot, name, sig: s })),
       ...Object.entries(this._channelSigs(sig)).map(([name, s]) => ({ slot: CHANNEL_SLOT, name, sig: s })),
     ];
+  }
+
+  /**
+   * The control entries as the engine is sent them. A control whose value is an expression
+   * (audio in it, or modulators combined - see signal.mjs's Expressions) becomes the expression
+   * itself, sent once with setParamExpr, plus one ordinary entry per input under the input's own
+   * name (leafName): each input is then polled, or run as a native modulator, exactly as a control
+   * of its own would be, and the engine adds them up. Worked out once per pattern.
+   */
+  _expanded(sig) {
+    if (this._expandedFor === sig && this._expandedCache) return this._expandedCache;
+    const entries = [];
+    const exprs = new Map();
+    const canEval = typeof this.engine.setParamExpr === 'function';
+    for (const c of this._controlEntries(sig)) {
+      const node = paramExpr(c.sig);
+      if (!node) { entries.push(c); continue; }
+      if (!canEval) {
+        // Without the engine's help an expression is still its JavaScript - except audio, which
+        // only the engine has.
+        if (!exprHasAudio(node)) entries.push(c);
+        else if (!this._warnedNoExprs) {
+          this._warnedNoExprs = true;
+          warnPattern(`[scheduler] this engine cannot patch audio into a control, so "${c.name}" on ${this.label ?? this.trackId} is left as it was. Everything else in the track plays as written.`);
+        }
+        continue;
+      }
+      const inputs = new Map(); // the signal (or source name) -> its input index
+      const wire = (n) => {
+        switch (n.k) {
+          case 'const': return { k: 'const', v: n.v };
+          case 'src': {
+            const at = `src:${n.source}`;
+            if (!inputs.has(at)) inputs.set(at, inputs.size);
+            return { k: 'in', i: inputs.get(at), rate: 'ar', source: n.source };
+          }
+          case 'leaf': {
+            if (!inputs.has(n.sig)) {
+              const i = inputs.size;
+              inputs.set(n.sig, i);
+              entries.push({ slot: c.slot, name: leafName(i, c.name), sig: n.sig });
+            }
+            return { k: 'in', i: inputs.get(n.sig), rate: n.sig.envIR ? 'ar' : 'kr' };
+          }
+          default: return { k: n.k, op: n.op, a: n.a.map(wire) };
+        }
+      };
+      exprs.set(`${c.slot}:${c.name}`, { slot: c.slot, name: c.name, tree: wire(node) });
+    }
+    this._expandedFor = sig;
+    this._expandedCache = { entries, exprs };
+    return this._expandedCache;
   }
 
   /**
@@ -1116,13 +1197,17 @@ export class Scheduler {
 
     // A plugin parameter the new pattern no longer polls - its call deleted, or now driven by a
     // native modulator instead - goes back to what it was before the pattern took it.
+    const expanded = this._expanded(sig);
     const polled = new Set(
-      Object.values(sig.paramSignals)
-        .filter((e) => !(e.sig.lfoIR || e.sig.envIR || e.sig.ccIR))
+      expanded.entries
+        .filter((e) => e.slot !== CHANNEL_SLOT && !(e.sig.lfoIR || e.sig.envIR || e.sig.ccIR))
         .map((e) => `${e.slot}:${e.name}`),
     );
     for (const key of [...this._heldParams]) {
       if (polled.has(key)) continue;
+      // Now an expression's: the engine hands the control over to it, and a release landing after
+      // would take it back.
+      if (expanded.exprs.has(key)) { this._heldParams.delete(key); continue; }
       const [slot, name] = splitHeldKey(key);
       this.engine.releaseParam(this.trackId, slot, name, resetSec);
       this._heldParams.delete(key);
@@ -1200,46 +1285,30 @@ export class Scheduler {
     // cuts the signal for a moment, and a parameter being fed at audio rate is audibly part of
     // the sound. An engine that cannot do this at all says so once and keeps playing - the rest
     // of the pattern is fine, and a track that refuses to sound is the worse failure.
-    const paramRoutes = Object.values(sig.paramRoutes ?? {});
-    if (typeof this.engine.connectParam === 'function') {
-      // What the ENGINE holds, not what this Scheduler sent, the first time through. The engine
-      // track outlives us - a re-eval, or a label removed and re-added, builds a fresh Scheduler
-      // on a synth still wired by the old pattern - so a route the new pattern dropped has to be
-      // found by asking rather than by remembering. The answer is in the same spelling as the
-      // keys below, so a route that did not change is still left alone.
-      if (!this._adoptedParamRoutes) {
-        this._adoptedParamRoutes = true;
-        // Feature-detected like every other optional engine call, and the ANSWER is checked too:
-        // an engine that has no routes to report may answer anything, and a Scheduler that threw
-        // here would take the whole pattern down over a capability it can do without.
-        const held = typeof this.engine.paramRoutes === 'function' ? this.engine.paramRoutes(this.trackId) : null;
+    const { exprs } = this._expanded(sig);
+    if (typeof this.engine.setParamExpr === 'function') {
+      // What the ENGINE holds, the first time through: the engine track outlives this Scheduler
+      // (a re-eval, a label removed and re-added), so an expression the new pattern dropped is
+      // found by asking - and one that didn't change is left running, inputs and all.
+      if (!this._adoptedExprs) {
+        this._adoptedExprs = true;
+        const held = typeof this.engine.paramExprs === 'function' ? this.engine.paramExprs(this.trackId) : null;
         if (held && typeof held[Symbol.iterator] === 'function') {
-          for (const [at, key] of held) this._sentParamRoutes.set(at, key);
+          for (const [at, json] of held) this._sentExprs.set(at, json);
         }
       }
       const next = new Map();
-      for (const route of paramRoutes) {
-        const key = `${route.source}|${route.gain}|${route.offset}`;
-        const at = `${route.slot}:${route.name}`;
-        next.set(at, key);
-        if (this._sentParamRoutes.get(at) !== key) {
-          this.engine.connectParam(this.trackId, route.slot, route.name, route.source, route.gain, route.offset);
-        }
+      for (const [at, e] of exprs) {
+        const json = JSON.stringify(e.tree);
+        next.set(at, json);
+        if (this._sentExprs.get(at) !== json) this.engine.setParamExpr(this.trackId, e.slot, e.name, e.tree);
       }
-      for (const at of this._sentParamRoutes.keys()) {
-        if (!next.has(at)) {
-          const [slot, ...rest] = at.split(':');
-          this.engine.disconnectParam(this.trackId, Number(slot), rest.join(':'));
-        }
+      for (const at of this._sentExprs.keys()) {
+        if (next.has(at)) continue;
+        const cut = at.indexOf(':');
+        this.engine.clearParamExpr(this.trackId, Number(at.slice(0, cut)), at.slice(cut + 1));
       }
-      this._sentParamRoutes = next;
-    } else if (paramRoutes.length && !this._warnedNoParamRoutes) {
-      this._warnedNoParamRoutes = true;
-      const names = paramRoutes.map((r) => `"${r.name}"`).join(', ');
-      warnPattern(
-        `[scheduler] this engine cannot patch audio into a parameter, so ${names} on ${this.label ?? this.trackId} `
-        + 'is not connected. Everything else in the track plays as written.',
-      );
+      this._sentExprs = next;
     }
 
     // MIDI injected into a plugin from a named source (Sig#midi injector): another track's notes
@@ -1261,7 +1330,7 @@ export class Scheduler {
     // pattern no longer carries (or whose kind changed, e.g. env -> LFO, or dropped to a Tier-1
     // polled signal, which a leftover bus mapping would fight with).
     const nextModulators = new Map();
-    for (const c of this._controlEntries(sig)) {
+    for (const c of this._expanded(sig).entries) {
       const kind = modulatorKind(c.sig);
       if (kind) nextModulators.set(`${c.slot} ${c.name}`, { ...c, kind });
     }
@@ -1363,28 +1432,40 @@ export class Scheduler {
     // which keeps it native and phase-continuous rather than restarting it.
     // A rand() a grain reads refreshes per grain rather than per second (see GRAIN_RAND_HZ).
     const grainRand = ir.shape === 'rand' && m.slot === CHANNEL_SLOT && GRAIN_CHANNELS.includes(m.name);
-    const rateHz = m.sig.lfoIR ? (grainRand ? GRAIN_RAND_HZ : lfoRateHz(ir, cps)) : null;
+    // A patterned rate is sent as the Hz it stands at now. Where the phase is anchored, every
+    // change of it travels timestamped with its anchor instead (see _scheduleRateChanges), and this
+    // send only seeds a new modulator: `rateFromAnchors` tells the engine to leave a running one's
+    // rate alone, since a re-send lands at once and a change is due at its step edge.
+    const nowCycle = this.transport.cycleAt(nowSec);
+    const rateHz = m.sig.lfoIR ? (grainRand ? GRAIN_RAND_HZ : lfoRateHz(ir, cps, nowCycle)) : null;
+    const rateFromAnchors = ir.rateSig != null && lfoAnchored(ir) && typeof this.engine.anchorParamLFO === 'function';
     const synced = m.sig.lfoIR != null && ir.rateHz == null;
     m.dynamic = typeof ir.min !== 'number' || typeof ir.max !== 'number' || synced || grainRand;
     // A resting signal bound (a mini-string bound mid-`~`) holds the last sent value; on the
     // very first send there's nothing to hold, so fall back to the unipolar default.
-    const [lo, hi] = this._readAt(this.transport.cycleAt(nowSec), (pos) => [
+    const [lo, hi] = this._readAt(nowCycle, (pos) => [
       sampleBound(ir.min, nowSec, cps, pos) ?? (initial ? 0 : null),
       sampleBound(ir.max, nowSec, cps, pos) ?? (initial ? 1 : null),
     ]);
     if (lo == null || hi == null) return;
-    if (!initial && lo === m.lastLo && hi === m.lastHi && rateHz === m.lastRateHz) return;
+    const rateKey = rateFromAnchors ? null : rateHz;
+    if (!initial && lo === m.lastLo && hi === m.lastHi && rateKey === m.lastRateHz) return;
     m.lastLo = lo;
     m.lastHi = hi;
-    m.lastRateHz = rateHz;
+    m.lastRateHz = rateKey;
     let resolved = m.dynamic ? { ...ir, min: lo, max: hi, ...(rateHz == null ? {} : { rateHz }) } : ir;
+    if (ir.rateSig) {
+      // The engine is handed numbers: the pattern stays here, where its changes are scheduled.
+      resolved = { ...resolved, ...(rateFromAnchors ? { rateFromAnchors: true } : {}) };
+      delete resolved.rateSig;
+    }
     if (m.kind === 'lfo' && ir.shape === 'custom') {
       // A drawn shape reaches the engine as breakpoints, and this is where its NAME becomes them
       // (see lfoShapes): the engine is deliberately ignorant of pattern-core, and by the time a
       // modulator is being sent the whole buffer has evaluated, so a `_shape(...)` written below
       // the pattern that names it is in the registry. `points` is the shape it starts on and
       // `shapes` the set compiled up front, both spelled as the engine has always read them.
-      const shapes = lfoShapes(ir, defScopeOf(this.deck));
+      const shapes = m.liveShapes ?? lfoShapes(ir, defScopeOf(this.deck));
       resolved = { ...resolved, points: shapes[0], shapes };
     }
     if (m.kind === 'lfo') {
@@ -1396,6 +1477,29 @@ export class Scheduler {
     } else {
       this.engine.setParamCC(this.trackId, m.slot, m.name, resolved);
     }
+  }
+
+  /**
+   * A drawn shape being dragged in the editor: every running modulator playing the breakpoints
+   * `from` plays `to` instead, from the phase it is at, without an evaluation (the engine updates
+   * a drawing in place). The code catches up when the drag ends; until the next evaluation the
+   * modulator keeps the dragged drawing, so a re-send in between doesn't put the old one back.
+   * Returns how many modulators took it.
+   */
+  liveShape(from, to) {
+    const was = JSON.stringify(from);
+    let took = 0;
+    const nowSec = this.engine.getTime();
+    for (const m of this._activeModulators.values()) {
+      const ir = m.sig.lfoIR;
+      if (m.kind !== 'lfo' || ir?.shape !== 'custom') continue;
+      const shapes = m.liveShapes ?? lfoShapes(ir, defScopeOf(this.deck));
+      if (!shapes.some((sh) => JSON.stringify(sh) === was)) continue;
+      m.liveShapes = shapes.map((sh) => (JSON.stringify(sh) === was ? to : sh));
+      this._withNoteGate(() => this._sendModulator(m, nowSec, true), this.transport.cycleAt(nowSec));
+      took += 1;
+    }
+    return took;
   }
 
   /**
@@ -1478,6 +1582,18 @@ export class Scheduler {
       this._clearModulator(m);
     }
     this._activeModulators = new Map();
+    // Expressions are modulators too, and go the same way.
+    for (const at of this._sentExprs.keys()) {
+      const cut = at.indexOf(':');
+      try {
+        this.engine.clearParamExpr(this.trackId, Number(at.slice(0, cut)), at.slice(cut + 1));
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.error(`[scheduler] track "${this.label}" could not clear the expression on "${at}": ${err.message ?? err}`);
+      }
+    }
+    this._sentExprs = new Map();
+    this._adoptedExprs = true;
     // Held parameters are NOT handed back here. Stopping leaves the sound as it is - a stopped
     // track's plugins keep the settings the pattern gave them, as they keep their voices ringing
     // (see the note at the top of stop()). The holds are forgotten, and the engine keeps its first
@@ -1543,6 +1659,7 @@ export class Scheduler {
         this._schedulePresetSwaps(this._scheduledUntilCycle, targetCycle);
         this._scheduleNoteEdges(this._scheduledUntilCycle, targetCycle, nowSec);
         this._scheduleShapeSwaps(this._scheduledUntilCycle, targetCycle);
+        this._scheduleRateChanges(this._scheduledUntilCycle, targetCycle);
         this._scheduledUntilCycle = targetCycle;
       }
 
@@ -1766,7 +1883,14 @@ export class Scheduler {
         if (index < 0 || index === m.shapeIndex) continue;
         m.shapeIndex = index;
         const atSec = this.transport.secAt(at);
-        this.engine.setParamShape(this.trackId, m.slot, m.name, index, atSec);
+        if (ir.rateSig) {
+          // The new shape starts at the rate in force at the swap. The engine's own idea of the
+          // rate is whatever was last scheduled, which may be a change further on in the window.
+          const rateHz = lfoRateHz(ir, this.transport.cps, at);
+          this.engine.setParamShape(this.trackId, m.slot, m.name, index, atSec, rateHz);
+        } else {
+          this.engine.setParamShape(this.trackId, m.slot, m.name, index, atSec);
+        }
         // Phase restarts at the swap, so that is where the anchor's phase formula counts from -
         // in both units, since a synced rate counts the swap's cycle and a Hz one its second.
         // In the note-gated modes the engine defers the swap to the next gate and keeps its own
@@ -2049,25 +2173,56 @@ export class Scheduler {
   // and the next periodic one locks it. Engines without anchorParamLFO just stay free-running.
   _anchorLFOs(nowSec) {
     if (typeof this.engine.anchorParamLFO !== 'function') return;
+    const cps = this.transport.cps;
     for (const m of this._activeModulators.values()) {
       const ir = m.sig.lfoIR;
-      if (!ir || ir.shape === 'rand' || ir.shape === 'perlin') continue; // noise shapes have no phase to anchor
-      if (ir.shape === 'custom' && ir.mode != null && ir.mode !== 'free') continue; // note-gated
-      if (m.anchoredAtSec != null && nowSec - m.anchoredAtSec < LFO_ANCHOR_INTERVAL_SEC) continue;
+      if (!lfoAnchored(ir)) continue;
+      // A patterned rate is sent in Hz with its anchor, so a tempo move is due at once rather
+      // than at the next periodic anchor (see _sendModulator's rateFromAnchors).
+      const tempoMoved = ir.rateSig != null && m.anchoredCps !== cps;
+      if (!tempoMoved && m.anchoredAtSec != null && nowSec - m.anchoredAtSec < LFO_ANCHOR_INTERVAL_SEC) continue;
       const targetSec = nowSec + DEFAULT_LOOKAHEAD_SEC;
-      const targetCycle = this.transport.cycleAt(targetSec);
-      // sampleLfoIR's own phase count (lfoPhaseCount: cycles for a synced rate, seconds for a Hz
-      // one), measured from the last shape swap where there has been one - the swap restarted the
-      // shape, so counting from the grid origin would immediately drag it back to a phase it never
-      // had. Both origins are carried, since which one is read depends on the rate's unit.
-      const total = lfoPhaseCount(
-        ir,
-        m.phaseOriginSec == null ? targetSec : targetSec - m.phaseOriginSec,
-        this.transport.cps,
-        m.phaseOriginCycle == null ? targetCycle : targetCycle - m.phaseOriginCycle,
-      );
-      this.engine.anchorParamLFO(this.trackId, m.slot, m.name, ((total % 1) + 1) % 1, targetSec);
+      this._anchorAt(m, targetSec, this.transport.cycleAt(targetSec));
       m.anchoredAtSec = nowSec;
+    }
+  }
+
+  // Sends one anchor: sampleLfoIR's own phase count (lfoPhaseCount: cycles for a synced rate,
+  // seconds for a Hz one, the integral for a patterned one), measured from the last shape swap
+  // where there has been one - the swap restarted the shape, so counting from the grid origin
+  // would immediately drag it back to a phase it never had. Both origins are carried, since which
+  // one is read depends on the rate's unit. A patterned rate's anchor carries the rate in force
+  // from that moment too, so the native modulator runs the same piecewise rate the count does.
+  _anchorAt(m, atSec, atCycle) {
+    const ir = m.sig.lfoIR;
+    const cps = this.transport.cps;
+    const from = m.phaseOriginSec == null ? null : { sec: m.phaseOriginSec, cycle: m.phaseOriginCycle };
+    const total = lfoPhaseCount(ir, atSec, cps, atCycle, from);
+    const phase01 = ((total % 1) + 1) % 1;
+    if (ir.rateSig) {
+      this.engine.anchorParamLFO(this.trackId, m.slot, m.name, phase01, atSec, lfoRateHz(ir, cps, atCycle));
+      m.anchoredCps = cps;
+    } else {
+      this.engine.anchorParamLFO(this.trackId, m.slot, m.name, phase01, atSec);
+    }
+  }
+
+  // A patterned rate (sine("<1 2 4>"), lfo(...).fast("<1 2>")): each change in the window goes out
+  // as an anchor timestamped at the change, carrying the new rate and the phase the integral has
+  // reached there - so the native modulator changes rate exactly on the step, from the phase the
+  // JS count says, rather than on whichever poll noticed. A change that coincides with a shape
+  // swap is the swap's: that restarts the shape at the rate in force (see _scheduleShapeSwaps).
+  // Unanchored LFOs (noise, note-gated shapes) take their rate from _sendModulator's re-sends.
+  _scheduleRateChanges(fromCycle, toCycle) {
+    if (typeof this.engine.anchorParamLFO !== 'function') return;
+    const cps = this.transport.cps;
+    for (const m of this._activeModulators.values()) {
+      const ir = m.sig.lfoIR;
+      if (!ir?.rateSig || !lfoAnchored(ir)) continue;
+      for (const { at } of lfoRateChanges(ir, fromCycle, toCycle, cps)) {
+        if (m.phaseOriginCycle != null && at <= m.phaseOriginCycle + 1e-9) continue;
+        this._anchorAt(m, this.transport.secAt(at), at);
+      }
     }
   }
 
@@ -2178,7 +2333,7 @@ export class Scheduler {
     // Read in song time (see setSongClock) - which on a painted track is the clip's own, with the
     // way back to the song bound for the lanes that want it (see _readAt).
     this._readAt(this.transport.cycleAt(applySec), (applyCycle) => {
-      for (const c of this._controlEntries(this.pattern)) {
+      for (const c of this._expanded(this.pattern).entries) {
         if (c.sig.lfoIR || c.sig.envIR || c.sig.ccIR) continue; // runs natively, programmed once in setPattern()
         // A mixer control being dragged holds this one at the value under your finger (see
         // holdChannel); the pattern's own value is what it returns to when you let go. Read with a

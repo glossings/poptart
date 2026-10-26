@@ -95,13 +95,13 @@ test('a streamed begin flags the event and is driven as a channel control', () =
   assert.ok(native.args[3].rateHz >= 500, 'refreshed per grain');
 });
 
-test('a begin no single modulator can express is polled onto grainpos', () => {
-  const { sch, calls } = run(s(mini('pad')).grain().begin(saw(0.25).range(0.2, 0.6).add(rand().mul(0.02))));
-  calls.length = 0;
-  sch._pollGenericParams(0);
-  const sets = channelSets(calls, 'grainpos');
-  assert.equal(sets.length, 1);
-  assert.ok(sets[0].args[3] >= 0.2 && sets[0].args[3] <= 0.62, `value ${sets[0].args[3]}`);
+test('a begin no single modulator can express is an expression on grainpos', () => {
+  const { calls } = run(s(mini('pad')).grain().begin(saw(0.25).range(0.2, 0.6).add(rand().mul(0.02))));
+  const expr = calls.find((c) => c.method === 'setParamExpr' && c.args[1] === -1 && c.args[2] === 'grainpos');
+  assert.ok(expr, 'grainpos is driven by an expression');
+  assert.equal(expr.args[3].op, 'add');
+  const inputs = calls.filter((c) => c.method === 'setParamLFO' && c.args[1] === -1).map((c) => c.args[2]);
+  assert.deepEqual(inputs, ['~0~grainpos', '~1~grainpos'], 'both modulators run natively as its inputs');
 });
 
 test('a constant on either side of a modulator keeps it native', () => {

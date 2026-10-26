@@ -43,6 +43,18 @@ function loadMappings() {
   return byPlugin;
 }
 
+// A real value to the 0..1 position one of poptart's own device controls sits at, on that
+// control's curve (the catalog's min/max/curve/curveExp - the descriptor's normalize()).
+function devicePosition(param, value) {
+  const { min, max } = param;
+  const v = Math.min(max, Math.max(min, Number.isFinite(value) ? value : min));
+  let t;
+  if (param.curve === 'exp') t = Math.log(v / min) / Math.log(max / min);
+  else if (param.curve === 'pow') t = Math.pow((v - min) / (max - min), 1 / (param.curveExp || 1));
+  else t = (v - min) / (max - min);
+  return Math.min(1, Math.max(0, t));
+}
+
 function toNormalized(value, spec) {
   const { min, max, curve = 'lin' } = spec;
   const norm = curve === 'log'
@@ -69,6 +81,7 @@ class MappedEngine {
     // the server. Unset (tests, scripts) means say nothing.
     this.warn = null;
     this._warnedWords = new Set(); // "track|slot|name" already reported, cleared on every eval
+    this._exprs = new Map(); // trackId -> "slot:name" -> { original, sent } JSON of the last setParamExpr
 
     // A capability the wrapped engine does not have must not LOOK like one it has.
     //
@@ -148,6 +161,12 @@ class MappedEngine {
   }
 
   setParam(trackId, slot, name, value, targetTime) {
+    const amp = this._amp(trackId, slot, name);
+    if (amp === null) return;
+    if (amp) {
+      this.engine.setParam(trackId, slot, amp.name, amp.position(value), targetTime);
+      return;
+    }
     const spec = this._spec(trackId, slot, name);
     // Only a NUMBER is converted. The scheduler passes strings through now (an enum label, which
     // the browser build's devices take), and a word run through toNormalized comes back NaN -
@@ -187,25 +206,51 @@ class MappedEngine {
   // A hold reads the plugin, a release writes back what it read - neither carries a value of
   // ours to convert, but both have to be real methods here for the same reason anchorParamLFO is.
   holdParam(trackId, slot, name) {
-    this.engine.holdParam(trackId, slot, name);
+    const amp = this._amp(trackId, slot, name);
+    if (amp === null) return;
+    this.engine.holdParam(trackId, slot, amp ? amp.name : name);
   }
 
   releaseParam(trackId, slot, name, targetTime) {
-    this.engine.releaseParam(trackId, slot, name, targetTime);
+    const amp = this._amp(trackId, slot, name);
+    if (amp === null) return;
+    this.engine.releaseParam(trackId, slot, amp ? amp.name : name, targetTime);
+  }
+
+  // `@amp.decay` - the amp envelope's decay on whatever instrument is in the slot, from
+  // .decay() on a synth - as that device's own control: { name, position(seconds) }. undefined
+  // for any other name; null, said once, where the slot has no such control (a plugin, or a device
+  // without that stage).
+  _amp(trackId, slot, name) {
+    if (typeof name !== 'string' || !name.startsWith('@amp.')) return undefined;
+    const stage = name.slice(5);
+    const plugin = this.chains.get(trackId)?.[slot];
+    const param = nativeDevice(plugin)?.params?.find((p) => p.amp === stage);
+    if (!param) {
+      const key = `${trackId}|${slot}|${name}`;
+      if (!this._warnedWords.has(key)) {
+        this._warnedWords.add(key);
+        const method = stage === 'scale' ? 'envscale' : stage;
+        this.warn?.(`[param] ${trackId}: ${plugin ?? 'this instrument'} has no amp envelope ${stage} poptart can reach, so .${method}() does nothing on it${nativeDevice(plugin) ? '' : ' - set the plugin\'s own envelope with .param()'}.`);
+      }
+      return null;
+    }
+    return { name: param.name, position: (v) => devicePosition(param, Number(v)) };
   }
 
   // Which shape a patterned lfo("<a b>") is on. An index, not a value, so there is nothing to
   // convert - but like anchorParamLFO it has to be a real method here: the Scheduler
   // feature-detects it on whatever engine it is given, and this wrapper is what it is given.
-  setParamShape(trackId, slot, name, index, targetTime) {
-    this.engine.setParamShape(trackId, slot, name, index, targetTime);
+  setParamShape(trackId, slot, name, index, targetTime, ...rate) {
+    this.engine.setParamShape(trackId, slot, name, index, targetTime, ...rate);
   }
 
   // Phase-only, no unit conversion - but it must be a real method (not a missing one): the
   // Scheduler feature-detects anchorParamLFO on whatever engine it's given, and this wrapper
-  // is what it's given in production.
-  anchorParamLFO(trackId, slot, name, phase01, targetTime) {
-    this.engine.anchorParamLFO(trackId, slot, name, phase01, targetTime);
+  // is what it's given in production. A patterned rate passes its rate in Hz after the time: a
+  // rate, not a parameter value, so it too goes through unconverted.
+  anchorParamLFO(trackId, slot, name, phase01, targetTime, ...rate) {
+    this.engine.anchorParamLFO(trackId, slot, name, phase01, targetTime, ...rate);
   }
 
   setParamEnv(trackId, slot, name, ir) {
@@ -295,19 +340,40 @@ class MappedEngine {
   clearAudioInject(...a) { return this.engine.clearAudioInject(...a); }
   injectMidi(trackId, slot, name, ...a) { return this.engine.injectMidi(trackId, slot, this._trackRef(name, trackId), ...a); }
   clearMidiInject(...a) { return this.engine.clearMidiInject(...a); }
-  // Audio patched onto a parameter (.param("Osc 1 Phase", audio("mod"))). The SOURCE is a
-  // routing name and is translated like the injectors above; the gain and offset ride on the
-  // connection and are already in whatever units the parameter takes, so no mapping applies to
-  // them - a connection is wired once and then runs in the audio graph, where there is nothing
-  // left to convert per value.
-  connectParam(trackId, slot, name, source, ...a) {
-    return this.engine.connectParam(trackId, slot, name, this._trackRef(source, trackId), ...a);
+  // An expression on a control (see pattern-core's Expressions): the audio sources inside it are
+  // routing names, translated like the injectors above, and a plugin parameter a mapping file
+  // gives real units has the whole expression converted at its root - the inputs and the math are
+  // in the units the code was written in. The tree the scheduler sent is kept as it was sent, so
+  // paramExprs answers in the scheduler's own spelling and an unchanged one isn't sent again.
+  setParamExpr(trackId, slot, name, tree) {
+    const resolve = (node) => {
+      if (node.k === 'in' && node.source != null) return { ...node, source: this._trackRef(node.source, trackId) };
+      return Array.isArray(node.a) ? { ...node, a: node.a.map(resolve) } : node;
+    };
+    let sent = resolve(tree);
+    const spec = this._spec(trackId, slot, name);
+    if (spec) sent = { k: 'map', min: spec.min, max: spec.max, curve: spec.curve ?? 'lin', a: [sent] };
+    if (!this._exprs.has(trackId)) this._exprs.set(trackId, new Map());
+    this._exprs.get(trackId).set(`${slot}:${name}`, { original: JSON.stringify(tree), sent: JSON.stringify(sent) });
+    return this.engine.setParamExpr(trackId, slot, name, sent);
   }
-  disconnectParam(...a) { return this.engine.disconnectParam(...a); }
-  // What the engine already has patched onto this track's parameters, which a fresh Scheduler
-  // reads so that a route the new pattern dropped is torn down. Nothing to map: the keys and the
-  // route spelling are the scheduler's own, and they come straight back.
-  paramRoutes(...a) { return this.engine.paramRoutes(...a); }
+  clearParamExpr(trackId, slot, name) {
+    this._exprs.get(trackId)?.delete(`${slot}:${name}`);
+    return this.engine.clearParamExpr(trackId, slot, name);
+  }
+  // The engine's answer is the truth (a track it dropped holds nothing); what it holds is handed
+  // back in the scheduler's spelling wherever it is still what was sent from here.
+  paramExprs(trackId) {
+    const held = typeof this.engine.paramExprs === 'function' ? this.engine.paramExprs(trackId) : null;
+    if (!held || typeof held[Symbol.iterator] !== 'function') return held;
+    const ours = this._exprs.get(trackId);
+    const out = new Map();
+    for (const [at, json] of held) {
+      const rec = ours?.get(at);
+      out.set(at, rec && rec.sent === json ? rec.original : json);
+    }
+    return out;
+  }
   // How late each slot's device is: seconds, nothing to map. The scheduler plays notes early by it.
   slotLatencies(...a) { return this.engine.slotLatencies(...a); }
 }
@@ -320,6 +386,6 @@ class MappedEngine {
  * whole file exists to prevent. Kept in step with the `typeof this.engine.X === 'function'`
  * checks in scheduler.mjs by a test, not by memory.
  */
-MappedEngine.OPTIONAL = Object.freeze(['connectParam', 'disconnectParam', 'paramRoutes', 'slotLatencies']);
+MappedEngine.OPTIONAL = Object.freeze(['setParamExpr', 'clearParamExpr', 'paramExprs', 'slotLatencies']);
 
 module.exports = { MappedEngine, loadMappings, toNormalized, toRealWorld };

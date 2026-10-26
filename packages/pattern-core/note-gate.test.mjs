@@ -133,7 +133,10 @@ test('a gate built from a grid reads onsets in cycle order across the lookback w
 function withScheduler(pattern, fn) {
   const calls = [];
   let now = 0;
-  const engine = new Proxy({ getTime: () => now }, { get: (t, p) => (p in t ? t[p] : (...a) => calls.push({ m: p, a })) });
+  // An engine that can't evaluate expressions, so a composed modulator is polled as its JavaScript -
+  // which is what reads the gate.
+  const noExprs = new Set(['setParamExpr', 'clearParamExpr', 'paramExprs']);
+  const engine = new Proxy({ getTime: () => now }, { get: (t, p) => (p in t ? t[p] : noExprs.has(p) ? undefined : (...a) => calls.push({ m: p, a })) });
   const sched = new Scheduler(engine, { trackId: 't' });
   sched.setPattern(pattern);
   sched.start(0);

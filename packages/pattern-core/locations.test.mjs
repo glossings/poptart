@@ -460,3 +460,11 @@ test("say()'s text is speech-mode mini; its voice stays a pattern, its method fo
     "say(mini(\"hey, i'm here\", 5, 'speech'), mini(\"<Whisper Zarvox>\", 22))");
   assert.equal(injectLocations('note("c3").say("hi there")'), 'note(mini("c3", 6)).say("hi there")');
 });
+
+test('a modulator\'s rate written in its options object is a pattern, and lights', async () => {
+  const { injectLocations } = await import('./src/locations.mjs');
+  const code = 'x: n(0).param("F", lfo("swell", { rate: "<0.3 2>" }))';
+  assert.equal(injectLocations(code, 0), 'x: n(0).param("F", lfo(mini("swell", 24), { rate: mini("<0.3 2>", 41) }))');
+  // Other option words stay as they are.
+  assert.equal(injectLocations('lfo("swell", { mode: "free" })', 0), 'lfo(mini("swell", 5), { mode: "free" })');
+});

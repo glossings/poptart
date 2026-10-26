@@ -40,6 +40,9 @@ export const TRACK_BEND_PARAM = 'track.bend';
 
 /** Parameter value curves: how a 0..1 position maps onto the parameter's real range. */
 const CURVES = new Set(['lin', 'exp', 'pow']);
+// The stages of an instrument's amp envelope a parameter can stand for, which the sampler's own
+// envelope methods (.attack() .decay() .sustain() .release() .envscale()) reach on any instrument.
+const AMP_STAGES = new Set(['attack', 'decay', 'sustain', 'release', 'scale']);
 
 /**
  * Widget kinds the generic panel knows how to draw. A `number` is a value dragged up and down or
@@ -205,6 +208,9 @@ function defineParam(deviceId, spec, seen) {
     fail(deviceId, `param "${id}": step must be a positive number`);
   }
 
+  const amp = spec.amp ?? null;
+  if (amp !== null && !AMP_STAGES.has(amp)) fail(deviceId, `param "${id}" has unknown amp stage "${amp}"`);
+
   if (seen.has(normalizeKey(id))) fail(deviceId, `duplicate param id "${id}"`);
   if (seen.has(normalizeKey(name))) fail(deviceId, `param name "${name}" collides with another param's id or name`);
   seen.add(normalizeKey(id));
@@ -229,6 +235,7 @@ function defineParam(deviceId, spec, seen) {
     capacity,
     takes,
     sampleAs,
+    amp,
     group: String(spec.group ?? '').trim() || null,
     description: String(spec.description ?? '').trim() || null,
   });
@@ -498,6 +505,11 @@ export function defineDevice(spec) {
  * whether that is a warning or an error (userland mistakes warn and keep playing).
  */
 export function findParam(descriptor, key) {
+  // `@amp.decay`: whichever parameter is this instrument's amp-envelope decay.
+  if (typeof key === 'string' && key.startsWith('@amp.')) {
+    const stage = key.slice(5);
+    return descriptor?.params.find((p) => p.amp === stage) ?? null;
+  }
   if (!descriptor || key == null) return null;
   const want = normalizeKey(key);
   for (const p of descriptor.params) {

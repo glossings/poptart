@@ -88,10 +88,10 @@ export const WAVETABLE = defineDevice({
     { id: 'sub.shape', name: 'Sub Shape', default: 0, options: ['sine', 'square'], rate: 'k', group: 'Sub' },
     { id: 'noise.level', name: 'Noise Level', min: 0, max: 1, default: 0, group: 'Sub' },
 
-    seconds('ampenv.attack', 'Amp Attack', 0.005, 'Amp Env'),
-    seconds('ampenv.decay', 'Amp Decay', 0.1, 'Amp Env'),
-    { id: 'ampenv.sustain', name: 'Amp Sustain', min: 0, max: 1, default: 0.8, group: 'Amp Env' },
-    seconds('ampenv.release', 'Amp Release', 0.15, 'Amp Env'),
+    { ...seconds('ampenv.attack', 'Amp Attack', 0.005, 'Amp Env'), amp: 'attack' },
+    { ...seconds('ampenv.decay', 'Amp Decay', 0.1, 'Amp Env'), amp: 'decay' },
+    { id: 'ampenv.sustain', name: 'Amp Sustain', min: 0, max: 1, default: 0.8, group: 'Amp Env', amp: 'sustain' },
+    { ...seconds('ampenv.release', 'Amp Release', 0.15, 'Amp Env'), amp: 'release' },
     // One curve per stage. The shape an attack wants and the shape a release wants are opposite
     // ends of this control, so a single knob for all three means picking which one to get right.
     { id: 'env.acurve', name: 'Attack Curve', min: -8, max: 8, default: -4, step: 0.5, rate: 'k', ui: 'number', group: 'Amp Env',
@@ -100,7 +100,7 @@ export const WAVETABLE = defineDevice({
       description: 'Zero is a straight line; negative falls fast and trails off, which is what a plucked sound wants.' },
     { id: 'env.rcurve', name: 'Release Curve', min: -8, max: 8, default: -4, step: 0.5, rate: 'k', ui: 'number', group: 'Amp Env',
       description: 'Zero is a straight line; negative drops away quickly and then hangs, positive holds the level and then cuts.' },
-    { id: 'env.scale', name: 'Env Scale', min: 0.05, max: 20, default: 1, curve: 'exp', unit: 'x', rate: 'k', group: 'Amp Env',
+    { id: 'env.scale', name: 'Env Scale', min: 0.05, max: 20, default: 1, curve: 'exp', unit: 'x', rate: 'k', group: 'Amp Env', amp: 'scale',
       description: 'Multiplies every envelope time at once.' },
 
     { id: 'glide', name: 'Glide', min: 0, max: 5, default: 0, unit: 's', curve: 'pow', curveExp: 3, group: 'Voice' },

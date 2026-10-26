@@ -44,6 +44,9 @@ const TRACK_BEND_PARAM = 'track.bend';
 
 /** Parameter value curves: how a 0..1 position maps onto the parameter's real range. */
 const CURVES = new Set(['lin', 'exp', 'pow']);
+// The stages of an instrument's amp envelope a parameter can stand for, which the sampler's own
+// envelope methods (.attack() .decay() .sustain() .release() .envscale()) reach on any instrument.
+const AMP_STAGES = new Set(['attack', 'decay', 'sustain', 'release', 'scale']);
 
 /**
  * Widget kinds the generic panel knows how to draw. A `number` is a value dragged up and down or
@@ -209,6 +212,9 @@ function defineParam(deviceId, spec, seen) {
     fail(deviceId, `param "${id}": step must be a positive number`);
   }
 
+  const amp = spec.amp ?? null;
+  if (amp !== null && !AMP_STAGES.has(amp)) fail(deviceId, `param "${id}" has unknown amp stage "${amp}"`);
+
   if (seen.has(normalizeKey(id))) fail(deviceId, `duplicate param id "${id}"`);
   if (seen.has(normalizeKey(name))) fail(deviceId, `param name "${name}" collides with another param's id or name`);
   seen.add(normalizeKey(id));
@@ -233,6 +239,7 @@ function defineParam(deviceId, spec, seen) {
     capacity,
     takes,
     sampleAs,
+    amp,
     group: String(spec.group ?? '').trim() || null,
     description: String(spec.description ?? '').trim() || null,
   });
@@ -502,6 +509,11 @@ function defineDevice(spec) {
  * whether that is a warning or an error (userland mistakes warn and keep playing).
  */
 function findParam(descriptor, key) {
+  // `@amp.decay`: whichever parameter is this instrument's amp-envelope decay.
+  if (typeof key === 'string' && key.startsWith('@amp.')) {
+    const stage = key.slice(5);
+    return descriptor?.params.find((p) => p.amp === stage) ?? null;
+  }
   if (!descriptor || key == null) return null;
   const want = normalizeKey(key);
   for (const p of descriptor.params) {
@@ -2656,10 +2668,10 @@ const WAVETABLE = defineDevice({
     { id: 'sub.shape', name: 'Sub Shape', default: 0, options: ['sine', 'square'], rate: 'k', group: 'Sub' },
     { id: 'noise.level', name: 'Noise Level', min: 0, max: 1, default: 0, group: 'Sub' },
 
-    seconds('ampenv.attack', 'Amp Attack', 0.005, 'Amp Env'),
-    seconds('ampenv.decay', 'Amp Decay', 0.1, 'Amp Env'),
-    { id: 'ampenv.sustain', name: 'Amp Sustain', min: 0, max: 1, default: 0.8, group: 'Amp Env' },
-    seconds('ampenv.release', 'Amp Release', 0.15, 'Amp Env'),
+    { ...seconds('ampenv.attack', 'Amp Attack', 0.005, 'Amp Env'), amp: 'attack' },
+    { ...seconds('ampenv.decay', 'Amp Decay', 0.1, 'Amp Env'), amp: 'decay' },
+    { id: 'ampenv.sustain', name: 'Amp Sustain', min: 0, max: 1, default: 0.8, group: 'Amp Env', amp: 'sustain' },
+    { ...seconds('ampenv.release', 'Amp Release', 0.15, 'Amp Env'), amp: 'release' },
     // One curve per stage. The shape an attack wants and the shape a release wants are opposite
     // ends of this control, so a single knob for all three means picking which one to get right.
     { id: 'env.acurve', name: 'Attack Curve', min: -8, max: 8, default: -4, step: 0.5, rate: 'k', ui: 'number', group: 'Amp Env',
@@ -2668,7 +2680,7 @@ const WAVETABLE = defineDevice({
       description: 'Zero is a straight line; negative falls fast and trails off, which is what a plucked sound wants.' },
     { id: 'env.rcurve', name: 'Release Curve', min: -8, max: 8, default: -4, step: 0.5, rate: 'k', ui: 'number', group: 'Amp Env',
       description: 'Zero is a straight line; negative drops away quickly and then hangs, positive holds the level and then cuts.' },
-    { id: 'env.scale', name: 'Env Scale', min: 0.05, max: 20, default: 1, curve: 'exp', unit: 'x', rate: 'k', group: 'Amp Env',
+    { id: 'env.scale', name: 'Env Scale', min: 0.05, max: 20, default: 1, curve: 'exp', unit: 'x', rate: 'k', group: 'Amp Env', amp: 'scale',
       description: 'Multiplies every envelope time at once.' },
 
     { id: 'glide', name: 'Glide', min: 0, max: 5, default: 0, unit: 's', curve: 'pow', curveExp: 3, group: 'Voice' },
@@ -3621,10 +3633,10 @@ const GRANULAR = defineDevice({
       description: 'How far grains are panned either way.' },
     { id: 'reverse', name: 'Reverse', min: 0, max: 1, default: 0, group: 'Grains',
       description: 'The share of grains that play backwards.' },
-    { id: 'attack', name: 'Attack', min: 0, max: 10, default: 0.02, unit: 's', curve: 'pow', curveExp: 3, group: 'Amp' },
-    { id: 'decay', name: 'Decay', min: 0, max: 10, default: 0.1, unit: 's', curve: 'pow', curveExp: 3, group: 'Amp' },
-    { id: 'sustain', name: 'Sustain', min: 0, max: 1, default: 1, group: 'Amp' },
-    { id: 'release', name: 'Release', min: 0, max: 10, default: 0.3, unit: 's', curve: 'pow', curveExp: 3, group: 'Amp' },
+    { id: 'attack', name: 'Attack', min: 0, max: 10, default: 0.02, unit: 's', curve: 'pow', curveExp: 3, group: 'Amp', amp: 'attack' },
+    { id: 'decay', name: 'Decay', min: 0, max: 10, default: 0.1, unit: 's', curve: 'pow', curveExp: 3, group: 'Amp', amp: 'decay' },
+    { id: 'sustain', name: 'Sustain', min: 0, max: 1, default: 1, group: 'Amp', amp: 'sustain' },
+    { id: 'release', name: 'Release', min: 0, max: 10, default: 0.3, unit: 's', curve: 'pow', curveExp: 3, group: 'Amp', amp: 'release' },
     { id: 'level', name: 'Level', min: 0, max: 1, default: 0.7, group: 'Amp' },
     { id: 'voices', name: 'Voices', min: 1, max: GRAIN_VOICES, default: 4, step: 1, rate: 'k', ui: 'number', group: 'Amp' },
   ],
@@ -4019,10 +4031,10 @@ const NOISE = defineDevice({
     { id: 'width', name: 'Width', min: 0, max: 1, default: 1, group: 'Noise',
       description: 'Zero plays the same noise on both sides; one gives each side its own.' },
 
-    envSeconds('ampenv.attack', 'Amp Attack', 0.002),
-    envSeconds('ampenv.decay', 'Amp Decay', 0.15),
-    { id: 'ampenv.sustain', name: 'Amp Sustain', min: 0, max: 1, default: 0.6, group: 'Amp Env' },
-    envSeconds('ampenv.release', 'Amp Release', 0.1),
+    { ...envSeconds('ampenv.attack', 'Amp Attack', 0.002), amp: 'attack' },
+    { ...envSeconds('ampenv.decay', 'Amp Decay', 0.15), amp: 'decay' },
+    { id: 'ampenv.sustain', name: 'Amp Sustain', min: 0, max: 1, default: 0.6, group: 'Amp Env', amp: 'sustain' },
+    { ...envSeconds('ampenv.release', 'Amp Release', 0.1), amp: 'release' },
     { id: 'env.acurve', name: 'Attack Curve', min: -8, max: 8, default: -4, step: 0.5, rate: 'k', ui: 'number', group: 'Amp Env',
       description: 'Zero is a straight line; negative rises fast and levels off, positive holds back and then rushes.' },
     { id: 'env.dcurve', name: 'Decay Curve', min: -8, max: 8, default: -4, step: 0.5, rate: 'k', ui: 'number', group: 'Amp Env',

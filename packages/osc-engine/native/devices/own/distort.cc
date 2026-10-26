@@ -6,9 +6,8 @@
 // cutting over mid-wave, and the DC blocker runs always and has its output faded in only for the
 // curves that need one.
 //
-// What is missing is the one thing a server has no path for: a curve somebody DREW, which reaches
-// the browser's device over a message port. A drawn mode here behaves as it does in the browser
-// before its table has arrived - a straight clip - and the modes that are named behave fully.
+// A curve somebody DREW arrives as a table through the host's /shape command (pd_shape below),
+// sampled by the engine exactly as the browser's engine samples one before posting it.
 
 #include "own/pd-own.h"
 #include "own/dsp/filters.h"
@@ -23,6 +22,12 @@ using namespace pd_own;
 
 /** How long a change of curve takes to fade in. */
 constexpr double kCurveFadeSec = 0.01;
+
+/** The mode control's entries: the named curves, then room for drawn ones (SHAPE_SLOTS). */
+constexpr int kModeSlots = kShaperModes + 8;
+
+/** The points a drawn curve is sampled at: the browser engine's SHAPE_POINTS. */
+constexpr int kShapePoints = 256;
 
 /** One channel's state, so the channels never share history. */
 struct Channel {
@@ -53,6 +58,24 @@ struct Device : pd_own::Device<ids::kCount> {
   double dcMix = 0;
   double comp = -1;
   double lastTone = -1;
+  /**
+   * The drawn curves, by mode. Each slot keeps the curve before its latest too, because a redraw
+   * into the slot that is playing FADES from the old curve to the new one, as a change of mode
+   * does - so the old one has to be still there to fade from.
+   */
+  float drawn[kModeSlots][2][kShapePoints];
+  int drawnLength[kModeSlots][2] = { { 0 } };
+  int drawnHalf[kModeSlots] = { 0 };
+  /** Which drawing a slot holds: bumped by every curve handed over, 0 for none. */
+  unsigned drawnId[kModeSlots] = { 0 };
+  unsigned nextDrawnId = 0;
+  unsigned lastDrawn = 0;
+  const float* lastTable = nullptr;
+  int lastTableLength = 0;
+  const float* fadeTable = nullptr;
+  int fadeTableLength = 0;
+  // The loudest input sample of the last block, for the picture of the curve.
+  double peak = 0;
 
   void pd_init(double sr) {
     sampleRate = sr;
@@ -65,10 +88,42 @@ struct Device : pd_own::Device<ids::kCount> {
     dcMix = 0;
     comp = -1;
     lastTone = -1;
+    lastDrawn = 0;
+    lastTable = nullptr;
+    fadeTable = nullptr;
+    peak = 0;
+  }
+
+  /** A drawn curve for a mode past the named ones. Copied: the host's memory is not ours. */
+  void pd_shape(int param, int slot, const float* table, int count) {
+    if (param != ids::mode || slot < kShaperModes || slot >= kModeSlots || !table || count <= 0) return;
+    const int n = count < kShapePoints ? count : kShapePoints;
+    const int half = drawnId[slot] ? 1 - drawnHalf[slot] : 0;
+    std::memcpy(drawn[slot][half], table, sizeof(float) * static_cast<size_t>(n));
+    drawnLength[slot][half] = n;
+    drawnHalf[slot] = half;
+    drawnId[slot] = ++nextDrawnId;
+  }
+
+  /** What the panel draws on the curve: the correction in decibels and where the input is. */
+  int pd_report(float* out, int capacity) {
+    if (capacity < 2) return 0;
+    out[0] = static_cast<float>(comp > 0 ? 20 * std::log10(comp) : 0);
+    out[1] = static_cast<float>(peak);
+    return 2;
   }
 
   void pd_process(int frames) {
-    const int mode = jsRoundInt(p[ids::mode]);
+    int mode = jsRoundInt(p[ids::mode]);
+    // A drawn slot whose table has not arrived yet keeps the curve before it, as in the browser:
+    // played empty, the slot is a hard clip for a block - a crack - on every pick.
+    const bool drawnMode = mode >= kShaperModes;
+    const bool haveTable = drawnMode && mode < kModeSlots && drawnId[mode] != 0;
+    if (drawnMode && !haveTable && haveLast) mode = lastMode;
+    const bool tabled = mode >= kShaperModes && mode < kModeSlots && drawnId[mode] != 0;
+    const float* table = tabled ? drawn[mode][drawnHalf[mode]] : nullptr;
+    const int tableLength = tabled ? drawnLength[mode][drawnHalf[mode]] : 0;
+    const unsigned tableId = tabled ? drawnId[mode] : 0;
     // 1x, 2x, 4x by option index; anything else is the setting that costs nothing.
     const int factorIndex = jsRoundInt(p[ids::oversample]);
     const int factor = factorIndex >= 2 ? 4 : (factorIndex == 1 ? 2 : 1);
@@ -80,16 +135,18 @@ struct Device : pd_own::Device<ids::kCount> {
     // The compensation is measured from where the controls END this block and reached from where
     // the last block left it, so a drive being dragged is corrected along a ramp rather than in
     // block-sized steps.
-    const double compTo = autogain ? autoGainFor(mode, drive, bias, character) : 1.0;
+    const double compTo = autogain ? autoGainFor(mode, drive, bias, character, table, tableLength) : 1.0;
     if (comp < 0) comp = compTo;
 
     // A different curve from last block's fades in rather than cutting over. Its gain is set
     // outright, and the outgoing curve keeps its own inside the blend, so the level does not
     // jump either. The same for a character that moves a curve in whole steps.
     const int step = characterStep(mode, character);
-    if (haveLast && (lastMode != mode || lastStep != step)) {
+    if (haveLast && (lastMode != mode || lastDrawn != tableId || lastStep != step)) {
       fading = true;
       fadeMode = lastMode;
+      fadeTable = lastTable;
+      fadeTableLength = lastTableLength;
       fadeComp = comp;
       fadeCharacter = lastCharacter;
       fadeLeft = fadeLen;
@@ -97,6 +154,9 @@ struct Device : pd_own::Device<ids::kCount> {
     }
     haveLast = true;
     lastMode = mode;
+    lastDrawn = tableId;
+    lastTable = table;
+    lastTableLength = tableLength;
     lastStep = step;
     lastCharacter = character;
 
@@ -126,19 +186,23 @@ struct Device : pd_own::Device<ids::kCount> {
     const int fadeStepOf = characterStep(fadeMode, fadeCharacter);
     const double fadeCharacterNow = fadeStepOf == -1 ? character : fadeCharacter;
     const int outgoing = fadeMode;
+    const float* outgoingTable = fadeTable;
+    const int outgoingTableLength = fadeTableLength;
     const double outgoingComp = fadeComp;
     const int len = fadeLen;
 
     auto curve = [&](double v, int i) -> double {
-      const double gained = shape(v, mode, drive, bias, character) * (gainFrom + gainStep * i);
+      const double gained = shape(v, mode, drive, bias, character, table, tableLength) * (gainFrom + gainStep * i);
       if (!blending) return gained;
       const double t = std::fmin(1.0, static_cast<double>(done + i) / len);
-      const double was = shape(v, outgoing, drive, bias, fadeCharacterNow) * outgoingComp;
+      const double was = shape(v, outgoing, drive, bias, fadeCharacterNow, outgoingTable, outgoingTableLength) * outgoingComp;
       return was + (gained - was) * t;
     };
 
+    double loudest = 0;
     for (int ch = 0; ch < 2; ++ch) {
       const float* input = ch == 0 ? inL() : inR();
+      for (int i = 0; i < frames; ++i) loudest = std::fmax(loudest, std::fabs(static_cast<double>(input[i])));
       float* out = ch == 0 ? outL() : outR();
       Channel& c = channels[ch];
       for (int i = 0; i < frames; ++i) c.dry[i] = input[i];
@@ -168,6 +232,7 @@ struct Device : pd_own::Device<ids::kCount> {
       if (fadeLeft == 0) fading = false;
     }
     if (dcStep != 0) dcMix = clamp(dcFrom + dcStep * frames, 0.0, 1.0);
+    peak = isPlayable(loudest) ? std::fmin(1.0, loudest) : 0.0;
   }
 };
 

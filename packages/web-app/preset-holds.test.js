@@ -535,3 +535,11 @@ test("a modulator's pattern-valued .range() bounds are in the grid; numeric boun
   const shaped = { paramSignals: { '1:x': { slot: 1, name: 'x', sig: { name: 'x', lfoIR: { shapePattern: { name: 'shapes' }, min: lo, max: 1 } } } }, channel: {}, presetPatterns: {} };
   assert.deepEqual(names(patternSigs(shaped)), ['x', 'shapes', 'lo']);
 });
+
+test('a patterned rate lights, in an options object and inside an expression', async () => {
+  const { synth, lfo, sine, audio, mini } = await import('@poptart/pattern-core');
+  const optionRate = synth('W').param('A', lfo(mini('swell', 0), { rate: mini('<0.3 2>', 20) }));
+  assert.ok(patternSigs(optionRate).some((s) => s.stepsForCycle?.(0).some((st) => (st.locs ?? [st.loc]).some((l) => l?.[0] === 21))), 'the rate option lights');
+  const inExpr = synth('W').param('A', audio('a').mul(sine(mini('<1 2>', 30))));
+  assert.ok(patternSigs(inExpr).some((s) => s.stepsForCycle?.(0).some((st) => (st.locs ?? [st.loc]).some((l) => l?.[0] === 31))), 'and so does one inside an expression');
+});

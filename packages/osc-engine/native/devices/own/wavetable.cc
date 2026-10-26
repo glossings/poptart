@@ -10,11 +10,11 @@
 // reads, so the block is walked sample by sample when either oscillator is bent that way and
 // oscillator by oscillator when neither is.
 //
-// Two things the browser has and this does not. A control that a signal moves is read per sample
-// there and per block here, which is the ABI (see own/pd-own.h). And a table loaded from a
-// SAMPLE - `.param("Table", "mysample")` - arrives over a message port there; there is no path
-// for one on this engine yet, so the table control reads the nine shipped tables and a slot past
-// them plays the first, which is what the browser does with a slot nothing has been loaded into.
+// A table loaded from a SAMPLE - `.param("Table", "mysample")` - reaches this through the host's
+// sample path as mono frames, and is cut into frames and band-limited OFF the audio thread
+// through the work calls (pd-device.h): the browser does the same work on its main thread before
+// it posts the pyramid. Until the table is built its slot plays the first table, which is what
+// the browser plays before a table has arrived.
 
 #include "own/pd-own.h"
 #include "own/dsp/adsr.h"
@@ -29,6 +29,9 @@ namespace ids = pd_ids::Wavetable;
 using namespace pd_own;
 
 constexpr int kMaxVoices = 16;
+
+/** How many entries the table control has: the shipped tables, then room for loaded ones. */
+constexpr int kTableSlots = 64;   // TABLE_SLOTS
 
 /** A small deterministic noise source, so a patch with noise in it still renders reproducibly. */
 struct Noise {
@@ -268,6 +271,21 @@ struct Device : pd_own::Device<ids::kCount, 2> {
   Event events[64];
   int eventCount = 0;
 
+  /** The tables loaded from files, by slot; null where nothing has been built yet. */
+  Table* loaded[kTableSlots] = { nullptr };
+  /** A file handed over and not yet built, by slot, newest wins. Audio thread. */
+  struct Pending { const float* mono = nullptr; int frames = 0; int frameLength = 0; };
+  Pending pending[kTableSlots];
+  int pendingCount = 0;
+  /** The round in flight: what work() builds from, what it built, and what workDone retired. */
+  Pending request[kTableSlots];
+  Table* built[kTableSlots] = { nullptr };
+  Table* retired[kTableSlots] = { nullptr };
+
+  ~Device() {
+    for (int i = 0; i < kTableSlots; ++i) { delete loaded[i]; delete built[i]; delete retired[i]; }
+  }
+
   void pd_init(double sr) {
     sampleRate = sr;
     // Builds the shipped tables the first time any Wavetable is opened - on this thread, which
@@ -304,7 +322,59 @@ struct Device : pd_own::Device<ids::kCount, 2> {
   const Table* tableFor(int index) {
     const std::vector<Table>& tables = builtInTables();
     const int i = index < 0 ? 0 : index;
-    return i < static_cast<int>(tables.size()) ? &tables[static_cast<size_t>(i)] : &tables[0];
+    if (i < static_cast<int>(tables.size())) return &tables[static_cast<size_t>(i)];
+    if (i < kTableSlots && loaded[i]) return loaded[i];
+    return &tables[0];
+  }
+
+  /**
+   * A file for a table slot. Audio thread: only the pointer is kept here, and the table is built
+   * in work(). A slot inside the shipped list is not a slot a file can take, as in the browser,
+   * where the option list's own entries are the shipped tables.
+   */
+  void pd_sample(int param, int slot, const PdSample& file) {
+    if (param != ids::osc1_table && param != ids::osc2_table) return;
+    if (slot < static_cast<int>(builtInTables().size()) || slot >= kTableSlots) return;
+    if (!file.mono || file.frames <= 0) return;
+    if (!pending[slot].mono) ++pendingCount;
+    pending[slot] = Pending{ file.mono, file.frames, file.frameLength };
+  }
+
+  bool pd_work_wanted() {
+    if (pendingCount == 0) return false;
+    for (int i = 0; i < kTableSlots; ++i) {
+      request[i] = pending[i];
+      pending[i] = Pending();
+    }
+    pendingCount = 0;
+    return true;
+  }
+
+  void pd_work() {
+    for (int i = 0; i < kTableSlots; ++i) {
+      if (!request[i].mono) continue;
+      built[i] = new Table(tableFromFile("loaded", request[i].mono, request[i].frames, request[i].frameLength));
+      request[i] = Pending();
+    }
+  }
+
+  void pd_work_done() {
+    for (int i = 0; i < kTableSlots; ++i) {
+      if (!built[i]) continue;
+      retired[i] = loaded[i];
+      loaded[i] = built[i];
+      built[i] = nullptr;
+      // Nothing may go on reading the table being retired: a voice on this slot moves to the new
+      // one now rather than at its next block, since the old one is freed on another thread.
+      for (auto& v : voices) {
+        if (v.osc1.table == retired[i]) v.osc1.setTable(loaded[i]);
+        if (v.osc2.table == retired[i]) v.osc2.setTable(loaded[i]);
+      }
+    }
+  }
+
+  void pd_work_release() {
+    for (int i = 0; i < kTableSlots; ++i) { delete retired[i]; retired[i] = nullptr; }
   }
 
   /** The controls, in real units, as the browser's setParams unpacks them into its struct. */

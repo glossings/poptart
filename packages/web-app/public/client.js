@@ -44,6 +44,7 @@ let recordMod = null; // record.mjs - a live take into a roll (the ● rec and c
 let slicesMod = null; // slices.mjs - reading, tidying and writing a _slices() set's positions
 let samplerctlMod = null; // samplerctl.mjs - the envelope panel's sampler-control reads and code edits
 let grooveMod = null; // groove.mjs - the groove table's format, its presets and its slot arithmetic
+let lfoRateMod = null; // lfo-rate.mjs - a patterned LFO rate's phase count, for the shape panel's playhead
 // Resolves once pattern-core is loaded (or failed) - the startup prebake waits on it so a
 // top-level noteToMidi()/etc. call in the prebake never races the import.
 const coreReady = Promise.all([
@@ -61,9 +62,11 @@ const coreReady = Promise.all([
   import('/pattern-core/groups.mjs'),
   import('/pattern-core/samplerctl.mjs'),
   import('/pattern-core/groove.mjs'),
+  import('/pattern-core/lfo-rate.mjs'),
 ])
-  .then(([m, l, s, pr, nt, mx, rc, ar, hm, ro, sl, gr, sc, gv]) => {
+  .then(([m, l, s, pr, nt, mx, rc, ar, hm, ro, sl, gr, sc, gv, lr]) => {
     grooveMod = gv;
+    lfoRateMod = lr;
     groupsMod = gr;
     samplerctlMod = sc;
     slicesMod = sl;
@@ -2273,6 +2276,21 @@ function upsertParam(trackId, slot, name, value) {
   // Overwrite an existing .param() for this name, else insert one targeting the touched slot.
   const existing = findParamCall(code, block, name, slot);
   if (existing) {
+    // A value with audio in it, or one that already ends in its own `.add(number)`, is a knob plus
+    // what moves it: the knob is that number, so turning it rewrites the number and leaves the
+    // rest - `audio("lfo").mul(0.2).add(0.4)` stays patched, around wherever it was turned to.
+    const text = code.slice(existing.valueStart, existing.valueEnd);
+    const base = /\.add\(\s*(-?(?:\d+\.?\d*|\.\d+)(?:e-?\d+)?)\s*\)\s*$/.exec(text);
+    if (base) {
+      const at = existing.valueStart + base.index + base[0].indexOf(base[1]);
+      ed.replaceRange(String(value), ed.posFromIndex(at), ed.posFromIndex(at + base[1].length));
+      return;
+    }
+    if (/\baudio\s*\(/.test(text)) {
+      const end = existing.valueStart + text.trimEnd().length;
+      ed.replaceRange(`.add(${value})`, ed.posFromIndex(end));
+      return;
+    }
     ed.replaceRange(` ${value}`, ed.posFromIndex(existing.valueStart), ed.posFromIndex(existing.valueEnd));
     return;
   }
@@ -2822,6 +2840,57 @@ function recordingHints(cur, typed) {
   return fetchRecordings().then(toResult);
 }
 
+// Scale names for setscale(" and .scale(": "<root> <mode>", read the way notes.mjs reads them.
+// The word under the cursor is completed from what comes before it - first a root (or a mode,
+// since the root is optional), then a mode, an EDO or a tuning file, and after an EDO a mode of it.
+const SCALE_ROOTS = ['c', 'c#', 'db', 'd', 'd#', 'eb', 'e', 'f', 'f#', 'gb', 'g', 'g#', 'ab', 'a', 'a#', 'bb', 'b'];
+const SCALE_EDOS = [12, 17, 19, 22, 24, 31, 41, 53];
+const SCALE_ROOT_RE = /^[a-gA-G][#sSbf]*-?\d*$/;
+const SCALE_EDO_RE = /^\d+-?(?:edo|tet|et)$/i;
+
+function scaleNameHints(cur, typed) {
+  const token = typed.match(/\S*$/)[0];
+  const prev = typed.slice(0, typed.length - token.length).trim().split(/\s+/).filter(Boolean);
+  const modes = notesMod?.modeNames?.() ?? [];
+  const tunings = notesMod?.tuningNames?.() ?? [];
+  let pool = [];
+  const modeItems = (note) => modes.map((m) => ({ key: m.name, label: `${m.name} · ${note ?? `${m.size} notes`}` }));
+  const tuningItems = () => [
+    ...SCALE_EDOS.map((n) => ({ key: `${n}edo`, label: `${n}edo · ${n} equal steps` })),
+    ...tunings.map((t) => ({ key: t, label: `${t} · tuning file` })),
+  ];
+  if (prev.length === 0) {
+    // The first word: a root, or a mode on its own (rooted on C). A root is followed by its mode,
+    // so taking one types the space and opens the next list.
+    pool = [...SCALE_ROOTS.map((r) => ({ key: r, label: `${r} · root`, root: true })), ...modeItems(), ...tuningItems()];
+  } else if (prev.length === 1 && SCALE_ROOT_RE.test(prev[0])) {
+    pool = [...modeItems(), ...tuningItems()];
+  } else if (SCALE_EDO_RE.test(prev[prev.length - 1]) && prev.length <= 2) {
+    const edo = prev[prev.length - 1].toLowerCase();
+    pool = modes.filter((m) => m.name !== 'chromatic').map((m) => ({ key: m.name, label: `${m.name} · nearest ${edo} steps` }));
+  }
+  // Exact matches stay listed so the popup doesn't vanish on a complete word.
+  const matches = token ? rankedMatches(pool, token, 40) : pool.slice(0, 40);
+  return hintResult(cur, token, matches.map((item) => ({
+    text: item.root ? `${item.key} ` : item.key,
+    displayText: item.label,
+    // A root goes on to its mode: put the word in, then ask for the next list.
+    hint: item.root
+      ? (ed, data, c) => { ed.replaceRange(c.text, data.from, data.to, 'complete'); setTimeout(() => showPoptartHint(ed)); }
+      : undefined,
+  })));
+}
+
+// The keys argument of .scale(name, " / .sc(octave, " - how live MIDI keys map into a tuning.
+function scaleKeysHints(cur, typed) {
+  const pool = [
+    { key: 'steps', label: 'steps · each key the next step of the tuning' },
+    { key: 'nearest', label: 'nearest · each key the tuning\'s nearest pitch' },
+  ];
+  const matches = typed ? rankedMatches(pool, typed, 2) : pool;
+  return hintResult(cur, typed, matches.map((item) => ({ text: item.key, displayText: item.label })));
+}
+
 function wordHints(cur, typed, words, context) {
   const pool = words.map((w) => ({ key: w }));
   const completions = rankedMatches(pool, typed, 24).map((item) => {
@@ -2867,6 +2936,14 @@ function poptartHint(editor) {
   // dot: chains can *start* with synth(...), so the call isn't always in method position.
   m = before.match(/\b(?:synth|fx)\s*\(\s*["']([^"']*)$/);
   if (m) return pluginHints(cur, m[1]);
+
+  // Inside the keys string of .scale(name, " / .sc(octave, " / .sc(" → steps or nearest.
+  m = before.match(/\.(?:scale\s*\(\s*(["'])[^"']*\1\s*,|sc\s*\(\s*[^,()"']*,|sc\s*\()\s*["']([^"']*)$/);
+  if (m) return scaleKeysHints(cur, m[2]);
+
+  // Inside the name string of setscale(" or .scale(" → roots, then modes and tunings.
+  m = before.match(/(?<![\w$])\.?(?:setscale|scale)\s*\(\s*["']([^"']*)$/);
+  if (m) return scaleNameHints(cur, m[1]);
 
   // Inside the device string of midicc(" or midikeys(" → connected MIDI device names.
   m = before.match(/\b(?:midicc|midikeys)\s*\(\s*["']([^"']*)$/);
@@ -6396,6 +6473,9 @@ function parseLfoCall(inner) {
   const rateText = String(rateM ? rateM[1] ?? rateM[2] : '1');
   const rateHz = /hz\s*$/i.test(rateText);
   const rate = Number(rateText.replace(/hz\s*$/i, '')) || 1;
+  // Anything else is a pattern of rates - rate: "<1 2 4>" - which the panel carries as written
+  // (see lfoCfgText) and has no number control for.
+  const ratePattern = !rateHz && rateText.trim() !== '' && !Number.isFinite(Number(rateText)) ? rateText : null;
   const mode = (/mode\s*:\s*["'](\w+)["']/.exec(inner) ?? [])[1] ?? 'free';
   // Read but never authored by the panel: the playhead has to count from the same offset the
   // engine does, and both of these have to survive a rate/mode edit instead of being written away
@@ -6410,12 +6490,12 @@ function parseLfoCall(inner) {
     // unparseable shape string - fall back to the default below
   }
   if (!points) points = shapeMod.parseShapePoints('0,0 0.5,1 1,0');
-  return { points, rate, rateHz, phase, glide, mode: ['free', 'retrigger', 'envelope'].includes(mode) ? mode : 'free' };
+  return { points, rate, rateHz, ratePattern, phase, glide, mode: ['free', 'retrigger', 'envelope'].includes(mode) ? mode : 'free' };
 }
 
 // The options an lfo() call carries - the half that belongs to the CALL rather than to the shape.
-function lfoCfgText({ rate, rateHz, mode, phase, glide }) {
-  const parts = [`rate: ${rateHz ? `"${rate}hz"` : String(rate)}`];
+function lfoCfgText({ rate, rateHz, ratePattern, mode, phase, glide }) {
+  const parts = [`rate: ${ratePattern ? JSON.stringify(ratePattern) : rateHz ? `"${rate}hz"` : String(rate)}`];
   if (mode !== 'free') parts.push(`mode: '${mode}'`);
   // Options the panel has no control for are carried through rather than rewritten away: an edit
   // to the rate is an edit to the rate.
@@ -6527,8 +6607,8 @@ function lfoUseInCall(id) {
 function lfoCarry() {
   const parts = lfoCallParts();
   if (!parts) return {};
-  const { rate, rateHz, mode, phase, glide } = parseLfoCall(parts.opts);
-  return { callSource: lfoState.callSource, options: { rate, rateHz, mode, phase, glide } };
+  const { rate, rateHz, ratePattern, mode, phase, glide } = parseLfoCall(parts.opts);
+  return { callSource: lfoState.callSource, options: { rate, rateHz, ratePattern, mode, phase, glide } };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -6681,8 +6761,8 @@ function openShapeFromIdCall(call, code, ed = cm) {
   // Marked so the panel's rate/mode controls can write back into this call while a definition of
   // its own is on screen (see writeLfoOptions).
   const callSource = ed.markText(ed.posFromIndex(call.start), ed.posFromIndex(call.close + 1), {});
-  const { rate, rateHz, mode, phase, glide } = parseLfoCall(code.slice(call.open + 1, call.close));
-  if (openShapeById(id, { callSource, options: { rate, rateHz, mode, phase, glide } }, ed)) return true;
+  const { rate, rateHz, ratePattern, mode, phase, glide } = parseLfoCall(code.slice(call.open + 1, call.close));
+  if (openShapeById(id, { callSource, options: { rate, rateHz, ratePattern, mode, phase, glide } }, ed)) return true;
   callSource.clear();
   return false;
 }
@@ -6756,6 +6836,7 @@ function syncLfoFromCode() {
   if (!lfoState.idLiteral) {
     lfoState.rate = parsed.rate;
     lfoState.rateHz = parsed.rateHz;
+    lfoState.ratePattern = parsed.ratePattern;
     lfoState.mode = parsed.mode;
     lfoState.phase = parsed.phase;
     lfoState.glide = parsed.glide;
@@ -6836,6 +6917,7 @@ function initLfoEditor() {
   lfoRate.addEventListener('change', () => {
     if (!lfoState) return;
     lfoState.rate = Math.max(0.01, Number(lfoRate.value) || 1);
+    lfoState.ratePattern = null;
     writeLfoRateMode();
   });
   lfoMode.addEventListener('change', () => {
@@ -6846,7 +6928,7 @@ function initLfoEditor() {
   // Cycles or hz. Same number, different unit - the value stays put so the toggle reads as "what
   // does this 2 mean", not as a conversion.
   lfoRateUnit.addEventListener('click', () => {
-    if (!lfoState) return;
+    if (!lfoState || lfoState.ratePattern) return; // a patterned rate is always in cycles
     lfoState.rateHz = !lfoState.rateHz;
     lfoSyncHead();
     writeLfoRateMode();
@@ -6933,12 +7015,43 @@ function lastGateBefore(region, cyclePos) {
 // swap cycle lives on the scheduler (see _scheduleShapeSwaps). The line is right wherever a swap
 // lands on a period boundary - one shape per pass, which is what a shape pattern is usually for -
 // and drifts within a pass otherwise.
+// A patterned rate's running count (see pattern-core's lfo-rate.mjs), built from the same mini
+// parse the engine plays and kept while the text stays the same: the count is remembered from
+// cycle 0, so rebuilding it every frame would redo the whole set's worth of it.
+let lfoRateLedger = null; // { text, ledger }
+function lfoRateLedgerFor(text) {
+  if (!lfoRateMod || !miniMod) return null;
+  if (lfoRateLedger?.text === text) return lfoRateLedger.ledger;
+  let ledger = null;
+  try {
+    const ast = miniMod.parseMini(text);
+    ledger = lfoRateMod.rateLedger({ stepsForCycle: (c) => miniMod.getStepsForCycle(ast, c) });
+  } catch {
+    // unparseable mid-edit - no playhead until it reads again
+  }
+  lfoRateLedger = { text, ledger };
+  return ledger;
+}
+
 function lfoPhaseNow() {
   if (!lfoState || transport.paused) return null;
   if (lfoCallee() !== 'lfo') return null; // a grain window is played per grain - nothing to follow
   const pos = currentCyclePos(deckOfCM(lfoCM)); // the deck the shape plays on, by its own clock
   let turns;
-  if (lfoState.mode === 'free') {
+  if (lfoState.ratePattern) {
+    // A patterned rate counts the integral of the rate on the cycle grid, as the engine's anchors do.
+    const ledger = lfoRateLedgerFor(lfoState.ratePattern);
+    if (!ledger) return null;
+    if (lfoState.mode === 'free') {
+      turns = ledger.turnsAt(pos);
+    } else {
+      const region = lfoGateRegion();
+      const gate = region && playing ? lastGateBefore(region, pos) : null;
+      if (gate == null) return null;
+      turns = ledger.turnsAt(pos) - ledger.turnsAt(gate);
+      if (lfoState.mode === 'envelope') return Math.min(1, turns);
+    }
+  } else if (lfoState.mode === 'free') {
     // A free-running rate counts the ENGINE's seconds, which is what its anchor counts (see the
     // scheduler's _anchorLFOs). On the desktop that is the wall clock; in the browser it is the
     // audio context's own, and the transport mirror carries the offset between the two.
@@ -7106,6 +7219,8 @@ function initLfoCanvas() {
     // A transfer curve's ends are the loudest negative and positive input: nothing joins them.
     // Only a shape in time wraps round from its end to its start, and only there do they pair.
     lfoDrag.linked = lfoDrag.end && !lfoState.axes && shapeMod.shapeEndsMeet(lfoState.points);
+    // What the engine is playing for this shape right now - the drawing the drag starts from.
+    lfoDrag.heard = lfoAsWritten(lfoState.points);
   });
 
   lfoCanvas.addEventListener('pointermove', (e) => {
@@ -7138,7 +7253,27 @@ function initLfoCanvas() {
       seg.c = Math.max(-12, Math.min(12, (seg.c ?? 0) + delta));
     }
     drawLfoShape();
+    lfoAuditionSoon();
   });
+
+  // Heard as it is drawn: once a frame, whatever modulators are playing the drawing the drag
+  // started from play this one instead, from the phase they are at (see /api/liveShape). The code
+  // is written, and evaluated, when the drag ends.
+  // Breakpoints as the code spells them, which is what the running modulators were built from.
+  const lfoAsWritten = (pts) => shapeMod.parseShapePoints(shapeMod.serializeShapePoints(pts));
+  let lfoAuditionFrame = 0;
+  const lfoAuditionSoon = () => {
+    if (lfoAuditionFrame) return;
+    lfoAuditionFrame = requestAnimationFrame(() => {
+      lfoAuditionFrame = 0;
+      if (!lfoDrag?.heard || !lfoState) return;
+      const to = lfoAsWritten(lfoState.points);
+      if (JSON.stringify(to) === JSON.stringify(lfoDrag.heard)) return;
+      const from = lfoDrag.heard;
+      lfoDrag.heard = to;
+      api('POST', '/api/liveShape', { deck: deckOfCM(lfoCM), from, to }).catch(() => {});
+    });
+  };
 
   lfoCanvas.addEventListener('pointerup', (e) => {
     // The drag ends whatever the write does: a point left in hand cannot be put down.
@@ -11504,7 +11639,13 @@ function lfoSyncHead() {
   lfoLockBtn.classList.toggle('active', lfoFollowLocked);
   lfoLockBtn.title = lfoFollowLocked ? 'pinned to this shape' : 'following the playing shape';
   lfoRateUnit.textContent = lfoState?.rateHz ? 'hz' : 'cyc';
-  lfoRateUnit.title = lfoState?.rateHz ? 'free-running — click for cycles' : 'synced to the cycle — click for hz';
+  lfoRateUnit.title = lfoState?.ratePattern ? 'a patterned rate counts in cycles'
+    : lfoState?.rateHz ? 'free-running — click for cycles' : 'synced to the cycle — click for hz';
+  // A patterned rate is edited in the code: the number box has nothing to show for "<1 2 4>", and
+  // typing into it would replace the pattern. Its tooltip says what the rate is.
+  if (lfoRate.dataset.title == null) lfoRate.dataset.title = lfoRate.title ?? '';
+  lfoRate.disabled = !!lfoState?.ratePattern;
+  lfoRate.title = lfoState?.ratePattern ? `rate: ${lfoState.ratePattern}` : lfoRate.dataset.title;
   lfoHead.syncHead(named ? shapeDefs.refCalls(lfoCM.getValue(), lfoState.shapeId).length : 0);
 }
 

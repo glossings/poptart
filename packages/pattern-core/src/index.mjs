@@ -13,7 +13,7 @@ export { setAudioInputLayout, audioInputLayout, audioInputChannelCount, resolveI
 export { setMacro, macroValue, MACRO_COUNT } from './macros.mjs';
 export { setFxKnob, fxKnobValue, FX_KNOB_COUNT } from './fxknobs.mjs';
 export { Scheduler, Transport, DeckClock, setEventLogger } from './scheduler.mjs';
-export { parseScaleName, degreeToMidi, midiToDegree, noteToMidi, registerTuning, registeredTunings, parseScala, scaleSize, tuningNames } from './notes.mjs';
+export { parseScaleName, degreeToMidi, midiToDegree, noteToMidi, registerTuning, registeredTunings, parseScala, scaleSize, tuningNames, modeNames } from './notes.mjs';
 export { setGlobalScale, globalScale, scaleAtOctave, scaleParts, DEFAULT_SCALE, DEFAULT_SCALE_OCTAVE } from './notes.mjs';
 export { recordingToMini, UNQUANTIZED_GRID, recordingToRoll, captureWindow, recordStartCycle, UNQUANTIZED_ROLL_GRID } from './record.mjs';
 export { parseMidiFile, midiFileToLanes, midiLanesToPianoroll, pickGrid, detectKey, GRID_CANDIDATES, BEATS_PER_CYCLE } from './midifile.mjs';

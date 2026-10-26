@@ -1,17 +1,11 @@
 // The desktop engine, the wrapper around it, and the scheduler driving both.
 //
-// The browser build added one thing the desktop engine could not do at first - patching an audio
-// signal onto a parameter - and the scheduler already knew how to refuse it: ask whether the
-// engine has `connectParam`, and if not, warn once and play everything else. The desktop can now
-// (for poptart's own devices); the refusal path is still covered for an engine that cannot. What broke that was the
-// layer in between. `MappedEngine` forwards every method the scheduler calls, which is right for
-// the calls the scheduler makes outright and wrong for the ones it asks about first: the wrapper
-// answered yes on the engine's behalf, the scheduler wired the route, and the call landed on
-// undefined. A TypeError out of `setPattern` takes the whole evaluation down.
-//
-// Each half is covered on its own - param-mapping.test.js for the wrapper, pattern-core's
-// param-routes.test.mjs for the scheduler's refusal - and the bug was in neither half. So this
-// puts the three together and drives them the way the desktop server does.
+// Some engine calls the scheduler asks about before making (an expression on a control, which
+// carries audio - see pattern-core's Expressions): ask whether the engine has `setParamExpr`, and
+// if not, warn once about audio and play everything else. What broke that once was the layer in
+// between: `MappedEngine` forwards every method the scheduler calls, and answering yes on the
+// engine's behalf sent the call to undefined - a TypeError out of `setPattern` takes the whole
+// evaluation down. So this puts the three together and drives them the way the desktop server does.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -64,12 +58,12 @@ test('the desktop engine has every call the scheduler makes, the optional ones i
   assert.deepEqual(absent.sort(), []);
 });
 
-test('a pattern that patches audio onto a parameter is wired on the desktop, not warned about', () => {
+test('a pattern that patches audio onto a parameter is sent on the desktop, not warned about', () => {
   const { engine } = desktopShapedEngine();
   const calls = [];
-  engine.connectParam = (...a) => calls.push(a);
+  engine.setParamExpr = (...a) => calls.push(a);
   const mapped = new MappedEngine(engine);
-  assert.equal(typeof mapped.connectParam, 'function', 'the wrapper should pass the capability on');
+  assert.equal(typeof mapped.setParamExpr, 'function', 'the wrapper should pass the capability on');
 
   const warnings = captureWarnings();
   try {
@@ -79,17 +73,16 @@ test('a pattern that patches audio onto a parameter is wired on the desktop, not
   } finally {
     warnings.restore();
   }
-  assert.deepEqual(calls, [['#1', 0, 'Osc 1 Phase', 'mod', 1, 0]]);
+  assert.deepEqual(calls, [['#1', 0, 'Osc 1 Phase', { k: 'in', i: 0, rate: 'ar', source: 'mod' }]]);
 });
 
-test('an engine without the routing pair is still warned about once, and does not throw', () => {
-  // The refusal path stays: an engine that cannot patch says so and plays everything else.
+test('an engine without expressions is warned about once for audio, and does not throw', () => {
   const { engine } = desktopShapedEngine();
-  delete engine.connectParam;
-  delete engine.disconnectParam;
-  delete engine.paramRoutes;
+  delete engine.setParamExpr;
+  delete engine.clearParamExpr;
+  delete engine.paramExprs;
   const mapped = new MappedEngine(engine);
-  assert.equal(typeof mapped.connectParam, 'undefined', 'the wrapper must not claim it');
+  assert.equal(typeof mapped.setParamExpr, 'undefined', 'the wrapper must not claim it');
 
   const warnings = captureWarnings();
   try {
@@ -97,34 +90,10 @@ test('an engine without the routing pair is still warned about once, and does no
     sched.setPattern(synth('Wavetable').param('Osc 1 Phase', audio('mod')));
 
     assert.equal(warnings.lines.length, 1, 'it should say so once');
-    assert.match(warnings.lines[0], /cannot patch audio into a parameter/);
+    assert.match(warnings.lines[0], /cannot patch audio into a control/);
     assert.match(warnings.lines[0], /"Osc 1 Phase"/, 'the parameter should be named');
     assert.match(warnings.lines[0], /lead/, 'so should the track');
   } finally {
     warnings.restore();
   }
-});
-
-test('an engine that can route still gets the connection, through the same wrapper', () => {
-  // The hiding is conditional, so the browser's engine - which has both - is unaffected.
-  const calls = [];
-  const engine = {};
-  for (const name of schedulerCalls()) engine[name] = (...a) => { calls.push([name, ...a]); };
-  engine.getTime = () => 0;
-
-  const mapped = new MappedEngine(engine);
-  assert.equal(typeof mapped.connectParam, 'function');
-
-  const warnings = captureWarnings();
-  try {
-    const sched = new Scheduler(mapped, { trackId: '#1', label: 'lead' });
-    sched.setPattern(synth('Wavetable').param('Osc 1 Phase', audio('mod')));
-    assert.deepEqual(warnings.lines, [], 'an engine that can do it should not be warned about');
-  } finally {
-    warnings.restore();
-  }
-
-  const wired = calls.filter(([name]) => name === 'connectParam');
-  assert.equal(wired.length, 1, 'the route should have been wired exactly once');
-  assert.deepEqual(wired[0], ['connectParam', '#1', 0, 'Osc 1 Phase', 'mod', 1, 0]);
 });

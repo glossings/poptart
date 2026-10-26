@@ -5228,7 +5228,8 @@
           "unit": "s",
           "ui": "knob",
           "group": "Amp",
-          "rate": "a"
+          "rate": "a",
+          "amp": "attack"
         },
         {
           "id": "decay",
@@ -5242,7 +5243,8 @@
           "unit": "s",
           "ui": "knob",
           "group": "Amp",
-          "rate": "a"
+          "rate": "a",
+          "amp": "decay"
         },
         {
           "id": "sustain",
@@ -5256,7 +5258,8 @@
           "unit": "",
           "ui": "knob",
           "group": "Amp",
-          "rate": "a"
+          "rate": "a",
+          "amp": "sustain"
         },
         {
           "id": "release",
@@ -5270,7 +5273,8 @@
           "unit": "s",
           "ui": "knob",
           "group": "Amp",
-          "rate": "a"
+          "rate": "a",
+          "amp": "release"
         },
         {
           "id": "level",
@@ -5871,7 +5875,8 @@
           "unit": "s",
           "ui": "knob",
           "group": "Amp Env",
-          "rate": "a"
+          "rate": "a",
+          "amp": "attack"
         },
         {
           "id": "ampenv.decay",
@@ -5885,7 +5890,8 @@
           "unit": "s",
           "ui": "knob",
           "group": "Amp Env",
-          "rate": "a"
+          "rate": "a",
+          "amp": "decay"
         },
         {
           "id": "ampenv.sustain",
@@ -5899,7 +5905,8 @@
           "unit": "",
           "ui": "knob",
           "group": "Amp Env",
-          "rate": "a"
+          "rate": "a",
+          "amp": "sustain"
         },
         {
           "id": "ampenv.release",
@@ -5913,7 +5920,8 @@
           "unit": "s",
           "ui": "knob",
           "group": "Amp Env",
-          "rate": "a"
+          "rate": "a",
+          "amp": "release"
         },
         {
           "id": "env.acurve",
@@ -7427,7 +7435,8 @@
           "unit": "s",
           "ui": "knob",
           "group": "Amp Env",
-          "rate": "a"
+          "rate": "a",
+          "amp": "attack"
         },
         {
           "id": "ampenv.decay",
@@ -7441,7 +7450,8 @@
           "unit": "s",
           "ui": "knob",
           "group": "Amp Env",
-          "rate": "a"
+          "rate": "a",
+          "amp": "decay"
         },
         {
           "id": "ampenv.sustain",
@@ -7455,7 +7465,8 @@
           "unit": "",
           "ui": "knob",
           "group": "Amp Env",
-          "rate": "a"
+          "rate": "a",
+          "amp": "sustain"
         },
         {
           "id": "ampenv.release",
@@ -7469,7 +7480,8 @@
           "unit": "s",
           "ui": "knob",
           "group": "Amp Env",
-          "rate": "a"
+          "rate": "a",
+          "amp": "release"
         },
         {
           "id": "env.acurve",
@@ -7525,7 +7537,8 @@
           "unit": "x",
           "ui": "knob",
           "group": "Amp Env",
-          "rate": "k"
+          "rate": "k",
+          "amp": "scale"
         },
         {
           "id": "glide",

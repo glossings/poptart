@@ -26,7 +26,9 @@ const { analyzeSlices } = require('./analysis');
 const { ensurePoptartExtension, ensureDeviceExtension, userExtensionsDir, sclangStartupFile } = require('./extensions');
 const {
   nativeDevice, deviceParam, deviceParamArgs, devicePositions, paramPosition, deviceStateText, readDeviceState,
+  readDeviceLive,
 } = require('./native-devices');
+const { wavFrameLength } = require('./wav');
 const {
   privateScInstalled,
   privateSclangPath,
@@ -39,6 +41,9 @@ const { advertiseOsc } = require('./bonjour');
 const { preparePluginScan, scanWarnings, joinPathList, noteProbe, noteProbeDone, markProbeCrashed } = require('./plugin-scan');
 const { ScanProgress } = require('./scan-progress');
 const { openEngineLog, engineLogPath } = require('./engine-log');
+
+// The name a param call uses for input i of the expression on `name` (see setParamExpr).
+const EXPR_LEAF = /^~\d+~/;
 
 // Plugin state compression, off the event loop. A Serum program is a couple of megabytes, and
 // this process also runs the note scheduler against a 150ms lookahead - gzipSync of that is
@@ -313,6 +318,12 @@ const DEFAULT_OSC_IN_PORT = Number(process.env.POPTART_OSC_IN_PORT || 57160);
 
 const READY_TIMEOUT_MS = 60000; // sclang class-library compile + scsynth boot
 const REPLY_TIMEOUT_MS = 10000;
+// A device window asks where its controls are every frame, one question at a time; an answer
+// later than this is a window that should ask again rather than wait.
+const LIVE_TIMEOUT_MS = 1000;
+// The points a drawn curve is sampled at before it is sent: the browser engine's SHAPE_POINTS,
+// so a device reads the same table on both engines.
+const SHAPE_POINTS = 256;
 // A first-ever plugin scan probes every installed plugin (out-of-process, ~seconds each, with
 // VSTPlugin's own per-plugin timeout skipping any that hang) - can legitimately take minutes.
 const SCAN_TIMEOUT_MS = 600000;
@@ -479,10 +490,10 @@ class OscEngine {
     // argument is resolved against (see setParam). Only this half knows: the scheduler sends a
     // name and a value and does not care what is hosting them, exactly as on the web.
     this._slotDevices = new Map();
-    // What is patched onto each track's parameters, as "slot:name" -> "source|gain|offset" - the
-    // scheduler's own spelling, which a fresh Scheduler reads back (paramRoutes) to find a route
-    // the new pattern dropped. The engine track outlives the Scheduler that wired it.
-    this._paramRoutes = new Map();
+    // What expression each track's controls carry, as "slot:name" -> the tree's JSON - which a
+    // fresh Scheduler reads back (paramExprs) to leave an unchanged one alone and find one the
+    // new pattern dropped. The engine track outlives the Scheduler that installed it.
+    this._paramExprs = new Map();
     // Where each of those devices' controls is sitting, as "trackId:slot" -> { paramId: 0..1 },
     // and what is driving any of them -> { paramId: 'lfo' | 'env' | 'cc' | 'osc' | 'pattern' }.
     //
@@ -496,6 +507,12 @@ class OscEngine {
     // { byRef, loaded } - the browser's own bookkeeping for the same controls (see
     // _loadDeviceSample), so an index means the same file on both engines.
     this._deviceFiles = new Map();
+    // What reads a drawn curve: pattern-core's shape functions, installed by the host (it is an
+    // ES module and this is not) - { looksLikeShapeData, parseShapePoints, sampleShape,
+    // lookupShape }. Without one a curve cannot be set, and saying so is all that happens.
+    this.shapeReader = null;
+    // The /poptart/deviceLive questions still waiting for sclang's inline answer, by request id.
+    this._liveAsks = new Map();
     this._stateSeq = new Map(); // "trackId|slot" -> latest restore, so a slow inflate can't win
     this._stateAcks = new Map(); // same key -> { seq, resolve }: the one restore still unanswered
     this._stateWork = new Set(); // restores still inflating/writing, so "all sent" is awaitable (see _stateIdle)
@@ -1089,7 +1106,7 @@ class OscEngine {
     for (const key of this._slotDevices.keys()) {
       if (key.startsWith(`${trackId}:`)) this._forgetDevice(key);
     }
-    this._paramRoutes.delete(trackId);
+    this._paramExprs.delete(trackId);
     this._send('/poptart/destroyTrack', [trackId]);
   }
   loadInstrument(trackId, pluginId) {
@@ -1192,11 +1209,16 @@ class OscEngine {
     // What has been loaded onto the controls that play a file, by the option slot it went into:
     // the name a window prints on that control, and what a `.param()` written from it says.
     const files = {};
+    // And the drawn curves, by option slot, as the browser's engine keeps them for its figures.
+    let shapes = null;
     for (const [held, one] of this._deviceFiles) {
       if (!held.startsWith(`${key}|`)) continue;
       const control = held.slice(key.length + 1);
       files[control] = {};
       for (const [ref, index] of one.byRef) files[control][index] = ref;
+      // A named curve is filed under its name and its points; the window prints the name.
+      for (const [name, index] of one.named ?? []) files[control][index] = name;
+      if (one.tables) shapes = { ...(shapes ?? {}), ...one.tables };
     }
     return {
       id: device.id,
@@ -1205,6 +1227,7 @@ class OscEngine {
       positions: { ...(this._devicePositions.get(key) ?? devicePositions(device)) },
       driven: Object.fromEntries(this._deviceDriven.get(key) ?? []),
       files,
+      shapes,
     };
   }
 
@@ -1461,7 +1484,10 @@ class OscEngine {
         const held = this._devicePositions.get(`${trackId}:${slotIndex}`);
         if (held) Object.assign(held, read.positions);
         for (const [id, ref] of Object.entries(read.files)) {
-          this._loadDeviceSample(trackId, slotIndex, device, deviceParam(device, id), ref, targetTime);
+          // A drawn curve is filed the same way as a file, under what `.param()` would say.
+          const control = deviceParam(device, id);
+          if (control?.takes === 'shape') this._loadDeviceShape(trackId, slotIndex, device, control, ref, targetTime);
+          else this._loadDeviceSample(trackId, slotIndex, device, control, ref, targetTime);
         }
       }
     })().catch((e) => {
@@ -1996,6 +2022,14 @@ class OscEngine {
     this._fanoutMidi(trackId, Math.round(note), 0, targetTime, false);
   }
   setParam(trackId, slotIndex, paramName, value, targetTime) {
+    // An expression's input ("~i~name") takes a plain number: it is a term in the expression, not
+    // a position on one of the device's controls.
+    if (EXPR_LEAF.test(String(paramName))) {
+      if (typeof value === 'number' && Number.isFinite(value)) {
+        this._send('/poptart/setParam', [trackId, slotIndex, paramName, value, this._latency(targetTime)]);
+      }
+      return;
+    }
     // One of poptart's own devices resolves the argument the way the browser does: an enum takes
     // a label or an index, a toggle takes on and off, and everything else takes the 0..1 position
     // it already is. Done HERE because this is the half that knows which device is in the slot,
@@ -2009,6 +2043,12 @@ class OscEngine {
       const takesFile = deviceParam(device, paramName);
       if (typeof value === 'string' && takesFile?.takes === 'sample') {
         this._loadDeviceSample(trackId, slotIndex, device, takesFile, value, targetTime);
+        return;
+      }
+      // A DRAWN curve, by name or as its breakpoints: `.param("Mode", "grit")`, or
+      // `.param("Window", "0,0 0.2,1 1,0")`. Sampled here and sent as points - see _loadDeviceShape.
+      if (typeof value === 'string' && takesFile?.takes === 'shape' && !takesFile.options?.some((o) => o.toLowerCase() === value.trim().toLowerCase())) {
+        this._loadDeviceShape(trackId, slotIndex, device, takesFile, value, targetTime);
         return;
       }
       const position = paramPosition(device, paramName, value);
@@ -2100,8 +2140,156 @@ class OscEngine {
     held.loaded += 1;
     held.byRef.set(ref, index);
     const paramIndex = device.params.findIndex((p) => p.id === control.id);
-    this._send('/poptart/deviceSample', [trackId, slotIndex, paramIndex, index, pack, file]);
+    // A table is cut at the frame length its file declares, which only the file's header says.
+    const frameLength = control.sampleAs === 'wavetable' ? wavFrameLength(entry.files[file]?.path) : 0;
+    this._send('/poptart/deviceSample', [trackId, slotIndex, paramIndex, index, pack, file, frameLength]);
     this.setParam(trackId, slotIndex, control.id, index, targetTime);
+  }
+
+  /**
+   * `.param("Mode", "grit")` on a control that takes a drawn curve: the curve sampled into a
+   * table and handed to the device, and the control pointed at the option slot it went into.
+   *
+   * The browser's _loadShapeParam, rule for rule, so a song means the same curve on both engines:
+   * a curve arrives as a NAME (a `_shape(...)` definition in the buffer) or as its breakpoints; a
+   * name keeps the slot it already holds, so redrawing a curve edits it in place rather than
+   * filling the menu with copies; and the curve is sampled with pattern-core's own sampler at the
+   * browser engine's SHAPE_POINTS, since a curve drawn in the editor and a curve played by the
+   * device have to be the same curve. The table goes first and the control second, as there: the
+   * other way round the device plays a block of the slot with no curve in it.
+   */
+  _loadDeviceShape(trackId, slotIndex, device, control, data, targetTime) {
+    const reader = this.shapeReader;
+    if (!reader) {
+      this._warnOnce('device-shape-reader', '[poptart] this build cannot read drawn shapes, so a curve cannot be set here');
+      return;
+    }
+    const key = `${trackId}:${slotIndex}|${control.id}`;
+    let held = this._deviceFiles.get(key);
+    if (!held) {
+      held = { byRef: new Map(), loaded: 0 };
+      this._deviceFiles.set(key, held);
+    }
+    let points;
+    let name = null;
+    let ref = data; // what the loaded table is filed under: a name AND its points, or the points
+    if (reader.looksLikeShapeData(data)) {
+      points = reader.parseShapePoints(data);
+    } else {
+      const defined = reader.lookupShape?.(data) ?? null;
+      if (!defined) {
+        this._warnOnce(`device-shape:${data}`, `[poptart] there is no shape called ${JSON.stringify(data)} - draw one from the device's window, or define it with _shape(${JSON.stringify(data)}, "0,0 0.5,1 1,0")`);
+        return;
+      }
+      name = data;
+      points = defined;
+      ref = `${data}=${JSON.stringify(defined)}`;
+    }
+    const already = held.byRef.get(ref);
+    if (already !== undefined) {
+      this.setParam(trackId, slotIndex, control.id, already, targetTime);
+      return;
+    }
+    if (!points?.length) {
+      this._warnOnce(`device-shape:${data}`, `[poptart] ${JSON.stringify(data)} has no points in it`);
+      return;
+    }
+    held.named ??= new Map(); // name -> the slot each named curve holds
+    let index = name != null ? held.named.get(name) : undefined;
+    if (index === undefined) {
+      index = this._spareDeviceOption(held, control, ref);
+      for (const [other, at] of held.named) if (at === index) held.named.delete(other);
+      if (name != null) held.named.set(name, index);
+    } else {
+      for (const [other, at] of held.byRef) if (at === index) held.byRef.delete(other);
+      held.byRef.set(ref, index);
+    }
+    this._sendDeviceShape(trackId, slotIndex, device, control, index, points, held, name ?? data);
+    this.setParam(trackId, slotIndex, control.id, index, targetTime);
+  }
+
+  /** A control's next free option slot past its own entries, or the oldest one when all are taken. */
+  _spareDeviceOption(held, control, ref) {
+    const first = control.options ? control.options.length : 0;
+    const capacity = control.capacity ?? first + 1;
+    let index = -1;
+    const taken = new Set(held.byRef.values());
+    for (let i = first; i < capacity; i++) if (!taken.has(i)) { index = i; break; }
+    if (index < 0) {
+      index = first + (held.loaded % Math.max(1, capacity - first));
+      for (const [other, took] of held.byRef) if (took === index) held.byRef.delete(other);
+    }
+    held.loaded += 1;
+    held.byRef.set(ref, index);
+    return index;
+  }
+
+  /** The curve as the device reads it: SHAPE_POINTS samples of it, evenly spaced, sent outright. */
+  _sendDeviceShape(trackId, slotIndex, device, control, index, points, held, label) {
+    const table = new Array(SHAPE_POINTS);
+    for (let i = 0; i < SHAPE_POINTS; i++) table[i] = this.shapeReader.sampleShape(points, i / (SHAPE_POINTS - 1));
+    // Kept for the window's picture of the curve, which reads the same table the device does.
+    (held.tables ??= {})[index] = { name: label, data: label, points: table };
+    const paramIndex = device.params.findIndex((p) => p.id === control.id);
+    this._send('/poptart/deviceShape', [trackId, slotIndex, paramIndex, index, ...table]);
+  }
+
+  /**
+   * Re-reads every named curve a device holds against the shape definitions as they stand now,
+   * and re-sends the ones whose definition changed - into the slot they already hold, WITHOUT
+   * moving a control onto them. Called after each evaluation, as the browser's engine is: a
+   * redrawn shape has to reach a device on it even when nothing sets the control again.
+   */
+  refreshNamedShapes() {
+    const reader = this.shapeReader;
+    if (!reader?.lookupShape) return;
+    for (const [key, held] of this._deviceFiles) {
+      if (!held.named?.size) continue;
+      const bar = key.indexOf('|');
+      const slotKey = key.slice(0, bar);
+      const device = this._slotDevices.get(slotKey);
+      const control = device && deviceParam(device, key.slice(bar + 1));
+      if (!control) continue;
+      const colon = slotKey.lastIndexOf(':');
+      const trackId = slotKey.slice(0, colon);
+      const slotIndex = Number(slotKey.slice(colon + 1));
+      for (const [name, index] of held.named) {
+        const points = reader.lookupShape(name);
+        if (!points?.length) continue;
+        const ref = `${name}=${JSON.stringify(points)}`;
+        if (held.byRef.get(ref) === index) continue;
+        for (const [other, at] of held.byRef) if (at === index) held.byRef.delete(other);
+        held.byRef.set(ref, index);
+        this._sendDeviceShape(trackId, slotIndex, device, control, index, points, held, name);
+      }
+    }
+  }
+
+  /**
+   * Where a device's controls ACTUALLY are, and what it says it is doing - asked of the UGen, so
+   * a control under a modulator is drawn where the modulator has got to rather than where it was
+   * pointed. Resolves to `{ positions: { id: 0..1 }, report }` (the report in the shape the
+   * browser's processor gives, or null), or to null when there is no device to ask or no answer.
+   */
+  deviceLive(trackId, slotIndex) {
+    const device = this._slotDevices.get(`${trackId}:${slotIndex}`);
+    if (!device || !this._port) return Promise.resolve(null);
+    const requestId = this._nextRequestId++;
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        this._liveAsks.delete(requestId);
+        resolve(null);
+      }, LIVE_TIMEOUT_MS);
+      this._liveAsks.set(requestId, (values) => {
+        clearTimeout(timer);
+        this._liveAsks.delete(requestId);
+        // The device may have changed while the question was out: an answer about another one
+        // is no answer.
+        if (this._slotDevices.get(`${trackId}:${slotIndex}`) !== device) { resolve(null); return; }
+        resolve(readDeviceLive(device, values));
+      });
+      this._send('/poptart/deviceLive', [requestId, trackId, slotIndex]);
+    });
   }
 
   /** A file's place in a pack, by index or by name, or null. */
@@ -2152,6 +2340,9 @@ class OscEngine {
         JSON.stringify(ir.shapes ?? [ir.points]),
         // How long a swap takes to glide, as a fraction of one LFO period. 0 jumps.
         ir.glide ?? 0,
+        // 1 when the rate is a pattern whose changes arrive timestamped with the phase anchors
+        // (see anchorParamLFO): a re-send then leaves a running modulator's rate alone.
+        ir.rateFromAnchors ? 1 : 0,
       ]);
       return;
     }
@@ -2164,13 +2355,16 @@ class OscEngine {
       ir.phaseCycles,
       ir.min,
       ir.max,
+      ir.rateFromAnchors ? 1 : 0, // as above
     ]);
   }
   // Which of a patterned lfo("<a b>")'s shapes is in force from `targetTime`. The engine restarts
   // the new shape from its beginning and glides across the step if the lfo() asked for one; in the
   // note-gated modes it holds the change until the next note rather than cutting a shape short.
-  setParamShape(trackId, slotIndex, paramName, index, targetTime) {
-    this._send('/poptart/setParamShape', [trackId, slotIndex, paramName, index, this._latency(targetTime)]);
+  // A patterned rate passes `rateHz`, the rate the new shape starts at (see anchorParamLFO).
+  setParamShape(trackId, slotIndex, paramName, index, targetTime, rateHz = null) {
+    const args = [trackId, slotIndex, paramName, index, this._latency(targetTime)];
+    this._send('/poptart/setParamShape', rateHz == null ? args : [...args, rateHz]);
   }
   clearParamLFO(trackId, slotIndex, paramName) {
     this._noteDriver(trackId, slotIndex, paramName, null);
@@ -2178,9 +2372,12 @@ class OscEngine {
   }
   // Re-pins a free-running LFO's phase (0..1) to the scheduler's clock at targetTime - the
   // periodic drift correction described at scheduler.mjs's LFO_ANCHOR_INTERVAL_SEC. sclang
-  // resets the modulator's phase in a timestamped bundle, same path as note events.
-  anchorParamLFO(trackId, slotIndex, paramName, phase01, targetTime) {
-    this._send('/poptart/anchorParamLFO', [trackId, slotIndex, paramName, phase01, this._latency(targetTime)]);
+  // resets the modulator's phase in a timestamped bundle, same path as note events. A patterned
+  // rate also passes `rateHz`, the rate it runs at from that moment: its changes travel this way,
+  // on the step they belong to, rather than as an immediate setParamLFO re-send.
+  anchorParamLFO(trackId, slotIndex, paramName, phase01, targetTime, rateHz = null) {
+    const args = [trackId, slotIndex, paramName, phase01, this._latency(targetTime)];
+    this._send('/poptart/anchorParamLFO', rateHz == null ? args : [...args, rateHz]);
   }
   // ADSR envelope retriggered by the track's note on/offs - same set-once Tier-2 contract as
   // setParamLFO (see the poptart_env SynthDef + gate wiring in sc/poptart.scd).
@@ -2421,27 +2618,29 @@ class OscEngine {
     this._send('/poptart/clearAudioInject', [trackId, slot]);
   }
 
-  // Audio patched onto a parameter (.param("Cutoff", audio("lfo"))): another track's output or a
-  // named bus, read every sample by one of poptart's own devices (PoptartDevice's /mapa). `gain`
-  // and `offset` are the .mul()/.add() on the handle, in the control's 0..1 positions; the device
-  // clamps the sum to that range. sclang resolves the source the way it resolves a sidechain's,
-  // orders the source ahead of this track, and puts the route back on whatever device takes the
-  // slot next. A plugin's parameter cannot take one (VSTPlugin reads its parameters a block at a
-  // time); sclang says so rather than connecting it.
-  connectParam(trackId, slot, name, source, gain = 1, offset = 0) {
-    if (!this._paramRoutes.has(trackId)) this._paramRoutes.set(trackId, new Map());
-    this._paramRoutes.get(trackId).set(`${slot}:${name}`, `${source}|${gain}|${offset}`);
-    this._noteDriver(trackId, slot, name, 'audio');
-    this._send('/poptart/connectParam', [trackId, slot, String(name), String(source), Number(gain), Number(offset)]);
+  // A param expression: a `.param()` value that combines signals - audio from other tracks or
+  // buses, modulators, polled values, constants - evaluated per sample in scsynth (see
+  // installExpr in sc/poptart.scd). `tree` is plain JSON:
+  //   {k:'const', v} | {k:'in', i, rate, source?} | {k:'op', op, a:[x, y]} | {k:'fn', op, a:[x]}
+  //   | {k:'map', min, max, curve, a:[x]}
+  // An `in` without a source is fed by ordinary param calls on the leaf name `~i~name` (setParam,
+  // setParamLFO, setParamEnv, ...); one with a source is wired from that track or bus here. A tree
+  // that differs from the last only in its constants updates the running synth in place.
+  setParamExpr(trackId, slot, name, tree) {
+    const json = JSON.stringify(tree);
+    if (!this._paramExprs.has(trackId)) this._paramExprs.set(trackId, new Map());
+    this._paramExprs.get(trackId).set(`${slot}:${name}`, json);
+    this._noteDriver(trackId, slot, name, 'expr');
+    this._send('/poptart/setParamExpr', [trackId, slot, String(name), json]);
   }
-  disconnectParam(trackId, slot, name) {
-    this._paramRoutes.get(trackId)?.delete(`${slot}:${name}`);
+  clearParamExpr(trackId, slot, name) {
+    this._paramExprs.get(trackId)?.delete(`${slot}:${name}`);
     this._noteDriver(trackId, slot, name, null);
-    this._send('/poptart/disconnectParam', [trackId, slot, String(name)]);
+    this._send('/poptart/clearParamExpr', [trackId, slot, String(name)]);
   }
-  /** What is patched onto this track's parameters, as `"slot:name" -> "source|gain|offset"`. */
-  paramRoutes(trackId) {
-    return new Map(this._paramRoutes.get(trackId) ?? []);
+  /** What expressions this track's controls carry, as `"slot:name" -> JSON.stringify(tree)`. */
+  paramExprs(trackId) {
+    return new Map(this._paramExprs.get(trackId) ?? []);
   }
 
   // Inject MIDI into the plugin at `slot` from a named source (Sig#midi injector, named form). A
@@ -2726,6 +2925,13 @@ class OscEngine {
       // A transport key typed into a plugin's editor window: ['eval' | 'stop'] (see onHotkey).
       const action = String(msg.args?.[0]?.value ?? msg.args?.[0] ?? '');
       if ((action === 'eval' || action === 'stop') && typeof this.onHotkey === 'function') this.onHotkey(action);
+      return;
+    }
+    if (msg.address === '/poptart/deviceLive.data') {
+      // A device's live state, answered inline: [requestId, count, position..., reportCount, report...]
+      // (see the deviceLive OSCdef in poptart.scd).
+      const args = (msg.args ?? []).map((a) => a?.value ?? a);
+      this._liveAsks.get(args[0])?.(args.slice(1).map(Number));
       return;
     }
     if (!msg.address.endsWith('.reply')) return;

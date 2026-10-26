@@ -41,6 +41,8 @@ var tracks = IdentityDictionary.new;
 var nodeGoneSaid = IdentitySet.new, nodeOwns = { |nodeID, what| }; // the engine's node bookkeeping (see nodeOwns in sc/poptart.scd) - inert here
 var modFreeDelay = 0.05;
 var freeModulatorLater, rampTo, dropRamp, dropSlotRamps;
+// What a ramp is mapped onto (paramTarget) and what it leans on; the expression half is unused here.
+var exprLeaf, busIndexOf, paramTarget, reassertAudioDrivers, exprFeed, channelDefault, resolveParamIndex;
 var maps = List.new;
 var ctlFor = { |slot| (map: { |self, index, bus| maps.add("slot" ++ slot ++ ":" ++ index ++ "->" ++ bus.index) }) };
 var track = (
@@ -56,24 +58,27 @@ ${extract('freeModulatorLater')}
 ${extract('rampTo')}
 ${extract('dropRamp')}
 ${extract('dropSlotRamps')}
+${extract('exprLeaf')}
+${extract('busIndexOf')}
+${extract('paramTarget')}
 ("COMPILES<" ++ [rampTo, dropRamp, dropSlotRamps].every({ |f| f.isKindOf(Function) }) ++ ">").postln;
 
 // First value on a plugin parameter: an entry, its bus mapped onto index 7.
-rampTo.(track, \\slot1_Mix, 1, "Mix", 7, 0.5);
+rampTo.(track, \\slot1_Mix, 1, paramTarget.(track, 1, "Mix", 7), 0.5);
 ("CREATED<" ++ track[\\ramps][\\slot1_Mix].notNil ++ "," ++ maps.last ++ ">").postln;
 mixBus = busOf.(\\slot1_Mix); mixSynth = track[\\ramps][\\slot1_Mix][\\synth];
 // A second value moves the target on the same entry - no new bus, no new map.
-rampTo.(track, \\slot1_Mix, 1, "Mix", 7, 0.8);
+rampTo.(track, \\slot1_Mix, 1, paramTarget.(track, 1, "Mix", 7), 0.8);
 ("MOVED<" ++ (busOf.(\\slot1_Mix) == mixBus) ++ "," ++ (track[\\ramps][\\slot1_Mix][\\synth] === mixSynth) ++ "," ++ maps.size ++ ">").postln;
 // The plugin was swapped and Mix is now index 3: the SAME bus is re-mapped there.
-rampTo.(track, \\slot1_Mix, 1, "Mix", 3, 0.8);
+rampTo.(track, \\slot1_Mix, 1, paramTarget.(track, 1, "Mix", 3), 0.8);
 ("FOLLOWED<" ++ (busOf.(\\slot1_Mix) == mixBus) ++ "," ++ maps.last ++ ">").postln;
 // A channel control maps onto the track synth by name.
-rampTo.(track, 'slot-1_gain', -1, "gain", nil, 1);
+rampTo.(track, 'slot-1_gain', -1, paramTarget.(track, -1, "gain"), 1);
 ("CHANNEL<" ++ maps.last ++ ">").postln;
 // Two slots' worth of ramps; dropping slot 2 leaves slot 1 and the channel alone.
-rampTo.(track, \\slot2_Drive, 2, "Drive", 1, 0.2);
-rampTo.(track, \\slot2_Tone, 2, "Tone", 2, 0.2);
+rampTo.(track, \\slot2_Drive, 2, paramTarget.(track, 2, "Drive", 1), 0.2);
+rampTo.(track, \\slot2_Tone, 2, paramTarget.(track, 2, "Tone", 2), 0.2);
 dropSlotRamps.(\\t, track, 2);
 ("DROPPED<" ++ track[\\ramps].keys.asArray.collect(_.asString).sort.join(",") ++ ">").postln;
 // ...and dropRamp on the channel control, for the native-takeover case.

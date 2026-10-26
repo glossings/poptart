@@ -24,6 +24,7 @@ import { macroValue, assertMacroIndex } from './macros.mjs';
 import { fxKnobValue, assertFxKnobIndex } from './fxknobs.mjs';
 import { Frac } from './frac.mjs';
 import { chordIntervals, chordExtension, invertVoices, spreadVoices, voicingVoices, leadVoices, VOICING_NAMES, justVoices, JI_LIMITS } from './harmony.mjs';
+import { rateLedger } from './lfo-rate.mjs';
 
 /**
  * @typedef {Object} Step
@@ -188,7 +189,6 @@ export class Sig {
     // scheduler's poll. `.param("Osc 1 Phase", audio("mod"))` is what puts an entry here, and
     // phase modulation is what it is for: a value polled every 30 ms cannot be a modulator at
     // audio rate however finely it is interpolated.
-    this.paramRoutes = opts.paramRoutes ?? {};
     // MIDI injected into a specific plugin in the chain (see Sig#midi, the injector form): each
     // { slot, name, note } routes another track's notes (or a MIDI device) into the plugin at
     // `slot` (1..n = fx). The engine fans a track source's notes to the plugin, or wires a device.
@@ -316,7 +316,6 @@ export class Sig {
       instrument: this.instrument,
       fxChain: this.fxChain,
       paramSignals: this.paramSignals,
-      paramRoutes: this.paramRoutes,
       midiInjects: this.midiInjects,
       audioInjects: this.audioInjects,
       inputSource: this.inputSource,
@@ -419,6 +418,9 @@ export class Sig {
 
   /** Maps this signal's values through `fn`; rests (null) pass through untouched. */
   mapValue(fn) {
+    // Audio has no values here to map - the engine has them - so a function of the value can't
+    // reach it. Said rather than dropped, whichever method got here.
+    if (isConnection(this)) return this._audioRefuse('[signal] that operation needs the values themselves, which audio does not have here, so it is left out');
     const mappedStepsForCycle = this.stepsForCycle
       ? (cycle) => this.stepsForCycle(cycle).map((s) => (s.value == null ? s : { ...s, value: fn(s.value) }))
       : null;
@@ -549,14 +551,30 @@ export class Sig {
       if (this.lfoIR) return withLfoIR({ ...this.lfoIR, min, max });
       if (this.envIR) return withEnvIR({ ...this.envIR, min, max });
       if (this.ccIR) return withCcIR({ ...this.ccIR, min, max });
-      return this.mapValue((v) => min + v * (max - min));
     }
     if (this.lfoIR) return withLfoIR({ ...this.lfoIR, min: toBound(min), max: toBound(max) });
     if (this.envIR) return withEnvIR({ ...this.envIR, min: toBound(min), max: toBound(max) });
     if (this.ccIR) return withCcIR({ ...this.ccIR, min: toBound(min), max: toBound(max) });
+    // Everything else is plain arithmetic, so range works on whatever arithmetic works on. It maps
+    // the signal's own span onto min..max: 0..1 for most signals, -1..1 for audio.
+    const [lo, hi] = this._span();
+    if (typeof min === 'number' && typeof max === 'number') {
+      const k = (max - min) / (hi - lo);
+      return this.mul(k).add(min - lo * k);
+    }
     const minSig = toSignal(min);
-    return this.mul(toSignal(max).sub(minSig)).add(minSig);
+    const scaled = this.sub(lo);
+    return scaled.mul(toSignal(max).sub(minSig).div(hi - lo)).add(minSig);
   }
+
+  /**
+   * The values this signal swings between, which .range() maps from: 0..1 for patterns, LFOs and
+   * envelopes, and for anything with audio in it whatever its arithmetic makes of audio's -1..1.
+   */
+  _span() {
+    return isConnection(this) ? exprSpan(exprOf(this)) : [0, 1];
+  }
+
 
   /**
    * Speeds playback up: `.fast(2)` fits two cycles of the pattern into every cycle; `.fast(1/2)`
@@ -565,8 +583,9 @@ export class Sig {
    * grid, ties/ringing tails, and per-event controls attached BEFORE the .fast() (.vel(), sampler
    * .i()/.speed()/...) all warp together, so their values stay aligned with their events;
    * track-level params and channel modulators (.param(sine(...)), .gain(env())...) stay in real
-   * time. On an LFO builder it multiplies the rate instead - sine(2).fast(2) runs at 4 Hz - use
-   * .rate() to set an LFO's rate absolutely.
+   * time. On an LFO builder it multiplies the rate instead - sine(2).fast(2) runs at 4 Hz, and
+   * sine(1).fast("<1 2>") alternates its rate per cycle - use .rate() to set an LFO's rate
+   * absolutely.
    */
   fast(factor) {
     // A PATTERNED factor - a mini string or any step Sig - lets the rate vary across the cycle,
@@ -581,17 +600,22 @@ export class Sig {
     // a one-step pattern with no constVal, so it comes through here as a single whole-cycle
     // window. The two routes have to agree on every onset, and fastslow.test.mjs holds them to it.
     const factorSig = factor instanceof Sig ? factor : null;
-    if (typeof factor === 'string' || (factorSig && factorSig.constVal === undefined)) {
+    const patterned = typeof factor === 'string' || (factorSig && factorSig.constVal === undefined);
+    // On an LFO, "faster" is its rate - except rand(), which has no pace to scale (see rand()). A
+    // patterned factor makes the rate a pattern (see parseRate), read continuously rather than
+    // held per cycle: the rate is a signal like any other argument.
+    if (this.lfoIR?.shape === 'rand') return warnAndKeep(this, NO_RAND_RATE);
+    if (this.lfoIR && patterned) return this._lfoTimesRate(toSignal(factor));
+    if (patterned) {
       return this._fastPatterned(factorSig && !factorSig.stepsForCycle ? factorSig.hold() : toSignal(factor));
     }
     const f = Number(factorSig ? factorSig.constVal : factor);
     if (!Number.isFinite(f) || f === 0) {
       throw new Error('[signal] .fast() takes a nonzero factor, e.g. .fast(2) - negative plays in reverse');
     }
-    // On an LFO, "faster" is its rate - except rand(), which has no pace to scale (see rand()).
-    if (this.lfoIR?.shape === 'rand') return warnAndKeep(this, NO_RAND_RATE);
     if (this.lfoIR) {
       const ir = this.lfoIR;
+      if (ir.rateSig) return withLfoIR({ ...ir, rateSig: ir.rateSig.mul(f) });
       return withLfoIR(ir.rateHz != null
         ? { ...ir, rateHz: ir.rateHz * f }
         : { ...ir, rateCycles: (ir.rateCycles ?? 1) * f });
@@ -631,7 +655,8 @@ export class Sig {
     // Same "what counts as patterned" rule as .fast() above.
     const factorSig = factor instanceof Sig ? factor : null;
     if (typeof factor === 'string' || (factorSig && factorSig.constVal === undefined)) {
-      const rate = factorSig && !factorSig.stepsForCycle ? factorSig.hold() : toSignal(factor);
+      // An LFO's rate follows a continuous factor as it moves, so only a pattern's is held.
+      const rate = factorSig && !factorSig.stepsForCycle && !this.lfoIR ? factorSig.hold() : toSignal(factor);
       return this.fast(rate.mapValue((v) => 1 / Number(v)));
     }
     const f = Number(factorSig ? factorSig.constVal : factor);
@@ -669,7 +694,8 @@ export class Sig {
 
   /**
    * Sets an LFO's rate absolutely (unlike .fast(), which multiplies it): a number of cycles per
-   * pass, or a string like "0.5hz" for a free-running rate that ignores the tempo.
+   * pass, a pattern or signal of them (.rate("<1 2 4>"), .rate(auto("wobble"))), or a string like
+   * "0.5hz" for a free-running rate that ignores the tempo.
    */
   rate(rate) {
     // rand() is the one shape with nothing to pace: it draws afresh at every read, so a rate would
@@ -677,6 +703,18 @@ export class Sig {
     if (this.lfoIR?.shape === 'rand') return warnAndKeep(this, NO_RAND_RATE);
     if (this.lfoIR) return withLfoIR(withRate(this.lfoIR, rate));
     throw new Error('[signal] .rate() only applies to LFO signals - on a pattern use .fast()/.slow()');
+  }
+
+  // An LFO sped up by a patterned factor: its rate becomes rate x factor, a pattern in cycles. A
+  // free "hz" rate has no cycle grid for a pattern to sit on (see parseRate), so it plays on as it
+  // was, and says so.
+  _lfoTimesRate(factorSig) {
+    const ir = this.lfoIR;
+    if (ir.rateHz != null) {
+      return warnAndKeep(this, `[signal] a free-running "${ir.rateHz}hz" rate can't follow a pattern - write the rate in cycles to pattern it, e.g. sine(1).fast("<1 2>").`);
+    }
+    const rateSig = ir.rateSig ? ir.rateSig.mul(factorSig) : factorSig.mul(ir.rateCycles ?? 1);
+    return withLfoIR({ ...ir, rateCycles: undefined, rateSig });
   }
   phase(phaseCycles) {
     if (this.lfoIR?.shape === 'rand') return warnAndKeep(this, NO_RAND_RATE);
@@ -698,11 +736,18 @@ export class Sig {
     // "1 0.5".as("vel").synth("X") means - not MIDI notes 1 and 0.5 (see _fromHeadCtl).
     if (this.ctl) return this._fromHeadCtl((trigger) => trigger.synth(pluginId, config));
     assertPluginName('synth', pluginId);
-    return this._clone({
+    // Envelope options written before the synth (`n(0).decay(0.2).synth("W")`) were waiting for a
+    // sampler; on a synth they are its own amp envelope.
+    const pending = this.samplerPending ?? {};
+    const ampKeys = Object.keys(pending).filter((k) => k in AMP_STAGE_OF);
+    let out = this._clone({
       instrument: pluginId,
       ...(config?.state ? { slotStates: { ...this.slotStates, 0: config.state } } : {}),
       slotLabels: this._withLabel(0, config?.label, 'synth'),
+      ...(ampKeys.length ? { samplerPending: Object.fromEntries(Object.entries(pending).filter(([k]) => !(k in AMP_STAGE_OF))) } : {}),
     });
+    for (const key of ampKeys) out = out._paramAt(0, `@amp.${AMP_STAGE_OF[key]}`, pending[key]);
+    return out;
   }
 
   /**
@@ -1288,24 +1333,10 @@ export class Sig {
       return this;
     }
     const key = `${slot}:${name}`;
-    // An audio handle in value position is a CONNECTION: wire that track or bus onto the
-    // parameter and let it run at the sample rate. `.param("Osc 1 Phase", audio("mod"))` is
-    // phase modulation, and `.param("Cutoff", audio("env").mul(2000).add(400))` is an audio-rate
-    // sweep - neither is something a polled value could be.
-    if (value instanceof Sig && value._isBareAudioHandle()) {
-      const src = value.inputSource;
-      const routes = { ...this.paramRoutes, [key]: { slot, name, source: src.name, gain: src.gain ?? 1, offset: src.offset ?? 0 } };
-      // A parameter is one thing: a connection replaces whatever value was set on it, the same
-      // way setting a control twice keeps the last one.
-      const { [key]: _dropped, ...signals } = this.paramSignals;
-      return this._clone({ paramRoutes: routes, paramSignals: signals });
-    }
-    const sig = toSignal(value);
-    const { [key]: _unrouted, ...routes } = this.paramRoutes;
-    return this._clone({
-      paramRoutes: routes,
-      paramSignals: { ...this.paramSignals, [key]: { slot, name, sig } },
-    });
+    // Any signal is the value, audio and expressions included: `.param("Osc 1 Phase",
+    // audio("mod"))` is phase modulation, and `audio("a").mul(0.2).add(0.4)` moves the control
+    // around 0.4 (see Expressions). The engine is handed what can't be sampled here.
+    return this._clone({ paramSignals: { ...this.paramSignals, [key]: { slot, name, sig: toSignal(value) } } });
   }
 
   /**
@@ -1427,13 +1458,15 @@ export class Sig {
     // gain and offset .mul()/.add() carry would quietly do nothing. Saying so is the whole point:
     // silently accepting `.round()` here is how somebody spends an afternoon on a modulation that
     // was never connected. Said, not thrown: the connection still plays, just without this.
-    if (this._isBareAudioHandle()) {
-      return this._audioRefuse(
-        `[signal] .${op}() is not something an audio connection can do, so it is left out. `
-        + 'Only a constant gain (.mul) and offset (.add) ride on one.',
-      );
+    const plain = () => this.mapValue((v) => fn(Number(v)));
+    if (EXPR_FNS.has(op) && (this.expr || isNativeMod(this) || isConnection(this))) {
+      const node = { k: 'fn', op, a: [exprOf(this)] };
+      const out = exprHasSource(node) ? new Sig(() => null, {}) : plain();
+      out.expr = node;
+      return out;
     }
-    return this.mapValue((v) => fn(Number(v)));
+    if (isConnection(this)) return this._audioRefuse(`[signal] .${op}() is not something audio can go through, so it is left out`);
+    return plain();
   }
 
   /**
@@ -1448,11 +1481,8 @@ export class Sig {
     // gain and offset .mul()/.add() carry would quietly do nothing. Saying so is the whole point:
     // silently accepting `.round()` here is how somebody spends an afternoon on a modulation that
     // was never connected. Said, not thrown: the connection still plays, just without this.
-    if (this._isBareAudioHandle()) {
-      return this._audioRefuse(
-        `[signal] .${op}() is not something an audio connection can do, so it is left out. `
-        + 'Only a constant gain (.mul) and offset (.add) ride on one.',
-      );
+    if (isConnection(this) || isConnection(other)) {
+      return this._audioRefuse(`[signal] .${op}() is not something audio can go through, so it is left out`);
     }
     // A CONTROL operand - one of the top-level sampler builders, `speed("-1")`/`begin(0.5)`/… -
     // names a CHANNEL rather than a value stream, so the operation lands on that channel instead
@@ -1834,41 +1864,25 @@ export class Sig {
   }
 
   /**
-   * Scales and offsets an audio handle. The result is another handle, so the chain reads the way
-   * the rest of the language reads - and the engine gets one gain and one offset rather than a
-   * signal it would have to sample.
-   *
-   * Only a constant operand is allowed. A patterned one would have to be sampled to mean
-   * anything, and a connection has no onsets to sample it at; saying so plainly beats accepting
-   * it and quietly using its value at cycle zero forever. A CONTINUOUS one is refused for the
-   * same reason and needs saying separately: sine() and lfo() carry no step grid, so a test for
-   * steps alone lets them through to be read once at cycle zero and wired as a fixed gain - the
-   * exact silent misbehavior this refuses, and harder to notice because it does make a sound.
+   * `this op x` as an expression (see Expressions, beside constantOf), or null when plain
+   * JavaScript is the whole answer. The result still samples in JavaScript wherever it can - the
+   * same values, for the editor and for an engine that can't evaluate expressions - and only a
+   * signal with audio in it has nothing to sample.
    */
-  _audioScale(op, xs) {
-    const src = this.inputSource;
-    const where = `audio(${JSON.stringify(src.name)})`;
+  _exprBinop(op, xs, plain) {
     if (xs.length !== 1) {
-      return this._audioRefuse(`[signal] .${op}() on ${where} takes one number - it is a connection, not a pattern - so it is left out`);
+      return isConnection(this) || xs.some(isConnection)
+        ? this._audioRefuse(`[signal] .${op}() on audio takes one operand at a time, so it is left out`)
+        : null;
     }
     const x = xs[0];
-    const k = typeof x === 'number' ? x : constantOf(x);
-    if (typeof k !== 'number' || !Number.isFinite(k)) {
-      return this._audioRefuse(
-        `[signal] .${op}() on ${where} needs a plain number, so it is left out. An audio signal patched into a parameter is a connection, `
-        + 'so only a constant gain (.mul) and offset (.add) can ride on it.',
-      );
-    }
-    let gain = src.gain ?? 1;
-    let offset = src.offset ?? 0;
-    if (op === 'mul') { gain *= k; offset *= k; }
-    else if (op === 'div') {
-      if (k === 0) return this._audioRefuse(`[signal] .div(0) on ${where} is left out`);
-      gain /= k; offset /= k;
-    } else if (op === 'add') offset += k;
-    else if (op === 'sub') offset -= k;
-    else return this._audioRefuse(`[signal] .${op}() is not something an audio connection can do, so it is left out - use .mul() or .add()`);
-    return this._clone({ inputSource: { ...src, gain, offset } });
+    if (isLayer(x) || (x instanceof Sig && x.ctl) || this.inputSource?.io === 'midi' || this.midiNotes) return null;
+    if (!wantsExpr(op, this, x)) return null;
+    if (!EXPR_OPS.has(op)) return this._audioRefuse(`[signal] .${op}() is not something audio can go through, so it is left out`);
+    const node = { k: 'op', op, a: [exprOf(this), exprOf(x)] };
+    const out = exprHasSource(node) ? new Sig(() => null, {}) : plain();
+    out.expr = node;
+    return out;
   }
 
   /**
@@ -1917,7 +1931,12 @@ export class Sig {
     // ordinary arithmetic on it would compose over nothing. Scaling and offsetting it are still
     // meaningful though, and they are what `.param("phase", audio("mod").mul(0.5))` needs, so
     // they are carried on the handle and become a gain and an offset in the graph.
-    if (this._isBareAudioHandle()) return this._audioScale(op, xs);
+    const asExpr = this._exprBinop(op, xs, () => this._arithPlain(op, xs, fn, linear));
+    if (asExpr) return asExpr;
+    return this._arithPlain(op, xs, fn, linear);
+  }
+
+  _arithPlain(op, xs, fn, linear) {
     const x = xs[0];
     if (xs.length !== 1 || isLayer(x) || (op === 'set' && !isBareControl(x))) return this._layers(op, fn, xs);
     const inScale = x instanceof Sig && x.pitchKind === 'degree' && this._holdsNotes();
@@ -1929,17 +1948,24 @@ export class Sig {
   ceil() { return this._unop('ceil', Math.ceil); }
   /** Bounds each value into [lo, hi]. Both bounds take patterns/signals, like every other control. */
   clamp(lo, hi) {
-    // Two operations underneath; a connection refuses the first, and one refusal is the message.
-    if (this._isBareAudioHandle()) return this._binop('clamp', lo, (a, b) => Math.max(a, b), false);
-    return this._binop('clamp', lo, (a, b) => Math.max(a, b), false)._binop('clamp', hi, (a, b) => Math.min(a, b), false);
+    const floorPlain = () => this._binop('clamp', lo, (a, b) => Math.max(a, b), false);
+    const floor = this._exprBinop('max', [lo], floorPlain) ?? floorPlain();
+    const ceilPlain = () => floor._binop('clamp', hi, (a, b) => Math.min(a, b), false);
+    return floor._exprBinop('min', [hi], ceilPlain) ?? ceilPlain();
   }
 
-  get gte() { return binopModes(this, (sig, [x]) => sig._binop('gte', x, (a, b) => (a >= b ? 1 : 0), false)); }
-  get gt() { return binopModes(this, (sig, [x]) => sig._binop('gt', x, (a, b) => (a > b ? 1 : 0), false)); }
-  get lte() { return binopModes(this, (sig, [x]) => sig._binop('lte', x, (a, b) => (a <= b ? 1 : 0), false)); }
-  get lt() { return binopModes(this, (sig, [x]) => sig._binop('lt', x, (a, b) => (a < b ? 1 : 0), false)); }
-  get eq() { return binopModes(this, (sig, [x]) => sig._binop('eq', x, (a, b) => (a === b ? 1 : 0), false)); }
-  get neq() { return binopModes(this, (sig, [x]) => sig._binop('neq', x, (a, b) => (a !== b ? 1 : 0), false)); }
+  /** A comparison: 1 where it holds, 0 where it doesn't. */
+  _compare(op, xs, fn) {
+    const plain = () => this._binop(op, xs[0], fn, false);
+    return this._exprBinop(op, xs, plain) ?? plain();
+  }
+
+  get gte() { return binopModes(this, (sig, xs) => sig._compare('gte', xs, (a, b) => (a >= b ? 1 : 0))); }
+  get gt() { return binopModes(this, (sig, xs) => sig._compare('gt', xs, (a, b) => (a > b ? 1 : 0))); }
+  get lte() { return binopModes(this, (sig, xs) => sig._compare('lte', xs, (a, b) => (a <= b ? 1 : 0))); }
+  get lt() { return binopModes(this, (sig, xs) => sig._compare('lt', xs, (a, b) => (a < b ? 1 : 0))); }
+  get eq() { return binopModes(this, (sig, xs) => sig._compare('eq', xs, (a, b) => (a === b ? 1 : 0))); }
+  get neq() { return binopModes(this, (sig, xs) => sig._compare('neq', xs, (a, b) => (a !== b ? 1 : 0))); }
 
   /**
    * `n("0 1 2 3").when("1 0", x => x.add(12))` - applies `fn` to this pattern wherever `cond` is
@@ -3068,6 +3094,9 @@ export class Sig {
   // -------------------------------------------------------------------------------------------
 
   _samplerOpt(method, key, sig) {
+    // On a synth the envelope options are its own amp envelope - whichever controls the device
+    // has for them, in the same seconds (see the engines' `@amp.` names).
+    if (!this.sampler && this.instrument && key in AMP_STAGE_OF) return this._paramAt(0, `@amp.${AMP_STAGE_OF[key]}`, sig);
     // Patterned values mix their structure into the event grid like .vel()/.note() do, so
     // s("breaks2").slice("0 1 2 3") plays four quarter-cycle events, not one, and a `,`-stacked
     // value plays its layers at once - `.speed("1.1,0.9")` is two hits, detuned apart. Each event
@@ -5608,6 +5637,113 @@ function withPitchKind(sig, kind) {
  * anything that moves. Used where a value has to be settled once and read forever, so "it happened
  * to be 0.5 at cycle zero" is not good enough.
  */
+// ---------------------------------------------------------------------------------------------
+// Expressions. Arithmetic that involves audio, or that combines modulators the engine runs
+// natively (lfo/env/cc) with each other or with patterns, records what it computed as a tree
+// beside the JavaScript that computes it. A control set to such a signal is sent to the engine as
+// that tree and evaluated there every sample (see Scheduler#_controlEntries), so
+// `audio("a").mul(lfo())` is a VCA, `env().mul(lfo())` is as sharp as a lone env(), and
+// `audio("a").mul(0.2).add(audio("b").mul(0.1)).add(0.4)` is both sources around 0.4.
+//
+// Nodes: { k: 'const', v } | { k: 'src', source } (an audio source) | { k: 'leaf', sig } (any
+// other signal - the engine is fed it as an input, natively when it is a single modulator and
+// polled otherwise) | { k: 'op', op, a: [x, y] } | { k: 'fn', op, a: [x] }.
+
+// The sampler envelope's options, and the amp-envelope stage each one is on a synth.
+const AMP_STAGE_OF = { attack: 'attack', decay: 'decay', sustain: 'sustain', release: 'release', envScale: 'scale' };
+
+const EXPR_OPS = new Set(['add', 'sub', 'mul', 'div', 'mod', 'gt', 'gte', 'lt', 'lte', 'eq', 'neq', 'min', 'max']);
+const EXPR_FNS = new Set(['abs', 'round', 'floor', 'ceil']);
+
+const isNativeMod = (s) => s instanceof Sig && Boolean(s.lfoIR || s.envIR || s.ccIR);
+
+/** A signal that carries audio: a bare audio("x") handle, or an expression with one in it. */
+function isConnection(s) {
+  if (!(s instanceof Sig)) return false;
+  if (s._isBareAudioHandle()) return true;
+  return Boolean(s.expr && exprHasSource(s.expr));
+}
+
+/**
+ * The expression a control set to `sig` has to be evaluated as, or null when `sig` is an ordinary
+ * signal (polled, or a single native modulator). For the scheduler, which hands it to the engine.
+ */
+export function paramExpr(sig) {
+  if (!(sig instanceof Sig)) return null;
+  if (sig.expr) return sig.expr;
+  return sig._isBareAudioHandle() ? { k: 'src', source: sig.inputSource.name } : null;
+}
+
+function exprHasSource(node) {
+  if (node.k === 'src') return true;
+  return Array.isArray(node.a) && node.a.some(exprHasSource);
+}
+
+/** `x` as an expression node. */
+function exprOf(x) {
+  if (typeof x === 'number') return { k: 'const', v: x };
+  if (x instanceof Sig) {
+    if (x.expr) return x.expr;
+    if (x._isBareAudioHandle()) return { k: 'src', source: x.inputSource.name };
+    if (!isNativeMod(x)) {
+      const c = constantOf(x);
+      if (c != null) return { k: 'const', v: c };
+    }
+    return { k: 'leaf', sig: x };
+  }
+  const s = toSignal(x);
+  const c = constantOf(s);
+  return c != null ? { k: 'const', v: c } : { k: 'leaf', sig: s };
+}
+
+/**
+ * Whether `a op b` is worth an expression rather than JavaScript alone: audio is involved, an
+ * expression already is, or a native modulator meets anything that isn't a constant. A modulator
+ * with a constant under + - * / stays the modulator it is (its range is rewritten instead).
+ */
+function wantsExpr(op, a, b) {
+  if (!EXPR_OPS.has(op)) return isConnection(a) || isConnection(b);
+  if (isConnection(a) || isConnection(b)) return true;
+  if ((a instanceof Sig && a.expr) || (b instanceof Sig && b.expr)) return true;
+  const asSig = (x) => (x instanceof Sig || typeof x === 'number' ? x : toSignal(x));
+  const constB = constantOf(asSig(b)) != null;
+  const constA = constantOf(asSig(a)) != null;
+  if (isNativeMod(a) && isNativeMod(b)) return true;
+  if (isNativeMod(a)) return !constB || !['add', 'sub', 'mul', 'div'].includes(op);
+  if (isNativeMod(b)) return !constA || !['add', 'sub', 'mul', 'div'].includes(op);
+  return false;
+}
+
+/**
+ * The values an expression swings between, by interval arithmetic: audio sources -1..1, every
+ * other input 0..1. What .range() maps from on a connection.
+ */
+function exprSpan(node) {
+  switch (node.k) {
+    case 'const': return [node.v, node.v];
+    case 'src': return [-1, 1];
+    case 'leaf': return [0, 1];
+    case 'op': {
+      const [a, b] = node.a.map(exprSpan);
+      const corners = (f) => { const v = [f(a[0], b[0]), f(a[0], b[1]), f(a[1], b[0]), f(a[1], b[1])]; return [Math.min(...v), Math.max(...v)]; };
+      if (node.op === 'add') return [a[0] + b[0], a[1] + b[1]];
+      if (node.op === 'sub') return [a[0] - b[1], a[1] - b[0]];
+      if (node.op === 'mul') return corners((x, y) => x * y);
+      if (node.op === 'div' && (b[0] > 0 || b[1] < 0)) return corners((x, y) => x / y);
+      if (node.op === 'min') return [Math.min(a[0], b[0]), Math.min(a[1], b[1])];
+      if (node.op === 'max') return [Math.max(a[0], b[0]), Math.max(a[1], b[1])];
+      return [0, 1];
+    }
+    case 'fn':
+      if (node.op === 'abs') {
+        const [lo, hi] = exprSpan(node.a[0]);
+        return lo >= 0 ? [lo, hi] : hi <= 0 ? [-hi, -lo] : [0, Math.max(-lo, hi)];
+      }
+      return exprSpan(node.a[0]);
+    default: return [0, 1];
+  }
+}
+
 function constantOf(x) {
   if (typeof x === 'number') return Number.isFinite(x) ? x : null;
   if (!(x instanceof Sig)) return null;
@@ -5702,7 +5838,11 @@ export function mini(str, offset = 0, mode) {
   }
   const ast = parseMini(String(str), offset);
   const valueFn = (v) => (Number.isNaN(Number(v)) ? v : Number(v));
-  return new Sig(miniStepSampler(ast, valueFn), { stepsForCycle: miniStepsForCycle(ast, valueFn) });
+  const sig = new Sig(miniStepSampler(ast, valueFn), { stepsForCycle: miniStepsForCycle(ast, valueFn) });
+  // The text it was written as, for the one reader that needs the literal back: a modulator's
+  // rate, where the editor's location transpile hands `sine("0.5hz")` over as mini("0.5hz", …).
+  sig.miniText = String(str);
+  return sig;
 }
 
 /** Scale-degree control - degrees are plain numbers until `.scale(...)` turns them into MIDI notes. */
@@ -7356,26 +7496,75 @@ function sampleViaSteps(stepsForCycleFn, t, cps, pos) {
 // there for a modulator that should ignore the tempo, written with the unit on it: rate: "0.5hz".
 // A synced rate follows setbpm (the scheduler re-sends it) and is counted on the cycle grid, so
 // rate 0.25 starts its pass on cycles 0, 4, 8 (see lfoPhaseCount); a free one does neither.
+//
+// Any other pattern or signal is a rate that moves - sine("<1 2 4>"), rate: auto("wobble") - and
+// rides in the IR as `rateSig`, in cycles. Its phase is the integral of the rate (see lfo-rate.mjs).
+// A patterned rate is always synced: the pattern lives on the cycle grid, so its "hz" would be a
+// different number of turns at every tempo.
 export function parseRate(rate) {
+  // The editor hands every literal over as mini(…); a lone number or "0.5hz" is still that value.
+  if (rate instanceof Sig && /^\s*-?[\d.]+\s*(hz)?\s*$/i.test(rate.miniText ?? '')) rate = rate.miniText;
   if (typeof rate === 'string') {
     const hz = /^\s*(-?[\d.]+)\s*hz\s*$/i.exec(rate);
     if (hz && Number.isFinite(Number(hz[1]))) return { rateHz: Number(hz[1]) };
+    if (rate.trim() !== '' && Number.isFinite(Number(rate))) return { rateCycles: Number(rate) };
+  }
+  if (typeof rate === 'string' || rate instanceof Sig) {
+    const sig = toSignal(rate);
+    if (typeof sig.constVal === 'number' && Number.isFinite(sig.constVal)) return { rateCycles: sig.constVal };
+    // A step pattern with no number in it ("quickly") is a mistake, not a rate: said now, against
+    // the line that wrote it, and played at the default rate rather than silencing the track. The
+    // first couple of cycles are looked at, so "<~ 2>" opening on a rest is not misjudged.
+    if (sig.stepsForCycle && ![0, 1].some((c) => sig.stepsForCycle(c).some((st) => st.value != null && Number.isFinite(Number(st.value))))) {
+      warnUser(`[signal] rate takes a number of cycles, a pattern of them, or a string with the unit for free-running - rate: 2, rate: "<1 2>" or rate: "0.5hz" (got ${JSON.stringify(sig.miniText ?? String(rate))}). Playing at rate 1.`);
+      return { rateCycles: 1 };
+    }
+    return { rateSig: sig };
   }
   const n = Number(rate);
   if (!Number.isFinite(n)) {
-    throw new Error(`[signal] rate takes a number of cycles, or a string with the unit for free-running - rate: 2 or rate: "0.5hz" (got ${JSON.stringify(rate)})`);
+    throw new Error(`[signal] rate takes a number of cycles, a pattern of them, or a string with the unit for free-running - rate: 2, rate: "<1 2>" or rate: "0.5hz" (got ${JSON.stringify(rate)})`);
   }
   return { rateCycles: n };
 }
 
-/** What a rate is worth in Hz right now: a free one as written, a synced one against the tempo. */
-export function lfoRateHz(ir, cps = 1) {
+// One running count per rate signal, shared by every IR that carries it (a .range() copies the IR,
+// not the rate), so the JS sample, the scheduler's anchors and its rate changes read one ledger.
+const rateLedgers = new WeakMap();
+function rateLedgerOf(sig) {
+  let ledger = rateLedgers.get(sig);
+  if (!ledger) {
+    let warnedHz = false;
+    ledger = rateLedger(sig, (value) => {
+      if (typeof value === 'string' && /hz\s*$/i.test(value) && !warnedHz) {
+        warnedHz = true;
+        warnUser(`[signal] a patterned rate counts in cycles - ${JSON.stringify(value)} holds the rate before it. A free-running "hz" rate has to be a single value.`);
+      }
+      const n = typeof value === 'number' ? value : Number(String(value).trim());
+      return Number.isFinite(n) ? n : null;
+    });
+    rateLedgers.set(sig, ledger);
+  }
+  return ledger;
+}
+
+/**
+ * What a rate is worth in Hz: a free one as written, a synced one against the tempo, and a
+ * patterned one as it stands at cycle position `pos`.
+ */
+export function lfoRateHz(ir, cps = 1, pos = 0) {
+  if (ir.rateSig) return rateLedgerOf(ir.rateSig).rateAt(pos, cps) * cps;
   return ir.rateHz ?? (ir.rateCycles ?? 1) * cps;
+}
+
+/** Every point in [from, to) where a patterned rate changes, as { at, rate } in cycles. */
+export function lfoRateChanges(ir, from, to, cps = 1) {
+  return ir.rateSig ? rateLedgerOf(ir.rateSig).changesIn(from, to, cps) : [];
 }
 
 /** Replaces whichever rate an IR carries with a newly parsed one. */
 function withRate(ir, rate) {
-  return { ...ir, rateHz: undefined, rateCycles: undefined, ...parseRate(rate) };
+  return { ...ir, rateHz: undefined, rateCycles: undefined, rateSig: undefined, ...parseRate(rate) };
 }
 
 /**
@@ -7385,13 +7574,25 @@ function withRate(ir, rate) {
  * moment the process happened to boot. A free "0.5hz" rate counts seconds and ignores the grid,
  * which is the whole of what asking for Hz means.
  *
+ * A patterned rate counts the integral of the rate over the cycles (see lfo-rate.mjs): the same
+ * grid anchors while the rate holds, carried on from wherever the phase had got to when it moves.
+ *
+ * `from` ({ sec, cycle }) counts from somewhere other than the origin - the last shape swap, which
+ * restarts the shape (see the scheduler's _scheduleShapeSwaps).
+ *
  * The scheduler pins the native modulator to this same count (see _anchorLFOs), so the sound, the
  * JS-side value, and anything drawing a playhead all read one clock.
  */
-export function lfoPhaseCount(ir, tSeconds, cps, pos) {
-  const turns = ir.rateHz != null
-    ? tSeconds * ir.rateHz
-    : (pos ?? tSeconds * cps) * (ir.rateCycles ?? 1);
+export function lfoPhaseCount(ir, tSeconds, cps, pos, from = null) {
+  let turns;
+  if (ir.rateSig) {
+    const ledger = rateLedgerOf(ir.rateSig);
+    turns = ledger.turnsAt(pos ?? tSeconds * cps, cps) - (from ? ledger.turnsAt(from.cycle, cps) : 0);
+  } else if (ir.rateHz != null) {
+    turns = (tSeconds - (from?.sec ?? 0)) * ir.rateHz;
+  } else {
+    turns = ((pos ?? tSeconds * cps) - (from?.cycle ?? 0)) * (ir.rateCycles ?? 1);
+  }
   return turns + (ir.phaseCycles ?? 0);
 }
 
@@ -7464,7 +7665,10 @@ function sampleLfoIR(ir, tSeconds, cps, pos) {
         unipolar = points[0].y;
         break;
       }
-      const turns = ((pos ?? tSeconds * cps) - onset) / cps * lfoRateHz(ir, cps);
+      const at = pos ?? tSeconds * cps;
+      const turns = ir.rateSig
+        ? rateLedgerOf(ir.rateSig).turnsAt(at, cps) - rateLedgerOf(ir.rateSig).turnsAt(onset, cps)
+        : (at - onset) / cps * lfoRateHz(ir, cps);
       unipolar = ir.mode === 'envelope'
         ? sampleShape(points, Math.min(turns, 1))
         : sampleShape(points, (((turns + (ir.phaseCycles ?? 0)) % 1) + 1) % 1);
@@ -7484,9 +7688,15 @@ function withLfoIR(ir) {
   return new Sig((t, cps, pos) => sampleLfoIR(ir, t, cps, pos), { lfoIR: ir });
 }
 
+// A modulator builder's lone argument is its rate unless it is an options object: a number, a
+// string ("0.5hz", or a mini pattern) or a signal (`sine(auto("wobble"))`).
+function isRateShorthand(opts) {
+  return typeof opts === 'number' || typeof opts === 'string' || opts instanceof Sig;
+}
+
 function shapeSignal(shape) {
   return (opts = {}) => {
-    const o = typeof opts === 'number' || typeof opts === 'string' ? { rate: opts } : opts; // sine(2), sine("0.5hz")
+    const o = isRateShorthand(opts) ? { rate: opts } : opts; // sine(2), sine("0.5hz"), sine("<1 2>")
     const { rate = 1, phase = 0 } = o;
     const ir = { shape, ...parseRate(rate), phaseCycles: phase, min: 0, max: 1 };
     // perlin is the only shape built here with a stream to decorrelate (rand() has its own builder
@@ -7567,7 +7777,7 @@ const DEFAULT_LFO_SHAPE = '0,0 0.5,1 1,0'; // triangle - what a bare lfo() start
  * 'envelope' (plays once per note over 1/rate seconds, then holds its final level).
  */
 export function lfo(shape, opts = {}) {
-  const { rate = 1, phase = 0, mode = 'free', glide = 0 } = typeof opts === 'number' || typeof opts === 'string' ? { rate: opts } : opts;
+  const { rate = 1, phase = 0, mode = 'free', glide = 0 } = isRateShorthand(opts) ? { rate: opts } : opts;
   if (!['free', 'retrigger', 'envelope'].includes(mode)) {
     throw new Error(`[signal] lfo() mode must be 'free', 'retrigger', or 'envelope' (got "${mode}")`);
   }

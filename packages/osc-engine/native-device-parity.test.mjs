@@ -48,7 +48,7 @@ import { WavetableSynth } from '../web-engine/src/devices/wavetable.mjs';
 import { GranularSynth } from '../web-engine/src/devices/granular.mjs';
 import { NoiseSynth } from '../web-engine/src/devices/noise.mjs';
 import { LpgProcessor } from '../web-engine/src/devices/lpg.mjs';
-import { IR_NAMES, synthesizeImpulse } from '../web-engine/src/devices/builtins.mjs';
+import { IR_NAMES, bufferFromChannels, synthesizeImpulse } from '../web-engine/src/devices/builtins.mjs';
 import { Biquad, BIQUAD_TYPES } from '../web-engine/src/dsp/biquad.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -127,13 +127,15 @@ function buildHarness(devices) {
 }
 
 /** One device's output: the values in real units, the input, and what comes back. */
-function runNative(binary, { id, values, input, frames, notes = [], bpm = 120, keyed = null, samples = [], moving = [] }) {
+function runNative(binary, { id, values, input, frames, notes = [], bpm = 120, keyed = null, samples = [], moving = [], shapes = [], report = null }) {
   const stdin = Buffer.alloc(values.length * 4 + input.length * 4);
   for (let i = 0; i < values.length; i++) stdin.writeFloatLE(Math.fround(values[i]), i * 4);
   for (let i = 0; i < input.length; i++) stdin.writeFloatLE(input[i], values.length * 4 + i * 4);
   const args = [id, String(SAMPLE_RATE), String(frames), String(BLOCK), String(bpm)];
   if (keyed !== null) args.push('-k', keyed ? '1' : '0');
-  for (const one of samples) args.push('-S', `${one.param}:${one.slot}:${one.rate}:${one.file}`);
+  for (const one of samples) args.push('-S', `${one.param}:${one.slot}:${one.rate}:${one.channels ?? 1}:${one.frameLength ?? 0}:${one.file}`);
+  for (const one of shapes) args.push('-H', `${one.param}:${one.slot}:${one.file}`);
+  if (report) args.push('-R', report);
   for (const n of notes) args.push('-n', `${n.frame}:${n.note}:${n.velocity}`);
   for (const one of moving) args.push('-A', `${one.param}:${one.file}`);
   const run = spawnSync(binary, args, { input: stdin, maxBuffer: 1 << 28 });
@@ -150,11 +152,12 @@ function runNative(binary, { id, values, input, frames, notes = [], bpm = 120, k
  * process that is handed its two output channels - exactly as the two worklets that host them do
  * (web-engine/src/worklets), so this stands in for both.
  */
-function runBrowser(descriptor, { values, input, frames, notes = [], bpm = 120, channels = 2, keyed = true, load = null }) {
-  if (descriptor.kind === 'synth') return runBrowserSynth(descriptor, { values, frames, notes, bpm, load });
+function runBrowser(descriptor, { values, input, frames, notes = [], bpm = 120, channels = 2, keyed = true, load = null, shapes = [], onDone = null }) {
+  if (descriptor.kind === 'synth') return runBrowserSynth(descriptor, { values, frames, notes, bpm, load, shapes, onDone });
   const Processor = PROCESSORS[descriptor.id];
   const fx = new Processor(SAMPLE_RATE);
-  if (load) fx.loadSample(load.param, load.slot, { channels: [load.data], sampleRate: load.rate });
+  if (load) fx.loadSample(load.param, load.slot, { channels: load.channels ?? [load.data], sampleRate: load.rate, frameLength: load.frameLength || null });
+  for (const one of shapes) fx.loadShape(one.param, one.slot, one.table);
   if (typeof fx.setTempo === 'function') fx.setTempo(bpm, 0);
   const params = {};
   descriptor.params.forEach((p, i) => { params[p.id] = Math.fround(values[i]); });
@@ -169,8 +172,9 @@ function runBrowser(descriptor, { values, input, frames, notes = [], bpm = 120, 
     const n = Math.min(BLOCK, frames - at);
     while (nextNote < notes.length && notes[nextNote].frame < at + n) {
       const one = notes[nextNote++];
-      if (one.velocity > 0) fx.noteOn?.(one.note, one.velocity, 0);
-      else fx.noteOff?.(one.note);
+      // At the note's own time: the processor places it inside the block itself.
+      if (one.velocity > 0) fx.noteOn?.(one.note, one.velocity, one.frame / SAMPLE_RATE);
+      else fx.noteOff?.(one.note, one.frame / SAMPLE_RATE);
     }
     for (let i = 0; i < n; i++) {
       inputs[0][i] = input[(at + i) * channels];
@@ -193,16 +197,18 @@ function runBrowser(descriptor, { values, input, frames, notes = [], bpm = 120, 
       out[(at + i) * 2 + 1] = outputs[1][i];
     }
   }
+  onDone?.(fx);
   return out;
 }
 
 /** An instrument, played the way the synth worklet plays one. */
-function runBrowserSynth(descriptor, { values, frames, notes, bpm, load = null }) {
+function runBrowserSynth(descriptor, { values, frames, notes, bpm, load = null, shapes = [], onDone = null }) {
   const Synth = PROCESSORS[descriptor.id];
   const synth = new Synth(SAMPLE_RATE);
   // A file the device plays, handed over as the engine hands one over: plain channels of
   // samples at the file's own rate (web-audio-engine.mjs's _loadSampleParam).
-  if (load) synth.loadSample(load.param, load.slot, { channels: [load.data], sampleRate: load.rate });
+  if (load) synth.loadSample(load.param, load.slot, { channels: load.channels ?? [load.data], sampleRate: load.rate, frameLength: load.frameLength || null });
+  for (const one of shapes) synth.loadShape(one.param, one.slot, one.table);
   if (typeof synth.setTempo === 'function') synth.setTempo(bpm, 0);
   const params = {};
   descriptor.params.forEach((p, i) => { params[p.id] = Math.fround(values[i]); });
@@ -214,12 +220,13 @@ function runBrowserSynth(descriptor, { values, frames, notes, bpm, load = null }
     const n = Math.min(BLOCK, frames - at);
     synth.setParams(params);
     synth.setBend(0);
-    // Notes land at the start of the block they arrive in, which is where they land on the
-    // desktop: an engine sends a note to a device between blocks, with no offset into one.
+    // Notes land on their own sample, as they do on the desktop: the UGen cuts its render at a
+    // note's offset into the block (World's mSampleOffset), and the synth here splits its block
+    // at the offset it is queued with.
     while (nextNote < notes.length && notes[nextNote].frame < at + n) {
       const one = notes[nextNote++];
-      if (one.velocity > 0) synth.queueNoteOn(one.note, one.velocity, 0);
-      else synth.queueNoteOff(one.note, 0);
+      if (one.velocity > 0) synth.queueNoteOn(one.note, one.velocity, one.frame - at);
+      else synth.queueNoteOff(one.note, one.frame - at);
     }
     left.fill(0);
     right.fill(0);
@@ -229,6 +236,7 @@ function runBrowserSynth(descriptor, { values, frames, notes, bpm, load = null }
       out[(at + i) * 2 + 1] = right[i];
     }
   }
+  onDone?.(synth);
   return out;
 }
 
@@ -494,6 +502,14 @@ function waysToPlay(device) {
       ...chord(BLOCK * 6, [48, 52, 55, 59], 0),
       ...chord(BLOCK * 12, [45, 48, 52, 55], 0),
     ] });
+    // Notes between block edges, which is where nearly every note falls: each has to start on its
+    // own sample, not on the edge before it.
+    ways.push({ what: 'playing notes off the block edges', keyed: null, notes: [
+      { frame: 37, note: 50, velocity: 0.9 },
+      { frame: BLOCK * 4 + 91, note: 57, velocity: 0.6 },
+      { frame: BLOCK * 9 + 5, note: 50, velocity: 0 },
+      { frame: BLOCK * 14 + 127, note: 57, velocity: 0 },
+    ] });
     return ways;
   }
   if (device.sidechain) {
@@ -507,6 +523,10 @@ function waysToPlay(device) {
       { frame: 0, note: 36, velocity: 1 },
       { frame: BLOCK * 8, note: 36, velocity: 1 },
       { frame: BLOCK * 16, note: 36, velocity: 1 },
+    ] });
+    ways.push({ what: "on a routed track's notes off the block edges", keyed: false, notes: [
+      { frame: 61, note: 36, velocity: 1 },
+      { frame: BLOCK * 8 + 77, note: 36, velocity: 1 },
     ] });
   }
   return ways;
@@ -852,4 +872,184 @@ test('a file loaded as the impulse response is convolved with, aligned', { skip:
   const theirs = convolverReference(CONVOLVER, { values, input, frames, response });
   const { rmsA } = compare('Convolver', 'with a file as its response', mine, theirs);
   assert.ok(rmsA > 1e-3, 'the loaded response made no sound');
+});
+
+// ---- what a device can be handed besides its controls ------------------------------------------
+//
+// A wavetable cut from a file, a drawn curve, a stereo response, and what a device reports back.
+// Each reaches the compiled device the way the host hands it over (PdSample, /shape, the work
+// calls, pd_report) and the browser's processor the way its engine posts it.
+
+/** A file as interleaved frames, at a rate and in channels of its own. */
+function interleave(channels) {
+  const frames = channels[0].length;
+  const out = new Float32Array(frames * channels.length);
+  for (let i = 0; i < frames; i++) for (let c = 0; c < channels.length; c++) out[i * channels.length + c] = channels[c][i];
+  return out;
+}
+
+/** A stack of waveforms, one per frame, each `length` long and brighter than the last. */
+function tableFile(frames, length, { stereo = false, seed = 3 } = {}) {
+  const next = rng(seed);
+  const left = new Float32Array(frames * length);
+  const right = new Float32Array(frames * length);
+  for (let f = 0; f < frames; f++) {
+    const harmonics = 1 + f * 3;
+    for (let i = 0; i < length; i++) {
+      const t = i / length;
+      let v = 0;
+      for (let k = 1; k <= harmonics; k++) v += Math.sin(2 * Math.PI * k * t) / k;
+      left[f * length + i] = Math.fround(v * 0.4 + (next() - 0.5) * 0.01);
+      right[f * length + i] = Math.fround(v * 0.3);
+    }
+  }
+  return stereo ? [left, right] : [left];
+}
+
+const WAVETABLE = devices.find((d) => d.id === 'Wavetable')?.device;
+
+for (const [what, make] of [
+  ['frames 256 long, as the file declares', () => ({ channels: tableFile(8, 256), rate: 44100, frameLength: 256 })],
+  ['frames of the usual length, in stereo', () => ({ channels: tableFile(3, 2048, { stereo: true }), rate: 48000, frameLength: 0 })],
+  ['a single cycle shorter than a frame', () => ({ channels: tableFile(1, 600), rate: 48000, frameLength: 0 })],
+  ['frames that are not a power of two long', () => ({ channels: tableFile(5, 1000), rate: 48000, frameLength: 1000 })],
+]) {
+  test(`a Wavetable table cut from a file plays the same on both engines: ${what}`, { skip: compiler ? false : 'no clang++' }, () => {
+    const binary = buildHarness(devices);
+    const { channels, rate, frameLength } = make();
+    const device = WAVETABLE;
+    const tableParam = device.params.findIndex((p) => p.id === 'osc1.table');
+    const slot = device.params[tableParam].options.length;
+    const file = writeFile(path.join(WORK, 'Wavetable-table.f32'), interleave(channels));
+    const values = defaultValues(device).map((v, i) => (i === tableParam ? slot : v));
+    // Between two frames, so the position blend reads the table the file became.
+    values[device.params.findIndex((p) => p.id === 'osc1.position')] = 0.4;
+    const frames = BLOCK * 24;
+    const notes = [{ frame: 0, note: 48, velocity: 0.9 }, { frame: BLOCK * 6 + 17, note: 79, velocity: 0.7 }];
+    const native = runNative(binary, {
+      id: 'Wavetable', values, input: new Float32Array(frames * 2), frames, notes,
+      samples: [{ param: tableParam, slot, rate, channels: channels.length, frameLength, file }],
+    });
+    const browser = runBrowser(device, {
+      values, input: new Float32Array(frames * 2), frames, notes,
+      load: { param: 'osc1.table', slot, channels, rate, frameLength },
+    });
+    const { rmsA } = compare('Wavetable', `with a table cut from ${what}`, native, browser);
+    assert.ok(rmsA > 1e-3, 'the loaded table made no sound');
+    // And it is the FILE playing, not the first shipped table an empty slot falls back to.
+    const shipped = runNative(binary, { id: 'Wavetable', values: values.map((v, i) => (i === tableParam ? 0 : v)), input: new Float32Array(frames * 2), frames, notes });
+    let differs = 0;
+    for (let i = 0; i < native.length; i++) differs = Math.max(differs, Math.abs(native[i] - shipped[i]));
+    assert.ok(differs > 1e-3, 'the loaded table sounded exactly like the shipped one');
+  });
+}
+
+/** A drawn curve, sampled at the engine's SHAPE_POINTS: lopsided, so it is nobody's named curve. */
+function drawnTable(points = 256) {
+  return Float32Array.from({ length: points }, (_, i) => {
+    const x = i / (points - 1);
+    return Math.fround(x < 0.5 ? 0.5 * Math.pow(x * 2, 0.4) : 0.5 + 0.45 * Math.pow((x - 0.5) * 2, 1.8));
+  });
+}
+
+test('a drawn Distort curve shapes the same on both engines', { skip: compiler ? false : 'no clang++' }, () => {
+  const binary = buildHarness(devices);
+  const { device } = devices.find((d) => d.id === 'Distort');
+  const mode = device.params.findIndex((p) => p.id === 'mode');
+  const slot = device.params[mode].options.length;
+  const table = drawnTable();
+  const file = writeFile(path.join(WORK, 'Distort-shape.f32'), table);
+  const frames = BLOCK * 24;
+  const input = testSignal(frames);
+  for (const [when, change] of [['at its defaults', {}], ['driven, with auto gain', { drive: 12, autogain: 1 }], ['oversampled', { oversample: 2, drive: 6 }]]) {
+    const values = device.params.map((p, i) => (i === mode ? slot : (p.id in change ? change[p.id] : p.default)));
+    const native = runNative(binary, { id: 'Distort', values, input, frames, shapes: [{ param: mode, slot, file }] });
+    const browser = runBrowser(device, { values, input, frames, shapes: [{ param: 'mode', slot, table }] });
+    compare('Distort', `on a drawn curve ${when}`, native, browser);
+    // Not the straight clip a drawn mode with no curve plays.
+    const empty = runNative(binary, { id: 'Distort', values, input, frames });
+    let differs = 0;
+    for (let i = 0; i < native.length; i++) differs = Math.max(differs, Math.abs(native[i] - empty[i]));
+    assert.ok(differs > 1e-3, `Distort ${when}: the drawn curve sounded like no curve at all`);
+  }
+});
+
+test('a drawn grain window and the grains reported play the same on both engines', { skip: compiler ? false : 'no clang++' }, () => {
+  const binary = buildHarness(devices);
+  const { device } = devices.find((d) => d.id === 'Granular');
+  const sampleParam = device.params.findIndex((p) => p.id === 'sample');
+  const sampleSlot = device.params[sampleParam].options.length;
+  const windowParam = device.params.findIndex((p) => p.id === 'window');
+  const windowSlot = device.params[windowParam].options.length;
+  const table = Float32Array.from({ length: 256 }, (_, i) => Math.fround(Math.sin((Math.PI * i) / 255) ** 3));
+  const sound = testFile();
+  const sampleFile = writeFile(path.join(WORK, 'Granular-grains.f32'), sound.data);
+  const shapeFile = writeFile(path.join(WORK, 'Granular-window.f32'), table);
+  const values = device.params.map((p, i) => (i === sampleParam ? sampleSlot : i === windowParam ? windowSlot : p.default));
+  const frames = BLOCK * 30;
+  const notes = [{ frame: 5, note: 60, velocity: 1 }];
+  const reportFile = path.join(WORK, 'Granular-report.f32');
+  let theirs = null;
+  const native = runNative(binary, {
+    id: 'Granular', values, input: new Float32Array(frames * 2), frames, notes,
+    samples: [{ param: sampleParam, slot: sampleSlot, rate: sound.rate, file: sampleFile }],
+    shapes: [{ param: windowParam, slot: windowSlot, file: shapeFile }], report: reportFile,
+  });
+  const browser = runBrowser(device, {
+    values, input: new Float32Array(frames * 2), frames, notes,
+    load: { param: 'sample', slot: sampleSlot, data: sound.data, rate: sound.rate },
+    shapes: [{ param: 'window', slot: windowSlot, table }], onDone: (synth) => { theirs = synth.report(); },
+  });
+  const { rmsA } = compare('Granular', 'through a drawn window', native, browser);
+  assert.ok(rmsA > 1e-3, 'the granulator made no sound through its drawn window');
+
+  const raw = fs.readFileSync(reportFile);
+  const mine = [];
+  for (let i = 0; i + 16 <= raw.length; i += 16) mine.push([0, 1, 2, 3].map((k) => raw.readFloatLE(i + k * 4)));
+  assert.ok(theirs?.grains?.length > 0, 'the browser reported no grains');
+  assert.equal(mine.length, theirs.grains.length, 'the two engines report a different number of grains');
+  mine.forEach((g, i) => g.forEach((v, k) => {
+    assert.ok(Math.abs(v - theirs.grains[i][k]) < 1e-5, `grain ${i} field ${k}: ${v} against ${theirs.grains[i][k]}`);
+  }));
+});
+
+test('a stereo file at another rate is convolved side by side, as Chromium convolves it', { skip: compiler ? false : 'no clang++' }, () => {
+  const binary = buildHarness(devices);
+  const frames = BLOCK * 16;
+  const input = testSignal(frames, 2, 17);
+  const next = rng(9);
+  const rate = 44100;
+  const taps = 1800;
+  const left = new Float32Array(taps);
+  const right = new Float32Array(taps);
+  for (let i = 0; i < taps; i++) {
+    left[i] = Math.fround((next() * 2 - 1) * Math.exp(-4 * i / taps));
+    right[i] = Math.fround((next() * 2 - 1) * Math.exp(-7 * i / taps) * 0.6);
+  }
+  const file = writeFile(path.join(WORK, 'Convolver-stereo.f32'), interleave([left, right]));
+  const slot = CONVOLVER.params.find((p) => p.id === 'ir').options.length;
+  const irParam = CONVOLVER.params.findIndex((p) => p.id === 'ir');
+  const values = defaultValues(CONVOLVER).map((v, i) => (i === irParam ? slot : v));
+  values[CONVOLVER.params.findIndex((p) => p.id === 'predelay')] = 0;
+  values[CONVOLVER.params.findIndex((p) => p.id === 'lowcut')] = 10;
+  values[CONVOLVER.params.findIndex((p) => p.id === 'damping')] = 20000;
+  values[CONVOLVER.params.findIndex((p) => p.id === 'mix')] = 1;
+  // The browser's own resampling of a loaded response to the context's rate, then Chromium's
+  // normalization of the two sides together.
+  const buffer = bufferFromChannels(fakeContext(SAMPLE_RATE), { sampleRate: rate, channels: [left, right] });
+  const response = normalized(buffer.getChannelData(0), buffer.getChannelData(1), SAMPLE_RATE);
+  const mine = runNative(binary, {
+    id: 'Convolver', values, input, frames,
+    samples: [{ param: irParam, slot, rate, channels: 2, file }],
+  });
+  const theirs = convolverReference(CONVOLVER, { values, input, frames, response });
+  const { rmsA } = compare('Convolver', 'with a stereo file at 44.1 kHz as its response', mine, theirs);
+  assert.ok(rmsA > 1e-3, 'the loaded stereo response made no sound');
+  // The two sides really are convolved apart: summing the response to one channel sounds different.
+  const mono = Float32Array.from(left, (v, i) => Math.fround((v + right[i]) / 2));
+  const summed = writeFile(path.join(WORK, 'Convolver-summed.f32'), mono);
+  const flat = runNative(binary, { id: 'Convolver', values, input, frames, samples: [{ param: irParam, slot, rate, file: summed }] });
+  let differs = 0;
+  for (let i = 0; i < mine.length; i++) differs = Math.max(differs, Math.abs(mine[i] - flat[i]));
+  assert.ok(differs > 1e-3, 'a stereo response sounded the same as its mono sum');
 });

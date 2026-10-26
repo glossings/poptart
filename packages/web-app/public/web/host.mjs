@@ -731,6 +731,13 @@ export function createHost({
       return { ok: true };
     },
     'POST /api/liveAuto': async (body) => ({ ok: patternCore.liveAuto(body.id, body.points) !== undefined }),
+    // A drawn shape being dragged: see the desktop server's route of the same name.
+    'POST /api/liveShape': async (body) => {
+      if (!Array.isArray(body?.from) || !Array.isArray(body?.to)) throw new Error('liveShape needs the shape before and after');
+      let took = 0;
+      for (const sched of evaluator.schedulers?.values() ?? []) took += sched.liveShape?.(body.from, body.to) ?? 0;
+      return { ok: true, took };
+    },
     'POST /api/liveGroove': async (body) => ({ ok: patternCore.liveGroove(body.id, String(body.table ?? '')) !== undefined }),
     'POST /api/liveSlices': async (body) => ({ ok: patternCore.liveSlices(body.id, body.set) !== undefined }),
 

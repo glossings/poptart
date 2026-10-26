@@ -435,6 +435,8 @@ export function catalogJson(devices) {
       ui: p.ui,
       group: p.group ?? '',
       rate: p.rate,
+      // Which stage of the instrument's amp envelope this is, for .attack() and the rest.
+      ...(p.amp ? { amp: p.amp } : {}),
       ...(p.options ? { options: [...p.options] } : {}),
       // What a control takes that is not a number: a FILE (a granulator's sample, a convolver's
       // impulse response) or a drawn CURVE. The engine reads this to know that `.param("sample",

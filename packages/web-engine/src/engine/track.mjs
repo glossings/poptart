@@ -108,25 +108,6 @@ export function rampParam(param, value, atTime, now, glide = PARAM_GLIDE_SEC) {
   }
 }
 
-/**
- * Unpicks one `.param(name, audio(…))` connection: the gain the source feeds and the constant
- * that carried its offset.
- *
- * Written once and shared by the engine's disconnect and the track's teardown. A connection that
- * is only half removed leaves another track wired into a parameter that no longer exists and a
- * constant source running for the life of the page, and neither makes a sound to give itself
- * away.
- */
-export function teardownParamConnection(conn) {
-  if (!conn) return;
-  try { conn.from?.disconnect?.(conn.scale); } catch { /* already detached */ }
-  try { conn.scale?.disconnect?.(); } catch { /* already detached */ }
-  if (conn.bias) {
-    try { conn.bias.stop(); } catch { /* never started */ }
-    try { conn.bias.disconnect(); } catch { /* already detached */ }
-  }
-}
-
 /** One filled slot: the device, its node graph and how its parameters are reached. */
 export class Slot {
   constructor(descriptor, built, wetGain, dryGain) {
@@ -250,7 +231,6 @@ export class Track {
     this.slots = new Map();                 // slot index -> Slot
     this.sends = new Map();                 // bus name -> GainNode
     this.source = null;                     // the instrument node, when there is one
-    this.paramConnections = new Map();      // "slot:name" -> { scale, bias, from, source, gain, offset }
     this.sidechains = new Map();            // slot index -> { from, source } feeding the slot's second input
     this.wetControls = new Map();           // slot index -> the constant its wet level is (see wetControl)
     this.grainSink = null;                  // where a modulator on a grain control plugs in (see driveChannel)
@@ -299,27 +279,6 @@ export class Track {
         return index > 0 ? this.wetControl(index).offset : null;
       }
     }
-  }
-
-  /**
-   * Unpicks every signal patched onto one slot's parameters and says what they were, so the
-   * engine can patch them onto whatever takes the slot next.
-   *
-   * A device swapped out from under a connection would otherwise leave that connection running
-   * into a parameter of a processor that has been told to stop - a source feeding nothing, a
-   * constant carrying an offset to nobody, and a parameter of the NEW device that reads as
-   * driven and so refuses to be set, for as long as the page is open.
-   */
-  takeConnections(index) {
-    const prefix = `${index}:`;
-    const taken = [];
-    for (const [key, conn] of [...this.paramConnections]) {
-      if (!key.startsWith(prefix)) continue;
-      teardownParamConnection(conn);
-      this.paramConnections.delete(key);
-      taken.push({ name: key.slice(prefix.length), source: conn.source, gain: conn.gain, offset: conn.offset });
-    }
-    return taken;
   }
 
   /**
@@ -394,7 +353,6 @@ export class Track {
   clearSlot(index, { rewire = true } = {}) {
     const slot = this.slots.get(index);
     if (!slot) return;
-    this.takeConnections(index);
     this.clearSidechain(index);
     if (index === 0 && this.bendInto) {
       try { this.bendNode?.disconnect(this.bendInto); } catch { /* already detached */ }
@@ -604,8 +562,6 @@ export class Track {
     for (const index of [...this.slots.keys()]) this.clearSlot(index, { rewire: false });
     for (const g of this.sends.values()) g.disconnect();
     this.sends.clear();
-    for (const conn of this.paramConnections.values()) teardownParamConnection(conn);
-    this.paramConnections.clear();
     for (const index of [...this.sidechains.keys()]) this.clearSidechain(index);
     // The bend constant is a started source: unplugged but not stopped, it runs for the life of
     // the page.

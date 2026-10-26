@@ -254,9 +254,10 @@ struct Device : pd_own::Device<ids::kCount, 2> {
   FmVoice voices[kVoices];
   int voiceCount = 8;
   long long clock = 0;
-  // Notes arrive between blocks on this engine rather than with an offset into one, so they are
-  // played at the start of the block they arrived in - as a plugin's notes are.
-  struct Event { int kind; double note; double velocity; };
+  // Notes come with their offset into the block (pd-device.h's noteOnAt), because the matrix
+  // ramps across the whole block: the block is cut at each note here, as the browser's process
+  // cuts it, with the ramp read at the sample's place in the WHOLE block.
+  struct Event { int at; int kind; double note; double velocity; };
   Event events[64];
   int eventCount = 0;
 
@@ -269,18 +270,21 @@ struct Device : pd_own::Device<ids::kCount, 2> {
     eventCount = 0;
   }
 
-  void pd_note_on(float note, float velocity) {
-    if (eventCount < 64) events[eventCount++] = { 1, note, velocity };
+  void pd_note_on(float note, float velocity) { pd_note_on_at(note, velocity, 0); }
+  void pd_note_off(float note) { pd_note_off_at(note, 0); }
+
+  void pd_note_on_at(float note, float velocity, int offset) {
+    if (eventCount < 64) events[eventCount++] = { offset > 0 ? offset : 0, 1, note, velocity };
   }
 
-  void pd_note_off(float note) {
+  void pd_note_off_at(float note, int offset) {
     if (note < 0) {
       // Every note off at once.
       eventCount = 0;
       for (auto& v : voices) if (v.active()) v.noteOff();
       return;
     }
-    if (eventCount < 64) events[eventCount++] = { 0, note, 0 };
+    if (eventCount < 64) events[eventCount++] = { offset > 0 ? offset : 0, 0, note, 0 };
   }
 
   void pd_bend(float semitones) { params.bend = isPlayable(semitones) ? semitones : 0.0; }
@@ -347,16 +351,40 @@ struct Device : pd_own::Device<ids::kCount, 2> {
     readParams();
     // The ramps are worked out for the WHOLE block and committed after it.
     params.beginBlock(frames);
-    for (int i = 0; i < eventCount; ++i) {
-      if (events[i].kind == 1) startNote(events[i].note, events[i].velocity);
-      else stopNote(events[i].note);
+    // In time order, ties in arrival order - a stable sort, as the browser's Array.sort is.
+    for (int i = 1; i < eventCount; ++i) {
+      const Event e = events[i];
+      int j = i - 1;
+      while (j >= 0 && events[j].at > e.at) { events[j + 1] = events[j]; --j; }
+      events[j + 1] = e;
     }
-    eventCount = 0;
     float* outl = outL();
     float* outr = outR();
     std::memset(outl, 0, sizeof(float) * static_cast<size_t>(frames));
     std::memset(outr, 0, sizeof(float) * static_cast<size_t>(frames));
-    for (auto& v : voices) if (v.active()) v.process(outl, outr, frames, 0, params);
+    int at = 0;
+    int next = 0;
+    while (at < frames) {
+      while (next < eventCount && events[next].at <= at) {
+        const Event& e = events[next++];
+        if (e.kind == 1) startNote(e.note, e.velocity);
+        else stopNote(e.note);
+      }
+      const int until = next < eventCount && events[next].at < frames ? events[next].at : frames;
+      const int n = until - at;
+      if (n > 0) {
+        for (auto& v : voices) if (v.active()) v.process(outl + at, outr + at, n, at, params);
+      }
+      at = until;
+    }
+    // Anything due after this block waits for the next one, at its place in that one.
+    int kept = 0;
+    for (int i = next; i < eventCount; ++i) {
+      Event e = events[i];
+      e.at = e.at - frames > 0 ? e.at - frames : 0;
+      events[kept++] = e;
+    }
+    eventCount = kept;
     params.commitBlock();
   }
 };

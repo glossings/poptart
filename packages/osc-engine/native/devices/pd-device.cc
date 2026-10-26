@@ -49,3 +49,21 @@ extern "C" const PdDeviceInfo* pd_find_device(const char* name) {
     }
     return nullptr;
 }
+
+void pd_mono_sum(const float* interleaved, int frames, int channels, float* out) {
+    if (channels <= 1) {
+        std::memcpy(out, interleaved, sizeof(float) * (size_t)frames);
+        return;
+    }
+    // Accumulated the way the browser accumulates it: each channel DIVIDED by the count (not
+    // multiplied by a reciprocal), added in channel order, and rounded to a float on every add -
+    // which is what `data[i] += c[i] / chans.length` on a Float32Array does. The arithmetic is the
+    // parity test's business, so it is copied rather than improved.
+    for (int i = 0; i < frames; ++i) {
+        float sum = 0.f;
+        for (int c = 0; c < channels; ++c) {
+            sum = (float)((double)sum + (double)interleaved[(size_t)i * channels + c] / (double)channels);
+        }
+        out[i] = sum;
+    }
+}

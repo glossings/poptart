@@ -11,7 +11,7 @@
 // pidfile alongside sclang/scsynth (see orphans.js), because a Node that dies without reaching
 // stop() would otherwise leave a dns-sd behind, and the next boot's registration would then come
 // up as "poptart (2)". Elsewhere (no dns-sd, or not darwin) this is a no-op that says so once -
-// a cross-platform announcer is a TODO.md item.
+// a cross-platform announcer is a TODO-verbose.md item.
 
 const { spawn } = require('node:child_process');
 

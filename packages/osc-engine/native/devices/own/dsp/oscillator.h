@@ -172,7 +172,7 @@ struct WavetableOscillator {
         if (s > worst) worst = s;
       }
     }
-    return mipLevelFor(worst);
+    return mipLevelFor(worst, table->schedule);
   }
 
   /** Places a 0..1 position in the frame stack: the two frames it sits between and the blend. */

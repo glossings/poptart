@@ -168,12 +168,27 @@ test('a capability the engine does have is forwarded as before', () => {
   for (const name of schedulerEngineCalls()) engine[name] = (...a) => { calls.push([name, ...a]); };
   const mapped = new MappedEngine(engine);
 
-  assert.equal(typeof mapped.connectParam, 'function');
+  assert.equal(typeof mapped.setParamExpr, 'function');
   mapped.setTrackResolver((label) => (label === 'mod' ? '#3' : label));
-  mapped.connectParam('#1', 0, 'Osc 1 Phase', 'mod', 0.5, 0);
-  assert.deepEqual(calls.pop(), ['connectParam', '#1', 0, 'Osc 1 Phase', '#3', 0.5, 0]);
-  mapped.disconnectParam('#1', 0, 'Osc 1 Phase');
-  assert.deepEqual(calls.pop(), ['disconnectParam', '#1', 0, 'Osc 1 Phase']);
+  const tree = { k: 'op', op: 'mul', a: [{ k: 'in', i: 0, rate: 'ar', source: 'mod' }, { k: 'const', v: 0.5 }] };
+  mapped.setParamExpr('#1', 0, 'Osc 1 Phase', tree);
+  assert.deepEqual(calls.pop(), ['setParamExpr', '#1', 0, 'Osc 1 Phase',
+    { k: 'op', op: 'mul', a: [{ k: 'in', i: 0, rate: 'ar', source: '#3' }, { k: 'const', v: 0.5 }] }], 'sources are routing names');
+  mapped.clearParamExpr('#1', 0, 'Osc 1 Phase');
+  assert.deepEqual(calls.pop(), ['clearParamExpr', '#1', 0, 'Osc 1 Phase']);
+});
+
+test('an expression on a parameter a mapping gives real units is converted at its root', () => {
+  const calls = [];
+  const engine = { setParamExpr: (...a) => calls.push(a), paramExprs: () => new Map(calls.map((c) => [`${c[1]}:${c[2]}`, JSON.stringify(c[3])])) };
+  const mapped = new MappedEngine(engine);
+  mapped.mappings = new Map([['Serum 2', { params: { 'Filter 1 Freq': { min: 20, max: 20000, curve: 'log' } } }]]);
+  mapped.chains.set('#1', ['Serum 2']);
+  const tree = { k: 'op', op: 'add', a: [{ k: 'in', i: 0, rate: 'kr' }, { k: 'const', v: 400 }] };
+  mapped.setParamExpr('#1', 0, 'Filter 1 Freq', tree);
+  assert.deepEqual(calls[0][3], { k: 'map', min: 20, max: 20000, curve: 'log', a: [tree] });
+  // What the engine holds comes back as the scheduler sent it, so it isn't sent again.
+  assert.equal(mapped.paramExprs('#1').get('0:Filter 1 Freq'), JSON.stringify(tree));
 });
 
 test('a word on a MAPPED parameter is handed on as it stands, not converted into NaN', () => {

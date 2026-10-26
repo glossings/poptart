@@ -46,6 +46,8 @@ var tracks = IdentityDictionary.new;
 var nodeGoneSaid = IdentitySet.new, nodeOwns = { |nodeID, what| }; // the engine's node bookkeeping (see nodeOwns in sc/poptart.scd) - inert here
 var modFreeDelay = 0.05;
 var freeModulatorLater, rampTo, dropRamp, bundleNow, resolveParamIndex;
+// What a param call is aimed at (paramTarget) and what it leans on; the expression half is unused here.
+var exprLeaf, busIndexOf, paramTarget, reassertAudioDrivers, exprFeed, channelDefault;
 var log = List.new;
 var pendingGet = nil;
 var info = (parameters: [(name: "Mix"), (name: "Drive")], findParamIndex: { |self, name| self[\\parameters].detectIndex { |p| p[\\name] == name.asString } });
@@ -71,6 +73,9 @@ ${extractClosure('rampTo')}
 ${extractClosure('dropRamp')}
 ${extractClosure('bundleNow')}
 ${extractClosure('resolveParamIndex')}
+${extractClosure('exprLeaf')}
+${extractClosure('busIndexOf')}
+${extractClosure('paramTarget')}
 ${extractOscdef('poptartHoldParam', '/poptart/holdParam').replace(/ctl\.set\(/g, 'ctl.setParam(')}
 ${extractOscdef('poptartReleaseParam', '/poptart/releaseParam').replace(/ctl\.set\(/g, 'ctl.setParam(')}
 ("COMPILES<" ++ (OSCdef(\\poptartHoldParam).notNil and: { OSCdef(\\poptartReleaseParam).notNil }) ++ ">").postln;
@@ -79,7 +84,7 @@ ${extractOscdef('poptartReleaseParam', '/poptart/releaseParam').replace(/ctl\.se
 hold.("Mix");
 ("ASKED<" ++ log.last ++ "," ++ track[\\resting][\\slot1_Mix] ++ ">").postln;
 // The first value lands meanwhile (a ramp, as any polled control); then the answer arrives.
-rampTo.(track, \\slot1_Mix, 1, "Mix", 0, 0.9);
+rampTo.(track, \\slot1_Mix, 1, paramTarget.(track, 1, "Mix"), 0.9);
 pendingGet.value(0.42);
 ("FILED<" ++ track[\\resting][\\slot1_Mix] ++ ">").postln;
 // A second hold - a fresh Scheduler - neither asks again nor overwrites the reading.
@@ -89,7 +94,7 @@ log.clear; hold.("Mix");
 log.clear; release.("Mix");
 ("RELEASED<" ++ log.join(" ") ++ "," ++ track[\\ramps][\\slot1_Mix].isNil ++ "," ++ track[\\resting][\\slot1_Mix].isNil ++ ">").postln;
 // A release with no reading to go back to (the get never answered) unmaps and sets nothing.
-hold.("Drive"); rampTo.(track, \\slot1_Drive, 1, "Drive", 1, 0.5);
+hold.("Drive"); rampTo.(track, \\slot1_Drive, 1, paramTarget.(track, 1, "Drive"), 0.5);
 log.clear; release.("Drive");
 ("UNANSWERED<" ++ log.join(" ") ++ ">").postln;
 // A parameter the plugin has not got is left alone on both sides.

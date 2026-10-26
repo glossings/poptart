@@ -4,9 +4,9 @@
 // which is what lets the device oversample it. The order of the modes is that file's, and an
 // index is what a saved song holds - so nothing here is ever reordered.
 //
-// A mode past the named ones is a curve somebody DREW, which arrives as a table over a message
-// port in the browser. There is no path for one on this engine yet, so a drawn mode behaves
-// exactly as the browser's does when its table has not arrived: a straight clip.
+// A mode past the named ones is a curve somebody DREW: a table the engine sampled from the
+// breakpoints, handed to the device by the host's /shape command (pd-device.h's shape), and read
+// here from -1 to 1 on both axes. With no table it is a straight clip, as in the browser.
 #pragma once
 
 #include <cmath>
@@ -31,6 +31,15 @@ inline bool shaperAsymmetric(int mode) {
 }
 
 inline double clamp1(double x) { return x < -1 ? -1 : (x > 1 ? 1 : x); }
+
+/** A drawn transfer curve at v: the table spans -1..1 in and 0..1 (meaning -1..1) out. */
+inline double drawnCurve(const float* table, int n, double v) {
+  const double p = ((clamp1(v) + 1) / 2) * (n - 1);
+  const int i = static_cast<int>(std::floor(p));
+  const double a = table[i];
+  const double b = table[i + 1 < n ? i + 1 : n - 1];
+  return clamp1((a + (b - a) * (p - i)) * 2 - 1);
+}
 
 /**
  * Triangle wavefolding: past full scale the signal turns round instead of clipping. A triangle
@@ -91,9 +100,11 @@ inline double jsSign(double x) { return x > 0 ? 1.0 : (x < 0 ? -1.0 : 0.0); }
  * One sample through one curve.
  *
  * `drive` is a linear gain (the device converts its dB knob before calling), `bias` shifts the
- * input before shaping, `character` is the shared 0..1 knob.
+ * input before shaping, `character` is the shared 0..1 knob, and `table` (`tableLength` points)
+ * is the drawn curve for a mode past the named ones.
  */
-inline double shape(double x, int mode, double drive, double bias, double character) {
+inline double shape(double x, int mode, double drive, double bias, double character,
+                    const float* table = nullptr, int tableLength = 0) {
   const double c = clamp(isPlayable(character) ? character : 0.5, 0.0, 1.0);
   const double v = x * drive + bias;
   switch (mode) {
@@ -201,8 +212,7 @@ inline double shape(double x, int mode, double drive, double bias, double charac
     }
 
     default:
-      // A drawn curve with no table, which is every drawn curve here.
-      return clamp1(v);
+      return table && tableLength > 0 ? drawnCurve(table, tableLength, v) : clamp1(v);
   }
 }
 
@@ -211,14 +221,15 @@ inline double shape(double x, int mode, double drive, double bias, double charac
  * probed with a sine and the ratio of what went in to what came out is the correction. Measured
  * on the part you hear, so the probe's average comes off first.
  */
-inline double autoGainFor(int mode, double drive, double bias, double character) {
+inline double autoGainFor(int mode, double drive, double bias, double character,
+                          const float* table = nullptr, int tableLength = 0) {
   constexpr int kProbes = 256;
   const double amplitude = 0.5;
   double ys[kProbes];
   double sum = 0;
   for (int i = 0; i < kProbes; ++i) {
     ys[i] = shape(std::sin((static_cast<double>(i) / kProbes) * M_PI * 2) * amplitude,
-                  mode, drive, bias, character);
+                  mode, drive, bias, character, table, tableLength);
     sum += ys[i];
   }
   const double mean = sum / kProbes;

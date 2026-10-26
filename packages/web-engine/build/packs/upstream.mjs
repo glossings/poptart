@@ -12,7 +12,7 @@
 // unanswered requests for a LICENSE file going back years) or carry a dedication from somebody
 // who was not the person who made the recording. Poptart's answer to that gap is to synthesize
 // its own, which is what the rendered packs already are: audio we made is audio we can dedicate.
-// See the web build entry in TODO.md.
+// See the web build entry in TODO-verbose.md.
 //
 // Nothing here is fetched at run time. A build step pulls these down and assembles a separate
 // repository of packs (see fetch-packs.mjs); the app reads the index that build produces. The

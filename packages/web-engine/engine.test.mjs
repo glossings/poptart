@@ -518,61 +518,58 @@ test('a note for a track with no instrument is dropped rather than throwing', ()
   assert.doesNotThrow(() => engine.noteOn('nonesuch', 60, 1, 0));
 });
 
-test('a signal patched onto a parameter is a connection, scaled and offset as asked', () => {
+// What pattern-core sends for `.param(name, audio("mod").mul(k).add(c))`: a tree with the source
+// as input 0. (The expressions' own suite is expr.test.mjs.)
+const patched = (source, k = 1, c = 0) => ({
+  k: 'op', op: 'add', a: [{ k: 'op', op: 'mul', a: [{ k: 'in', i: 0, rate: 'ar', source }, { k: 'const', v: k }] }, { k: 'const', v: c }],
+});
+const exprOf = (engine, trackId, key) => engine.exprs.get(trackId)?.get(key);
+
+test('a signal patched onto a parameter is an expression node fed by the source', () => {
   const { engine } = makeEngine();
   engine.createTrack('mod');
   engine.createTrack('lead');
   engine.loadInstrument('lead', 'Wavetable');
-  engine.connectParam('lead', 0, 'Osc 1 Phase', 'mod', 0.5, 0.1);
+  engine.setParamExpr('lead', 0, 'Osc 1 Phase', patched('mod', 0.5, 0.1));
 
   const phase = engine.tracks.get('lead').slots.get(0).built.node.parameters.get('osc1.phase');
-  assert.ok(phase, 'the phase should be an audio-rate parameter');
-  const conn = engine.tracks.get('lead').paramConnections.get('0:Osc 1 Phase');
-  assert.ok(conn, 'the connection should be recorded so it can be torn down');
-  assert.equal(conn.scale.gain.value, 0.5, 'the .mul() should become the gain');
-  assert.equal(conn.bias.offset.value, 0.1, 'and the .add() an offset');
-  assert.ok(engine.tracks.get('mod').panner.reaches(conn.scale), 'the source should feed the gain');
-  assert.ok(conn.scale.outputs.includes(phase), 'and the gain the parameter');
+  const rec = exprOf(engine, 'lead', '0:Osc 1 Phase');
+  assert.equal(rec.node.processorName, 'poptart-expr');
+  assert.deepEqual(rec.node.options.processorOptions.tree, patched('mod', 0.5, 0.1), 'the tree goes to the processor as sent');
+  assert.ok(engine.tracks.get('mod').panner.links.some((l) => l.target === rec.node && l.input === 0), 'the source feeds input 0');
+  assert.ok(rec.node.outputs.includes(phase), 'and the node the parameter');
+  assert.equal(phase.value, 0, 'whose own value is zeroed, since what arrives adds to it');
 });
 
-test('a connection with no offset builds no constant source to carry it', () => {
+test('an expression can be torn down, and a new shape replaces rather than stacking', () => {
   const { engine } = makeEngine();
   engine.createTrack('mod');
   engine.createTrack('lead');
   engine.loadInstrument('lead', 'Wavetable');
-  engine.connectParam('lead', 0, 'Osc 1 Phase', 'mod', 1, 0);
-  assert.equal(engine.tracks.get('lead').paramConnections.get('0:Osc 1 Phase').bias, null);
-});
-
-test('a connection can be torn down, and re-connecting replaces rather than stacking', () => {
-  const { engine } = makeEngine();
-  engine.createTrack('mod');
-  engine.createTrack('lead');
-  engine.loadInstrument('lead', 'Wavetable');
-  engine.connectParam('lead', 0, 'Osc 1 Phase', 'mod', 1, 0);
-  engine.connectParam('lead', 0, 'Osc 1 Phase', 'mod', 2, 0);
+  engine.setParamExpr('lead', 0, 'Osc 1 Phase', patched('mod'));
+  engine.setParamExpr('lead', 0, 'Osc 1 Phase', { k: 'in', i: 0, rate: 'ar', source: 'mod' });
   const phase = engine.tracks.get('lead').slots.get(0).built.node.parameters.get('osc1.phase');
-  assert.equal(phase.connectedFrom.length, 1, 'the old connection should have been removed first');
-  engine.disconnectParam('lead', 0, 'Osc 1 Phase');
+  assert.equal(phase.connectedFrom.length, 1, 'the old node should have been taken off first');
+  engine.clearParamExpr('lead', 0, 'Osc 1 Phase');
   assert.equal(phase.connectedFrom.length, 0);
-  assert.equal(engine.tracks.get('lead').paramConnections.size, 0);
+  assert.equal(engine.exprs.get('lead').size, 0);
 });
 
-test('patching into something that cannot take a signal warns instead of failing quietly', () => {
+test('an expression on something that cannot take a signal warns instead of failing quietly', () => {
   const { engine, warnings } = makeEngine();
   engine.createTrack('mod');
   engine.createTrack('lead');
   engine.loadInstrument('lead', 'Wavetable');
-  engine.connectParam('lead', 0, 'Voices', 'mod', 1, 0);   // a k-rate count
+  engine.setParamExpr('lead', 0, 'Voices', patched('mod'));   // a k-rate count
   assert.ok(warnings.some((w) => w.includes('Voices') && w.includes('audio rate')));
-  assert.equal(engine.tracks.get('lead').paramConnections.size, 0);
+  assert.equal(exprOf(engine, 'lead', '0:Voices').target, null);
 });
 
 test('patching from something that does not exist warns and names it', async () => {
   const { engine, warnings } = makeEngine();
   engine.createTrack('lead');
   engine.loadInstrument('lead', 'Wavetable');
-  engine.connectParam('lead', 0, 'Osc 1 Phase', 'nonesuch', 1, 0);
+  engine.setParamExpr('lead', 0, 'Osc 1 Phase', patched('nonesuch'));
   await new Promise((r) => setTimeout(r, 10));
   assert.ok(warnings.some((w) => w.includes('nonesuch')));
 });
@@ -688,13 +685,13 @@ test('a parameter something else is driving is reported, by what is driving it',
   assert.deepEqual([...engine.drivenParams('t1', 1)], []);
 });
 
-test('a parameter with an audio signal patched into it reads as driven too', () => {
+test('a parameter an expression drives reads as driven too', () => {
   const { engine } = makeEngine();
   engine.createTrack('mod');
   engine.createTrack('t1');
   engine.loadInstrument('t1', 'Wavetable');
-  engine.connectParam('t1', 0, 'Osc 1 Phase', 'mod');
-  assert.deepEqual([...engine.drivenParams('t1', 0)], [['osc1.phase', 'an audio signal']]);
+  engine.setParamExpr('t1', 0, 'Osc 1 Phase', patched('mod'));
+  assert.deepEqual([...engine.drivenParams('t1', 0)], [['osc1.phase', 'a combination of signals']]);
 });
 
 test('a named pack arrives from the scheduler as sp:<id> and is looked up by its bare id', () => {
@@ -792,9 +789,9 @@ test('a routing name is the label somebody typed, resolved to the track the host
     'and the kick should reach the ducker');
   assert.deepEqual(warnings, []);
 
-  // The same lookup serves a parameter connection and a track reading another track.
-  engine.connectParam('#2', 0, 'Osc 1 Phase', 'kick');
-  assert.ok(engine.tracks.get('#2').paramConnections.has('0:Osc 1 Phase'));
+  // The same lookup serves an expression's source and a track reading another track.
+  engine.setParamExpr('#2', 0, 'Osc 1 Phase', patched('kick'));
+  assert.ok(exprOf(engine, '#2', '0:Osc 1 Phase').sources.has(0));
   engine.setInputSource('#2', 'audio', 'kick');
   assert.ok(engine.tracks.get('#2')._headSource, 'a bare label is a track before it is a bus');
 
@@ -814,14 +811,14 @@ test('a route naming a track written further down waits for it, and says nothing
   engine.createTrack('pad');
   // bass: ….fx("Ducker").audio("kick"), a phase patch and a head, all above `kick:`.
   engine.injectAudio('bass', 1, 'kick', 0.5);
-  engine.connectParam('bass', 0, 'Osc 1 Phase', 'kick');
+  engine.setParamExpr('bass', 0, 'Osc 1 Phase', patched('kick'));
   engine.setInputSource('pad', 'audio', 'kick');
   assert.equal(engine.tracks.get('bass').sidechains.size, 0);
 
   engine.createTrack('kick');
   const kick = engine.tracks.get('kick').panner;
   assert.ok(kick.outputs.includes(engine.tracks.get('bass').sidechains.get(1).level), 'the sidechain is wired when kick arrives');
-  assert.ok(engine.tracks.get('bass').paramConnections.get('0:Osc 1 Phase')?.from === kick, 'and the parameter patch');
+  assert.ok(exprOf(engine, 'bass', '0:Osc 1 Phase').sources.get(0)?.from === kick, 'and the parameter patch');
   assert.equal(engine.tracks.get('pad')._headSource, kick, 'and the head');
   await new Promise((r) => setTimeout(r, 10));
   assert.deepEqual(warnings.filter((w) => w.includes('kick')), []);
@@ -1203,4 +1200,19 @@ test('a slot reports how late its device is, which is what the scheduler plays n
   engine.loadEffect('t', 'Filter', 3);
   assert.deepEqual(engine.slotLatencies('t'), [0, 0.12, 0, 0]);
   assert.deepEqual(engine.slotLatencies('nobody'), []);
+});
+
+test('.decay() and the rest on a synth set its own amp envelope, in seconds', () => {
+  const { engine, warnings } = makeEngine();
+  engine.createTrack('t1');
+  engine.loadInstrument('t1', 'Wavetable');
+  engine.setParam('t1', 0, '@amp.decay', 0.3, 0);
+  engine.setParam('t1', 0, '@amp.sustain', 0, 0);
+  const slot = engine.tracks.get('t1').slots.get(0);
+  assert.ok(Math.abs(slot.values['ampenv.decay'] - 0.3) < 1e-6, `decay is ${slot.values['ampenv.decay']}`);
+  assert.equal(slot.values['ampenv.sustain'], 0);
+  engine.loadInstrument('t1', 'Plaits');
+  engine.setParam('t1', 0, '@amp.decay', 0.3, 0);
+  engine.setParam('t1', 0, '@amp.decay', 0.4, 0);
+  assert.equal(warnings.filter((w) => /has no amp envelope decay/.test(w)).length, 1, 'a device without one says so once');
 });

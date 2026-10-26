@@ -10,10 +10,9 @@
 // PoptartDevice.cpp's sample stages, and pd-device.h). With no file named the synth is silent,
 // which is what the browser does too.
 //
-// One divergence, the same one every device here has: a control a signal moves is read per
-// sample in the browser and per block here, which is the ABI. For the level that means a `.param
-// ("Level", lfo())` is stepped per block rather than smooth, and nothing else here reads a
-// control per sample at all.
+// A DRAWN window reaches it through the host's /shape command (pd_shape), sampled by the engine
+// as the browser's engine samples one; and what it is doing - the grains in flight - goes back
+// to the device window through pd_report, in the order the browser's report() lists them.
 
 #include "own/pd-own.h"
 #include "own/dsp/adsr.h"
@@ -41,13 +40,29 @@ constexpr int kSampleSlots = 32;
 /** The last hundredth of a grain, faded, so a window that ends loud does not click. */
 inline double grainTail(double t) { return std::fmin(1.0, (1.0 - t) * 100.0); }
 
+/** The shipped windows, and room past them for drawn ones (SHAPE_SLOTS). */
+constexpr int kWindows = 6;
+constexpr int kWindowSlots = kWindows + 8;
+/** The points a drawn window is sampled at: the browser engine's SHAPE_POINTS. */
+constexpr int kShapePoints = 256;
+/** How many grains the window is told about at once (REPORTED_GRAINS). */
+constexpr int kReportedGrains = 48;
+
+/** A drawn window, read at `t` - linear between the points the engine sampled. */
+inline double drawnWindow(const float* table, int n, double t) {
+  const double x = clamp(t, 0.0, 1.0) * (n - 1);
+  const int i = static_cast<int>(std::floor(x));
+  const double a = table[i];
+  const double b = table[i + 1 < n ? i + 1 : n - 1];
+  return (a + (b - a) * (x - i)) * grainTail(t);
+}
+
 /**
  * One grain's amplitude at `t` through its length, by window shape.
  *
  * The same six shapes the browser ships, in the same order - the order is the control's option
- * list, and an index is what a saved song holds. A DRAWN window (a shape somebody made) is a
- * table rather than a formula and there is no path for one on this engine yet, so an index past
- * these plays the first, which is what the browser does with an empty shape slot.
+ * list, and an index is what a saved song holds. An index past these with no drawn window in it
+ * plays the first, which is what the browser does with an empty shape slot.
  */
 inline double grainWindow(int mode, double t) {
   if (mode == 5) return 0.42 - 0.5 * std::cos(2 * M_PI * t) + 0.08 * std::cos(4 * M_PI * t);
@@ -135,7 +150,8 @@ struct Voice {
     env.gateOff();
   }
 
-  void process(float* outl, float* outr, int count, const Params& p, const Sample* sample) {
+  void process(float* outl, float* outr, int count, const Params& p, const Sample* sample,
+               const float* drawn, int drawnLength) {
     if (!env.active()) return;
     env.setStages(p.attack, p.decay, p.sustain, p.release, -4, -4, -4);
     const double sr = sampleRate;
@@ -176,7 +192,7 @@ struct Voice {
         for (auto& g : grains) {
           if (!g.on) continue;
           const double t = static_cast<double>(g.at) / g.len;
-          const double w = grainWindow(p.window, t);
+          const double w = drawn ? drawnWindow(drawn, drawnLength, t) : grainWindow(p.window, t);
           const double pos = std::fmod(std::fmod(g.pos, (double)len) + len, (double)len);
           const int whole = static_cast<int>(std::floor(pos));
           const double frac = pos - whole;
@@ -215,11 +231,49 @@ struct Device : pd_own::Device<ids::kCount, 2> {
     eventCount = 0;
   }
 
-  /** A file the host read for us, on the control that takes one. */
-  void pd_sample(int param, int slot, const float* data, int frames, double rate) {
+  /** The drawn windows, by window slot. Copied: the host's memory is not ours. */
+  float drawn[kWindowSlots][kShapePoints];
+  int drawnLength[kWindowSlots] = { 0 };
+
+  /** A file the host read for us, on the control that takes one: summed to one channel. */
+  void pd_sample(int param, int slot, const PdSample& file) {
     if (param != ids::sample) return;
     if (slot < 0 || slot >= kSampleSlots) return;
-    samples[slot] = Sample{ data, frames, rate > 0 ? rate : sampleRate };
+    samples[slot] = Sample{ file.mono, file.frames, file.sampleRate > 0 ? file.sampleRate : sampleRate };
+  }
+
+  /** A window somebody drew, for a window slot past the shipped ones. */
+  void pd_shape(int param, int slot, const float* table, int count) {
+    if (param != ids::window || slot < 0 || slot >= kWindowSlots || !table || count <= 0) return;
+    const int n = count < kShapePoints ? count : kShapePoints;
+    std::memcpy(drawn[slot], table, sizeof(float) * static_cast<size_t>(n));
+    drawnLength[slot] = n;
+  }
+
+  /**
+   * The grains in flight: four floats each - where it started and how far through its life it
+   * is, its pan, and the stretch of the file it plays as a share of the file - which is the
+   * browser's report() entry by entry, voices in order and grains in order within a voice.
+   */
+  int pd_report(float* out, int capacity) {
+    const int which = params.sample;
+    const Sample* sample = (which >= 0 && which < kSampleSlots && samples[which].data
+                            && samples[which].frames > 0) ? &samples[which] : nullptr;
+    if (!sample) return 0;
+    const double len = sample->frames;
+    int n = 0;
+    for (auto& v : voices) {
+      if (!v.active()) continue;
+      for (auto& g : v.grains) {
+        if (!g.on) continue;
+        if (n / 4 >= kReportedGrains || n + 4 > capacity) return n;
+        out[n++] = static_cast<float>(std::fmod(std::fmod(g.from, len) + len, len) / len);
+        out[n++] = static_cast<float>(static_cast<double>(g.at) / g.len);
+        out[n++] = static_cast<float>(g.pan);
+        out[n++] = static_cast<float>((g.len * g.rate) / len);
+      }
+    }
+    return n;
   }
 
   void pd_note_on(float note, float velocity) {
@@ -298,7 +352,11 @@ struct Device : pd_own::Device<ids::kCount, 2> {
     std::memset(outr, 0, sizeof(float) * static_cast<size_t>(frames));
     // Every ACTIVE voice renders, not only the first `voiceCount`: the count limits what a new
     // note may take, and a voice above it finishes its note rather than being cut off.
-    for (auto& v : voices) if (v.active()) v.process(outl, outr, frames, params, sample);
+    const int window = params.window;
+    const bool isDrawn = window >= 0 && window < kWindowSlots && drawnLength[window] > 0;
+    const float* table = isDrawn ? drawn[window] : nullptr;
+    const int tableLength = isDrawn ? drawnLength[window] : 0;
+    for (auto& v : voices) if (v.active()) v.process(outl, outr, frames, params, sample, table, tableLength);
   }
 };
 

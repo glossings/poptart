@@ -150,6 +150,11 @@ export function tuningNames() {
   return [...TUNINGS.keys()];
 }
 
+/** The named modes, each with its note count (for completions). Aliases are left out. */
+export function modeNames() {
+  return Object.entries(SCALE_INTERVALS).map(([name, intervals]) => ({ name, size: intervals.length }));
+}
+
 /** Every registered tuning as data - what the host hands the editor, which parses scale names too. */
 export function registeredTunings() {
   return [...TUNINGS].map(([name, { intervals, period }]) => ({ name, intervals: [...intervals], period }));

@@ -36,7 +36,7 @@ export function patternSigs(sig) {
       const ir = s?.lfoIR ?? s?.envIR ?? s?.ccIR;
       if (!ir) return [s];
       const bounds = [ir.min, ir.max].filter((b) => b && typeof b === 'object');
-      return [s, ...(ir.shapePattern ? [ir.shapePattern] : []), ...bounds];
+      return [s, ...(ir.shapePattern ? [ir.shapePattern] : []), ...(ir.rateSig ? [ir.rateSig] : []), ...bounds];
     })
     .filter(Boolean);
 }

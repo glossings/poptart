@@ -4416,6 +4416,14 @@ let scanPhase = null;
 // first audio-device change. Any new engine callback goes here and nowhere else.
 function wireEngine() {
   mappedEngine = new MappedEngine(engine);
+  // What a device control that takes a drawn curve reads it with: pattern-core's own sampler and
+  // its shape definitions, so a curve drawn in the editor is the curve the device plays.
+  engine.shapeReader = {
+    looksLikeShapeData: patternCore.looksLikeShapeData,
+    parseShapePoints: patternCore.parseShapePoints,
+    sampleShape: patternCore.sampleShape,
+    lookupShape: patternCore.lookupShape,
+  };
   // The wrapper's own warnings (a word given to a plugin parameter) go where pattern warnings go.
   mappedEngine.warn = (line) => {
     eventLogQueue.push(line);
@@ -5288,15 +5296,20 @@ function patternSigs(sig) {
   // A modulator's signal-valued .range() bounds light up the same way: `sine(1).range("200 300",
   // 4000)` is native engine-side, but the "200 300" is a step pattern of its own that the scheduler
   // polls to move the running LFO's floor - it is what says where the sweep sits, and it is on
-  // screen. Numeric bounds have nothing to light and are skipped.
+  // screen. Numeric bounds have nothing to light and are skipped. A patterned rate - sine("<1 2>")
+  // - lights the same way: its steps are when the rate changes.
   const presets = Object.values(sig.presetPatterns ?? {});
   const params = Object.values(sig.paramSignals).map((e) => e.sig);
+  // An expression (audio and modulators combined - see pattern-core's Expressions) lights what
+  // went into it: each input, read the same way.
+  const inputsOf = (node) => (node.k === 'leaf' ? [node.sig] : (node.a ?? []).flatMap(inputsOf));
   return [sig, ...params, ...Object.values(sig.channel), ...presets]
+    .flatMap((s) => (s?.expr ? [s, ...inputsOf(s.expr)] : [s]))
     .flatMap((s) => {
       const ir = s?.lfoIR ?? s?.envIR ?? s?.ccIR;
       if (!ir) return [s];
       const bounds = [ir.min, ir.max].filter((b) => b && typeof b === 'object');
-      return [s, ...(ir.shapePattern ? [ir.shapePattern] : []), ...bounds];
+      return [s, ...(ir.shapePattern ? [ir.shapePattern] : []), ...(ir.rateSig ? [ir.rateSig] : []), ...bounds];
     });
 }
 
@@ -6807,6 +6820,8 @@ async function deviceInSlot(trackLabel, slot) {
     // The names of whatever has been loaded onto a control that plays a file, by the option slot
     // it went into: what the control prints, and what a `.param()` written from the window says.
     extras: at.files ?? {},
+    // The curves drawn onto a control that takes one, as the device reads them.
+    shapes: at.shapes ?? null,
   };
 }
 
@@ -6817,8 +6832,53 @@ function deviceFigureOpts(state) {
     // a different copy would be a picture of a different sound.
     tables: state.kit.tables.sharedBuiltInTables(),
     extras: state.extras,
+    shapes: state.shapes ?? null,
     sampleRate: DEVICE_FIGURE_RATE,
   };
+}
+
+/** The figures that draw what a device is DOING rather than how it is set, and so always follow. */
+const LIVE_DEVICE_FIGURES = new Set(['sample', 'meter', 'transfer', 'eq', 'shaper', 'sweep', 'duck']);
+
+/**
+ * A device's live answer as the window reads it: each driven control's value, position and
+ * readout, and the pictures redrawn with them - the browser host's deviceLive, from the UGen's
+ * report instead of the processor's.
+ *
+ * An equalizer's curve is drawn over what the mixer's analyzer hears of the track, when the mixer
+ * is analyzing it: a window does not start an analyzer of its own (the mixer's are budgeted -
+ * see mixTapLabels), so with the mixer closed the curve is drawn alone. And the analyzer hears the
+ * track's output, after the whole chain, where the browser's taps the equalizer itself.
+ */
+function deviceLiveBody(state, live, trackLabel) {
+  const { kit, descriptor } = state;
+  const values = {};
+  const merged = { ...state.values };
+  for (const p of descriptor.params) {
+    const position = live.positions[p.id];
+    if (position === undefined) continue;
+    const value = kit.descriptor.denormalize(p, position);
+    merged[p.id] = value;
+    if (state.driven.has(p.id)) {
+      values[p.id] = { value, position, text: kit.descriptor.formatValue(p, value, state.extras?.[p.id] ?? null) };
+    }
+  }
+  let report = live.report;
+  if ((descriptor.figures ?? []).some((f) => f.kind === 'eq')) {
+    const bands = mixSpecs.get(trackLabel);
+    const freqs = engine?.mixBandFreqs?.() ?? [];
+    if (bands?.length && freqs.length === bands.length) {
+      const db = (a) => (a > 0 ? Math.max(-120, 20 * Math.log10(a)) : -120);
+      report = { ...(report ?? {}), spectrum: freqs.map((hz, i) => ({ hz, db: db(Math.max(bands[i][0], bands[i][1])) })) };
+    }
+  }
+  const opts = { ...deviceFigureOpts(state), report };
+  const figures = (descriptor.figures ?? [])
+    .filter((f) => LIVE_DEVICE_FIGURES.has(f.kind) || Object.values(f.params).some((id) => state.driven.has(id)))
+    .map((f) => kit.figures.figuresFor(descriptor, Object.values(f.params).find((id) => state.driven.has(id)) ?? Object.values(f.params)[0], merged, opts))
+    .flat();
+  const seen = new Set();
+  return { values, figures: figures.filter((f) => (seen.has(f.id) ? false : seen.add(f.id))) };
 }
 
 /** The panel model for a slot's device, as the editor draws it. */
@@ -8231,6 +8291,9 @@ const routes = {
     for (const b of active) hlTracks.set(keyOf(b), { sig: b.sig, start: b.start, end: b.end, clock: b.trackClock ?? null });
     const gridFrom = currentGridCycle(deck);
 
+    // A shape the evaluation redefined reaches the devices already on it, playing or not.
+    engine.refreshNamedShapes?.();
+
     // Pairs with the event-loop watchdog above: an evaluation that held the process this long
     // starved the scheduler of the OTHER deck too, and the terminal should name the culprit.
     const evalMs = performance.now() - evalT0;
@@ -8390,6 +8453,20 @@ const routes = {
     if (typeof id !== 'number' && typeof id !== 'string') throw new Error('liveGroove needs the groove id');
     liveOnDeck(body, () => patternCore.liveGroove(id, String(body.table ?? '')));
     return { status: 200, body: { ok: true } };
+  },
+
+  // A drawn shape being dragged in the LFO panel: body { deck, from, to }, each breakpoints as the
+  // panel holds them. Every modulator on that deck playing `from` plays `to` from the phase it is
+  // at, heard as the drag happens; the code is written and evaluated when the drag settles.
+  'POST /api/liveShape': async (body) => {
+    if (!Array.isArray(body?.from) || !Array.isArray(body?.to)) throw new Error('liveShape needs the shape before and after');
+    const onB = body.deck === 'b';
+    let took = 0;
+    for (const [label, sched] of schedulers) {
+      if (String(label).startsWith('b:') !== onB) continue;
+      took += sched.liveShape(body.from, body.to);
+    }
+    return { status: 200, body: { ok: true, took } };
   },
 
   'POST /api/liveSlices': async (body) => {
@@ -8808,8 +8885,8 @@ const routes = {
   },
 
   // A device window opened or closed. Only the closing matters here: the browser build also uses
-  // this to start and stop the processor reporting where its driven controls are, and scsynth has
-  // nothing to report with (see deviceLive).
+  // this to start and stop the processor reporting where its driven controls are, and here the
+  // UGen is simply asked whenever the window polls (see deviceLive).
   'POST /api/deviceWatch': async (body) => {
     const trackId = String(body?.trackId ?? '');
     const slot = Number(body?.slot ?? 0);
@@ -8817,14 +8894,22 @@ const routes = {
     return { status: 200, body: { ok: true } };
   },
 
-  // Where the driven controls of an open window are right now.
+  // Where the driven controls of an open window are right now, and the pictures they move.
   //
-  // The browser answers this from the processor's own reports, and there is no equivalent in
-  // scsynth: a modulator is a control bus mapped onto the UGen's input, read by nobody. So a
-  // knob under an LFO is drawn where the modulator was pointed rather than where it has got to,
-  // and this answers with nothing rather than with a guess. The editor polls it only while
-  // something in the window is driven, and treats a null as "not following".
-  'POST /api/deviceLive': async () => ({ status: 200, body: { values: null, figures: [] } }),
+  // Asked of the UGen itself (osc-engine's deviceLive, the /report unit command), which reports
+  // each control as the DEVICE last read it - so a knob under an LFO is drawn where the modulator
+  // has got to rather than where it was pointed - and what the device says it is doing, the
+  // grains a granulator has in the air. The editor polls it while something in the window is
+  // driven or a picture is of what the device is doing, and treats a null as "not following".
+  'POST /api/deviceLive': async (body) => {
+    const trackLabel = String(body?.trackId ?? '');
+    const slot = Number(body?.slot ?? 0);
+    const state = await deviceInSlot(trackLabel, slot);
+    if (!state) return { status: 200, body: { values: null, figures: [] } };
+    const live = await engine.deviceLive?.(engineTrack(trackLabel), slot);
+    if (!live) return { status: 200, body: { values: null, figures: [] } };
+    return { status: 200, body: deviceLiveBody(state, live, trackLabel) };
+  },
 
   // "I'm back in the code" - the editor sends this on a click in the buffer, and every slot being
   // held by hand goes back to its pattern (see the hand-editing section). No body: a click is not

@@ -10,7 +10,7 @@
 // And what is not here at all is the sweep. On the desktop a month of playing leaves hundreds of
 // megabytes of captured programs and the store has to give ground; here the browser already
 // enforces a quota and clearing site data is one click, so a collector of our own would be a
-// second opinion about the same bytes. See the web build entry in TODO.md.
+// second opinion about the same bytes. See the web build entry in TODO-verbose.md.
 
 const ID_RE = /^[0-9a-f]{12}$/;
 

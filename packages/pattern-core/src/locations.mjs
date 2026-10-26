@@ -246,6 +246,9 @@ export function isPatternPosition(before, after, text = '') {
     return true;
   }
   if (method) return true;
+  // An option a modulator patterns, written in its options object - `lfo("swell", { rate:
+  // "<0.3 2>" })` - is as much a pattern as the same thing given to .rate().
+  if (/[{,]\s*rate\s*:\s*$/.test(near)) return true;
   return false;
 }
 

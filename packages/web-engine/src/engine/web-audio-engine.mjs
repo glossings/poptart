@@ -22,13 +22,23 @@ import { defaultValues, denormalize, findParam, normalize } from '../descriptor.
 import { decodeWav, framesOf } from '../dsp/wavfile.mjs';
 import { buildMipmaps, powerOfTwoAtLeast, resampleFrame } from '../dsp/tables.mjs';
 import { outlineOf } from '../dsp/outline.mjs';
+import { compileExpr, exprConsts, exprInputCount, exprInputs, exprShape } from '../dsp/expr.mjs';
 import { MIX_BAND_FREQS, MIX_TRACK_MAX, MixAnalysis, SpectrumTap } from './analysis.mjs';
 import { MidiRoutes } from './midi-routes.mjs';
 import { detectOnsets, monoOf, planSample, sliceEntryFor } from './sample-plan.mjs';
 import { EnvConnection, FeedConnection, LfoConnection } from './modulators.mjs';
-import { GRAIN_CHANNEL_FIELDS, SUPPORTED_CHANNELS, Track, rampParam, teardownParamConnection } from './track.mjs';
+import { GRAIN_CHANNEL_FIELDS, SUPPORTED_CHANNELS, Track, rampParam } from './track.mjs';
 
 const keyOf = (slot, name) => `${slot}:${name}`;
+
+// An input of a parameter expression is addressed like a parameter of its own: `~i~name` is input
+// i of the expression on `name`, on the same slot. Polled values and modulators aimed at it drive
+// the input exactly as they would drive the parameter (see setParamExpr).
+const LEAF_RE = /^~(\d+)~([\s\S]*)$/;
+function leafOf(name) {
+  const m = LEAF_RE.exec(String(name ?? ''));
+  return m ? { i: Number(m[1]), name: m[2] } : null;
+}
 
 /**
  * The note a sample plays at unrepitched, when its pack does not say what pitch it holds.
@@ -189,6 +199,7 @@ export class WebAudioEngine {
     this.tracks = new Map();        // trackId -> Track
     this.buses = new Map();         // bus name -> GainNode
     this.modulators = new Map();    // trackId -> Map("slot:name" -> connection)
+    this.exprs = new Map();         // trackId -> Map("slot:name" -> parameter expression, see setParamExpr)
     this.envelopes = new Map();     // trackId -> Map("slot:name" -> EnvConnection), gated per note
     this.feeds = new Map();         // "device|cc" or "osc:address" -> Set(FeedConnection)
     this.held = new Map();          // trackId -> how many of its notes are held, which gates its env()s
@@ -319,6 +330,8 @@ export class WebAudioEngine {
     if (!track) return;
     const now = this.getTime();
     this._clearAllModulators(trackId);
+    for (const rec of this.exprs.get(trackId)?.values() ?? []) this._disposeExpr(trackId, rec, false);
+    this.exprs.delete(trackId);
     for (const key of [...this._waiting.keys()]) if (key.split('|')[1] === trackId) this._waiting.delete(key);
     // What reads into it: the head input (a bus, another track, a hardware input) and the
     // hardware routes into its sidechains.
@@ -474,7 +487,9 @@ export class WebAudioEngine {
       track.setParamValue(slot, id, value, now, now);
     }
     for (const { method, name, ir } of carried.modulators) this[method](trackId, slot, name, ir);
-    for (const { name, source, gain, offset } of carried.connections) this.connectParam(trackId, slot, name, source, gain, offset);
+    for (const rec of this.exprs.get(trackId)?.values() ?? []) {
+      if (rec.slot === slot && rec.node) this._attachExprOutput(trackId, rec);
+    }
     if (carried.sidechain) this.injectAudio(trackId, slot, carried.sidechain);
     return placed;
   }
@@ -508,14 +523,22 @@ export class WebAudioEngine {
     const modulators = [];
     for (const [key, conn] of [...(this.modulators.get(trackId) ?? [])]) {
       if (!key.startsWith(prefix)) continue;
+      // An expression's inputs belong to the expression, not to the device: they stay as they are.
+      if (leafOf(key.slice(prefix.length))) continue;
       modulators.push({ method: conn.method, name: key.slice(prefix.length), ir: conn.ir });
       this._clearModulator(trackId, slot, key.slice(prefix.length));
     }
     const track = this.tracks.get(trackId);
-    const connections = track?.takeConnections(slot) ?? [];
+    // An expression on the slot lets go of the old device's parameter and is pointed at the new
+    // one's once it is built.
+    for (const rec of this.exprs.get(trackId)?.values() ?? []) {
+      if (rec.slot !== slot || !rec.node) continue;
+      try { rec.node.disconnect(); } catch { /* not connected */ }
+      rec.target = null;
+    }
     const sidechain = track?.sidechains.get(slot)?.source ?? null;
     track?.clearSidechain(slot);
-    return { modulators, connections, sidechain };
+    return { modulators, sidechain };
   }
 
   loadInstrument(trackId, deviceId) {
@@ -878,6 +901,25 @@ export class WebAudioEngine {
     // scalar written over it would fight with the connection until one of them stopped. The same
     // for a channel control one drives (bend - see _targetParam).
     if (this.modulators.get(trackId)?.has(keyOf(slot, name))) return;
+    // A value for one of an expression's inputs, in whatever units the expression reads it in.
+    const leaf = this._leafTarget(trackId, slot, name);
+    if (leaf !== undefined) {
+      if (leaf) rampParam(leaf, Number(value) || 0, atTime, now, glide);
+      return;
+    }
+    if (this._exprOwns(trackId, slot, name)) return;
+    // `@amp.decay`: the instrument's own amp envelope, in seconds (or a level, for sustain), from
+    // .attack()/.decay()/.sustain()/.release()/.envscale() on a synth.
+    if (typeof name === 'string' && name.startsWith('@amp.')) {
+      const device = track.slots.get(slot)?.descriptor;
+      const param = findParam(device, name);
+      if (!param) {
+        this._warnOnce(`amp:${trackId}:${slot}:${name}`, `[web-engine] ${device?.name ?? 'this instrument'} has no amp envelope ${name.slice(5)}, so .${name.slice(5) === 'scale' ? 'envscale' : name.slice(5)}() does nothing on it.`);
+        return;
+      }
+      name = param.id;
+      value = normalize(param, Number(value));
+    }
     if (slot === -1) {
       if (!track.setChannel(name, value, atTime, now)) {
         this._warnOnce(`channel:${name}`, `[web-engine] the "${name}" channel control is not implemented in the browser build yet, so it does nothing here. Implemented: ${SUPPORTED_CHANNELS.join(', ')} and wet1..wet20.`);
@@ -1183,6 +1225,8 @@ export class WebAudioEngine {
 
   /** The AudioParam a modulator or a connection should drive, or null with a warning. */
   _targetParam(trackId, slot, name) {
+    const leaf = this._leafTarget(trackId, slot, name);
+    if (leaf !== undefined) return leaf;
     const track = this.tracks.get(trackId);
     if (slot === -1) {
       // A channel control is driven in its own units, as a set value is: gain as a level, pan
@@ -1299,7 +1343,7 @@ export class WebAudioEngine {
     this._recordLeft(trackId, slot, name, left);
     held.delete(key);
     const track = this.tracks.get(trackId);
-    if (slot === -1 && track) {
+    if (slot === -1 && track && !leafOf(name)) {
       const now = this.getTime();
       // A bend is left where it rests, not where the modulator stopped: a pattern that dropped its
       // lfo() on bend should not stay out of tune by wherever the sweep happened to be. Anything
@@ -1334,6 +1378,7 @@ export class WebAudioEngine {
 
   /** The pattern is about to drive a plugin parameter by poll (see Track#holdParam). */
   holdParam(trackId, slot, name) {
+    if (leafOf(name)) return;
     this.tracks.get(trackId)?.holdParam(slot, name);
   }
 
@@ -1341,6 +1386,7 @@ export class WebAudioEngine {
   releaseParam(trackId, slot, name, atTime, glide) {
     const track = this.tracks.get(trackId);
     if (!track || this.modulators.get(trackId)?.has(keyOf(slot, name))) return;
+    if (leafOf(name) || this._exprOwns(trackId, slot, name)) return;
     track.releaseParam(slot, name, atTime, this.getTime(), glide);
   }
 
@@ -1363,15 +1409,18 @@ export class WebAudioEngine {
    * beginning, as the desktop's does and as the scheduler's phase anchors count; in the
    * note-gated modes it waits for the next note (see LfoConnection#swapTo).
    */
-  setParamShape(trackId, slot, name, index, atTime) {
+  setParamShape(trackId, slot, name, index, atTime, rateHz = null) {
     const conn = this.modulators.get(trackId)?.get(keyOf(slot, name));
-    if (conn instanceof LfoConnection) conn.swapTo(index, atTime);
+    if (conn instanceof LfoConnection) conn.swapTo(index, atTime, rateHz);
   }
 
-  /** Puts a free-running LFO back on the grid's phase, which the scheduler does periodically. */
-  anchorParamLFO(trackId, slot, name, phase01, atTime) {
+  /**
+   * Puts a free-running LFO back on the grid's phase, which the scheduler does periodically. A
+   * patterned rate also names the rate it runs at from then on: its changes arrive this way.
+   */
+  anchorParamLFO(trackId, slot, name, phase01, atTime, rateHz = null) {
     const conn = this.modulators.get(trackId)?.get(keyOf(slot, name));
-    if (conn instanceof LfoConnection) conn.anchor(phase01, atTime);
+    if (conn instanceof LfoConnection) conn.anchor(phase01, atTime, rateHz);
   }
 
   /** The host feeds a MIDI continuous controller in; every parameter watching it follows. */
@@ -1404,85 +1453,207 @@ export class WebAudioEngine {
     for (const conn of this.feeds.get(`osc|${address}|${index ?? 0}`) ?? []) conn.feed(unit, atTime);
   }
 
-  // -- signal patched onto a parameter ------------------------------------------------------
+  // -- parameter expressions ----------------------------------------------------------------
 
   /**
-   * Wires a track's or bus's output onto a parameter, at audio rate.
+   * Installs the expression a `.param()` value became - `audio("a").mul(lfo())`, two sources
+   * summed, `env().mul(lfo())` - on (slot, name). One worklet node per expression evaluates the
+   * tree every sample (dsp/expr.mjs) and drives the parameter, which it then owns outright, as a
+   * modulator does. Its inputs are of two kinds: another track or a bus, wired here by name, and
+   * everything else, which arrives as ordinary parameter calls on the leaf name `~i~name` (see
+   * _leafTarget) - so an lfo(), an env() or a polled pattern feeding an expression is programmed
+   * exactly as it would be on a parameter of its own.
    *
-   * This is what makes phase modulation possible at all: a value the scheduler polls every 30 ms
-   * is a sweep, not a modulator. `gain` and `offset` are the `.mul()` and `.add()` that rode in
-   * on the handle, and they become a gain node and a constant - there is nothing to sample, so
-   * there is nothing to poll. The parameter is a 0..1 position like every other, so a bipolar
-   * signal wants `.mul(0.5).add(0.5)` to cover it and a smaller gain to modulate around the
-   * middle.
+   * A tree that differs from the running one only in its constants is taken in place, without a
+   * rebuild: a knob turned in the code or the panel moves the value and cuts nothing.
    */
-  connectParam(trackId, slot, name, source, gain = 1, offset = 0) {
-    const track = this.tracks.get(trackId);
-    if (!track) return;
-    const key = keyOf(slot, name);
-    this.disconnectParam(trackId, slot, name);
-    const target = this._targetParam(trackId, slot, name);
-    if (!target) return;
-    // The parameter is looked up again when the source arrives: the device in the slot may have
-    // been swapped while the route waited.
-    this._route(`param|${trackId}|${key}`, source, (from) => {
-      const param = this._targetParam(trackId, slot, name);
-      if (param) this._patchParam(track, key, param, from, source, gain, offset);
-    }, `source:${source}`, `[web-engine] there is nothing called "${source}" to patch into "${name}".`);
+  setParamExpr(trackId, slot, name, tree) {
+    if (!this.tracks.has(trackId)) return;
+    const rec = this._exprRecord(trackId, slot, name);
+    const json = JSON.stringify(tree);
+    if (rec.node && rec.json === json) return;
+    try {
+      compileExpr(tree);
+    } catch (err) {
+      this._warnOnce(`expr:${trackId}:${rec.key}`, `[web-engine] the value given to "${name}" could not be built (${err?.message ?? err}), so it is left where it was.`);
+      return;
+    }
+    const shape = exprShape(tree);
+    if (rec.node && rec.shape === shape) {
+      rec.node.port?.postMessage?.({ consts: exprConsts(tree) });
+      rec.tree = tree;
+      rec.json = json;
+      return;
+    }
+    let node;
+    try {
+      if (!this.AudioWorkletNodeCtor) throw new Error('this build has no AudioWorkletNode');
+      node = new this.AudioWorkletNodeCtor(this.ctx, 'poptart-expr', {
+        numberOfInputs: exprInputCount(tree),
+        numberOfOutputs: 1,
+        outputChannelCount: [1],
+        // Every input is read as one channel, and a stereo source is folded to it as (L + R) / 2 -
+        // what the desktop's devices make of a pair patched onto a control.
+        channelCount: 1,
+        channelCountMode: 'explicit',
+        channelInterpretation: 'speakers',
+        processorOptions: { tree },
+      });
+    } catch (err) {
+      this._warnOnce(`expr-build:${trackId}:${rec.key}`, `[web-engine] the value given to "${name}" needs the effects worklet, which is not loaded (${err?.message ?? err}), so it is left where it was.`);
+      return;
+    }
+    // Whatever drove the parameter before is taken off: the expression is its whole value now.
+    this._clearModulator(trackId, slot, name);
+    this._detachExprInputs(trackId, rec);
+    const old = rec.node;
+    rec.node = node;
+    rec.tree = tree;
+    rec.json = json;
+    rec.shape = shape;
+    rec.wired = new Set();
+    for (const leaf of exprInputs(tree)) {
+      const i = Number(leaf.i) | 0;
+      if (rec.wired.has(i)) continue;
+      rec.wired.add(i);
+      if (leaf.source != null) this._wireExprSource(trackId, rec, i, String(leaf.source));
+      else this._exprInput(rec, i).connect(node, 0, i);
+    }
+    if (old) this._retireExprNode(old);
+    this._attachExprOutput(trackId, rec);
   }
 
-  _patchParam(track, key, target, from, source, gain, offset) {
-    const scale = this.ctx.createGain();
-    scale.gain.value = gain;
-    from.connect(scale);
-    scale.connect(target);
-    let bias = null;
-    if (offset !== 0) {
-      bias = this.ctx.createConstantSource();
-      bias.offset.value = offset;
-      bias.connect(target);
-      bias.start();
-    }
-    // The parameter's own value would ADD to what arrives, so it is zeroed: a connection is the
-    // whole value, exactly as a modulator is.
-    try { target.value = 0; } catch { /* a param that refuses a direct set */ }
-    track.paramConnections.set(key, { scale, bias, from, source, gain, offset });
+  /** Takes the expression off (slot, name); the parameter goes back to the value last set on it. */
+  clearParamExpr(trackId, slot, name) {
+    const held = this.exprs.get(trackId);
+    const rec = held?.get(keyOf(slot, name));
+    if (!rec) return;
+    this._disposeExpr(trackId, rec, true);
+    held.delete(rec.key);
   }
 
   /**
-   * Unpatches a signal from a parameter and hands the parameter back at the value last set on it.
-   * The connection zeroed it, and what the signal was doing at the moment it went is not something
-   * the main thread can know, so the control returns to where the pattern or the panel last put
-   * it rather than being left at the bottom of its range.
+   * What expressions this track's parameters carry, as `"slot:name" -> the tree as set` - the
+   * spelling the scheduler diffs against, so a fresh Scheduler on a track that outlived its old
+   * one leaves an unchanged expression running instead of rebuilding it.
    */
-  disconnectParam(trackId, slot, name) {
-    this._waiting.delete(`param|${trackId}|${keyOf(slot, name)}`);
-    const track = this.tracks.get(trackId);
-    const conn = track?.paramConnections.get(keyOf(slot, name));
-    if (!conn) return;
-    teardownParamConnection(conn);
-    track.paramConnections.delete(keyOf(slot, name));
-    const filled = track.slots.get(slot);
-    const found = filled?.paramFor(name);
-    if (found?.audioParam) {
-      try { found.audioParam.value = normalize(found.param, filled.values[found.param.id]); } catch { /* a param that refuses a direct set */ }
-    }
-  }
-
-  /**
-   * What is patched onto this track's parameters right now, as `"slot:name" -> source|gain|offset`.
-   *
-   * The engine track outlives the Scheduler that wired it: a label removed and re-added, or a
-   * re-evaluation, arrives with an empty record of what it sent and would leave a dropped route
-   * playing for good. So a fresh Scheduler asks, and the answer is spelled as the same key it
-   * diffs against - which is what lets a route that did not change survive a re-eval without
-   * being cut and re-made.
-   */
-  paramRoutes(trackId) {
+  paramExprs(trackId) {
     const out = new Map();
-    const track = this.tracks.get(trackId);
-    for (const [key, conn] of track?.paramConnections ?? []) out.set(key, `${conn.source}|${conn.gain}|${conn.offset}`);
+    for (const [key, rec] of this.exprs.get(trackId) ?? []) if (rec.json != null) out.set(key, rec.json);
     return out;
+  }
+
+  /** Whether an installed expression owns this parameter, so nothing else may set it. */
+  _exprOwns(trackId, slot, name) {
+    return this.exprs.get(trackId)?.get(keyOf(slot, name))?.json != null;
+  }
+
+  _exprRecord(trackId, slot, name) {
+    if (!this.exprs.has(trackId)) this.exprs.set(trackId, new Map());
+    const held = this.exprs.get(trackId);
+    const key = keyOf(slot, name);
+    let rec = held.get(key);
+    if (!rec) {
+      rec = { key, slot, name, tree: null, json: null, shape: null, node: null, wired: new Set(), inputs: new Map(), sources: new Map(), target: null, rest: undefined };
+      held.set(key, rec);
+    }
+    return rec;
+  }
+
+  /**
+   * The parameter a leaf name stands for: the offset of the constant feeding that input. Made on
+   * first use, by whichever arrives first - the expression or a call aimed at one of its inputs -
+   * so a modulator programmed a moment before its expression lands is already in place when it
+   * does. Undefined for a name that is not a leaf; null when there is no track to hold it.
+   */
+  _leafTarget(trackId, slot, name) {
+    const leaf = leafOf(name);
+    if (!leaf) return undefined;
+    if (!this.tracks.has(trackId)) return null;
+    return this._exprInput(this._exprRecord(trackId, slot, leaf.name), leaf.i).offset;
+  }
+
+  _exprInput(rec, i) {
+    let source = rec.inputs.get(i);
+    if (!source) {
+      source = this.ctx.createConstantSource();
+      source.offset.value = 0;
+      source.start();
+      rec.inputs.set(i, source);
+      if (rec.node && rec.wired.has(i) && !this._exprSourceAt(rec, i)) source.connect(rec.node, 0, i);
+    }
+    return source;
+  }
+
+  _exprSourceAt(rec, i) {
+    return exprInputs(rec.tree).some((leaf) => (Number(leaf.i) | 0) === i && leaf.source != null);
+  }
+
+  _wireExprSource(trackId, rec, i, name) {
+    const node = rec.node;
+    this._route(`expr|${trackId}|${rec.key}|${i}`, name, (from) => {
+      if (rec.node !== node) return;   // rebuilt while this waited
+      from.connect(node, 0, i);
+      rec.sources.set(i, { from, name });
+    }, `source:${name}`, `[web-engine] there is nothing called "${name}" to patch into "${rec.name}".`);
+  }
+
+  /** Unplugs every input from the running node, and forgets the routes still waiting for one. */
+  _detachExprInputs(trackId, rec) {
+    for (const key of [...this._waiting.keys()]) {
+      if (key.startsWith(`expr|${trackId}|${rec.key}|`)) this._waiting.delete(key);
+    }
+    if (!rec.node) return;
+    for (const source of rec.inputs.values()) { try { source.disconnect(rec.node); } catch { /* not connected */ } }
+    for (const { from } of rec.sources.values()) { try { from.disconnect(rec.node); } catch { /* not connected */ } }
+    rec.sources.clear();
+  }
+
+  _retireExprNode(node) {
+    try { node.disconnect(); } catch { /* already detached */ }
+    try { node.port?.postMessage?.({ kind: 'dispose' }); } catch { /* no port to tell */ }
+  }
+
+  /**
+   * Points the expression at the parameter it drives, which may have changed under it - a device
+   * swapped into the slot, or loaded only now. The parameter's own value is zeroed, because what
+   * arrives at an AudioParam adds to it.
+   */
+  _attachExprOutput(trackId, rec) {
+    if (!rec.node) return;
+    try { rec.node.disconnect(); } catch { /* not connected */ }
+    const target = this._targetParam(trackId, rec.slot, rec.name);
+    rec.target = target;
+    if (!target) return;
+    if (rec.slot === -1 && rec.rest === undefined) rec.rest = target.value;
+    try { target.cancelScheduledValues(this.getTime()); } catch { /* nothing scheduled */ }
+    try { target.value = 0; } catch { /* a param that refuses a direct set */ }
+    rec.node.connect(target);
+  }
+
+  /** Takes an expression down, and with `restore` puts its parameter back where it was last set. */
+  _disposeExpr(trackId, rec, restore) {
+    this._detachExprInputs(trackId, rec);
+    for (const source of rec.inputs.values()) {
+      try { source.stop(); } catch { /* never started */ }
+      try { source.disconnect(); } catch { /* already detached */ }
+    }
+    rec.inputs.clear();
+    if (rec.node) this._retireExprNode(rec.node);
+    rec.node = null;
+    rec.json = null;
+    const target = rec.target;
+    rec.target = null;
+    if (!restore || !target) return;
+    if (rec.slot === -1) {
+      if (Number.isFinite(rec.rest)) { try { target.value = rec.rest; } catch { /* refuses a direct set */ } }
+      return;
+    }
+    const filled = this.tracks.get(trackId)?.slots.get(rec.slot);
+    const found = filled?.paramFor(rec.name);
+    if (found?.audioParam) {
+      try { found.audioParam.value = normalize(found.param, filled.values[found.param.id]); } catch { /* refuses a direct set */ }
+    }
   }
 
   // -- routing -----------------------------------------------------------------------------
@@ -1587,11 +1758,16 @@ export class WebAudioEngine {
           track._headName = name;
         }, `head:${name}`, `[web-engine] there is nothing called "${name}" for this track to read.`);
       }
-      for (const [key, conn] of [...track.paramConnections]) {
-        if (conn.from !== panner) continue;
-        const cut = key.indexOf(':');
-        this.disconnectParam(id, Number(key.slice(0, cut)), key.slice(cut + 1));
-        this.connectParam(id, Number(key.slice(0, cut)), key.slice(cut + 1), conn.source, conn.gain, conn.offset);
+    }
+    for (const [id, held] of this.exprs) {
+      if (id === sourceId) continue;
+      for (const rec of held.values()) {
+        for (const [i, { from, name }] of [...rec.sources]) {
+          if (from !== panner) continue;
+          try { from.disconnect(rec.node); } catch { /* already detached */ }
+          rec.sources.delete(i);
+          this._wireExprSource(id, rec, i, name);
+        }
       }
     }
   }
@@ -1923,7 +2099,7 @@ export class WebAudioEngine {
     const now = this.getTime();
     const files = parsed?.files ?? {};
     // A parameter something else is driving is not a preset's to set, for the same reason it is
-    // not setParam's: a modulator adds to the intrinsic value, which connectParam zeroed, so
+    // not setParam's: a modulator adds to the intrinsic value, which it zeroed, so
     // writing the captured number back would offset the modulation by it and squash it against
     // the top of the range. The rest of the preset lands; these keep their modulator.
     const driven = this.drivenParams(trackId, slot);
@@ -1992,7 +2168,7 @@ export class WebAudioEngine {
       if (found) out.set(found.id, what);
     };
     for (const [key, conn] of this.modulators.get(trackId) ?? []) record(key, conn.kind ?? 'a modulator');
-    for (const key of track.paramConnections.keys()) record(key, 'an audio signal');
+    for (const [key, rec] of this.exprs.get(trackId) ?? []) if (rec.json != null) record(key, 'a combination of signals');
     return out;
   }
 

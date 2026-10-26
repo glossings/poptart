@@ -53,6 +53,34 @@ struct PdParamSpec {
 enum PdCurve { kPdLinear = 0, kPdExponential = 1, kPdPower = 2 };
 
 /**
+ * A FILE handed to a device: a granulator's sample, a convolver's impulse response, a wavetable.
+ *
+ * Two layouts of the same frames, because devices want different ones and none of them may build
+ * the other on the audio thread. `mono` is every channel summed to one, with the browser's own
+ * arithmetic (each channel divided by the count and added in order), which is what a granulator
+ * and a wavetable read. `channels` is the file as it is, interleaved, which is what a convolver
+ * reads: the browser convolves each side with its own side of a stereo response. For a mono file
+ * the two are the same pointer.
+ *
+ * The frames are at the FILE'S OWN RATE and the host owns them for as long as the device is in
+ * the slot; a later file for the same (param, slot) replaces them. A device keeps the pointers
+ * rather than a copy.
+ */
+struct PdSample {
+  const float* mono;
+  const float* channels;
+  int frames;
+  int channelCount;
+  double sampleRate;
+  /**
+   * The wavetable frame length the file declares in its `clm ` chunk, or 0 when it declares
+   * none - the browser's decodeWav reads the same chunk, and a table cut at the wrong length is
+   * every frame read through the end of the one before it.
+   */
+  int frameLength;
+};
+
+/**
  * One device instance.
  *
  * The methods are the generated ABI under different names: a virtual call per BLOCK (not per
@@ -72,8 +100,19 @@ struct PdAny {
   virtual float* out() = 0;
   virtual float* params() = 0;
   virtual void process(int frames) = 0;
+  /**
+   * A note lands on the sample it was scheduled for, one of two ways. By default the host cuts
+   * its render there and makes the call between the two pieces, which is what the browser's
+   * module host does too (wasm.worklet.js) and asks nothing of a device. A device whose browser
+   * twin works out something across the WHOLE block - the FM synth ramps its matrix over the
+   * block, so a cut would restart the ramp - takes the offset instead (`pd_note_on_at`), is never
+   * cut for a note, and places the note inside its own block as the browser's processor does.
+   */
   virtual void noteOn(float note, float velocity) { (void)note; (void)velocity; }
   virtual void noteOff(float note) { (void)note; }
+  virtual bool takesNoteOffsets() { return false; }
+  virtual void noteOnAt(float note, float velocity, int offset) { (void)offset; noteOn(note, velocity); }
+  virtual void noteOffAt(float note, int offset) { (void)offset; noteOff(note); }
   virtual void bend(float semitones) { (void)semitones; }
   /**
    * The tempo, and where the transport is - in seconds since the beat the engine last anchored.
@@ -107,21 +146,61 @@ struct PdAny {
   virtual void keyPatched(bool on) { (void)on; }
   virtual void noteRoute(bool on) { (void)on; }
   /**
-   * A FILE the device plays: a granulator's sample, a convolver's impulse response.
+   * A FILE the device plays: a granulator's sample, a convolver's impulse response, a table.
+   * Audio thread.
    *
    * `param` is the control that takes it and `slot` the entry on that control's option list the
    * file was loaded into, which is the pair the browser keys a loaded file by too (its
    * _spareOption / loadSample) - a song that loads two samples and then switches between them by
-   * index has to mean the same thing on both engines.
-   *
-   * The frames are summed to ONE channel at the FILE'S OWN RATE, as the browser hands them over,
-   * and the device does not own them: the host holds that memory for as long as the device is in
-   * the slot, and a later file for the same (param, slot) replaces it. A device therefore keeps
-   * the pointer rather than a copy - megabytes are not copied on the audio thread.
+   * index has to mean the same thing on both engines. See PdSample for what the device is given
+   * and who owns it: megabytes are not copied on the audio thread. A device that has to BUILD
+   * something out of the frames (a wavetable's pyramid, a convolver's partitions) asks for the
+   * time to do it through the work calls below.
    */
-  virtual void sample(int param, int slot, const float* data, int frames, double sampleRate) {
-    (void)param; (void)slot; (void)data; (void)frames; (void)sampleRate;
+  virtual void sample(int param, int slot, const PdSample& file) {
+    (void)param; (void)slot; (void)file;
   }
+  /**
+   * A DRAWN curve for a control that takes one (`takes: 'shape'`): Distort's transfer curve, a
+   * grain window. Audio thread.
+   *
+   * `table` is the curve as the engine sampled it - the browser's own SHAPE_POINTS, evenly
+   * spaced, read by the device the way the browser's processor reads the table it is posted. The
+   * host owns the memory on the same terms as a file's frames: for as long as the device is in
+   * the slot, until a later curve for the same (param, slot) replaces it.
+   */
+  virtual void shape(int param, int slot, const float* table, int count) {
+    (void)param; (void)slot; (void)table; (void)count;
+  }
+  /**
+   * WORK OFF THE AUDIO THREAD: building something out of a setting or a file where it is allowed
+   * to take time. The host crosses the same three threads a device's open does:
+   *
+   *   workWanted()   audio thread, before each block's process while no work is in flight. The
+   *                  controls for the block are already in params(). A device that has something
+   *                  to build says so and SNAPSHOTS what it needs into its own request state.
+   *   work()         the non-realtime thread. Builds from the snapshot only, into state the audio
+   *                  thread does not read: the device goes on playing meanwhile.
+   *   workDone()     audio thread. Swaps what was built in - pointer swaps, nothing allocated.
+   *   workRelease()  the non-realtime thread. Frees what workDone swapped out.
+   *
+   * At most one round is in flight per device. The host guarantees the device outlives its own
+   * round, and that workDone is only called while it is still the device in the slot; a device
+   * replaced mid-round never hears about it again, and frees whatever it built in its destructor.
+   * Until workDone, the device plays what it had: a convolver keeps its old space, a new table
+   * slot plays what an empty slot plays.
+   */
+  virtual bool workWanted() { return false; }
+  virtual void work() {}
+  virtual void workDone() {}
+  virtual void workRelease() {}
+  /**
+   * What the device is DOING, for the window drawn of it: a granulator's grains in flight. Audio
+   * thread, on request. Writes at most `capacity` floats into `out` and returns how many; the
+   * layout is the device's own, and the engine's Node half reads it back into the shape the
+   * browser's processor reports (native-devices.js's readReport).
+   */
+  virtual int report(float* out, int capacity) { (void)out; (void)capacity; return 0; }
 };
 
 /** Whether a device reads the transport. */
@@ -145,6 +224,13 @@ template <class Device>
 struct PdTakesNotes<Device, decltype(std::declval<Device&>().pd_note_on(0.f, 0.f))>
     : std::true_type {};
 
+/** Whether a device places notes inside its own block, at an offset the host hands it. */
+template <class Device, class = void>
+struct PdTakesNoteOffsets : std::false_type {};
+template <class Device>
+struct PdTakesNoteOffsets<Device, decltype(std::declval<Device&>().pd_note_on_at(0.f, 0.f, 0))>
+    : std::true_type {};
+
 /** Whether a device asks to be told what is routed into its slot's key input. */
 template <class Device, class = void>
 struct PdTakesKeyPatched : std::false_type {};
@@ -164,7 +250,29 @@ template <class Device, class = void>
 struct PdTakesSample : std::false_type {};
 template <class Device>
 struct PdTakesSample<Device,
-    decltype(std::declval<Device&>().pd_sample(0, 0, (const float*)nullptr, 0, 0.0))>
+    decltype(std::declval<Device&>().pd_sample(0, 0, std::declval<const PdSample&>()))>
+    : std::true_type {};
+
+/** Whether a device reads drawn curves. */
+template <class Device, class = void>
+struct PdTakesShape : std::false_type {};
+template <class Device>
+struct PdTakesShape<Device,
+    decltype(std::declval<Device&>().pd_shape(0, 0, (const float*)nullptr, 0))>
+    : std::true_type {};
+
+/** Whether a device asks for work off the audio thread. It then has all four calls. */
+template <class Device, class = void>
+struct PdTakesWork : std::false_type {};
+template <class Device>
+struct PdTakesWork<Device, std::void_t<decltype(std::declval<Device&>().pd_work_wanted())>>
+    : std::true_type {};
+
+/** Whether a device reports what it is doing. */
+template <class Device, class = void>
+struct PdReports : std::false_type {};
+template <class Device>
+struct PdReports<Device, std::void_t<decltype(std::declval<Device&>().pd_report((float*)nullptr, 0))>>
     : std::true_type {};
 
 /** Whether a device is bent. Every instrument is; nothing else is. */
@@ -207,6 +315,15 @@ struct PdAdapter : PdAny {
     if constexpr (PdTakesNotes<Device>::value) d.pd_note_off(note);
     else { (void)note; }
   }
+  bool takesNoteOffsets() override { return PdTakesNoteOffsets<Device>::value; }
+  void noteOnAt(float note, float velocity, int offset) override {
+    if constexpr (PdTakesNoteOffsets<Device>::value) d.pd_note_on_at(note, velocity, offset);
+    else noteOn(note, velocity);
+  }
+  void noteOffAt(float note, int offset) override {
+    if constexpr (PdTakesNoteOffsets<Device>::value) d.pd_note_off_at(note, offset);
+    else noteOff(note);
+  }
   void bend(float semitones) override {
     if constexpr (PdTakesBend<Device>::value) d.pd_bend(semitones);
     else { (void)semitones; }
@@ -227,9 +344,24 @@ struct PdAdapter : PdAny {
     if constexpr (PdTakesNoteRoute<Device>::value) d.pd_note_route(on);
     else { (void)on; }
   }
-  void sample(int param, int slot, const float* data, int frames, double sampleRate) override {
-    if constexpr (PdTakesSample<Device>::value) d.pd_sample(param, slot, data, frames, sampleRate);
-    else { (void)param; (void)slot; (void)data; (void)frames; (void)sampleRate; }
+  void sample(int param, int slot, const PdSample& file) override {
+    if constexpr (PdTakesSample<Device>::value) d.pd_sample(param, slot, file);
+    else { (void)param; (void)slot; (void)file; }
+  }
+  void shape(int param, int slot, const float* table, int count) override {
+    if constexpr (PdTakesShape<Device>::value) d.pd_shape(param, slot, table, count);
+    else { (void)param; (void)slot; (void)table; (void)count; }
+  }
+  bool workWanted() override {
+    if constexpr (PdTakesWork<Device>::value) return d.pd_work_wanted();
+    else return false;
+  }
+  void work() override { if constexpr (PdTakesWork<Device>::value) d.pd_work(); }
+  void workDone() override { if constexpr (PdTakesWork<Device>::value) d.pd_work_done(); }
+  void workRelease() override { if constexpr (PdTakesWork<Device>::value) d.pd_work_release(); }
+  int report(float* out, int capacity) override {
+    if constexpr (PdReports<Device>::value) return d.pd_report(out, capacity);
+    else { (void)out; (void)capacity; return 0; }
   }
 };
 
@@ -260,3 +392,10 @@ extern "C" const PdDeviceInfo* pd_find_device(const char* name);
 
 /** A 0..1 position as the real value the DSP reads. The browser's denormalize(), in C++. */
 float pd_denormalize(const PdParamSpec& spec, float position);
+
+/**
+ * A file's interleaved channels summed to one, as the browser sums them (PdSample::mono). Shared
+ * by the UGen and the parity harness, so the frames the test hands a device are the frames the
+ * server hands it.
+ */
+void pd_mono_sum(const float* interleaved, int frames, int channels, float* out);
