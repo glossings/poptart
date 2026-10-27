@@ -53,6 +53,7 @@ export function createWebMidi({
   let clockName = null;
   let clockTimer = null;
   let wanted = readPref(prefs);
+  let feedbackOut = null;       // the MIDIOutput the DJ desk's lamps and meters go to
 
   const available = typeof requestAccess === 'function';
 
@@ -183,6 +184,33 @@ export function createWebMidi({
     clockName = null;
   }
 
+  // ---- the DJ desk's talk-back -------------------------------------------------------------------
+
+  /**
+   * Points the desk's lamps and meters at a destination by a fragment of its name, or nowhere.
+   * Answers { active }: the port's own name, or null when nothing connected matches.
+   */
+  async function setFeedback(fragment) {
+    feedbackOut = null;
+    const want = String(fragment ?? '').trim().toLowerCase();
+    if (!want) return { active: null };
+    await enable();
+    feedbackOut = [...access.outputs.values()].find((p) => p.state !== 'disconnected' && String(p.name ?? '').toLowerCase().includes(want)) ?? null;
+    return { active: feedbackOut?.name ?? null };
+  }
+
+  /**
+   * Messages to that port, now: [kind, channel (0-15), num, value (0-127)], kind 'note' or 'cc' -
+   * the shape the desktop's engine takes (see its midiOut).
+   */
+  function feedback(messages) {
+    if (!feedbackOut) return;
+    for (const [kind, channel, num, value] of messages ?? []) {
+      const status = (kind === 'cc' ? 0xb0 : 0x90) | (channel & 0x0f);
+      try { feedbackOut.send([status, num & 0x7f, Math.max(0, Math.min(127, Math.round(value)))]); } catch (err) { warn(`MIDI talk-back: ${err?.message ?? err}`); return; }
+    }
+  }
+
   /** Points clock out at a destination by a fragment of its name, or turns it off. */
   async function setClock(fragment) {
     const want = fragment ? String(fragment).trim() : null;
@@ -221,6 +249,8 @@ export function createWebMidi({
     outputs,
     setClock,
     clockState,
+    setFeedback,
+    feedback,
     /** Whether a clock is wanted from a previous visit - the host asks for access at boot then. */
     get clockWanted() { return !!wanted; },
     dispose() { stopClock(); },

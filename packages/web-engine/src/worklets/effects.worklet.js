@@ -31,6 +31,7 @@ import { GRAINECHO, GrainEchoProcessor } from '../devices/grainecho.mjs';
 import { LPG, LpgProcessor } from '../devices/lpg.mjs';
 import { RecorderTap } from '../devices/recorder.mjs';
 import { compileExpr, exprConsts, exprInputCount, renderExpr } from '../dsp/expr.mjs';
+import { SongReader } from '../devices/song-reader.mjs';
 import { Reporter, isDispose, parameterDescriptorsFor, realParams } from './shared.mjs';
 
 class EffectProcessor extends AudioWorkletProcessor {
@@ -144,6 +145,27 @@ registerProcessor('poptart-recorder', class extends AudioWorkletProcessor {
     if (!this.alive) return false;
     const input = inputs[0] ?? [];
     this.tap.process(input[0] ?? null, input[1] ?? null, input[0]?.length ?? 128, currentFrame);
+    return true;
+  }
+});
+
+// The song player (see devices/song-reader.mjs): a DJ deck's decoded song under a playhead. Not an
+// effect either, and here for the same reason the recorder is.
+registerProcessor('poptart-song', class extends AudioWorkletProcessor {
+  constructor(options) {
+    super(options);
+    this.alive = true;
+    this.reader = new SongReader(sampleRate, (m) => this.port.postMessage(m));
+    this.port.onmessage = (event) => {
+      if (isDispose(event.data)) { this.alive = false; return; }
+      this.reader.receive(event.data);
+    };
+  }
+
+  process(_inputs, outputs) {
+    if (!this.alive) return false;
+    const out = outputs[0] ?? [];
+    if (out[0]) this.reader.process(out[0], out[1] ?? null, out[0].length, currentFrame);
     return true;
   }
 });

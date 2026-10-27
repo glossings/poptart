@@ -61,6 +61,8 @@ function readPackDir(dir) {
 function listPackFiles(pack) {
   const name = String(pack);
   const own = readPackDir(path.join(samplesRoot(), name));
+  const listed = own ? null : require('./listed-packs').listedPackEntries(name); // see listed-packs.js
+  if (listed) return expandPackEntries(listed.filter((e) => path.isAbsolute(e)));
   if (own || !builtInRoot || name.includes('/') || name.includes('\\') || name.startsWith('.')) return own;
   return readPackDir(path.join(builtInRoot, name));
 }

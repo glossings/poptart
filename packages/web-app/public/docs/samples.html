@@ -48,11 +48,6 @@ bell: s("pt_keys:1").note("&lt;g3 bb3 c4 eb4&gt;").vel(0.5)
             are kept after that. The sounds tab lists every pack: hold a file to hear it.
           </p>
           <p>
-            <strong>Your own files:</strong> drop audio on the window and it is kept in this browser as the
-            <code>files</code> pack: <code>s("files:loop.wav")</code>. Dropped on the code, the
-            <code>s()</code> that plays it is written where it lands.
-          </p>
-          <p>
             <strong>A folder on this computer:</strong> <strong>settings → sample library → choose
             folder…</strong> makes a pack of each folder of audio in it. Nothing is copied; a file is read
             when a pattern first plays its pack. On a later visit the browser asks before the page may read
@@ -92,6 +87,13 @@ beat: s("more_bd*4, ~ more_sn")</code></pre>
             deleted.
           </li>
         </ul>
+        <p>
+          <strong>Your own files:</strong> drop audio on the code and it joins the <code>files</code> pack,
+          with the <code>s("files:loop.wav")</code> that plays it written where it lands.
+          <span data-build="web">The file is kept in this browser.</span><span data-build="desktop">Nothing is
+          copied: the pack plays each file from where it is. A library folder called <code>files</code> plays
+          in its place.</span>
+        </p>
 
         <h2 id="controls">Sampler controls</h2>
         <pre><code>s("pt_kit:4*8")
@@ -138,7 +140,7 @@ chops: s("pt_keys:3").fit(1).begin(irand(8).seg(8).div(8))
 kick: s("pt_kit:0*4").postgain(0.4)</code></pre>
         <p>
           A loop of your own plays the same way:
-          <code data-build="web">s("files:loop.wav").fit()</code><code data-build="desktop">s("breaks:19").fit()</code>.
+          <code>s("files:loop.wav").fit()</code>.
         </p>
         <p>
           If a fitted loop drops out, the region ran out before the step ended: <code>.loop()</code> it,

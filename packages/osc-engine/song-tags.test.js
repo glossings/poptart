@@ -282,3 +282,18 @@ test('parseId3 walks past unknown frames and stops at padding', () => {
   assert.equal(parseId3(rebuilt).bpm, 99);
   assert.deepEqual(parseId3(Buffer.alloc(32)), NONE);
 });
+
+test('a browser File reads to the same tags as the file on disk, a few slices at a time', async () => {
+  const { readFileTags } = await import('./song-tags-core.mjs');
+  const files = fs.readdirSync(TMP).filter((n) => !n.startsWith('gone'));
+  assert.ok(files.length > 8, 'the fixtures above are on disk');
+  for (const name of files) {
+    const bytes = fs.readFileSync(path.join(TMP, name));
+    const slices = [];
+    const blob = new Blob([bytes]);
+    const file = { size: blob.size, slice: (a, b) => { slices.push(b - a); return blob.slice(a, b); } };
+    // eslint-disable-next-line no-await-in-loop
+    assert.deepEqual(await readFileTags(file), readSongTags(path.join(TMP, name)), name);
+    assert.ok(slices.every((n) => n < 1024 * 1024 + 16), `${name}: never the whole song at once`);
+  }
+});

@@ -14,6 +14,8 @@
 //   /pattern-core      the language, as source
 //   /web-engine        the devices, the worklets and the packs that ship with the app
 //   /web               the host that stands in for the server
+//   /osc-engine        the maths the desktop's engine shares with the page (the sample map, songs)
+//   /shared            the desk's tempo maths, the desktop server's own files
 //
 // The one edit is a script tag: the page has to start the host before the editor's first
 // request, and the editor waits on the promise it leaves behind. On the desktop that tag is
@@ -46,8 +48,11 @@ function sources() {
     { from: path.join(webEngine, 'public', 'worklets'), to: 'web-engine/worklets' },
     { from: path.join(webEngine, 'public', 'packs'), to: 'web-engine/packs' },
     { from: path.join(webEngine, 'public', 'devices'), to: 'web-engine/devices' },
-    // The sample map's maths, the one module both builds share (see its header).
-    { from: path.join(repoRoot, 'packages', 'osc-engine'), to: 'osc-engine', only: ['sample-map-core.mjs'] },
+    // The maths both builds share, each a module of its own (see their headers): the sample map,
+    // and a song's waveform and beatgrid for the DJ decks.
+    { from: path.join(repoRoot, 'packages', 'osc-engine'), to: 'osc-engine', only: ['sample-map-core.mjs', 'wave-core.mjs', 'song-detect-core.mjs', 'song-tags-core.mjs'] },
+    // ...and the desk's tempo maths, which the desktop server require()s and the page imports.
+    { from: here, to: 'shared', only: ['song-sync.js', 'link-sync.js'] },
   ];
 }
 

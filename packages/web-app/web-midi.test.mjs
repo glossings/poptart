@@ -171,3 +171,19 @@ test('the recorder arms, records on the phrase and hands back the take in its wi
   assert.deepEqual(done.results.map((r) => [r.label, r.events[0].note, r.events[0].end]), [['keys', 64, 8]], 'a held key rings to the end of the window');
   assert.throws(() => { log.cancel(); log.start({}); log.start({}); }, /already armed/);
 });
+
+test('the desk\'s talk-back goes to the port named, as note and cc bytes, and nowhere once let go', async () => {
+  const sent = [];
+  const output = { name: 'Pad Controller MK2', state: 'connected', send: (bytes) => sent.push([...bytes]) };
+  const access = { inputs: new Map(), outputs: new Map([['o', output]]), onstatechange: null };
+  const midi = createWebMidi({ requestAccess: async () => access, prefs: null });
+  assert.deepEqual(await midi.setFeedback('nothing like it'), { active: null });
+  midi.feedback([['note', 0, 11, 127]]);
+  assert.deepEqual(sent, [], 'no port, nothing sent');
+  assert.deepEqual(await midi.setFeedback('pad controller'), { active: 'Pad Controller MK2' });
+  midi.feedback([['note', 1, 11, 127], ['cc', 15, 20, 300], ['cc', 0, 21, 63.6]]);
+  assert.deepEqual(sent, [[0x91, 11, 127], [0xbf, 20, 127], [0xb0, 21, 64]]);
+  await midi.setFeedback(null);
+  midi.feedback([['note', 1, 11, 0]]);
+  assert.equal(sent.length, 3);
+});

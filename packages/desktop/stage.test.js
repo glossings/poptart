@@ -34,6 +34,7 @@ const TRACKED = [
   'LICENSE',
   'mappings/synth.json',
   'packages/desktop/main.js',
+  'packages/desktop/preload.js',
   'packages/desktop/server-process.js',
   'packages/desktop/diagnostics.js',
   'packages/desktop/portable.js',
@@ -180,6 +181,7 @@ test('every file the shell requires is on the list of files staged from this fol
   visit('main.js');
   assert.ok(seen.has('diagnostics.js') && seen.has('server-process.js'));
   assert.ok(entry.only.includes('loading.html'));
+  assert.ok(entry.only.includes('preload.js'), 'the window loads it by path, not by require');
 });
 
 test('a shell script outside native/ is not mistaken for a build script', () => {

@@ -88,3 +88,73 @@ test('the choice comes back on the next load, by id and then by name', async () 
   b.store.set('poptart.audioOutput', JSON.stringify({ id: 'x', name: 'Gone' }));
   assert.equal(await createAudioOutputs(b).restore(), null);
 });
+
+// --- the headphone cue ----------------------------------------------------------------------------
+
+/** An engine that records where the cue was routed. */
+function fakeEngine() {
+  return { routes: [], setCueRoute(r) { this.routes.push(r); } };
+}
+
+/** A second context's constructor that remembers what it was pointed at. */
+function fakeContexts() {
+  const made = [];
+  class Ctx {
+    constructor(opts) { this.opts = opts; this.state = 'running'; made.push(this); }
+    async setSinkId(id) { this.sink = id; }
+    createMediaStreamSource(stream) { return { stream, connect: (to) => { this.connected = to; } }; }
+    get destination() { return 'ctx2-out'; }
+    close() { this.closed = true; }
+  }
+  return { Ctx, made };
+}
+
+test('an output with four channels offers its second pair as the cue, and routes it there', async () => {
+  const b = fakeBrowser();
+  b.context.destination = { maxChannelCount: 4 };
+  b.context.createMediaStreamDestination = () => ({ stream: 's' });
+  const engine = fakeEngine();
+  const outputs = createAudioOutputs({ ...b, engine, AudioContextCtor: null });
+  const d = await outputs.describe();
+  assert.equal(d.cueAvailable, true);
+  assert.deepEqual(d.cuePairs.pairs, [1]);
+  const res = await outputs.chooseCue({ device: d.cuePairs.device, pair: 1 });
+  assert.deepEqual(engine.routes.at(-1), { pair: 1 });
+  assert.match(res.active, /channels 3\/4/);
+  assert.equal(res.cuePair, 1);
+  assert.equal(res.cuePreviewDevice, null, 'an audition cannot be pointed at a pair');
+  await assert.rejects(outputs.chooseCue({ pair: 2 }), /no channels 5\/6/);
+  await outputs.chooseCue({});
+  assert.equal(engine.routes.at(-1), null, 'none takes the cue off');
+});
+
+test('a second device carries the cue on a second context pointed at it', async () => {
+  const b = fakeBrowser();
+  b.context.sampleRate = 48000;
+  b.context.createMediaStreamDestination = () => ({ stream: 'cue-stream' });
+  const engine = fakeEngine();
+  const { Ctx, made } = fakeContexts();
+  const outputs = createAudioOutputs({ ...b, engine, AudioContextCtor: Ctx });
+  const res = await outputs.chooseCue({ device: 'Scarlett 2i2 USB' });
+  assert.equal(res.active, 'Scarlett 2i2 USB');
+  assert.equal(made[0].sink, 'b2');
+  assert.equal(made[0].opts.sampleRate, 48000, 'the same rate, so only the clocks differ');
+  assert.equal(made[0].connected, 'ctx2-out');
+  assert.ok(engine.routes.at(-1).node, 'the engine hands the headphones to that stream');
+  assert.equal(res.cuePreviewDevice, 'Scarlett 2i2 USB', 'auditions follow the cue there');
+  await outputs.chooseCue({});
+  assert.equal(made[0].closed, true);
+  // Remembered: the next load routes it again.
+  const again = createAudioOutputs({ ...b, engine, AudioContextCtor: Ctx });
+  await outputs.chooseCue({ device: 'Scarlett 2i2 USB' });
+  assert.equal(await again.restoreCue(), 'Scarlett 2i2 USB');
+});
+
+test('a browser that can do neither says so where the cue menu is drawn', async () => {
+  const b = fakeBrowser();
+  const outputs = createAudioOutputs({ ...b, engine: fakeEngine(), AudioContextCtor: null });
+  const d = await outputs.describe();
+  assert.equal(d.cueAvailable, false);
+  assert.match(d.cueWarning, /four channels/);
+  await assert.rejects(outputs.chooseCue({ device: 'Scarlett 2i2 USB' }), /cannot play to a second output/);
+});

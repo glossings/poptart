@@ -8798,6 +8798,14 @@ function grooveSetSlot(lane, slot, value) {
 // against the notes and drawn over, and only becomes a definition the way anything else drawn here
 // does (see writeGrooveIntoRoll). A measurement is not yet a decision about how music should feel.
 
+/**
+ * A dropped File's absolute path, from the desktop shell (desktop/preload.js) - or null in a
+ * browser, which never says, and for a drag that carried bytes rather than a file.
+ */
+function droppedFilePath(file) {
+  return window.poptartDesktop?.pathForFile?.(file) || null;
+}
+
 /** The one absolute audio path a drop carries, located on disk if all we were handed was a File. */
 async function grooveDroppedPath(dt) {
   const paths = packDropPaths(dt).filter((path) => isAudioPath(path));
@@ -8807,6 +8815,8 @@ async function grooveDroppedPath(dt) {
   }
   const file = [...(dt.files ?? [])].find((f) => isAudioPath(f.name));
   if (!file) return null;
+  const known = droppedFilePath(file);
+  if (known) return (await api('POST', '/api/locateSample', { path: known })).file ?? null;
   // A dropped File has no path - the browser won't say - so the real file is found again on disk by
   // name, size and hash, exactly as a pack drop finds it (see packDropFiles, and sample-locate.js
   // for why nothing is ever copied).
@@ -20882,17 +20892,8 @@ pluginSearch.addEventListener('input', () => renderPlugins());
 // that would rescan them is not drawn at all.
 if (window.__poptartHostReady) document.getElementById('pluginsSection')?.classList.add('no-scan');
 
-// What the browser build does not have at all - the DJ desk, the sample map, and the organizer's
-// view of the disk - is not drawn there (style.css, .web-build). Each one also refuses at its
-// opener with a line in the console, because a keyboard shortcut reaches past a hidden button:
-// opened anyway, they asked a server the page does not have and one kept retrying for the rest
-// of the session.
+// What the browser build does not have at all is not drawn there (style.css, .web-build).
 if (window.__poptartHostReady) document.body.classList.add('web-build');
-function desktopOnly(what) {
-  if (!window.__poptartHostReady) return false;
-  logLine(`${what} is part of the desktop app - the browser build does not have it`, true);
-  return true;
-}
 
 async function doScan() {
   logLine('scanning for plugins…');
@@ -21288,7 +21289,7 @@ async function refreshAudioDevices() {
   try {
     const {
       devices, selected, outputChannels, outputChannelChoices, audibleChannels,
-      cueAvailable, cueSelected, cuePair, cuePairs, cueActive, canReveal, canChoose, warning,
+      cueAvailable, cueSelected, cuePair, cuePairs, cueActive, cueDevices, cueWarning, canReveal, canChoose, warning,
     } = await api('GET', '/api/audioDevices');
     audioCueSelect.innerHTML = '';
     audioCueSelect.appendChild(new Option('none', ''));
@@ -21304,14 +21305,18 @@ async function refreshAudioDevices() {
     }
     // ...then the separate devices. Not the output device itself: cueing to its FIRST pair is
     // the master out, which the server refuses, and its other pairs are the options above.
-    for (const d of devices.filter((x) => !x.isAggregate && x.name !== cuePairs?.device)) {
-      audioCueSelect.appendChild(new Option(`${d.name} · ${d.channels} ch`, d.name));
+    // (A browser that cannot play to a second output offers only the pairs.)
+    for (const d of devices.filter((x) => !x.isAggregate && x.name !== cuePairs?.device && cueDevices !== false)) {
+      audioCueSelect.appendChild(new Option(d.channels ? `${d.name} · ${d.channels} ch` : d.name, d.name));
     }
     const cueValue = cuePair ? `pair:${cuePair}` : (cueSelected ?? '');
     audioCueSelect.value = cueValue;
     if (audioCueSelect.value !== cueValue) audioCueSelect.value = '';
     audioCueSelect.disabled = !cueAvailable;
-    if (!cueAvailable) audioCueSelect.title = 'the headphone cue needs the poptart-audio helper, which is not available on this system';
+    // The menu's own description, put back whenever neither of the two notes below applies.
+    audioCueSelect.dataset.title ||= audioCueSelect.title;
+    audioCueSelect.title = audioCueSelect.dataset.title;
+    if (!cueAvailable) audioCueSelect.title = cueWarning ?? 'the headphone cue needs the poptart-audio helper, which is not available on this system';
     else if (cueSelected && !cueActive) audioCueSelect.title = `"${cueSelected}" is chosen but the running engine has no cue pair - is it plugged in? (restart the engine to retry)`;
     audioDeviceSelect.innerHTML = '';
     const def = document.createElement('option');
@@ -21356,6 +21361,8 @@ audioCueSelect.addEventListener('change', async () => {
   const device = onPair ? (audioCueOutName ?? null) : (raw || null);
   const pair = onPair ? Number(raw.slice('pair:'.length)) : 0;
   const label = onPair ? audioCueSelect.selectedOptions[0]?.textContent ?? device : device;
+  // The browser build moves the cue in place: nothing restarts and nothing stops playing.
+  if (window.__poptartHostReady) { chooseWebCue(device, pair); return; }
   if (!await scanSurvivesRestart('the headphone cue device')) {
     refreshAudioDevices().catch(() => {}); // put the menu back on the cue still in use
     return;
@@ -21388,6 +21395,23 @@ audioCueSelect.addEventListener('change', async () => {
     refreshStatus().catch(() => {});
   }
 });
+
+/** The browser build's headphone cue: moved in place - a pair of this output, or a second device. */
+async function chooseWebCue(device, pair) {
+  audioCueSelect.disabled = true;
+  try {
+    const res = await api('POST', '/api/audioCueDevice', { device, pair });
+    logLine(res.active ? `headphone cue on ${res.active}` : 'headphone cue off');
+    previewSink.for = undefined; // a new cue device: the audition routing is re-derived
+    syncPreviewRouting();
+    if (mixModeOn) mixRefresh();
+  } catch (e) {
+    logLine(e.message ?? String(e), true);
+  } finally {
+    audioCueSelect.disabled = false;
+    refreshAudioDevices().catch(() => {});
+  }
+}
 
 /** The browser build's channel count: set in place, nothing restarts. */
 async function chooseWebOutputChannels(channels) {
@@ -21987,11 +22011,37 @@ async function importStore(file) {
   }
 }
 
+// The music folder's settings row (browser build only - see pickMusicFolder).
+const musicFolderSection = document.getElementById('musicFolderSection');
+const musicFolderPick = document.getElementById('musicFolderPick');
+const musicFolderReconnect = document.getElementById('musicFolderReconnect');
+const musicFolderForget = document.getElementById('musicFolderForget');
+const musicFolderInput = document.getElementById('musicFolderInput');
+const musicFolderNote = document.getElementById('musicFolderNote');
 if (window.__poptartHostReady) {
-  // The headphone cue is the DJ desk's, and both are the desktop's alone: a row here that can
-  // only ever be disabled is a promise the page cannot keep.
-  document.getElementById('audioCueSelect')?.closest('label')?.classList.add('hidden');
-  document.getElementById('djSection')?.classList.add('hidden'); // the desk is the desktop's too
+  // The headphone cue moves in place here (see chooseWebCue): nothing restarts.
+  document.getElementById('audioCueSelect').title = 'where the headphones are: another channel pair of this output - which is how a controller\'s own headphone jack is reached, master on channels 1/2 and phones on 3/4 - or a second output device, which runs on a clock of its own and arrives a little late. Mix mode\'s 🎧 buttons pre-listen a deck there (post-EQ, pre-fader)';
+  // The DJ desk's songs come from a folder the page is handed (see music-folder.mjs).
+  musicFolderSection.classList.remove('hidden');
+  musicFolderPick.addEventListener('click', () => pickMusicFolder().catch((e) => logLine(e.message ?? String(e), true)));
+  musicFolderInput.addEventListener('change', () => {
+    const files = [...(musicFolderInput.files ?? [])];
+    musicFolderInput.value = '';
+    if (files.length) useMusicFolder(files).catch((e) => logLine(e.message ?? String(e), true));
+  });
+  // A browser that cannot keep a folder has nothing to ask for again: the folder is chosen anew
+  // on each visit, and the button has nothing to do there.
+  if (typeof window.showDirectoryPicker !== 'function') musicFolderReconnect.classList.add('hidden');
+  musicFolderReconnect.addEventListener('click', async () => {
+    musicFolderReconnect.disabled = true;
+    await api('POST', '/api/musicFolder/reconnect').catch((e) => logLine(e.message ?? String(e), true));
+    await refreshMusicFolder();
+  });
+  musicFolderForget.addEventListener('click', async () => {
+    await api('POST', '/api/musicFolder/forget').catch((e) => logLine(e.message ?? String(e), true));
+    await refreshMusicFolder();
+  });
+  refreshMusicFolder();
   storeSection.classList.remove('hidden');
   const fileShareBtn = document.getElementById('fileShareBtn');
   fileShareBtn.classList.remove('hidden');
@@ -22219,6 +22269,57 @@ async function refreshSampleFolder() {
   }[s.state] ?? '';
   sampleFolderReconnect.disabled = s.state !== (typeof window.showDirectoryPicker === 'function' ? 'prompt' : 'session');
   sampleFolderForget.disabled = s.state === 'none';
+}
+
+/**
+ * The browser build's music folder: where the DJ decks' songs are read from, in place - through
+ * `showDirectoryPicker` where the browser has it (the folder is kept for the next visit), the
+ * ordinary folder chooser elsewhere (for this visit). Never copied: a music library is gigabytes.
+ */
+async function pickMusicFolder() {
+  if (typeof window.showDirectoryPicker !== 'function') {
+    musicFolderInput.click();
+    return;
+  }
+  let handle;
+  try {
+    handle = await window.showDirectoryPicker({ id: 'poptart-music', mode: 'read' });
+  } catch (e) {
+    if (e?.name === 'AbortError') return; // closed without choosing
+    throw e;
+  }
+  await useMusicFolder(handle);
+}
+
+async function useMusicFolder(source) {
+  musicFolderPick.disabled = true;
+  musicFolderNote.textContent = `reading ${source?.name ?? 'the folder'}…`;
+  try {
+    await api('POST', '/api/musicFolder', { source });
+    orgDisk = null; // the organize window's disk view reads the new folder next time it is opened
+  } finally {
+    musicFolderPick.disabled = false;
+    await refreshMusicFolder();
+  }
+}
+
+async function refreshMusicFolder() {
+  let s;
+  try {
+    s = await api('GET', '/api/musicFolder');
+  } catch {
+    return;
+  }
+  const counts = `${s.songs} song${s.songs === 1 ? '' : 's'}${s.truncated ? ' (the first of more)' : ''}`;
+  musicFolderNote.textContent = {
+    none: '',
+    reading: `reading ${s.name}…`,
+    ready: `${s.name}: ${counts}, read from where they are`,
+    prompt: `${s.name}: the browser wants a click before poptart reads it again`,
+    session: `${s.name}: ${counts} - gone when this page closes`,
+  }[s.state] ?? '';
+  musicFolderReconnect.disabled = s.state !== 'prompt';
+  musicFolderForget.disabled = s.state === 'none';
 }
 
 async function refreshSamplesDir() {
@@ -23601,16 +23702,17 @@ async function packDropFiles({ files = [], paths = [] }) {
     ...paths.filter((p) => isAudioPath(p)).map((path) => ({ name: packBasename(path), path })),
   ];
   if (!items.length) return packSay('drop wav, aif, aiff, flac or mp3 files', true);
-  if (files.length && !globalThis.crypto?.subtle) return packSay("can't hash the file here - open poptart at localhost", true);
+  if (files.some((f) => !droppedFilePath(f)) && !globalThis.crypto?.subtle) return packSay("can't hash the file here - open poptart at localhost", true);
   const state = packState;
   const found = [];
   const missing = [];
   for (const [n, item] of items.entries()) {
     packSay(`finding ${item.name} on disk${items.length > 1 ? ` (${n + 1} of ${items.length})` : ''}…`);
     try {
-      const body = item.file
+      const known = item.file ? droppedFilePath(item.file) : null;
+      const body = item.file && !known
         ? { name: item.file.name, size: item.file.size, sha256: await packHashFile(item.file), hint: packBrowse.path }
-        : { path: item.path };
+        : { path: known ?? item.path };
       const { file: abs } = await api('POST', '/api/locateSample', body);
       if (abs) found.push(abs);
       else missing.push(item.name);
@@ -27837,29 +27939,51 @@ function midiImportMods() {
   return midiImportModsPromise;
 }
 
-const MIDI_FILE_RE = /\.midi?$/i;
-const MIDI_MIME_RE = /^audio\/(x-)?midi$/i;
-
+// What a dropped file is and what dropping it does where it lands: file-drop.js.
 const dragHasFiles = (e) => Array.from(e.dataTransfer?.types ?? []).includes('Files');
-
-const midiFileIn = (dt) =>
-  Array.from(dt?.files ?? []).find((f) => MIDI_FILE_RE.test(f.name) || MIDI_MIME_RE.test(f.type)) ?? null;
 
 // dragenter/dragleave fire once per element the pointer crosses, so the overlay is refcounted -
 // toggling it directly makes it flicker every time the drag passes over a child.
 let fileDragDepth = 0;
+let fileDragSaid = null; // { target, label } - what the overlay last said, and over what
 
 function endFileDrag() {
   fileDragDepth = 0;
+  fileDragSaid = null;
   fileDropOverlay.classList.add('hidden');
+}
+
+const deckEditor = (deck) => (deck === 'a' ? cm : deck === 'b' ? deckBCM : null);
+
+/** Where a drop at `target` lands, in fileDropAction's terms (see file-drop.js). */
+function fileDropWhere(target) {
+  const panel = !packBackdrop.classList.contains('hidden') ? 'pack'
+    : grooveState && grooveCanvas.contains(target) ? 'groove' : null;
+  const deck = mixModeOn ? deckOfDrop(target) : null;
+  return {
+    panel,
+    organize: !!orgEl?.contains(target),
+    deck,
+    holds: deck ? deckHolding({ song: !!songPanes[deck].song, code: deckEditor(deck)?.getValue() }) : null,
+    onCode: !!editorAt(target),
+  };
+}
+
+/** What the drop would do where the pointer is now, said by the overlay while the drag moves. */
+function sayFileDrop(e) {
+  if (fileDragSaid?.target === e.target) return fileDragSaid.decision;
+  const types = Array.from(e.dataTransfer?.items ?? [], (it) => (it.kind === 'file' ? it.type : ''));
+  const decision = fileDropAction(dragKind(types), fileDropWhere(e.target), { mixMode: mixModeOn });
+  fileDragSaid = { target: e.target, decision };
+  fileDropOverlay.classList.toggle('hidden', !decision.label);
+  if (decision.label) fileDropOverlay.firstElementChild.textContent = decision.label;
+  return decision;
 }
 
 document.addEventListener('dragenter', (e) => {
   if (!dragHasFiles(e)) return;
   fileDragDepth++;
-  // The pack panel takes audio files dropped on its list (see packDropFiles) - a .mid prompt over
-  // it would promise the wrong thing.
-  if (packBackdrop.classList.contains('hidden')) fileDropOverlay.classList.remove('hidden');
+  sayFileDrop(e);
 });
 document.addEventListener('dragleave', (e) => {
   if (dragHasFiles(e) && --fileDragDepth <= 0) endFileDrag();
@@ -27868,51 +27992,124 @@ document.addEventListener('dragend', endFileDrag); // a drag abandoned mid-fligh
 document.addEventListener('dragover', (e) => {
   if (!dragHasFiles(e)) return;
   e.preventDefault(); // a drop target that never says so leaves the browser to open the file
-  e.dataTransfer.dropEffect = 'copy';
+  const { act } = sayFileDrop(e);
+  e.dataTransfer.dropEffect = act === 'none' ? 'none' : 'copy';
 }, true);
 document.addEventListener('drop', (e) => {
   endFileDrag();
-  const file = midiFileIn(e.dataTransfer);
-  // The browser build: audio dropped on the window is kept in this browser's own files, since a
-  // page has no disk to find it on - and, dropped on the code, written in as the s() that plays it.
-  const audio = !file && window.__poptartHostReady
-    ? Array.from(e.dataTransfer?.files ?? []).filter((f) => isAudioPath(f.name))
-    : [];
-  // Which deck it landed on, if either: a drop on deck B's code is for deck B, as a drop on the
-  // main buffer is for deck A. Off both, it is for the deck being worked in (see activeCM).
-  const onDeck = [cm, deckBCM].find((ed) => ed?.getWrapperElement().contains(e.target)) ?? null;
-  if (audio.length) {
-    e.preventDefault();
-    e.stopPropagation();
-    const at = onDeck ? onDeck.coordsChar({ left: e.clientX, top: e.clientY }, 'window') : null;
-    keepDroppedAudio(audio, at, onDeck ?? cm);
-    return;
-  }
-  if (!file) {
+  const files = Array.from(e.dataTransfer?.files ?? []);
+  const web = !!window.__poptartHostReady;
+  const kinds = files.map((f) => dropFileKind(f.name, f.type, { web }));
+  const where = fileDropWhere(e.target);
+  const { act, label, deck } = fileDropAction(dropKindOfFiles(kinds), where, { mixMode: mixModeOn });
+  const onCode = editorAt(e.target);
+  if (act === 'pass') {
+    // A panel's own drop listener takes it; the browser must not open the file over the panel.
+    if (where.panel) return e.preventDefault();
     // Not ours: CodeMirror inserts a dropped text file itself, so leave drops on the editor to it.
     // Elsewhere, swallow the drop rather than letting the browser navigate away from the patch.
-    if (!onDeck) e.preventDefault();
+    if (onCode) return;
+    e.preventDefault();
+    if (files.length) logLine(`${files.map((f) => f.name).join(', ')}: not a .mid or an audio file this build plays`, true);
     return;
   }
   e.preventDefault();
   e.stopPropagation();
-  openMidiImport(file, onDeck ?? activeCM());
+  if (act === 'none') return logLine(label, true);
+  if (act === 'midi') return openMidiImport(files[kinds.indexOf('midi')], onCode ?? deckEditor(deck) ?? activeCM());
+  const playable = files.filter((_, i) => kinds[i] === 'sample' || kinds[i] === 'song');
+  if (act === 'song' || act === 'tracks') return dropSongs(playable, act === 'song' ? deck : null);
+  // A sample: written in where it landed on the code, or at the cursor of the livecode deck it
+  // was dropped on; anywhere else it only joins the files pack.
+  const samples = files.filter((_, i) => kinds[i] === 'sample');
+  const songOnly = playable.filter((f) => !samples.includes(f)).map((f) => f.name);
+  if (songOnly.length) logLine(`${songOnly.join(', ')}: only wav, aif, aiff, flac and mp3 can be a sample`, true);
+  const ed = onCode ?? deckEditor(deck) ?? cm;
+  const at = onCode ? onCode.coordsChar({ left: e.clientX, top: e.clientY }, 'window') : deck ? ed.getCursor() : null;
+  addDroppedSamples(samples, at, ed);
 }, true);
 
-/** Files dropped on the browser build's window, into "your files" - and into `ed`'s code at `at`. */
-async function keepDroppedAudio(files, at, ed = cm) {
+/** The DJ deck a drop landed on: deck A's pane is the main editor's, deck B's its own. */
+function deckOfDrop(target) {
+  if (document.getElementById('deckBPane')?.contains(target)) return 'b';
+  if (document.getElementById('editorPane')?.contains(target)) return 'a';
+  return null;
+}
+
+/**
+ * Where a dropped file lives, as /api/library/locate and /api/files/add are asked it. The browser
+ * build finds a file in the folders it was handed by name and size. The desktop is never told a
+ * dropped file's path either, so it finds the file on the disk by name, size and the hash of its
+ * bytes (sample-locate.js) - which is why nothing is copied to make it playable.
+ */
+async function dropLookup(file) {
+  const item = { name: file.name, size: file.size };
+  if (window.__poptartHostReady) return item;
+  const known = droppedFilePath(file);
+  if (known) return { ...item, path: known };
+  if (!globalThis.crypto?.subtle) throw new Error("can't hash the file here - open poptart at localhost");
+  return { ...item, sha256: await packHashFile(file) };
+}
+
+/**
+ * Song files dropped on a deck (the first loads there) or in organize (all join the collection),
+ * each by the path where it lives - found for it, never copied - and a file that can't be found
+ * says so.
+ */
+async function dropSongs(files, deck) {
+  const say = (text, bad = false) => (deck ? logLine(text, bad) : orgSay(text, bad));
+  const web = !!window.__poptartHostReady;
+  let paths;
+  try {
+    if (!web) say(`finding ${files.length === 1 ? files[0].name : `${files.length} files`} on disk…`);
+    const asked = [];
+    for (const f of files) asked.push(await dropLookup(f));
+    ({ paths } = await api('POST', '/api/library/locate', { files: asked }));
+  } catch (err) {
+    return say(err.message ?? String(err), true);
+  }
+  const found = paths.filter(Boolean);
+  const outside = files.filter((_, i) => !paths[i]).map((f) => f.name);
+  if (outside.length) {
+    const who = outside.length === 1 ? `"${outside[0]}"` : `${outside.length} files`;
+    say(web
+      ? `${outside.length === 1 ? `${who} is` : `${who} are`} not in your music folder - choose a folder that holds ${outside.length === 1 ? 'it' : 'them'} in settings, under music folder`
+      : `couldn't find where ${who} ${outside.length === 1 ? 'lives' : 'live'} on disk - add ${outside.length === 1 ? 'it' : 'them'} from organize's folder browser`, true);
+  }
+  if (!found.length) return;
+  if (!deck) return orgImportPaths(found);
+  orgImportPaths([found[0]], { quiet: true });
+  const name = pathBasename(found[0]).replace(/\.[^.]+$/, '');
+  return loadDeckSong(deck, { kind: 'file', path: found[0], title: name });
+}
+
+/**
+ * Samples dropped on the window, into the `files` pack - and into `ed`'s code at `at`, as the
+ * s() that plays each. The browser build keeps the file's bytes in its own store, since a page has
+ * no disk to point at; the desktop lists the path where the file lives.
+ */
+async function addDroppedSamples(files, at, ed = cm) {
+  const web = !!window.__poptartHostReady;
   const refs = [];
+  let shadowed = false;
   for (const file of files) {
     try {
-      const res = await api('POST', '/api/files/add', { name: file.name, bytes: await file.arrayBuffer(), pack: 'files' });
+      const body = web
+        ? { name: file.name, bytes: await file.arrayBuffer(), pack: 'files' }
+        : { ...(await dropLookup(file)), pack: 'files' };
+      const res = await api('POST', '/api/files/add', body);
       refs.push(res.ref ?? `files:${file.name}`);
+      shadowed ||= !!res.shadowed;
     } catch (err) {
       logLine(`${file.name}: ${err.message ?? err}`, true);
     }
   }
   if (!refs.length) return;
   if (at) ed.replaceRange(refs.map((r) => `s(${JSON.stringify(r)})`).join('\n'), at);
-  logLine(`kept in this browser: ${refs.join(', ')}${at ? '' : ` - play with s(${JSON.stringify(refs[0])})`}`);
+  const where = web ? 'kept in this browser' : 'added to the files pack, played from where they are';
+  logLine(`${where}: ${refs.join(', ')}${at ? '' : ` - play with s(${JSON.stringify(refs[0])})`}`);
+  if (shadowed) logLine('your sample library has a folder called "files", which plays in place of the files pack - rename the folder to hear what was dropped', true);
+  loadSamples(); // the sounds tab lists the pack
 }
 
 const midiErr = (e) => String(e?.message ?? e).replace(/^\[[\w-]+\]\s*/, '');
@@ -29184,7 +29381,6 @@ function djTellServer(on) {
 }
 
 async function openMixMode() {
-  if (desktopOnly('DJ mode')) return;
   // The current song is about to become deck A of a mix. Keep it first: a named song is saved
   // over silently (saving over the open pattern is what saving is), a nameless one gets one
   // three-way offer - "don't save" just means the pre-mix buffer only lives in this browser
@@ -30765,10 +30961,11 @@ function djLiveWaveStop() {
 }
 
 // --- stacked decks: deck B's pane under deck A's rather than beside it (the ⇅ strip button) ---
-// A per-browser preference, not desk state: nothing about the sound changes. The canvases
-// re-measure themselves every frame (songSizeCanvas), so the reflow needs no extra plumbing.
+// A per-browser preference, not desk state: nothing about the sound changes. Stacked unless this
+// browser was told otherwise. The canvases re-measure themselves every frame (songSizeCanvas), so
+// the reflow needs no extra plumbing.
 const MIX_STACK_KEY = 'poptartMixStacked';
-let mixStacked = localStorage.getItem(MIX_STACK_KEY) === '1';
+let mixStacked = localStorage.getItem(MIX_STACK_KEY) !== '0';
 // The deck alone full-screen, or null - see djSetZoom. Declared here, ahead of the stack and the
 // region sizes, because both read it and both run as the page loads.
 let djZoomedDeck = null;
@@ -31751,9 +31948,36 @@ function mixSyncValues(state) {
 // traffic - see serveMixEvents in server.js. EventSource reconnects by itself, so a server
 // restart mid-session just resumes the mirror.
 let mixEvents = null;
+
+/**
+ * An event stream: the server's, on the desktop, and the host's push channel in the browser build,
+ * behind the same face - `onmessage` for unnamed frames, addEventListener for named ones, close.
+ */
+function openEvents(path) {
+  if (!window.__poptartHostReady) return new EventSource(path);
+  const named = new Map();
+  const source = {
+    onmessage: null,
+    addEventListener(kind, fn) {
+      if (!named.has(kind)) named.set(kind, new Set());
+      named.get(kind).add(fn);
+    },
+    close() { source.closed = true; source.stop?.(); },
+  };
+  window.__poptartHostReady.then((host) => {
+    if (source.closed) return;
+    source.stop = host.events(path, (kind, data) => {
+      const event = { data: JSON.stringify(data) };
+      if (kind === 'message') source.onmessage?.(event);
+      else for (const fn of named.get(kind) ?? []) fn(event);
+    });
+  }).catch((e) => logLine(e.message ?? String(e), true));
+  return source;
+}
+
 function mixPushStart() {
   mixPushStop();
-  mixEvents = new EventSource('/api/mix/events');
+  mixEvents = openEvents('/api/mix/events');
   mixEvents.onmessage = (e) => {
     if (!mixModeOn) return;
     try {
@@ -32323,7 +32547,9 @@ function fxEditorBuild() {
     if (!slot) return;
     e.preventDefault();
     if (fxEdName && fxEdName === mixFxNow.chain) {
-      mixFxPost({ editor: slot }, () => `fx: opened effect ${slot}'s window - what you set there is pinned into "${fxEdName}"`);
+      mixFxPost({ editor: slot }, () => `fx: opened effect ${slot}'s window - what you set there is pinned into "${fxEdName}"`)
+        // A device with no window of its own is answered with where it is, and drawn here.
+        .then((r) => { if (r?.editor) showPluginEditor(r.editor.trackId, r.editor.slot); });
     } else {
       fxEditorSay('save the chain and load it on the unit first - a plugin window is the running chain\'s');
     }
@@ -33890,8 +34116,6 @@ function orgRenderSide() {
     src: { kind: 'tracks' },
     onClick: () => orgGoto({ kind: 'tracks' }),
   });
-  // The collection is the disk's, and the browser build has no disk to fill it from - so it is
-  // not drawn there either, and nothing it offers can be reached (style.css, web-host.test.mjs).
   tracksRow.id = 'orgTracksSource';
   ul.appendChild(tracksRow);
 
@@ -33907,7 +34131,7 @@ function orgRenderSide() {
     src: { kind: 'disk' },
     onClick: () => orgGoto({ kind: 'disk' }),
   });
-  diskRow.id = 'orgDiskSource'; // the browser build has no disk to browse, and hides this (style.css)
+  diskRow.id = 'orgDiskSource'; // in the browser build, the music folder
   ul.appendChild(diskRow);
   if (diskOpen && orgDisk) {
     const parts = String(orgDisk.dir).split('/').filter(Boolean);
@@ -34011,7 +34235,6 @@ function orgPlaylistRow(p, depth) {
 
 /** Where the table is pointed. Keeps each source's own selection out of the next one's rows. */
 function orgGoto(src) {
-  if (src.kind === 'disk' && desktopOnly('browsing audio files on disk')) return;
   orgSrc = src;
   orgKeepSrc();
   orgSel.clear();
@@ -34276,6 +34499,8 @@ function orgEmptyText() {
   if (orgSrc.kind === 'tracks') return 'no tracks yet — open disk and import some';
   if (orgSrc.kind === 'playlist') return 'empty — drag songs in, or right-click them to add';
   if (orgSrc.kind === 'disk') {
+    // The browser build's disk is a folder the page was handed, and until it has one it has none.
+    if (orgDisk?.empty) return 'no music folder yet — choose one in settings, under music folder';
     return orgDiskFindActive() && orgDiskFind.running ? 'searching…' : 'nothing playable in here';
   }
   return orgSrc.folder ? 'nothing filed here' : 'nothing saved yet';
@@ -34601,7 +34826,7 @@ function orgRenderBar() {
     importBtn.textContent = n ? `import ${n > 1 ? n : ''}`.trimEnd() : 'import all';
     importBtn.title = n
       ? 'add the selection to the track collection, reading each file\'s tags'
-      : 'add every playable file here to the track collection';
+      : 'add every playable file here, and in the folders under it, to the track collection';
   }
 
   // The collection's own housekeeping, where it acts: measuring what the files never said,
@@ -34870,8 +35095,8 @@ function orgMidiSources() {
     }
   };
   walk(orgFolderTree(orgSongs.map((x) => x.folder).filter(Boolean)));
-  // The collection and the disk are the desktop app's; the browser build draws neither.
-  if (!window.__poptartHostReady) out.push({ kind: 'tracks' }, { kind: 'disk' });
+  // The browser build's disk is its music folder.
+  out.push({ kind: 'tracks' }, { kind: 'disk' });
   for (const pl of libDoc.playlists) out.push({ kind: 'playlist', id: pl.id });
   return out;
 }
@@ -35075,6 +35300,15 @@ function orgOnKey(e) {
   }
 }
 
+/**
+ * ⌘A. On disk the folders come too, so ⌘A then import takes the whole tree in one go; elsewhere a
+ * folder row is only a way in, and every action on the selection skips it anyway.
+ */
+function orgSelectAll() {
+  for (const r of orgDrawnRows) if (r.kind !== 'dir' || orgSrc.kind === 'disk') orgSel.add(r.key);
+  orgRenderMain();
+}
+
 function orgBodyKeys(e) {
   const meta = editMod(e);
   if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
@@ -35082,8 +35316,7 @@ function orgBodyKeys(e) {
     orgStep(e.key === 'ArrowDown' ? 1 : -1, e.shiftKey);
   } else if (meta && e.key.toLowerCase() === 'a') {
     e.preventDefault();
-    for (const r of orgDrawnRows) if (r.kind !== 'dir') orgSel.add(r.key);
-    orgRenderMain();
+    orgSelectAll();
   } else if (e.key === ' ') {
     e.preventDefault();
     orgPlayerToggle();
@@ -35237,7 +35470,12 @@ function orgRowMenu(row, x, y) {
   const items = [];
   if (row.kind === 'dir') {
     items.push(['go in', () => orgBrowseTo(row.path)]);
-    items.push(['import everything in it', () => orgImportFolder(row.path), 'every playable file anywhere under it, tags and all']);
+    const picked = orgSelectedRows();
+    if (picked.length > 1 && picked.includes(row)) {
+      items.push([`import ${picked.length}`, () => orgImportShown(), 'every playable file in them and anywhere under the folders, tags and all']);
+    } else {
+      items.push(['import everything in it', () => orgImportFolder(row.path), 'every playable file anywhere under it, tags and all']);
+    }
     items.push({ sub: 'add everything to…', items: orgFolderAddSubmenu(row) });
   } else {
     if (rows.length) items.push({ sub: many ? `add ${rows.length} to…` : 'add to…', items: orgPlaylistSubmenu(rows) });
@@ -35279,10 +35517,7 @@ function orgRowMenu(row, x, y) {
     }
   }
   items.push('-');
-  items.push(['select all', () => {
-    for (const r of orgDrawnRows) if (r.kind !== 'dir') orgSel.add(r.key);
-    orgRenderMain();
-  }, chordLabel('mod+a')]);
+  items.push(['select all', () => orgSelectAll(), chordLabel('mod+a')]);
   openCtxMenu(orgMenu, x, y, {
     head: many ? `${rows.length} selected` : row.name,
     items,
@@ -35408,13 +35643,19 @@ async function orgImportPaths(paths, { quiet = false } = {}) {
 }
 
 /** A folder's whole tree, walked server-side so a deep archive is one request. */
-async function orgImportFolder(dir) {
-  orgSay(`reading ${pathBasename(dir)}…`);
+function orgImportFolder(dir) {
+  return orgImportTrees([dir], []);
+}
+
+/** Folders (each one's whole tree) and loose files, in one request. */
+async function orgImportTrees(dirs, paths) {
+  const from = dirs.length === 1 && !paths.length ? pathBasename(dirs[0]) : null;
+  orgSay(`reading ${from ?? `${dirs.length + paths.length} items`}…`);
   try {
     await flushLibraryDoc();
-    const { library, added, already, queued } = await api('POST', '/api/library/import', { dir });
+    const { library, added, already, queued } = await api('POST', '/api/library/import', { dirs, paths });
     orgTookLibrary(library);
-    orgSay(`imported ${added} track${added === 1 ? '' : 's'} from ${pathBasename(dir)}${already ? `, ${already} already there` : ''}${orgMeasuring(queued)}`);
+    orgSay(`imported ${added} track${added === 1 ? '' : 's'}${from ? ` from ${from}` : ''}${already ? `, ${already} already there` : ''}${orgMeasuring(queued)}`);
   } catch (e) {
     orgSay(e.message ?? String(e), true);
   }
@@ -35488,14 +35729,18 @@ async function orgForgetMissing() {
   }
 }
 
-/** The import button: the selection, or everything the disk view is showing. */
+/**
+ * The import button: the selection (folders with everything under them), or with nothing
+ * selected, the folder being shown and everything under it.
+ */
 function orgImportShown() {
   const picked = orgSelectedRows();
-  const dirs = picked.filter((r) => r.kind === 'dir');
-  const files = (picked.length ? picked : orgDrawnRows).filter((r) => r.kind === 'diskfile');
-  if (dirs.length === 1 && !files.length) return orgImportFolder(dirs[0].path);
-  if (!files.length) return orgSay('nothing to import here', true);
-  return orgImportPaths(files.map((r) => r.path));
+  if (!picked.length) return orgDisk?.dir ? orgImportFolder(orgDisk.dir) : orgSay('nothing to import here', true);
+  const dirs = picked.filter((r) => r.kind === 'dir').map((r) => r.path);
+  const files = picked.filter((r) => r.kind === 'diskfile').map((r) => r.path);
+  if (!dirs.length && !files.length) return orgSay('nothing to import here', true);
+  if (!dirs.length) return orgImportPaths(files);
+  return orgImportTrees(dirs, files);
 }
 
 /**
@@ -35910,8 +36155,11 @@ const ORG_BUFFER_CACHE = 24; // whole songs, not one-shots - keep fewer than the
 async function orgLoadBuffer(abs) {
   if (orgBuffers.has(abs)) return orgBuffers.get(abs);
   previewCtx ??= new (window.AudioContext || window.webkitAudioContext)();
-  const res = await fetch(`/api/songAudio?file=${encodeURIComponent(abs)}`);
+  let url = `/api/songAudio?file=${encodeURIComponent(abs)}`;
+  if (window.__poptartHostReady) ({ url } = await api('GET', url)); // the page reads the file itself
+  const res = await fetch(url);
   if (!res.ok) throw new Error(`can't read ${pathBasename(abs)} (${res.status})`);
+  if (url.startsWith('blob:')) setTimeout(() => URL.revokeObjectURL(url), 0);
   const buf = await previewCtx.decodeAudioData(await res.arrayBuffer());
   if (orgBuffers.size >= ORG_BUFFER_CACHE) orgBuffers.delete(orgBuffers.keys().next().value);
   orgBuffers.set(abs, buf);

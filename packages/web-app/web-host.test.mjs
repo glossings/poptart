@@ -33,6 +33,11 @@ import { createBlobs } from './public/web/blobs.mjs';
 import { createEvaluator } from './public/web/evaluate.mjs';
 import { createSampleStore, registerPacks } from './public/web/samples.mjs';
 import { createHost } from './public/web/host.mjs';
+import { createDesk } from './public/web/desk.mjs';
+import { createBlockEvaluator } from './public/web/block-eval.mjs';
+import { createMusicFolder } from './public/web/music-folder.mjs';
+import { createLibrary } from './public/web/library.mjs';
+import { libraryTracks } from './public/web/library-doc.mjs';
 import { WEB_SKETCH } from './build-web.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -67,7 +72,12 @@ function makeHost({ builtIn = [], library = { packs: [], problems: [], urlFor: c
     },
   });
   const transport = new patternCore.Transport(() => engine.getTime(), { cps: 0.5, paused: true });
-  const evaluator = createEvaluator({ patternCore, engine, transport });
+  // The DJ desk, as the page builds it: its tempo maths is the desktop's own two files.
+  const desk = createDesk({ patternCore, engine, transport, songSync: require('./song-sync.js'), linkSync: require('./link-sync.js'), store: memoryStore(),
+    blockEvaluator: (builders) => createBlockEvaluator(patternCore, { hostBuilders: builders }) });
+  const evaluator = createEvaluator({ patternCore, engine, transport, desk });
+  desk.attach(evaluator);
+  const musicFolder = createMusicFolder();
   const store = memoryStore();
   const blobs = createBlobs(store);
   const storage = createStorage(store, { meta, blobs });
@@ -78,8 +88,11 @@ function makeHost({ builtIn = [], library = { packs: [], problems: [], urlFor: c
     builtIn,
     builtInUrl: (id, file) => `/web-engine/packs/${id}/${file}`,
     library,
+    desk,
+    musicFolder,
+    musicLibrary: createLibrary({ storage, libraryTracks, folder: musicFolder, desk }),
   });
-  const rig = { host, engine, transport, evaluator, storage, ctx, samples };
+  const rig = { host, engine, transport, evaluator, storage, ctx, samples, desk };
   liveRigs.add(rig);
   return rig;
 }
@@ -402,19 +415,28 @@ test('the playlists are kept in the desktop shape, and a write answers with what
   const rig = makeHost();
   // Every field the editor reads is present, empty: the organize window counts `tracks`, files
   // sets under `folder` and stars saves in `saves`, and a document missing any of them took the
-  // window down on the web build.
-  assert.deepEqual(await rig.host.call('GET', '/api/library'), { version: 2, tracks: [], playlists: [], active: null, saves: {} });
+  // window down on the web build. The pass and tonight's played marks ride along, as on the desktop.
+  assert.deepEqual(await rig.host.call('GET', '/api/library'), {
+    version: 2, tracks: [], playlists: [], active: null, saves: {},
+    analyzing: null, playedSession: [], playedSaves: [], onDeck: {},
+  });
   const kept = await rig.host.call('POST', '/api/library', {
-    playlists: [{ id: 'p1', name: 'set', folder: ' club / 2026 ', items: ['song', { kind: 'file', path: '/x.wav', bpm: 128 }, { junk: 1 }] }],
+    playlists: [{ id: 'p1', name: 'set', folder: ' club / 2026 ', items: ['song', { kind: 'file', path: '/music/x.wav', bpm: 128 }, { junk: 1 }] }],
     active: 'p1',
     saves: { song: { rating: 4 }, other: { rating: 9 } },
   });
-  assert.deepEqual(kept.playlists[0].items, ['song', { kind: 'file', path: '/x.wav', bpm: 128 }]);
+  // A file used in a set is filed in the collection, and the set refers to its record.
+  assert.equal(kept.tracks.length, 1);
+  const { id, ...facts } = kept.tracks[0];
+  assert.deepEqual(kept.playlists[0].items[1], { ...facts, kind: 'file', trackId: id });
+  assert.equal(kept.tracks[0].bpm, 128);
   assert.equal(kept.playlists[0].folder, 'club/2026');
   assert.equal(kept.active, 'p1');
   assert.deepEqual(kept.saves, { song: { rating: 4 } }); // a star out of range is no star
-  assert.deepEqual(kept.tracks, []); // the collection is the disk's, and the browser has none
-  assert.deepEqual(await rig.host.call('GET', '/api/library'), kept);
+  const { analyzing, playedSession, playedSaves, onDeck, ...doc } = await rig.host.call('GET', '/api/library');
+  const { analyzing: a2, ...keptDoc } = kept;
+  assert.deepEqual(doc, keptDoc);
+  shutdown(rig);
 });
 
 test('sessions and saved patterns are listed apart, as the files tab draws them', async () => {
@@ -473,30 +495,6 @@ test('every path the editor asks for is one the host has an answer for', () => {
   const desktopOnly = new Set([
     // a toggle drawn disabled: the host answers `available: false` for it
     'POST /api/link',
-    // the DJ desk's song player: DJ mode is refused at its opener (client.js, desktopOnly)
-    'POST /api/song/play', 'POST /api/song/cue', 'POST /api/song/pause', 'POST /api/song/seek',
-    'POST /api/song/stop', 'POST /api/song/meta', 'POST /api/song/nudge', 'POST /api/song/reanalyze',
-    'GET /api/song/onsets', 'GET /api/song/waveform',
-    // the DJ desk's own controls, same door: the loop toggles and tempo sliders live in the
-    // deck heads (hidden outside mix mode), the FX unit in the mix strip
-    'POST /api/arrangeLoops', 'POST /api/mix/decktempo', 'POST /api/mix/livesync', 'POST /api/mix/jogsize', 'POST /api/mix/loop', 'POST /api/mix/fx', 'POST /api/mix/fxchain',
-    'POST /api/mix/feedback',
-    // ...and the mode itself, which this build never enters (openMixMode refuses it), so the
-    // tempo rule it switches on - setbpm as metadata - can never come up here either.
-    'POST /api/mix/dj',
-    // The library browser's disk source - the intake - is not drawn here and is refused at
-    // orgGoto, so there is no way to produce a disk path. That makes the TRACK COLLECTION
-    // unreachable too (it is the disk's), so its source row is not drawn either and everything
-    // reached from it goes with it: importing, measuring tempo and key, editing or rating a
-    // record, forgetting one. The livecode saves and the playlists are all this build browses.
-    'GET /api/songfiles/find',
-    'POST /api/library/import',
-    'POST /api/library/analyze', 'POST /api/library/analyze/stop',
-    'POST /api/library/track', 'POST /api/library/forget',
-    // asked inside a try whose failure is expected: a playlist's file rows render as missing
-    'POST /api/songfiles/stat',
-    // the headphone cue device row, drawn disabled from cueAvailable: false
-    'POST /api/audioCueDevice',
     // the projector feed: a server handing the frame to another program on the machine, which
     // this build has no server for. Its switch is not drawn (style.css, .web-build) and
     // pushProjectorFeed returns on __poptartHostReady before it can ask.
@@ -1023,5 +1021,24 @@ test('a shape redefined by an evaluation reaches the device on it, playing or no
   node.port.postMessage = (m, t) => { if (m.kind === 'shape') order.push('table'); return origPost(m, t); };
   await rig.host.call('POST', '/api/deviceParam', { trackId: 'lead', slot: 1, id: 'mode', sample: 'other', commit: false });
   assert.deepEqual(order.slice(0, 2), ['table', 'control']);
+  shutdown(rig);
+});
+
+test('a device window on the DJ FX unit leaves its settings in the chain, not in the buffer', async () => {
+  const rig = makeHost();
+  await rig.host.call('POST', '/api/mix/dj', { on: true });
+  await rig.host.call('POST', '/api/mix/fxchain', { save: 'grit', code: '.fx("Distort")' });
+  const { editor } = await rig.host.call('POST', '/api/mix/fx', { chain: 'grit', editor: 1 });
+  await rig.host.call('POST', '/api/showEditor', editor);
+  const panel = await rig.host.call('GET', `/api/deviceParams?trackId=${encodeURIComponent(editor.trackId)}&slot=${editor.slot}`).catch(() => null);
+  const id = panel?.params?.find?.((p) => p.id === 'drive')?.id ?? 'drive';
+  await rig.host.call('POST', '/api/deviceParam', { ...editor, id, position: 0.8, commit: true });
+  await rig.host.call('POST', '/api/deviceWatch', { ...editor, on: false });
+  assert.deepEqual((await rig.host.call('POST', '/api/pluginEdits', {})).edits, [], 'nothing for the editor to write into the buffer');
+  const { code } = await rig.host.call('GET', '/api/mix/fxchain?name=grit');
+  assert.match(code, /^\.fx\("Distort", \{ state: "[A-Za-z0-9+/=]+" \}\)$/);
+  await rig.host.call('POST', '/api/mix/eject');
+  await rig.host.call('POST', '/api/mix/dj', { on: false });
+  rig.transport.rampCps(rig.transport.cps);
   shutdown(rig);
 });

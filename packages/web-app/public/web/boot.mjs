@@ -17,6 +17,7 @@
 // a processor that has not been registered throws, and the error names the processor rather than
 // the file that failed to load, which is a confusing place to start looking.
 
+import { decodeAudio } from './audio-decode.mjs';
 import { memoryStore, openStore } from './kv.mjs';
 import { createBlobs } from './blobs.mjs';
 import { createStorage } from './storage.mjs';
@@ -31,6 +32,11 @@ import { createBlockEvaluator } from './block-eval.mjs';
 import { createRemotePacks } from './remote-packs.mjs';
 import { createLocalFolder } from './local-folder.mjs';
 import { createWebSampleMap } from './sample-map.mjs';
+import { createDesk } from './desk.mjs';
+import { createMusicFolder } from './music-folder.mjs';
+import { createSongSource } from './song-load.mjs';
+import { createLibrary } from './library.mjs';
+import { libraryTracks } from './library-doc.mjs';
 
 /** Where the pieces are served from. One place, so moving a folder is one edit. */
 export const PATHS = Object.freeze({
@@ -40,6 +46,11 @@ export const PATHS = Object.freeze({
   builtInPacks: '/web-engine/packs',
   devices: '/web-engine/devices',
   sampleMapCore: '/osc-engine/sample-map-core.mjs',
+  // The DJ desk's tempo and follow maths, the desktop's own files (see build-web.mjs).
+  // A song file's own tags, read with the desktop's reader.
+  songTags: '/osc-engine/song-tags-core.mjs',
+  songSync: '/shared/song-sync.js',
+  linkSync: '/shared/link-sync.js',
 });
 
 /**
@@ -188,7 +199,9 @@ export async function boot({
   const blobs = createBlobs(store);
   // pinned-defs.js owns the ★ library's file format and the snippet format (see storage and prebake).
   await import('./pinned-defs.js');
-  const storage = createStorage(store, { meta: globalThis, blobs, snippetFormat: globalThis.poptartPinnedDefs, replayLog: globalThis.poptartReplayLog });
+  // ...and set-log-format.js the tracklist a DJ set leaves behind (see desk.mjs).
+  await import('../set-log-format.js');
+  const storage = createStorage(store, { meta: globalThis, blobs, snippetFormat: globalThis.poptartPinnedDefs, replayLog: globalThis.poptartReplayLog, setLog: globalThis.poptartSetLog });
 
   const samples = createSampleStore({ context, store, warn });
   // A pack written as a list - _pack("kit", […]), what the pack panel and the sample map write -
@@ -234,7 +247,66 @@ export async function boot({
     say: (text) => note({ level: 'info', text }),
     note,
   });
-  const evaluator = createEvaluator({ patternCore, engine, transport, prebakeDefs, log: say, remotePacks });
+  let desk = null;
+  // The DJ desk: two decks, the crossfader, the song player and the headphone cue (desk.mjs).
+  // Its tempo maths is the desktop's song-sync.js and link-sync.js, loaded as they are.
+  await import(PATHS.songSync);
+  await import(PATHS.linkSync);
+  // MIDI from the controllers on this machine. Asked for only when something wants it (see
+  // midi.mjs); every message goes to the engine, which plays the tracks listening to that device,
+  // and a controller also to the language's own store, which a midicc() read in a pattern samples.
+  const midi = createWebMidi({
+    transport,
+    context,
+    warn,
+    onMessage: (device, msg) => {
+      // A control learned for the DJ desk (or being learned) is the desk's alone: it must not
+      // also play a track or move a midicc() in a pattern.
+      if (desk?.handleMidi(device, msg)) return;
+      engine.midiIn(device, msg.kind, msg.channel, msg.num, msg.value);
+      if (msg.kind === 'cc') patternCore.feedMidiCC(device, msg.channel, msg.num, msg.value);
+    },
+  });
+  // Clock out chosen on an earlier visit: the permission was given then, so this does not prompt.
+  if (midi.available && midi.clockWanted) midi.enable().catch((err) => warn(err.message));
+
+  const musicFolder = createMusicFolder({ store: isolated ? null : store, warn, say });
+  const tagsCore = await import(PATHS.songTags).catch((err) => {
+    warn(`[songs] a song's own tags will not be read - ${err.message ?? err}`);
+    return null;
+  });
+  const songs = createSongSource({ context, folder: musicFolder, readTags: tagsCore?.readFileTags ?? null, warn });
+  // The music library's collection (library.mjs): it asks the desk when to stand aside, and the
+  // desk tells it what a deck learned - hence the late binding of the one to the other.
+  const musicLibrary = createLibrary({
+    storage,
+    libraryTracks,
+    folder: musicFolder,
+    songs,
+    desk: { analysisWait: () => desk?.analysisWait() ?? null, playedNow: () => desk?.playedNow() },
+    store: isolated ? null : store,
+    log: warn,
+  });
+  desk = createDesk({
+    patternCore,
+    engine,
+    transport,
+    songSync: globalThis.poptartSongSync,
+    linkSync: globalThis.poptartLinkSync,
+    store: isolated ? null : store,
+    songs,
+    library: musicLibrary,
+    writeSet: isolated ? null : (set, ended) => storage.writeSetLog(set, ended),
+    parseMeta: globalThis.parseMeta,
+    midi,
+    // The FX unit's chains are built like any block, with the prebake in scope.
+    blockEvaluator: (builders) => createBlockEvaluator(patternCore, { defs: new Map(prebakeDefs), hostBuilders: builders }),
+    log: (line) => note(typeof line === 'string' ? { level: 'info', text: line } : line),
+  });
+  const evaluator = createEvaluator({ patternCore, engine, transport, prebakeDefs, log: say, remotePacks, desk });
+  desk.attach(evaluator);
+  await desk.restore();
+  if (!isolated) await musicLibrary.restore();
 
   const builtIn = await readBuiltInPacks(fetchImpl);
   const builtInUrl = (id, file) => `${PATHS.builtInPacks}/${id}/${file}`;
@@ -278,7 +350,7 @@ export async function boot({
 
   // The output device chosen last time, if it is still plugged in. Not awaited past a moment:
   // a device that takes its time to answer should not hold up the editor.
-  const outputs = createAudioOutputs({ context });
+  const outputs = createAudioOutputs({ context, engine });
   const restored = await Promise.race([outputs.restore(), new Promise((r) => setTimeout(() => r(null), 1500))]);
   if (restored) say(`playing to ${restored}`);
 
@@ -320,7 +392,7 @@ export async function boot({
       const res = await fetchImpl(builtInUrl(pack, file));
       return res.ok ? res.arrayBuffer() : null;
     },
-    decode: (bytes) => context.decodeAudioData(bytes),
+    decode: (bytes) => decodeAudio(context, bytes),
     analyze: mapRunner.analyze,
     derive: mapRunner.derive,
     log: say,
@@ -329,28 +401,19 @@ export async function boot({
   if (!isolated) {
     await Promise.race([localFolder.restore().catch((err) => warn(`[samples] ${err.message ?? err}`)), new Promise((r) => setTimeout(r, 1500))]);
     if (localFolder.status().state === 'prompt') say(`sample folder: ${localFolder.status().name} needs a click before this page reads it again - settings, "allow again"`);
+    // The music folder the decks load from, the same way - and not waited for at all: nothing
+    // plays from it until DJ mode is opened.
+    musicFolder.restore().catch((err) => warn(`[songs] ${err.message ?? err}`));
   }
 
-  // MIDI from the controllers on this machine. Asked for only when something wants it (see
-  // midi.mjs); every message goes to the engine, which plays the tracks listening to that device,
-  // and a controller also to the language's own store, which a midicc() read in a pattern samples.
-  const midi = createWebMidi({
-    transport,
-    context,
-    warn,
-    onMessage: (device, msg) => {
-      engine.midiIn(device, msg.kind, msg.channel, msg.num, msg.value);
-      if (msg.kind === 'cc') patternCore.feedMidiCC(device, msg.channel, msg.num, msg.value);
-    },
-  });
-  // Clock out chosen on an earlier visit: the permission was given then, so this does not prompt.
-  if (midi.available && midi.clockWanted) midi.enable().catch((err) => warn(err.message));
 
   // The output channel count chosen on an earlier visit, where the device still has them.
   try {
     const saved = Number(globalThis.localStorage?.getItem('poptart.outputChannels'));
     if (saved > 2) engine.setOutputChannels(saved);
   } catch { /* storage off */ }
+  // ...and the headphone cue, once the channels it may sit on are there.
+  if (!isolated) outputs.restoreCue().then((active) => { if (active) say(`headphone cue on ${active}`); });
 
   // Audio in: the inputs picked in settings, or the default one the first time input() is read.
   // The engine takes its channels off one node; the language is told the channel layout, which
@@ -415,6 +478,9 @@ export async function boot({
     remotePacks,
     localFolder,
     sampleMap,
+    desk,
+    musicFolder,
+    musicLibrary,
   });
 
   say(`ready - ${webEngine.catalog.list().length} devices, ${builtIn.length + library.packs.length} packs`);
@@ -427,6 +493,8 @@ export async function boot({
     samples,
     patternCore,
     webEngine,
+    evaluator,
+    desk,
     storeKind: opened.kind,
   };
 }

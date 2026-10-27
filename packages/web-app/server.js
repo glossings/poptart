@@ -19,6 +19,7 @@ const blobs = require('./blobs');
 const pinnedDefs = require('./pinned-defs');
 const snippets = require('./snippets');
 const { locateDroppedFile, verifyDroppedPath } = require('./sample-locate');
+const { createDroppedFiles, locateDrops, addDroppedSample, DROPPED_FILES_PACK } = require('./dropped-files');
 const { readPasteboardFiles } = require('./pasteboard');
 const recordings = require('@poptart/osc-engine/recordings');
 const analysis = require('@poptart/osc-engine/analysis');
@@ -1038,10 +1039,12 @@ function songSetMeta(deck, patch) {
       decks[deck].bpm = bpm; // the native tempo the desk's migration slider/detents ride to
       songDetectKick(deck); // re-fit the grid around the typed tempo (which is the fit's hint)
     }
+    rememberTrackEdit(s.path, { bpm: s.bpm });
   }
   if ('key' in patch) {
     s.musicalKey = String(patch.key ?? '').trim() || null;
     delete s.keyDetected;
+    rememberTrackEdit(s.path, { key: s.musicalKey });
   }
   if ('anchorSec' in patch) {
     const a = Number(patch.anchorSec);
@@ -1093,6 +1096,21 @@ function songSetMeta(deck, patch) {
     deck, bpm: s.bpm, musicalKey: s.musicalKey, anchorSec: s.anchorSec,
     sync: s.sync, syncMult: s.syncMult, keylock: s.keylock, quantize: s.quantize !== false, rate: s.rate,
   };
+}
+
+/**
+ * A tempo or key typed on a deck, kept on the track's library record as typed by hand, so the
+ * next load of the file comes back with it and no analysis overwrites it. A cleared tempo leaves
+ * the record without one, and the measuring welcome to fill it in again.
+ */
+function rememberTrackEdit(trackPath, fields) {
+  try {
+    importTracks([trackPath], { readTags: readSongTags });
+    const track = readLibrary().tracks.find((t) => t.path === trackPath);
+    if (!track) return;
+    if ('bpm' in fields && fields.bpm == null) forgetTrackTempo(trackPath);
+    else editTrack(track.id, fields);
+  } catch { /* the collection can be unwritable; the deck still holds the edit for the session */ }
 }
 
 // --- the per-deck tempo sliders (/api/mix/decktempo and the `tempo` MIDI fader) ---
@@ -3955,6 +3973,10 @@ require('@poptart/osc-engine/samples').setSamplesRoot(settings.samplesDir ?? nul
 // The packs poptart ships (pt_kit, pt_keys) are web-engine's, the files the browser build plays,
 // so a pattern written for either build plays its samples on both.
 require('@poptart/osc-engine/samples').setBuiltInPacksRoot(path.join(__dirname, '..', 'web-engine', 'public', 'packs'));
+// The `files` pack: audio dropped on the code, played from where it lives - a list of paths, the
+// desktop's side of the browser build's stored `files` (see dropped-files.js).
+const droppedFiles = createDroppedFiles(process.env.POPTART_FILES_PACK_FILE || path.join(poptartHome(), 'files-pack.json'));
+require('@poptart/osc-engine/listed-packs').setListedPack(DROPPED_FILES_PACK, () => droppedFiles.read());
 
 // The sample map (similarity map of the folders in settings.mapSources - see sample-map-api.js).
 // Its routes join the table below; the index itself loads and refreshes once the server is up.
@@ -5363,6 +5385,9 @@ const hlTracks = new Map(); // label -> { sig, start, end, clock } for the last 
 function sampleRefFiles(ref) {
   const { listPackFiles, resolveSampleFile, expandPackEntries } = require('@poptart/osc-engine/samples');
   const { resolveRecording } = require('@poptart/osc-engine/recordings');
+  const { splitPackFileRef, pickPackFile } = require('@poptart/osc-engine/pack-file-ref');
+  const named = splitPackFileRef(ref); // s("files:loop.wav") - one file of a pack, by its name
+  if (named) return [pickPackFile(sampleRefFiles(named.pack), named.want)].filter(Boolean);
   if (ref.startsWith('sp:')) return expandPackEntries(patternCore?.lookupPack(ref.slice(3))?.files ?? []);
   if (ref.startsWith('file:')) return [resolveSampleFile(ref.slice(5))].filter(Boolean);
   if (ref.startsWith('rec:')) return [resolveRecording(ref.slice(4))].filter(Boolean);
@@ -5559,6 +5584,7 @@ const {
   writeLibrary,
   importTracks,
   editTrack,
+  forgetTrackTempo,
   setTrackFacts,
   setTrackAnchor,
   forgetTracks,
@@ -7383,8 +7409,16 @@ const routes = {
     const packs = entries
       .filter((e) => e.isDirectory() || e.isSymbolicLink())
       .map((e) => ({ name: e.name, files: (listPackFiles(e.name) ?? []).map((f) => path.basename(f)) }))
-      .filter((p) => p.files.length > 0)
-      .sort((a, b) => a.name.localeCompare(b.name));
+      .filter((p) => p.files.length > 0);
+    // The packs that are lists of files where they live (the dropped `files`), unless a library
+    // folder of the same name plays in their place - it is then already in the list above.
+    const { listedPackNames } = require('@poptart/osc-engine/listed-packs');
+    for (const name of listedPackNames()) {
+      if (packs.some((p) => p.name === name)) continue;
+      const files = (listPackFiles(name) ?? []).map((f) => path.basename(f));
+      if (files.length) packs.push({ name, files });
+    }
+    packs.sort((a, b) => a.name.localeCompare(b.name));
     return { status: 200, body: { root, packs } };
   },
 
@@ -7499,6 +7533,29 @@ const routes = {
       walk: walkAudioFiles,
     });
     return { status: 200, body: { file } };
+  },
+
+  // Audio dropped on the code: into the `files` pack, as the path where it lives. Body: { path }
+  // when the drag named the file, else { name, size, sha256, hint? } to find it as the pack panel
+  // does (see locateSample). -> { ref, index, name, path, shadowed } - `ref` is what s() plays it by.
+  'POST /api/files/add': async (body) => {
+    const pack = String(body?.pack ?? DROPPED_FILES_PACK);
+    if (pack !== DROPPED_FILES_PACK) throw new Error(`only the "${DROPPED_FILES_PACK}" pack takes dropped files here`);
+    const { isAudioName, samplesRoot, walkAudioFiles } = require('@poptart/osc-engine/samples');
+    const added = await addDroppedSample(body ?? {}, {
+      store: droppedFiles,
+      find: (item) => locateDroppedFile({
+        name: item.name, size: item.size, sha256: item.sha256,
+        hints: item.hint ? [String(item.hint)] : [],
+        samplesRoot: samplesRoot(), isAudioName, walk: walkAudioFiles,
+      }),
+      verify: (p) => verifyDroppedPath(p, { isAudioName }),
+      shadowed: () => {
+        try { return fs.statSync(path.join(samplesRoot(), DROPPED_FILES_PACK)).isDirectory(); } catch { return false; }
+      },
+    });
+    engine?.forgetSamplePack?.(DROPPED_FILES_PACK); // the next event reads the list again
+    return { status: 200, body: added };
   },
 
   // The audio files on the system clipboard, for ⌘V on the pack list: what "copy" in Finder or a
@@ -9029,17 +9086,18 @@ const routes = {
     return { status: 200, body: {} };
   },
 
-  // Body: { paths: [...] } or { dir }, plus { mode: 'rescan' } -> { library, added, already }.
+  // Body: { paths: [...] } and/or { dirs: [...] } (or { dir }), plus { mode: 'rescan' } -> { library, added, already }.
   // The intake: disk files into the track collection, each one's own tags read for what it can
   // say about itself. A path already in the collection is a no-op that only fills gaps (see
   // importTracks), so this is safe to fire from any gesture that merely USES a file. `rescan` is
   // the asked-for exception that lets a retagged file update what it already said.
   'POST /api/library/import': async (body) => {
     let paths = Array.isArray(body?.paths) ? body.paths : [];
-    if (body?.dir) {
+    const dirs = [...(Array.isArray(body?.dirs) ? body.dirs : []), ...(body?.dir ? [body.dir] : [])];
+    for (const given of dirs) {
       // A folder imports every playable file anywhere under it. Bounded by the same walk the
       // browser's folder adds use, so a sample-pack-sized tree can't run away with it.
-      const dir = path.resolve(String(body.dir));
+      const dir = path.resolve(String(given));
       let walked;
       try {
         if (!fs.statSync(dir).isDirectory()) throw new Error('not a folder');
@@ -9049,6 +9107,7 @@ const routes = {
       }
       paths = paths.concat((walked.files ?? []).map((f) => path.join(dir, f)));
     }
+    paths = [...new Set(paths)];
     if (paths.length > IMPORT_MAX) throw new Error(`that is more than ${IMPORT_MAX} files - import a folder at a time`);
     const mode = body?.mode === 'rescan' ? 'rescan' : 'fill';
     const { library, added, already } = importTracks(paths, { readTags: readSongTags, mode });
@@ -9065,6 +9124,21 @@ const routes = {
 
   // Body: { ids?: [...], all?: true, force?: false } -> { queued, analyzing }. Measures tempo and
   // key for tracks whose files never stated them. `force` re-measures even what has been tried.
+  // Body: { files: [{ name, size, sha256 } | { path }] } -> { paths }: where each song dropped on
+  // the window lives (null for one that is nowhere on the disk), so a drop can load or import it
+  // by its path. Found the way a dropped sample is (sample-locate.js); a song can be anywhere.
+  'POST /api/library/locate': async (body) => {
+    const isSongName = (name) => !!classifySongFile(name);
+    const paths = await locateDrops(body?.files, {
+      find: (item) => locateDroppedFile({
+        name: item.name, size: item.size, sha256: item.sha256, hints: [],
+        isAudioName: isSongName, walk: walkSongFiles,
+      }),
+      verify: (p) => verifyDroppedPath(p, { isAudioName: isSongName }),
+    });
+    return { status: 200, body: { paths } };
+  },
+
   'POST /api/library/analyze': async (body) => {
     const lib = readLibrary();
     const wanted = Array.isArray(body?.ids) && body.ids.length
@@ -10585,8 +10659,10 @@ const STATIC_ROOTS = [
   { prefix: '/web-engine/worklets/', root: path.join(WEB_ENGINE_PUBLIC, 'worklets') },
   { prefix: '/web-engine/packs/', root: path.join(WEB_ENGINE_PUBLIC, 'packs') },
   { prefix: '/web-engine/devices/', root: path.join(WEB_ENGINE_PUBLIC, 'devices') },
-  // The one module of osc-engine both builds share; the rest of that package stays private.
-  { prefix: '/osc-engine/', root: OSC_ENGINE_DIR, only: ['sample-map-core.mjs'] },
+  // The modules of osc-engine both builds share; the rest of that package stays private.
+  { prefix: '/osc-engine/', root: OSC_ENGINE_DIR, only: ['sample-map-core.mjs', 'wave-core.mjs', 'song-detect-core.mjs', 'song-tags-core.mjs'] },
+  // This server's own files the page's desk shares (build-web.mjs's /shared).
+  { prefix: '/shared/', root: __dirname, only: ['song-sync.js', 'link-sync.js'] },
   // The ★ library's file format, which the page's host imports from beside itself (build-web.mjs).
   { prefix: '/web/', root: __dirname, only: ['pinned-defs.js'] },
 ];

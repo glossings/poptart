@@ -517,8 +517,10 @@ test('muted code dims, the menu offers the envelope, and drops land, on either d
   const menu = grab('openEditorMenu');
   assert.ok(!/ed === cm/.test(menu), 'nothing on the menu is deck A\'s alone');
   assert.match(menu, /openEnvelopeAt\(ed\.getValue\(\), at, ed\)/);
-  assert.match(SRC, /const onDeck = \[cm, deckBCM\]\.find\(\(ed\) => ed\?\.getWrapperElement\(\)\.contains\(e\.target\)\) \?\? null;/);
-  assert.match(SRC, /openMidiImport\(file, onDeck \?\? activeCM\(\)\);/);
+  assert.match(grab('editorAt'), /return ed === cm \|\| ed === deckBCM \? ed : null;/);
+  assert.match(SRC, /const onCode = editorAt\(e\.target\);/);
+  assert.match(SRC, /openMidiImport\(files\[kinds\.indexOf\('midi'\)\], onCode \?\? deckEditor\(deck\) \?\? activeCM\(\)\);/);
+  assert.match(SRC, /const ed = onCode \?\? deckEditor\(deck\) \?\? cm;/);
   assert.match(grab('runMidiImport'), /const ed = st\.ed \?\? cm;/);
   assert.match(grab('insertSnippet'), /refoldAll\(ed\);/);
   assert.match(grab('bounceBlockAtCursor'), /const ed = activeCM\(\);/);

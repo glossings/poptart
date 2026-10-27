@@ -19,7 +19,34 @@
 import { TRACK_BEND_PARAM, argToValue, clampParam, defaultValues, findParam, normalize } from '../descriptor.mjs';
 
 /** Channel-strip controls this engine implements. The rest warn once - see the engine. */
-export const SUPPORTED_CHANNELS = Object.freeze(['gain', 'postgain', 'pan', 'dry', 'mon', 'width', 'bassmono', 'bend', 'bendrange', 'out', 'grainsize', 'grainrate', 'grainpan', 'grainpos']);
+export const SUPPORTED_CHANNELS = Object.freeze(['gain', 'postgain', 'pan', 'dry', 'mon', 'width', 'bassmono', 'bend', 'bendrange', 'out', 'grainsize', 'grainrate', 'grainpan', 'grainpos',
+  'trim', 'eqlo', 'eqmid', 'eqhi', 'djf', 'djres', 'fader', 'deck', 'cue', 'mdeck']);
+
+/**
+ * The DJ stage's controls at rest (see the stage in Track): unity trim, bands, fader and deck
+ * gain, the filter at its center detent with no resonance, no cue send. A track sounds exactly as
+ * it would without the stage until a mix session touches one - the desktop's DJ_NEUTRAL.
+ */
+export const DJ_NEUTRAL = Object.freeze({ trim: 1, eqlo: 1, eqmid: 1, eqhi: 1, djf: 0, djres: 0, fader: 1, deck: 1, cue: 0 });
+
+/** The isolator's crossovers, the desktop's djIsolator: Linkwitz-Riley at 250 Hz and 2.5 kHz. */
+const DJ_XO_LOW = 250;
+const DJ_XO_HIGH = 2500;
+/**
+ * A second-order Butterworth's Q, as a Web Audio lowpass or highpass takes it - in decibels,
+ * not as the linear 1/sqrt(2) a cookbook writes, so -3.01 dB. Two in a row are the fourth-order
+ * Linkwitz-Riley the isolator is built from.
+ */
+const BUTTERWORTH_Q_DB = 20 * Math.log10(Math.SQRT1_2);
+/**
+ * How long the stage's controls take to reach a value. They stream from the desk at ~20 values a
+ * second, and a glide shorter than the gap between them reproduces the steps (a stepped resonant
+ * cutoff reads as tremolo) - the desktop lags these by 80 ms, and the filter's cutoff by 150.
+ */
+const DJ_GLIDE_SEC = 0.08;
+const DJ_FILTER_GLIDE_SEC = 0.15;
+/** How long the EQ and the filter take to cross in and out of the path at exact neutral. */
+const DJ_XFADE_SEC = 0.05;
 
 /**
  * The strip's constant-power pan, the desktop's law: a sine/cosine pair referenced to the CENTER,
@@ -108,6 +135,21 @@ export function rampParam(param, value, atTime, now, glide = PARAM_GLIDE_SEC) {
   }
 }
 
+/**
+ * A frequency moved to a value along an exponential curve, which is how a sweep is heard: equal
+ * times for equal musical intervals. A glide of zero steps.
+ */
+function glideFrequency(param, hz, atTime, now, glide) {
+  const when = Math.max(now + PARAM_LOOKAHEAD_SEC, atTime ?? now);
+  try {
+    if (typeof param.cancelAndHoldAtTime === 'function') param.cancelAndHoldAtTime(when);
+    if (glide > 0) param.exponentialRampToValueAtTime(hz, when + glide);
+    else param.setValueAtTime(hz, when);
+  } catch {
+    param.value = hz;
+  }
+}
+
 /** One filled slot: the device, its node graph and how its parameters are reached. */
 export class Slot {
   constructor(descriptor, built, wetGain, dryGain) {
@@ -142,10 +184,12 @@ export class Slot {
 }
 
 export class Track {
-  constructor(ctx, id, master, registry) {
+  constructor(ctx, id, master, registry, desk = null) {
     this.ctx = ctx;
     this.id = id;
     this.registry = registry;
+    // Where the DJ stage's taps go: the engine's headphone cue bus and its two deck meters.
+    this.desk = desk;
 
     // The chain, built empty. Every node here exists for the track's whole life so that changing
     // what is in a slot never means rebuilding the path around it.
@@ -223,8 +267,45 @@ export class Track {
     this.panL.connect(this.merge, 0, 0);
     this.panR.connect(this.merge, 0, 1);
     this.merge.connect(this.panner);
-    this.panner.connect(this.monGate);
-    this.monGate.connect(this.dryGain);
+
+    // THE DJ STAGE, the desktop's order: trim, the three-band isolator, the one-knob filter, and
+    // then - on the direct path only - the stem's fader and its deck's crossfader gain. The cue
+    // and the deck meter read the stage's output before either of those, so a deck that is out of
+    // the mix is still heard in the headphones and still metered. The sends leave from before the
+    // stage but after the fader, as the desktop's do: a crossfade applies each deck's gain exactly
+    // once (a bus ends at some track's own output, which wears it), and a gated stem goes quiet
+    // including whatever it was feeding.
+    //
+    // The EQ and the filter are not in the path at all until they leave neutral, which is the
+    // desktop's crossfade at exact neutral with the nodes built only when they are first wanted:
+    // a track nobody mixes costs nothing for having a stage.
+    this.djTrim = gain(1);
+    this.djMid = gain(1);                    // between the EQ and the filter
+    this.djLive = gain(1);                   // the stage's output: what cue, meter and fader read
+    this.djTrim.connect(this.djMid);
+    this.djMid.connect(this.djLive);
+    this.djEq = null;                        // the isolator, once a band has moved
+    this.djFilter = null;                    // the filter, once it has left its center
+    this.dj = { ...DJ_NEUTRAL, mdeck: -1, mon: 0 };
+    this.cueGain = gain(0);                  // cue (or mon), into the headphone cue bus
+    this.meterGain = null;                   // into the deck meter the track reports to
+    this.meterDeck = -1;
+    this.fxDirect = gain(1);                 // the direct path's share while the FX unit is in
+    this.faderGain = gain(1);
+    this.deckGain = gain(1);
+    this.fx = null;                          // the FX unit's send, once one is set (see setFxSend)
+    this.sendMain = gain(1);                 // the sends' own copy of mon's gate...
+    this.sendFader = gain(1);                // ...and of the fader
+    this.panner.connect(this.djTrim);
+    this.djLive.connect(this.cueGain);
+    if (desk?.cueBus) this.cueGain.connect(desk.cueBus);
+    this.djLive.connect(this.monGate);
+    this.monGate.connect(this.fxDirect);
+    this.fxDirect.connect(this.faderGain);
+    this.faderGain.connect(this.deckGain);
+    this.deckGain.connect(this.dryGain);
+    this.panner.connect(this.sendMain);
+    this.sendMain.connect(this.sendFader);
     this.master = master;
     this.dryGain.connect(master);
 
@@ -458,7 +539,19 @@ export class Track {
         return true;
       }
       case 'dry': rampParam(this.dryGain.gain, value, atTime, now, g); return true;
-      case 'mon': rampParam(this.monGate.gain, value > 0 ? 0 : 1, atTime, now, g); return true;
+      // Monitor (a label's `M`): the track plays to the headphone cue in full and to nothing the
+      // room hears - not the direct output and not its sends. The taps keep reading it.
+      case 'mon': {
+        this.dj.mon = value > 0 ? 1 : 0;
+        rampParam(this.monGate.gain, 1 - this.dj.mon, atTime, now, g);
+        rampParam(this.sendMain.gain, 1 - this.dj.mon, atTime, now, g);
+        this._djCue(atTime, now, g);
+        return true;
+      }
+      case 'trim': case 'eqlo': case 'eqmid': case 'eqhi': case 'djf': case 'djres':
+      case 'fader': case 'deck': case 'cue': case 'mdeck':
+        this._djSet(name, Number(value), atTime, now, g);
+        return true;
       default:
         if (name.startsWith('wet')) {
           // Kept for an empty slot too: the level waits for whatever device is put there.
@@ -469,6 +562,205 @@ export class Track {
         }
         return false;
     }
+  }
+
+  // -- the DJ stage ----------------------------------------------------------------------------
+
+  /** One stage control, clamped to the desktop's ranges. `g` is the first-value step (see setChannel). */
+  _djSet(name, value, atTime, now, g) {
+    const v = Number.isFinite(value) ? value : DJ_NEUTRAL[name] ?? 0;
+    const clamp = (lo, hi) => Math.min(hi, Math.max(lo, v));
+    switch (name) {
+      case 'trim':
+        this.dj.trim = clamp(0, 4);
+        rampParam(this.djTrim.gain, this.dj.trim, atTime, now, g ?? DJ_GLIDE_SEC);
+        break;
+      case 'eqlo': case 'eqmid': case 'eqhi':
+        this.dj[name] = clamp(0, 2);
+        this._djEq(atTime, now, g);
+        break;
+      case 'djf': case 'djres':
+        this.dj[name] = name === 'djf' ? clamp(-1, 1) : clamp(0, 1);
+        this._djFilter(atTime, now, g);
+        break;
+      case 'fader':
+        this.dj.fader = clamp(0, 1);
+        rampParam(this.faderGain.gain, this.dj.fader, atTime, now, g ?? DJ_GLIDE_SEC);
+        rampParam(this.sendFader.gain, this.dj.fader, atTime, now, g ?? DJ_GLIDE_SEC);
+        if (this.fx) rampParam(this.fx.fader.gain, this.dj.fader, atTime, now, g ?? DJ_GLIDE_SEC);
+        break;
+      case 'deck':
+        this.dj.deck = clamp(0, 1);
+        rampParam(this.deckGain.gain, this.dj.deck, atTime, now, g ?? DJ_GLIDE_SEC);
+        break;
+      case 'cue':
+        this.dj.cue = clamp(0, 1);
+        this._djCue(atTime, now, g);
+        break;
+      case 'mdeck':
+        this._djMeter(Math.round(v));
+        break;
+      default:
+        break;
+    }
+  }
+
+  /**
+   * The DJ FX unit's send: the finished stage (post trim, EQ and filter), gated like the direct
+   * path by the fader and by monitor, but NOT by the crossfader - the unit's return is a track of
+   * this deck and wears that gain itself, so a crossfade applies it exactly once. An INSERT, not an
+   * aux: the direct path closes by as much as the send opens, on the same glide, so switching the
+   * unit in is a crossfade between two paths carrying the same signal. `into` is the bus the
+   * deck's return reads; null parks the send.
+   */
+  setFxSend(into, level, now) {
+    const amt = into ? Math.min(1, Math.max(0, Number(level) || 0)) : 0;
+    if (!this.fx && amt === 0) return;
+    if (!this.fx) {
+      const send = this.ctx.createGain();
+      send.gain.value = 0;
+      const fader = this.ctx.createGain();
+      fader.gain.value = this.dj.fader;
+      this.monGate.connect(send);
+      send.connect(fader);
+      this.fx = { send, fader, into: null };
+    }
+    if (this.fx.into !== into) {
+      try { this.fx.fader.disconnect(); } catch { /* not connected */ }
+      if (into) this.fx.fader.connect(into);
+      this.fx.into = into;
+    }
+    rampParam(this.fx.send.gain, amt, now, now, DJ_GLIDE_SEC);
+    rampParam(this.fxDirect.gain, 1 - amt, now, now, DJ_GLIDE_SEC);
+  }
+
+  /** The headphone send: the cue level, or all of it for a monitored track. */
+  _djCue(atTime, now, g) {
+    rampParam(this.cueGain.gain, Math.max(this.dj.cue, this.dj.mon), atTime, now, g ?? DJ_XFADE_SEC);
+  }
+
+  /** Which deck meter the track reports to: 0 is A, 1 is B, anything else none. */
+  _djMeter(deck) {
+    const want = deck === 0 || deck === 1 ? deck : -1;
+    if (want === this.meterDeck) return;
+    if (this.meterGain) {
+      try { this.meterGain.disconnect(); } catch { /* already detached */ }
+      try { this.djLive.disconnect(this.meterGain); } catch { /* already detached */ }
+      this.meterGain = null;
+    }
+    this.meterDeck = want;
+    this.dj.mdeck = want;
+    const into = want >= 0 ? this.desk?.deckMeters?.[want] : null;
+    if (!into) return;
+    this.meterGain = this.ctx.createGain();
+    this.djLive.connect(this.meterGain);
+    this.meterGain.connect(into);
+  }
+
+  /**
+   * The three-band isolator, the desktop's djIsolator: a Linkwitz-Riley tree (250 Hz, then
+   * 2.5 kHz on the upper half, with the low band through the 2.5 kHz pair's all-pass so the three
+   * carry the same phase and sum flat). 0 on a band is a true kill and nothing boosts its
+   * neighbors. Flat but phase-shifted, so at exact neutral it is crossfaded out of the path.
+   */
+  _djEq(atTime, now, g) {
+    const { eqlo, eqmid, eqhi } = this.dj;
+    const on = (Math.abs(eqlo - 1) + Math.abs(eqmid - 1) + Math.abs(eqhi - 1)) > 0.001;
+    if (!this.djEq && !on) return;
+    if (!this.djEq) this.djEq = this._djEqBuild();
+    const eq = this.djEq;
+    rampParam(eq.lo.gain, eqlo, atTime, now, g ?? DJ_GLIDE_SEC);
+    rampParam(eq.mid.gain, eqmid, atTime, now, g ?? DJ_GLIDE_SEC);
+    rampParam(eq.hi.gain, eqhi, atTime, now, g ?? DJ_GLIDE_SEC);
+    rampParam(eq.wet.gain, on ? 1 : 0, atTime, now, DJ_XFADE_SEC);
+    rampParam(eq.dry.gain, on ? 0 : 1, atTime, now, DJ_XFADE_SEC);
+  }
+
+  _djEqBuild() {
+    const ctx = this.ctx;
+    const nodes = [];
+    const gain = (v) => { const n = ctx.createGain(); n.gain.value = v; nodes.push(n); return n; };
+    const bq = (type, hz) => {
+      const b = ctx.createBiquadFilter();
+      b.type = type;
+      b.frequency.value = hz;
+      b.Q.value = BUTTERWORTH_Q_DB;
+      nodes.push(b);
+      return b;
+    };
+    // Two Butterworths in a row: one side of a Linkwitz-Riley crossover.
+    const lr4 = (from, type, hz) => {
+      const a = bq(type, hz);
+      const b = bq(type, hz);
+      from.connect(a);
+      a.connect(b);
+      return b;
+    };
+    const lo = gain(1);
+    const mid = gain(1);
+    const hi = gain(1);
+    const wet = gain(0);
+    const dry = gain(1);
+    const low = lr4(this.djTrim, 'lowpass', DJ_XO_LOW);
+    const upper = lr4(this.djTrim, 'highpass', DJ_XO_LOW);
+    lr4(upper, 'lowpass', DJ_XO_HIGH).connect(mid);
+    lr4(upper, 'highpass', DJ_XO_HIGH).connect(hi);
+    lr4(low, 'lowpass', DJ_XO_HIGH).connect(lo);
+    lr4(low, 'highpass', DJ_XO_HIGH).connect(lo);
+    for (const band of [lo, mid, hi]) band.connect(wet);
+    try { this.djTrim.disconnect(this.djMid); } catch { /* not connected */ }
+    this.djTrim.connect(dry);
+    dry.connect(this.djMid);
+    wet.connect(this.djMid);
+    return { lo, mid, hi, wet, dry, nodes };
+  }
+
+  /**
+   * The one-knob filter: `djf` 0 is untouched, negative sweeps a low-pass down from 18 kHz toward
+   * 20 Hz, positive a high-pass up from 20 Hz toward 18 kHz, both exponential. `djres` is its
+   * resonance, a control of its own (neutral 0, a plain two-pole). Crossfaded out at the center.
+   */
+  _djFilter(atTime, now, g) {
+    const v = this.dj.djf;
+    const on = Math.abs(v) > 0.005;
+    if (!this.djFilter && !on) return;
+    if (!this.djFilter) this.djFilter = this._djFilterBuild();
+    const f = this.djFilter;
+    const lpHz = Math.min(18000, Math.max(20, 18000 * 900 ** Math.min(0, v)));
+    const hpHz = Math.min(18000, Math.max(20, 20 * 900 ** Math.max(0, v)));
+    // rq is 1/Q: 1 is a flat two-pole, 0.38 about +8 dB at the corner. In decibels for Web Audio.
+    const rq = 1 - 0.62 * this.dj.djres;
+    const qDb = Math.max(0, -20 * Math.log10(rq));
+    glideFrequency(f.lp.frequency, lpHz, atTime, now, g ?? DJ_FILTER_GLIDE_SEC);
+    glideFrequency(f.hp.frequency, hpHz, atTime, now, g ?? DJ_FILTER_GLIDE_SEC);
+    rampParam(f.lp.Q, qDb, atTime, now, g ?? DJ_GLIDE_SEC);
+    rampParam(f.hp.Q, qDb, atTime, now, g ?? DJ_GLIDE_SEC);
+    rampParam(f.wet.gain, on ? 1 : 0, atTime, now, DJ_XFADE_SEC);
+    rampParam(f.dry.gain, on ? 0 : 1, atTime, now, DJ_XFADE_SEC);
+  }
+
+  _djFilterBuild() {
+    const ctx = this.ctx;
+    const lp = ctx.createBiquadFilter();
+    lp.type = 'lowpass';
+    lp.frequency.value = 18000;
+    lp.Q.value = 0;
+    const hp = ctx.createBiquadFilter();
+    hp.type = 'highpass';
+    hp.frequency.value = 20;
+    hp.Q.value = 0;
+    const wet = ctx.createGain();
+    wet.gain.value = 0;
+    const dry = ctx.createGain();
+    dry.gain.value = 1;
+    try { this.djMid.disconnect(this.djLive); } catch { /* not connected */ }
+    this.djMid.connect(lp);
+    lp.connect(hp);
+    hp.connect(wet);
+    wet.connect(this.djLive);
+    this.djMid.connect(dry);
+    dry.connect(this.djLive);
+    return { lp, hp, wet, dry, nodes: [lp, hp, wet, dry] };
   }
 
   /**
@@ -578,6 +870,12 @@ export class Track {
       try { ctl.disconnect(); } catch { /* already detached */ }
     }
     this.wetControls.clear();
+    for (const node of [...(this.djEq?.nodes ?? []), ...(this.djFilter?.nodes ?? [])]) {
+      try { node.disconnect(); } catch { /* already detached */ }
+    }
+    for (const node of [this.djTrim, this.djMid, this.djLive, this.cueGain, this.meterGain, this.fxDirect, this.faderGain, this.deckGain, this.sendMain, this.sendFader, this.fx?.send, this.fx?.fader]) {
+      try { node?.disconnect(); } catch { /* already detached */ }
+    }
     try {
       this.input.disconnect();
       this.chainIn.disconnect();

@@ -2138,16 +2138,6 @@ li.CodeMirror-hint-active {
   display: none;
 }
 
-/* Nor a DJ desk, a sample map, or a disk to browse: the browser build does not draw their
-   buttons (client.js, desktopOnly). */
-.web-build #viewDjBtn,
-.web-build #sampleMapBtn,
-.web-build #orgDiskSource,
-.web-build #orgTracksSource,
-.web-build #orgFilter {
-  display: none;
-}
-
 /* Nor a projector feed: that is a server handing the frame to another program on the same
    machine, and the browser build has no server. The projector window itself works there. */
 .web-build #projectorFeedRow,

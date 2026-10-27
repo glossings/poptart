@@ -161,8 +161,13 @@ function servoTrim(errSec) {
   return -Math.min(SERVO_MAX, Math.max(-SERVO_MAX, errSec / SERVO_CLOSE_SEC));
 }
 
-module.exports = {
+const exported = {
   syncRate, syncOctave, effectiveRate, bendStep, snapToGrid, alignToGrid, gridPhase, servoTrim,
   NUDGE_PCT, BEND_SENS, BEND_MAX, BEND_ATTACK_SEC, BEND_RELEASE_SEC,
   RATE_MIN, RATE_MAX, SERVO_HARD_SEC, BEATS_PER_CYCLE,
 };
+
+// Shared with the browser build, which loads this file as a module of its own (see build-web.mjs)
+// and finds the same functions on globalThis - the desktop server require()s it as before.
+if (typeof module !== 'undefined' && module.exports) module.exports = exported;
+else globalThis.poptartSongSync = exported;

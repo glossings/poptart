@@ -297,7 +297,9 @@ function createWindow() {
     ...(MAC_TITLE_BAR ? { titleBarStyle: 'hiddenInset', trafficLightPosition: TRAFFIC_LIGHTS } : {}),
     webPreferences: {
       // The page is our own server's, but it also evaluates user code and can load plugin
-      // metadata; there is no reason for it to reach Node, so it doesn't.
+      // metadata; there is no reason for it to reach Node, so it doesn't. The preload gives it
+      // one thing only: a dropped file's path (see preload.js).
+      preload: path.join(__dirname, 'preload.js'),
       nodeIntegration: false,
       contextIsolation: true,
       spellcheck: false,

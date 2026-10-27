@@ -330,10 +330,14 @@ test('the channel strip controls this build has work; the ones it lacks warn onc
   assert.ok(track.bassHp.frequency.landedOn(150) && track.sideHigh.gain.landedOn(1) && track.sideDry.gain.landedOn(0));
   assert.deepEqual(warnings, []);
 
-  // A DJ desk control is not a thing a track in the browser has.
+  // The DJ stage's controls are a track's like the rest (see dj-stage.test.mjs).
   engine.setParam('t1', -1, 'djf', 1, 0);
-  engine.setParam('t1', -1, 'djf', 1, 0);
-  const said = warnings.filter((w) => w.includes('djf'));
+  assert.deepEqual(warnings, []);
+
+  // A control this build does not have warns, once.
+  engine.setParam('t1', -1, 'nosuchcontrol', 1, 0);
+  engine.setParam('t1', -1, 'nosuchcontrol', 1, 0);
+  const said = warnings.filter((w) => w.includes('nosuchcontrol'));
   assert.equal(said.length, 1, 'the gap belongs once, not once per tick');
   assert.ok(said[0].includes('not implemented'));
 });
@@ -703,6 +707,29 @@ test('a named pack arrives from the scheduler as sp:<id> and is looked up by its
   assert.equal(engine.playSample('t1', 'sp:pt_kit', { index: 2 }, 0, 1).skipped, undefined, 'sp("pt_kit:2") plays');
   assert.equal(engine.playSample('t1', 'pt_kit', { index: 2 }, 0, 1).skipped, undefined, 's("pt_kit:2") plays');
   assert.deepEqual(asked, [['pt_kit', 2], ['pt_kit', 2]]);
+});
+
+test('s("pack:file") plays the file of that name, with or without its extension', () => {
+  const buffer = { duration: 2, length: 96000, sampleRate: 48000 };
+  const asked = [];
+  const names = ['kick.wav', 'loop.wav'];
+  const store = {
+    get: (pack, index) => { asked.push([pack, index]); return pack === 'files' ? buffer : null; },
+    indexOf: (pack, key) => {
+      if (pack !== 'files') return null;
+      const i = names.findIndex((n) => n === key || n.replace(/\.wav$/, '') === key);
+      return i < 0 ? null : i;
+    },
+  };
+  const { engine } = makeEngine({ samples: store });
+  engine.createTrack('t1');
+  assert.equal(engine.playSample('t1', 'files:loop.wav', {}, 0, 1).index, 1);
+  assert.equal(engine.playSample('t1', 'files:loop', {}, 0, 1).index, 1);
+  assert.deepEqual(asked, [['files', 1], ['files', 1]]);
+  // A name not in the pack is silent - reported, never another file played in its place.
+  asked.length = 0;
+  assert.deepEqual(engine.playSample('t1', 'files:gone.wav', {}, 0, 1), { skipped: 'source not ready' });
+  assert.deepEqual(asked, [['files', 0]], 'asked only to start the pack loading');
 });
 
 test('a sample plays, and a missing one is reported rather than thrown', () => {
@@ -1237,4 +1264,25 @@ test('the two oscillators load into one bank of tables, so their files take diff
     assert.equal(slot.extras[id][one], 'files:kick');
     assert.equal(slot.extras[id][two], 'files:snare');
   }
+});
+
+test('a deck on a clock of its own tells its tracks\' devices its tempo, and keeps it for devices built later', () => {
+  const { engine } = makeEngine();
+  for (const id of ['room', 'deckB']) {
+    engine.createTrack(id);
+    engine.loadEffect(id, 'Delay', 1);
+  }
+  const tempos = (id, slot = 1) => engine.tracks.get(id).slots.get(slot).built.node.messages.filter((m) => m.kind === 'tempo').map((m) => m.bpm);
+  engine.setTempo(128, 0);
+  engine.setTempo(140, 0.5, { only: ['deckB'] });
+  engine.setTempo(130, 0, { except: ['deckB'] });
+  assert.deepEqual(tempos('room').slice(-2), [128, 130]);
+  assert.deepEqual(tempos('deckB').slice(-2), [128, 140], 'the room\'s change passed it by');
+  assert.equal(engine.bpm, 130, 'the room\'s own tempo is the room\'s');
+  engine.loadEffect('deckB', 'Delay', 2);
+  assert.deepEqual(tempos('deckB', 2), [140], 'a device built on the deck starts at its tempo');
+  // The deck rejoins the room: one tempo for all again, and nothing kept.
+  engine.setTempo(132, 0);
+  assert.equal(engine.trackTempo.size, 0);
+  assert.equal(tempos('deckB').at(-1), 132);
 });

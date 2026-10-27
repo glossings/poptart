@@ -38,7 +38,7 @@ const LAYOUT = [
   {
     from: 'packages/desktop',
     to: 'packages/desktop',
-    only: ['main.js', 'server-process.js', 'diagnostics.js', 'portable.js', 'loading.html', 'package.json'],
+    only: ['main.js', 'preload.js', 'server-process.js', 'diagnostics.js', 'portable.js', 'loading.html', 'package.json'],
   },
   { from: 'packages/web-app', to: 'packages/web-app', workspace: true },
   { from: 'packages/osc-engine', to: 'node_modules/@poptart/osc-engine', workspace: true, byName: true },

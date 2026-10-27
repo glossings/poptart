@@ -28,6 +28,8 @@ import { MidiRoutes } from './midi-routes.mjs';
 import { detectOnsets, monoOf, planSample, sliceEntryFor } from './sample-plan.mjs';
 import { EnvConnection, FeedConnection, LfoConnection } from './modulators.mjs';
 import { GRAIN_CHANNEL_FIELDS, SUPPORTED_CHANNELS, Track, rampParam } from './track.mjs';
+import { DeskAudio } from './desk-audio.mjs';
+import { SONG_LATENCY_SEC, SongPlayer } from './song-player.mjs';
 
 const keyOf = (slot, name) => `${slot}:${name}`;
 
@@ -225,11 +227,15 @@ export class WebAudioEngine {
       resolve: (name) => this.resolveTrack?.(name) ?? name,
     });
     this.bpm = DEFAULT_BPM;
+    this.trackTempo = new Map();    // trackId -> { bpm, anchorSec } for a deck on a clock of its own
     // Where a beat falls on the context's clock: the time cycle zero was at. The devices on the
     // grid count from it.
     this.anchorSec = 0;
     // The meters and plots, built only while the mixer is open.
     this.analysis = new MixAnalysis(ctx, this.master);
+    // The DJ desk's half of the graph: the headphone cue and the deck meters (see desk-audio.mjs).
+    this.desk = new DeskAudio(ctx, this.master);
+    this.songs = new Map();         // trackId -> SongPlayer, for a track a DJ deck plays a song on
   }
 
   // -- what the mixer reads -----------------------------------------------------------------
@@ -306,7 +312,7 @@ export class WebAudioEngine {
   createTrack(trackId, initial = null) {
     let track = this.tracks.get(trackId);
     if (!track) {
-      track = new Track(this.ctx, trackId, this.master, this.registry);
+      track = new Track(this.ctx, trackId, this.master, this.registry, this.desk);
       this.tracks.set(trackId, track);
       this.modulators.set(trackId, new Map());
       this.envelopes.set(trackId, new Map());
@@ -354,6 +360,7 @@ export class WebAudioEngine {
       this._untapIfIdle(trackId);
     }
     for (const voice of this.voices.get(trackId) ?? []) voice.release(now, 0.005);
+    this.songFree(trackId);
     track.dispose();
     for (const node of track._outNodes ?? []) { try { node.disconnect(); } catch { /* gone */ } }
     this.tracks.delete(trackId);
@@ -482,6 +489,9 @@ export class WebAudioEngine {
     }
     const placed = track.setSlot(slot, descriptor, built);
     this._listen(trackId, slot, placed);
+    // A device built on a track whose deck runs at its own tempo starts at that tempo.
+    const own = this.trackTempo.get(trackId);
+    if (own) { try { built.node?.port?.postMessage?.({ kind: 'tempo', ...own }); } catch { /* no port */ } }
     const now = this.getTime();
     for (const [id, value] of Object.entries(defaultValues(descriptor))) {
       track.setParamValue(slot, id, value, now, now);
@@ -562,13 +572,26 @@ export class WebAudioEngine {
    * steps. Every processor with a port is told, and a device built later is told on its way
    * in, so nothing has to be re-sent when the buffer is re-evaluated.
    */
-  setTempo(bpm, anchorSec = null) {
+  setTempo(bpm, anchorSec = null, scope = null) {
     if (!(bpm > 0) || !Number.isFinite(bpm)) return;
-    this.bpm = bpm;
-    if (Number.isFinite(anchorSec)) this.anchorSec = anchorSec;
-    for (const track of this.tracks.values()) {
+    // `scope` narrows the message to some tracks: { only: [ids] } is a DJ deck whose clock has left
+    // the room's (sync off, a jog), told its own tempo - and kept, so a device built on one of its
+    // tracks later starts at it - and { except: [ids] } is the room's tempo for everybody else.
+    // Without one, it is the room's for every track, as it always was.
+    const only = scope?.only ? new Set(scope.only) : null;
+    const except = scope?.except ? new Set(scope.except) : null;
+    const anchor = Number.isFinite(anchorSec) ? anchorSec : this.anchorSec;
+    if (only) {
+      for (const id of only) this.trackTempo.set(id, { bpm, anchorSec: anchor });
+    } else {
+      this.bpm = bpm;
+      this.anchorSec = anchor;
+      for (const id of [...this.trackTempo.keys()]) if (!except?.has(id)) this.trackTempo.delete(id);
+    }
+    for (const [id, track] of this.tracks) {
+      if (only ? !only.has(id) : except?.has(id)) continue;
       for (const slot of track.slots.values()) {
-        try { slot.built.node?.port?.postMessage?.({ kind: 'tempo', bpm, anchorSec: this.anchorSec }); } catch { /* no port */ }
+        try { slot.built.node?.port?.postMessage?.({ kind: 'tempo', bpm, anchorSec: anchor }); } catch { /* no port */ }
       }
     }
   }
@@ -788,6 +811,7 @@ export class WebAudioEngine {
     } catch (err) {
       this._warnOnce(`channels:${want}`, `[web-engine] the output would not take ${want} channels - ${err?.message ?? err}`);
     }
+    this.desk.setOutputChannels(want);
     for (const track of this.tracks.values()) this._routeOut(track);
     return want;
   }
@@ -798,7 +822,11 @@ export class WebAudioEngine {
    * merger onto its two channels.
    */
   _routeOut(track) {
-    const pairs = Math.max(1, Math.floor(this.outputChannels / 2));
+    // A headphone cue on a pair of this output takes that pair and everything above it out of
+    // `.o()`'s reach, so a pattern cannot play into somebody's headphones.
+    const cue = this.desk?.cuePair;
+    const all = Math.floor(this.outputChannels / 2);
+    const pairs = Math.max(1, cue != null ? Math.min(cue, all) : all);
     const pair = ((((Math.round(track.outValue ?? 1) - 1) % pairs) + pairs) % pairs);
     if (track._outPair === pair) return;
     try { track.dryGain.disconnect(); } catch { /* not connected */ }
@@ -1088,6 +1116,7 @@ export class WebAudioEngine {
     for (const p of sharing) extrasOf(p)[optionIndex] = name;
     return optionIndex;
   }
+
 
   /**
    * Loads a sample into a device, on a parameter that takes one, and points the parameter at it.
@@ -1801,7 +1830,7 @@ export class WebAudioEngine {
         // put the whole track into the bus for the length of the ramp.
         node = this.ctx.createGain();
         node.gain.value = send.amount ?? 1;
-        track.monGate.connect(node); // a monitored track feeds no bus (see Track's monGate)
+        track.sendFader.connect(node); // post-fader, and a monitored track feeds no bus (see Track's DJ stage)
         node.connect(this._bus(send.name));
         track.sends.set(send.name, node);
         continue;
@@ -2301,9 +2330,17 @@ export class WebAudioEngine {
     }
     // A recording, by name: sr("bass") arrives as rec:bass.
     const isRec = typeof packId === 'string' && packId.startsWith('rec:');
+    // One file of a pack by its name: s("files:loop.wav") plays the file of that name, matched as
+    // a device's sample control matches it (see _sampleIndex).
+    const byName = !isRec && typeof packId === 'string' && !packId.startsWith('file:') ? parseSampleRef(packId) : null;
+    const source = byName ? byName.pack : packId;
+    const index = byName ? this._sampleIndex(byName.pack, byName.key) : cfg.index ?? 0;
+    // A name the store can't place yet may be in a pack that has not loaded: asking for its first
+    // file starts that load, so the name plays once it is in.
+    if (byName && index == null) this.samples?.get?.(source, 0);
     const got = isRec
       ? this.samples?.named?.('rec', packId.slice(4)) ?? null
-      : this.samples?.get?.(packId, cfg.index ?? 0) ?? null;
+      : index == null ? null : this.samples?.get?.(source, index) ?? null;
     // The store may hand back a bare AudioBuffer, or the buffer with the note it was recorded at.
     const buffer = got?.buffer ?? got;
     if (!buffer) return { skipped: 'source not ready' };
@@ -2311,7 +2348,7 @@ export class WebAudioEngine {
 
     // The slice positions `.slice(n)` indexes: the hand-drawn set's marks for this file where it
     // has some, and the file's own transients otherwise - worked out on first ask, off the tick.
-    const key = isRec ? `rec:${packId.slice(4)}.wav` : this.samples?.fileKey?.(packId, cfg.index ?? 0) ?? null;
+    const key = isRec ? `rec:${packId.slice(4)}.wav` : this.samples?.fileKey?.(source, index) ?? null;
     const authored = cfg.slices ? sliceEntryFor(cfg.slices, key) ?? sliceEntryFor(cfg.slices, key?.split('/').pop()) : null;
     const slices = cfg.slice != null ? authored?.marks ?? this._transientsOf(buffer) : null;
     const plan = planSample({ duration: buffer.duration, rootNote }, { ...cfg }, onsetSec, offsetSec, { slices, authoredFit: authored?.fit ?? null, anchor: SAMPLER_ANCHOR });
@@ -2323,7 +2360,7 @@ export class WebAudioEngine {
       this._warnOnce(`reverse:${packId}`, `[web-engine] "${packId}" cannot be played backwards here, so a negative speed plays it forwards.`);
     }
     const info = {
-      index: cfg.index ?? 0, begin: plan.begin, end: plan.end, loop: plan.loop, speed: plan.speed, stretch: plan.stretch,
+      index, begin: plan.begin, end: plan.end, loop: plan.loop, speed: plan.speed, stretch: plan.stretch,
       durSec: plan.durSec, cut: plan.cut, amp: plan.amp, fileSec: plan.fileSec,
       attack: plan.attack, decay: plan.decay, release: plan.release,
       loopWrap: plan.windowed ? 'window' : 'file', loopDir: plan.pingpong ? 'pingpong' : 'forward',
@@ -2505,6 +2542,103 @@ export class WebAudioEngine {
   /** The master level, which the host uses for its own fade in and out. */
   setMasterGain(value, atTime) {
     rampParam(this.master.gain, value, atTime, this.getTime());
+  }
+
+  // -- the DJ desk ------------------------------------------------------------------------------
+
+  /** The headphone section's two knobs (see desk-audio.mjs). */
+  setHeadphones(level, mix) {
+    this.desk.setHeadphones(Number(level), Number(mix));
+  }
+
+  /**
+   * Where the headphone cue plays: `{ pair }` - a stereo pair of this output, from 0 - or
+   * `{ node }`, a node the host carries to another device, or null for nowhere. A pair past the
+   * output's channels widens the output to reach it, if the device has the channels.
+   */
+  setCueRoute(route) {
+    if (route && Number.isInteger(route.pair)) {
+      const need = (route.pair + 1) * 2;
+      if (this.outputChannels < need) {
+        if (this.setOutputChannels(need) < need) throw new Error(`this output has no channels ${need - 1}/${need}`);
+      }
+    }
+    this.desk.setRoute(route);
+    for (const track of this.tracks.values()) this._routeOut(track);
+  }
+
+  /** The cue's route as plain data: the pair it is on, or whether it goes to another device. */
+  cueRoute() {
+    const r = this.desk.route;
+    return r ? (r.pair != null ? { pair: r.pair } : { device: true }) : null;
+  }
+
+  /** The headphone signal itself, for a host that carries it to another device. */
+  get cueOutput() {
+    return this.desk.out;
+  }
+
+  /**
+   * A track's send into the DJ FX unit: `bus` names the bus the deck's return reads ('' parks
+   * it), `level` how far the unit is switched in (see Track#setFxSend - an insert, not an aux).
+   */
+  setFxSend(trackId, bus, level) {
+    const track = this.tracks.get(trackId);
+    if (!track) return;
+    track.setFxSend(bus ? this._bus(bus) : null, level, this.getTime());
+  }
+
+  /** The deck meters exist only while somebody is looking at them. */
+  deckMeters(on) {
+    this.desk.setMeters(!!on);
+  }
+
+  /** One reading of the deck meters and the master - null while they are off. */
+  deckLevels() {
+    return this.desk.read();
+  }
+
+  // -- songs on a DJ deck ----------------------------------------------------------------------
+
+  /** How long after the player reads a moment of the song it is heard (see song-player.mjs). */
+  get songLatency() {
+    return SONG_LATENCY_SEC;
+  }
+
+  _song(trackId) {
+    let player = this.songs.get(trackId);
+    if (!player) {
+      const track = this.createTrack(trackId);
+      player = new SongPlayer(this, track);
+      this.songs.set(trackId, player);
+    }
+    return player;
+  }
+
+  /**
+   * Puts a decoded song on a track: `planes` are its channels as 16-bit samples at this
+   * context's rate, handed over (transferred) rather than copied. Replaces any song it held.
+   */
+  songLoad(trackId, { planes, frames }) {
+    this._song(trackId).load({ planes, frames });
+    return { sampleRate: this.ctx.sampleRate, frames, channels: planes.length };
+  }
+
+  // The player's own times: each is the moment the PLAYER does it, which is heard songLatency later.
+  songStart(trackId, pos, rate, at, keylock = false) { this._song(trackId).start(pos, rate, at, keylock); }
+  songRate(trackId, rate, at) { this.songs.get(trackId)?.setRate(rate, at); }
+  songSeek(trackId, pos, at) { this.songs.get(trackId)?.seek(pos, at); }
+  songPause(trackId, at) { this.songs.get(trackId)?.pause(at); }
+  songStop(trackId, at, release) { this.songs.get(trackId)?.stop(at, release); }
+  songKeylock(trackId, on, at) { this.songs.get(trackId)?.setKeylock(!!on, at); }
+  songQuery(trackId) { return this.songs.get(trackId)?.query() ?? Promise.resolve(null); }
+
+  /** Lets a track's song go: the player stops and the song's memory is released. */
+  songFree(trackId) {
+    const player = this.songs.get(trackId);
+    if (!player) return;
+    player.dispose();
+    this.songs.delete(trackId);
   }
 
   async stop() {

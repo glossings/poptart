@@ -320,6 +320,7 @@ class MappedEngine {
   songStop(...a) { return this.engine.songStop(...a); }
   songFree(...a) { return this.engine.songFree(...a); }
   defineSamplePacks(...a) { return this.engine.defineSamplePacks(...a); }
+  forgetSamplePack(...a) { return this.engine.forgetSamplePack(...a); }
   record(...a) { return this.engine.record(...a); }
   enableMidi(...a) { return this.engine.enableMidi(...a); }
   enableOsc(...a) { return this.engine.enableOsc(...a); }

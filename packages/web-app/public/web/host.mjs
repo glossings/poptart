@@ -68,16 +68,12 @@ const EMPTY_ANSWERS = {
   // Each of these is the desktop's answer with nothing in it, field for field: the settings
   // tab reads every one of these names, and a missing one is a row that throws while drawing.
   'GET /api/link': { enabled: false, peers: 0, playing: false, bpm: null, available: false },
-  'GET /api/songfiles': { entries: [] },
   // The settings tab draws these two rows as the page loads, so they answer rather than refuse.
   // The library is every pack the page knows, under the pack panel's root (see sample-map.mjs),
   // and neither plugin format is preferred because neither is here. Saving either is refused
   // below, where the reason belongs.
   'GET /api/samplesDir': { dir: '/packs', envOverride: false },
   'GET /api/preferVst3': { enabled: false },
-  // What the DJ decks would open their loop regions at. The row is hidden here (there is no
-  // desk), but the settings tab asks for it as the panel opens, so it answers.
-  'GET /api/djRegions': { mode: 'off' },
 
   'POST /api/captureEditors': { ok: true },
 };
@@ -91,27 +87,11 @@ const PACK_ROOT_PREFIX = /^\/packs\//;
 
 /** Routes that are refused by name, with the reason the editor's console will show. */
 const REFUSALS = {
-  'POST /api/song/load': ['the DJ decks', 'they stay on the desktop'],
   'POST /api/locateSample': ['finding a dropped file on disk', 'a page cannot see your disk'],
   'GET /api/pasteboardFiles': ['reading the clipboard for files', 'a page cannot see your disk'],
   'POST /api/samplesDir': ['choosing a sample folder', 'a page cannot see your disk'],
   'POST /api/preferVst3': ['choosing between plugin formats', 'there are no plugins to host'],
-  'POST /api/djRegions': ['the DJ decks', 'they stay on the desktop'],
   'POST /api/patterns/wip/retention': ['expiring old sessions', 'nothing here is deleted on its own'],
-  // The DJ desk is two decks, a crossfader and a song player, none of which is here. Every one
-  // of its routes says so rather than half-answering, which would be a desk that never updates.
-  'GET /api/mix': ['the DJ desk', 'it stays on the desktop'],
-  'POST /api/mix/set': ['the DJ desk', 'it stays on the desktop'],
-  'POST /api/mix/gate': ['the DJ desk', 'it stays on the desktop'],
-  'POST /api/mix/gateall': ['the DJ desk', 'it stays on the desktop'],
-  'POST /api/mix/solo': ['the DJ desk', 'it stays on the desktop'],
-  'POST /api/mix/swap': ['the DJ desk', 'it stays on the desktop'],
-  'POST /api/mix/headphones': ['the headphone cue', 'it stays on the desktop'],
-  'POST /api/mix/clear': ['the DJ desk', 'it stays on the desktop'],
-  'POST /api/mix/eject': ['the DJ desk', 'it stays on the desktop'],
-  'POST /api/mix/complete': ['the DJ desk', 'it stays on the desktop'],
-  'POST /api/mix/midilearn': ['the DJ desk', 'it stays on the desktop'],
-  'POST /api/mix/midiswitch': ['the DJ desk', 'it stays on the desktop'],
 };
 
 export function createHost({
@@ -141,6 +121,13 @@ export function createHost({
   localFolder = null,
   // The sample map over every pack (see sample-map.mjs). Absent, the map routes say so.
   sampleMap = null,
+  // The DJ desk (desk.mjs) and the folder its songs come from (music-folder.mjs). Absent, the
+  // desk's routes say so.
+  desk = null,
+  musicFolder = null,
+  // The music library's collection, its imports and its measuring pass (library.mjs). Absent,
+  // the library is the playlists alone, as storage keeps them.
+  musicLibrary = null,
   version = '0.1.1-web',
   // Which device the page plays to (see audio-output.mjs). Absent in a host built without a
   // page around it, which then answers as a machine with only the system default.
@@ -466,6 +453,12 @@ export function createHost({
     if (!state) return;
     const held = await engine.getPluginState?.(tid, slot);
     if (!held) return;
+    // A device window on the DJ FX unit's return belongs to the chain, not to the buffer: what it
+    // left is pinned into the chain's own code (see the desk's fxPinState).
+    if (desk?.isFxKey?.(label)) {
+      await desk.fxPinState(slot, held);
+      return;
+    }
     captured.set(key, {
       trackId: label,
       slot,
@@ -525,6 +518,16 @@ export function createHost({
     return recorder;
   };
 
+  /** Runs `fn` with new definitions filed under the deck the body names (deck A when absent). */
+  function liveOnDeck(body, fn) {
+    patternCore.setDefOwner?.(body?.deck === 'b' ? 'b' : 'a');
+    try {
+      return fn();
+    } finally {
+      patternCore.setDefOwner?.('a');
+    }
+  }
+
   let replaysExpired = false; // see the replay routes
   const routes = {
     // ---- what the editor asks before anything else -------------------------------------------
@@ -577,6 +580,9 @@ export function createHost({
       const result = await evaluator.evaluate(body.code ?? '', {
         start: body.start,
         arrangeFrom: body.arrangeFrom,
+        deck: body.deck === 'b' ? 'b' : 'a',
+        fresh: body.fresh === true,
+        name: body.name ?? null,
       });
       // A shape the evaluation redefined reaches the devices already on it, playing or not.
       engine.refreshNamedShapes?.();
@@ -586,7 +592,7 @@ export function createHost({
       return result;
     },
 
-    'POST /api/stop': async () => {
+    'POST /api/stop': async (body) => {
       // Keys still down on the computer keyboard are let go, so nothing is left sounding.
       const at = engine.getTime();
       for (const [label, held] of kbHeld) {
@@ -597,28 +603,34 @@ export function createHost({
         }
       }
       kbHeld.clear();
-      return evaluator.stop();
+      // `deck` stops one deck of the DJ desk and leaves the other playing; `hush` takes its
+      // voices too, which is how an audition ends as the finger comes up.
+      return evaluator.stop(body?.deck === 'a' || body?.deck === 'b' ? body.deck : null, { hush: !!body?.hush });
     },
 
+    // `deck` narrows the window to one deck's tracks, counted on that deck's own clock.
     'GET /api/highlight': async (_body, query) => evaluator.highlightWindow(
       Number(query.get('from') ?? 0),
       Number(query.get('count') ?? 32),
+      query.get('deck'),
     ),
 
-    'GET /api/arrange': async () => ({ arrange: evaluator.arrangeClock?.snapshot() ?? null }),
+    'GET /api/arrange': async (_body, query) => ({ arrange: evaluator.arrangeClockOf?.(query?.get('deck') === 'b' ? 'b' : 'a')?.snapshot() ?? evaluator.arrangeClock?.snapshot() ?? null }),
 
-    'POST /api/arrangeEnd': async () => {
-      // The deck ran off the end of its arrangement. Stopping is the whole behavior; there is no
-      // song deck here to pause alongside it. `ended` is what the editor waits for before it
+    'POST /api/arrangeEnd': async (body) => {
+      // A deck ran off the end of its arrangement. Stopping it is the whole behavior - one deck
+      // of the DJ desk, the other playing on. `ended` is what the editor waits for before it
       // lands its own stop - without it, it asks again every quarter second.
-      const result = evaluator.stop();
-      return { ended: true, ...result, arrange: evaluator.arrangeClock?.snapshot() ?? null };
+      const deck = body?.deck === 'b' ? 'b' : 'a';
+      const result = evaluator.stop(desk ? deck : null);
+      return { ended: true, ...result, arrange: evaluator.arrangeClockOf?.(deck)?.snapshot() ?? null };
     },
-    'POST /api/arrangeUnlock': async () => {
+    'POST /api/arrangeUnlock': async (body) => {
       // app+L: let a looping region go. The clock answers with what it released, if anything.
-      const clock = evaluator.arrangeClock;
+      const deck = body?.deck === 'b' ? 'b' : 'a';
+      const clock = evaluator.arrangeClockOf?.(deck) ?? evaluator.arrangeClock;
       if (!clock) return { released: null, arrange: null };
-      const released = clock.release(transport.cycleAt(engine.getTime()));
+      const released = clock.release((evaluator.clockOf?.(deck) ?? transport).cycleAt(engine.getTime()));
       return { released, arrange: clock.snapshot() };
     },
 
@@ -695,12 +707,9 @@ export function createHost({
       }
       return midi.clockState({ ask });
     },
-    // The DJ desk is not in this build, so its talk-back port has nothing to write to - but
-    // the settings row is in the same page, and a row that logs an error as the tab opens is
-    // a broken row. Answered as an empty picker, exactly as the clock's is with no MIDI.
+    // With no desk in this host there is no talk-back port to choose: an empty picker, as the
+    // clock's is with no MIDI. (The page's desk answers this itself - see desk.mjs.)
     'GET /api/mix/feedback': async () => ({ destinations: [], selected: null, active: null, meters: false }),
-    // No headphone cue in the browser: the knobs are not shown.
-    'GET /api/mix/headphones': async () => ({ level: 1, mix: 0, cuePair: false, unavailable: true }),
     'POST /api/midiClock': async (body) => {
       if (!midi) throw new Unsupported('MIDI clock out', 'this browser has no MIDI');
       return midi.setClock(body?.device ?? null);
@@ -724,22 +733,27 @@ export function createHost({
         pinned: prebake ? await prebake.pinnedList() : [],
       };
     },
+    // A panel's live re-file of a definition lands in the deck whose buffer it is editing - each
+    // deck has its own names. Body: { deck? }, deck A when absent.
     'POST /api/liveRoll': async (body) => {
       const id = body?.id;
       if (typeof id !== 'number' && typeof id !== 'string') throw new Error('liveRoll needs the roll id');
-      patternCore.liveRoll(id, String(body.notes ?? ''), body.opts ?? {});
+      liveOnDeck(body, () => patternCore.liveRoll(id, String(body.notes ?? ''), body.opts ?? {}));
       return { ok: true };
     },
-    'POST /api/liveAuto': async (body) => ({ ok: patternCore.liveAuto(body.id, body.points) !== undefined }),
+    'POST /api/liveAuto': async (body) => ({ ok: liveOnDeck(body, () => patternCore.liveAuto(body.id, body.points)) !== undefined }),
     // A drawn shape being dragged: see the desktop server's route of the same name.
     'POST /api/liveShape': async (body) => {
       if (!Array.isArray(body?.from) || !Array.isArray(body?.to)) throw new Error('liveShape needs the shape before and after');
       let took = 0;
-      for (const sched of evaluator.schedulers?.values() ?? []) took += sched.liveShape?.(body.from, body.to) ?? 0;
+      const onB = body.deck === 'b';
+      for (const [label, sched] of evaluator.schedulers ?? []) {
+        if (String(label).startsWith('b:') === onB) took += sched.liveShape?.(body.from, body.to) ?? 0;
+      }
       return { ok: true, took };
     },
-    'POST /api/liveGroove': async (body) => ({ ok: patternCore.liveGroove(body.id, String(body.table ?? '')) !== undefined }),
-    'POST /api/liveSlices': async (body) => ({ ok: patternCore.liveSlices(body.id, body.set) !== undefined }),
+    'POST /api/liveGroove': async (body) => ({ ok: liveOnDeck(body, () => patternCore.liveGroove(body.id, String(body.table ?? ''))) !== undefined }),
+    'POST /api/liveSlices': async (body) => ({ ok: liveOnDeck(body, () => patternCore.liveSlices(body.id, body.set)) !== undefined }),
 
     // ---- devices --------------------------------------------------------------------------------
 
@@ -1524,11 +1538,10 @@ export function createHost({
   const channelInfo = () => (typeof engine.outputChannelChoices === 'function'
     ? { outputChannels: engine.outputChannels, outputChannelChoices: engine.outputChannelChoices(), audibleChannels: Math.max(...engine.outputChannelChoices()) }
     : {});
-  // The headphone cue is a desktop thing twice over: it wants a second channel pair on a real
-  // device, and it wants an engine restart to compile the send. A page has one stereo destination
-  // and no restart, so these answer empty rather than being left out - the settings tab reads
-  // every one of them as the panel opens, and a missing field there is a row that logs an error
-  // instead of drawing itself.
+  // The headphone cue's fields, as a host with no output to route one on answers them (the page's
+  // own come from audio-output.mjs). Answered rather than left out - the settings tab reads every
+  // one of them as the panel opens, and a missing field there is a row that logs an error instead
+  // of drawing itself.
   const NO_CUE = {
     cueAvailable: false,
     cueSelected: null,
@@ -1536,6 +1549,8 @@ export function createHost({
     cuePairs: { device: null, pairs: [] },
     cuePreviewDevice: null,
     cueActive: null,
+    cueDevices: false,
+    cueWarning: 'this page has no audio output to send a headphone cue to',
   };
   routes['GET /api/audioDevices'] = async () => ({ ...NO_CUE, ...(outputs ? await outputs.describe() : structuredClone(NO_OUTPUTS)), ...channelInfo() });
   // More than two outputs: .o(n) reaches the other pairs. Instant here, as the device switch is.
@@ -1550,6 +1565,65 @@ export function createHost({
     if (body?.reveal) return outputs.reveal();
     const answer = await outputs.choose(body?.device ?? null);
     return { ...answer, warning: null };
+  };
+
+  // The headphone cue: on a pair of this output, or on a second device (see audio-output.mjs).
+  // Instant here - nothing restarts - and the desk's cue buttons act on it at once.
+  routes['POST /api/audioCueDevice'] = async (body) => {
+    if (!outputs?.chooseCue) throw new Unsupported('the headphone cue', 'this host was built without an audio output');
+    const answer = await outputs.chooseCue({ device: body?.device ?? null, pair: Number(body?.pair) || 0 });
+    desk?.notify?.();
+    return answer;
+  };
+
+  // ---- the DJ desk and the songs on its decks ---------------------------------------------------
+  if (desk) Object.assign(routes, desk.routes);
+  if (musicLibrary) Object.assign(routes, musicLibrary.routes);
+
+  // The music folder (music-folder.mjs): what the settings row says, and what it can do. A folder
+  // arrives as the handle the page's own picker returned, or as an ordinary chooser's files.
+  const needMusic = () => {
+    if (!musicFolder) throw new Unsupported('a music folder', 'this host has no way to read one');
+    return musicFolder;
+  };
+  routes['GET /api/musicFolder'] = async () => musicFolder?.status() ?? { state: 'none', name: '', songs: 0, truncated: false };
+  routes['POST /api/musicFolder'] = async (body) => {
+    await needMusic().choose(body?.source);
+    return musicFolder.status();
+  };
+  routes['POST /api/musicFolder/reconnect'] = async () => {
+    if (!(await needMusic().reconnect())) throw new Error('the browser did not allow reading the folder');
+    return musicFolder.status();
+  };
+  routes['POST /api/musicFolder/forget'] = async () => {
+    await needMusic().forget();
+    return musicFolder.status();
+  };
+  // The organize window's disk source, over the music folder: one directory at a time, the
+  // desktop's browseSongDir shape, and every song under one for its tree search.
+  routes['GET /api/songfiles'] = async (_body, query) => {
+    if (!musicFolder || musicFolder.status().state === 'none') return { dir: '/music', parent: null, entries: [], empty: true };
+    return musicFolder.browse(query.get('dir') || null);
+  };
+  routes['GET /api/songfiles/find'] = async (_body, query) => {
+    const walked = needMusic().walk(query.get('dir') || null);
+    const terms = String(query.get('q') ?? '').toLowerCase().split(/\s+/).filter(Boolean);
+    const hits = terms.length ? walked.files.filter((f) => terms.every((t) => f.toLowerCase().includes(t))) : walked.files;
+    const limit = Math.max(1, Math.min(20000, Number(query.get('limit')) || 500));
+    return { path: walked.path, files: hits.slice(0, limit), matched: hits.length, total: walked.files.length, truncated: walked.truncated };
+  };
+  routes['POST /api/songfiles/stat'] = async (body) => {
+    const exists = {};
+    for (const p of (Array.isArray(body?.paths) ? body.paths : []).slice(0, 2000)) {
+      if (typeof p === 'string') exists[p] = !!musicFolder?.has(p);
+    }
+    return { exists };
+  };
+  // The organize window's preview player fetches a song's bytes from this path on the desktop;
+  // here the page reads the file itself and answers with a URL for it.
+  routes['GET /api/songAudio'] = async (_body, query) => {
+    const file = await needMusic().file(String(query.get('file') ?? ''));
+    return { url: URL.createObjectURL(file) };
   };
 
   for (const [key, answer] of Object.entries(EMPTY_ANSWERS)) {
@@ -1574,7 +1648,20 @@ export function createHost({
     return handler(body, new URLSearchParams(search));
   }
 
-  return { call, routes, Unsupported };
+  /**
+   * The push channels the desktop serves as event streams - for now the desk's, `/api/mix/events`.
+   * `listener(kind, data)` hears what an EventSource would deliver: 'message' for an unnamed
+   * frame and the event's name otherwise. Returns the close.
+   */
+  function events(path, listener) {
+    if (String(path).split('?')[0] === '/api/mix/events') {
+      if (!desk) throw new Unsupported('the DJ desk', 'this host has none');
+      return desk.subscribe(listener);
+    }
+    throw new Error(`no event stream ${path} in the browser build`);
+  }
+
+  return { call, routes, events, Unsupported };
 }
 
 export { Unsupported };

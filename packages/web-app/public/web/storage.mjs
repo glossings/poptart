@@ -16,13 +16,14 @@
 // already loads and the desktop server already requires, and passing the same module to both is
 // what stops a pattern being labeled one way here and another way there.
 
-import { normalizeLibrary } from './library-doc.mjs';
+import { hydrateLibrary, normalizeLibrary } from './library-doc.mjs';
 
 const PATTERNS = 'patterns/';
 const WIP = 'patterns/wip/';
 const SNIPPETS = 'snippets/';
 const SNAPSHOTS = 'snapshots/';
 const LIBRARY_KEY = 'patterns/library.json';
+const SETS = 'patterns/sets/';
 const PREBAKE_KEY = 'prebake/prebake.js';
 const PINNED_KEY = 'prebake/pinned.js';
 const REPLAYS = 'patterns/replays/';
@@ -97,13 +98,31 @@ function fromBase64(text) {
   return out.buffer;
 }
 
-export function createStorage(store, { meta = globalThis, now = () => Date.now(), blobs = null, maxSnapshots = MAX_SNAPSHOTS, snippetFormat = null, replayLog = null } = {}) {
+export function createStorage(store, { meta = globalThis, now = () => Date.now(), blobs = null, maxSnapshots = MAX_SNAPSHOTS, snippetFormat = null, replayLog = null, setLog = null } = {}) {
   const { parseMeta, displayLabel, patternNameProblem, matchesQuery } = meta;
   if (typeof patternNameProblem !== 'function') {
     throw new Error('[storage] the pattern metadata helpers are missing - pattern-meta.js has to load first');
   }
 
   const read = async (key) => (await store.get(key))?.text ?? null;
+  // Every change to the library document goes through this one queue, read and write together:
+  // a deck's edit, the measuring pass and the editor's own playlists all arrive at once, and two
+  // read-change-write passes interleaved would each write over what the other just changed.
+  let libraryTurn = Promise.resolve();
+  const libraryInTurn = (fn) => {
+    const next = libraryTurn.then(fn, fn);
+    libraryTurn = next.catch(() => {});
+    return next;
+  };
+  // The library document as stored, or null when there is none or it does not parse.
+  const readLibraryRaw = async () => {
+    try {
+      const text = await read(LIBRARY_KEY);
+      return text ? JSON.parse(text) : null;
+    } catch {
+      return null; // unreadable - start empty rather than take the tab down
+    }
+  };
   const write = (key, text) => store.put(key, { text: String(text), mtime: now() });
 
   /** The key a saved pattern lives at. Names are one segment, exactly as they are on disk. */
@@ -501,20 +520,45 @@ export function createStorage(store, { meta = globalThis, now = () => Date.now()
     writeWip: async (id, code) => write(wipKey(id), code),
     deleteWip: async (id) => store.delete(wipKey(id)),
 
-    // the files tab's own ordering
-    readLibrary: async () => {
-      const text = await read(LIBRARY_KEY);
-      try {
-        return normalizeLibrary(text ? JSON.parse(text) : null);
-      } catch {
-        return normalizeLibrary(null); // unreadable - start empty rather than take the tab down
-      }
-    },
-    /** Normalizes, writes, and returns what was kept, which the editor takes as its working copy. */
-    writeLibrary: async (doc) => {
-      const clean = normalizeLibrary(doc);
+    // the files tab's own ordering, and the music library's collection (see library-tracks.js):
+    // stored in the desktop's shape, handed out hydrated as the desktop hands it out
+    readLibrary: async () => hydrateLibrary(normalizeLibrary(await readLibraryRaw())),
+    /**
+     * Normalizes, writes, and returns what was kept, hydrated - which the editor takes as its
+     * working copy. A document with no `tracks` keeps the collection already stored: the editor
+     * posts its playlists that way, and a measurement written meanwhile must not be undone by it.
+     */
+    writeLibrary: (doc) => libraryInTurn(async () => {
+      const src = doc && typeof doc === 'object' ? doc : {};
+      const held = src.tracks === undefined ? ((await readLibraryRaw())?.tracks ?? []) : src.tracks;
+      const clean = normalizeLibrary({ ...src, tracks: held });
       await write(LIBRARY_KEY, JSON.stringify(clean, null, 2));
-      return clean;
+      return hydrateLibrary(clean);
+    }),
+    /**
+     * One change to the stored document: `change(doc)` edits the normalized document in place and
+     * answers whatever the caller wants back; the document is written unless it answers `false`.
+     * Returns { library (hydrated), result }.
+     */
+    updateLibrary: (change) => libraryInTurn(async () => {
+      const doc = normalizeLibrary(await readLibraryRaw());
+      const result = await change(doc);
+      if (result !== false) await write(LIBRARY_KEY, JSON.stringify(normalizeLibrary(doc), null, 2));
+      return { library: hydrateLibrary(normalizeLibrary(doc)), result };
+    }),
+
+    /**
+     * A DJ set's tracklist, written whole at patterns/sets/<month>/<file>.md - the desktop's path
+     * (set-log.js) - with the file of the set's previous write let go when the name has changed
+     * (a finished set's name carries its length). Returns the key written, kept on the set.
+     */
+    writeSetLog: async (set, ended = null) => {
+      if (!setLog) throw new Error('[storage] the tracklist format is missing - set-log-format.js has to load first');
+      const key = `${SETS}${setLog.monthOf(set.started)}/${setLog.setFileName(set.started, ended)}`;
+      await write(key, setLog.formatSetLog(set, ended));
+      if (set.file && set.file !== key) await store.delete(set.file).catch(() => {});
+      set.file = key;
+      return key;
     },
 
     // snippets

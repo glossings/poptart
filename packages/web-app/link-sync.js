@@ -98,7 +98,7 @@ function sameTempo(a, b) {
   return Number.isFinite(a) && Number.isFinite(b) && Math.abs(a - b) < 0.001;
 }
 
-module.exports = {
+const exported = {
   QUANTUM_BEATS,
   DEAD_CYCLES,
   SOFT_CYCLES,
@@ -111,3 +111,8 @@ module.exports = {
   declarationMoves,
   sameTempo,
 };
+
+// Shared with the browser build, which loads this file as a module of its own (see build-web.mjs)
+// and finds the same functions on globalThis - the desktop server require()s it as before.
+if (typeof module !== 'undefined' && module.exports) module.exports = exported;
+else globalThis.poptartLinkSync = exported;

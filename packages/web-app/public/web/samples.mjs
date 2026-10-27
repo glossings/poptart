@@ -20,6 +20,7 @@
 // is several times larger, it is tied to the sample rate of the context that decoded it, and
 // decoding again on the next visit costs milliseconds.
 
+import { decodeAudio } from './audio-decode.mjs';
 import { parseOrigin } from './remote-packs.mjs';
 
 /** Where a pack's audio is held once it has been decoded, keyed "<pack>/<index>". */
@@ -163,7 +164,7 @@ export function createSampleStore({
         const bytes = read ? await read(manifest, file.file) : await bytesFor(manifest, file.file, urlFor(manifest.id, file.file));
         // decodeAudioData detaches the buffer it is given, and the same bytes may be decoded
         // again after a context change, so it gets a copy.
-        const audio = await context.decodeAudioData(bytes.slice(0));
+        const audio = await decodeAudio(context, bytes.slice(0));
         decoded.set(keyOf(manifest.id, index), {
           buffer: audio,
           rootNote: Number.isFinite(file.rootNote) ? file.rootNote : null,
@@ -303,7 +304,7 @@ export function createSampleStore({
       try {
         const held = await store.get(`samples/${pack}/${files[index].file}`);
         if (!held?.bytes) continue;
-        const audio = await context.decodeAudioData(held.bytes.slice(0));
+        const audio = await decodeAudio(context, held.bytes.slice(0));
         if (!decoded.has(keyOf(pack, index))) decoded.set(keyOf(pack, index), { buffer: audio, rootNote: null });
       } catch (err) {
         warn(`[samples] ${pack}:${index} (${files[index].file}) could not be decoded - ${err.message}`);
@@ -375,7 +376,7 @@ export function createSampleStore({
     decoded.delete(keyOf(pack, index));
     if (context && ADDED_PACKS[pack].decode) {
       try {
-        const audio = await context.decodeAudioData(raw.slice(0));
+        const audio = await decodeAudio(context, raw.slice(0));
         decoded.set(keyOf(pack, index), { buffer: audio, rootNote: null });
       } catch (err) {
         warn(`[samples] ${file} could not be decoded as audio - ${err.message}`);

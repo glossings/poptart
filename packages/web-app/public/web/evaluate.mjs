@@ -4,13 +4,10 @@
 // closely enough that the comments there explain the ones here. The order is not incidental:
 // several steps only work because of where they sit, and each of those is noted where it stands.
 //
-// WHAT IS NOT HERE, and why. There is one performance deck rather than two, because the second
-// deck belongs to the DJ side and that stays on the desktop - so a scheduler's key is simply the
-// block's label, and every `keyOfBlock` the desktop needs disappears. There is no plugin capture,
-// because there are no plugin windows to capture from; no sample-pack definition over a wire,
-// because the packs are objects in this process; no MIDI or OSC enable, because neither is wired
-// up yet and the engine says so itself. What remains is the pattern language, which is the part
-// both builds share and the part that must not differ.
+// WHAT IS NOT HERE, and why. There is no plugin capture, because there are no plugin windows to
+// capture from; no sample-pack definition over a wire, because the packs are objects in this
+// process. What remains is the pattern language, which is the part both builds share and the
+// part that must not differ - and the two decks of the DJ desk, keyed as the desktop keys them.
 
 import { createBlockEvaluator, GROOVE_BLOCK, SCALE_BLOCK, TEMPO_BLOCK } from './block-eval.mjs';
 
@@ -131,29 +128,59 @@ export function highlightGrid(patternCore, sig, start, end, from, count, clock =
   return grid;
 }
 
+/** The decks a buffer can be evaluated onto: 'a' is the main editor, 'b' the DJ desk's second. */
+const DECKS = ['a', 'b'];
+const deckName = (deck) => (deck === 'b' ? 'b' : 'a');
+/** A scheduler's key: deck A's is the block's label, deck B's "b:<label>" (a label has no ':'). */
+export const deckOfKey = (key) => (String(key).includes(':') ? String(key).slice(0, String(key).indexOf(':')) : 'a');
+
 /**
  * The evaluator, and the state a buffer leaves behind between evaluations.
  *
  * That state is the reason this is a factory rather than a function: a scheduler outlives the
  * evaluation that made it, and so do the engine track ids, the song clock and the definitions
  * the buffer declared. An evaluation that rebuilt them would cut every sound on every keystroke.
+ *
+ * TWO DECKS. A buffer is evaluated onto deck A (the main editor) unless the caller says deck B -
+ * the DJ desk's second editor - and everything that keys or scopes by label goes through
+ * keyOfBlock, so the two decks' identically named blocks stay separate tracks: deck B's `kick`
+ * is "b:kick". Each deck has its own arrangement, its own song facts (the key setscale() left,
+ * the tempo setbpm() asked for, the feel setgroove() set) and its own clock. The global scale and
+ * feel hold deck A's at rest; deck B's evaluation borrows them and puts them back.
+ *
+ * `desk` is the DJ desk (desk.mjs), when there is one: the decks' clocks, whether a setbpm()
+ * may move the room's tempo, what a new track is born wearing. Without one there is one deck on
+ * the room's clock, exactly as before there was a desk.
  */
-export function createEvaluator({ patternCore, engine, transport, prebakeDefs = new Map(), log = null, remotePacks = null }) {
-  const schedulers = new Map();        // label -> Scheduler
-  const trackIds = new Map();          // label -> engine track id
+export function createEvaluator({ patternCore, engine, transport, prebakeDefs = new Map(), log = null, remotePacks = null, desk = null }) {
+  const schedulers = new Map();        // key -> Scheduler
+  const trackIds = new Map();          // key -> engine track id
   // The engine keys its tracks by those ids, and every routing name a pattern carries is the
   // LABEL somebody typed - audio("kick"), a group reading its members, a signal patched onto a
   // parameter. Handing it the lookup is what makes those names resolve; without it they warn
   // about a name that is plainly in the buffer. (The desktop does this in its engine wrapper.)
   engine.setTrackResolver?.((label) => trackIds.get(label) ?? label);
-  const hlTracks = new Map();          // label -> { sig, start, end, clock }
-  // Monitor (`M`) takeovers: which block was being cued (see patternCore.monitorPicker).
-  const monitorPicker = patternCore.monitorPicker();
+  const hlTracks = new Map();          // key -> { sig, start, end, clock }
   const eventLog = [];
   let nextTrackNum = 1;
-  let arrangeClock = null;
-  let arrangeClips = null;
-  let clipsMemo = { src: null, rows: new Map() };
+  // Each deck's song: its arrangement clock and clips, its monitor takeovers, its song facts and
+  // its loop toggle (see setLoops).
+  const newDeck = () => ({
+    arrangeClock: null,
+    arrangeClips: null,
+    clipsMemo: { src: null, rows: new Map() },
+    // Monitor (`M`) takeovers: which block was being cued (see patternCore.monitorPicker).
+    monitorPicker: patternCore.monitorPicker(),
+    scale: null,
+    groove: null,
+    bpm: null,
+    // Whether the arrangement's loop regions are armed. On, everywhere but the DJ desk, which
+    // opens with them off so a song runs start to end like a record (see setLoops).
+    loopsOn: true,
+    loopsPinned: false,
+  });
+  const decks = { a: newDeck(), b: newDeck() };
+  const clockOf = (deck) => desk?.clockOf?.(deck) ?? transport;
 
   const say = (line) => {
     eventLog.push(line);
@@ -165,11 +192,11 @@ export function createEvaluator({ patternCore, engine, transport, prebakeDefs = 
    * passes through as itself, and the engine ignores it the way it ignores anything aimed at a
    * track that does not exist - which is better than allocating a ghost track for a typo.
    */
-  function claimTrack(label) {
-    let id = trackIds.get(label);
+  function claimTrack(key) {
+    let id = trackIds.get(key);
     if (!id) {
       id = `#${nextTrackNum++}`;
-      trackIds.set(label, id);
+      trackIds.set(key, id);
     }
     return id;
   }
@@ -181,38 +208,73 @@ export function createEvaluator({ patternCore, engine, transport, prebakeDefs = 
    * time, which is mostly BETWEEN evaluations, and a resolver torn down after each one would
    * leave every clips() track silent the moment its evaluation finished.
    */
-  patternCore.setClipsResolver((_deck, label) => {
+  patternCore.setClipsResolver((deck, label) => {
     const NONE = { clips: [], arranged: false };
-    if (!arrangeClips) return NONE;
-    if (clipsMemo.src !== arrangeClips) clipsMemo = { src: arrangeClips, rows: new Map() };
-    let row = clipsMemo.rows.get(label);
+    const d = decks[deckName(deck)];
+    if (!d.arrangeClips) return NONE;
+    if (d.clipsMemo.src !== d.arrangeClips) d.clipsMemo = { src: d.arrangeClips, rows: new Map() };
+    let row = d.clipsMemo.rows.get(label);
     if (!row) {
-      row = { clips: patternCore.clipsOfLabel(arrangeClips, label), arranged: true };
-      clipsMemo.rows.set(label, row);
+      row = { clips: patternCore.clipsOfLabel(d.arrangeClips, label), arranged: true };
+      d.clipsMemo.rows.set(label, row);
     }
     return row;
   });
 
   /** Builds a few cycles up front, so a broken pattern reports in the buffer and not mid-set. */
-  function dryRun(sig) {
-    const cps = transport?.cps ?? 0.5;
+  function dryRun(sig, cps) {
     for (const s of patternSigs(sig)) {
       if (s.stepsForCycle) for (let cycle = 0; cycle < DRY_RUN_CYCLES; cycle++) s.stepsForCycle(cycle);
       s.sample?.(0, cps, 0);
     }
   }
 
-  function evaluate(code, { start = true, arrangeFrom = null } = {}) {
+  /** Is any of this deck's code playing? */
+  const deckRunning = (deck) => [...schedulers].some(([key, sch]) => deckOfKey(key) === deck && sch.running);
+
+  /**
+   * The loop toggle's resting position for a deck about to play `regions` (null: no arrangement
+   * at all). `on` is what was asked for, and the answer only ever differs by coming back ON: an
+   * unarranged song - one region from bar 0 over the whole of it, the shape a fresh arrangement
+   * has - loops, because switching its loop off does not make it play like a record, it makes it
+   * stop after the eight bars nobody wrote. Once the toggle is pressed, it stays where the press
+   * put it.
+   */
+  function loopsDefault(deck, on, regions, end) {
+    if (on !== false || decks[deck].loopsPinned) return on !== false;
+    return !regions || patternCore.isWholeSongLoop(regions, end);
+  }
+
+  /** A deck's loop toggle. `pinned: false` is a default being set, not a press of the button. */
+  function setLoops(deck, on, { pinned = true } = {}) {
+    const d = decks[deckName(deck)];
+    const clock = d.arrangeClock;
+    if (!pinned) on = loopsDefault(deck, on, clock ? clock.regions : null, clock ? clock.end : 0);
+    d.loopsPinned = pinned;
+    d.loopsOn = on !== false;
+    if (clock) {
+      const c = clockOf(deck);
+      clock.setLoops(d.loopsOn, !c.paused ? c.cycleAt(engine.getTime()) : 0);
+    }
+    desk?.notify?.();
+    return d.loopsOn;
+  }
+
+  function evaluate(code, { start = true, arrangeFrom = null, deck: deckIn = 'a', fresh = false, name = null } = {}) {
     eventLog.length = 0;
+    const deck = deckName(deckIn);
+    const keyOfBlock = (label) => (deck === 'a' ? label : `b:${label}`);
+    const d = decks[deck];
     const blocks = patternCore.splitLabeledBlocks(code ?? '');
     if (blocks.length === 0) throw new Error('nothing to evaluate');
+    desk?.noteBuffer?.(deck, { name, code });
 
     // Rewound before anything is built, so a seeded choose()/irand() is a function of where it
     // sits in the buffer rather than of how many times this page has evaluated. Without it a
     // stop and a replay would come back as a different performance of the same code.
     patternCore.resetRandomSeeds();
-    patternCore.setDefOwner('a');
-    const definitionsBefore = patternCore.clearRolls('buffer', 'a');
+    patternCore.setDefOwner(deck);
+    const definitionsBefore = patternCore.clearRolls('buffer', deck);
     // Enter with no key in force: the buffer's own setscale is the only thing that sets one, or
     // the last song's key leaks into a song that never asked for one. Kept, for an evaluation
     // that fails to put back: the tracks still playing are still in that key.
@@ -221,20 +283,31 @@ export function createEvaluator({ patternCore, engine, transport, prebakeDefs = 
     // ...and the same for the buffer's feel (see setgroove below).
     const grooveBefore = patternCore.globalGroove();
     patternCore.restoreGlobalGroove(null);
+    // The global scale and feel hold deck A's at rest (every reader outside an evaluation means
+    // the main deck's), so a deck B evaluation borrows them and puts deck A's back however it ends.
+    const putBackGlobals = () => {
+      if (deck === 'a') return;
+      patternCore.setGlobalScale(decks.a.scale ?? null);
+      patternCore.restoreGlobalGroove(decks.a.groove ?? null);
+    };
 
     let sawSetbpm = false;
     const hostBuilders = {
+      // A deck's setbpm() is its NATIVE tempo, always recorded. Only deck A's drives the room's
+      // clock, and not even that while the desk holds it - a DJ set's tempo is the desk's, and a
+      // buffer's setbpm there is metadata (see the desk's clockHeld).
       setbpm: (value) => {
         const v = typeof value === 'string' ? patternCore.mini(value) : value;
         if (typeof v !== 'number' && typeof v?.sample !== 'function') {
           throw new Error('[transport] setbpm() takes a number or a signal (mini string / LFO / pattern)');
         }
         sawSetbpm = true;
-        transport.setBpm(v);
+        d.bpm = v;
+        if (deck === 'a' && !desk?.clockHeld?.(deck)) transport.setBpm(v);
         return TEMPO_BLOCK;
       },
-      setscale: (name) => {
-        patternCore.setGlobalScale(name);
+      setscale: (scaleName) => {
+        patternCore.setGlobalScale(scaleName);
         return SCALE_BLOCK;
       },
       // The groove every track plays by where it sets no swing of its own. Global and hoisted on
@@ -254,6 +327,19 @@ export function createEvaluator({ patternCore, engine, transport, prebakeDefs = 
     };
     const evalBlock = createBlockEvaluator(patternCore, { defs: new Map(prebakeDefs), hostBuilders, miniOff: patternCore.miniOffRanges(code ?? '') });
 
+    // Which row a `clips()` written in this block plays (see pattern-core's clips()). Restores
+    // whatever was in force rather than clearing, because these nest: a copy() resolves inside the
+    // COPIER's build, and when it is done the copier's own row is the one still being built.
+    const asBlock = (b, run) => {
+      const was = patternCore.clipsOwnerNow?.() ?? { deck: 'a', label: null };
+      patternCore.setClipsOwner?.(deck, b.label);
+      try {
+        return run();
+      } finally {
+        patternCore.setClipsOwner?.(was.deck, was.label);
+      }
+    };
+
     const byLabel = new Map(blocks.map((b) => [b.label, b]));
     patternCore.setCopyResolver((label, seen = new Set()) => {
       if (seen.has(label)) throw new Error(`copy("${label}") is inside itself`);
@@ -261,13 +347,13 @@ export function createEvaluator({ patternCore, engine, transport, prebakeDefs = 
       if (!b) throw new Error(`there is no block called ${JSON.stringify(label)} to copy`);
       seen.add(label);
       try {
-        return evalBlock(b.code, b.start);
+        return asBlock(b, () => evalBlock(b.code, b.start));
       } finally {
         seen.delete(label);
       }
     });
 
-    const clipsBefore = arrangeClips;
+    const clipsBefore = d.arrangeClips;
     let evaluated;
     try {
       // setscale is HOISTED: the last one in the buffer is the key the whole buffer plays in,
@@ -296,8 +382,7 @@ export function createEvaluator({ patternCore, engine, transport, prebakeDefs = 
 
       evaluated = blocks.map((b) => {
         try {
-          patternCore.setClipsOwner?.('a', b.label);
-          const value = hoisted.has(b) ? hoisted.get(b) : evalBlock(b.code, b.start);
+          const value = hoisted.has(b) ? hoisted.get(b) : asBlock(b, () => evalBlock(b.code, b.start));
           const isPattern = value instanceof patternCore.Sig;
           const setupValue = value === TEMPO_BLOCK || value === SCALE_BLOCK || value === GROOVE_BLOCK || value?.poptartArrangeBlock;
           // Only a NAMED block promises sound. Anything anonymous that makes none is a setup
@@ -318,11 +403,12 @@ export function createEvaluator({ patternCore, engine, transport, prebakeDefs = 
       // and shapes it NAMES lazily, and the editor writes those definitions at the FOOT of the
       // buffer - so building a cycle inside the pass above would ask for definitions the pass
       // had not reached, and every drawn roll would report itself undefined on every evaluation.
-      arrangeClips = arrangementClipsOf(evaluated);
+      d.arrangeClips = arrangementClipsOf(evaluated);
+      const cps = clockOf(deck)?.cps ?? 0.5;
       for (const b of evaluated) {
         if (!(b.sig instanceof patternCore.Sig)) continue;
         try {
-          dryRun(b.sig);
+          asBlock(b, () => dryRun(b.sig, cps));
         } catch (err) {
           throw new Error(`${b.label}: ${err.message ?? err}`);
         }
@@ -331,26 +417,41 @@ export function createEvaluator({ patternCore, engine, transport, prebakeDefs = 
       // An evaluation that throws applies NOTHING: the tracks still playing must still find the
       // definitions they resolve by name each cycle.
       patternCore.setCopyResolver(null);
-      arrangeClips = clipsBefore;
-      patternCore.restoreRolls(definitionsBefore, 'buffer', 'a');
+      d.arrangeClips = clipsBefore;
+      patternCore.restoreRolls(definitionsBefore, 'buffer', deck);
       patternCore.setGlobalScale(scaleBefore);
       patternCore.restoreGlobalGroove(grooveBefore);
+      patternCore.setDefOwner('a');
       throw err;
     }
     patternCore.setCopyResolver(null);
-    const scale = patternCore.globalScale();
-    const sessionFeel = patternCore.globalGroove();
+    patternCore.setDefOwner('a');
+    // What setscale() and setgroove() left in force are this deck's; the globals go back to deck A's.
+    const scale = (d.scale = patternCore.globalScale());
+    const sessionFeel = (d.groove = patternCore.globalGroove());
+    putBackGlobals();
     const groove = sessionFeel ? { shape: sessionFeel.text, depth: sessionFeel.depth } : null;
-    if (!sawSetbpm) { /* the tempo simply stays where it was */ }
+    // A buffer with no setbpm() has the default as its native tempo; the clock itself simply
+    // stays where it was.
+    if (!sawSetbpm) d.bpm = null;
 
     const built = evaluated.filter((b) => b.sig instanceof patternCore.Sig && !b.sig.isDef);
     const groupTree = patternCore.treeOfBlocks(built);
-    const routed = patternCore.routeGroups(built, (label) => label, groupTree);
+    const routed = patternCore.routeGroups(built, keyOfBlock, groupTree);
+    // What the desk shows: a track inside a real group is not its own channel - its group's
+    // fader, gate and solo take it (see the desk's groupMembers).
+    desk?.setGroupMembers?.(deck, [...routed.routedParents]
+      .filter(([, parent]) => parent !== patternCore.GROUP_ROOT)
+      .map(([label, parent]) => [keyOfBlock(label), keyOfBlock(parent)]));
+
+    // A deck coming in under the desk's clock takes its tempo and place first (see the desk).
+    desk?.beforeTracks?.(deck, { start: start !== false, fresh, running: deckRunning(deck) });
 
     // The arrangement pass: with an arrangement in the buffer every track is one of its rows and
     // plays only inside its clips, and a track with no clips is silent - which is what a row you
     // emptied has to mean.
     const arrangements = evaluated.map((b) => b.sig).filter((v) => v?.poptartArrangeBlock);
+    const deckClock = clockOf(deck);
     if (arrangements.length) {
       const clips = arrangements.flatMap((a) => a.clips);
       const songEnd = patternCore.arrangementEnd(clips);
@@ -360,24 +461,37 @@ export function createEvaluator({ patternCore, engine, transport, prebakeDefs = 
         if (!labels.has(label)) say(`[arrange] no block called ${JSON.stringify(label)} - its clips play nothing`);
       }
       const regions = arrangements.flatMap((a) => patternCore.arrangementLoops(a.clips, a.opts));
-      const nowCycle = transport.cycleAt(engine.getTime());
+      const nowCycle = deckClock.cycleAt(engine.getTime());
+      // An unarranged song loops whatever the desk's default says (see loopsDefault): asked on
+      // every evaluation and reported only when it moves.
+      const loops = loopsDefault(deck, d.loopsOn, regions, songEnd);
+      if (loops !== d.loopsOn) {
+        d.loopsOn = loops;
+        if (desk?.on?.()) say(`[arrange] deck ${deck.toUpperCase()} is one loop over its whole length, so its regions stay armed - carve it into parts to play it through`);
+      }
       // The clock is a function of the regions alone, so painting clips keeps it and changed
       // regions rebuild it where the old one stands.
       const clockKey = JSON.stringify(regions);
-      if (arrangeClock?.key !== clockKey) {
-        arrangeClock = arrangeClock
-          ? arrangeClock.rebuilt({ regions }, nowCycle)
-          : new patternCore.ArrangeClock({ regions });
-        arrangeClock.key = clockKey;
+      if (d.arrangeClock?.key !== clockKey) {
+        d.arrangeClock = d.arrangeClock
+          ? d.arrangeClock.rebuilt({ regions }, nowCycle)
+          : new patternCore.ArrangeClock({ regions, loopsOn: d.loopsOn });
+        d.arrangeClock.key = clockKey;
       }
-      arrangeClock.setEnd(songEnd);
-      arrangeClips = clips;
+      d.arrangeClock.setLoops?.(d.loopsOn, nowCycle); // the deck's loop toggle outlives any one clock
+      d.arrangeClock.setEnd(songEnd);
+      d.arrangeClips = clips;
 
-      const stopped = ![...schedulers.values()].some((s) => s.running);
+      // Where this deck's song starts from: the painter's marker, else the top. A deck JOINING a
+      // clock the other deck already has running starts its song too, at the room's place in the
+      // bar, so the two decks' bar lines agree. Only for a deck that is not already playing - an
+      // evaluation mid-song leaves the playhead where it is.
+      const stopped = !deckRunning(deck);
       const from = stopped && arrangeFrom != null && Number.isFinite(Number(arrangeFrom)) ? Number(arrangeFrom) : null;
-      if (from != null) {
-        const at = arrangeClock.seek(nowCycle, from);
-        say(`[arrange] playing from bar ${Math.round(at * 100) / 100}`);
+      const joining = !deckClock.paused && stopped;
+      if (from != null || joining) {
+        const at = d.arrangeClock.seek(nowCycle, (from ?? 0) + (joining ? nowCycle - Math.floor(nowCycle) : 0));
+        if (from != null) say(`[arrange] playing from bar ${Math.round(at * 100) / 100}`);
       }
 
       for (const b of built) {
@@ -391,11 +505,14 @@ export function createEvaluator({ patternCore, engine, transport, prebakeDefs = 
         // pattern starts where the clip does, and between them it is not read at all - so that
         // clock is its gate as well. A clips() track and a painted group stay on the deck clock.
         if (b.sig.clipsHead || routed.groups.has(b.label)) b.sig = b.sig._arrangeGate(painted ?? []);
-        else b.trackClock = new patternCore.ClipClock(arrangeClock, patternCore.clipsOfLabel(clips, b.label));
+        else b.trackClock = new patternCore.ClipClock(d.arrangeClock, patternCore.clipsOfLabel(clips, b.label));
       }
     } else {
-      arrangeClock = null;
-      arrangeClips = null;
+      d.arrangeClock = null;
+      d.arrangeClips = null;
+      // No arrangement at all: nothing gates these tracks and nothing can stop them, so the
+      // toggle reads ON whatever a mix asked for, because that is what the deck is doing.
+      if (!d.loopsPinned) d.loopsOn = true;
     }
 
     // Mute and solo travel down the group tree, and solo travels up it as well: a soloed track is
@@ -405,62 +522,77 @@ export function createEvaluator({ patternCore, engine, transport, prebakeDefs = 
 
     // Monitor (`M`): a monitored block is a track of its own (`bass~M`) beside an unmarked one of
     // the same name, and dropping the `M` re-keys it onto the plain name in place of the original
-    // (see the desktop server's eval, and patternCore.trackNames). The browser has no headphone
-    // cue, so here a monitored track is not heard at all - which the log says.
-    const cuedName = (label) => `${label}${patternCore.MONITOR_SUFFIX}`;
-    const names = monitorPicker.names(built, (label) => schedulers.has(cuedName(label)));
+    // (see the desktop server's eval, and patternCore.trackNames).
+    const cuedKey = (label) => keyOfBlock(`${label}${patternCore.MONITOR_SUFFIX}`);
+    const names = d.monitorPicker.names(built, (label) => schedulers.has(cuedKey(label)));
+    const keyOf = (b) => keyOfBlock(names.nameOf(b));
     const active = built.filter((b) => !isMuted(b) && (!anySolo || isSoloed(b)) && !names.shadowed.has(b));
-    for (const { from, to } of names.handed.map((label) => ({ from: cuedName(label), to: label }))) {
-      if (!active.some((b) => names.nameOf(b) === to)) continue;
+    for (const { from, to } of names.handed.map((label) => ({ from: cuedKey(label), to: keyOfBlock(label) }))) {
+      if (!active.some((b) => keyOf(b) === to)) continue;
       const old = schedulers.get(to);
       if (old) old.stop();
       if (trackIds.has(to)) engine.destroyTrack?.(trackIds.get(to));
-      const sch = schedulers.get(from);
-      schedulers.delete(from);
-      schedulers.set(to, sch);
-      sch.label = to;
-      trackIds.set(to, trackIds.get(from));
-      trackIds.delete(from);
+      rekey(from, to);
     }
     for (const b of active) if (b.monitored) b.sig = patternCore.monitorSig(b.sig);
     const cued = active.filter((b) => b.monitored).map((b) => b.label);
-    if (cued.length) say(`[${cued.join(', ')}] M plays to a headphone cue, which the browser doesn't have - not heard`);
-
-    // Tracks whose label disappeared, or that are now muted or un-soloed, stop.
-    for (const [label, sch] of [...schedulers]) {
-      if (active.some((b) => names.nameOf(b) === label)) continue;
-      sch.stop();
-      schedulers.delete(label);
+    if (cued.length && !desk?.cueRouted?.()) {
+      say(`[${cued.join(', ')}] M plays to the headphone cue, and no cue output is set in the audio settings - not heard`);
     }
 
-    let scheduleFrom = transport.cycleAt(engine.getTime());
+    // Tracks whose label disappeared, or that are now muted or un-soloed, stop - within THIS deck
+    // only: the other deck's tracks are not in this buffer.
+    for (const [key, sch] of [...schedulers]) {
+      if (deckOfKey(key) !== deck) continue;
+      if (active.some((b) => keyOf(b) === key)) continue;
+      sch.stop();
+      schedulers.delete(key);
+    }
+
+    // A fresh buffer - a file opened into the editor, not an edit of the one playing - takes down
+    // every track this deck kept warm for a label the new code never mentions.
+    if (fresh) {
+      const claimed = new Set(built.map(keyOf));
+      for (const key of [...trackIds.keys()]) {
+        if (deckOfKey(key) !== deck || claimed.has(key) || desk?.isSongKey?.(key)) continue;
+        schedulers.get(key)?.stop();
+        schedulers.delete(key);
+        dropTrack(key);
+      }
+    }
+
+    let scheduleFrom = deckClock.cycleAt(engine.getTime());
     const starting = active.length > 0 && start !== false && transport.paused;
     const toStart = [];
 
     for (const b of active) {
-      const label = names.nameOf(b);
-      const tid = claimTrack(label);
-      let sch = schedulers.get(label);
-      engine.createTrack(tid);
+      const key = keyOf(b);
+      const tid = claimTrack(key);
+      let sch = schedulers.get(key);
+      // A new track is born wearing the desk as it stands - a queued deck arrives at the desk's
+      // gains, not at full level (see the desk's birthFor).
+      desk?.gateNewStem?.(key, deck, !sch);
+      engine.createTrack(tid, desk?.birthFor?.(key) ?? null);
       if (!sch) {
-        sch = new patternCore.Scheduler(engine, { transport, trackId: tid, label });
-        schedulers.set(label, sch);
+        sch = new patternCore.Scheduler(engine, { transport: clockOf(deck), trackId: tid, label: key, deck });
+        schedulers.set(key, sch);
       } else if (!sch.running && starting) {
         // Play after stop: stop leaves tails ringing on purpose, and the restart is what hushes
         // them, or the tail of the last run plays under the first notes of this one.
         engine.hush(tid);
       }
-      sch.setSongClock(b.trackClock ?? arrangeClock);
+      sch.setSongClock(b.trackClock ?? d.arrangeClock);
       sch.setPattern(b.sig);
+      desk?.applyTo?.(key);
       if (starting) toStart.push(sch);
       else sch.start(scheduleFrom);
     }
 
-    hlTracks.clear();
+    for (const k of [...hlTracks.keys()]) if (deckOfKey(k) === deck) hlTracks.delete(k);
     for (const b of active) {
-      hlTracks.set(names.nameOf(b), { sig: b.sig, start: b.start, end: b.end, clock: b.trackClock ?? arrangeClock });
+      hlTracks.set(keyOf(b), { sig: b.sig, start: b.start, end: b.end, clock: b.trackClock ?? d.arrangeClock });
     }
-    const gridFrom = Math.floor(transport.cycleAt(transport.getTime()));
+    const gridFrom = Math.max(0, Math.floor(deckClock.cycleAt(deckClock.getTime())));
 
     // What a sampler track plays, in the desktop's shape (see trackSampleInfo in server.js): the
     // first file it sounds and its length after .fit(). The length is known once the file has
@@ -478,17 +610,18 @@ export function createEvaluator({ patternCore, engine, transport, prebakeDefs = 
         got = engine.samples?.describe?.(ref.startsWith('sp:') ? ref.slice(3) : ref, index) ?? null;
       }
       if (!got?.file) return { ...out, count: got?.count ?? 0 };
-      return { ...out, ...got, cycles: patternCore.fittedCycles(got.seconds, transport.cps > 0 ? 1 / transport.cps : 0, fit) };
+      return { ...out, ...got, cycles: patternCore.fittedCycles(got.seconds, deckClock.cps > 0 ? 1 / deckClock.cps : 0, fit) };
     };
 
     // Every track, playing or not, in the shape the editor's track list reads: the muted ones
     // are drawn with a badge rather than left out, and the chain is `instrument` plus `fxChain`
-    // because that is what it concatenates.
+    // because that is what it concatenates. `key` is what the track is called here - deck B's
+    // are "b:<label>".
     const tracks = built.map((b) => {
       const playing = active.includes(b);
       return {
         label: b.label,
-        key: names.nameOf(b),
+        key: keyOf(b),
         muted: isMuted(b),
         soloed: isSoloed(b),
         monitored: isMonitored(b),
@@ -500,7 +633,7 @@ export function createEvaluator({ patternCore, engine, transport, prebakeDefs = 
         fxChain: [...(b.sig.fxChain ?? [])],
         sample: b.sig.sampler ? trackSampleInfo(b.sig) : null,
         paramNames: paramLabels(b.sig),
-        grid: playing ? highlightGrid(patternCore, b.sig, b.start, b.end, gridFrom, HL_WINDOW, b.trackClock ?? arrangeClock) : null,
+        grid: playing ? highlightGrid(patternCore, b.sig, b.start, b.end, gridFrom, HL_WINDOW, b.trackClock ?? d.arrangeClock) : null,
       };
     });
 
@@ -513,24 +646,41 @@ export function createEvaluator({ patternCore, engine, transport, prebakeDefs = 
       // reaches them. The schedulers open their windows AT that cycle rather than at wherever
       // the clock has got to, which is what keeps the downbeat on the downbeat.
       const at = engine.getTime() + START_LEAD_SEC;
-      transport.start(at);
-      scheduleFrom = transport.cycleAt(at);
+      if (!desk?.transportStart?.(at)) transport.start(at);
+      scheduleFrom = deckClock.cycleAt(at);
       for (const sch of toStart) sch.start(scheduleFrom);
     }
     tellTempo();
+    desk?.afterEvaluate?.(deck);
 
     return {
-      cps: transport.cps,
+      cps: deckClock.cps,
       transport: transportForEditor(),
+      deckTransport: deckClocksForEditor(),
       scale,
       groove, // what setgroove() left in force - the editor's groove control shows it
-      arrange: arrangeClock ? arrangeClock.snapshot() : null,
+      arrange: d.arrangeClock ? d.arrangeClock.snapshot() : null,
+      deck,
+      deckBpm: nativeBpm(deck),
       gridFrom,
       gridCount: HL_WINDOW,
       tracks,
       log: [...eventLog],
     };
   }
+
+  /**
+   * A deck's native tempo as the desk sees it: what its code declared, or the 120 an undeclared
+   * buffer plays at. A signal-driven setbpm() has no single number, and reads as null.
+   */
+  function nativeBpm(deck) {
+    const bpm = decks[deckName(deck)].bpm;
+    if (typeof bpm === 'number') return bpm;
+    return bpm == null ? 120 : null;
+  }
+
+  /** The editor computes a clock's position from the wall clock; this one runs on the context's. */
+  const clockOffset = () => Date.now() / 1000 - engine.getTime();
 
   /**
    * The transport as the editor mirrors it.
@@ -542,12 +692,22 @@ export function createEvaluator({ patternCore, engine, transport, prebakeDefs = 
    * moved onto the wall clock here, once, on the way out; every time inside the host stays on
    * the context's clock, which is the one the sound is scheduled on.
    */
-  function transportForEditor() {
-    const snap = transport.snapshot();
-    const clockOffset = Date.now() / 1000 - engine.getTime();
+  function transportForEditor(clock = transport) {
+    if (!clock) return null;
+    const snap = clock.snapshot();
+    const offset = clockOffset();
     // The offset travels too: a free-running ("0.5hz") LFO is anchored on the engine's seconds,
     // and the editor's picture of its phase has to count the same seconds.
-    return { ...snap, baseSec: snap.baseSec + clockOffset, clockOffset };
+    return { ...snap, baseSec: snap.baseSec + offset, clockOffset: offset };
+  }
+
+  /** Both decks' own clocks the same way, where the desk gives them clocks of their own. */
+  function deckClocksForEditor() {
+    if (!desk?.clockOf) return { a: null, b: null };
+    return Object.fromEntries(DECKS.map((dk) => {
+      const c = desk.clockOf(dk);
+      return [dk, c && c !== transport ? transportForEditor(c) : null];
+    }));
   }
 
   /** Every clip the buffer's arrangements carry, or null when it has none at all. */
@@ -556,33 +716,131 @@ export function createEvaluator({ patternCore, engine, transport, prebakeDefs = 
     return found.length ? found.flatMap((a) => a.clips) : null;
   }
 
-  /** A later window of the same grid, for the editor's scroll-ahead. */
-  function highlightWindow(from, count) {
+  /** A later window of the same grid, for the editor's scroll-ahead - one deck's, or every one. */
+  function highlightWindow(from, count, deck = null) {
     const base = Math.max(0, Math.floor(from));
     const span = Math.min(HL_WINDOW * 4, Math.max(1, Math.floor(count) || HL_WINDOW));
+    const only = deck === 'a' || deck === 'b' ? deck : null;
     const tracks = [];
     for (const [label, t] of hlTracks) {
-      tracks.push({ label, grid: highlightGrid(patternCore, t.sig, t.start, t.end, base, span, t.clock) });
+      if (only && deckOfKey(label) !== only) continue;
+      tracks.push({ label, grid: highlightGrid(patternCore, t.sig, t.start, t.end, base, span, t.clock ?? decks[deckOfKey(label)].arrangeClock) });
     }
     return { gridFrom: base, gridCount: span, tracks };
   }
 
-  /** Stops everything and rewinds, which is what the transport's stop means. */
   /**
    * The devices on the grid - a synced delay, a ducker, a beat repeat - hear the tempo and where
    * cycle zero sits on the audio clock, from the transport itself rather than from a copy.
    */
   function tellTempo() {
     if (typeof engine.setTempo !== 'function' || !transport) return;
-    engine.setTempo(transport.cps * 240, transport.secAt(0));
+    // With a desk, a deck on a clock of its own tells its own tracks its own tempo.
+    if (desk?.tellTempo) desk.tellTempo();
+    else engine.setTempo(transport.cps * 240, transport.secAt(0));
   }
-  if (transport) transport.onCpsChange = () => tellTempo();
+  if (transport) {
+    transport.onCpsChange = () => {
+      tellTempo();
+      desk?.onCpsChange?.(); // rate-locked songs ride the clock through every step of a ramp
+    };
+  }
 
-  function stop() {
+  /**
+   * Stops playback: one deck's, or with none named, everything. A deck's schedulers stop and its
+   * tracks stay warm, and the room's clock runs on for the other deck; only when nothing is left
+   * playing anywhere does it become the full stop that rewinds the clock. `hush` takes the
+   * deck's voices too rather than letting them ring - an audition ending as the finger comes up.
+   */
+  function stop(deck = null, { hush = false } = {}) {
+    if (deck === 'a' || deck === 'b') {
+      for (const [key, sch] of schedulers) {
+        if (deckOfKey(key) !== deck) continue;
+        sch.stop();
+        if (hush) engine.hush?.(trackIds.get(key) ?? key);
+      }
+      desk?.deckStopped?.(deck);
+      const otherPlaying = [...schedulers].some(([key, sch]) => deckOfKey(key) !== deck && sch.running)
+        || !!desk?.othersSounding?.(deck);
+      if (otherPlaying) {
+        desk?.notify?.();
+        return { deck, transport: null, deckTransport: deckClocksForEditor() };
+      }
+    }
     for (const sch of schedulers.values()) sch.stop();
+    desk?.allStopped?.();
     transport.stop();
-    arrangeClock?.reset();
-    return { transport: transportForEditor() };
+    for (const dk of DECKS) decks[dk].arrangeClock?.reset();
+    desk?.notify?.();
+    return { transport: transportForEditor(), deckTransport: deckClocksForEditor() };
+  }
+
+  /** Forgets a track completely: its scheduler, its engine track and its highlight. */
+  function dropTrack(key) {
+    schedulers.get(key)?.stop();
+    schedulers.delete(key);
+    const id = trackIds.get(key);
+    if (id) engine.destroyTrack?.(id);
+    trackIds.delete(key);
+    hlTracks.delete(key);
+    desk?.forgetKey?.(key);
+  }
+
+  /** Everything filed under `from` answers to `to` from here on. The engine is never touched. */
+  function rekey(from, to) {
+    const id = trackIds.get(from);
+    trackIds.delete(from);
+    if (id) trackIds.set(to, id);
+    const sch = schedulers.get(from);
+    if (sch) {
+      schedulers.delete(from);
+      schedulers.set(to, sch);
+      sch.label = to;
+      sch.deck = deckOfKey(to);
+    }
+    const hl = hlTracks.get(from);
+    if (hl) {
+      hlTracks.delete(from);
+      hlTracks.set(to, hl);
+    }
+    desk?.rekeyKey?.(from, to);
+  }
+
+  /**
+   * Empties one deck - a pane loading a different song: its schedulers stop, its tracks are
+   * destroyed, and its song facts and definitions go. The other deck is untouched.
+   */
+  function clearDeck(deck) {
+    const dk = deckName(deck);
+    for (const key of [...trackIds.keys()]) if (deckOfKey(key) === dk && !desk?.isSongKey?.(key)) dropTrack(key);
+    for (const key of [...schedulers.keys()]) if (deckOfKey(key) === dk) dropTrack(key);
+    const keepLoops = { loopsOn: decks[dk].loopsOn };
+    decks[dk] = { ...newDeck(), ...keepLoops };
+    if (dk === 'a') {
+      patternCore.setGlobalScale(null); // the resting scale was this deck's fact
+      patternCore.restoreGlobalGroove(null); // ...and so was the resting feel
+    }
+    patternCore.clearRolls('buffer', dk);
+  }
+
+  /**
+   * Deck B becomes deck A - the end of a mix that keeps the incoming song. Deck A's tracks are
+   * destroyed; deck B's are re-keyed to plain labels with nothing in the engine touched, so the
+   * music does not blink. Returns the labels promoted.
+   */
+  function promote() {
+    const promoted = [...schedulers.keys()].filter((k) => deckOfKey(k) === 'b');
+    for (const key of [...trackIds.keys()]) if (deckOfKey(key) === 'a' && !desk?.isSongKey?.(key)) dropTrack(key);
+    for (const key of [...schedulers.keys()]) if (deckOfKey(key) === 'a') dropTrack(key);
+    for (const key of promoted) rekey(key, key.slice(key.indexOf(':') + 1));
+    for (const key of [...trackIds.keys()]) if (deckOfKey(key) === 'b' && !desk?.isSongKey?.(key)) dropTrack(key);
+    decks.a = { ...decks.b, monitorPicker: decks.b.monitorPicker };
+    decks.b = newDeck();
+    patternCore.setGlobalScale(decks.a.scale ?? null);
+    patternCore.restoreGlobalGroove(decks.a.groove ?? null);
+    patternCore.clearRolls('buffer', 'a'); // the outgoing song's definitions
+    patternCore.adoptDefs?.('b', 'a'); // the promoted song's are the main deck's now
+    return promoted.map((k) => k.slice(k.indexOf(':') + 1));
   }
 
   return {
@@ -590,11 +848,25 @@ export function createEvaluator({ patternCore, engine, transport, prebakeDefs = 
     highlightWindow,
     stop,
     transportForEditor,
+    deckClocksForEditor,
     schedulers,
     trackIds,
     hlTracks,
-    get arrangeClock() { return arrangeClock; },
-    get arrangeClips() { return arrangeClips; },
+    claimTrack,
+    dropTrack,
+    rekey,
+    clearDeck,
+    promote,
+    setLoops,
+    deckRunning,
+    nativeBpm,
+    facts: (deck) => decks[deckName(deck)],
+    arrangeClockOf: (deck) => decks[deckName(deck)].arrangeClock,
+    loopsOf: (deck) => decks[deckName(deck)].loopsOn,
+    clockOf,
+    get arrangeClock() { return decks.a.arrangeClock; },
+    get arrangeClips() { return decks.a.arrangeClips; },
+    tellTempo,
     get log() { return [...eventLog]; },
   };
 }

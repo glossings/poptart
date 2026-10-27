@@ -10,7 +10,7 @@ If you want to try it out now, check out [poptart.glossing.dev](https://poptart.
 | **Mixer** | **Native synths and effects** |
 | ![The mixer](packages/web-app/public/docs/img/mixer.png) | ![The wavetable synth](packages/web-app/public/docs/img/device-wavetable.png) |
 
-If you want the full version, with DJ mode and your VST plugins, download it from [Releases](https://github.com/glossings/poptart/releases/latest) on the right, or [clone the repo](#getting-started-from-source).
+If you want the full version, with your VST plugins, download it from [Releases](https://github.com/glossings/poptart/releases/latest) on the right, or [clone the repo](#getting-started-from-source).
 
 ![DJ mode: a deck playing code and a deck playing a song, their waveforms stacked above and the mixer below](packages/web-app/public/docs/img/dj-mode.png)
 

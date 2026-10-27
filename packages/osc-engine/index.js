@@ -20,6 +20,7 @@ const { spawn } = require('node:child_process');
 const osc = require('osc');
 const { pidfilePath, reapOrphanedEngine, recordEnginePids, clearEnginePids, killIfOurs } = require('./orphans');
 const { samplesRoot, listPackFiles, resolveSampleFile, expandPackEntries, sliceEntryFor } = require('./samples');
+const { splitPackFileRef, pickPackFile } = require('./pack-file-ref');
 const { recordingsRoot, resolveRecording } = require('./recordings');
 const { speechRoot, cachedSpeech, renderSpeech, parseSpeech, voiceInstalled } = require('./tts');
 const { analyzeSlices } = require('./analysis');
@@ -1643,6 +1644,19 @@ class OscEngine {
   }
 
   /**
+   * A pack whose files changed on the host's side (a file added to the `files` list): its loaded
+   * cache and every "pack:file" source in it are dropped, so the next event loads the new list.
+   */
+  forgetSamplePack(name) {
+    const pack = String(name);
+    for (const ref of [...this._packs.keys()]) {
+      if (ref !== pack && !ref.startsWith(`${pack}:`)) continue;
+      this._packs.delete(ref);
+      this._warned.delete(`source:${ref}`);
+    }
+  }
+
+  /**
    * What a sampler source ref names on disk. A ref is the mini-notation value with a namespace in
    * front: a bare name is a PACK (s("bd") - a folder, addressed further by index), "sp:<id>" is a
    * NAMED pack (sp("kit") - a hand-picked list of files the host pushed via defineSamplePacks,
@@ -1654,6 +1668,14 @@ class OscEngine {
    * as `render`, a promise of its one path, instead.
    */
   _resolveSource(ref) {
+    // One file of a pack by its name (s("files:loop.wav")): a source of one, looked for again on
+    // a miss, since the file may be added to the pack after the pattern that names it.
+    const named = splitPackFileRef(ref);
+    if (named) {
+      const whole = this._resolveSource(named.pack);
+      const file = pickPackFile(whole.paths, named.want);
+      return { paths: file ? [file] : null, what: `"${named.want}" in ${whole.what}`, where: whole.where, stable: false };
+    }
     if (ref.startsWith('say:')) {
       const value = ref.slice(4);
       const { voice, text } = parseSpeech(value);

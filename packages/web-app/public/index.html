@@ -68,7 +68,7 @@
         </div>
         <!-- The headphones: level, and the blend from what is cued (a deck's 🎧, a track's M) to the
              main mix. In the header rather than on the desk because cueing is not only a DJ-mode
-             thing. Knobs built by client.js (phonesLevel / phonesMix); hidden in the browser. -->
+             thing. Knobs built by client.js (phonesLevel / phonesMix). -->
         <div id="phonesCtl" class="phones-ctl"></div>
         <select id="themeSelect" title="color theme"></select>
         <button id="themeEditBtn" title="edit theme colors"><span class="ico">🎨</span></button>
@@ -546,6 +546,20 @@
                   <option value="on">on - the song's regions hold</option>
                 </select>
               </label>
+            </section>
+            <!-- Where the DJ decks' songs come from in the browser build: a folder on this computer,
+                 read where it lives. Browser build only - the desktop's decks browse the disk. -->
+            <section id="musicFolderSection" class="hidden">
+              <h2>music folder</h2>
+              <div class="settings-actions">
+                <button id="musicFolderPick" class="small"
+                  title="The folder the DJ decks load songs from, and the organize window's disk source. Each song is read from where it is when it is loaded onto a deck - nothing is copied into this browser, and nothing is sent anywhere.">choose folder…</button>
+                <button id="musicFolderReconnect" class="small" disabled
+                  title="the browser asks again, on each visit, before a page may read a folder it was given before">allow again</button>
+                <button id="musicFolderForget" class="small" disabled title="stop reading the folder; its files are left as they are">forget</button>
+              </div>
+              <input id="musicFolderInput" type="file" webkitdirectory multiple hidden />
+              <div id="musicFolderNote" class="files-note"></div>
             </section>
             <section id="syncSection">
               <h2>sync</h2>
@@ -1313,7 +1327,7 @@
       </div>
     </div>
 
-    <div id="fileDropOverlay" class="file-drop-overlay hidden"><span>drop a .mid file to import it</span></div>
+    <div id="fileDropOverlay" class="file-drop-overlay hidden"><span>drop a .mid or an audio file</span></div>
 
     <script src="/vendor/codemirror/lib/codemirror.js"></script>
     <script src="/vendor/codemirror/mode/javascript/javascript.js"></script>
@@ -1336,6 +1350,7 @@
     <script src="theme-file.js"></script>
     <script src="snippet-code.js"></script>
     <script src="projector-frame.js"></script>
+    <script src="file-drop.js"></script>
     <script src="client.js"></script>
   </body>
 </html>

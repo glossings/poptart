@@ -77,7 +77,6 @@ Delete an entry when it's done. Details: TODO-verbose.md.
 [ ] Vocoder
 [ ] Move the host behind a message boundary
 [ ] Plugins (local engine mode / WAM)
-[ ] DJ desk and song player
 [ ] Sample map
 [ ] Headphone cue
 [ ] Link bridge

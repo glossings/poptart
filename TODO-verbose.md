@@ -524,8 +524,8 @@ entry here when its TODO.md line goes.
         resonating a track's audio is not exposed; Plaits and Rings are monophonic, as the modules are. Nine of Mutable's modules cannot be
         ported at all - five are analog hardware with no DSP published, three make control
         voltages rather than audio, and one was never published; sources.json says which.
-    (3) Link, osc() input, plugins, the DJ desk, the sample map and the headphone cue: see (6) to
-        (11). Everything else the desktop's engine does, the page's now does too.
+    (3) Link, osc() input and plugins: see (6) to (8). Everything else the desktop's engine
+        does, the page's now does too.
     (4) A vocoder. One was written and taken out before the first release: it sounded wrong
         (a bandpass bank with the carrier's bands copied from the modulator's, an emphasis tilt
         and a flat doubling of the wet sum - the intelligibility was never there), it had no
@@ -553,27 +553,12 @@ entry here when its TODO.md line goes.
         - Web Audio Modules (WAM 2): the open standard for plugins built for the browser, hosted
           in the page on the page's clock with no helper. Only plugins their makers ported; not a
           bought VST.
-    (7) The DJ desk and song player. Scope, not the browser: decoding is decodeAudioData, keylock
-        would be the Signalsmith Stretch already ported for Shift (see the Rubber Band entry).
-        The cost is memory - a decoded ten-minute stereo track is about 230 MB, two decks plus
-        stretch buffers is a lot for a tab - so look at decoding in chunks before building it.
-    (8) The sample map. Scope, not the browser: its maths is plain JS, the feature analysis
-        would run in a Worker, the cache in IndexedDB, and the browser's decoder replaces the
-        afconvert step. The folder is picked with the File System Access API, which keeps a handle
-        to the files rather than a copy (never copy user files) - Chrome and Edge only; elsewhere
-        the folder is picked again each visit. Indexing a large library is slower in a tab.
-    (9) The headphone cue. Two routes: on one interface with four or more outputs, a single
-        AudioContext plays the cue on 3/4 - same clock, no added delay, on the multichannel output
-        the page already has; on two devices, a second AudioContext on the headphones via setSinkId -
-        separate clocks, tens of milliseconds late and drifting, fine for pre-listening only.
-        The cue exists mostly for the DJ desk, so it is built with (7); the roll's audition
-        button could use it sooner.
-    (10) A Link bridge. A page cannot join Link (UDP multicast), so a small local helper joins the
+    (7) A Link bridge. A page cannot join Link (UDP multicast), so a small local helper joins the
         session and relays tempo, beat and phase over a WebSocket. Check the existing ones before
         writing one: Carabiner (Deep Symmetry) already exposes Link over a local TCP socket and
         would need only a WebSocket shim in front of it. The local engine mode in (6) gets Link
         for free, since the desktop already runs it.
-    (11) An OSC bridge. A page cannot listen on a UDP port, so a local relay forwards OSC to the
+    (8) An OSC bridge. A page cannot listen on a UDP port, so a local relay forwards OSC to the
         page over a WebSocket, where the engine's feedOsc is waiting. osc.js ships a UDP-to-
         WebSocket relay that may do this as it is. Again free under the local engine mode in (6).
     The nine-oh-nine and the rest: there is NO redistributable recording of any classic drum

@@ -297,10 +297,21 @@ and it is what leaves room for the host to move into a worker or a sandboxed fra
   window and says nothing, and this answers with the panel to draw instead, which is what the
   editor branches on rather than on knowing which build it is.
 - `evaluate.mjs` — the browser's `/api/evaluate`, following the desktop's order of operations,
-  minus the second deck, the plugin capture and the MIDI enable. Holds the state that outlives an
-  evaluation: the schedulers, the engine track ids, the song clock. Also the highlight grid,
-  which is pure pattern-core and therefore the same code on both sides in everything but where it
-  lives.
+  minus the plugin capture and the MIDI enable. Two decks, keyed as the desktop keys them (deck
+  B's `kick` is the track `b:kick`), each with its own arrangement clock, song facts and clock.
+  Holds the state that outlives an evaluation: the schedulers, the engine track ids, the song
+  clocks. Also the highlight grid, which is pure pattern-core and therefore the same code on both
+  sides in everything but where it lives.
+- `desk.mjs` — the DJ desk: a port of `server.js`'s desk, function for function and with the same
+  names, so a fix to one reads across to the other. Its push channel is the host's `events()`
+  in place of the desktop's `/api/mix/events` stream. See the DJ desk decision below for what
+  differs and why.
+- `music-folder.mjs` + `song-load.mjs` + `song-worker.mjs` — where the decks' songs come from
+  (a folder the page was handed, read in place), how one is made playable (decoded, packed to
+  16-bit planes), and how it is measured (the desktop's waveform and beatgrid maths, on a
+  worker).
+- `library.mjs` — the track collection: the desktop's `/api/library` routes (import, the
+  measuring pass, edits, forget) over `public/library-tracks.js`, the rules both builds share.
 - `block-eval.mjs` — the names an evaluated block is given. Not shared with `server.js` yet, so a
   test reads the lists out of its source and fails if they drift: a builder on one side only is a
   pattern that runs in one build and throws in the other.
@@ -512,28 +523,49 @@ built tree.
   bounce is keyed on the *block label*, which is why app+B works on any block without it.
 - **Plain HTTP + browser, no Electron.** Open the served page in any browser; keeps the footprint
   small.
-- **The DJ desk is desktop-only.** The web build refuses every `/api/mix` and `/api/song` route by
-  name (`REFUSALS` in `packages/web-app/public/web/host.mjs`); that is the intended state, not a
-  gap. A live set is the one use a browser punishes: a page cannot see the disk, so a music
-  library is a drag-in that is gone on reload; a backgrounded tab is throttled; choosing an output
-  device (`AudioContext.setSinkId`) exists only in Chromium; and a page cannot join a Link session
-  without a local helper. The desk is also ~1,200 lines of server state and ~20 routes, and every
-  later desk feature would have to be built for two engines. The web build's job is patterns with
-  no install - try it, share a link, read the docs - and the desk does not serve that.
-
-  The path back, cheapest first. Pattern decks: move the desk state and routes out of `server.js`
-  into a module both hosts call (the shape `evaluate.mjs` already has), give `evaluate.mjs` a deck
-  dimension, and add the DJ strip (trim, 3-band EQ, `djf`/`djres`, fader, crossfader) to the web
-  engine's track - a few days, since `client.js` already draws the desk. Song decks with repitch:
-  decode a file to an AudioBuffer and play it at a rate; `song-sync.js` is already pure, and
-  `song-detect.js`'s analysis would run in a worker - about a week more. Keylock, cue and Link are
-  open-ended. Link only works through a local bridge (the desktop's Link helper behind a
-  WebSocket), which defeats the point of a web build. A headphone cue on a second output device
-  needs two AudioContexts, whose clocks drift apart by up to ~6 ms a minute; the working design
-  is a SharedArrayBuffer ring between two worklets, read through a resampler whose ratio is a
-  servo on ring occupancy (what an aggregate device does), with 8-16 ms of added latency. It
-  needs cross-origin isolation, which the host can set with response headers. The web engine is
-  the only place that design could live: scsynth opens one device.
+- **The DJ desk runs in both builds.** It was desktop-only until the web build became the main one;
+  `client.js` draws the same desk against either host. The web desk (`public/web/desk.mjs`) is a
+  PORT of `server.js`'s, not a shared module: the desktop's is ~3,000 lines threaded through
+  module state that only exists in that process, and its tests read functions out of `server.js`
+  by name. What IS shared is the maths, as files both builds load: `song-sync.js` and
+  `link-sync.js` (tempo, grid, bend, follow), `osc-engine/wave-core.mjs` (a song's waveform),
+  `osc-engine/song-detect-core.mjs` (its tempo, beatgrid and key), `osc-engine/song-tags-core.mjs`
+  (its file tags, read a few slices at a time), `public/library-tracks.js` (the track collection's
+  rules: import, edits by hand, measured facts, anchors, forgetting) and `public/set-log-format.js`
+  (a set's tracklist). The controller code (learning, driving, talk-back) is ported with the rest
+  of the desk and talks to Web MIDI. What differs, and why:
+  - **One clock.** The song players run on the audio context, the clock everything is scheduled
+    on, so there is no drift between a player and the model of it and none of the desktop's servo.
+  - **Heard time.** Keylock is the ported Signalsmith Stretch (Shift's pitch half): the repitched
+    read shifted back by the same interval, as the desktop does with Rubber Band. The shifter is
+    0.12 s late, so the plain path is delayed by exactly as much and every song is heard that long
+    after its player reads it. Keylock is then a crossfade between two aligned paths, and the
+    desk keeps its playhead model in HEARD time and sends each event to the player that much
+    early (a rate change is rebased where it will be heard). Starts and loop wraps are already
+    timestamped ahead, so only the momentary gestures (a nudge, a fader) answer 0.12 s later.
+  - **Memory.** A browser cannot decode a compressed file in pieces (WebCodecs decodes frames,
+    not files, so it would need a demuxer per container), and a decoded ten-minute stereo song is
+    ~230 MB of floats. So a song is decoded whole, once, packed to 16-bit planes in slices with the
+    page let go between them, and the floats are dropped: a loaded deck holds ~115 MB per ten
+    minutes, handed to the audio thread by transfer, never copied. The decode briefly needs both.
+  - **Songs come from a folder the page was handed** (`showDirectoryPicker`, the handle kept in
+    IndexedDB; elsewhere the ordinary chooser, for the visit). Never copied. The track collection
+    (`public/web/library.mjs`, the desktop's `/api/library` routes) keeps its records in the
+    page's store beside that handle, by path in the folder; importing reads each file's tags in
+    the page, and the measuring pass decodes and measures on the decks' analysis worker, standing
+    aside while a deck needs it. A bpm, key or anchor set on a deck is written to the track's record.
+  - **The headphone cue has two routes** in the page: a pair of the output it already plays to
+    (channels 3/4 of a four-output interface - one clock, no delay), or a second device, carried
+    by a second AudioContext pointed at it with `setSinkId` (a media element where only those can
+    be pointed). Two devices are two clocks, tens of milliseconds late and drifting: fine for
+    pre-listening, which is all a cue is for. A browser that can do neither says so on the menu.
+  - **A set's tracklist** is written to the page's store at the desktop's path
+    (`patterns/sets/<month>/<file>.md`), so it is listed and exported with the other files.
+  - **An FX chain's device window** is the editor's drawn panel on the unit's return track; what
+    is set there is pinned into the chain's code when the window closes, as on the desktop.
+  - **Not here, refused by name:** Link (a page cannot join it without a local helper). A
+    backgrounded tab that is playing audio is not throttled, which is what lets the desk's timers
+    keep time.
 
 ## Testing posture
 
@@ -554,11 +586,12 @@ hand.
 - **Slice analysis is WAV-only** and Node-side; other formats play but have no transient slices.
 - **Bouncing doesn't free the plugin.** A bounced track keeps its VST loaded in its slot (ready for
   the un-mute), so `.record()` is a bounce, not yet a freeze — it doesn't buy back CPU.
-- **Headphone cue needs one device with four outputs.** Cue is a channel offset inside the one
-  device scsynth opens (`cueOffset` in `poptart.scd`), and combining two devices is a CoreAudio
-  aggregate built by the Swift helper (`audio-devices.js`), which is macOS-only. On Windows, a
-  controller that presents master and headphones as two stereo endpoints, or a USB headphone
-  dongle, has no cue.
+- **Headphone cue needs one device with four outputs (desktop).** Cue is a channel offset inside
+  the one device scsynth opens (`cueOffset` in `poptart.scd`), and combining two devices is a
+  CoreAudio aggregate built by the Swift helper (`audio-devices.js`), which is macOS-only. On
+  Windows, a controller that presents master and headphones as two stereo endpoints, or a USB
+  headphone dongle, has no cue. The browser build can cue to a second device (see the DJ desk
+  decision), on a second clock.
 - **A bounce assumes a steady tempo.** The window's edges are converted from cycles to seconds when
   the recording is armed, so a tempo change mid-window desyncs the result from the grid.
 
