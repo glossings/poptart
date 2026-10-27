@@ -2868,6 +2868,9 @@ function deckBandShare(low, mid, high) {
   return vals.map((v) => Math.round((v / total) * 100) / 100);
 }
 
+// The deck meter's reply period: \poptart_deck_meter's SendPeakRMS runs at 20 replies a second.
+const DECK_METER_MS = 50;
+
 let deckLevelTimer = null;
 function deckLevelNotify() {
   if (!mixEventClients.size || deckLevelTimer) return;
@@ -4587,6 +4590,10 @@ function wireEngine() {
       p: Math.max(peakL, peakR),
       r: Math.max(rmsL, rmsR),
       b: deckBands[d],
+      // When the sound it measured played, on the engine's clock (the wall clock here): each
+      // reply covers the DECK_METER_MS before it, so the middle of that. Stamped on arrival, ahead
+      // of the coalescing below, so the strip places it by this rather than by when it lands.
+      t: Date.now() / 1000 - DECK_METER_MS / 2000,
     };
     deckLevelNotify();
     mixFeedbackLevels(); // ...and out to the surface's own meters, if one is listening

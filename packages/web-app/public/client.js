@@ -30713,7 +30713,8 @@ const songPanes = { a: makeSongPane('a'), b: makeSongPane('b') };
 // deckLevelNotify), kept as a short timestamped history rather than only its latest value - so
 // the past's amplitude costs no engine work, no request and no analysis. It is the loose part
 // though: a reading reaches here some tens of ms after the sound it measures, so it is slid back
-// by DJ_LIVE_TRACE_LAG, which is an estimate and the only guessed number on the strip.
+// to the moment it measured: every reading carries `t`, when that sound played on the engine's
+// clock (the middle of the meter's window), and is placed there - not by when it arrived.
 //
 // It is drawn exactly as a song deck's waveform is, down to the colors: the same mirrored peak
 // envelope with the rms body inside it, each column tinted by where its energy sits (bandColor,
@@ -30731,7 +30732,6 @@ const songPanes = { a: makeSongPane('a'), b: makeSongPane('b') };
 // Stacked layout only. A pattern deck's editor IS the instrument, and covering it with a waveform
 // - which is what a song deck does to its own editor - would take the instrument away.
 
-const DJ_LIVE_TRACE_LAG = 90; // ms: the meter's analysis window plus the SSE coalesce (see above)
 const DJ_LIVE_TRACE_MAX = 2000; // ~80s of history at the feed's ~25/sec - past the widest zoom
 const djLiveTrace = { a: [], b: [] }; // [{ c: the deck's cycle it sounded on, p, r, b }]
 
@@ -30745,12 +30745,17 @@ const djLiveTrace = { a: [], b: [] }; // [{ c: the deck's cycle it sounded on, p
  * whole picture, as it does a song deck's.
  */
 function djLiveTracePush(frame) {
-  const t = performance.now();
+  const now = Date.now();
   for (const deck of ['a', 'b']) {
     const v = frame?.[deck];
     if (!v) continue;
+    // `t` is on the engine's clock; the clock's offset moves it onto the wall clock the playhead
+    // is computed on (zero on the desktop, whose engine runs on the wall clock). A frame without
+    // one can only be placed where it landed.
+    const clock = deckClock(deck);
+    const soundMs = Number.isFinite(v.t) ? (v.t + (clock.clockOffset ?? 0)) * 1000 : now;
     // The clock's rate as it is being bent: this is a position, not a scale (see deckBaseCps).
-    const c = djLiveTraceCycle(t, t, currentCyclePos(deck), deckClock(deck).cps);
+    const c = djLiveTraceCycle(soundMs, now, currentCyclePos(deck), clock.cps);
     djLiveTraceAdd(djLiveTrace[deck], { c, p: v.p ?? 0, r: v.r ?? 0, b: v.b ?? null }, DJ_LIVE_TRACE_MAX);
   }
 }
@@ -30800,15 +30805,14 @@ function djLiveWindow(cycNow, cps, spanSec, w) {
 }
 
 /**
- * The cycle a meter frame belongs on. `t` is when the frame ARRIVED; the sound it measured
- * happened DJ_LIVE_TRACE_LAG earlier than that, so the trace is slid further back into the past,
- * never forward. Getting this sign wrong is the failure that looks like a working strip whose
- * beats sit twice the lag off the grid. Asked once, as the frame lands (djLiveTracePush, with
- * `nowMs` = `t`), and the answer is kept: a clock that is nudged afterwards has moved the frame's
- * beat line too, and working the place out again from the tempo would leave the frame behind.
+ * The cycle a meter frame belongs on. `soundMs` is when the sound it measured played, on the wall
+ * clock the editor's playhead runs on; `nowMs` is now on that clock and `cycNow` the deck's
+ * position now. Asked once, as the frame lands (djLiveTracePush), and the answer is kept: a clock
+ * that is nudged afterwards has moved the frame's beat line too, and working the place out again
+ * from the tempo would leave the frame behind.
  */
-function djLiveTraceCycle(t, nowMs, cycNow, cps) {
-  return cycNow - ((nowMs - t + DJ_LIVE_TRACE_LAG) / 1000) * cps;
+function djLiveTraceCycle(soundMs, nowMs, cycNow, cps) {
+  return cycNow - ((nowMs - soundMs) / 1000) * cps;
 }
 
 /** A deck draws this strip when it is playing CODE - a deck holding a file has its own waveform. */
@@ -30887,7 +30891,7 @@ function djLiveWaveDraw(deck) {
   // still on screen, with a floor so a silent deck doesn't magnify its own noise into a waveform.
   const ring = djLiveTrace[deck];
   const nowMs = performance.now();
-  const newest = djLiveTraceCycle(nowMs, nowMs, cycNow, deckClock(deck).cps); // where a frame landing now would go
+  const newest = cycNow; // the last column runs up to the playhead
   let loudest = 0;
   for (const s of ring) if (s.p > loudest) loudest = s.p;
   const norm = loudest < 0.02 ? 1 : Math.min(6, 1 / loudest);

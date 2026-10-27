@@ -234,9 +234,13 @@ export class DeskAudio {
       return bandShare(acc);
     };
     const [a, b] = m.decks;
+    // When the sound this reading measured was played, on the engine's clock: an analyser holds
+    // the last METER_FFT samples the context rendered, so the middle of that window. The editor
+    // places the reading by this rather than by when it arrived (see client.js's djLiveTracePush).
+    const t = this.ctx.currentTime - METER_FFT / 2 / this.ctx.sampleRate;
     return {
-      a: { ...level(a), b: bands(a) },
-      b: { ...level(b), b: bands(b) },
+      a: { ...level(a), b: bands(a), t },
+      b: { ...level(b), b: bands(b), t },
       m: level(m.master),
     };
   }

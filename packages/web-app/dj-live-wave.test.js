@@ -16,8 +16,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 // Lifted out of the browser script the way pane-resize.test.js lifts settleSeamDrag: both are
-// plain arithmetic with no DOM in them, so they run as-is. DJ_LIVE_TRACE_LAG comes along because
-// djLiveTraceCycle closes over it, and the end-of-track warning's two constants likewise.
+// plain arithmetic with no DOM in them, so they run as-is. The end-of-track warning's two
+// constants come along because djEndWarnAt closes over them.
 function loadWaveGeometry() {
   const src = fs.readFileSync(path.join(__dirname, 'public/client.js'), 'utf8');
   const grab = (needle) => {
@@ -33,17 +33,16 @@ function loadWaveGeometry() {
   };
   // eslint-disable-next-line no-new-func
   return new Function(`
-    const DJ_LIVE_TRACE_LAG = ${num('DJ_LIVE_TRACE_LAG')};
     const DJ_END_WARN_SEC = ${num('DJ_END_WARN_SEC')};
     const DJ_END_WARN_HURRY = ${num('DJ_END_WARN_HURRY')};
     ${grab('function djLiveWindow(')}
     ${grab('function djLiveTraceCycle(')}
     ${grab('function djLiveTraceAdd(')}
     ${grab('function djEndWarnAt(')}
-    return { djLiveWindow, djLiveTraceCycle, djLiveTraceAdd, djEndWarnAt, DJ_LIVE_TRACE_LAG, DJ_END_WARN_SEC, DJ_END_WARN_HURRY };
+    return { djLiveWindow, djLiveTraceCycle, djLiveTraceAdd, djEndWarnAt, DJ_END_WARN_SEC, DJ_END_WARN_HURRY };
   `)();
 }
-const { djLiveWindow, djLiveTraceCycle, djLiveTraceAdd, djEndWarnAt, DJ_LIVE_TRACE_LAG, DJ_END_WARN_SEC, DJ_END_WARN_HURRY } = loadWaveGeometry();
+const { djLiveWindow, djLiveTraceCycle, djLiveTraceAdd, djEndWarnAt, DJ_END_WARN_SEC, DJ_END_WARN_HURRY } = loadWaveGeometry();
 
 // 120bpm: bpm = cps x 240, and a cycle is four beats - so half a cycle a second, two seconds a bar.
 const CPS = 0.5;
@@ -81,12 +80,13 @@ test('the edges of the window are the edges of the canvas', () => {
   assert.ok(Math.abs(xOf(cyc1) - W) < 1e-9);
 });
 
-test('a meter frame is slid BACK by the lag, never forward', () => {
+test('a meter frame is placed where the sound it measured played, not where it landed', () => {
   const now = 100000;
-  // A frame that landed this instant measured sound one lag ago - so it draws left of center.
-  assert.ok(djLiveTraceCycle(now, now, 10, CPS) < 10);
-  const behind = 10 - djLiveTraceCycle(now, now, 10, CPS);
-  assert.ok(Math.abs(behind - (DJ_LIVE_TRACE_LAG / 1000) * CPS) < 1e-9);
+  // A frame measuring sound from 60ms ago draws 60ms of cycles left of the playhead, however late
+  // it arrives - no guessed transit time.
+  const behind = 10 - djLiveTraceCycle(now - 60, now, 10, CPS);
+  assert.ok(Math.abs(behind - 0.06 * CPS) < 1e-9);
+  assert.equal(djLiveTraceCycle(now, now, 10, CPS), 10, 'sound playing right now is at the playhead');
 });
 
 test('an older frame lands further back, by exactly the time between them', () => {
@@ -96,13 +96,13 @@ test('an older frame lands further back, by exactly the time between them', () =
   assert.ok(Math.abs((fresh - old) - 1) < 1e-9);
 });
 
-test('the trace and the grid agree: a hit heard now draws where it was heard', () => {
-  // The moment the engine played one lag ago, and the meter frame reporting it, landing now.
+test('the trace and the grid agree: a hit draws on the beat it played on', () => {
+  // A kick on the downbeat at cycle 9.75, measured and reported a while later.
   const now = 100000;
   const cycNow = 10;
-  const heardAt = cycNow - (DJ_LIVE_TRACE_LAG / 1000) * CPS;
+  const playedMs = now - (0.25 / CPS) * 1000;
   const { xOf } = djLiveWindow(cycNow, CPS, 12, W);
-  assert.ok(Math.abs(xOf(djLiveTraceCycle(now, now, cycNow, CPS)) - xOf(heardAt)) < 1e-9);
+  assert.ok(Math.abs(xOf(djLiveTraceCycle(playedMs, now, cycNow, CPS)) - xOf(9.75)) < 1e-9);
 });
 
 test('a stalled feed leaves a gap rather than sliding the history off the beat', () => {
@@ -112,7 +112,7 @@ test('a stalled feed leaves a gap rather than sliding the history off the beat',
   const gap = djLiveTraceCycle(now - 400, now, 10, CPS) - djLiveTraceCycle(now - 440, now, 10, CPS);
   const normal = djLiveTraceCycle(now, now, 10, CPS) - djLiveTraceCycle(now - 40, now, 10, CPS);
   assert.ok(Math.abs(gap - normal) < 1e-9, 'spacing is a function of elapsed time only');
-  assert.ok(Math.abs(djLiveTraceCycle(now - 400, now, 10, CPS) - (10 - 0.2 - 0.045)) < 1e-9);
+  assert.ok(Math.abs(djLiveTraceCycle(now - 400, now, 10, CPS) - (10 - 0.2)) < 1e-9);
 });
 
 // --- the end-of-track warning (both kinds of deck flash the same way) --------------------------
@@ -326,8 +326,9 @@ test('a nudged deck carries the drums already on its strip along with their beat
   deck.align();
   const mirror = () => { const t = deck.snapshot(); return { cps: t.cps, pos: t.baseCycle + (now - t.baseSec) * t.cps }; };
 
-  // A kick on every beat of the deck's clock; its meter frame lands one lag later and is stamped
-  // exactly as djLiveTracePush stamps it.
+  // A kick on every beat of the deck's clock; its meter frame lands TRANSIT_MS later carrying the
+  // time the kick played, and is placed exactly as djLiveTracePush places it.
+  const TRANSIT_MS = 90;
   const ring = [];
   const kicks = []; // the frames that carry a kick, with the beat each one IS
   const waiting = [];
@@ -336,10 +337,10 @@ test('a nudged deck carries the drums already on its strip along with their beat
     while (now < until - 1e-9) {
       now += 0.005;
       const at = Math.floor(deck.cycleAt(now) * 4);
-      if (at !== beat) { beat = at; waiting.push({ due: now + DJ_LIVE_TRACE_LAG / 1000, cycle: at / 4 }); }
+      if (at !== beat) { beat = at; waiting.push({ due: now + TRANSIT_MS / 1000, played: now, cycle: at / 4 }); }
       while (waiting.length && waiting[0].due <= now) {
         const { cps, pos } = mirror();
-        const frame = { c: djLiveTraceCycle(now * 1000, now * 1000, pos, cps), p: 1 };
+        const frame = { c: djLiveTraceCycle(waiting[0].played * 1000, now * 1000, pos, cps), p: 1 };
         djLiveTraceAdd(ring, frame, 2000);
         kicks.push({ frame, cycle: waiting.shift().cycle });
       }
@@ -384,8 +385,9 @@ test('the history only runs forward: a clock stepped back gives up what it is ab
 
 test('the strip stamps a frame as it lands and draws it from the stamp', () => {
   const src = fs.readFileSync(path.join(__dirname, 'public/client.js'), 'utf8');
-  assert.match(src, /const c = djLiveTraceCycle\(t, t, currentCyclePos\(deck\), deckClock\(deck\)\.cps\);/,
+  assert.match(src, /const c = djLiveTraceCycle\(soundMs, now, currentCyclePos\(deck\), clock\.cps\);/,
     'the position reads the clock as it is being bent');
+  assert.match(src, /v\.t \+ \(clock\.clockOffset \?\? 0\)/, 'a frame is placed by when its sound played, on the playhead\'s clock');
   assert.match(src, /const x = xOf\(ring\[i\]\.c\);/);
   assert.doesNotMatch(src, /djLiveTraceCycle\(ring\[i\]/, 'nothing works a kept frame out again from the tempo');
 });
