@@ -73,6 +73,9 @@
         <select id="themeSelect" title="color theme"></select>
         <button id="themeEditBtn" title="edit theme colors"><span class="ico">🎨</span></button>
         <a id="docsLink" class="hbtn" href="/docs/" target="_blank" rel="noopener" title="open the poptart guide in a new tab">docs <span class="ico">↗</span></a>
+        <!-- Where the theme picker and the docs link go when the window is too narrow for them
+             (shown only then - see the header breakpoints at the end of style.css). -->
+        <button id="headerMoreBtn" title="theme and docs" aria-haspopup="menu"><span class="ico">⋯</span></button>
         <button id="playBtn" class="primary" data-chord-title="{#play}"><span class="ico">▶</span> play</button>
         <button id="updateBtn" title="evaluate without changing play state"><span class="ico">↻</span> update</button>
       </header>
@@ -156,6 +159,7 @@
             <canvas id="songDetailA" class="song-detail stack-deck-a"></canvas>
             <canvas id="songOverviewA" class="song-overview"></canvas>
             <div class="song-ctl-row">
+              <span class="song-ctl-group">
               <button id="songCueA" class="small song-cue" data-chord-title="cue - hold to preview from the cue point ({app+c}), release to drop back on it, paused. Pressing while paused sets the cue point exactly at the playhead and makes it the beatgrid's downbeat (the waveform pulls onto transients as you scrub); pressing while playing takes the deck back to it">cue</button>
               <span class="song-ctl-sep"></span>
               <button id="songJogDnA" class="small" title="jog back by the jog size (one beat is the bar-fix after sync got the beats right)"><svg class="song-ctl-icon" viewBox="0 0 12 10" aria-hidden="true"><rect x="1" y="1" width="1.6" height="8" rx="0.4"/><path d="M11 1 4.2 5 11 9Z"/></svg></button>
@@ -163,13 +167,16 @@
               <button id="songNudgeUpA" class="small" title="hold: push the platter (+4% while held)"><svg class="song-ctl-icon" viewBox="0 0 12 10" aria-hidden="true"><path d="M2.6 1 9.4 5 2.6 9Z"/></svg></button>
               <button id="songJogUpA" class="small" title="jog forward by the jog size"><svg class="song-ctl-icon" viewBox="0 0 12 10" aria-hidden="true"><path d="M1 1 7.8 5 1 9Z"/><rect x="9.4" y="1" width="1.6" height="8" rx="0.4"/></svg></button>
               <button id="songJogSizeA" class="small deck-loop-len-btn" title="jog size: how many beats one jog steps - click for the next size, right-click for the one before">1</button>
+              </span>
               <span class="song-ctl-gap"></span>
-              <label class="song-bpm-label">bpm <input id="songBpmA" class="song-bpm" type="number" min="20" max="400" step="any" placeholder="&mdash;" /></label>
+              <span class="song-ctl-group">
+              <label class="song-bpm-label" title="the song's tempo in bpm">bpm <input id="songBpmA" class="song-bpm" type="number" min="20" max="400" step="any" placeholder="&mdash;" /></label>
               <button id="songAnchorA" class="small" title="anchor the beatgrid's downbeat at the playhead - kept on the track across loads; right-click to re-analyze when the grid itself is wrong">&#9875;</button>
               <button id="songQuantA" class="small song-quant" title="quantize: lit, play waits for the matching grid position (a bar at most) so the entry lands in time; off, play starts the moment it is pressed. Shift+play is one unquantized start either way; cue previews are always immediate">Q</button>
               <button id="songSyncA" class="small" title="rate-lock to the master clock: rate = master / native bpm, riding every tempo migration">sync</button>
               <button id="songMultA" class="small song-mult" title="tempo ratio to the clock: 1× beat-matched, ½× half-time, 2× double-time; chosen automatically, click to pin">1×</button>
               <button id="songKeylockA" class="small" title="keylock: rate changes stretch time, not pitch">key</button>
+              </span>
             </div>
           </div>
         </div>
@@ -209,6 +216,7 @@
             <canvas id="songDetailB" class="song-detail stack-deck-b"></canvas>
             <canvas id="songOverviewB" class="song-overview"></canvas>
             <div class="song-ctl-row">
+              <span class="song-ctl-group">
               <button id="songCueB" class="small song-cue" data-chord-title="cue - hold to preview from the cue point ({app+c}), release to drop back on it, paused. Pressing while paused sets the cue point exactly at the playhead and makes it the beatgrid's downbeat (the waveform pulls onto transients as you scrub); pressing while playing takes the deck back to it">cue</button>
               <span class="song-ctl-sep"></span>
               <button id="songJogDnB" class="small" title="jog back by the jog size (one beat is the bar-fix after sync got the beats right)"><svg class="song-ctl-icon" viewBox="0 0 12 10" aria-hidden="true"><rect x="1" y="1" width="1.6" height="8" rx="0.4"/><path d="M11 1 4.2 5 11 9Z"/></svg></button>
@@ -216,13 +224,16 @@
               <button id="songNudgeUpB" class="small" title="hold: push the platter (+4% while held)"><svg class="song-ctl-icon" viewBox="0 0 12 10" aria-hidden="true"><path d="M2.6 1 9.4 5 2.6 9Z"/></svg></button>
               <button id="songJogUpB" class="small" title="jog forward by the jog size"><svg class="song-ctl-icon" viewBox="0 0 12 10" aria-hidden="true"><path d="M1 1 7.8 5 1 9Z"/><rect x="9.4" y="1" width="1.6" height="8" rx="0.4"/></svg></button>
               <button id="songJogSizeB" class="small deck-loop-len-btn" title="jog size: how many beats one jog steps - click for the next size, right-click for the one before">1</button>
+              </span>
               <span class="song-ctl-gap"></span>
-              <label class="song-bpm-label">bpm <input id="songBpmB" class="song-bpm" type="number" min="20" max="400" step="any" placeholder="&mdash;" /></label>
+              <span class="song-ctl-group">
+              <label class="song-bpm-label" title="the song's tempo in bpm">bpm <input id="songBpmB" class="song-bpm" type="number" min="20" max="400" step="any" placeholder="&mdash;" /></label>
               <button id="songAnchorB" class="small" title="anchor the beatgrid's downbeat at the playhead - kept on the track across loads; right-click to re-analyze when the grid itself is wrong">&#9875;</button>
               <button id="songQuantB" class="small song-quant" title="quantize: lit, play waits for the matching grid position (a bar at most) so the entry lands in time; off, play starts the moment it is pressed. Shift+play is one unquantized start either way; cue previews are always immediate">Q</button>
               <button id="songSyncB" class="small" title="rate-lock to the master clock: rate = master / native bpm, riding every tempo migration">sync</button>
               <button id="songMultB" class="small song-mult" title="tempo ratio to the clock: 1× beat-matched, ½× half-time, 2× double-time; chosen automatically, click to pin">1×</button>
               <button id="songKeylockB" class="small" title="keylock: rate changes stretch time, not pitch">key</button>
+              </span>
             </div>
           </div>
         </div>
@@ -807,6 +818,18 @@
       <div class="lfo-help">drag points · drag a segment to bend it · double-click adds/removes · esc closes</div>
     </div>
 
+    <!-- The env() editor: the envelope modulator drawn the way a device window draws its own, with
+         a number box per setting. Every edit is written back into that env({ ... }) call. -->
+    <div id="envModPanel" class="lfo-panel env-mod-panel hidden">
+      <div class="lfo-panel-head">
+        <span>envelope</span>
+        <span class="spacer"></span>
+        <button id="envModClose" class="small">✕</button>
+      </div>
+      <div id="envModFigure"></div>
+      <div id="envModFields" class="device-widgets"></div>
+    </div>
+
     <!-- The groove manager: swing as a per-slot table rather than one number (see groove.mjs). Two
          drawn lanes - when each slot plays, and how hard - over one bar at the chosen grid. -->
     <div id="groovePanel" class="groove-panel hidden">
@@ -950,6 +973,7 @@
     <!-- The editor's own right-click menu: save the selection as a snippet, or put one back.
          Same widget and placement as the piano roll's (see openCtxMenu). -->
     <div id="editorMenu" class="ctx-menu hidden" role="menu"></div>
+    <div id="headerMenu" class="ctx-menu hidden" role="menu"></div>
 
     <div id="themePanel" class="theme-panel hidden">
       <div class="theme-panel-head">
@@ -1351,6 +1375,7 @@
     <script src="snippet-code.js"></script>
     <script src="projector-frame.js"></script>
     <script src="file-drop.js"></script>
+    <script src="header-menu.js"></script>
     <script src="client.js"></script>
   </body>
 </html>

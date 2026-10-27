@@ -198,7 +198,7 @@ const API_DOCS = {
   env: {
     kind: 'builder',
     sig: 'env({ attack, decay, sustain, release, curve, retrigger })',
-    desc: 'An ADSR envelope, triggered by the track\'s notes. attack, decay and release are in seconds; sustain is a level from 0 to 1. curve shapes each segment: negative is exponential, 0 is linear, positive bows outward. With retrigger: true every note restarts the attack, including notes that overlap the one before.',
+    desc: 'An ADSR envelope, triggered by the track\'s notes; double-click the name to open the envelope editor. attack, decay and release are in seconds; sustain is a level from 0 to 1. curve shapes each segment: negative is exponential, 0 is linear, positive bows outward. With retrigger: true every note restarts the attack, including notes that overlap the one before.',
     eg: 'gain(env({ attack: 0.01, release: 0.3 }))',
   },
   dur: {

@@ -25,6 +25,7 @@ import { fxKnobValue, assertFxKnobIndex } from './fxknobs.mjs';
 import { Frac } from './frac.mjs';
 import { chordIntervals, chordExtension, invertVoices, spreadVoices, voicingVoices, leadVoices, VOICING_NAMES, justVoices, JI_LIMITS } from './harmony.mjs';
 import { rateLedger } from './lfo-rate.mjs';
+import { ENV_DEFAULTS } from './envctl.mjs';
 
 /**
  * @typedef {Object} Step
@@ -8179,7 +8180,8 @@ export function sampleEnvIR(ir, pos, cps = 1) {
  * overlaps.
  */
 export function env(opts = {}) {
-  const { attack = 0.01, decay = 0.1, sustain = 0.7, release = 0.2, curve = -4, retrigger = false } = opts;
+  const d = ENV_DEFAULTS; // the env() editor draws a missing setting at the same value (envctl.mjs)
+  const { attack = d.attack, decay = d.decay, sustain = d.sustain, release = d.release, curve = d.curve, retrigger = false } = opts;
   return withEnvIR({ attack, decay, sustain, release, curve, retrigger: retrigger === true, min: 0, max: 1 });
 }
 

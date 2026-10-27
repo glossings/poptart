@@ -45,6 +45,7 @@ let slicesMod = null; // slices.mjs - reading, tidying and writing a _slices() s
 let samplerctlMod = null; // samplerctl.mjs - the envelope panel's sampler-control reads and code edits
 let grooveMod = null; // groove.mjs - the groove table's format, its presets and its slot arithmetic
 let lfoRateMod = null; // lfo-rate.mjs - a patterned LFO rate's phase count, for the shape panel's playhead
+let envctlMod = null; // envctl.mjs - the env() editor's reads and code edits
 // Resolves once pattern-core is loaded (or failed) - the startup prebake waits on it so a
 // top-level noteToMidi()/etc. call in the prebake never races the import.
 const coreReady = Promise.all([
@@ -63,8 +64,10 @@ const coreReady = Promise.all([
   import('/pattern-core/samplerctl.mjs'),
   import('/pattern-core/groove.mjs'),
   import('/pattern-core/lfo-rate.mjs'),
+  import('/pattern-core/envctl.mjs'),
 ])
-  .then(([m, l, s, pr, nt, mx, rc, ar, hm, ro, sl, gr, sc, gv, lr]) => {
+  .then(([m, l, s, pr, nt, mx, rc, ar, hm, ro, sl, gr, sc, gv, lr, ec]) => {
+    envctlMod = ec;
     grooveMod = gv;
     lfoRateMod = lr;
     groupsMod = gr;
@@ -89,6 +92,7 @@ const coreReady = Promise.all([
     initPackPanel();
     initSlicePanel();
     initEnvelopePanel();
+    initEnvModPanel();
     initGroovePanel();
     initWidgetHandles(); // double-click a call's name to open its editor (needs all of the above)
     updateMutedDim();
@@ -3278,7 +3282,7 @@ function attachWidgetHandles(editor) {
 // Names that could be a handle. Checked before any finder runs: this is asked on every pointer
 // move, and parsing the buffer to discover the pointer is over `const` would be work for nothing.
 // The envelope panel's own words are asked separately, off the set the panel already keeps.
-const CALL_HANDLE_WORDS = new Set(['_arrange', 'auto', 'lfo', 'grainshape', 'pianoroll', 'preset',
+const CALL_HANDLE_WORDS = new Set(['_arrange', 'auto', 'lfo', 'env', 'grainshape', 'pianoroll', 'preset',
   'sp', 'slice', 'slices', 'record', 'synth', 'fx']);
 
 let handleMark = null; // the underline currently drawn, in whichever pane the pointer is over
@@ -3319,6 +3323,7 @@ function isWidgetHandleAt(editor, code, idx) {
   if (editor === fxEdCM) return !!fxChainSlotAt(code, idx);
   if (arrangeMod && (findArrangeCallAt(code, idx)?.onName || findAutoCallAt(code, idx)?.onName)) return true;
   if (shapeMod && findLfoCallAt(code, idx)?.onName) return true;
+  if (envctlMod?.findEnvCallAt(code, idx)?.onName) return true;
   if (pianorollMod && findPianorollCallAt(code, idx)?.onName) return true;
   if (findPresetCallAt(code, idx)?.onName) return true;
   if (findSpCallAt(code, idx)?.onName) return true;
@@ -3378,6 +3383,14 @@ function openWidgetAt(code, idx, ed = cm) {
       return true;
     }
     if (!lfoState || lfoCM !== ed || lfo.start !== lfoState.callStart) openLfoEditor(lfo, ed);
+    return true;
+  }
+  // env({ attack, decay, ... }) - the envelope modulator, drawn as the device windows draw theirs.
+  // Not the sampler's envelope panel: that one is the `.adsr()`/`.attack()` controls of an s()
+  // chain, drawn over the sample (see openEnvelopeAt).
+  const envCall = envctlMod?.findEnvCallAt(code, idx);
+  if (envCall?.onName) {
+    openEnvModEditor(envCall, ed);
     return true;
   }
   const roll = pianorollMod && findPianorollCallAt(code, idx);
@@ -4253,6 +4266,9 @@ function figureHz(hz) {
   return figurePad(hz >= 1000 ? `${(hz / 1000).toFixed(2)} kHz` : `${Math.round(hz)} Hz`, 9);
 }
 
+/** An audio file's extension, which a name shown in the UI leaves off - the full name is in the tooltip. */
+const AUDIO_EXT_RE = /\.(wav|wave|aiff?|flac|mp3|ogg|oga|opus|m4a)$/i;
+
 /**
  * One figure: a heading with its readout, and the canvas under it.
  *
@@ -4260,6 +4276,18 @@ function figureHz(hz) {
  * is what a drag calls per frame, and what an evaluation calls once.
  */
 function deviceFigure(trackLabel, slot, figure) {
+  const { cell, entry } = figureCell(figure, figureSender(trackLabel, slot), trackLabel, slot);
+  deviceFigureEls.set(figure.id, entry);
+  return cell;
+}
+
+/**
+ * The cell deviceFigure draws, and its { figure, update, paint } entry, with its gestures handed to
+ * `send(body, commit)` - the device route for a device's window, or whatever else owns the values
+ * the picture is drawn from (the env() editor writes them into the code). `trackLabel` and `slot`
+ * are only read by controls a figure carries in its heading.
+ */
+function figureCell(figure, send, trackLabel = null, slot = null) {
   const cell = document.createElement('div');
   cell.className = 'device-figure';
 
@@ -4366,12 +4394,11 @@ function deviceFigure(trackLabel, slot, figure) {
     // a drag, so it cannot live on the figure data.
     focus: 1,
   };
-  deviceFigureEls.set(figure.id, entry);
-  wireFigureDrag(canvas, trackLabel, slot, entry);
+  wireFigureDrag(canvas, entry, send);
   // A canvas has no size until it is laid out, so the first paint waits a frame rather than
   // drawing into a one-pixel box.
   requestAnimationFrame(paint);
-  return cell;
+  return { cell, entry };
 }
 
 /**
@@ -4419,11 +4446,10 @@ function figureLevelAt(y, h) {
  * An `adsr` has named handles and is dragged by them; everything else is a field whose `drag` map
  * says which parameter each axis moves.
  */
-function wireFigureDrag(canvas, trackLabel, slot, entry) {
+function wireFigureDrag(canvas, entry, send) {
   const figure = entry.figure();
   const handled = new Set(['adsr', 'eq', 'band', 'matrix']);
   if (!handled.has(figure.kind) && !figure.drag) return;
-  const send = figureSender(trackLabel, slot);
 
   canvas.addEventListener('pointerdown', (e) => {
     const f = entry.figure();
@@ -4891,7 +4917,7 @@ const FIGURE_DRAWERS = {
    */
   wavetable(ctx, w, h, f, c) {
     const waveH = Math.max(8, h - FIGURE_SCRUB_H - 4);
-    if (!f.wave.length) return figurePad(f.loading ? 'loading' : 'no table', 24);
+    if (!f.wave.length) return figurePad(f.loading ? 'loading' : 'no table', 14);
 
     // The table as a stack leaning away from you, the same drawing the file picker makes, with
     // the cycle the oscillator is actually reading - blended and warped - in front of it. One
@@ -4919,23 +4945,27 @@ const FIGURE_DRAWERS = {
     ctx.arc(hx, sy, 4, 0, Math.PI * 2);
     ctx.fill();
 
-    // Which frame the position is on, in the corner of the picture it belongs to rather than in
-    // a heading above it - the frame is a fact about the drawing, and the heading carries the
-    // name of the table already.
+    // Which frame the position is on - and, where the table names its frames, which two it is
+    // between - in the corner of the picture it belongs to rather than in the heading: these are
+    // facts about the drawing, and the heading carries the table's name and the warp. So is a
+    // cross-mod warp the picture cannot show, said where the picture is.
     const [lo, hi] = f.between;
+    const names = f.frameNames;
+    const between = !names ? '' : lo === hi ? names[lo] : `${names[lo]} \u2192 ${names[hi]}`;
     ctx.font = '9px ui-monospace, monospace';
     ctx.textAlign = 'end';
     ctx.textBaseline = 'bottom';
     ctx.fillStyle = c.dim;
-    ctx.fillText(`${lo + 1} / ${f.frameCount}`, w - 4, waveH - 2);
+    ctx.fillText(`${between ? `${between}  ` : ''}${lo + 1} / ${f.frameCount}`, w - 4, waveH - 2);
+    if (f.cross) {
+      ctx.textBaseline = 'top';
+      ctx.fillText('warp not drawn', w - 4, 2);
+    }
     ctx.textAlign = 'start';
 
-    // The heading says what the position is between, where the table names its frames, and what
-    // the warp is doing - both printed whether or not they have anything to say.
-    const names = f.frameNames;
-    const between = figurePad(!names ? '' : lo === hi ? names[lo] : `${names[lo]} \u2192 ${names[hi]}`, 16);
-    const warp = `${figurePad(f.warpModeName ?? 'warp', 9)} ${figurePad(`${Math.round(f.warp * 100)}%`, 4)}`;
-    return `${between} \u00b7 ${warp}${f.cross ? ' (not drawn)' : figurePad('', 12)}`;
+    // The heading reads the warp, at one width whatever it says, so the table picker beside it
+    // never moves.
+    return `${figurePad(f.warpModeName ?? 'warp', 9)} ${figurePad(`${Math.round(f.warp * 100)}%`, 4)}`;
   },
 
   /**
@@ -5953,7 +5983,8 @@ function deviceWidget(trackLabel, slot, widget, { bare = false } = {}) {
       const cut = ref.indexOf(':');
       const tail = ref.slice(cut + 1);
       const file = tail.slice(tail.lastIndexOf('/') + 1);
-      return widget.sampleAs === 'wavetable' || cut < 0 ? file : `${ref.slice(0, cut)} \u00b7 ${file}`;
+      const bare = file.replace(AUDIO_EXT_RE, '');
+      return widget.sampleAs === 'wavetable' || cut < 0 ? bare : `${ref.slice(0, cut)} \u00b7 ${bare}`;
     };
     const named = () => widget.options?.[Math.round(widget.value)] ?? 'none';
     const paint = (ref) => {
@@ -6252,7 +6283,7 @@ function drawFilePickFiles() {
   filePickFilesEl.innerHTML = '';
   for (const entry of here) {
     const row = document.createElement('div');
-    row.textContent = entry.name;
+    row.textContent = String(entry.name).replace(AUDIO_EXT_RE, '');
     row.title = entry.ref;
     if (entry.ref === filePicker.selected) row.classList.add('on');
     row.onclick = () => selectFilePick(entry.ref);
@@ -26550,6 +26581,267 @@ function initSlicePanel() {
 }
 
 // ---------------------------------------------------------------------------------------------
+// The env() editor - the envelope modulator, drawn the way a device window draws its own.
+//
+// The picture IS the device windows' `adsr` figure: web-engine's figures.mjs computes it from a
+// small descriptor of env()'s settings, through the curve function the envelope generator runs,
+// and FIGURE_DRAWERS.adsr draws it with the device figures' own gestures (wireFigureDrag) - drag
+// a point for its stage, the plateau for the sustain level, and the wheel over a stage (or a drag
+// up and down on it) for the curve. env() has one curve for all three stages, so all three bend it.
+// A number box per setting sits under it, for typing an exact value.
+//
+// Every change is written back into the call's own `{ ... }` (see envctl.mjs) when the gesture
+// ends, and the deck re-evaluates a moment later - what the shape editor's rate box does. A setting
+// written as anything but a number is shown and never overwritten: its box prints the code, and
+// its handle on the picture does not move, the way a driven device control does not turn.
+// ---------------------------------------------------------------------------------------------
+
+const envModPanel = document.getElementById('envModPanel');
+const envModFigureEl = document.getElementById('envModFigure');
+const envModFieldsEl = document.getElementById('envModFields');
+const ENV_MOD_EVAL_DEBOUNCE_MS = 150; // the shape editor's: a setting is heard as soon as you stop
+
+// The number boxes, in the order env() lists its settings. Unbounded where env() is: a time is
+// never negative and a sustain is a level, but nothing caps how long a stage runs or how hard a
+// curve bends.
+const ENV_MOD_FIELDS = [
+  { id: 'attack', min: 0, max: Infinity, step: 0.001, decimals: 3, unit: 's', description: 'Seconds from silence to full level.' },
+  { id: 'decay', min: 0, max: Infinity, step: 0.001, decimals: 3, unit: 's', description: 'Seconds from full level down to the sustain level.' },
+  { id: 'sustain', min: 0, max: 1, step: 0.01, decimals: 2, description: 'The level held while the note is down, from 0 to 1.' },
+  { id: 'release', min: 0, max: Infinity, step: 0.001, decimals: 3, unit: 's', description: 'Seconds from the sustain level to silence once the note ends.' },
+  { id: 'curve', min: -Infinity, max: Infinity, step: 0.1, decimals: 1,
+    description: 'Shapes every stage. Zero is a straight line; negative moves fast and levels off, positive holds back and then rushes.' },
+];
+
+// { at, mods, read, draft, entry, setters } - the call on screen. `at` is a bookmark on its name,
+// which moves with the text; `read` is what the code says (envctl's readEnvCall) and `draft` what a
+// gesture in progress has moved, laid over it. `setters` repaint the number boxes by setting.
+let envModState = null;
+let envModCM = cm; // the deck the call is in - see prCM
+let envModWriting = false; // our own write is landing: the code is not changing under the panel
+const envModEvalSoon = { timer: null, ed: null };
+let envModModsPromise = null;
+
+/** web-engine's figure builder and parameter curve, loaded the first time the editor opens. */
+function envModLoad() {
+  envModModsPromise ??= Promise.all([import('/web-engine/src/figures.mjs'), import('/web-engine/src/descriptor.mjs')])
+    .then(([figures, descriptor]) => ({ buildFigures: figures.buildFigures, denormalize: descriptor.denormalize }));
+  return envModModsPromise;
+}
+
+/**
+ * env() as the device descriptor the figure is built from. The curve's range is the device
+ * envelopes' own (see web-engine's wavetable.mjs), which is what the wheel steps across; a curve
+ * typed past it is still drawn as written.
+ */
+function envModDescriptor() {
+  const d = envctlMod.ENV_DEFAULTS;
+  return {
+    params: [
+      { id: 'attack', min: 0, max: Infinity, default: d.attack },
+      { id: 'decay', min: 0, max: Infinity, default: d.decay },
+      { id: 'sustain', min: 0, max: 1, default: d.sustain },
+      { id: 'release', min: 0, max: Infinity, default: d.release },
+      { id: 'curve', min: -8, max: 8, step: 0.1, default: d.curve },
+    ],
+    figures: [{
+      id: 'envmod',
+      kind: 'adsr',
+      description: 'The envelope, drawn through its curve. Drag a point for its stage, the plateau for the sustain level, and turn the wheel over a stage to bend the curve.',
+      params: { attack: 'attack', decay: 'decay', sustain: 'sustain', release: 'release', acurve: 'curve', dcurve: 'curve', rcurve: 'curve' },
+      subsumes: [],
+    }],
+  };
+}
+
+/** The call the panel is on, found again from its bookmark - null once it has gone. */
+function envModCall() {
+  const pos = envModState?.at.find();
+  if (!pos) return null;
+  const code = envModCM.getValue();
+  const idx = envModCM.indexFromPos(pos);
+  const call = envctlMod.findEnvCallAt(code, idx);
+  return call && call.start === idx ? { call, code } : null;
+}
+
+/** Re-reads the call from the code. False (and the panel closed) once it is no longer there. */
+function envModRead() {
+  const found = envModCall();
+  if (!found) {
+    closeEnvModEditor();
+    return false;
+  }
+  envModState.read = envctlMod.readEnvCall(found.code, found.call);
+  return true;
+}
+
+/** Every setting as a number: the gesture in progress over what the code says. */
+function envModValues() {
+  return { ...envModState.read.values, ...(envModState.draft ?? {}) };
+}
+
+/** What a setting is written as when the editor may not change it, else null. */
+function envModFixedText(key) {
+  const { arg, fields } = envModState.read;
+  if (arg.kind === 'opaque') return arg.text;
+  const f = fields[key];
+  return f && !f.literal ? f.text : null;
+}
+
+function envModFigureData() {
+  const modulated = new Map();
+  for (const { id } of ENV_MOD_FIELDS) {
+    const fixed = envModFixedText(id);
+    if (fixed != null) modulated.set(id, fixed);
+  }
+  return envModState.mods.buildFigures(envModDescriptor(), envModValues(), { modulated })[0];
+}
+
+// `ed` is the deck the call is in; opened from the other deck, the panel moves across.
+async function openEnvModEditor(call, ed = cm) {
+  if (envModState && envModCM === ed && envModCall()?.call.start === call.start) {
+    bringPanelToFront(envModPanel);
+    return;
+  }
+  if (envModState) closeEnvModEditor();
+  envModCM = ed;
+  const state = {
+    at: ed.setBookmark(ed.posFromIndex(call.start), { insertLeft: true }),
+    mods: null,
+    read: null,
+    draft: null,
+    entry: null,
+    setters: {},
+  };
+  envModState = state;
+  try {
+    state.mods = await envModLoad();
+  } catch (e) {
+    envModModsPromise = null;
+    logLine(`the envelope editor could not load: ${e.message ?? e}`, true);
+    if (envModState === state) closeEnvModEditor();
+    return;
+  }
+  if (envModState !== state || !envModRead()) return;
+  envModBuild();
+  envModPanel.classList.remove('hidden');
+  bringPanelToFront(envModPanel);
+}
+
+function closeEnvModEditor() {
+  if (!envModState) return;
+  envModState.at.clear();
+  envModState = null;
+  envModPanel.classList.add('hidden');
+  envModFigureEl.replaceChildren();
+  envModFieldsEl.replaceChildren();
+}
+
+/** The picture and the boxes, from scratch - on opening, and when the code changes under them. */
+function envModBuild() {
+  const st = envModState;
+  const { cell, entry } = figureCell(envModFigureData(), envModSend);
+  st.entry = entry;
+  envModFigureEl.replaceChildren(cell);
+  st.setters = {};
+  envModFieldsEl.replaceChildren(...ENV_MOD_FIELDS.map(envModField));
+}
+
+/** One setting's box: the device window's number box, under the setting's name. */
+function envModField(spec) {
+  const st = envModState;
+  const fixed = envModFixedText(spec.id);
+  const cell = document.createElement('div');
+  cell.className = 'device-widget';
+  const name = document.createElement('div');
+  name.className = 'device-widget-name';
+  name.textContent = spec.id;
+  cell.appendChild(name);
+  if (fixed != null) {
+    cell.classList.add('driven');
+    cell.title = st.read.arg.kind === 'opaque' ? `env(${fixed})` : `${spec.id}: ${fixed}`;
+  } else {
+    cell.title = spec.description;
+  }
+  const widget = { ...spec, value: envModValues()[spec.id], modulatedBy: fixed, text: fixed ?? undefined };
+  cell.appendChild(deviceNumber(widget, {
+    onDrag: (value, paint) => { paint(); envModPreview({ [spec.id]: value }); },
+    onCommit: (value, paint) => { paint(); envModCommit({ [spec.id]: value }); },
+    register: fixed != null ? null : (fn) => { st.setters[spec.id] = fn; },
+  }));
+  return cell;
+}
+
+/** A gesture on the picture, as the device route would get it: seconds and levels, or a position. */
+function envModSend(body, commit) {
+  if (!envModState?.mods) return;
+  const params = envModDescriptor().params;
+  const set = {};
+  for (const one of body.params ?? [body]) {
+    const param = params.find((p) => p.id === one.id);
+    if (!param) continue;
+    set[one.id] = one.value !== undefined ? one.value : envModState.mods.denormalize(param, one.position);
+  }
+  if (commit) envModCommit(set);
+  else envModPreview(set);
+}
+
+/** A gesture in progress: drawn and printed, not yet written. */
+function envModPreview(set) {
+  if (!envModState) return;
+  envModState.draft = { ...(envModState.draft ?? {}), ...set };
+  envModRepaint();
+}
+
+function envModRepaint() {
+  const st = envModState;
+  st.entry?.update(envModFigureData());
+  const values = envModValues();
+  for (const [key, set] of Object.entries(st.setters)) set(values[key]);
+}
+
+/** A finished gesture: into the call's own object, then heard. */
+function envModCommit(set) {
+  const found = envModCall();
+  if (!found) {
+    closeEnvModEditor();
+    return;
+  }
+  const { edits } = envctlMod.envCallEdits(found.code, found.call, set);
+  envModWriting = true;
+  try {
+    // Back to front, so each edit's offsets are still the document's when it lands.
+    envModCM.operation(() => {
+      for (const e of edits) envModCM.replaceRange(e.text, envModCM.posFromIndex(e.from), envModCM.posFromIndex(e.to));
+    });
+  } finally {
+    envModWriting = false; // never leave it latched: the panel would stop following the code
+  }
+  envModState.draft = null;
+  if (!envModRead()) return;
+  envModRepaint();
+  if (edits.length) deckEvalSoon(envModEvalSoon, envModCM, ENV_MOD_EVAL_DEBOUNCE_MS);
+}
+
+// The code moved under the panel - a typed edit, an undo - so the panel follows it. Not mid-gesture:
+// the hand is the source of truth until it lets go, and its commit reads the code afresh anyway.
+function envModSyncFromCode() {
+  if (!envModState?.mods || envModWriting || envModState.draft) return;
+  if (!envModRead()) return;
+  envModBuild();
+}
+
+function initEnvModPanel() {
+  document.getElementById('envModClose').addEventListener('click', () => closeEnvModEditor());
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && envModState) closeEnvModEditor();
+  });
+  window.addEventListener('resize', () => envModState?.entry?.paint());
+  // Either deck's edits, but only those to the buffer the call is in.
+  onEveryDeck((ed) => ed.on('change', () => { if (ed === envModCM) envModSyncFromCode(); }));
+}
+
+// ---------------------------------------------------------------------------------------------
 // Envelope panel - a sampler chain's amplitude envelope, drawn over the sample it shapes.
 //
 // The envelope's times are seconds (see Sig#attack), which is what makes drawing it over the
@@ -28688,6 +28980,35 @@ document.getElementById('docsLink')?.addEventListener('click', (e) => {
   e.currentTarget.href = `/docs/?theme=${encodeURIComponent(theme)}`;
 });
 
+// The header's ⋯: in a window too narrow for the theme picker, its edit button and the docs link,
+// those fold into this menu (the header breakpoints at the end of style.css show one or the
+// other). Each entry does what the folded control does - the docs entry clicks the hidden link,
+// so it opens the same way and carries the theme the same way.
+const headerMoreBtn = document.getElementById('headerMoreBtn');
+const headerMenuEl = document.getElementById('headerMenu');
+headerMoreBtn.addEventListener('click', () => {
+  if (!headerMenuEl.classList.contains('hidden')) { headerMenuEl.classList.add('hidden'); return; }
+  const r = headerMoreBtn.getBoundingClientRect();
+  openCtxMenu(headerMenuEl, r.left, r.bottom + 4, {
+    items: headerMenuItems({
+      themes: [...themeSelect.options].map((o) => [o.value, o.textContent]),
+      current: themeSelect.value,
+      onTheme: applyTheme,
+      onEditTheme: () => themeEditBtn.click(),
+      onDocs: () => document.getElementById('docsLink').click(),
+    }),
+  });
+});
+// Away on any press outside it (the button's own press is its toggle), on Escape, and when the
+// window resizes - a wider window puts the controls it holds back in the header.
+document.addEventListener('pointerdown', (e) => {
+  if (!headerMenuEl.contains(e.target) && !headerMoreBtn.contains(e.target)) headerMenuEl.classList.add('hidden');
+}, true);
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !headerMenuEl.classList.contains('hidden')) { headerMenuEl.classList.add('hidden'); e.stopPropagation(); }
+}, true);
+window.addEventListener('resize', () => headerMenuEl.classList.add('hidden'));
+
 playBtn.addEventListener('click', togglePlay);
 updateBtn.addEventListener('click', () => evaluate(false, { byHand: true }));
 scanBtn.addEventListener('click', doScan);
@@ -29568,7 +29889,7 @@ function finishDjExit() {
 
 /**
  * Put away every panel that is editing `ed`'s buffer - the piano roll, the shape and groove
- * editors, the preset, pack, slice, envelope and record panels. For a deck whose buffer is about to
+ * editors, the preset, pack, slice, envelope, env() and record panels. For a deck whose buffer is about to
  * go (deck B, as DJ mode ends): a panel left open on it would go on writing into an editor nobody
  * can see.
  */
@@ -29581,6 +29902,7 @@ function closePanelsOn(ed) {
   if (packState && packCM === ed) closePackPanel();
   if (sliceState && sliceCM === ed) closeSlicePanel();
   if (envState && envCM === ed) closeEnvelopePanel();
+  if (envModState && envModCM === ed) closeEnvModEditor();
   if (recordState && recCM === ed) closeRecordPanel();
 }
 

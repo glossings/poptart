@@ -2331,6 +2331,36 @@ li.CodeMirror-hint-active {
   font-size: 12px;
 }
 
+/* The env() editor: the shape editor's chrome around a device window's envelope figure and its
+   number boxes - the same picture and the same boxes, opened from the code instead of a device. */
+/* Five boxes of a device widget's width, their gaps and the gutter: one row, never two. */
+.env-mod-panel {
+  width: 400px;
+}
+
+.env-mod-panel .device-figure {
+  padding: 10px 10px 4px;
+}
+
+.env-mod-panel .device-widgets {
+  justify-content: space-between;
+  padding: 4px 10px 10px;
+}
+
+/* A setting the code writes as something other than a number: its text, read-only, in the accent
+   a driven control is named in. Cut to the box, so a long pattern does not widen the row. */
+.env-mod-panel .device-widget.driven .device-number {
+  display: block;
+  padding: 0 4px;
+  line-height: 26px;
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--accent);
+  cursor: default;
+}
+
 /* The groove lanes docked under the roll's grid: a strip in the panel's own flow, the way the
    value lane lives inside the canvas above it. The canvas keeps #grooveCanvas's own face; only its
    floating margin goes, since the strip's padding is the spacing here and the left offset is set
@@ -4942,6 +4972,27 @@ body.mix-on #deckBPane {
   #deckAHead > .deck-head-gap {
     display: none;
   }
+  /* The song pane under it, by the same rule. The title row's title steps aside - the head
+     above already says it on a line of its own - and leaves its slack to the readouts; a deck
+     too narrow even for those gives the time a line under them rather than cutting it. (These
+     rules are written one class longer than the base ones further down, which they must beat.) */
+  .song-pane .song-title-row {
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    row-gap: 2px;
+  }
+  .song-title-row > .song-title {
+    visibility: hidden;
+  }
+  /* The transport row says "bpm" only where there is room for it (the box keeps the tooltip),
+     and its two halves - the platter, the tempo - take a line each when they cannot share one. */
+  .song-ctl-row .song-bpm-label {
+    font-size: 0;
+  }
+  .song-pane .song-ctl-row {
+    flex-wrap: wrap;
+    row-gap: 4px;
+  }
 }
 /* The set's queue bookkeeping - never shown (the song button below is the picker). */
 #deckAFile,
@@ -5556,12 +5607,26 @@ body.mix-on #deckBPane {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   color: var(--accent);
   white-space: nowrap;
+  /* Room for the longest it says ("-100.0%") whether or not it is showing, so the rate coming
+     and going never moves the readouts beside it. */
+  min-width: 7ch;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
 }
 .song-ctl-row {
   display: flex;
   align-items: center;
   gap: 6px;
   flex: none;
+}
+/* The row's two halves - cue and the platter, then the tempo controls - each kept whole, so a
+   deck too narrow for one line (see the deck container query) breaks between them, never inside. */
+.song-ctl-group {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  row-gap: 4px;
 }
 /* The transport glyphs (jog |◀ ▶| and nudge ◀ ▶) are drawn, not typed: as text, the bar and
    the arrow are two characters of a font with no say in how they line up - the bar sat off the
@@ -7097,4 +7162,140 @@ html[data-embed] .cm-s-poptart .CodeMirror-gutters {
 #replayKeep.on {
   color: var(--accent);
   border-color: var(--accent);
+}
+
+/* ------------------------------------------------------- narrow windows: the header + the desk */
+
+/* These sit at the END of the file on purpose: the rules they override are thousands of lines up,
+   and at equal specificity the later rule wins. */
+
+/* The header's ⋯ (see headerMenuItems): shown only while the controls it holds are folded away.
+   Sized like the theme's edit button it stands in for. */
+#headerMoreBtn {
+  display: none;
+  padding: 0 10px;
+}
+
+/* The header never wraps and never pushes the page sideways: as the window narrows it gives up its
+   least important pieces first, and play/stop and update stay on screen at every width. The widths
+   are where the full row stops fitting: with every control, it is 1233 px (each later step is that,
+   less what the steps before it gave up). The clip is the last resort below the last step (see 4),
+   and only sideways - the rec options still drop down under their button. */
+.layout > header {
+  overflow-x: clip;
+}
+/* 1. The headphone knobs keep their knobs and lose their words (the knobs' tooltips say them). */
+@media (max-width: 1240px) {
+  .phones-knob > span {
+    display: none;
+  }
+}
+/* 2. The phrase circles. */
+@media (max-width: 1145px) {
+  #phraseViz {
+    display: none;
+  }
+}
+/* 3. The theme picker, its edit button and the docs link fold into the ⋯ menu. */
+@media (max-width: 1060px) {
+  #themeSelect,
+  #themeEditBtn,
+  #docsLink {
+    display: none;
+  }
+  #headerMoreBtn {
+    display: inline-flex;
+  }
+}
+/* 4. Below the narrowest supported window: the wordmark goes (the logo says it), the spacing
+   tightens, and the engine's status pill is the one thing that may shrink, ending in "…" -
+   it still colors itself for ready and down. */
+@media (max-width: 830px) {
+  .layout > header {
+    /* With room to spare the spacer takes it all and this changes nothing; with none left, the
+       row overflows at its START, so what the clip takes is the logo end, never play and update. */
+    justify-content: flex-end;
+    gap: 6px;
+    padding-left: 10px;
+    padding-right: 10px;
+  }
+  .layout > header h1 {
+    display: none;
+  }
+  .layout > header > * {
+    flex: none;
+  }
+  .layout > header > .spacer {
+    flex: 1;
+  }
+  .layout > header > .status {
+    flex: 0 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}
+
+/* The desk. Its fixed columns (the knobs, faders, meters and the center) take 704 px with the
+   strip's padding, 684 inside it (a container query measures the inside); the two
+   track columns share what is left. Folded in the same order as everything else - words first,
+   then pieces - against the strip's own width, so a collapsed sidebar gets the roomy desk back. */
+body.mix-on #mixStrip {
+  container: strip / inline-size;
+}
+/* 1. The decks' names go (the desk is mirrored: A is left, B right), and the stem names give way
+   to the faders beside them, ending in "…". 1060 = the fixed 684 inside the strip's padding, plus
+   two 188 px track columns, the width a stem's row takes with its whole name and fader. */
+@container strip (max-width: 1059px) {
+  .mix-deck-head > strong {
+    display: none;
+  }
+  #mixStrip .mix-name {
+    flex: 0 1 70px;
+    min-width: 0;
+  }
+}
+/* 2. The knob columns and the center drop their side padding; each deck's cue and mute-all stand one above the other,
+   and a stem's fader takes the line under its gate and name. The two heads stay packed toward the
+   center, mirroring each other. */
+@container strip (max-width: 959px) {
+  .mix-knobs,
+  .mix-center {
+    padding-left: 0;
+    padding-right: 0;
+  }
+  .mix-deck-head {
+    flex-direction: column;
+    align-items: flex-end; /* deck A's toward the center, as on one line */
+    gap: 3px;
+  }
+  .mix-tracks-col:last-child .mix-deck-head {
+    align-items: flex-start;
+  }
+  .mix-deck-head > .spacer {
+    display: none;
+  }
+  #mixStrip .mix-track {
+    flex-wrap: wrap;
+    row-gap: 2px;
+  }
+  #mixStrip .mix-ctl {
+    flex-basis: 100%;
+    min-width: 0;
+  }
+}
+/* With the sidebar open, a window this narrow leaves the desk less than it can fold into, so the
+   sidebar stops above the desk and the desk takes the window's full width (its center then sits at
+   the window's middle rather than under the seam between the decks). 1110 = the sidebar's 320 px
+   plus the 790 px the folded desk needs. */
+@media (max-width: 1110px) {
+  body.mix-on aside {
+    grid-row: 3;
+  }
+  body.mix-on #djStripResize,
+  body.mix-on #mixStrip,
+  body.mix-on #djStripRail {
+    grid-column: 1 / -1;
+  }
 }
