@@ -60,5 +60,15 @@
       "source": "rendered by packages/web-engine/build/render-packs.mjs",
       "by": null
     }
-  ]
+  ],
+  "shortNames": {
+    "bd": "kick.wav",
+    "sd": "snare.wav",
+    "rim": "rim.wav",
+    "cp": "clap.wav",
+    "hh": "hat.wav",
+    "oh": "hatopen.wav",
+    "lt": "tomlo.wav",
+    "ht": "tomhi.wav"
+  }
 }

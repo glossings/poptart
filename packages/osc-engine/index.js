@@ -1657,6 +1657,23 @@ class OscEngine {
   }
 
   /**
+   * The pack `.bank()` makes of a pack name: s("bd").bank("808") plays the pack "808_bd". A bank
+   * this machine has no pack for warns once and plays the pack the pattern named, so a pattern
+   * written for a bank the browser build downloads still plays here. Only a plain pack name takes
+   * a bank; a named pack, a file or a recording is played as written.
+   */
+  _bankRef(ref, bank) {
+    const name = String(bank ?? '').trim();
+    if (!name || ref.includes(':')) return ref;
+    const banked = `${name}_${ref}`;
+    if (this._warned.has(`bank:${banked}`)) return ref; // looked once and it was not there, as a missing pack stays missing
+    const known = this._packs.get(banked);
+    if (known ? known.status !== 'error' : listPackFiles(banked)) return banked;
+    this._warnOnce(`bank:${banked}`, `[poptart] .bank(${JSON.stringify(name)}): there is no "${banked}" pack in ${samplesRoot()} - playing "${ref}"`);
+    return ref;
+  }
+
+  /**
    * What a sampler source ref names on disk. A ref is the mini-notation value with a namespace in
    * front: a bare name is a PACK (s("bd") - a folder, addressed further by index), "sp:<id>" is a
    * NAMED pack (sp("kit") - a hand-picked list of files the host pushed via defineSamplePacks,
@@ -1838,6 +1855,7 @@ class OscEngine {
     // a ducker/arp keyed off a drum pattern triggers even before the pack finishes loading (when
     // the sample itself would still be silent).
     this._fanoutMidiSample(trackId, cfg.vel ?? 1, onsetSec, offsetSec, cfg.note ?? null);
+    if (cfg.bank != null) ref = this._bankRef(ref, cfg.bank);
     const entry = this._ensurePack(ref);
     if (entry.status !== 'ready' || entry.files.length === 0) return { skipped: `source "${ref}" ${entry.status}` };
 

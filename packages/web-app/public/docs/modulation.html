@@ -91,7 +91,7 @@ _shape("wobble", "0,0 0.5,1,-3 1,0")</code></pre>
   .fx("Filter").param("Mode", "ladder")
   .param("Cutoff", env({ attack: 0.01, decay: 0.2, sustain: 0.1 })
     .range(0.25, 0.7)).postgain(0.45)
-kick: s("pt_kit:0*4").postgain(0.45)</code></pre>
+kick: s("bd*4").postgain(0.45)</code></pre>
         <p>
           <code>retrigger: true</code> starts the attack again on every note, even while the last one is
           still held. <code>dur()</code> is the current note's length in seconds, for anything that should

@@ -111,6 +111,8 @@ export function createHost({
   wavetables = null,
   builtIn = [],
   builtInUrl = null,
+  // The shipped packs' short names (`bd` is pt_kit's kick), as { id, of, file } - see samples.mjs.
+  shortNames = [],
   library = { packs: [], problems: [] },
   remotePacks = null,
   // Lines for the editor's console that arrive between requests (samples() finishing a download,
@@ -157,10 +159,14 @@ export function createHost({
   /** Every pack the page knows, built-in first, each with where its files are. */
   function allPacks() {
     const out = [];
-    for (const m of builtIn) out.push({ manifest: m, urlFor: builtInUrl });
+    // A folder in the sample library with a shipped pack's name plays in its place, so it is listed
+    // in its place too.
+    const local = localFolder?.packs() ?? [];
+    const mine = new Set(local.map((p) => p.manifest.id));
+    for (const m of builtIn) if (!mine.has(m.id)) out.push({ manifest: m, urlFor: builtInUrl });
     for (const m of library.packs) out.push({ manifest: m, urlFor: library.urlFor ?? null });
     for (const p of remotePacks?.packs() ?? []) out.push(p);
-    for (const p of localFolder?.packs() ?? []) out.push(p);
+    for (const p of local) out.push(p);
     return out;
   }
 
@@ -180,7 +186,7 @@ export function createHost({
   }
 
   function browsablePacks() {
-    const added = (samples.addedPacks?.() ?? []).filter((m) => m.files.length && m.id !== 'wt' && m.id !== 'rec');
+    const added = (samples.addedPacks?.() ?? []).filter((m) => m.files.length && m.id !== 'wt' && m.id !== 'rec' && !samples.ownHidden?.(m.id));
     return [...allPacks().map((p) => p.manifest), ...added];
   }
 
@@ -194,7 +200,14 @@ export function createHost({
     if (ref.startsWith('file:')) return [];
     const id = ref.startsWith('sp:') ? ref.slice(3) : ref;
     const manifest = allPacks().find((p) => p.manifest.id === id)?.manifest ?? samples.addedPack?.(id);
-    return (manifest?.files ?? []).map((f) => ({ key: `${id}/${f.file}`, name: String(f.file).split('/').pop() }));
+    if (!manifest) {
+      // A definition's files are keyed where they live, as the engine keys them (samples.mjs, fileKey).
+      return (samples.definitionFiles?.(id) ?? []).map(({ pack, index }) => {
+        const key = samples.fileKey?.(pack, index);
+        return key ? { key, name: key.split('/').pop() } : null;
+      }).filter(Boolean);
+    }
+    return manifest.files.map((f) => ({ key: `${id}/${f.file}`, name: String(f.file).split('/').pop() }));
   }
 
   /**
@@ -266,8 +279,13 @@ export function createHost({
 
   function fileUrlOf(packId, index) {
     const found = allPacks().find((p) => p.manifest.id === packId);
-    const entry = found?.manifest.files[index];
-    if (!found || !entry || !found.urlFor) return null;
+    if (!found) {
+      // A pack written as a list of other packs' files (a short name like `bd`, a _pack definition).
+      const via = samples.resolveEntry?.(packId, index);
+      return via && via.pack !== packId ? fileUrlOf(via.pack, via.index) : null;
+    }
+    const entry = found.manifest.files[index];
+    if (!entry || !found.urlFor) return null;
     return found.urlFor(packId, entry.file);
   }
 
@@ -1035,10 +1053,16 @@ export function createHost({
         })),
         // The files somebody added to this browser: one-offs under `files`, a wavetable folder
         // under `wt`. Listed only once there is something in them.
-        ...(samples.addedPacks?.() ?? []).filter((m) => m.files.length).map((m) => ({
+        ...(samples.addedPacks?.() ?? []).filter((m) => m.files.length && !samples.ownHidden?.(m.id)).map((m) => ({
           name: m.id,
           files: m.files.map((f) => f.file),
           loaded: true,
+        })),
+        // The short names, where no pack of that name plays instead.
+        ...shortNames.filter((sn) => !allPacks().some((p) => p.manifest.id === sn.id)).map((sn) => ({
+          name: sn.id,
+          files: [sn.file],
+          loaded: samples.has(sn.of),
         })),
       ],
       problems: library.problems,

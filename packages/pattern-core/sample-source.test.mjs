@@ -34,3 +34,7 @@ test("a fitted length is the engine's: the given cycles, or the nearest power of
   assert.equal(fittedCycles(7.2, 2, 8), 8);
   assert.equal(fittedCycles(null, 2, 'auto'), null);
 });
+
+test('.bank() is named beside the pack, so the track list can look in the bank first', () => {
+  assert.deepEqual(sampleSourcesOf(s('bd:3').bank('808')), [{ ref: 'bd', index: 3, fit: null, bank: '808' }]);
+});

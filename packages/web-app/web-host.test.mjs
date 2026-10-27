@@ -31,7 +31,7 @@ import { memoryStore } from './public/web/kv.mjs';
 import { createStorage } from './public/web/storage.mjs';
 import { createBlobs } from './public/web/blobs.mjs';
 import { createEvaluator } from './public/web/evaluate.mjs';
-import { createSampleStore, registerPacks } from './public/web/samples.mjs';
+import { createSampleStore, registerPacks, registerShortNames, shortNamePacks } from './public/web/samples.mjs';
 import { createHost } from './public/web/host.mjs';
 import { createDesk } from './public/web/desk.mjs';
 import { createBlockEvaluator } from './public/web/block-eval.mjs';
@@ -49,7 +49,7 @@ const KIT = { id: 'pt_kit', title: 'Kit', kind: 'drums', files: [{ file: 'kick.w
 const PIANO = { id: 'pt_piano', title: 'Piano', kind: 'melodic', files: [{ file: 'c3.wav', rootNote: 60 }] };
 const cdn = (id, file) => `https://cdn.invalid/${id}/${file}`;
 
-function makeHost({ builtIn = [], library = { packs: [], problems: [], urlFor: cdn } } = {}) {
+function makeHost({ builtIn = [], library = { packs: [], problems: [], urlFor: cdn }, shortNames = [], localFolder = null } = {}) {
   const ctx = new FakeAudioContext();
   // The sample store is built first and handed to the engine, exactly as the page does it: a
   // device that loads a file - a wavetable, an impulse response - asks the engine, which asks
@@ -87,10 +87,12 @@ function makeHost({ builtIn = [], library = { packs: [], problems: [], urlFor: c
     tables: sharedBuiltInTables,
     builtIn,
     builtInUrl: (id, file) => `/web-engine/packs/${id}/${file}`,
+    shortNames,
     library,
     desk,
     musicFolder,
     musicLibrary: createLibrary({ storage, libraryTracks, folder: musicFolder, desk }),
+    localFolder,
   });
   const rig = { host, engine, transport, evaluator, storage, ctx, samples, desk };
   liveRigs.add(rig);
@@ -379,6 +381,87 @@ test('holding a sample row is answered with where the file is, since there is no
   assert.deepEqual(await rig.host.call('GET', '/api/sampleAudio?pack=pt_kit&i=1'), { url: '/web-engine/packs/pt_kit/snare.wav' });
   assert.deepEqual(await rig.host.call('GET', '/api/sampleAudio?pack=pt_piano&i=0'), { url: cdn('pt_piano', 'c3.wav') });
   await assert.rejects(rig.host.call('GET', '/api/sampleAudio?pack=pt_kit&i=9'), /there is no sample/);
+});
+
+test('bd..ht are pt_kit\'s files: listed, auditioned and played from the kit\'s own audio', async () => {
+  const kit = shippedPacks[0];
+  const shortNames = shortNamePacks([kit]);
+  assert.deepEqual(Object.fromEntries(shortNames.map((sn) => [sn.id, `${sn.of}/${sn.file}`])), {
+    bd: 'pt_kit/kick.wav', sd: 'pt_kit/snare.wav', rim: 'pt_kit/rim.wav', cp: 'pt_kit/clap.wav',
+    hh: 'pt_kit/hat.wav', oh: 'pt_kit/hatopen.wav', lt: 'pt_kit/tomlo.wav', ht: 'pt_kit/tomhi.wav',
+  });
+  const rig = makeHost({ builtIn: [kit], shortNames });
+  patternCore.clearRolls('prebake');
+  registerPacks(patternCore, [kit]);
+  registerShortNames(patternCore, shortNames);
+  try {
+    rig.samples.setPackResolver((id) => patternCore.lookupPack(id)?.files ?? null);
+    rig.samples.register([kit], (id, file) => `/web-engine/packs/${id}/${file}`);
+    const kick = { duration: 1 };
+    const hat = { duration: 0.2 };
+    rig.samples.put('pt_kit', 0, kick);
+    rig.samples.put('pt_kit', 4, hat);
+    assert.equal(rig.samples.get('bd', 0)?.buffer, kick, 'bd is pt_kit:0');
+    assert.equal(rig.samples.get('bd', 3)?.buffer, kick, 'a pack of one: every index is the kick');
+    assert.equal(rig.samples.get('hh', 0)?.buffer, hat);
+    assert.equal(rig.samples.knows('bd'), true);
+    assert.equal(rig.samples.knows('808_bd'), false);
+    assert.equal(rig.samples.fileKey('bd', 0), 'pt_kit/kick.wav', 'a slice set drawn on bd is drawn on the kit\'s file');
+
+    const { packs } = await rig.host.call('GET', '/api/samples');
+    const listed = Object.fromEntries(packs.map((p) => [p.name, p.files]));
+    assert.deepEqual(listed.bd, ['kick.wav']);
+    assert.deepEqual(listed.ht, ['tomhi.wav']);
+    assert.deepEqual(await rig.host.call('GET', '/api/sampleAudio?pack=bd&i=0'), { url: '/web-engine/packs/pt_kit/kick.wav' });
+    assert.equal((await rig.host.call('GET', '/api/sampleFile?ref=bd&i=0')).key, 'pt_kit/kick.wav');
+
+    // Survives an evaluation, which clears and refills the definitions.
+    await rig.host.call('POST', '/api/evaluate', { code: 'drums: s("bd*4")' });
+    assert.deepEqual(patternCore.lookupPack('bd')?.files, ['pt_kit/kick.wav']);
+    shutdown(rig);
+  } finally {
+    registerShortNames(patternCore, []);
+    patternCore.clearRolls('prebake');
+  }
+});
+
+test('a pack of your own called bd plays in place of the built-in one', async () => {
+  const kit = shippedPacks[0];
+  const shortNames = shortNamePacks([kit]);
+  const mine = { id: 'bd', title: 'bd - my samples', kind: 'drums', local: true, files: [{ file: 'my kick.wav' }] };
+  const rig = makeHost({ builtIn: [kit], shortNames, library: { packs: [mine], problems: [], urlFor: cdn } });
+  patternCore.clearRolls('prebake');
+  registerShortNames(patternCore, shortNames);
+  registerPacks(patternCore, [kit, mine]);
+  try {
+    rig.samples.setPackResolver((id) => patternCore.lookupPack(id)?.files ?? null);
+    rig.samples.register([kit], (id, file) => `/web-engine/packs/${id}/${file}`);
+    rig.samples.register([mine], cdn);
+    const kick = { duration: 1 };
+    const myKick = { duration: 0.5 };
+    rig.samples.put('pt_kit', 0, kick);
+    rig.samples.put('bd', 0, myKick);
+    assert.equal(rig.samples.get('bd', 0)?.buffer, myKick);
+    assert.deepEqual(patternCore.lookupPack('bd')?.files, ['bd/my kick.wav']);
+    const { packs } = await rig.host.call('GET', '/api/samples');
+    assert.deepEqual(packs.filter((p) => p.name === 'bd').map((p) => p.files), [['my kick.wav']], 'listed once, as yours');
+    assert.equal(rig.samples.get('sd', 0), null, 'the other names are still the kit (not decoded here)');
+    assert.deepEqual(patternCore.lookupPack('sd')?.files, ['pt_kit/snare.wav']);
+  } finally {
+    registerShortNames(patternCore, []);
+    patternCore.clearRolls('prebake');
+  }
+});
+
+test('the sounds tab lists a sample-folder pack in place of the shipped pack or short name it replaces', async () => {
+  const kit = shippedPacks[0];
+  const folderPack = (id, file) => ({ manifest: { id, title: id, kind: 'drums', local: true, files: [{ file }] }, urlFor: null });
+  const localFolder = { packs: () => [folderPack('pt_kit', 'pt_kit/a.wav'), folderPack('bd', 'bd/k.wav')] };
+  const rig = makeHost({ builtIn: [kit], shortNames: shortNamePacks([kit]), localFolder });
+  const { packs } = await rig.host.call('GET', '/api/samples');
+  assert.deepEqual(packs.filter((p) => p.name === 'pt_kit').map((p) => p.files), [['pt_kit/a.wav']]);
+  assert.deepEqual(packs.filter((p) => p.name === 'bd').map((p) => p.files), [['bd/k.wav']]);
+  assert.deepEqual(packs.filter((p) => p.name === 'sd').map((p) => p.files), [['snare.wav']]);
 });
 
 test('a registered pack is listed with its files and survives an evaluation', async () => {

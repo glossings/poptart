@@ -6,7 +6,7 @@
 // a license file and generated credits - which is then pushed once and served from a CDN.
 //
 //   node build/fetch-packs.mjs --out ../../../poptart-packs
-//   node build/fetch-packs.mjs --out ../../../poptart-packs --only pt_drumbox
+//   node build/fetch-packs.mjs --out ../../../poptart-packs --only 808_bd
 //   node build/fetch-packs.mjs --plan-only          (resolve and choose, download nothing)
 //
 // THE LOCK FILE IS THE POINT. Every upstream reference is resolved to a commit and written to

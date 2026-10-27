@@ -600,14 +600,16 @@ export function createEvaluator({ patternCore, engine, transport, prebakeDefs = 
     const trackSampleInfo = (sig) => {
       const sources = patternCore.sampleSourcesOf(sig, { cycles: 4 });
       if (!sources.length) return null;
-      const { ref, index, fit } = sources[0];
+      const { ref, index, fit, bank } = sources[0];
       const out = { ref, index, fit, others: sources.length - 1, file: null, path: null, count: 0, seconds: null, cycles: null };
+      // A .bank() pack where there is one, as the engine plays it (web-audio-engine's _bankPack).
+      const banked = bank && engine.samples?.knows?.(`${bank}_${ref}`) ? `${bank}_${ref}` : ref;
       let got = null;
       if (ref.startsWith('rec:')) {
         const held = engine.samples?.named?.('rec', ref.slice(4));
         got = held ? { file: `${ref.slice(4)}.wav`, index: 0, count: 1, seconds: (held.buffer ?? held)?.duration ?? null } : null;
       } else {
-        got = engine.samples?.describe?.(ref.startsWith('sp:') ? ref.slice(3) : ref, index) ?? null;
+        got = engine.samples?.describe?.(banked.startsWith('sp:') ? banked.slice(3) : banked, index) ?? null;
       }
       if (!got?.file) return { ...out, count: got?.count ?? 0 };
       return { ...out, ...got, cycles: patternCore.fittedCycles(got.seconds, deckClock.cps > 0 ? 1 / deckClock.cps : 0, fit) };

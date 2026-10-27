@@ -196,3 +196,63 @@ test('a pack poptart ships plays where the library has none of that name', () =>
   }
   assert.strictEqual(engine()._resolveSource('pt_kit').paths, null);
 });
+
+// The packs the app ships, exactly as the host points the engine at them (web-app/server.js).
+const SHIPPED = path.join(__dirname, '..', 'web-engine', 'public', 'packs');
+
+test('the short drum names are pt_kit\'s files, the same ones the browser build plays', () => {
+  const { setBuiltInPacksRoot, builtInPacks } = require('./samples.js');
+  const LIB = fs.mkdtempSync(path.join(os.tmpdir(), 'poptart-lib-'));
+  const was = process.env.POPTART_SAMPLES_DIR;
+  process.env.POPTART_SAMPLES_DIR = LIB;
+  setBuiltInPacksRoot(SHIPPED);
+  try {
+    const kit = engine()._resolveSource('pt_kit').paths;
+    assert.deepStrictEqual(kit.map((p) => path.basename(p)), ['kick.wav', 'snare.wav', 'rim.wav', 'clap.wav', 'hat.wav', 'hatopen.wav', 'tomlo.wav', 'tomhi.wav'], 'in the manifest\'s order: pt_kit:0 is the kick');
+    const expected = { bd: 'kick.wav', sd: 'snare.wav', rim: 'rim.wav', cp: 'clap.wav', hh: 'hat.wav', oh: 'hatopen.wav', lt: 'tomlo.wav', ht: 'tomhi.wav' };
+    for (const [name, file] of Object.entries(expected)) {
+      assert.deepStrictEqual(engine()._resolveSource(name).paths, [path.join(SHIPPED, 'pt_kit', file)], `${name} is pt_kit's ${file}`);
+    }
+    assert.strictEqual(engine()._resolveSource('mt').paths, null, 'pt_kit has no mid tom');
+    const listed = Object.fromEntries(builtInPacks().map((p) => [p.name, p.files.map((f) => path.basename(f))]));
+    assert.deepStrictEqual(listed.bd, ['kick.wav'], 'the sounds tab lists them');
+    assert.strictEqual(listed.pt_kit[0], 'kick.wav');
+
+    // A library folder of the name plays in its place, as it does for a built-in pack.
+    const mine = put(LIB, 'bd/my kick.wav');
+    assert.deepStrictEqual(engine()._resolveSource('bd').paths, [mine]);
+    assert.deepStrictEqual(engine()._resolveSource('sd').paths, [path.join(SHIPPED, 'pt_kit', 'snare.wav')]);
+  } finally {
+    setBuiltInPacksRoot(null);
+    process.env.POPTART_SAMPLES_DIR = was;
+  }
+});
+
+test('.bank() plays "<bank>_<name>" where the library has it, and otherwise warns once and plays the name', () => {
+  const { setBuiltInPacksRoot } = require('./samples.js');
+  const LIB = fs.mkdtempSync(path.join(os.tmpdir(), 'poptart-lib-'));
+  const was = process.env.POPTART_SAMPLES_DIR;
+  process.env.POPTART_SAMPLES_DIR = LIB;
+  setBuiltInPacksRoot(SHIPPED);
+  const warn = console.warn;
+  const warnings = [];
+  console.warn = (line) => warnings.push(String(line));
+  try {
+    put(LIB, 'mine_bd/a.wav');
+    const e = engine();
+    const asked = [];
+    e._ensurePack = (ref) => { asked.push(ref); return { status: 'loading', files: [] }; };
+    e.playSample('t', 'bd', { bank: 'mine', index: 3 }, 0, 1);
+    e.playSample('t', 'bd', { bank: '808' }, 1, 2);
+    e.playSample('t', 'bd', { bank: '808' }, 2, 3);
+    e.playSample('t', 'sp:bd', { bank: 'mine' }, 3, 4);
+    e.playSample('t', 'bd', {}, 4, 5);
+    assert.deepStrictEqual(asked, ['mine_bd', 'bd', 'bd', 'sp:bd', 'bd']);
+    assert.strictEqual(warnings.filter((w) => w.includes('"808_bd"')).length, 1, 'warned once');
+    assert.deepStrictEqual(engine()._resolveSource('bd').paths, [path.join(SHIPPED, 'pt_kit', 'kick.wav')], 'and the fallback is pt_kit\'s kick');
+  } finally {
+    console.warn = warn;
+    setBuiltInPacksRoot(null);
+    process.env.POPTART_SAMPLES_DIR = was;
+  }
+});

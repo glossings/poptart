@@ -22,7 +22,7 @@ import { memoryStore, openStore } from './kv.mjs';
 import { createBlobs } from './blobs.mjs';
 import { createStorage } from './storage.mjs';
 import { createEvaluator } from './evaluate.mjs';
-import { createSampleStore, registerPacks, restorePacks } from './samples.mjs';
+import { createSampleStore, registerPacks, registerShortNames, restorePacks, shortNamePacks, unregisterPacks } from './samples.mjs';
 import { createHost } from './host.mjs';
 import { createAudioOutputs } from './audio-output.mjs';
 import { createWebMidi } from './midi.mjs';
@@ -310,7 +310,10 @@ export async function boot({
 
   const builtIn = await readBuiltInPacks(fetchImpl);
   const builtInUrl = (id, file) => `${PATHS.builtInPacks}/${id}/${file}`;
-  registerPacks(patternCore, builtIn);
+  registerPacks(patternCore, builtIn, { ships: true });
+  samples.register(builtIn, builtInUrl, { ships: true });
+  const shortNames = shortNamePacks(builtIn);
+  registerShortNames(patternCore, shortNames);
   for (const manifest of builtIn) {
     await samples.ensure(manifest, builtInUrl);
   }
@@ -361,6 +364,7 @@ export async function boot({
     store: isolated ? null : store,
     samples,
     onPacks: (manifests) => registerPacks(patternCore, manifests),
+    onForget: (ids) => unregisterPacks(patternCore, ids),
     warn,
     say,
   });
@@ -375,13 +379,17 @@ export async function boot({
     core: mapCore,
     store: isolated ? null : store,
     // The packs in the order the host lists them (host.mjs, allPacks), and the files added here.
-    packs: () => [
-      ...builtIn,
-      ...library.packs,
-      ...remotePacks.packs().map((p) => p.manifest),
-      ...localFolder.packs().map((p) => p.manifest),
-      ...samples.addedPacks().filter((m) => m.files.length),
-    ],
+    packs: () => {
+      const local = localFolder.packs().map((p) => p.manifest);
+      const mine = new Set(local.map((m) => m.id));
+      return [
+        ...builtIn.filter((m) => !mine.has(m.id)),
+        ...library.packs,
+        ...remotePacks.packs().map((p) => p.manifest),
+        ...local,
+        ...samples.addedPacks().filter((m) => m.files.length && !samples.ownHidden(m.id)),
+      ];
+    },
     bytesOf: async (pack, index) => {
       const held = await samples.bytes(pack, index);
       if (held) return held;
@@ -474,6 +482,7 @@ export async function boot({
     wavetables: { decodeWav: webEngine.decodeWav, framesOf: webEngine.framesOf },
     builtIn,
     builtInUrl,
+    shortNames,
     library,
     remotePacks,
     localFolder,

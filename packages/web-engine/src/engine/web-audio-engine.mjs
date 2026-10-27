@@ -2311,6 +2311,21 @@ export class WebAudioEngine {
   // -- samples -----------------------------------------------------------------------------
 
   /**
+   * The pack `.bank()` makes of a pack name: s("bd").bank("808") plays the pack "808_bd". A bank
+   * with no pack of that name here warns once and plays the pack the pattern named. Only a plain
+   * pack name takes a bank; a recording or anything else namespaced is played as written.
+   */
+  _bankPack(pack, bank) {
+    const name = String(bank ?? '').trim();
+    if (!name || typeof pack !== 'string' || pack.includes(':')) return pack;
+    const banked = `${name}_${pack}`;
+    const known = this.samples?.knows ? this.samples.knows(banked) : this.samples?.get?.(banked, 0) != null;
+    if (known) return banked;
+    this._warnOnce(`bank:${banked}`, `[web-engine] .bank(${JSON.stringify(name)}): there is no "${banked}" pack - playing "${pack}".`);
+    return pack;
+  }
+
+  /**
    * Plays one sample. The scheduler reads the returned object straight back for its log line, so
    * it is built synchronously - and a reason for NOT playing is a field on it rather than an
    * exception, because a missing sample should cost one quiet line and not the rest of the tick.
@@ -2319,7 +2334,8 @@ export class WebAudioEngine {
     const track = this.createTrack(trackId);
     // A named pack arrives as `sp:<id>` - the scheduler's spelling for a pack the language
     // defines, as against a folder or a recording - and the store keys packs by their bare id.
-    const packId = typeof pack === 'string' && pack.startsWith('sp:') ? pack.slice(3) : pack;
+    const named = typeof pack === 'string' && pack.startsWith('sp:') ? pack.slice(3) : pack;
+    const packId = cfg.bank != null && named === pack ? this._bankPack(pack, cfg.bank) : named;
     // Routed onward as an on/off pair, whether or not this sample has loaded yet: a kick keys a
     // ducker by being scheduled, not by being heard.
     if (this.midiRoutes.size && (cfg.vel ?? 1) > 0) this.midiRoutes.sampleEvent(trackId, cfg.vel ?? 1, onsetSec, offsetSec, cfg.note ?? null);

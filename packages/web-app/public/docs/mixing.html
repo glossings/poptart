@@ -62,7 +62,7 @@ input(1).fx("Overdrive")            // a microphone or interface input</code></p
           <strong>After an <code>.fx()</code></strong> they feed that effect: <code>.midi("kick")</code>
           replays kick's notes into it, and <code>.audio("kick")</code> feeds kick's audio into its sidechain.
         </p>
-        <pre data-run><code>kick: s("pt_kit:0*4").postgain(0.3)
+        <pre data-run><code>kick: s("bd*4").postgain(0.3)
 // the ducker dips on each of kick's notes
 bass: note("c2*8").synth("Wavetable").fx("Ducker").midi("kick").postgain(0.3)
 // the compressor listens to kick's audio

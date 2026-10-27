@@ -232,6 +232,19 @@ test('rendering is deterministic, so the committed files are reproducible', () =
   }
 });
 
+test('the kit gives its voices the standard short drum names, in the manifest both builds read', () => {
+  const { manifests } = renderPacks({ write: false });
+  const fresh = manifests.find((m) => m.id === 'pt_kit');
+  const committed = JSON.parse(fs.readFileSync(path.join(packsDir, 'pt_kit', 'manifest.json'), 'utf8'));
+  const expected = {
+    bd: 'kick.wav', sd: 'snare.wav', rim: 'rim.wav', cp: 'clap.wav', hh: 'hat.wav', oh: 'hatopen.wav', lt: 'tomlo.wav', ht: 'tomhi.wav',
+  };
+  assert.deepEqual({ ...fresh.shortNames }, expected);
+  assert.deepEqual(committed.shortNames, expected, 'the committed manifest is what the render writes');
+  assert.equal(committed.files[0].file, 'kick.wav', 'bd is bd:0 is pt_kit:0');
+  assert.equal(manifests.find((m) => m.id === 'pt_keys').shortNames, undefined);
+});
+
 test('the wav writer and reader round-trip', () => {
   const left = Float32Array.from({ length: 512 }, (_, i) => Math.sin(i * 0.1) * 0.5);
   const right = Float32Array.from({ length: 512 }, (_, i) => Math.cos(i * 0.1) * 0.25);

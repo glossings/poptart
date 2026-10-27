@@ -25,6 +25,11 @@ import { parseOrigin } from './remote-packs.mjs';
 
 /** Where a pack's audio is held once it has been decoded, keyed "<pack>/<index>". */
 const keyOf = (pack, index) => `${pack}/${index}`;
+/**
+ * The same for the page's own packs (`files`, `wt`, `rec`): kept apart, so a folder in the sample
+ * library with one of those names can play in its place without the two overwriting each other.
+ */
+const ownKeyOf = (pack, index) => `\u0000${pack}/${index}`;
 
 /** How long a pack that failed to load is left alone before a note may try it again. */
 export const RETRY_FAILED_MS = 60_000;
@@ -41,6 +46,9 @@ export function createSampleStore({
   const loading = new Map();     // pack id -> the promise that is loading it, so two asks are one
   const failed = new Map();      // pack id -> { why, at }, so a broken pack is reported once
   const known = new Map();       // pack id -> { manifest, urlFor } for a pack that loads on demand
+  // The packs that ship with the page, by id, which come back when a pack that took their name goes.
+  const shipped = new Map();     // pack id -> { manifest, urlFor }
+  const hidingWarned = new Set(); // the page's own packs the console has said are hidden
 
   // Where a file's bytes are kept. By pack and file for the packs this app ships, whose ids are
   // its own; a pack from somewhere else (samples(), remote-packs.mjs) names a prefix of its own
@@ -252,6 +260,18 @@ export function createSampleStore({
   const manifestKey = (pack) => `samples/${pack}/manifest.json`;
 
   /**
+   * Whether one of the page's own packs is hidden by a pack of the same name from the sample
+   * library - which then plays in its place, as a folder does on the desktop.
+   */
+  const ownHidden = (pack) => added.has(pack) && known.has(pack);
+  /** Files an own pack's manifest as the one in memory, unless a library pack has the name. */
+  function ownManifest(pack) {
+    if (!ownHidden(pack)) manifests.set(pack, added.get(pack));
+  }
+  /** What is decoded for one file of a pack: the page's own, or whatever else has the name. */
+  const decodedOf = (pack, index) => decoded.get((added.has(pack) && !ownHidden(pack) ? ownKeyOf : keyOf)(pack, index));
+
+  /**
    * A name kept as the path it had inside the folder somebody chose - "Basic/saw.wav" rather
    * than "saw.wav".
    *
@@ -300,17 +320,17 @@ export function createSampleStore({
     if (!context || !store) return;
     const files = added.get(pack)?.files ?? [];
     for (let index = 0; index < files.length; index++) {
-      if (decoded.has(keyOf(pack, index))) continue;
+      if (decoded.has(ownKeyOf(pack, index))) continue;
       try {
         const held = await store.get(`samples/${pack}/${files[index].file}`);
         if (!held?.bytes) continue;
         const audio = await decodeAudio(context, held.bytes.slice(0));
-        if (!decoded.has(keyOf(pack, index))) decoded.set(keyOf(pack, index), { buffer: audio, rootNote: null });
+        if (!decoded.has(ownKeyOf(pack, index))) decoded.set(ownKeyOf(pack, index), { buffer: audio, rootNote: null });
       } catch (err) {
         warn(`[samples] ${pack}:${index} (${files[index].file}) could not be decoded - ${err.message}`);
       }
     }
-    manifests.set(pack, added.get(pack));
+    ownManifest(pack);
   }
 
   /**
@@ -373,16 +393,16 @@ export function createSampleStore({
       // an import that did not finish anyway.
       if (opts.defer !== true) await store.put(manifestKey(pack), { files: manifest.files, mtime: Date.now() }).catch(() => {});
     }
-    decoded.delete(keyOf(pack, index));
+    decoded.delete(ownKeyOf(pack, index));
     if (context && ADDED_PACKS[pack].decode) {
       try {
         const audio = await decodeAudio(context, raw.slice(0));
-        decoded.set(keyOf(pack, index), { buffer: audio, rootNote: null });
+        decoded.set(ownKeyOf(pack, index), { buffer: audio, rootNote: null });
       } catch (err) {
         warn(`[samples] ${file} could not be decoded as audio - ${err.message}`);
       }
     }
-    manifests.set(pack, added.get(pack));
+    ownManifest(pack);
     stamp += 1;
     return { ref: `${pack}:${file}`, index, name: file };
   }
@@ -395,7 +415,7 @@ export function createSampleStore({
     const manifest = added.get(pack);
     if (!manifest) return null;
     if (store) await store.put(manifestKey(pack), { files: manifest.files, mtime: Date.now() }).catch(() => {});
-    manifests.set(pack, manifest);
+    ownManifest(pack);
     return manifest;
   }
 
@@ -407,9 +427,9 @@ export function createSampleStore({
       for (const entry of manifest.files) await store.delete?.(`samples/${pack}/${entry.file}`).catch(() => {});
       await store.put(manifestKey(pack), { files: [], mtime: Date.now() }).catch(() => {});
     }
-    manifest.files.forEach((_, i) => decoded.delete(keyOf(pack, i)));
+    manifest.files.forEach((_, i) => decoded.delete(ownKeyOf(pack, i)));
     added.set(pack, { ...manifest, files: [] });
-    manifests.set(pack, added.get(pack));
+    ownManifest(pack);
     stamp += 1;
     return true;
   }
@@ -486,7 +506,7 @@ export function createSampleStore({
 
   /** The manifest a file of a pack sits in, from the added packs, what has loaded or what is known. */
   function manifestOf(pack) {
-    return added.get(pack) ?? manifests.get(pack) ?? known.get(pack)?.manifest ?? null;
+    return (ownHidden(pack) ? null : added.get(pack)) ?? manifests.get(pack) ?? known.get(pack)?.manifest ?? null;
   }
 
   /** The index a key names in a pack: a number, or a file's name with or without its extension. */
@@ -529,9 +549,33 @@ export function createSampleStore({
    * never finish starting; instead the first ask for any of a pack's files starts that pack
    * loading, and the notes until it lands are the "source not ready" the engine already reports.
    */
-  function register(list, urlFor, { read = null } = {}) {
-    for (const manifest of list) known.set(manifest.id, { manifest, urlFor, read });
+  function register(list, urlFor, { read = null, ships = false } = {}) {
+    for (const manifest of list) {
+      const id = manifest.id;
+      if (ships) shipped.set(id, { manifest, urlFor });
+      else if (shipped.has(id) && known.get(id)?.manifest === shipped.get(id).manifest) {
+        // A pack of the library's own takes a shipped pack's name: the shipped one leaves memory and
+        // comes back when that pack goes (forget).
+        drop(id);
+      }
+      if (!ships && added.has(id)) {
+        if (manifests.get(id) === added.get(id)) manifests.delete(id);
+        if (!hidingWarned.has(id)) {
+          hidingWarned.add(id);
+          warn(`[samples] "${id}" in your sample library plays in place of this page's own ${id} pack while that folder is chosen`);
+        }
+      }
+      known.set(id, { manifest, urlFor, read });
+    }
     stamp += 1;
+  }
+
+  /** Lets a pack's audio and its manifest go from memory. */
+  function drop(pack) {
+    const manifest = manifests.get(pack) ?? known.get(pack)?.manifest;
+    for (let i = 0; i < (manifest?.files.length ?? 0); i++) decoded.delete(keyOf(pack, i));
+    manifests.delete(pack);
+    failed.delete(pack);
   }
 
   /**
@@ -540,11 +584,12 @@ export function createSampleStore({
    * cached under their own source (cacheKeyOf), so going back to the first costs no download.
    */
   function forget(pack) {
-    const manifest = manifests.get(pack) ?? known.get(pack)?.manifest;
-    for (let i = 0; i < (manifest?.files.length ?? 0); i++) decoded.delete(keyOf(pack, i));
-    manifests.delete(pack);
+    drop(pack);
     known.delete(pack);
-    failed.delete(pack);
+    // Whatever that pack was hiding has its name back: a shipped pack, or one of the page's own.
+    const base = shipped.get(pack);
+    if (base) known.set(pack, { manifest: base.manifest, urlFor: base.urlFor, read: null });
+    if (added.has(pack)) ownManifest(pack);
     stamp += 1;
   }
 
@@ -558,6 +603,8 @@ export function createSampleStore({
     packSize,
     /** The manifests of the packs somebody added to, for the sounds tab and the table lists. */
     addedPacks: () => [...added.values()],
+    /** Whether one of those is hidden by a pack of the same name from the sample library. */
+    ownHidden,
     addedPack: (pack) => added.get(pack) ?? null,
     indexOf,
     bytes,
@@ -581,7 +628,7 @@ export function createSampleStore({
       if (!manifest) return null;
       const want = String(name);
       const index = manifest.files.findIndex((f) => f.file === want || f.file === `${want}.wav`);
-      return index < 0 ? null : decoded.get(keyOf(pack, index)) ?? null;
+      return index < 0 ? null : decoded.get(ownKeyOf(pack, index)) ?? null;
     },
     /**
      * The name a file goes by in a hand-drawn slice set: "pack/file" - the desktop keys a file by
@@ -590,8 +637,7 @@ export function createSampleStore({
     fileKey(pack, index) {
       const via = viaDefinition(pack, index);
       if (via) return this.fileKey(via.pack, via.index);
-      const manifest = manifests.get(pack) ?? added.get(pack);
-      const file = manifest?.files?.[index]?.file;
+      const file = manifestOf(pack)?.files?.[index]?.file;
       return file ? `${pack}/${file}` : null;
     },
     /**
@@ -605,7 +651,7 @@ export function createSampleStore({
       const files = manifestOf(pack)?.files ?? [];
       const file = files[index];
       if (!file) return { file: null, index, count: files.length, seconds: null };
-      const held = decoded.get(keyOf(pack, index));
+      const held = decodedOf(pack, index);
       return { file: file.file, index, count: files.length, seconds: held?.buffer?.duration ?? null };
     },
     /** The names in an added pack, newest last, without their extension - sr("'s completion. */
@@ -613,7 +659,7 @@ export function createSampleStore({
       return (added.get(pack)?.files ?? []).map((f) => f.file.replace(/\.wav$/i, ''));
     },
     get(pack, index) {
-      const held = decoded.get(keyOf(pack, index));
+      const held = decodedOf(pack, index);
       if (held) return held;
       const via = viaDefinition(pack, index);
       if (via) return this.get(via.pack, via.index);
@@ -642,18 +688,26 @@ export function createSampleStore({
     },
     /** The file a definition's index lands on, as { pack, index }, or null. */
     resolveEntry: (pack, index) => viaDefinition(pack, index),
+    /** Every file a definition plays, in index order, as [{ pack, index }] - empty for anything else. */
+    definitionFiles: (pack) => (viaDefinition(pack, 0) ? [...expanded.get(pack).files] : []),
     originFile,
     put,
     loaded: () => [...manifests.keys()],
     problems: () => Object.fromEntries([...failed].map(([id, f]) => [id, f.why])),
     /** Whether a pack is in memory, for the browser's "downloaded" mark. */
     has: (id) => manifests.has(id),
+    /** Whether a name is a pack here at all - one with files, or a definition of one - loaded or not. */
+    knows(id) {
+      if (manifestOf(id)) return true;
+      const entries = resolvePack?.(id);
+      return Array.isArray(entries) && entries.length > 0;
+    },
     /** How many of a pack's files actually decoded, which is not always all of them. */
     countOf: (id) => {
       const manifest = manifests.get(id);
       if (!manifest) return 0;
       let n = 0;
-      for (let i = 0; i < manifest.files.length; i++) if (decoded.has(keyOf(id, i))) n += 1;
+      for (let i = 0; i < manifest.files.length; i++) if (decodedOf(id, i)) n += 1;
       return n;
     },
     base,
@@ -667,17 +721,66 @@ export function createSampleStore({
  * the same file twice: inserting one would renumber everything after it and change what every
  * saved song using that pack plays.
  */
-export function registerPacks(patternCore, manifests) {
+export function registerPacks(patternCore, manifests, { ships = false } = {}) {
   // Remembered, because the layer below is also the one the prebake clears wholesale every time
   // it runs (see restorePacks) - and it runs at every boot, pin and unpin.
   let known = registered.get(patternCore);
   if (!known) registered.set(patternCore, known = new Map());
   for (const manifest of manifests) known.set(manifest.id, manifest);
+  if (ships) {
+    let base = shippedPacks.get(patternCore);
+    if (!base) shippedPacks.set(patternCore, base = new Map());
+    for (const manifest of manifests) base.set(manifest.id, manifest);
+  }
   filePacks(patternCore, manifests);
 }
 
+/**
+ * Takes packs that have gone - a sample folder let go, or a subfolder no longer in it - out of the
+ * language. A name they had taken from a shipped pack or a short name goes back to it.
+ */
+export function unregisterPacks(patternCore, ids) {
+  const known = registered.get(patternCore);
+  for (const id of ids) known?.delete(id);
+  const base = shippedPacks.get(patternCore);
+  const back = ids.map((id) => base?.get(id)).filter(Boolean);
+  if (back.length) registerPacks(patternCore, back);
+  else filePacks(patternCore, []);
+}
+
+/** The packs that ship with the page, per pattern-core instance, by id. */
+const shippedPacks = new WeakMap();
+
 /** Every pack registerPacks has been handed, per pattern-core instance, by id. */
 const registered = new WeakMap();
+
+/**
+ * The short names a shipped manifest gives its files (`shortNames`, see web-engine's
+ * render-packs.mjs) as packs of one file each: { id, of, file } - `bd` is pt_kit's kick.wav.
+ */
+export function shortNamePacks(manifests) {
+  const out = [];
+  for (const m of manifests ?? []) {
+    for (const [id, file] of Object.entries(m?.shortNames ?? {})) {
+      if (m.files?.some((f) => f.file === file)) out.push({ id, of: m.id, file });
+    }
+  }
+  return out;
+}
+
+/**
+ * Files the short names as definitions over the shipped pack's own file, so they add no audio of
+ * their own. Filed ahead of every manifest (see filePacks), and a definition only plays where no
+ * pack of that name has files (samples.mjs, viaDefinition) - so a folder called `bd` plays in place
+ * of the built-in one, as a folder does on the desktop.
+ */
+export function registerShortNames(patternCore, shorts) {
+  shortNames.set(patternCore, shorts);
+  filePacks(patternCore, []);
+}
+
+/** The short-name packs registerShortNames was handed, per pattern-core instance. */
+const shortNames = new WeakMap();
 
 function filePacks(patternCore, manifests) {
   // In the library layer, the one the desktop's prebake fills: every evaluation clears the
@@ -685,6 +788,10 @@ function filePacks(patternCore, manifests) {
   // the first note of the first pattern to name it.
   patternCore.setRollLayer('prebake');
   try {
+    const packIds = new Set([...(registered.get(patternCore)?.keys() ?? [])]);
+    for (const short of shortNames.get(patternCore) ?? []) {
+      if (!packIds.has(short.id)) patternCore._pack(short.id, [`${short.of}/${short.file}`]);
+    }
     for (const manifest of manifests) {
       patternCore._pack(manifest.id, manifest.files.map((f) => `${manifest.id}/${f.file}`));
     }

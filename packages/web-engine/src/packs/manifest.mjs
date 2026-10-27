@@ -28,6 +28,12 @@ export const ALLOWED_LICENSES = Object.freeze([
  */
 export const PACK_PREFIX = 'pt_';
 
+/** Whether an id can be a shipped pack's: one wearing the prefix, or a bank's "<bank>_<voice>". */
+export const isShippedPackId = (id) => {
+  const text = String(id ?? '');
+  return /^[a-z0-9_]+$/.test(text) && (text.startsWith(PACK_PREFIX) || /^[a-z0-9]+_[a-z0-9_]+$/.test(text));
+};
+
 const isNonEmptyString = (v) => typeof v === 'string' && v.trim().length > 0;
 
 /**
@@ -39,8 +45,15 @@ export function validateManifest(manifest) {
   if (!manifest || typeof manifest !== 'object') throw new Error('[packs] a manifest must be an object');
   const id = String(manifest.id ?? '').trim();
   if (!id) throw new Error('[packs] a manifest needs an id');
-  if (!id.startsWith(PACK_PREFIX)) {
-    throw new Error(`[packs] "${id}" must start with "${PACK_PREFIX}" so it cannot take a name somebody wants for their own pack`);
+  // A bank's packs are named "<bank>_<voice>" instead, which is what `.bank()` looks for.
+  const bank = manifest.bank == null ? null : String(manifest.bank).trim();
+  if (bank !== null && !/^[a-z0-9]+$/.test(bank)) {
+    throw new Error(`[packs] "${id}" is in bank "${bank}", and a bank is lowercase letters and digits`);
+  }
+  if (bank !== null ? !id.startsWith(`${bank}_`) || id.length === bank.length + 1 : !id.startsWith(PACK_PREFIX)) {
+    throw new Error(bank !== null
+      ? `[packs] "${id}" is in bank "${bank}", so it must be named "${bank}_<voice>"`
+      : `[packs] "${id}" must start with "${PACK_PREFIX}" so it cannot take a name somebody wants for their own pack`);
   }
   if (!/^[a-z0-9_]+$/.test(id)) {
     throw new Error(`[packs] "${id}" must be lowercase letters, digits and underscores - it has to be typeable inside sp("…")`);
@@ -113,6 +126,7 @@ export function validateManifest(manifest) {
 
   return Object.freeze({
     id,
+    ...(bank !== null ? { bank } : {}),
     title: String(manifest.title).trim(),
     description: String(manifest.description ?? '').trim() || null,
     kind: manifest.kind === 'melodic' ? 'melodic' : 'drums',

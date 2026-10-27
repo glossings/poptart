@@ -5446,9 +5446,10 @@ function audioHeaderOf(file) {
 function trackSampleInfo(sig, cps) {
   const sources = patternCore.sampleSourcesOf(sig, { cycles: 4 });
   if (!sources.length) return null;
-  const { ref, index, fit } = sources[0];
+  const { ref, index, fit, bank } = sources[0];
   const out = { ref, index, fit, others: sources.length - 1, file: null, path: null, count: 0, seconds: null, cycles: null };
-  const files = sampleRefFiles(ref);
+  // A .bank() pack where there is one, as the engine plays it (OscEngine#_bankRef).
+  const files = (bank ? sampleRefFiles(`${bank}_${ref}`) : null) ?? sampleRefFiles(ref);
   if (!files?.length) return out;
   const i = ((index % files.length) + files.length) % files.length; // wrapped, as the sampler wraps it
   const seconds = audioHeaderOf(files[i])?.duration ?? null;
@@ -7405,7 +7406,7 @@ const routes = {
   // in, so a file's position in the list is its `s("pack:idx")` index. Reads the filesystem
   // directly rather than going through the engine, so it works even before the engine is up.
   'GET /api/samples': async () => {
-    const { samplesRoot, listPackFiles } = require('@poptart/osc-engine/samples');
+    const { samplesRoot, listPackFiles, builtInPacks } = require('@poptart/osc-engine/samples');
     const root = samplesRoot();
     let entries = [];
     try {
@@ -7413,10 +7414,16 @@ const routes = {
     } catch {
       // missing root = no packs, not an error
     }
-    const packs = entries
+    const own = entries
       .filter((e) => e.isDirectory() || e.isSymbolicLink())
       .map((e) => ({ name: e.name, files: (listPackFiles(e.name) ?? []).map((f) => path.basename(f)) }))
       .filter((p) => p.files.length > 0);
+    // The shipped packs (pt_kit, bd, …) too, except where a library folder of that name plays instead.
+    const mine = new Set(own.map((p) => p.name));
+    const packs = [
+      ...own,
+      ...builtInPacks().filter((p) => !mine.has(p.name)).map((p) => ({ name: p.name, files: p.files.map((f) => path.basename(f)) })),
+    ];
     // The packs that are lists of files where they live (the dropped `files`), unless a library
     // folder of the same name plays in their place - it is then already in the list above.
     const { listedPackNames } = require('@poptart/osc-engine/listed-packs');

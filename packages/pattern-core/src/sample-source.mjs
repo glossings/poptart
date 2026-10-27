@@ -9,8 +9,8 @@
 
 /**
  * The distinct sources a sampler track plays in its first `cycles` cycles, in the order they
- * first sound: [{ ref (the engine's spelling), index, fit ('auto' | measures | null) }]. Empty for
- * a track that is not a sampler, or plays nothing that soon.
+ * first sound: [{ ref (the engine's spelling), index, fit ('auto' | measures | null), and bank
+ * where .bank() names one }]. Empty for a track that is not a sampler, or plays nothing that soon.
  */
 export function sampleSourcesOf(sig, { cycles = 1, max = 8 } = {}) {
   const sampler = sig?.sampler;
@@ -59,10 +59,19 @@ export function sampleSourcesOf(sig, { cycles = 1, max = 8 } = {}) {
       if (at('splice', step, onset) > 0.5) fit = null; // a splice fits each chop to its event instead
       else if (sampler.fit === 'auto') fit = 'auto';
       else fit = at('fit', step, onset) ?? null;
-      const id = `${ref}\n${index}`;
+      // .bank(): the family the engine looks for the pack in first ("808" -> "808_bd"), or null.
+      let bank = null;
+      if (kind === 'pack' && sampler.bank) {
+        try {
+          bank = sampler.bank.sample(onset, 1, onset) ?? null;
+        } catch {
+          bank = null;
+        }
+      }
+      const id = `${ref}\n${index}\n${bank}`;
       if (seen.has(id)) continue;
       seen.add(id);
-      out.push({ ref, index, fit });
+      out.push(bank ? { ref, index, fit, bank } : { ref, index, fit });
       if (out.length >= max) break;
     }
   }

@@ -16,7 +16,7 @@
 // each taking the shortest tail of its path no other folder shares, so `808/Kicks` and
 // `909/Kicks` are `808_kicks` and `909_kicks` and a lone `Snares` is `snares`.
 
-import { AUDIO, isReservedPack, packName, packsFromTree } from './remote-packs.mjs';
+import { AUDIO, packsFromTree } from './remote-packs.mjs';
 
 /** Where the chosen folder's handle is kept. Not text, so the backup export passes over it. */
 export const FOLDER_KEY = 'settings/sample-folder';
@@ -73,13 +73,13 @@ export function filesFromList(list, { limit = MAX_FOLDER_FILES } = {}) {
 
 /**
  * A folder's files as sample-store manifests. `folder` is the chosen folder's name, which names
- * the files sitting directly in it and goes in front of a subfolder named like one of poptart's
- * own packs.
+ * the files sitting directly in it. A subfolder named like one of poptart's own packs keeps its
+ * name and plays in that pack's place, as a folder in the desktop's sample library does.
  */
 export function folderManifests(paths, { folder }) {
   const title = folder || 'your folder';
   return packsFromTree(paths, { rootName: folder || 'folder' }).map((p) => {
-    const id = isReservedPack(p.name) ? packName(`${folder || 'folder'}_${p.name}`) : p.name;
+    const id = p.name;
     return {
       id,
       title: `${id} - ${title}`,
@@ -105,7 +105,7 @@ export function folderManifests(paths, { folder }) {
  * through the ordinary chooser and is gone on the next visit, 'copying' while such a folder is
  * copied in, and 'copied' once it has been.
  */
-export function createLocalFolder({ store = null, samples, onPacks = () => {}, warn = () => {}, say = () => {} }) {
+export function createLocalFolder({ store = null, samples, onPacks = () => {}, onForget = () => {}, warn = () => {}, say = () => {} }) {
   let handle = null;
   let files = new Map();       // path -> FileSystemFileHandle | File
   let active = [];             // manifests
@@ -135,10 +135,13 @@ export function createLocalFolder({ store = null, samples, onPacks = () => {}, w
 
   function install(found, folder) {
     for (const m of active) samples.forget?.(m.id);
+    const was = active.map((m) => m.id);
     files = found.files;
     truncated = found.truncated;
     name = folder;
     active = folderManifests([...files.keys()], { folder });
+    const now = new Set(active.map((m) => m.id));
+    if (was.some((id) => !now.has(id))) onForget(was.filter((id) => !now.has(id)));
     samples.register(active, null, { read });
     onPacks(active);
     const count = active.reduce((n, m) => n + m.files.length, 0);
@@ -240,6 +243,7 @@ export function createLocalFolder({ store = null, samples, onPacks = () => {}, w
     async forget() {
       if (copied.length) await dropCopy();
       for (const m of active) samples.forget?.(m.id);
+      onForget(active.map((m) => m.id));
       active = [];
       files = new Map();
       handle = null;

@@ -25,27 +25,28 @@
           <code>s("pack")</code> plays a pack of files, numbered from 0: <code>"pack:3"</code> is the fourth
           file (the same as <code>.i(3)</code>). A sampler takes <code>.fx()</code> like any instrument.
         </p>
-        <pre data-run><code>drums: s("pt_kit:0*4, ~ pt_kit:3 ~ pt_kit:3, pt_kit:4*8").vel("1 .6").postgain(0.35)
+        <pre data-run><code>drums: s("bd*4, ~ cp ~ cp, hh*8").vel("1 .6").postgain(0.35)
 bass: s("pt_keys:2").note("c2 ~ c2 eb2 ~ c2 g1 bb1").postgain(0.35)
 bell: s("pt_keys:1").note("&lt;g3 bb3 c4 eb4&gt;").vel(0.5)
   .fx("Delay").param("Sync", "1/8.").postgain(0.35)</code></pre>
         <table>
           <tr><th>Pack</th><th>Has</th></tr>
+          <tr><td><code>bd</code> · <code>sd</code> · <code>rim</code> · <code>cp</code> · <code>hh</code> · <code>oh</code> · <code>lt</code> · <code>ht</code></td><td>kick, snare, rim, clap, hat, open hat, low tom, high tom: one file each, from <code>pt_kit</code></td></tr>
           <tr><td><code>pt_kit</code></td><td>a drum kit: 0 kick, 1 snare, 2 rim, 3 clap, 4 hat, 5 open hat, 6 low tom, 7 high tom</td></tr>
           <tr><td><code>pt_keys</code></td><td>one-shots at middle C: 0 pluck, 1 bell, 2 bass, 3 pad, 4 stab</td></tr>
-          <tr data-build="web"><td><code>pt_drumbox</code> and <code>pt_drumbox_kick</code>, <code>_snare</code>, …</td><td>a drum machine, and sweeps of each of its voices</td></tr>
+          <tr data-build="web"><td><code>s("bd").bank("808")</code></td><td>a drum machine: the names above plus <code>mt</code>, congas <code>lc</code> <code>mc</code> <code>hc</code>, <code>cr</code> cymbal, <code>cb</code> cowbell, <code>cl</code> claves, <code>sh</code> maracas; <code>"bd:3"</code> is another dial setting</td></tr>
           <tr data-build="web"><td><code>pt_mallets</code> · <code>pt_piano</code> · <code>pt_perc</code> · <code>pt_synth</code></td><td>melodic and percussion packs</td></tr>
         </table>
         <p data-build="desktop">
-          Those two are built in. Every other pack is a folder in your sample library
+          Those are built in. Every other pack is a folder in your sample library
           (<code>~/.poptart/samples</code> unless settings says otherwise), its files numbered in name
-          order; a folder with a built-in pack's name plays in its place. The sounds tab lists every pack:
-          hold a file to hear it.
+          order. The sounds tab lists every pack: hold a file to hear it.
         </p>
+        <p>A folder in your sample library with a built-in pack's name, such as <code>bd</code>, plays in its place.</p>
         <div data-build="web">
           <p>
-            The first two are part of the page. The others download the first time a pattern names them and
-            are kept after that. The sounds tab lists every pack: hold a file to hear it.
+            The first three rows are part of the page. The others download the first time a pattern names them
+            and are kept after that. The sounds tab lists every pack: hold a file to hear it.
           </p>
           <p>
             <strong>A folder on this computer:</strong> <strong>settings → sample library → choose
@@ -96,7 +97,7 @@ beat: s("more_bd*4, ~ more_sn")</code></pre>
         </p>
 
         <h2 id="controls">Sampler controls</h2>
-        <pre><code>s("pt_kit:4*8")
+        <pre><code>s("hh*8")
   .begin(0).end(1)          // the region to play, 0..1
   .speed("1 -1")            // rate; negative plays backwards
   .note("c3 _ g3 c4")       // repitch: c3 plays as recorded
@@ -121,8 +122,8 @@ sweep: s("pt_keys:3").note("c2").speed(-1).begin(0.2).vel(0.6)
           Every control is also a builder, which reaches into one control from inside a transform:
           <code>.mul(speed(-1))</code> flips whatever speed is set.
         </p>
-        <pre data-run><code>kick: s("pt_kit:0*4").postgain(0.25)
-hats: s("pt_kit:5*8").vel("1 .5")
+        <pre data-run><code>kick: s("bd*4").postgain(0.25)
+hats: s("oh*8").vel("1 .5")
   // about 3 bars in 10 backwards
   .when(rand().gte(0.7), (x) =&gt; x.mul(speed(-1))).postgain(0.25)</code></pre>
 
@@ -137,7 +138,7 @@ hats: s("pt_kit:5*8").vel("1 .5")
         <pre data-run><code>// eight random starts a bar, through a held pad
 chops: s("pt_keys:3").fit(1).begin(irand(8).seg(8).div(8))
   .fx("Delay").param("Sync", "1/16.").postgain(0.4)
-kick: s("pt_kit:0*4").postgain(0.4)</code></pre>
+kick: s("bd*4").postgain(0.4)</code></pre>
         <p>
           A loop of your own plays the same way:
           <code>s("files:loop.wav").fit()</code>.

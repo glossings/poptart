@@ -3242,6 +3242,17 @@ export class Sig {
     if (!this.sampler) return this._clone({ samplerPending: { ...(this.samplerPending ?? {}), slices: slicesSignal(v) } });
     return this._clone({ sampler: { ...this.sampler, slices: slicesSignal(v) } });
   }
+  /**
+   * Which drum machine's pack a name plays: `s("bd").bank("808")` plays the pack "808_bd", and
+   * `s("bd:3").bank("808")` its fourth file. A pattern of names is read at each event, like
+   * .slices() - it adds no structure. A bank with no pack for a name warns once and plays the name
+   * as written, so `s("bd")` still sounds where the bank is not available.
+   */
+  bank(v) {
+    const sig = bankSignal(v);
+    if (!this.sampler) return this._clone({ samplerPending: { ...(this.samplerPending ?? {}), bank: sig } });
+    return this._clone({ sampler: { ...this.sampler, bank: sig } });
+  }
 
   // -------------------------------------------------------------------------------------------
   // Granular voice. One synth per event, like every other sampler voice, so the amplitude ADSR,
@@ -3773,9 +3784,9 @@ export class Sig {
     let out = noteSig._asSampler(method, this.samplerSrc, this.samplerKind, 'a sample source');
     for (const [key, v] of Object.entries(this.sampler)) {
       if (v == null || key === 'note') continue; // the new notes ARE the repitch now
-      // slices/grainShape are set without a grid merge (they add no structure); every other key
+      // slices/grainShape/bank are set without a grid merge (they add no structure); every other key
       // is a control and folds in exactly as its chain method did.
-      if (key === 'slices' || key === 'grainShape') out = out._clone({ sampler: { ...out.sampler, [key]: v } });
+      if (key === 'slices' || key === 'grainShape' || key === 'bank') out = out._clone({ sampler: { ...out.sampler, [key]: v } });
       else out = out._samplerOpt(key, key, v);
     }
     // The chain, params, channel strip and note channels carry over exactly as the synth path's
@@ -7308,6 +7319,17 @@ export function _pack(id, files = []) {
   const sig = new Sig(() => null);
   sig.isDef = key;
   return sig;
+}
+
+// The value of a `.bank()` call as a signal whose per-onset value is a bank name, or null for none.
+function bankSignal(v) {
+  if (v === undefined || v === null || v === '') return new Sig(() => null);
+  const selector = toSignal(v);
+  return new Sig((sec, cps, cycle) => {
+    const value = selector.sample(sec, cps, cycle);
+    const name = value == null || value === '~' ? '' : String(value).trim();
+    return name || null;
+  });
 }
 
 // The value of a `.slices()` call as a signal whose per-onset value is the SET - a list of

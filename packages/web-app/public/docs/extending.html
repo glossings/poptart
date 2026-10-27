@@ -119,7 +119,7 @@ Signal.prototype.strum = function (gap = 0.015) {
 chords: note("&lt;[c3,eb3,g3,bb3] [ab2,c3,eb3,g3]&gt; ~ ~ [bb2,d3,f3]")
   .strum().synth("Wavetable").postgain(0.4)
 bass: note("c2 ~ eb2 ~ ~ g1 ~ bb1").legato().synth("FM").postgain(0.4)
-hats: s("pt_kit:4*16").humanize().postgain(0.4)</code></pre>
+hats: s("hh*16").humanize().postgain(0.4)</code></pre>
         <p>
           An event can move up to one cycle either way. Each cycle is worked out once and remembered, so
           <code>Math.random()</code> gives one answer per cycle rather than a new one every time the cycle

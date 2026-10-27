@@ -39,9 +39,58 @@ function samplesRoot() {
 // the browser build plays), set by the host. A pack of that name in the library comes first, so
 // the built-in ones only fill in where the library has nothing.
 let builtInRoot = null;
+let builtInCache = null; // { packs: Map(name -> paths), short: Map(name -> path) }, read once per root
 
 function setBuiltInPacksRoot(dir) {
   builtInRoot = dir ? String(dir) : null;
+  builtInCache = null;
+}
+
+/**
+ * The built-in packs and their short names, read from their manifests. A manifest's file order is
+ * the pack's index order, the same as the browser build's (pt_kit:0 is the kick, not the clap a
+ * filename sort would put first), and its `shortNames` are packs of one of its files: `bd` is
+ * pt_kit's kick. A folder without a manifest is read in filename order like any other.
+ */
+function builtIns() {
+  if (builtInCache) return builtInCache;
+  const packs = new Map();
+  const short = new Map();
+  let names = [];
+  try {
+    names = builtInRoot ? fs.readdirSync(builtInRoot, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name) : [];
+  } catch {
+    names = [];
+  }
+  for (const name of names.sort()) {
+    const dir = path.join(builtInRoot, name);
+    let manifest = null;
+    try {
+      manifest = JSON.parse(fs.readFileSync(path.join(dir, 'manifest.json'), 'utf8'));
+    } catch {
+      manifest = null;
+    }
+    const listed = Array.isArray(manifest?.files)
+      ? manifest.files.map((f) => String(f?.file ?? '')).filter((f) => AUDIO_EXTS.has(path.extname(f).toLowerCase()) && fs.existsSync(path.join(dir, f)))
+      : null;
+    const paths = listed ? listed.map((f) => path.join(dir, f)) : readPackDir(dir);
+    if (!paths?.length) continue;
+    packs.set(name, paths);
+    for (const [id, file] of Object.entries(manifest?.shortNames ?? {})) {
+      if (listed?.includes(String(file)) && !short.has(id)) short.set(id, path.join(dir, String(file)));
+    }
+  }
+  builtInCache = { packs, short };
+  return builtInCache;
+}
+
+/** The packs poptart ships, short names included, as { name, files } in name order. */
+function builtInPacks() {
+  const { packs, short } = builtIns();
+  return [
+    ...[...packs].map(([name, files]) => ({ name, files })),
+    ...[...short].map(([name, file]) => ({ name, files: [file] })),
+  ].sort((a, b) => a.name.localeCompare(b.name));
 }
 
 function readPackDir(dir) {
@@ -64,7 +113,9 @@ function listPackFiles(pack) {
   const listed = own ? null : require('./listed-packs').listedPackEntries(name); // see listed-packs.js
   if (listed) return expandPackEntries(listed.filter((e) => path.isAbsolute(e)));
   if (own || !builtInRoot || name.includes('/') || name.includes('\\') || name.startsWith('.')) return own;
-  return readPackDir(path.join(builtInRoot, name));
+  const { packs, short } = builtIns();
+  if (packs.has(name)) return [...packs.get(name)];
+  return short.has(name) ? [short.get(name)] : null;
 }
 
 /**
@@ -461,6 +512,7 @@ module.exports = {
   samplesRoot,
   setSamplesRoot,
   setBuiltInPacksRoot,
+  builtInPacks,
   listPackFiles,
   resolveSampleFile,
   expandPackEntries,

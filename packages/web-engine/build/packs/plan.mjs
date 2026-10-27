@@ -112,6 +112,7 @@ export function chooseFromSfz(sfzPath, sfzText, { note = 60, velocity = 100 } = 
 export function planNamedFiles(plan, source, ref) {
   return {
     id: plan.id,
+    ...(plan.bank ? { bank: plan.bank } : {}),
     title: plan.title,
     kind: plan.kind,
     description: plan.description,

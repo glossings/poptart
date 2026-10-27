@@ -283,8 +283,14 @@ const KEYS = [
 
 const SOURCE = 'rendered by packages/web-engine/build/render-packs.mjs';
 
-function manifestFor(id, title, description, kind, names) {
-  return validateManifest({
+// The standard short drum names, each a pack of one of pt_kit's files: s("bd") is the kick.
+// Written into the kit's manifest, which both builds read, so the names live in one place.
+const KIT_SHORT_NAMES = Object.freeze({
+  bd: 'kick', sd: 'snare', rim: 'rim', cp: 'clap', hh: 'hat', oh: 'hatopen', lt: 'tomlo', ht: 'tomhi',
+});
+
+function manifestFor(id, title, description, kind, names, shortNames = null) {
+  const manifest = validateManifest({
     id,
     title,
     description,
@@ -296,11 +302,19 @@ function manifestFor(id, title, description, kind, names) {
       source: SOURCE,
     })),
   });
+  if (!shortNames) return manifest;
+  for (const [short, name] of Object.entries(shortNames)) {
+    if (!names.includes(name)) throw new Error(`[packs] "${short}" names ${name}, which ${id} does not have`);
+  }
+  return Object.freeze({
+    ...manifest,
+    shortNames: Object.freeze(Object.fromEntries(Object.entries(shortNames).map(([short, name]) => [short, `${name}.wav`]))),
+  });
 }
 
 export function renderPacks({ write = true } = {}) {
   const packs = [
-    { id: 'pt_kit', title: 'poptart kit', description: 'A starter drum kit, synthesized.', kind: 'drums', items: DRUMS },
+    { id: 'pt_kit', title: 'poptart kit', description: 'A starter drum kit, synthesized.', kind: 'drums', items: DRUMS, shortNames: KIT_SHORT_NAMES },
     { id: 'pt_keys', title: 'poptart keys', description: 'Melodic one-shots, all at middle C.', kind: 'melodic', items: KEYS },
   ];
 
@@ -314,7 +328,7 @@ export function renderPacks({ write = true } = {}) {
       if (write) fs.writeFileSync(path.join(dir, `${name}.wav`), bytes);
       rendered.push({ pack: pack.id, name, bytes: bytes.length });
     }
-    const manifest = manifestFor(pack.id, pack.title, pack.description, pack.kind, pack.items.map(([n]) => n));
+    const manifest = manifestFor(pack.id, pack.title, pack.description, pack.kind, pack.items.map(([n]) => n), pack.shortNames);
     if (write) fs.writeFileSync(path.join(dir, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
     manifests.push(manifest);
   }

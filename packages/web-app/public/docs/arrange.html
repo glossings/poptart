@@ -43,8 +43,8 @@
         <pre data-run><code>setscale("C minor")
 
 keys: n("&lt;0 5 3 4&gt;").sc(3).chord(7).synth("Wavetable").postgain(0.25)
-hats: s("pt_kit:4*8").vel("1 .5").postgain(0.3)
-kick: s("pt_kit:0*4").postgain(0.3)
+hats: s("hh*8").vel("1 .5").postgain(0.3)
+kick: s("bd*4").postgain(0.3)
 bass: n("&lt;0 5 3 4&gt;").sc(1).ply(4).synth("Wavetable")
   .fx("Filter").param("Mode", "ladder").param("Cutoff", 0.4).postgain(0.4)
 
@@ -121,9 +121,9 @@ _auto("sweep", "0,0 6,1,-2 8,0")</code></pre>
           them into one channel:
         </p>
         <pre data-run><code>drums: group({
-  kick: s("pt_kit:0*4")
-  snare: s("~ pt_kit:1 ~ pt_kit:1")
-  hats: s("pt_kit:4*8").vel("1 .5")
+  kick: s("bd*4")
+  snare: s("~ sd ~ sd")
+  hats: s("hh*8").vel("1 .5")
 }).fx("Reverb").param("Mix", 0.15).postgain(0.4)</code></pre>
         <ul>
           <li>The braces <em>are</em> the membership: where a track is written is where it belongs.</li>

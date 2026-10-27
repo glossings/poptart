@@ -176,3 +176,13 @@ test('say() keeps its kind through transforms, and its method form repitches', (
   // The method form says its whole literal phrase on every note, quotes and all.
   assert.deepEqual(refs(note('c5').say("hi, i'm dreamin'")), ["say:hi, i'm dreamin'"]);
 });
+
+test('.bank() rides each event as the bank name, read per event, and adds no events of its own', () => {
+  assert.deepEqual(cfgs(s('bd:3 sd').bank('808')).map((c) => [c.bank, c.index]), [['808', 3], ['808', undefined]]);
+  assert.deepEqual(refs(s('bd:3 sd').bank('808')), ['bd', 'sd'], 'the engine finds the bank pack, so it can fall back to the name');
+  assert.deepEqual(play(s('bd*2').bank('<808 x>'), 2).map((c) => c.args[2].bank), ['808', '808', 'x', 'x']);
+  assert.deepEqual(cfgs(s('bd').bank('808 x')).map((c) => c.bank), ['808'], 'one hit, read at its onset');
+  assert.deepEqual(cfgs(note('c3').bank('808').s('bd')).map((c) => c.bank), ['808'], 'written ahead of the source');
+  assert.equal(cfgs(s('bd'))[0].bank, undefined);
+  assert.equal(cfgs(s('bd').bank(''))[0].bank, undefined);
+});

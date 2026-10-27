@@ -18,7 +18,7 @@
 // anything is built from it, paths are refused unless they are plain relative names, and a pack
 // that fails validation is dropped with a reason rather than taken on faith. See validateIndex.
 
-import { PACK_PREFIX, validateManifest } from './manifest.mjs';
+import { isShippedPackId, validateManifest } from './manifest.mjs';
 
 /** The index format's name. A future format changes this rather than adding optional fields. */
 export const INDEX_FORMAT = 'poptart-packs-1';
@@ -104,7 +104,7 @@ export function validateIndex(raw) {
 /** Where one file of one pack lives. */
 export function fileUrl(base, packId, file) {
   if (!isSafeRelativePath(file)) throw new Error(`[packs] "${file}" is not a path a pack may serve`);
-  if (!String(packId).startsWith(PACK_PREFIX)) throw new Error(`[packs] "${packId}" is not a shipped pack`);
+  if (!isShippedPackId(packId)) throw new Error(`[packs] "${packId}" is not a shipped pack`);
   const root = String(base ?? '').replace(/\/+$/, '');
   return `${root}/${packId}/${file}`;
 }
@@ -122,6 +122,7 @@ export function buildIndex(manifests, { generated = null, sizes = {} } = {}) {
     generated: generated ?? new Date().toISOString().slice(0, 10),
     packs: manifests.map((m) => ({
       id: m.id,
+      ...(m.bank ? { bank: m.bank } : {}),
       title: m.title,
       description: m.description,
       kind: m.kind,

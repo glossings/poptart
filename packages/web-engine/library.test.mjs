@@ -13,8 +13,8 @@ import assert from 'node:assert/strict';
 import { buildIndex, creditLine, fileUrl, isSafeRelativePath, validateIndex, INDEX_FORMAT } from './src/packs/library.mjs';
 import { validateManifest } from './src/packs/manifest.mjs';
 import { chooseRegion, noteNumber, parseSfz, readOpcodes, regionRoot, samplePath } from './build/packs/sfz.mjs';
-import { chooseFromSfz, findSfz, planInstruments, servedName } from './build/packs/plan.mjs';
-import { DIAL_SWEEP, defaultFile, packPlans, voiceFiles } from './build/packs/upstream.mjs';
+import { chooseFromSfz, findSfz, planInstruments, planNamedFiles, servedName } from './build/packs/plan.mjs';
+import { DIAL_SWEEP, DRUM_BANK, DRUM_VOICES, SOURCES, packPlans, voiceFiles } from './build/packs/upstream.mjs';
 
 // ---- reading an SFZ ---------------------------------------------------------------------------
 
@@ -175,15 +175,31 @@ test('a two-control voice sweeps both, tone first, and a no-control voice is one
   assert.deepEqual(cowbell.map((f) => f.file), ['cb8/CB.WAV']);
 });
 
-test('the kit takes each voice from the middle of its dials', () => {
-  assert.equal(defaultFile({ code: 'BD', dir: 'bd8', knobs: 2 }), 'bd8/BD5050.WAV');
-  assert.equal(defaultFile({ code: 'OH', dir: 'oh8', knobs: 1 }), 'oh8/OH50.WAV');
-  assert.equal(defaultFile({ code: 'CB', dir: 'cb8', knobs: 0 }), 'cb8/CB.WAV');
+test('the drum machine is the 808 bank: one pack per voice under its short name, every dial setting in sweep order', () => {
+  assert.equal(DRUM_BANK, '808');
+  const plans = packPlans().filter((p) => p.bank === DRUM_BANK);
+  assert.deepEqual(plans.map((p) => p.id), [
+    '808_bd', '808_sd', '808_rim', '808_cp', '808_hh', '808_oh', '808_lt', '808_mt', '808_ht',
+    '808_lc', '808_mc', '808_hc', '808_cr', '808_cb', '808_cl', '808_sh',
+  ]);
+  const paths = (id) => plans.find((p) => p.id === id).files.map((f) => f.path);
+  const bd = paths('808_bd');
+  assert.equal(bd[0], 'bd8/BD5050.WAV', 's("bd").bank("808") is the kick with both controls halfway');
+  assert.deepEqual(bd.slice(1), voiceFiles(DRUM_VOICES[0]).map((f) => f.file).filter((f) => f !== 'bd8/BD5050.WAV'), 'then the sweep in dial order, nothing twice');
+  assert.equal(bd.length, 25);
+  assert.equal(bd[3], 'bd8/BD0050.WAV', 's("bd:3").bank("808") is another dial setting');
+  const oh = paths('808_oh');
+  assert.deepEqual(oh, ['oh8/OH50.WAV', 'oh8/OH00.WAV', 'oh8/OH25.WAV', 'oh8/OH75.WAV', 'oh8/OH10.WAV']);
+  assert.deepEqual(paths('808_hh'), ['ch8/CH.WAV']);
+  for (const plan of plans) assert.equal(new Set(plan.files.map((f) => f.path)).size, plan.files.length);
+  assert.ok(!packPlans().some((p) => p.id.startsWith('pt_drumbox')), 'the old drum machine packs are gone');
+  for (const plan of plans) assert.equal(validateManifest(planNamedFiles(plan, SOURCES['808'], 'abc')).bank, '808');
 });
 
 test('every planned pack has a usable id and would pass the shipping check', () => {
   for (const plan of packPlans()) {
-    assert.ok(plan.id.startsWith('pt_'), `${plan.id} must not take a name somebody wants for their own pack`);
+    const prefix = plan.bank ? `${plan.bank}_` : 'pt_';
+    assert.ok(plan.id.startsWith(prefix), `${plan.id} must not take a name somebody wants for their own pack`);
     assert.ok(/^[a-z0-9_]+$/.test(plan.id), `${plan.id} has to be typeable inside sp("…")`);
     assert.ok(plan.title, `${plan.id} needs a title`);
   }
@@ -240,6 +256,16 @@ test('a pack cannot point the app anywhere but at its own folder', () => {
   });
   assert.equal(packs.length, 0);
   assert.ok(problems[0].includes('pt_escape'));
+});
+
+test('a bank pack is named for its bank, and the index keeps the bank', () => {
+  const bd = { ...goodPack, id: '808_bd', bank: '808' };
+  const { packs, problems } = validateIndex({ format: INDEX_FORMAT, packs: [bd, { ...goodPack, id: 'bd', bank: '808' }, { ...goodPack, id: '808_' , bank: '808' }] });
+  assert.deepEqual(packs.map((p) => [p.id, p.bank]), [['808_bd', '808']]);
+  assert.equal(problems.length, 2, 'a bank pack has to be "<bank>_<voice>"');
+  assert.throws(() => validateManifest({ ...goodPack, id: '808_bd' }), /must start with "pt_"/, 'without its bank it is an ordinary pack');
+  assert.equal(buildIndex(packs).packs[0].bank, '808');
+  assert.equal(fileUrl('https://cdn.invalid', '808_bd', 'kick0000.wav'), 'https://cdn.invalid/808_bd/kick0000.wav');
 });
 
 test('a file URL is built under the pack, and refuses to be built anywhere else', () => {

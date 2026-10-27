@@ -732,6 +732,24 @@ test('s("pack:file") plays the file of that name, with or without its extension'
   assert.deepEqual(asked, [['files', 0]], 'asked only to start the pack loading');
 });
 
+test('.bank() plays "<bank>_<name>", and a bank with no such pack warns once and plays the name', () => {
+  const buffer = { duration: 2, length: 96000, sampleRate: 48000 };
+  const asked = [];
+  const packs = new Set(['bd', '808_bd']);
+  const store = {
+    knows: (pack) => packs.has(pack),
+    get: (pack, index) => { asked.push([pack, index]); return packs.has(pack) ? buffer : null; },
+  };
+  const { engine, warnings } = makeEngine({ samples: store });
+  engine.createTrack('t1');
+  assert.equal(engine.playSample('t1', 'bd', { index: 3, bank: '808' }, 0, 1).skipped, undefined);
+  assert.equal(engine.playSample('t1', 'bd', { bank: 'nine' }, 1, 2).skipped, undefined, 'still plays');
+  engine.playSample('t1', 'bd', { bank: 'nine' }, 2, 3);
+  assert.equal(engine.playSample('t1', 'sp:bd', { bank: '808' }, 3, 4).skipped, undefined);
+  assert.deepEqual(asked, [['808_bd', 3], ['bd', 0], ['bd', 0], ['bd', 0]], 'a named pack is played as written');
+  assert.equal(warnings.filter((w) => w.includes('"nine_bd"')).length, 1);
+});
+
 test('a sample plays, and a missing one is reported rather than thrown', () => {
   const buffer = { duration: 2, length: 96000, sampleRate: 48000 };
   const store = { get: (pack) => (pack === 'kit' ? buffer : null) };

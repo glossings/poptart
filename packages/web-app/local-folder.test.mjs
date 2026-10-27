@@ -4,6 +4,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { createLocalFolder, filesFromList, folderManifests, walkDirectory, FOLDER_KEY } from './public/web/local-folder.mjs';
+import * as patternCore from '@poptart/pattern-core';
+import { createSampleStore, registerPacks, registerShortNames, shortNamePacks, unregisterPacks } from './public/web/samples.mjs';
+import { createRequire } from 'node:module';
+
+const shippedKit = createRequire(import.meta.url)('../web-engine/public/packs/pt_kit/manifest.json');
 
 /** A stand-in for a FileSystemDirectoryHandle over { name: contents | {subfolder} }. */
 function dirHandle(name, tree, { permission = 'granted' } = {}) {
@@ -68,9 +73,9 @@ test('a folder is walked for audio, hidden folders left out', async () => {
   assert.equal(capped.truncated, true);
 });
 
-test('packs are named by folder, as samples() names a repository\'s, and never take one of poptart\'s own names', () => {
-  const manifests = folderManifests(['808/Kicks/kick 10.wav', '808/Kicks/kick 2.wav', '909/Kicks/k.wav', 'Snares/sd.wav', 'pt_kit/x.wav', 'loose.aif'], { folder: 'My Samples' });
-  assert.deepEqual(manifests.map((m) => m.id), ['808_kicks', '909_kicks', 'my_samples', 'my_samples_pt_kit', 'snares']);
+test('packs are named by folder, as samples() names a repository\'s, and a folder with one of poptart\'s own names keeps it', () => {
+  const manifests = folderManifests(['808/Kicks/kick 10.wav', '808/Kicks/kick 2.wav', '909/Kicks/k.wav', 'Snares/sd.wav', 'pt_kit/x.wav', 'bd/k.wav', 'files/f.wav', 'loose.aif'], { folder: 'My Samples' });
+  assert.deepEqual(manifests.map((m) => m.id), ['808_kicks', '909_kicks', 'bd', 'files', 'my_samples', 'pt_kit', 'snares']);
   const kicks = manifests.find((m) => m.id === '808_kicks');
   assert.deepEqual(kicks.files.map((f) => f.file), ['808/Kicks/kick 2.wav', '808/Kicks/kick 10.wav'], 'in natural order');
   assert.equal(kicks.files[0].name, 'kick 2');
@@ -97,7 +102,7 @@ test('a chosen folder is kept, registered with a reader, and read where it lives
   await folder.choose(handle);
   assert.equal(store.map.get(FOLDER_KEY).handle, handle, 'the handle is kept for the next visit');
   assert.deepEqual(folder.status(), { state: 'ready', name: 'Samples', packs: 5, files: 6, truncated: false, bytes: 0, progress: null });
-  assert.deepEqual(filed.sort(), ['808_kicks', '909_kicks', 'samples', 'samples_pt_kit', 'snares']);
+  assert.deepEqual(filed.sort(), ['808_kicks', '909_kicks', 'pt_kit', 'samples', 'snares']);
   const kicks = samples.registered.get('808_kicks');
   assert.equal(kicks.urlFor, null, 'nothing to fetch');
   const bytes = await kicks.read(kicks.manifest, '808/Kicks/kick 2.wav');
@@ -186,4 +191,67 @@ test('choosing another folder replaces a kept copy', async () => {
   await folder.keepCopy();
   await folder.choose(dirHandle('Samples', LIBRARY));
   assert.deepEqual([...store.map.keys()], [FOLDER_KEY], 'only the new folder\'s handle');
+});
+
+// A context whose "decoded audio" says which bytes it was decoded from.
+const tagContext = { decodeAudioData: async (bytes) => ({ duration: 1, tag: new TextDecoder().decode(bytes) }) };
+const settle = () => new Promise((r) => setTimeout(r, 0));
+
+test('a library folder named pt_kit, bd or files plays in place of the page\'s own, and they come back when it goes', async () => {
+  const warnings = [];
+  const shippedBytes = (id, file) => new TextEncoder().encode(`shipped ${id}/${file}`).buffer;
+  const samples = createSampleStore({
+    context: tagContext,
+    fetchImpl: async (url) => ({ ok: true, arrayBuffer: async () => shippedBytes(...url.split('/').slice(-2)) }),
+    warn: (line) => warnings.push(line),
+  });
+  const builtInUrl = (id, file) => `/web-engine/packs/${id}/${file}`;
+  patternCore.clearRolls('prebake');
+  const shorts = shortNamePacks([shippedKit]);
+  registerPacks(patternCore, [shippedKit], { ships: true });
+  registerShortNames(patternCore, shorts);
+  samples.setPackResolver((id) => patternCore.lookupPack(id)?.files ?? null);
+  samples.register([shippedKit], builtInUrl, { ships: true });
+  await samples.ensure(shippedKit, builtInUrl);
+  await samples.addFile('dropped.wav', new TextEncoder().encode('dropped'), 'files');
+  try {
+    assert.equal(samples.get('pt_kit', 0).buffer.tag, 'shipped pt_kit/kick.wav');
+    assert.equal(samples.get('bd', 0).buffer.tag, 'shipped pt_kit/kick.wav');
+    assert.equal(samples.get('files', 0).buffer.tag, 'dropped');
+
+    const folder = createLocalFolder({
+      samples,
+      onPacks: (m) => registerPacks(patternCore, m),
+      onForget: (ids) => unregisterPacks(patternCore, ids),
+    });
+    await folder.choose(dirHandle('Samples', { pt_kit: { 'a.wav': 'my kit' }, bd: { 'k.wav': 'my kick' }, files: { 'f.wav': 'my file' } }));
+    assert.deepEqual(folder.packs().map((p) => p.manifest.id).sort(), ['bd', 'files', 'pt_kit'], 'the names are kept');
+
+    // The first ask starts the folder's pack loading, as for any pack that loads on demand.
+    for (const id of ['pt_kit', 'bd', 'files']) samples.get(id, 0);
+    await settle();
+    assert.equal(samples.get('pt_kit', 0).buffer.tag, 'my kit');
+    assert.equal(samples.get('bd', 0).buffer.tag, 'my kick');
+    assert.equal(samples.get('files', 0).buffer.tag, 'my file');
+    assert.equal(samples.get('sd', 0), null, 'sd is pt_kit:1, and pt_kit is the folder\'s now - which has one file');
+    assert.equal(samples.ownHidden('files'), true);
+    assert.equal(warnings.filter((w) => w.includes('"files"')).length, 1, 'the console says once that the page\'s own pack is hidden');
+    assert.equal(samples.named('rec', 'x'), null);
+
+    // Dropping a file while the folder has the name keeps it for when the folder goes.
+    await samples.addFile('second.wav', new TextEncoder().encode('second'), 'files');
+    assert.equal(samples.get('files', 0).buffer.tag, 'my file');
+
+    await folder.forget();
+    for (const id of ['pt_kit', 'bd']) samples.get(id, 0);
+    await settle();
+    assert.equal(samples.get('pt_kit', 0).buffer.tag, 'shipped pt_kit/kick.wav');
+    assert.equal(samples.get('bd', 0).buffer.tag, 'shipped pt_kit/kick.wav');
+    assert.deepEqual(patternCore.lookupPack('bd')?.files, ['pt_kit/kick.wav']);
+    assert.equal(samples.get('files', 0).buffer.tag, 'dropped');
+    assert.equal(samples.get('files', 1).buffer.tag, 'second');
+  } finally {
+    registerShortNames(patternCore, []);
+    patternCore.clearRolls('prebake');
+  }
 });

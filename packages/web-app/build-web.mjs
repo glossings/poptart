@@ -169,8 +169,8 @@ export function markDocsWeb(html) {
 }
 
 export const WEB_SKETCH = [
-  'kick: s("pt_kit:0*4")',
-  'hat: s("pt_kit:4*8")',
+  'kick: s("bd*4")',
+  'hat: s("hh*8")',
   'keys: n("0 2 3 <5 7>")',
   '  .scale("F minor")',
   '  .synth("Wavetable")',

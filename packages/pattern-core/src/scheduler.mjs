@@ -2132,6 +2132,12 @@ export class Scheduler {
       const set = src.slices.sample(onsetSec, this.transport.cps, onsetCycle);
       if (set && !sliceSetIsEmpty(set)) cfg.slices = set;
     }
+    // .bank() names a pack family, not an amount: passed on as the name, and the engine resolves it
+    // against the packs it has (see OscEngine#_bankRef).
+    if (src.bank) {
+      const bank = src.bank.sample(onsetSec, this.transport.cps, onsetCycle);
+      if (bank != null) cfg.bank = bank;
+    }
     if (cfg.grain > 0.5) this._grainConfigAt(cfg, onsetSec, onsetCycle);
     if (src.fit === 'auto') {
       cfg.fit = 'auto';

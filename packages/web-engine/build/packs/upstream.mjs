@@ -26,7 +26,7 @@
  * a song that was written against it.
  */
 export const SOURCES = Object.freeze({
-  drumbox: {
+  808: {
     title: 'Drum machine one-shots by Michael Fischer',
     kind: 'github',
     repo: 'tidalcycles/sounds-tr808-fischer',
@@ -78,26 +78,30 @@ export const SOURCES = Object.freeze({
  */
 export const DIAL_SWEEP = Object.freeze(['00', '25', '50', '75', '10']);
 
-/** The dial position a kit's default sample is taken from: halfway up both controls. */
-const MIDDLE = '50';
+/**
+ * The bank the drum machine's packs make: `s("bd").bank("808")` plays the pack "808_bd". Each
+ * voice is a pack under its standard short name, holding every dial setting it was recorded at
+ * (see bankFiles for the order).
+ */
+export const DRUM_BANK = '808';
 
-const DRUM_VOICES = Object.freeze([
-  { code: 'BD', dir: 'bd8', name: 'kick', knobs: 2, title: 'Kick' },
-  { code: 'SD', dir: 'sd8', name: 'snare', knobs: 2, title: 'Snare' },
-  { code: 'RS', dir: 'rs8', name: 'rim', knobs: 0, title: 'Rim shot' },
-  { code: 'CP', dir: 'cp8', name: 'clap', knobs: 0, title: 'Hand clap' },
-  { code: 'CH', dir: 'ch8', name: 'hat', knobs: 0, title: 'Closed hi-hat' },
-  { code: 'OH', dir: 'oh8', name: 'hatopen', knobs: 1, title: 'Open hi-hat' },
-  { code: 'LT', dir: 'lt8', name: 'tomlo', knobs: 1, title: 'Low tom' },
-  { code: 'MT', dir: 'mt8', name: 'tommid', knobs: 1, title: 'Mid tom' },
-  { code: 'HT', dir: 'ht8', name: 'tomhi', knobs: 1, title: 'High tom' },
-  { code: 'LC', dir: 'lc8', name: 'congalo', knobs: 1, title: 'Low conga' },
-  { code: 'MC', dir: 'mc8', name: 'congamid', knobs: 1, title: 'Mid conga' },
-  { code: 'HC', dir: 'hc8', name: 'congahi', knobs: 1, title: 'High conga' },
-  { code: 'CY', dir: 'cy8', name: 'cymbal', knobs: 2, title: 'Cymbal' },
-  { code: 'CB', dir: 'cb8', name: 'cowbell', knobs: 0, title: 'Cowbell' },
-  { code: 'CL', dir: 'cl8', name: 'claves', knobs: 0, title: 'Claves' },
-  { code: 'MA', dir: 'ma8', name: 'maracas', knobs: 0, title: 'Maracas' },
+export const DRUM_VOICES = Object.freeze([
+  { code: 'BD', dir: 'bd8', short: 'bd', name: 'kick', knobs: 2, title: 'Kick' },
+  { code: 'SD', dir: 'sd8', short: 'sd', name: 'snare', knobs: 2, title: 'Snare' },
+  { code: 'RS', dir: 'rs8', short: 'rim', name: 'rim', knobs: 0, title: 'Rim shot' },
+  { code: 'CP', dir: 'cp8', short: 'cp', name: 'clap', knobs: 0, title: 'Hand clap' },
+  { code: 'CH', dir: 'ch8', short: 'hh', name: 'hat', knobs: 0, title: 'Closed hi-hat' },
+  { code: 'OH', dir: 'oh8', short: 'oh', name: 'hatopen', knobs: 1, title: 'Open hi-hat' },
+  { code: 'LT', dir: 'lt8', short: 'lt', name: 'tomlo', knobs: 1, title: 'Low tom' },
+  { code: 'MT', dir: 'mt8', short: 'mt', name: 'tommid', knobs: 1, title: 'Mid tom' },
+  { code: 'HT', dir: 'ht8', short: 'ht', name: 'tomhi', knobs: 1, title: 'High tom' },
+  { code: 'LC', dir: 'lc8', short: 'lc', name: 'congalo', knobs: 1, title: 'Low conga' },
+  { code: 'MC', dir: 'mc8', short: 'mc', name: 'congamid', knobs: 1, title: 'Mid conga' },
+  { code: 'HC', dir: 'hc8', short: 'hc', name: 'congahi', knobs: 1, title: 'High conga' },
+  { code: 'CY', dir: 'cy8', short: 'cr', name: 'cymbal', knobs: 2, title: 'Cymbal' },
+  { code: 'CB', dir: 'cb8', short: 'cb', name: 'cowbell', knobs: 0, title: 'Cowbell' },
+  { code: 'CL', dir: 'cl8', short: 'cl', name: 'claves', knobs: 0, title: 'Claves' },
+  { code: 'MA', dir: 'ma8', short: 'sh', name: 'maracas', knobs: 0, title: 'Maracas' },
 ]);
 
 /** Every file of one voice, in dial order: 1, 5 or 25 of them depending on its controls. */
@@ -115,10 +119,18 @@ export function voiceFiles(voice) {
   return out;
 }
 
-/** The one file that stands for a voice in the mixed kit: both controls at their midpoint. */
-export function defaultFile(voice) {
-  const dial = voice.knobs === 0 ? '' : voice.knobs === 1 ? MIDDLE : `${MIDDLE}${MIDDLE}`;
-  return `${voice.dir}/${voice.code}${dial}.WAV`;
+/** The dial position a bank's first file is taken from: halfway up every control. */
+const MIDDLE = '50';
+
+/**
+ * A voice's files as its bank pack lists them: the midpoint first, so `s("bd").bank("808")` is the
+ * kick with both controls halfway, then every other setting in dial order. Nothing twice.
+ */
+export function bankFiles(voice) {
+  const files = voiceFiles(voice);
+  const mid = voice.knobs === 0 ? null : MIDDLE.repeat(voice.knobs);
+  const at = files.findIndex((f) => f.dial === mid);
+  return at < 0 ? files : [files[at], ...files.slice(0, at), ...files.slice(at + 1)];
 }
 
 /**
@@ -248,26 +260,17 @@ export function freepatsUrl(bank) {
 export function packPlans() {
   const plans = [];
 
-  plans.push({
-    id: 'pt_drumbox',
-    source: 'drumbox',
-    title: 'Drum machine kit',
-    kind: 'drums',
-    description: 'One voice per slot, every control at its midpoint.',
-    files: DRUM_VOICES.map((v) => ({ path: defaultFile(v), name: v.name })),
-  });
-
   for (const voice of DRUM_VOICES) {
-    if (voice.knobs === 0) continue;   // nothing to sweep; it is already in the kit above
     plans.push({
-      id: `pt_drumbox_${voice.name}`,
-      source: 'drumbox',
-      title: `${voice.title} sweep`,
+      id: `${DRUM_BANK}_${voice.short}`,
+      bank: DRUM_BANK,
+      source: '808',
+      title: voice.title,
       kind: 'drums',
       description: voice.knobs === 2
-        ? 'Every combination of the two controls, tone first then decay, in dial order.'
-        : 'The one control swept, in dial order.',
-      files: voiceFiles(voice).map((f) => ({ path: f.file, name: f.name })),
+        ? 'Both controls halfway, then every other combination, tone first then decay, in dial order.'
+        : voice.knobs === 1 ? 'The control halfway, then every other setting in dial order.' : null,
+      files: bankFiles(voice).map((f) => ({ path: f.file, name: f.name })),
     });
   }
 
