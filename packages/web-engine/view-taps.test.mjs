@@ -5,7 +5,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { FakeAudioContext } from './fake-context.mjs';
-import { ViewTaps, VIEW_TAP_MAX, VIEW_DECIM } from './src/engine/view-taps.mjs';
+import { ViewTaps, VIEW_DECIM } from './src/engine/view-taps.mjs';
 import { WebAudioEngine } from './src/engine/web-audio-engine.mjs';
 import { catalog } from './src/catalog.mjs';
 
@@ -46,10 +46,10 @@ test('a track not built yet is waited for, and a spectrum only taps the mono sum
 
 test('the budget is the desktop\'s, and the master is extra', () => {
   const { views } = rig();
-  const list = [{ id: '*' }, ...Array.from({ length: VIEW_TAP_MAX + 1 }, (_, k) => ({ id: `#${k}` }))];
+  const list = [{ id: '*' }, ...Array.from({ length: 12 }, (_, k) => ({ id: `#${k}` }))];
   const res = views.arm(list);
-  assert.equal(res.armed.length, VIEW_TAP_MAX + 1);
-  assert.deepEqual(res.over, [`#${VIEW_TAP_MAX}`]);
+  assert.equal(res.armed.length, 13, 'every track asked for is armed, plus the master');
+  assert.deepEqual(res.over, []);
 });
 
 test('disarming takes the tap out of the graph; changing what it needs rebuilds it', () => {
@@ -68,7 +68,6 @@ test('disarming takes the tap out of the graph; changing what it needs rebuilds 
 test('the engine forwards both calls and reads the master', () => {
   const ctx = new FakeAudioContext();
   const engine = new WebAudioEngine(ctx, { registry: catalog, warn: () => {} });
-  assert.equal(engine.viewTapMax(), VIEW_TAP_MAX);
   engine.viewTaps([{ id: '*' }]);
   assert.ok(engine.viewRead()['*'].scope);
 });

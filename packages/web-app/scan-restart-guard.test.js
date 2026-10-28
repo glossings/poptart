@@ -53,6 +53,7 @@ for (const [what, listener, endpoint] of [
   ['the output channel count', "audioChannelSelect.addEventListener('change'", '/api/audioOutputChannels'],
   ['the input devices', "audioInputApply.addEventListener('click'", '/api/audioInputs'],
   ['the headphone cue device', "audioCueSelect.addEventListener('change'", '/api/audioCueDevice'],
+  ['the engine', "nodeEngineToggle.addEventListener('change'", '/api/audioEngine'],
 ]) {
   test(`changing ${what} asks first, before anything is torn down`, () => {
     const body = handler(listener, endpoint);
@@ -84,7 +85,7 @@ test('every endpoint that restarts the engine is covered here', () => {
   const endpoints = [...server.matchAll(/'POST (\/api\/[A-Za-z]+)': async[\s\S]*?(?=\n {2}'(?:POST|GET) \/api|\n};)/g)]
     .filter((m) => /restartEngine\(/.test(m[0]))
     .map((m) => m[1]);
-  const guarded = ['/api/audioDevice', '/api/audioOutputChannels', '/api/audioInputs', '/api/audioCueDevice'];
+  const guarded = ['/api/audioDevice', '/api/audioOutputChannels', '/api/audioInputs', '/api/audioCueDevice', '/api/audioEngine'];
   const unguarded = endpoints.filter((e) => !guarded.includes(e));
   assert.deepEqual(unguarded, [], 'a settings endpoint restarts the engine with no scan guard in client.js');
 });

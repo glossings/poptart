@@ -3831,9 +3831,11 @@ export class Sig {
    *   bass: note("c2 eb2").synth("Wavetable").color("orange")
    *
    * Anywhere in the chain; it never changes the sound. A track without one gets a color of its
-   * own from the theme, the same one every evaluation.
+   * own from the theme, the same one every evaluation - and so does a bare `.color()`, which the
+   * editor draws as a swatch that opens a color picker.
    */
   color(c) {
+    if (c === undefined) return this._clone({ trackColor: null });
     // A string argument arrives as a mini pattern; its text is the color written.
     const raw = c instanceof Sig && typeof c.miniText === 'string' ? c.miniText : c;
     const name = trackColorOf(raw);

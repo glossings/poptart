@@ -87,7 +87,8 @@ class DirectPath {
    * sendRaw(bytes): one datagram to scsynth. tell(address, args): a bookkeeping message to sclang.
    * now(): seconds on the engine's clock (OscEngine#getTime). warn(key, text): a one-shot warning.
    */
-  constructor({ sendRaw, tell, now, warn = () => {} }) {
+  constructor({ sendRaw, tell, now, warn = () => {}, allocNode = null }) {
+    this.allocNode = allocNode;
     this._sendRaw = sendRaw;
     this._tell = tell;
     this._now = now;
@@ -276,6 +277,8 @@ class DirectPath {
   // --- sending --------------------------------------------------------------------------------
 
   _allocNode() {
+    // The node engine hands out every id from one allocator (server/alloc.js).
+    if (this.allocNode) return this.allocNode();
     const s = this.server;
     const id = this._nextNode;
     this._nextNode = id >= s.nodeHi ? s.nodeLo : id + 1;

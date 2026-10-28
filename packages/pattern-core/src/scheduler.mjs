@@ -744,6 +744,7 @@ export class Scheduler {
     this._sentBusSends = null; // bus sends as last resolved and pushed, for diffing (see _syncBusSends)
     this._appliedStates = new Map(); // "slot:pluginId" -> state string already sent (see setPattern)
     this._statePending = new Map(); // same key -> the push the engine has not answered for yet (see holdPluginState)
+    this._stateKnown = new Set(); // same keys, where the plugin is KNOWN to hold that state (see knownStates)
     // "pluginId\0presetName" -> a program auto-pin captured OUT of that plugin which the code does
     // not carry yet. A capture reaches the buffer through the editor's poll, a few hundred ms after
     // it was taken, and in that gap the preset's definition still describes the sound as it was
@@ -885,6 +886,43 @@ export class Scheduler {
   _forgetState(key) {
     this._appliedStates.delete(key);
     this._statePending.delete(key);
+    this._stateKnown.delete(key);
+  }
+
+  /**
+   * The programs this track's plugins are KNOWN to hold, as "slot:pluginId" -> state: the pushes
+   * the engine said landed, and the states read out of a plugin (markStateApplied). The host
+   * carries them over to the Scheduler it builds for the same engine track next (a solo toggle
+   * rebuilds every track it brings back), so a preset that has not changed is not loaded again -
+   * a load resets the plugin's voices, and re-chews a big program.
+   *
+   * Left out on purpose, so the next Scheduler sends them again: a push the engine has not
+   * answered for, one it said did not land (a cold open that timed out would otherwise be
+   * trusted for good), one from an engine that never answers, and a slot being edited by hand,
+   * whose plugin holds something newer than what was sent.
+   */
+  knownStates() {
+    const out = new Map();
+    for (const [key, state] of this._appliedStates) {
+      if (!this._stateKnown.has(key) || this._statePending.has(key)) continue;
+      if (this._stateHold.has(Number(key.slice(0, key.indexOf(':'))))) continue;
+      out.set(key, state);
+    }
+    return out;
+  }
+
+  /**
+   * Takes over what an earlier Scheduler of this engine track knew (see knownStates). Called
+   * before the first setPattern, and only by a host that knows the track's plugins have not been
+   * reopened in between: same engine, same track, nothing destroyed. A slot whose plugin the new
+   * pattern changes drops its entry in setPattern, like any other replaced plugin.
+   */
+  adoptKnownStates(states) {
+    for (const [key, state] of states ?? []) {
+      if (this._appliedStates.has(key)) continue; // this Scheduler's own record is newer
+      this._appliedStates.set(key, state);
+      this._stateKnown.add(key);
+    }
   }
 
   // Records one program as sent. It counts as loaded from here - a swap is sent a lookahead early
@@ -893,11 +931,14 @@ export class Scheduler {
   // every push in doubt, which is the cautious reading: a freeze forgets it.
   _noteStatePush(key, state, landed) {
     this._appliedStates.set(key, state);
+    this._stateKnown.delete(key);
     const push = {};
     this._statePending.set(key, push);
     if (typeof landed?.then !== 'function') return;
-    landed.then(() => {
-      if (this._statePending.get(key) === push) this._statePending.delete(key);
+    landed.then((ok) => {
+      if (this._statePending.get(key) !== push) return;
+      this._statePending.delete(key);
+      if (ok === true) this._stateKnown.add(key); // only a load the engine says is IN is known
     });
   }
 
@@ -1060,6 +1101,7 @@ export class Scheduler {
     if (pluginId == null) return;
     this._appliedStates.set(`${slot}:${pluginId}`, state);
     this._statePending.delete(`${slot}:${pluginId}`); // read OUT of the plugin: nothing in flight to doubt
+    this._stateKnown.add(`${slot}:${pluginId}`);
   }
 
   // What auto-pin captured out of a plugin, parked here until the editor has written it into the
@@ -1179,8 +1221,15 @@ export class Scheduler {
     // (or the plugin occupying the slot) actually changed - a livecoding re-eval must not make
     // the plugin re-chew a megabyte state blob every keystroke. Removing the state from the
     // code deliberately resets nothing: the plugin just keeps sounding how it sounds.
+    // A slot this pattern puts a different plugin in (or none) has closed the one its record is
+    // about, and a plugin reopened later starts from its defaults: the record goes, so a `{ state }`
+    // or preset brought back with it is sent again rather than taken as already loaded.
+    const chain = [sig.instrument, ...sig.fxChain];
+    for (const key of [...this._appliedStates.keys()]) {
+      const at = key.indexOf(':');
+      if (`${chain[Number(key.slice(0, at))]}` !== key.slice(at + 1)) this._forgetState(key); // as the key was built
+    }
     if (typeof this.engine.setPluginState === 'function') {
-      const chain = [sig.instrument, ...sig.fxChain];
       for (const [slotStr, state] of Object.entries(sig.slotStates ?? {})) {
         const slot = Number(slotStr);
         // A slot a .preset(...) drives belongs to the pattern, so its pinned `{ state }` is dead

@@ -17,6 +17,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const { StateCarry } = require('./state-carry');
 const path = require('node:path');
 
 // patternSigs is internal to server.js (which spawns an engine on require), so it is read out of
@@ -124,14 +125,17 @@ function loadHoldFns() {
   const pluginInSlot = (label, slot) => chains.get(label)?.[slot] ?? null;
   const names = ['stateHeld', 'syncStateHold', 'stateHeldSlotsFor', 'noteHandEdit', 'takeSlotByHand',
     'releaseSlotsHeldByHand', 'commitCapture', 'currentHolds', 'expireStateHolds', 'setPresetHold',
-    'expirePresetHolds', 'thawReplacedSlots', 'replacedHeldSlots'];
+    'expirePresetHolds', 'thawReplacedSlots', 'replacedHeldSlots', 'forgetSlotState'];
+  // A stopped track's record of its slots (see state-carry.js): none of these tracks is parked.
+  const stateCarry = new StateCarry();
+  const engineTrack = (label) => label;
   // eslint-disable-next-line no-new-func
   const make = new Function('presetHolds', 'schedulers', 'handTaken', 'uncaptured', 'autoPinDirty',
-    'capturedPresetOf', 'captureOpenEditors', 'pluginInSlot', 'PRESET_HOLD_TTL_MS', 'UNCAPTURED_TTL_MS',
+    'capturedPresetOf', 'captureOpenEditors', 'pluginInSlot', 'PRESET_HOLD_TTL_MS', 'UNCAPTURED_TTL_MS', 'stateCarry', 'engineTrack',
     `let editSeq = 0;\n${names.map(take).join('\n')}\nreturn { ${names.join(', ')} };`);
   const fns = make(presetHolds, schedulers, handTaken, uncaptured, autoPinDirty, capturedPresetOf,
-    captureOpenEditors, pluginInSlot, ttl, uncapTtl);
-  return { presetHolds, schedulers, handTaken, uncaptured, autoPinDirty, capturedPresetOf, chains, asked, ttl, uncapTtl, ...fns };
+    captureOpenEditors, pluginInSlot, ttl, uncapTtl, stateCarry, engineTrack);
+  return { presetHolds, schedulers, handTaken, uncaptured, autoPinDirty, capturedPresetOf, chains, asked, ttl, uncapTtl, stateCarry, ...fns };
 }
 
 // Records every hold/release the Scheduler is actually asked to perform. holdPreset() LOADS a
@@ -351,6 +355,18 @@ test('a capture that never reaches the code times out rather than freezing the s
   assert.deepEqual(sch.frozen.at(-1), [0, false]);
   // The one thaw that owes the pattern a real load: the plugin holds an edit nothing filed.
   assert.deepEqual(sch.forgotten, [0]);
+});
+
+test('...and on a track a solo has stopped, the load is still owed when it comes back', () => {
+  // No Scheduler while it is stopped: the record parked for its return (see state-carry.js) is
+  // what must forget the slot, or the rebuilt Scheduler takes the edited plugin as holding the code's program.
+  const { noteHandEdit, expireStateHolds, uncaptured, uncapTtl, stateCarry } = loadHoldFns();
+  const engine = {};
+  stateCarry.markApplied('lead', 0, 'Serum 2', '@code', engine);
+  noteHandEdit('lead|0');
+  uncaptured.get('lead|0').at -= uncapTtl + 1;
+  expireStateHolds();
+  assert.equal(stateCarry.applied('lead', 0, 'Serum 2'), undefined);
 });
 
 test('handing a slot back by hand does not make its next program push unconditional', () => {

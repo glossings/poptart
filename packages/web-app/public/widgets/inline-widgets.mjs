@@ -90,7 +90,7 @@ export function createInlineWidgets({
   let pendingRelayout = false;
   const frames = new Map(); // target -> latest frame
   const levels = new Map(); // target -> [{ ms, pk, l, r }]
-  let over = new Set(); // targets the engine's tap budget left out
+  let over = new Set(); // targets the engine reports it could not tap (none today)
   let liveNow = {}; // plot at -> value right now
   const dataWin = { from: 0, to: 0, fetching: false };
   const FOLDED = new Set(calls.FOLDED_WIDGETS ?? ['steps', 'sliders', 'matrix']);
@@ -1002,7 +1002,7 @@ export function createInlineWidgets({
       return displayBlock(w, (ctx, c, width, height) => {
         const f = frames.get(w.entry.target)?.scope;
         midline(ctx, c, width, height);
-        if (!f) return; // nothing to show yet: stopped, not armed, or past the tap budget
+        if (!f) return; // nothing to show yet: stopped or not armed
         const windowMs = w.entry.opts?.window ?? 20;
         const span = Math.max(8, Math.min(f.l.length - 1, Math.round((windowMs / 1000) * f.rate)));
         const mono = new Float32Array(f.l.length);
@@ -1145,7 +1145,7 @@ export function createInlineWidgets({
         ctx.arc(cx, bottom, radius, Math.PI, 2 * Math.PI);
         ctx.stroke();
         const f = frames.get(w.entry.target)?.scope;
-        if (!f) return; // nothing to show yet: stopped, not armed, or past the tap budget
+        if (!f) return; // nothing to show yet: stopped or not armed
         const { pts, correlation } = M.imagerPoints(f.l, f.r);
         ctx.fillStyle = c.accent;
         ctx.globalAlpha = 0.5;
@@ -1968,6 +1968,12 @@ export function createInlineWidgets({
     clear,
     get widgets() { return widgets; },
     get folds() { return folds; },
+    /** A track's color changed: the displays drawn once while stopped are drawn again in it. */
+    recolor() {
+      for (const w of widgets) w.drawnStill = false;
+      if (bg) bg.still = false;
+      ensureLoop();
+    },
     /** For tests: run one frame now. */
     _frame: frame,
   };

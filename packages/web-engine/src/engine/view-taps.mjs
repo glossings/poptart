@@ -8,12 +8,7 @@
 // scope's samples kept one in VIEW_DECIM, the spectrum a 2048-point transform scaled so a
 // full-scale sine reads 0 dB. A display is then the same picture whichever engine is playing.
 //
-// A tap exists only while the editor is asking for frames (the host arms and disarms them), and the
-// track budget is the desktop's, so a song with a display on every track shows the same thing in
-// both builds.
-
-/** The most tracks that get a view tap at once. The master is extra. */
-export const VIEW_TAP_MAX = 4;
+// A tap exists only while the editor is asking for frames (the host arms and disarms them).
 
 /** How many of the AnalyserNode samples the scope keeps: one in this many. */
 export const VIEW_DECIM = 2;
@@ -128,26 +123,18 @@ export class ViewTaps {
   }
 
   /**
-   * Arm a tap on each of `list` - `[{ id, fft }]` - and drop every other. Past VIEW_TAP_MAX tracks
-   * the rest are left out. Returns `{ armed, over }`, the ids in each.
+   * Arm a tap on each of `list` - `[{ id, fft }]` - and drop every other. Every track asked for gets one.
+   * Returns `{ armed, over }`; `over` is always empty (kept for callers).
    */
   arm(list = []) {
     const seen = new Set();
     const armed = [];
     const over = [];
     const wanted = [];
-    let tracks = 0;
     for (const want of list) {
       const id = String(want.id);
       if (seen.has(id)) continue;
       seen.add(id);
-      if (id !== '*') {
-        if (tracks >= VIEW_TAP_MAX) {
-          over.push(id);
-          continue;
-        }
-        tracks++;
-      }
       armed.push(id);
       wanted.push({ id, fft: !!want.fft });
     }

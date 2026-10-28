@@ -74,6 +74,8 @@ const EMPTY_ANSWERS = {
   // below, where the reason belongs.
   'GET /api/samplesDir': { dir: '/packs', envOverride: false },
   'GET /api/preferVst3': { enabled: false },
+  // One engine here, the page's own.
+  'GET /api/audioEngine': { node: false, fromEnv: false, available: false },
 
   'POST /api/captureEditors': { ok: true },
 };
@@ -91,6 +93,7 @@ const REFUSALS = {
   'GET /api/pasteboardFiles': ['reading the clipboard for files', 'a page cannot see your disk'],
   'POST /api/samplesDir': ['choosing a sample folder', 'a page cannot see your disk'],
   'POST /api/preferVst3': ['choosing between plugin formats', 'there are no plugins to host'],
+  'POST /api/audioEngine': ['choosing the desktop engine', 'the browser build has one engine'],
   'POST /api/patterns/wip/retention': ['expiring old sessions', 'nothing here is deleted on its own'],
 };
 

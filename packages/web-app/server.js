@@ -16,6 +16,7 @@ const { preferVst3 } = require('./plugin-filter');
 const { deviceRows, deviceParamRows, nativeDevice } = require('@poptart/osc-engine/native-devices');
 const { SNAPSHOT_DIR, putSnapshot, getSnapshot, pruneSnapshots } = require('./snapshots');
 const blobs = require('./blobs');
+const { StateCarry } = require('./state-carry');
 const pinnedDefs = require('./pinned-defs');
 const snippets = require('./snippets');
 const { locateDroppedFile, verifyDroppedPath } = require('./sample-locate');
@@ -75,6 +76,26 @@ let transport = null; // the ROOM's tempo clock (pattern-core Transport): songs 
 const deckClocks = { a: null, b: null };
 const clockOf = (deck) => deckClocks[deck] ?? transport;
 const schedulers = new Map(); // pattern label -> Scheduler (one engine track per label)
+// What a stopped track's plugins are known to hold, for the Scheduler its return builds (see
+// state-carry.js): a solo toggle must not reload every preset it brings back.
+const stateCarry = new StateCarry();
+// The scheduler-side record of a slot, whether its track is playing or parked: auto-pin and the
+// hand-edit expiry reach a track stopped by a solo too, and what they learn must survive to the
+// Scheduler its return builds.
+function forgetSlotState(label, slot) {
+  const sch = schedulers.get(label);
+  if (sch) sch.forgetAppliedState(slot);
+  else stateCarry.forgetSlot(engineTrack(label), slot);
+}
+function markSlotState(label, slot, pluginId, state) {
+  const sch = schedulers.get(label);
+  if (sch) sch.markStateApplied(slot, pluginId, state);
+  else stateCarry.markApplied(engineTrack(label), slot, pluginId, state, mappedEngine);
+}
+function slotState(label, slot, pluginId) {
+  const sch = schedulers.get(label);
+  return sch ? sch.appliedState(slot, pluginId) : stateCarry.applied(engineTrack(label), slot, pluginId);
+}
 // The keys inside a real GROUP (written inside a `group({ ... })` body - see groups.mjs): their
 // audio goes into the group's bus and the group's track is the one the desk shows and gates - so
 // these never get a fader or a swap gate of their own. Reaching only the implicit `main` root
@@ -3254,6 +3275,7 @@ const PIPED_MAPS = () => [presetHolds, channelHolds, uncaptured, autoPinDirty, a
 // a dropped label's track warm for the label's return.
 function dropTrack(key) {
   const id = trackIds.get(key);
+  if (id) stateCarry.forgetTrack(id); // its plugins close with it
   // A song track's Node-side state goes with it (the engine side - player synth, buffer - is
   // destroyTrack's; see sc/poptart.scd). Usually already cleared by songUnload; this is the net.
   for (const d of ['a', 'b']) {
@@ -4326,6 +4348,8 @@ async function loadEngine() {
       )),
       inChannels: active?.inChannels ?? 0,
       cueOffset: activeCue?.offset ?? null,
+      // Which engine drives scsynth: POPTART_ENGINE outranks the settings tab's choice.
+      engine: process.env.POPTART_ENGINE || settings.audioEngine || null,
     });
     await e.start(48000, 256);
     engineError = null;
@@ -4360,6 +4384,7 @@ async function restartEngine(reason = 'unspecified') {
       mappedEngine?.removeChain(label);
     }
     schedulers.clear();
+    stateCarry.clear(); // the replacement engine opens every plugin afresh
     // The song buffers and player synths died with the old scsynth; the deck states describe
     // sound that no longer exists. Cleared rather than reloaded - re-queuing a song after an
     // engine restart is a deliberate act, like re-evaling a pattern deck.
@@ -6685,7 +6710,7 @@ function expireStateHolds() {
     console.log(`[auto-pin] ${key.slice(0, key.lastIndexOf('|'))} slot ${key.slice(key.lastIndexOf('|') + 1)}: the capture never reached the code - the slot goes back to its pattern`);
     // An edit nothing filed: the plugin no longer holds what was last sent, so the pattern's
     // program is owed a real load. The one thaw that is (see Scheduler#holdPluginState).
-    schedulers.get(key.slice(0, key.lastIndexOf('|')))?.forgetAppliedState(Number(key.slice(key.lastIndexOf('|') + 1)));
+    forgetSlotState(key.slice(0, key.lastIndexOf('|')), Number(key.slice(key.lastIndexOf('|') + 1)));
     syncStateHold(key);
   }
 }
@@ -7223,7 +7248,7 @@ async function captureDirtyPlugins(which = null) {
       // program the pattern put there after the gesture that queued this one - without it, either
       // would read as an edit and file a sound nobody dialled in back into the code.
       const unchanged = handle === lastCapturedState.get(key)
-        || handle === stateHandle(schedulers.get(trackId)?.appliedState(slot, now));
+        || handle === stateHandle(slotState(trackId, slot, now));
       lastCapturedState.set(key, handle);
       if (speculative) {
         if (unchanged) {
@@ -7231,8 +7256,7 @@ async function captureDirtyPlugins(which = null) {
           // slot gets one: otherwise its next swap re-loads what is already in, and a load resets
           // the plugin's voices. Only where it has none - a record kept as a whole state (a shared
           // file's) is the same program under a string the code would no longer compare equal to.
-          const sch = schedulers.get(trackId);
-          if (sch && sch.appliedState(slot, now) == null) sch.markStateApplied(slot, now, handle);
+          if (slotState(trackId, slot, now) == null) markSlotState(trackId, slot, now, handle);
           continue;
         }
         // It WAS an edit, just an unreported one. From here it is one: frozen until the code has
@@ -7257,7 +7281,7 @@ async function captureDirtyPlugins(which = null) {
       // tell the track's scheduler it's already applied. Without this, every eval would have
       // the plugin re-chew a state it already has (a reload, and an audible one on some).
       // Marked under the handle, because that is what the code the next eval reads will say.
-      schedulers.get(trackId)?.markStateApplied(slot, mappedEngine?.chains.get(engineTrack(trackId))?.[slot], handle);
+      markSlotState(trackId, slot, mappedEngine?.chains.get(engineTrack(trackId))?.[slot], handle);
     } catch (e) {
       // Slot emptied, engine restarted mid-gesture, writeProgram refused - all recoverable and
       // all self-correcting on the next edit. Log once per slot so it's diagnosable, but not for a
@@ -7725,6 +7749,26 @@ const routes = {
     settings.djRegions = mode;
     saveSettings();
     return { status: 200, body: { mode } };
+  },
+
+  // The engine (settings tab): sclang's, the default, or the one this process runs itself
+  // (POPTART_ENGINE=node). Read at engine start, so a change restarts the engine.
+  'GET /api/audioEngine': async () => ({
+    status: 200,
+    body: {
+      node: (process.env.POPTART_ENGINE || settings.audioEngine) === 'node',
+      fromEnv: !!process.env.POPTART_ENGINE,
+      available: true,
+    },
+  }),
+
+  'POST /api/audioEngine': async (body) => {
+    if (process.env.POPTART_ENGINE) throw new Error('POPTART_ENGINE is set, and it decides the engine');
+    settings.audioEngine = body?.node ? 'node' : 'sclang';
+    saveSettings();
+    await restartEngine('the engine choice changed');
+    if (!engine) throw new Error(engineError ?? 'engine failed to restart');
+    return { status: 200, body: { node: settings.audioEngine === 'node', fromEnv: false, available: true } };
   },
 
   'GET /api/preferVst3': async () => ({
@@ -8245,6 +8289,9 @@ const routes = {
     for (const [key, sch] of schedulers) {
       if (deckOfKey(key) !== deck) continue;
       if (!active.some((b) => keyOf(b) === key)) {
+        // The engine track stays warm, plugins open: its return need not reload them. Read before
+        // the stop, which lets go of the hand-edit holds the record must leave out.
+        stateCarry.retire(sch, mappedEngine);
         sch.stop();
         schedulers.delete(key);
         mappedEngine.removeChain(engineTrack(key));
@@ -8334,6 +8381,7 @@ const routes = {
       if (sch && !sch.running && starting) mappedEngine.hush(tid);
       if (!sch) {
         sch = new patternCore.Scheduler(mappedEngine, { transport: clockOf(deckOfKey(key)), trackId: tid, label: key, deck: deckOfKey(key) });
+        stateCarry.adopt(sch, mappedEngine); // before setPattern, which compares against it
         schedulers.set(key, sch);
       }
       // Hand-edit freezes go on BEFORE the pattern does: setPattern pushes any pinned `{ state }`,

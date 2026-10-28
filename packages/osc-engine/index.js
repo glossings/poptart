@@ -19,7 +19,7 @@ const crypto = require('node:crypto');
 const { promisify } = require('node:util');
 const { spawn } = require('node:child_process');
 const osc = require('osc');
-const { pidfilePath, reapOrphanedEngine, recordEnginePids, clearEnginePids, killIfOurs } = require('./orphans');
+const { pidfilePath, reapOrphanedEngine, recordEnginePids, clearEnginePids, killAndAwaitExit } = require('./orphans');
 const { samplesRoot, listPackFiles, resolveSampleFile, expandPackEntries, sliceEntryFor } = require('./samples');
 const { splitPackFileRef, pickPackFile } = require('./pack-file-ref');
 const { recordingsRoot, resolveRecording } = require('./recordings');
@@ -45,7 +45,8 @@ const { preparePluginScan, scanWarnings, joinPathList, noteProbe, noteProbeDone,
 const { ScanProgress } = require('./scan-progress');
 const { openEngineLog, engineLogPath } = require('./engine-log');
 const { DirectPath } = require('./direct');
-const { ViewTaps, VIEW_TAP_MAX } = require('./view-taps');
+const { ViewTaps } = require('./view-taps');
+const { engineMode, startNodeEngine, stopNodeEngine } = require('./node-engine');
 
 // The name a param call uses for input i of the expression on `name` (see setParamExpr).
 const EXPR_LEAF = /^~\d+~/;
@@ -459,7 +460,10 @@ class OscEngine {
   // belong to the input devices combined in behind the playback device.
   // inChannels: that same device's input channel count (0 for output-only devices) - scsynth opens
   // one device for both in and out, so numInputBusChannels must not exceed what the device offers.
-  constructor({ nodePort = DEFAULT_NODE_PORT, scPort = DEFAULT_SC_PORT, sclangPath = null, outDevice = null, outChannels = 2, playChannels = null, inChannels = 0, cueOffset = null, oscInPort = DEFAULT_OSC_IN_PORT } = {}) {
+  constructor({ nodePort = DEFAULT_NODE_PORT, scPort = DEFAULT_SC_PORT, sclangPath = null, outDevice = null, outChannels = 2, playChannels = null, inChannels = 0, cueOffset = null, oscInPort = DEFAULT_OSC_IN_PORT, engine = null } = {}) {
+    // Which engine runs: 'sclang' (the default) or 'node' (scsynth driven from this process, see
+    // node-engine.js). Read once, at construction; a change takes an engine restart.
+    this.engineMode = engineMode(engine);
     this.nodePort = nodePort;
     this.scPort = scPort;
     this.oscInPort = oscInPort;
@@ -614,7 +618,10 @@ class OscEngine {
       sendSc: (address, args) => this._send(address, args),
       sendScsynth: (packet, port) => {
         if (!this._port) throw new Error('OscEngine not started');
-        this._port.send(packet, '127.0.0.1', port);
+        // The node engine's port is the engine itself: scsynth is reached by its raw path, and the
+        // replies come back to the engine's server socket (see startNodeEngine).
+        if (this.engineMode === 'node') this._port.sendRaw(osc.writePacket(packet, { metadata: true }));
+        else this._port.send(packet, '127.0.0.1', port);
       },
     });
   }
@@ -752,6 +759,9 @@ class OscEngine {
   // happen synchronously over a subprocess + OSC round-trip - callers (packages/web-app) must
   // await it before driving the engine.
   start(sampleRate = 48000, bufferSize = 256) {
+    if (this.engineMode === 'node') {
+      return startNodeEngine(this, sampleRate, bufferSize, { MIX_BAND_FREQS, clarify: clarifySclangLine });
+    }
     // Instant heads-up for the most common fresh-install gap, instead of a 60s timeout: the
     // engine script cannot compile without the VSTPlugin extension. Warn-only, since
     // sclang_conf.yaml can legitimately include it from a non-standard directory.
@@ -1016,6 +1026,7 @@ class OscEngine {
   // Await it before starting a replacement engine.
   async stop() {
     this._views.reset(); // the taps go with the server
+    if (this.engineMode === 'node') return stopNodeEngine(this);
     // From here on, a server that exits did so because we asked. Clearing the journal matters as
     // much as the flag: an interrupted scan's last probe is innocent, and leaving it recorded
     // would skip a perfectly good plugin on the next start.
@@ -1050,10 +1061,15 @@ class OscEngine {
     if (this._scsynthPid != null) {
       const pid = this._scsynthPid;
       this._scsynthPid = null;
-      if (killIfOurs(pid)) {
+      // Awaited to the end of the process, not just the signal: stop()'s promise is "the next
+      // engine start can open the device", and a killed scsynth holds it until it is gone.
+      const { killed, gone } = await killAndAwaitExit(pid);
+      if (killed) {
         // eslint-disable-next-line no-console
         console.warn(`[poptart] scsynth (pid ${pid}) outlived sclang - killed it so the next engine start can open the audio device`);
       }
+      // eslint-disable-next-line no-console
+      if (!gone) console.warn(`[poptart] scsynth (pid ${pid}) is still exiting after a kill - the next engine start may find the audio device busy`);
     }
     // The Bonjour announcement withdraws when its dns-sd exits; the next sclang opens the port
     // afresh and announces again.
@@ -1386,8 +1402,8 @@ class OscEngine {
   // exists is tapped when it appears. Every tapped track gets its own analyzer. Idempotent.
   /**
    * The editor's inline audio displays: arm a view tap on each of `list` - `[{ id, fft }]`, a track
-   * id or '*' for the master, `fft` when a spectrum is drawn of it - and disarm the rest. Past
-   * VIEW_TAP_MAX tracks the rest are left out; returns `{ armed, over }`. See view-taps.js.
+   * id or '*' for the master, `fft` when a spectrum is drawn of it - and disarm the rest. Returns
+   * `{ armed, over }`. See view-taps.js.
    */
   viewTaps(list) {
     return this._views.arm(list);
@@ -1396,11 +1412,6 @@ class OscEngine {
   /** The latest frame of every armed view tap - see ViewTaps#read. */
   viewRead() {
     return this._views.read();
-  }
-
-  /** The most tracks that get a view tap at once. */
-  viewTapMax() {
-    return VIEW_TAP_MAX;
   }
 
   mixMeters(on, trackIds = []) {

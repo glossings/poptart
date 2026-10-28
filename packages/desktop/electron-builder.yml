@@ -64,7 +64,7 @@ mac:
     # part of poptart that does so by design - its peers find each other over multicast.
     NSLocalNetworkUsageDescription: poptart uses the local network for Ableton Link, to find and sync with other Link apps. Nothing else needs it.
     NSAudioCaptureUsageDescription: poptart's audio engine opens your audio device for input as well as output.
-  # Signing: poptart's own native helpers (native/bin/poptart-audio, native/link/bin/poptart-link,
+  # Signing: poptart's own native helpers (native/bin/poptart-audio, native/bin/poptart-midi, native/link/bin/poptart-link,
   # native/rubberband/bin/PoptartPitchShift.scx) are ad-hoc signed today and must be re-signed
   # with a Developer ID for distribution. hardenedRuntime + these entitlements are what SC's own
   # binaries ship with, and disable-library-validation is not optional: loading third-party VSTs

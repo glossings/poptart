@@ -2362,6 +2362,110 @@ li.CodeMirror-hint-active {
   cursor: default;
 }
 
+/* The color picker: the shape editor's chrome at the env() editor's width. Both tabs are one
+   height, so switching between them moves nothing; a long "in this song" row scrolls inside. */
+.color-panel {
+  width: 400px;
+}
+
+.color-panel .lfo-panel-head .side-tab {
+  font-weight: 400;
+}
+
+.color-tab-body {
+  box-sizing: border-box;
+  height: 290px;
+  overflow-y: auto;
+}
+
+/* The wheel, drawn borderless: the colors run to its rim. */
+#colorWheel {
+  display: block;
+  width: 200px;
+  height: 200px;
+  margin: 10px auto;
+  cursor: crosshair;
+  touch-action: none;
+}
+
+.color-controls {
+  justify-content: center;
+}
+
+.color-controls .pr-box-slider {
+  width: 62px;
+}
+
+/* Seven characters of the mono face: a whole "#rrggbb", never cut. */
+.color-controls input[type='text'] {
+  box-sizing: content-box; /* the 7ch is the text's; padding and border sit outside it */
+  width: 7ch;
+  padding: 3px 6px;
+  font-size: 12px;
+  font-family: var(--mono);
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  outline: none;
+}
+
+.color-controls input[type='text']:focus {
+  border-color: var(--accent);
+}
+
+/* A color to pick: a step cell of the piano roll's, in the color. An empty recent slot keeps its
+   place, outlined, so the row never shifts as picks arrive. */
+.color-swatch {
+  flex: none;
+  box-sizing: border-box;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.color-swatch:hover,
+.color-swatch:focus-visible {
+  border-color: var(--text);
+}
+
+.color-swatch.empty {
+  border-style: dashed;
+  background: none;
+  cursor: default;
+}
+
+span.color-swatch {
+  cursor: default;
+}
+
+.color-group {
+  display: grid;
+  grid-template-columns: 96px 1fr;
+  align-items: start;
+  gap: 6px;
+  padding: 4px 12px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.color-group-name {
+  line-height: 16px;
+}
+
+.color-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+#colorPaletteTab {
+  padding: 6px 0;
+}
+
 /* The groove lanes docked under the roll's grid: a strip in the panel's own flow, the way the
    value lane lives inside the canvas above it. The canvas keeps #grooveCanvas's own face; only its
    floating margin goes, since the strip's padding is the spacing here and the left offset is set

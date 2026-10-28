@@ -6,19 +6,16 @@
 // A VIEW TAP is a copy of one track's post-fader output (or of the master) kept in scsynth for as
 // long as a display of it is on screen: a stereo ring buffer of its most recent samples, the ring's
 // write position on a control bus, and - when a spectrum wants it - an FFT frame in a buffer of its
-// own. sclang builds and frees them (see the view-tap section of sc/poptart.scd) and says where
-// they are; reading them is done from HERE, straight from scsynth with /b_getn and /c_get, rather
-// than having sclang forward every frame. sclang is the one thread every note passes through, and a
+// own. sclang builds and frees them (see the view-tap section of sc/poptart.scd, or
+// engine/view-taps.js on the node engine) and says where they are; reading them is done from HERE,
+// straight from scsynth with /b_getn and /c_get, rather than having sclang forward every frame. sclang is the one thread every note passes through, and a
 // display redrawn twenty-five times a second has no business in its queue. scsynth answers a
 // /b_getn between two audio blocks in a few microseconds and replies to whoever asked.
 //
 // The cost on the audio thread is small and bounded: per tap, one bus read, a phasor, a buffer
-// write and (for a spectrum) one 2048-point FFT every 1024 samples, for at most VIEW_TAP_MAX tracks
-// plus the master. Taps exist only while the editor is polling for them (see web-app's widgets
+// write and (for a spectrum) one 2048-point FFT every 1024 samples, for each track a display asks
+// for, plus the master. Taps exist only while the editor is polling for them (see web-app's widgets
 // section, which arms and disarms them), so a closed editor costs nothing.
-
-/** The most tracks that get a view tap at once. The master is extra; past the cap a display says so. */
-const VIEW_TAP_MAX = 4;
 
 /** How often the taps are read while armed: a little faster than the editor draws them. */
 const POLL_MS = 40;
@@ -50,26 +47,18 @@ class ViewTaps {
 
   /**
    * Arm the taps for `list` - `[{ id, fft }]`, where `id` is an engine track id or '*' for the
-   * master - and disarm every other. Past VIEW_TAP_MAX tracks the rest are left out. Returns
-   * `{ armed, over }`, the ids in each. Idempotent: asking again for the same set sends nothing.
+   * master - and disarm every other. Returns `{ armed, over }`: every id is armed, and `over` is
+   * always empty (kept for callers). Idempotent: asking again for the same set sends nothing.
    */
   arm(list = []) {
     const seen = new Set();
     const armed = [];
     const over = [];
-    let tracks = 0;
     const args = [];
     for (const want of list) {
       const id = String(want.id);
       if (seen.has(id)) continue;
       seen.add(id);
-      if (id !== '*') {
-        if (tracks >= VIEW_TAP_MAX) {
-          over.push(id);
-          continue;
-        }
-        tracks++;
-      }
       armed.push(id);
       args.push(id, want.fft ? 1 : 0);
     }
@@ -275,4 +264,4 @@ function fftDecibels(data) {
   return db;
 }
 
-module.exports = { ViewTaps, VIEW_TAP_MAX, fftDecibels };
+module.exports = { ViewTaps, fftDecibels };

@@ -93,6 +93,7 @@ const coreReady = Promise.all([
     initSlicePanel();
     initEnvelopePanel();
     initEnvModPanel();
+    initColorPanel();
     initGroovePanel();
     initWidgetHandles(); // double-click a call's name to open its editor (needs all of the above)
     updateMutedDim();
@@ -303,6 +304,8 @@ function recolorTracks() {
     sw.style.background = trackColor(sw.dataset.deck, sw.dataset.label);
   }
   try { if (arState) drawArrange(); } catch { /* not up yet */ }
+  for (const iw of inlineWidgetsByEditor.values()) iw.recolor?.();
+  try { recolorColorSwatches(); } catch { /* not up yet */ }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -3569,7 +3572,7 @@ function attachWidgetHandles(editor) {
 // move, and parsing the buffer to discover the pointer is over `const` would be work for nothing.
 // The envelope panel's own words are asked separately, off the set the panel already keeps.
 const CALL_HANDLE_WORDS = new Set(['_arrange', 'auto', 'lfo', 'env', 'grainshape', 'pianoroll', 'preset',
-  'sp', 'slice', 'slices', 'record', 'synth', 'fx']);
+  'sp', 'slice', 'slices', 'record', 'synth', 'fx', 'color']);
 
 let handleMark = null; // the underline currently drawn, in whichever pane the pointer is over
 let handleMarkKey = null; // the name it was computed for, so a jiggle within it doesn't reparse
@@ -3616,6 +3619,7 @@ function isWidgetHandleAt(editor, code, idx) {
   if (slicesMod && findSliceCallAt(code, idx)?.onName) return true;
   if (findEnvelopeHandleAt(code, idx)) return true;
   if (findRecordCallAt(code, idx)?.onName) return true;
+  if (inlineWidgetsMod?.calls.findColorCallAt?.(code, idx)?.onName) return true;
   return !!findChainHandleAt(code, idx);
 }
 
@@ -3679,6 +3683,9 @@ function openWidgetAt(code, idx, ed = cm) {
     openEnvModEditor(envCall, ed);
     return true;
   }
+  // .color(...) - the color picker, on the track the call colors (see openColorPicker).
+  const colorCall = inlineWidgetsMod?.calls.findColorCallAt?.(code, idx);
+  if (colorCall?.onName && openColorPicker(colorCall, ed)) return true;
   const roll = pianorollMod && findPianorollCallAt(code, idx);
   if (roll?.onName) {
     // An empty pianoroll() has neither notes nor a name yet. Give it both, then open whatever it
@@ -21518,7 +21525,7 @@ function activateTab(name) {
   settingsTab.classList.toggle('hidden', name !== 'settings');
   if (name === 'sounds') loadSamples();
   if (name === 'files') refreshPatternFiles();
-  if (name === 'settings') { refreshAudioDevices(); refreshAudioInputs(); refreshSamplesDir().then(refreshMapSources); refreshPreferVst3(); refreshWipRetention(); refreshReplayRetention(); refreshDjRegions(); refreshMidiClock(); refreshMixFeedback(); refreshLink(); if (window.__poptartHostReady) refreshDownloads(); }
+  if (name === 'settings') { refreshAudioDevices(); refreshAudioInputs(); refreshSamplesDir().then(refreshMapSources); refreshPreferVst3(); refreshAudioEngine(); refreshWipRetention(); refreshReplayRetention(); refreshDjRegions(); refreshMidiClock(); refreshMixFeedback(); refreshLink(); if (window.__poptartHostReady) refreshDownloads(); }
 }
 
 for (const btn of document.querySelectorAll('.side-tab')) {
@@ -22711,6 +22718,44 @@ djRegionsSelect.addEventListener('change', async () => {
 });
 
 const preferVst3Toggle = document.getElementById('preferVst3Toggle');
+
+// The desktop engine: sclang's (the default) or poptart's own. Switching restarts the engine.
+const nodeEngineToggle = document.getElementById('nodeEngineToggle');
+
+async function refreshAudioEngine() {
+  try {
+    const { node, fromEnv, available } = await api('GET', '/api/audioEngine');
+    nodeEngineToggle.checked = node;
+    nodeEngineToggle.disabled = !available || fromEnv;
+    nodeEngineToggle.parentElement.classList.toggle('hidden', !available);
+    if (fromEnv) nodeEngineToggle.parentElement.title = 'POPTART_ENGINE is set, and it decides the engine';
+  } catch (e) {
+    logLine(e.message ?? String(e), true);
+  }
+}
+
+nodeEngineToggle.addEventListener('change', async () => {
+  if (!await scanSurvivesRestart('the engine choice')) {
+    refreshAudioEngine().catch(() => {});
+    return;
+  }
+  nodeEngineToggle.disabled = true;
+  engineStatus.textContent = 'restarting engine…';
+  engineStatus.className = 'status';
+  try {
+    const { node } = await api('POST', '/api/audioEngine', { node: nodeEngineToggle.checked });
+    stopHighlighting();
+    playing = false;
+    updateTransportButtons();
+    freezeClocks();
+    logLine(`engine ${node ? 'without sclang' : 'on sclang'} - re-evaluate (${chordLabel('mod+enter')}) to resume playback`);
+  } catch (e) {
+    logLine(e.message ?? String(e), true);
+  } finally {
+    refreshAudioEngine().catch(() => {});
+    refreshStatus().catch(() => {});
+  }
+});
 
 async function refreshPreferVst3() {
   try {
@@ -27090,6 +27135,485 @@ function initEnvModPanel() {
 }
 
 // ---------------------------------------------------------------------------------------------
+// The color picker - a track's `.color()`, picked rather than typed.
+//
+// Every `.color(...)` in a livecode deck wears a swatch before its name, in the color the track is
+// drawn in (a bare `.color()` is the automatic one - see trackColor). Clicking the swatch, or
+// double-clicking the `color` name, opens the panel on that call, against the deck it is in. A drag
+// on the wheel or the lightness box is shown at once wherever the track's color is drawn - it rides
+// codeTrackColors, which is what an evaluation of the call would put there - and letting go writes
+// it into the call as `.color("#rrggbb")` (see pattern-core's colorCallEdit). Nothing is heard, so
+// nothing is evaluated. A name already written is left alone until a pick replaces it.
+
+const colorPanel = document.getElementById('colorPanel');
+const colorTitleEl = document.getElementById('colorTitle');
+const colorWheelEl = document.getElementById('colorWheel');
+const colorNowEl = document.getElementById('colorNow');
+const colorHexEl = document.getElementById('colorHex');
+const colorRecentEl = document.getElementById('colorRecent');
+const colorWheelTab = document.getElementById('colorWheelTab');
+const colorPaletteTab = document.getElementById('colorPaletteTab');
+const COLOR_RECENT_KEY = 'poptartRecentColors';
+// One row of the wheel tab: the panel's width, less the row's label column, in 16px swatches.
+const COLOR_RECENT_COUNT = 12;
+
+// { ed, at, label, h, s, l, base, tab } - the call on screen. `at` is a bookmark on its name;
+// `base` is what codeTrackColors said for the track before any preview (`{ has, value }`), put back
+// when the panel closes on a gesture that was never let go of.
+let colorState = null;
+let colorLastTab = 'wheel';
+let colorLightSlider = null;
+let colorWriting = false;
+
+const colorSafeStorage = () => {
+  try { return window.localStorage; } catch { return null; }
+};
+
+function colorRecent() {
+  return widgetMathMod ? widgetMathMod.readRecentColors(colorSafeStorage(), COLOR_RECENT_KEY, COLOR_RECENT_COUNT) : [];
+}
+
+/** The label of the block `idx` of the code is in, or null outside every block. */
+function colorLabelAt(code, idx, blocks = labelsMod?.splitLabeledBlocks(code) ?? []) {
+  let found = null;
+  for (const b of blocks) if (idx >= b.start && idx < b.end && (!found || b.start >= found.start)) found = b;
+  return found?.label ?? null;
+}
+
+/**
+ * The color a `.color()` call shows: the one being picked for it while the panel is on it, else the
+ * one it writes when the browser can draw it, else the track's.
+ */
+function colorOfCall(ed, call, code, blocks) {
+  if (colorState?.ed === ed && colorState.at.find() && ed.indexFromPos(colorState.at.find()) === call.at) return colorState.shown ?? colorHexNow();
+  const written = call.lit ? cssColorHex(call.lit.text.trim()) : null;
+  if (written) return written;
+  const label = colorLabelAt(code, call.at, blocks);
+  return label != null ? trackColor(deckOfCM(ed), label) : null;
+}
+
+// ---- the swatches in the code
+
+const colorSwatchesByEditor = new Map(); // editor -> [{ mark, el }]
+const colorSwatchTimers = new Map();
+
+function syncColorSwatchesSoon(ed) {
+  clearTimeout(colorSwatchTimers.get(ed));
+  colorSwatchTimers.set(ed, setTimeout(() => syncColorSwatches(ed), 60));
+}
+
+/** Puts a swatch before every `.color(` in `ed`, keeping the ones still where their call is. */
+function syncColorSwatches(ed) {
+  if (!ed || !inlineWidgetsMod?.calls.findColorCalls || !foldsHere(ed)) return;
+  const code = ed.getValue();
+  const found = inlineWidgetsMod.calls.findColorCalls(code);
+  const blocks = found.length && labelsMod ? labelsMod.splitLabeledBlocks(code) : [];
+  const old = new Map();
+  for (const sw of colorSwatchesByEditor.get(ed) ?? []) {
+    const p = sw.mark.find();
+    const idx = p ? ed.indexFromPos(p) : -1;
+    if (idx < 0 || old.has(idx)) sw.mark.clear();
+    else old.set(idx, sw);
+  }
+  const next = [];
+  for (const call of found) {
+    let sw = old.get(call.at);
+    if (sw) old.delete(call.at);
+    else sw = makeColorSwatch(ed, call.at);
+    sw.el.style.background = colorOfCall(ed, call, code, blocks) ?? 'transparent';
+    next.push(sw);
+  }
+  for (const sw of old.values()) sw.mark.clear();
+  colorSwatchesByEditor.set(ed, next);
+}
+
+function makeColorSwatch(ed, at) {
+  const el = document.createElement('span');
+  el.className = 'iw iw-color';
+  el.title = 'pick a color';
+  const mark = ed.setBookmark(ed.posFromIndex(at), { widget: el, insertLeft: false });
+  el.addEventListener('mousedown', (e) => {
+    e.preventDefault(); // the caret stays where it was
+    e.stopPropagation();
+  });
+  el.addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const p = mark.find();
+    if (!p) return;
+    const code = ed.getValue();
+    const call = inlineWidgetsMod.calls.findColorCallAt(code, ed.indexFromPos(p));
+    if (call) openColorPicker(call, ed);
+  });
+  return { mark, el };
+}
+
+/** Every swatch on both decks, in the colors their tracks are drawn in now. */
+function recolorColorSwatches() {
+  for (const ed of colorSwatchesByEditor.keys()) syncColorSwatches(ed);
+}
+
+// ---- the panel
+
+/** The call the panel is on, found again from its bookmark - null once it has gone. */
+function colorPickerCall() {
+  const pos = colorState?.at.find();
+  if (!pos) return null;
+  const code = colorState.ed.getValue();
+  const idx = colorState.ed.indexFromPos(pos);
+  const call = inlineWidgetsMod.calls.findColorCallAt(code, idx);
+  return call && call.at === idx ? { call, code } : null;
+}
+
+function openColorPicker(call, ed = cm) {
+  if (!widgetMathMod || !inlineWidgetsMod?.calls.colorCallEdit) return false;
+  if (colorState && colorState.ed === ed && colorPickerCall()?.call.at === call.at) {
+    bringPanelToFront(colorPanel);
+    return true;
+  }
+  const code = ed.getValue();
+  const label = colorLabelAt(code, call.at);
+  const deck = deckOfCM(ed);
+  const hex = colorOfCall(ed, call, code) ?? '#ff7a9c';
+  const [h, s, l] = widgetMathMod.hexToHsl(hex);
+  const m = codeTrackColors[deck];
+  closeColorPicker();
+  colorState = {
+    ed, label, deck, h, s, l, tab: colorLastTab,
+    at: ed.setBookmark(ed.posFromIndex(call.at), { insertLeft: true }),
+    base: { has: m.has(label), value: m.get(label) },
+    exact: hex,
+    shown: null, // a preview on screen that is not the panel's own color (a palette swatch hovered)
+    dragging: false,
+  };
+  colorTitleEl.textContent = label != null && !String(label).startsWith('$') ? `color · ${label}` : 'color';
+  colorPanel.classList.remove('hidden');
+  bringPanelToFront(colorPanel);
+  colorShowTab(colorState.tab);
+  colorPaint();
+  return true;
+}
+
+/** Closes the panel; a preview that was never let go of goes back to what the track had. */
+function closeColorPicker() {
+  const st = colorState;
+  if (!st) return;
+  colorState = null;
+  st.at.clear();
+  colorPanel.classList.add('hidden');
+  colorRestoreBase(st);
+  recolorColorSwatches();
+}
+
+function colorRestoreBase(st) {
+  st.shown = null;
+  const m = codeTrackColors[st.deck];
+  const now = m.get(st.label);
+  if (st.base.has ? now === st.base.value : !m.has(st.label)) return;
+  if (st.base.has) m.set(st.label, st.base.value);
+  else m.delete(st.label);
+  colorRecolorAll();
+}
+
+function colorRecolorAll() {
+  trackColorMemo.a.key = null;
+  trackColorMemo.b.key = null;
+  recolorTracks();
+}
+
+// The panel's color. `exact` is the hex it was opened on or last given, kept as it was rather than
+// put through hue/saturation/lightness and back; the wheel and the lightness box clear it.
+function colorHexNow() {
+  const st = colorState;
+  return st.exact ?? widgetMathMod.hslHex(st.h, st.s, st.l);
+}
+
+/** Shows `hex` wherever the track's color is drawn, without writing it. */
+function colorPreview(hex) {
+  const st = colorState;
+  if (!st || st.label == null) return;
+  st.shown = hex === colorHexNow() ? null : hex;
+  codeTrackColors[st.deck].set(st.label, hex);
+  colorRecolorAll();
+}
+
+/** A finished pick: into the call, then remembered among the recent ones. */
+function colorCommit(hex) {
+  const found = colorPickerCall();
+  if (!found) {
+    closeColorPicker();
+    return;
+  }
+  const st = colorState;
+  const e = inlineWidgetsMod.calls.colorCallEdit(found.call, hex);
+  colorWriting = true;
+  try {
+    st.ed.replaceRange(e.text, st.ed.posFromIndex(e.from), st.ed.posFromIndex(e.to), '+trackcolor');
+  } finally {
+    colorWriting = false;
+  }
+  if (st.label != null) {
+    codeTrackColors[st.deck].set(st.label, hex);
+    st.base = { has: true, value: hex };
+  }
+  colorRecolorAll();
+  const recent = widgetMathMod.rememberColor(colorRecent(), hex, COLOR_RECENT_COUNT);
+  widgetMathMod.writeRecentColors(colorSafeStorage(), COLOR_RECENT_KEY, recent);
+  colorPaint();
+  colorRecentEl.replaceChildren(...colorRecentRow());
+}
+
+/** Takes `hex` as the panel's color and writes it - a swatch's click, a typed hex. */
+function colorPick(hex) {
+  const st = colorState;
+  if (!st) return;
+  [st.h, st.s, st.l] = widgetMathMod.hexToHsl(hex);
+  st.exact = hex;
+  colorCommit(hex);
+}
+
+// The palette is worked out when its tab is shown, from the colors then: picking one of its
+// suggestions leaves the rest where they are, rather than turning them all to follow it.
+function colorShowTab(tab) {
+  if (!colorState) return;
+  colorState.tab = tab;
+  colorLastTab = tab;
+  for (const b of colorPanel.querySelectorAll('[data-color-tab]')) b.classList.toggle('active', b.dataset.colorTab === tab);
+  colorWheelTab.classList.toggle('hidden', tab !== 'wheel');
+  colorPaletteTab.classList.toggle('hidden', tab !== 'palette');
+  colorPaint();
+  if (tab === 'wheel') colorRecentEl.replaceChildren(...colorRecentRow());
+  else colorPaletteTab.replaceChildren(...colorPaletteGroups());
+}
+
+function colorPaint() {
+  const st = colorState;
+  if (!st) return;
+  const hex = colorHexNow();
+  colorNowEl.style.background = hex;
+  colorNowEl.title = hex;
+  if (document.activeElement !== colorHexEl) colorHexEl.value = hex;
+  colorLightSlider?.set(Math.round(st.l * 100));
+  if (st.tab === 'wheel') colorDrawWheel();
+}
+
+// The wheel at the current lightness, its marker on the current hue and saturation.
+let colorWheelCache = { key: null, image: null };
+function colorDrawWheel() {
+  const st = colorState;
+  const dpr = window.devicePixelRatio || 1;
+  const css = colorWheelEl.clientWidth || 200;
+  const n = Math.round(css * dpr);
+  if (colorWheelEl.width !== n) {
+    colorWheelEl.width = n;
+    colorWheelEl.height = n;
+  }
+  const ctx = colorWheelEl.getContext('2d');
+  const r = n / 2;
+  const key = `${n}|${st.l.toFixed(3)}`;
+  if (colorWheelCache.key !== key) {
+    const img = ctx.createImageData(n, n);
+    const d = img.data;
+    const M = widgetMathMod;
+    for (let y = 0; y < n; y++) {
+      for (let x = 0; x < n; x++) {
+        const dx = x + 0.5 - r;
+        const dy = y + 0.5 - r;
+        const dist = Math.hypot(dx, dy);
+        if (dist > r) continue;
+        const { h, s } = M.wheelAt(dx, dy, r);
+        const rgb = M.parseHex(M.hslHex(h, s, st.l));
+        const o = (y * n + x) * 4;
+        d[o] = rgb[0];
+        d[o + 1] = rgb[1];
+        d[o + 2] = rgb[2];
+        d[o + 3] = dist > r - 1 ? Math.round(255 * (r - dist)) : 255; // the rim, softened
+      }
+    }
+    colorWheelCache = { key, image: img };
+  }
+  ctx.putImageData(colorWheelCache.image, 0, 0);
+  const p = widgetMathMod.wheelPoint(st.h, st.s, r);
+  const css2 = getComputedStyle(document.documentElement);
+  ctx.lineWidth = 2 * dpr;
+  ctx.strokeStyle = css2.getPropertyValue('--bg').trim() || '#000';
+  ctx.beginPath();
+  ctx.arc(r + p.x, r + p.y, 6 * dpr, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.lineWidth = 1 * dpr;
+  ctx.strokeStyle = css2.getPropertyValue('--text').trim() || '#fff';
+  ctx.beginPath();
+  ctx.arc(r + p.x, r + p.y, 7.5 * dpr, 0, Math.PI * 2);
+  ctx.stroke();
+}
+
+function colorSwatchButton(hex) {
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.className = 'color-swatch';
+  b.style.background = hex;
+  b.title = hex;
+  b.dataset.color = hex;
+  b.addEventListener('pointerenter', () => colorPreview(hex));
+  b.addEventListener('pointerleave', () => { if (colorState) colorRestoreBase(colorState); });
+  b.addEventListener('click', () => colorPick(hex));
+  return b;
+}
+
+function colorRecentRow() {
+  const recent = colorRecent();
+  const out = recent.map(colorSwatchButton);
+  while (out.length < COLOR_RECENT_COUNT) {
+    const e = document.createElement('span');
+    e.className = 'color-swatch empty';
+    out.push(e);
+  }
+  return out;
+}
+
+/** The palette tab: suggestions from this track's color and the song's other tracks. */
+function colorPaletteGroups() {
+  const st = colorState;
+  const code = st.ed.getValue();
+  const blocks = labelsMod ? labelsMod.splitLabeledBlocks(code) : [];
+  // A track's color as its code says it now - the last .color() it writes, typed since the last
+  // evaluation or not - else the one it is drawn in.
+  const written = new Map();
+  for (const call of inlineWidgetsMod.calls.findColorCalls(code)) {
+    const label = colorLabelAt(code, call.at, blocks);
+    const hex = call.lit ? cssColorHex(call.lit.text.trim()) : null;
+    if (label != null) written.set(label, hex);
+  }
+  const labels = [...new Set(blocks.map((b) => b.label))];
+  const others = labels.filter((l) => l !== st.label && !String(l).startsWith('$')).map((l) => written.get(l) || trackColor(st.deck, l)).filter(Boolean);
+  const groups = widgetMathMod.colorSuggestions(colorHexNow(), [...new Set(others)], trackColorThemeNow().bg);
+  return groups.map((g) => {
+    const row = document.createElement('div');
+    row.className = 'color-group';
+    row.dataset.group = g.key;
+    const name = document.createElement('span');
+    name.className = 'color-group-name';
+    name.textContent = g.label;
+    const sw = document.createElement('div');
+    sw.className = 'color-row';
+    sw.append(...g.colors.map(colorSwatchButton));
+    row.append(name, sw);
+    return row;
+  });
+}
+
+// The code moved under the panel - a typed edit, an undo. Gone: the panel goes with it. A color
+// written by hand is followed, unless a gesture is under way.
+function colorSyncFromCode() {
+  if (!colorState || colorWriting || colorState.dragging) return;
+  const found = colorPickerCall();
+  if (!found) {
+    closeColorPicker();
+    return;
+  }
+  const written = found.call.lit ? cssColorHex(found.call.lit.text.trim()) : null;
+  if (written && written !== colorHexNow()) {
+    [colorState.h, colorState.s, colorState.l] = widgetMathMod.hexToHsl(written);
+    colorState.exact = written;
+    colorPaint();
+  }
+}
+
+function initColorPanel() {
+  document.getElementById('colorClose').addEventListener('click', () => closeColorPicker());
+  for (const b of colorPanel.querySelectorAll('[data-color-tab]')) b.addEventListener('click', () => colorShowTab(b.dataset.colorTab));
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && colorState) closeColorPicker();
+  });
+  // A click anywhere off the panel puts it away - except on a swatch, whose own click opens the
+  // panel on its call. Capture phase, like the piano roll's.
+  document.addEventListener('pointerdown', (e) => {
+    if (colorState && !colorPanel.contains(e.target) && !e.target.closest?.('.iw-color')) closeColorPicker();
+  }, true);
+
+  colorWheelEl.addEventListener('pointerdown', (e) => {
+    if (!colorState || e.button !== 0) return;
+    e.preventDefault();
+    colorWheelEl.setPointerCapture(e.pointerId);
+    const st = colorState;
+    st.dragging = true;
+    const at = (ev) => {
+      const box = colorWheelEl.getBoundingClientRect();
+      const r = box.width / 2;
+      const { h, s } = widgetMathMod.wheelAt(ev.clientX - box.left - r, ev.clientY - box.top - r, r);
+      st.h = h;
+      st.s = s;
+      st.exact = null;
+      colorPaint();
+      colorPreview(colorHexNow());
+    };
+    at(e);
+    const onMove = (ev) => { if (colorState === st) at(ev); };
+    const onUp = () => {
+      colorWheelEl.removeEventListener('pointermove', onMove);
+      colorWheelEl.removeEventListener('pointerup', onUp);
+      colorWheelEl.removeEventListener('pointercancel', onUp);
+      st.dragging = false;
+      if (colorState === st) colorCommit(colorHexNow());
+    };
+    colorWheelEl.addEventListener('pointermove', onMove);
+    colorWheelEl.addEventListener('pointerup', onUp);
+    colorWheelEl.addEventListener('pointercancel', onUp);
+  });
+
+  // The box's wheel moves it without a commit of its own (see prMakeBoxSlider), so a turn that has
+  // stopped is written here; a held drag is written when the hand lets go.
+  const lightEl = document.getElementById('colorLight');
+  let lightHeld = false;
+  let lightWheelTimer = null;
+  lightEl.addEventListener('pointerdown', () => { lightHeld = true; });
+  const lightLetGo = () => { lightHeld = false; };
+  lightEl.addEventListener('pointerup', lightLetGo);
+  lightEl.addEventListener('pointercancel', lightLetGo);
+  const lightCommit = () => {
+    clearTimeout(lightWheelTimer);
+    if (!colorState?.dragging) return;
+    colorState.dragging = false;
+    colorCommit(colorHexNow());
+  };
+  colorLightSlider = prMakeBoxSlider(lightEl, {
+    min: 0,
+    max: 100,
+    step: 1,
+    home: 50,
+    fmt: (v) => String(Math.round(v)),
+    onInput: (v) => {
+      if (!colorState) return;
+      colorState.l = v / 100;
+      colorState.exact = null;
+      colorState.dragging = true;
+      colorPaint();
+      colorPreview(colorHexNow());
+      clearTimeout(lightWheelTimer);
+      if (!lightHeld) lightWheelTimer = setTimeout(lightCommit, 400);
+    },
+    onCommit: lightCommit,
+  });
+
+  colorHexEl.addEventListener('change', () => {
+    const hex = cssColorHex(colorHexEl.value.trim());
+    if (hex && colorState) colorPick(hex);
+    else colorPaint();
+  });
+  colorHexEl.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') colorHexEl.blur(); // blur lands the change
+  });
+
+  onEveryDeck((ed) => {
+    ed.on('changes', () => {
+      syncColorSwatchesSoon(ed);
+      if (colorState?.ed === ed) colorSyncFromCode();
+    });
+    syncColorSwatchesSoon(ed);
+  });
+}
+
+// ---------------------------------------------------------------------------------------------
 // Envelope panel - a sampler chain's amplitude envelope, drawn over the sample it shapes.
 //
 // The envelope's times are seconds (see Sig#attack), which is what makes drawing it over the
@@ -30151,6 +30675,7 @@ function closePanelsOn(ed) {
   if (sliceState && sliceCM === ed) closeSlicePanel();
   if (envState && envCM === ed) closeEnvelopePanel();
   if (envModState && envModCM === ed) closeEnvModEditor();
+  if (colorState && colorState.ed === ed) closeColorPicker();
   if (recordState && recCM === ed) closeRecordPanel();
 }
 

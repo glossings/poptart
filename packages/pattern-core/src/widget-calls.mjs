@@ -250,12 +250,12 @@ export function widgetCallEdits(code, base = 0, masking = null) {
 /**
  * The argument list of the call whose `(` is at `open`: where it closes and the span of each
  * top-level argument, trimmed - `{ close, args: [{ from, to, text }] }`, or null when the call is
- * not closed. Brackets, strings and comments nest; an empty list has no arguments.
+ * not closed. Brackets, strings and comments nest; an empty list has no arguments. `masked` is
+ * maskCode's text for `code`, for a caller that already has it.
  */
-export function callArgs(code, open) {
+export function callArgs(code, open, masked = maskCode(String(code)).masked) {
   const src = String(code);
   if (src[open] !== '(') return null;
-  const { masked } = maskCode(src);
   const args = [];
   let depth = 0;
   let from = open + 1;
@@ -580,3 +580,67 @@ export function optionDrop(kind, parsed, key) {
   return { from: arg.from + from, to: arg.from + to, text: '' };
 }
 
+
+// ---------------------------------------------------------------------------- .color()
+
+/**
+ * Every `.color(...)` written on a pattern in `code`, in document order:
+ *
+ *   { at, open, close, arg, lit }
+ *
+ * `at` is where the name starts, `open` and `close` the call's parentheses. `arg` is the first
+ * argument (`{ from, to, text }`), or null for a bare `.color()`; `lit` is that argument's content
+ * span (`{ from, to, text }`) when it is a plain string literal, else null. Only the dotted
+ * spelling counts - a `color(` of its own, or `.colors(`, is somebody else's - and nothing inside a
+ * string or a comment. An unclosed call is left out.
+ */
+export function findColorCalls(code, masking = null) {
+  const src = String(code);
+  const { masked } = masking ?? maskCode(src);
+  const out = [];
+  const re = /color\s*\(/g;
+  let m;
+  while ((m = re.exec(masked))) {
+    const at = m.index;
+    if (at > 0 && /[\w$]/.test(masked[at - 1])) continue;
+    let j = at;
+    while (j > 0 && /\s/.test(masked[j - 1])) j--;
+    if (j === 0 || masked[j - 1] !== '.') continue;
+    const open = at + m[0].length - 1;
+    const parsed = callArgs(src, open, masked);
+    if (!parsed) continue;
+    const arg = parsed.args[0] ?? null;
+    let lit = null;
+    if (arg) {
+      const q = arg.text[0];
+      const plain = arg.text.length >= 2 && (q === '"' || q === "'" || q === '`') && arg.text[arg.text.length - 1] === q
+        && !arg.text.slice(1, -1).includes(q) && !(q === '`' && arg.text.includes('${'));
+      if (plain) lit = { from: arg.from + 1, to: arg.to - 1, text: arg.text.slice(1, -1) };
+    }
+    out.push({ at, open, close: parsed.close, arg, lit });
+  }
+  return out;
+}
+
+/**
+ * The `.color(...)` call `idx` is in - on its name or anywhere up to its closing parenthesis - as
+ * findColorCalls gives it, with `onName` saying the index is on the name itself. Null elsewhere.
+ */
+export function findColorCallAt(code, idx) {
+  for (const c of findColorCalls(code)) {
+    if (idx >= c.at && idx <= c.close) return { ...c, onName: idx >= c.at && idx <= c.at + 'color'.length };
+  }
+  return null;
+}
+
+/**
+ * The one edit that makes `call` say `hex`: `{ from, to, text }` over the code it was found in.
+ * A string literal keeps its quotes and only its content changes; a bare call gets the color as a
+ * double-quoted string; any other first argument is replaced by one. Whatever else the call holds -
+ * further arguments, the spacing and comments around them - is left as written.
+ */
+export function colorCallEdit(call, hex) {
+  if (call.lit) return { from: call.lit.from, to: call.lit.to, text: hex };
+  if (call.arg) return { from: call.arg.from, to: call.arg.to, text: JSON.stringify(hex) };
+  return { from: call.open + 1, to: call.close, text: JSON.stringify(hex) };
+}

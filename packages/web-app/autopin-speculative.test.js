@@ -16,6 +16,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const { StateCarry } = require('./state-carry');
 const path = require('node:path');
 const crypto = require('node:crypto');
 
@@ -36,6 +37,9 @@ function loadAutopin(deps) {
   };
   const body = [
     grab('function stateHandle('),
+    grab('function forgetSlotState('),
+    grab('function markSlotState('),
+    grab('function slotState('),
     grab('function markSlotDirty('),
     grab('function captureOpenEditors('),
     grab('async function captureDirtyPlugins('),
@@ -81,6 +85,7 @@ function harness({ program = 'PROGRAM-A', applied, mode = 'deferred' } = {}) {
     syncStateHold: () => {},
     pluginInSlot: (trackId, slot) => deps.mappedEngine.chains.get('t1')?.[slot] ?? null,
     engineTrack: () => 't1',
+    stateCarry: new StateCarry(), // a parked track's record (see state-carry.js); these tracks play
     deckOfKey: (key) => (key.startsWith('b:') ? 'b' : 'a'),
     AUTOPIN_MODE: mode,
     AUTOPIN_SLOW_MS: 50,

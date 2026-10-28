@@ -58,6 +58,19 @@
   line-height: 0;
 }
 
+/* .color(): a swatch in the track's color, the meter's 12px, before the name. Its click opens the
+   color picker (client.js). */
+.CodeMirror-widget .iw-color {
+  width: 12px;
+  height: 12px;
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  cursor: pointer;
+}
+.CodeMirror-widget .iw-color:hover {
+  border-color: var(--text);
+}
+
 /* ------------------------------------------------------------- the folded controls */
 
 /* steps(), sliders() and matrix() stand where their call's text was. --iw-cell and --iw-cell-h are

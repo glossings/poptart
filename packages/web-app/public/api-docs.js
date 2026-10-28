@@ -638,8 +638,8 @@ const API_DOCS = {
   },
   color: {
     kind: 'method',
-    sig: 'color(name)',
-    desc: 'The color the track is drawn in everywhere: the arrangement, the mixer, the DJ desk and the displays. A CSS color name or a hex color. Without one a track takes a color from the theme, picked by its name. Changes nothing about the sound.',
+    sig: 'color(name?)',
+    desc: 'The color the track is drawn in everywhere: the arrangement, the mixer, the DJ desk and the displays. A CSS color name or a hex color. Without one, or with a bare color(), a track takes a color from the theme, picked by its name. The swatch before the name, or a double-click on it, opens a color picker. Changes nothing about the sound.',
     eg: 's("bd*4").color("tomato")',
   },
 

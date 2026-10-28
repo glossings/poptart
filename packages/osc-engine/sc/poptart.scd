@@ -2124,6 +2124,8 @@ if (outDevice.notNil and: { outDevice.isEmpty.not }) {
 // At least stereo; more when the selected device has it, so input-side channel numbering and the
 // device's own outputs both line up. What .o(n) wraps at is playChannels, not this.
 server.options.numOutputBusChannels = max(2, outChannels);
+// Tests run with the output stream off: the same channels, nothing reaches the speakers.
+if (("POPTART_SILENT".getenv == "1") or: { "NODE_TEST_CONTEXT".getenv.notNil }) { server.options.outputStreamsEnabled = "0" };
 // One buffer per file in a sample pack, and packs stay loaded for the session - scsynth's default
 // table of 1024 is exhausted by a single big drum library ("No more buffer numbers" on the first
 // s("...")). The table itself is only a few hundred bytes per slot (the audio lives in separate

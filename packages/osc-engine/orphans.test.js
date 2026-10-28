@@ -101,6 +101,33 @@ test('killIfOurs() survives the process exiting between the check and the kill',
   assert.equal(orphans.killIfOurs(100, { comm, kill }), false);
 });
 
+// A kill is delivered at once, but the process goes later, holding the audio device and its port
+// until then. stop() promises the next start can open them, so it waits for the end of the process.
+test('killAndAwaitExit() resolves only once the killed process is gone', async () => {
+  const { killed, kill } = recorder();
+  const comm = table({ 100: 'scsynth' });
+  let checks = 0;
+  const alive = () => ++checks < 4; // still there for the first three looks after the kill
+  const res = await orphans.killAndAwaitExit(100, { comm, kill, alive });
+  assert.deepEqual(res, { killed: true, gone: true });
+  assert.deepEqual(killed, [100]);
+  assert.equal(checks, 4, 'it kept looking until the pid was gone');
+});
+
+test('killAndAwaitExit() does not wait on a pid it did not kill', async () => {
+  const { kill } = recorder();
+  let checks = 0;
+  const alive = () => { checks++; return true; };
+  const res = await orphans.killAndAwaitExit(100, { comm: table({ 100: 'ssh' }), kill, alive });
+  assert.deepEqual(res, { killed: false, gone: true });
+  assert.equal(checks, 0);
+});
+
+test('awaitExit() gives up at its deadline and says so', async () => {
+  assert.equal(await orphans.awaitExit(100, { alive: () => true, timeoutMs: 30 }), false);
+  assert.equal(await orphans.awaitExit(100, { alive: () => false, timeoutMs: 30 }), true);
+});
+
 test('recorded pids round-trip through the pidfile', () => {
   const file = tmpPidfile();
   orphans.recordEnginePids({ sclang: 100, scsynth: 101 }, { file });

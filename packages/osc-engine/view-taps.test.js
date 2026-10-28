@@ -6,7 +6,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { ViewTaps, VIEW_TAP_MAX, fftDecibels } = require('./view-taps');
+const { ViewTaps, fftDecibels } = require('./view-taps');
 
 const f = (value) => ({ type: 'f', value });
 const i = (value) => ({ type: 'i', value });
@@ -21,13 +21,13 @@ function rig() {
   return { taps, sc, synth };
 }
 
-test('arming asks sclang for the set once, and the budget leaves the rest out', () => {
+test('arming asks sclang for the set once, every track asked for included', () => {
   const { taps, sc } = rig();
-  const list = [{ id: '*' }, ...Array.from({ length: VIEW_TAP_MAX + 2 }, (_, k) => ({ id: `t${k}`, fft: k === 0 }))];
+  const list = [{ id: '*' }, ...Array.from({ length: 12 }, (_, k) => ({ id: `t${k}`, fft: k === 0 }))];
   const res = taps.arm(list);
-  assert.deepEqual(res.armed, ['*', 't0', 't1', 't2', 't3']);
-  assert.deepEqual(res.over, ['t4', 't5']);
-  assert.deepEqual(sc, [{ address: '/poptart/viewTaps', args: ['*', 0, 't0', 1, 't1', 0, 't2', 0, 't3', 0] }]);
+  assert.deepEqual(res.armed, ['*', ...Array.from({ length: 12 }, (_, k) => `t${k}`)]);
+  assert.deepEqual(res.over, []);
+  assert.deepEqual(sc, [{ address: '/poptart/viewTaps', args: ['*', 0, ...Array.from({ length: 12 }, (_, k) => [`t${k}`, k === 0 ? 1 : 0]).flat()] }]);
   taps.arm(list);
   assert.equal(sc.length, 1);
   taps.arm([]);

@@ -134,6 +134,46 @@ function killIfOurs(pid, { comm = commandName, kill = defaultKill } = {}) {
   }
 }
 
+// Signal 0 delivers nothing; it only asks whether the pid exists. EPERM means it does, under
+// another user - which, for a pid we just killed, still means "not gone yet".
+const defaultAlive = (pid) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return e.code === 'EPERM';
+  }
+};
+
+/**
+ * Resolves once `pid` no longer exists, or after `timeoutMs`. Resolves true when it is gone.
+ *
+ * A SIGKILL is delivered, not completed: the process is torn down by the kernel afterwards, and
+ * for that short while it still holds the audio device and its UDP port. Anything that promises
+ * "the next engine start can open the device" has to wait for the end of the process, not the
+ * sending of the signal. A process wedged in the kernel (a vanished CoreAudio device) can take
+ * a while to go, hence the bound - the same grace sclang gets to quit.
+ */
+async function awaitExit(pid, { timeoutMs = 5000, alive = defaultAlive, pollMs = 10 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  while (alive(pid)) {
+    if (Date.now() >= deadline) return false;
+    await new Promise((r) => setTimeout(r, pollMs));
+  }
+  return true;
+}
+
+/**
+ * killIfOurs, then wait for the process to actually be gone (see awaitExit).
+ *
+ * @returns {Promise<{ killed: boolean, gone: boolean }>}
+ */
+async function killAndAwaitExit(pid, { comm = commandName, kill = defaultKill, alive = defaultAlive, timeoutMs } = {}) {
+  const killed = killIfOurs(pid, { comm, kill });
+  if (!killed) return { killed, gone: true };
+  return { killed, gone: await awaitExit(pid, { timeoutMs, alive }) };
+}
+
 /**
  * Kill anything still running from the previously recorded stack, and forget it. Called before
  * spawning a new sclang, which is the one moment nothing of ours should be running.
@@ -195,5 +235,7 @@ module.exports = {
   clearEnginePids,
   readEnginePids,
   killIfOurs,
+  awaitExit,
+  killAndAwaitExit,
   reapOrphanedEngine,
 };

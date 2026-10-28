@@ -98,6 +98,51 @@ The concrete engine implementation the scheduler drives. Bridges Node and audio.
   command set to it: load plugin into a track slot, set parameters, trigger notes, start/stop
   native LFOs and envelopes, tempo, routing. Implements the plain-object engine interface the
   scheduler expects.
+- **Two engines behind one switch.** By default `index.js` runs the engine above: an `sclang`
+  process running `sc/poptart.scd`, which drives scsynth. `POPTART_ENGINE=node` (or the settings
+  tab's "run the engine without sclang", read at engine start; a change restarts the engine)
+  selects the other one, where nothing runs sclang (`node-engine.js`). OscEngine then boots scsynth
+  itself and runs the same engine in its own process. The `/poptart/*` protocol between the two
+  halves is unchanged: `_send` dispatches into the engine instead of onto a socket (floats rounded
+  to float32, as OSC carried them), and what the engine tells reaches `_handleMessage` as sclang's
+  messages did, a microtask later, never inside the handler that said it.
+  - `server/` — scsynth from Node. `server.js` boots it with the options `poptart.scd` sets (flag
+    for flag what ServerOptions writes), talks to it over one UDP socket (bundles, `makeBundle`,
+    `sync`, replies), and owns every node, bus and buffer id through one allocator (`alloc.js`).
+    The direct path takes its node ids from it too. `objects.js` is Synth/Group/Bus/Buffer with the
+    class library's method names. `defs.js` builds the SynthDefs in Node (`synthdef/`) at boot,
+    checks which of poptart's extensions are installed, and sends the defs; nothing is compiled by
+    sclang or cached.
+  - `server/vst.js` + `server/device.js` — VSTPluginController/VSTPlugin and
+    PoptartDeviceController, re-implemented over the UGens' own `/u_cmd` protocol, with the class
+    library's method names and callbacks: open/close, params, programs and banks, state through
+    temp files (no size limit, byte-identical), the editor, MIDI, transport, latency and the edit
+    events, and the plugin search and its cache. The search still runs VSTPlugin's own probe host,
+    so the fork's probe fix and editor key forwarding work unchanged; scsynth gets
+    `POPTART_HOTKEY_PORT`, and OscEngine listens there for the keys.
+  - `engine/` — `poptart.scd`'s handlers, ported one section per file (tracks, routing, loads, ids,
+    params, expr, notes, sampler, songs, state, scan, record, mixer, view-taps, midi, osc-in, clock,
+    quit)
+    under the conventions at the top of `engine/core.js`: every top-level sclang variable is a
+    property of the engine under the same name, a handler reads `msg` as an OSCdef did, a routine
+    is an async function, and every `server.sync` stays where it was, because those are ordering.
+    `boot.js` is the `waitForBoot` block. Expression defs are built on demand by `synthdef`
+    (`exprDef`) and sent with `/d_recv`. The view taps' defs, which sclang builds the first time a
+    display asks, load at boot with the fixed set; their `/b_getn` reads go out on the engine's
+    server socket, whose `/b_setn` and `/c_set` answers `node-engine.js` hands to `view-taps.js`.
+  - MIDI in the node engine. On macOS it is `native/poptart-midi.swift`, a CoreMIDI helper
+    (committed prebuilt and universal, like the audio helper; built by `native/build-midi.sh`).
+    It reads input on CoreMIDI's own thread and stamps outgoing packets in host time. A worker
+    thread (`server/midi-worker.js`) owns it, and runs three things there so a busy main thread
+    cannot delay them:
+    - the live input paths: a `midicc()` knob's bus, a `midikeys()` route's notes, an injected
+      device;
+    - MIDI clock out's ticker, which schedules each tick ahead with its intended time, as
+      `MIDIOut` with latency did;
+    - the parsing.
+    Lamps and plain MIDI out leave at once. On Windows the device I/O alone is a small sclang
+    helper (`sc/midi-io.scd`) behind the same interface (`server/midi-io.js`;
+    `POPTART_MIDI_BACKEND` overrides the choice); nothing else there uses sclang.
 - `direct.js` — the direct path: builds and sends the per-event bundles to scsynth itself, so a busy
   sclang cannot make a note late. sclang keeps building everything and tells Node the ids; Node never
   guesses one, takes per-note voice ids from a node-id block sclang's allocator never reaches, and
@@ -118,6 +163,23 @@ The concrete engine implementation the scheduler drives. Bridges Node and audio.
   extension, builds each track as a group of nodes - one per device (the instrument, each effect,
   each internal crossover) plus a channel strip - and runs the native LFOs/envelopes
   sample-accurately inside the audio graph.
+- `synthdef/` — **SynthDefs without sclang**: a Node port of sclang's SynthDef construction
+  (controls from the argument list, the MulAdd/Sum3/Sum4/neg rewrites, dead-code elimination,
+  constant numbering, the depth-first sort) and an SCgf version 2 writer. `graph.js` is the
+  builder, `ugens.js` the UGen classes poptart uses (VSTPlugin, PoptartDevice, PoptartPitchShift
+  and PoptartSpectrum included), `defs.js` every def `sc/poptart.scd` builds, written in the order
+  sclang evaluates them, `expr.js` the param-expression defs (one per tree shape, named from a hash
+  of the shape, constants as controls `c<j>`, input buses as `k<i>`/`a<i>`). The API is
+  `defsFor(options)` for the fixed set, `mixDefsFor(freqs, options)`, `exprDef(tree, {outKind,
+  rates})` → `{name, bytes, consts, inputs, meta}`, and `writeConfigDir(config)`, which writes a
+  configuration's `.scsyndef` files plus `defs.json`. Each def's `meta` is the UGen index of
+  every VSTPlugin and PoptartDevice by id, which is what a controller's `/u_cmd` addresses, plus
+  its control names. `loadMessages(defs, {dir})` packs defs into as few `/d_recv` messages as
+  stay under one UDP datagram (9216 bytes, macOS's default) and writes any def too big for one
+  to a file for `/d_load`. `synthdef-sclang.test.js` holds every def to sclang's own `asBytes`,
+  byte for byte, across three engine configurations and a set of expression trees, with the
+  def-building code lifted out of `sc/poptart.scd`. It also loads the whole set into an offline
+  scsynth. So a change to a def in `poptart.scd` has to be made in `defs.js` too.
 - `native/devices/` — **poptart's own devices on the desktop**: the same synths and effects the
   browser build plays, compiled for scsynth instead of for WebAssembly, so `synth("Plaits")` and
   `fx("Galactic")` open the same device on either engine with the same control names and the same

@@ -326,6 +326,179 @@ export function resolveTrackColor(track, palette, { isColor = () => true, fallba
   return fallback;
 }
 
+// ---------------------------------------------------------------------------- the color picker
+
+/** A hex color as [hue 0..360, saturation 0..1, lightness 0..1], or null. */
+export function hexToHsl(hex) {
+  const rgb = parseHex(hex);
+  return rgb ? rgbToHsl(rgb) : null;
+}
+
+/** [hue 0..360 (any turn), saturation 0..1, lightness 0..1] as "#rrggbb". */
+export function hslHex(h, s, l) {
+  const clamp = (v) => Math.min(1, Math.max(0, v));
+  return hslToHex(((h % 360) + 360) % 360, clamp(s), clamp(l));
+}
+
+/** WCAG's relative luminance of a hex color, 0 (black) to 1 (white). */
+export function luminance(hex) {
+  const [r, g, b] = (parseHex(hex) ?? [0, 0, 0]).map((v) => {
+    const c = v / 255;
+    return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+  });
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+
+/** WCAG's contrast ratio of two colors, 1 (the same) to 21 (black on white). */
+export function contrastRatio(a, b) {
+  const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x);
+  return (hi + 0.05) / (lo + 0.05);
+}
+
+/** The contrast WCAG asks of a graphic against what it is drawn on (its non-text minimum). */
+export const MIN_GRAPHIC_CONTRAST = 3;
+
+/**
+ * `hex` with its lightness moved away from the background's - lighter on a dark theme, darker on a
+ * light one - just far enough to stand `min` apart from `bg`; as it was when it already does. Hue
+ * and saturation are kept, so a suggestion stays the color it was worked out as.
+ */
+export function fitToBackground(hex, bg, min = MIN_GRAPHIC_CONTRAST) {
+  const hsl = hexToHsl(hex);
+  if (!hsl || contrastRatio(hex, bg) >= min) return hsl ? hslHex(...hsl) : hex;
+  const [h, s, l0] = hsl;
+  const dir = isLightBg(bg) ? -1 : 1;
+  let best = hslHex(h, s, l0);
+  for (let l = l0; l >= 0 && l <= 1; l += dir * 0.01) {
+    best = hslHex(h, s, l);
+    if (contrastRatio(best, bg) >= min) return best;
+  }
+  return best;
+}
+
+/** `hex` turned `deg` round the color wheel, its saturation and lightness kept. */
+export function rotateHue(hex, deg) {
+  const hsl = hexToHsl(hex);
+  return hsl ? hslHex(hsl[0] + deg, hsl[1], hsl[2]) : null;
+}
+
+/** Hue distance round the wheel, 0..180. */
+const hueApart = (a, b) => {
+  const d = Math.abs((((a - b) % 360) + 360) % 360);
+  return Math.min(d, 360 - d);
+};
+
+/**
+ * `count` hues as far as they can be from every one of `hues`: each in the middle of the widest gap
+ * left round the wheel, the gap then split by it - the hues a song has not used yet. With no hues
+ * at all, `from` and its even spacing.
+ */
+export function openHues(hues, count, from = 0) {
+  const taken = [...hues].map((h) => ((h % 360) + 360) % 360);
+  const out = [];
+  for (let k = 0; k < count; k++) {
+    if (!taken.length) {
+      const h = ((from % 360) + 360) % 360;
+      taken.push(h);
+      out.push(h);
+      continue;
+    }
+    const sorted = [...taken].sort((a, b) => a - b);
+    let best = { gap: -1, at: 0 };
+    for (let i = 0; i < sorted.length; i++) {
+      const a = sorted[i];
+      const b = i + 1 < sorted.length ? sorted[i + 1] : sorted[0] + 360;
+      if (b - a > best.gap + 1e-9) best = { gap: b - a, at: (a + (b - a) / 2) % 360 };
+    }
+    taken.push(best.at);
+    out.push(best.at);
+  }
+  return out;
+}
+
+/**
+ * The palette tab's suggestions for one track, as groups `{ key, label, colors }` in the order they
+ * are shown. The hues are this track's turned round the wheel - neighbors either side, the opposite,
+ * the two either side of the opposite, the two that make three equal steps - and the hues the
+ * song's other tracks leave open. Every one is drawn at the song's own saturation and lightness
+ * (the mean of the other tracks', this track's when it is alone), kept to the range the theme's
+ * automatic colors use, then moved just far enough from the theme's background to read on it (see
+ * fitToBackground). Last come the colors the song uses now, this track's among them, as they are.
+ *
+ * `base` is this track's color, `others` the other tracks' colors, `bg` the theme's background.
+ */
+export function colorSuggestions(base, others = [], bg = '#0e0f13') {
+  const baseHsl = hexToHsl(base) ?? [0, 0.6, 0.6];
+  const song = others.map(hexToHsl).filter(Boolean);
+  const mean = (i) => (song.length ? song.reduce((a, c) => a + c[i], 0) / song.length : baseHsl[i]);
+  const s = Math.min(0.85, Math.max(0.5, mean(1)));
+  const l = Math.min(0.75, Math.max(0.35, mean(2)));
+  const h0 = baseHsl[0];
+  const at = (deg) => fitToBackground(hslHex(h0 + deg, s, l), bg);
+  const uniq = (list) => [...new Set(list.map((c) => String(c).toLowerCase()))];
+  const otherHues = song.filter((c) => c[1] > 0.08).map((c) => c[0]);
+  const groups = [
+    { key: 'neighbors', label: 'neighbors', colors: uniq([-60, -30, 30, 60].map(at)) },
+    { key: 'opposite', label: 'opposite', colors: uniq([180].map(at)) },
+    { key: 'split', label: 'split opposite', colors: uniq([150, 210].map(at)) },
+    { key: 'triad', label: 'three-way', colors: uniq([120, 240].map(at)) },
+    {
+      key: 'open',
+      label: 'unused hues',
+      colors: uniq(openHues([h0, ...otherHues], 4, h0 + 180).map((h) => fitToBackground(hslHex(h, s, l), bg))),
+    },
+    { key: 'song', label: 'in this song', colors: uniq([base, ...others].filter((c) => parseHex(c))) },
+  ];
+  return groups.filter((g) => g.colors.length);
+}
+
+/**
+ * Where a hue and saturation sit on a color wheel of `radius` centered on (0, 0): the hue is the
+ * angle (red to the right, turning clockwise on screen), the saturation the distance out.
+ */
+export function wheelPoint(h, s, radius) {
+  const a = (h * Math.PI) / 180;
+  const r = Math.min(1, Math.max(0, s)) * radius;
+  return { x: Math.cos(a) * r, y: Math.sin(a) * r };
+}
+
+/** The hue and saturation at (x, y) from the wheel's center - wheelPoint undone, the rim clamped. */
+export function wheelAt(x, y, radius) {
+  const h = ((Math.atan2(y, x) * 180) / Math.PI + 360) % 360;
+  const s = radius > 0 ? Math.min(1, Math.hypot(x, y) / radius) : 0;
+  return { h, s };
+}
+
+/** `list` with `hex` put first and any earlier copy of it dropped, kept to `max` entries. */
+export function rememberColor(list, hex, max) {
+  const c = String(hex).toLowerCase();
+  return [c, ...list.filter((x) => x !== c)].slice(0, max);
+}
+
+/**
+ * The recent picks kept in `storage` under `key` (a hex list), newest first - an empty list when
+ * storage is missing, throws, or holds something else.
+ */
+export function readRecentColors(storage, key, max) {
+  try {
+    const raw = storage?.getItem(key);
+    const list = raw ? JSON.parse(raw) : [];
+    return Array.isArray(list) ? list.filter((c) => typeof c === 'string' && /^#[0-9a-f]{6}$/i.test(c)).map((c) => c.toLowerCase()).slice(0, max) : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Keeps `list` in `storage` under `key`; says whether it could (private windows and blocked storage throw). */
+export function writeRecentColors(storage, key, list) {
+  try {
+    storage?.setItem(key, JSON.stringify(list));
+    return !!storage;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * The bands the displays behind the code share: one each, the editor's height split evenly in the
  * order they were written, as `{ y, height }` in CSS pixels (whole pixels, the last taking the rest).

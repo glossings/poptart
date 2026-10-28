@@ -370,6 +370,10 @@
               <label class="settings-row">output channels
                 <select id="audioChannelSelect" title="how many output channels .o(n) may play to - stereo folds every orbit onto channels 1/2; raise it to reach an interface's other pairs"></select>
               </label>
+              <label class="settings-check" title="drive the audio server from poptart itself instead of from sclang - applying restarts the engine">
+                <input id="nodeEngineToggle" type="checkbox" />
+                run the engine without sclang
+              </label>
               <label class="settings-row">cue output
                 <select id="audioCueSelect" title="where the headphones are: a separate output device, or another channel pair of the output device itself - which is how a controller's own headphone jack is reached, master on channels 1/2 and phones on 3/4. Mix mode's 🎧 buttons pre-listen a deck there (post-EQ, pre-fader). A before-the-gig choice - applying restarts the engine"></select>
               </label>
@@ -828,6 +832,35 @@
       </div>
       <div id="envModFigure"></div>
       <div id="envModFields" class="device-widgets"></div>
+    </div>
+
+    <!-- The color picker: opened from a .color() call's swatch or name, on the track it colors. A
+         wheel of hue and saturation with the lightness beside it, the recent picks, and a palette
+         worked out from the song's other tracks. A pick is written into that .color() call. -->
+    <div id="colorPanel" class="lfo-panel color-panel hidden">
+      <div class="lfo-panel-head">
+        <span id="colorTitle">color</span>
+        <span class="spacer"></span>
+        <button class="side-tab active" data-color-tab="wheel">wheel</button>
+        <button class="side-tab" data-color-tab="palette">palette</button>
+        <button id="colorClose" class="small">✕</button>
+      </div>
+      <div id="colorWheelTab" class="color-tab-body">
+        <canvas id="colorWheel" title="hue around, saturation outward"></canvas>
+        <div class="lfo-controls color-controls">
+          <span id="colorNow" class="color-swatch"></span>
+          <label>light
+            <div id="colorLight" class="pr-box-slider" role="slider" tabindex="0" aria-label="lightness"
+              aria-valuemin="0" aria-valuemax="100" aria-valuenow="50" title="lightness"><span class="pr-box-fill"></span><span class="pr-box-val">50</span></div>
+          </label>
+          <label>hex <input id="colorHex" type="text" spellcheck="false" maxlength="7" title="a hex color; enter writes it" /></label>
+        </div>
+        <div class="color-group">
+          <span class="color-group-name">recent</span>
+          <div id="colorRecent" class="color-row"></div>
+        </div>
+      </div>
+      <div id="colorPaletteTab" class="color-tab-body hidden"></div>
     </div>
 
     <!-- The groove manager: swing as a per-slot table rather than one number (see groove.mjs). Two

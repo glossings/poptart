@@ -24,7 +24,7 @@ import { decodeWav, framesOf } from '../dsp/wavfile.mjs';
 import { buildMipmaps, powerOfTwoAtLeast, resampleFrame } from '../dsp/tables.mjs';
 import { outlineOf } from '../dsp/outline.mjs';
 import { compileExpr, exprConsts, exprInputCount, exprInputs, exprShape } from '../dsp/expr.mjs';
-import { ViewTaps, VIEW_TAP_MAX } from './view-taps.mjs';
+import { ViewTaps } from './view-taps.mjs';
 
 // How long a sample name may stay unknown before it is said to be (see _unknownSource).
 const UNKNOWN_SOURCE_GRACE_MS = 2000;
@@ -263,10 +263,6 @@ export class WebAudioEngine {
     return this.views.read();
   }
 
-  /** The most tracks that get a view tap at once. */
-  viewTapMax() {
-    return VIEW_TAP_MAX;
-  }
 
   // -- what the mixer reads -----------------------------------------------------------------
 
