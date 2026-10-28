@@ -77,6 +77,7 @@ server = Server(\\poptartFailTest, NetAddr("127.0.0.1", ${SCSYNTH_PORT}));
 // supply is itself a boot failure (see sc/poptart.scd's device notes), and nothing here sounds.
 server.options.numInputBusChannels = 0;
 server.options.numOutputBusChannels = 2;
+server.options.outputStreamsEnabled = "0"; // tests never play through the speakers
 server.options.memSize = 8192;
 
 // The responder under test, registered exactly as the engine registers its own.
@@ -212,6 +213,7 @@ tracks = IdentityDictionary.new;
 server = Server(\\poptartFailReal, NetAddr("127.0.0.1", ${SCSYNTH_PORT + 1}));
 server.options.numInputBusChannels = 0;
 server.options.numOutputBusChannels = 2;
+server.options.outputStreamsEnabled = "0"; // tests never play through the speakers
 server.options.memSize = 8192;
 
 ${oscdef('poptartServerFail')}

@@ -289,6 +289,9 @@ export class Sig {
     // Metadata like everything above, so it survives the rest of the chain (.log() can go
     // anywhere in it) - see _meta().
     this.logging = opts.logging ?? false;
+    // .color(): how the track is drawn in the editor's displays - a CSS color name or hex, or null
+    // for the automatic one. Metadata like logging: nothing in playback reads it.
+    this.trackColor = opts.trackColor ?? null;
     // Headed by clips(): the track plays the rolls painted along its row, and places them in the
     // song ITSELF (see clips()). The host reads this to leave such a track on the song's own
     // clock - handing it clip-relative time as well would move every roll twice.
@@ -344,6 +347,7 @@ export class Sig {
       pitchKind: this.pitchKind,
       scaleName: this.scaleName,
       logging: this.logging,
+      trackColor: this.trackColor,
       clipsHead: this.clipsHead,
       pending: this.pending,
     };
@@ -3818,6 +3822,26 @@ export class Sig {
    */
   log(on = true) {
     return this._clone({ logging: !!on });
+  }
+
+  /**
+   * How this track is drawn in the editor's displays - its events in a punchcard() behind the
+   * code, its trace, its own .scope() and the rest: a CSS color name or a hex color.
+   *
+   *   bass: note("c2 eb2").synth("Wavetable").color("orange")
+   *
+   * Anywhere in the chain; it never changes the sound. A track without one gets a color of its
+   * own from the theme, the same one every evaluation.
+   */
+  color(c) {
+    // A string argument arrives as a mini pattern; its text is the color written.
+    const raw = c instanceof Sig && typeof c.miniText === 'string' ? c.miniText : c;
+    const name = trackColorOf(raw);
+    if (name === null) {
+      const said = typeof raw === 'string' ? JSON.stringify(raw) : c instanceof Sig ? 'a pattern' : String(raw);
+      warnUser(`[signal] .color() takes a CSS color name or a hex color, like .color("pink") or .color("#ff7a9c") - got ${said}; using the track's own`);
+    }
+    return this._clone({ trackColor: name });
   }
 
   /**
@@ -8668,3 +8692,28 @@ export function input(...args) {
 // For route.mjs, which turns a chain's split/bands tree into the engine's wiring and composes
 // branch levels the way .postgain() composes its own factors.
 export { toSignal, multiplyGain };
+
+// The CSS named colors, for .color() to tell a name from a typo.
+const CSS_COLOR_NAMES = new Set(('aliceblue antiquewhite aqua aquamarine azure beige bisque black blanchedalmond blue '
+  + 'blueviolet brown burlywood cadetblue chartreuse chocolate coral cornflowerblue cornsilk crimson cyan darkblue '
+  + 'darkcyan darkgoldenrod darkgray darkgreen darkgrey darkkhaki darkmagenta darkolivegreen darkorange darkorchid '
+  + 'darkred darksalmon darkseagreen darkslateblue darkslategray darkslategrey darkturquoise darkviolet deeppink '
+  + 'deepskyblue dimgray dimgrey dodgerblue firebrick floralwhite forestgreen fuchsia gainsboro ghostwhite gold '
+  + 'goldenrod gray green greenyellow grey honeydew hotpink indianred indigo ivory khaki lavender lavenderblush '
+  + 'lawngreen lemonchiffon lightblue lightcoral lightcyan lightgoldenrodyellow lightgray lightgreen lightgrey '
+  + 'lightpink lightsalmon lightseagreen lightskyblue lightslategray lightslategrey lightsteelblue lightyellow lime '
+  + 'limegreen linen magenta maroon mediumaquamarine mediumblue mediumorchid mediumpurple mediumseagreen '
+  + 'mediumslateblue mediumspringgreen mediumturquoise mediumvioletred midnightblue mintcream mistyrose moccasin '
+  + 'navajowhite navy oldlace olive olivedrab orange orangered orchid palegoldenrod palegreen paleturquoise '
+  + 'palevioletred papayawhip peachpuff peru pink plum powderblue purple rebeccapurple red rosybrown royalblue '
+  + 'saddlebrown salmon sandybrown seagreen seashell sienna silver skyblue slateblue slategray slategrey snow '
+  + 'springgreen steelblue tan teal thistle tomato turquoise violet wheat white whitesmoke yellow yellowgreen').split(' '));
+
+/** A .color() argument as the editor draws it: a CSS color name (lower case) or a hex color, else null. */
+export function trackColorOf(c) {
+  if (typeof c !== 'string') return null;
+  const t = c.trim().toLowerCase();
+  if (/^#(?:[0-9a-f]{3}|[0-9a-f]{4}|[0-9a-f]{6}|[0-9a-f]{8})$/.test(t)) return t;
+  return CSS_COLOR_NAMES.has(t) ? t : null;
+}
+

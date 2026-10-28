@@ -32,6 +32,7 @@
 import { looksLikeNoteString } from './pianoroll.mjs';
 import { looksLikeShapeData } from './shape.mjs';
 import { grooveNameLike } from './groove.mjs';
+import { widgetCallEdits, RAW_TEXT_WIDGETS } from './widget-calls.mjs';
 
 // Rewrites `code` so each pattern-position string/template literal is wrapped in mini(str, START),
 // where START = `base` + the literal's first-content-char offset within `code`. Pass the block's
@@ -45,8 +46,8 @@ import { grooveNameLike } from './groove.mjs';
 // through the blocks below it.
 export function injectLocations(code, base = 0, { miniOff = [] } = {}) {
   const { lits, masked } = scanLiterals(code);
-  let out = '';
-  let prev = 0;
+  // [from, to, replacement] over the ORIGINAL code, applied in one pass below.
+  const edits = [];
   for (const lit of lits) {
     if (lit.quote === "'" || inRanges(miniOff, base + lit.fullStart)) continue;
     // Position is judged on the MASKED code: what is inside other literals and comments is not
@@ -56,9 +57,18 @@ export function injectLocations(code, base = 0, { miniOff = [] } = {}) {
     const after = masked.slice(lit.fullEnd);
     const position = lit.hasInterp ? false : isPatternPosition(before, after, code.slice(lit.contentStart, lit.fullEnd - 1));
     if (!position) continue;
-    out += code.slice(prev, lit.fullStart);
-    out += `mini(${code.slice(lit.fullStart, lit.fullEnd)}, ${base + lit.contentStart}${position === 'speech' ? ", 'speech'" : ''})`;
-    prev = lit.fullEnd;
+    edits.push([lit.fullStart, lit.fullEnd, `mini(${code.slice(lit.fullStart, lit.fullEnd)}, ${base + lit.contentStart}${position === 'speech' ? ", 'speech'" : ''})`]);
+  }
+  // The editor's inline widgets (slider(), .scope(), ...) are tagged with where they are, which is
+  // what keys a widget's live value and display to the control drawn there (see widget-calls.mjs).
+  // Their edits replace a call's name and paren, never a literal, so the two lists don't overlap.
+  edits.push(...widgetCallEdits(code, base, { masked, lits }));
+  edits.sort((x, y) => x[0] - y[0]);
+  let out = '';
+  let prev = 0;
+  for (const [from, to, text] of edits) {
+    out += code.slice(prev, from) + text;
+    prev = to;
   }
   out += code.slice(prev);
   return out;
@@ -129,6 +139,9 @@ const NAME_ARG_CALLS = new Set([
   'param', // the NAME: the first argument, and the second in the device form (see the later-argument rule below); only the final argument patterns the value
   // A place to read sample packs from - "user/repo", a URL - which a "/" would make a division.
   'samples',
+  // The inline widgets whose first argument is the control's own data - steps("x . x ."),
+  // sliders("0.2 0.8") - written as plain text the editor rewrites cell by cell (widget-calls.mjs).
+  ...RAW_TEXT_WIDGETS,
 ]);
 // Of those, the ones whose LATER arguments are also never patterns - a captured plugin-state blob
 // (.synth("Serum 2", "<state>")), an lfo() options object, pianoroll()'s grid, roll()'s drawn

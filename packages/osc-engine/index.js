@@ -45,6 +45,7 @@ const { preparePluginScan, scanWarnings, joinPathList, noteProbe, noteProbeDone,
 const { ScanProgress } = require('./scan-progress');
 const { openEngineLog, engineLogPath } = require('./engine-log');
 const { DirectPath } = require('./direct');
+const { ViewTaps, VIEW_TAP_MAX } = require('./view-taps');
 
 // The name a param call uses for input i of the expression on `name` (see setParamExpr).
 const EXPR_LEAF = /^~\d+~/;
@@ -607,6 +608,15 @@ class OscEngine {
     // Node (defer mode) and Node answers with the mapped /poptart/noteOn - trackId -> { noteMap,
     // held }. Static device routes never appear here; they play direct in sclang.
     this._deferRoutes = new Map();
+    // The editor's inline audio displays (.scope(), .spectrum(), ...): taps sclang builds and this
+    // process reads straight from scsynth - see view-taps.js.
+    this._views = new ViewTaps({
+      sendSc: (address, args) => this._send(address, args),
+      sendScsynth: (packet, port) => {
+        if (!this._port) throw new Error('OscEngine not started');
+        this._port.send(packet, '127.0.0.1', port);
+      },
+    });
   }
 
   // Does the routing name refer to `sourceTrackId`? Track-first: a bare name (or "track:name")
@@ -1005,6 +1015,7 @@ class OscEngine {
   // e.g. across an output-device change) - escalating to SIGKILL if it doesn't exit in time.
   // Await it before starting a replacement engine.
   async stop() {
+    this._views.reset(); // the taps go with the server
     // From here on, a server that exits did so because we asked. Clearing the journal matters as
     // much as the flag: an interrupted scan's last probe is innocent, and leaving it recorded
     // would skip a perfectly good plugin on the next start.
@@ -1373,6 +1384,25 @@ class OscEngine {
   // along so the analyzer is built against MIX_BAND_FREQS (see there). `trackIds` is the set to
   // tap - the caller's playing tracks, re-sent whenever that set changes; a track named before it
   // exists is tapped when it appears. Every tapped track gets its own analyzer. Idempotent.
+  /**
+   * The editor's inline audio displays: arm a view tap on each of `list` - `[{ id, fft }]`, a track
+   * id or '*' for the master, `fft` when a spectrum is drawn of it - and disarm the rest. Past
+   * VIEW_TAP_MAX tracks the rest are left out; returns `{ armed, over }`. See view-taps.js.
+   */
+  viewTaps(list) {
+    return this._views.arm(list);
+  }
+
+  /** The latest frame of every armed view tap - see ViewTaps#read. */
+  viewRead() {
+    return this._views.read();
+  }
+
+  /** The most tracks that get a view tap at once. */
+  viewTapMax() {
+    return VIEW_TAP_MAX;
+  }
+
   mixMeters(on, trackIds = []) {
     this._send('/poptart/mixMeters', [on ? 1 : 0, JSON.stringify(MIX_BAND_FREQS), JSON.stringify(trackIds)]);
   }
@@ -2913,6 +2943,7 @@ class OscEngine {
   }
 
   _handleMessage(msg) {
+    if (this._views.handle(msg)) return;
     if (this._direct.handle(msg)) return;
     if (msg.address === '/fail') {
       // scsynth answering a command the direct path sent: the repair is sclang's (see

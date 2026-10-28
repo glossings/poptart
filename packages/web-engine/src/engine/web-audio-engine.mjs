@@ -24,6 +24,10 @@ import { decodeWav, framesOf } from '../dsp/wavfile.mjs';
 import { buildMipmaps, powerOfTwoAtLeast, resampleFrame } from '../dsp/tables.mjs';
 import { outlineOf } from '../dsp/outline.mjs';
 import { compileExpr, exprConsts, exprInputCount, exprInputs, exprShape } from '../dsp/expr.mjs';
+import { ViewTaps, VIEW_TAP_MAX } from './view-taps.mjs';
+
+// How long a sample name may stay unknown before it is said to be (see _unknownSource).
+const UNKNOWN_SOURCE_GRACE_MS = 2000;
 import { MIX_BAND_FREQS, MixAnalysis, SpectrumTap } from './analysis.mjs';
 import { MidiRoutes } from './midi-routes.mjs';
 import { detectOnsets, monoOf, planSample, sliceEntryFor } from './sample-plan.mjs';
@@ -240,6 +244,28 @@ export class WebAudioEngine {
     this.songs = new Map();         // trackId -> SongPlayer, for a track a DJ deck plays a song on
     // Every route between tracks and buses, so a feedback loop gets the delay it needs to sound.
     this.routes = new RouteGraph(ctx, () => [...this.tracks.keys()].map((id) => `t:${id}`));
+    // ...and what the editor's inline displays read (.scope(), .spectrum(), ...), while they are drawn.
+    this.views = new ViewTaps(ctx, (id) => (id === '*' ? this.master : this.tracks.get(id)?.panner ?? null));
+  }
+
+  // -- what the editor's inline displays read ---------------------------------------------------
+
+  /**
+   * Arm a view tap on each of `list` - `[{ id, fft }]`, a track id or '*' for the master, `fft`
+   * when a spectrum is drawn of it - and drop the rest. Returns `{ armed, over }`; see view-taps.mjs.
+   */
+  viewTaps(list) {
+    return this.views.arm(list);
+  }
+
+  /** The latest frame of every armed view tap: `{ [id]: { scope, level, spec? } }`. */
+  viewRead() {
+    return this.views.read();
+  }
+
+  /** The most tracks that get a view tap at once. */
+  viewTapMax() {
+    return VIEW_TAP_MAX;
   }
 
   // -- what the mixer reads -----------------------------------------------------------------
@@ -287,6 +313,24 @@ export class WebAudioEngine {
 
   version() {
     return '0.1.2-web';
+  }
+
+  /**
+   * A name the sample store has never heard of - `s("zz")`, a matrix() row naming a sound that
+   * is not here - plays nothing, and says so once. Only once it has stayed unknown for a moment:
+   * a pack read from a repository has no manifest until its fetch lands, and a name in it is not
+   * a mistake for that second.
+   */
+  _unknownSource(name) {
+    if (typeof name !== 'string' || !name || typeof this.samples?.knows !== 'function') return;
+    if (/^(?:file|rec|say):/.test(name) || this.samples.knows(name)) return;
+    this._unknownSince ??= new Map();
+    const now = Date.now();
+    const since = this._unknownSince.get(name) ?? now;
+    this._unknownSince.set(name, since);
+    if (now - since >= UNKNOWN_SOURCE_GRACE_MS) {
+      this._warnOnce(`source:${name}`, `[web-engine] there is no sound called ${JSON.stringify(name)} here - it plays nothing.`);
+    }
   }
 
   /** Says a thing this engine cannot do, once per distinct thing. */
@@ -2450,7 +2494,10 @@ export class WebAudioEngine {
       : index == null ? null : this.samples?.get?.(source, index) ?? null;
     // The store may hand back a bare AudioBuffer, or the buffer with the note it was recorded at.
     const buffer = got?.buffer ?? got;
-    if (!buffer) return { skipped: 'source not ready' };
+    if (!buffer) {
+      this._unknownSource(isRec ? null : source);
+      return { skipped: 'source not ready' };
+    }
     const rootNote = Number.isFinite(got?.rootNote) ? got.rootNote : SAMPLER_ANCHOR;
 
     // The slice positions `.slice(n)` indexes: the hand-drawn set's marks for this file where it

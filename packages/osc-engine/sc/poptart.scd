@@ -269,6 +269,9 @@ var recGroup, recTaps, startTap, stopTap;
 var mixTaps, mixOn = false, mixBandFreqs, mixMaster, buildMixDef, mixBank, mixForwards;
 var mixWanted, mixReconcile, mixReconciling = false, mixDirty = false;
 var startMixTap, stopMixTap, stopMixMaster;
+// The editor's inline audio displays ('/poptart/viewTaps'): everything they need, in one event -
+// see the view-tap section.
+var viewTap;
 // DJ deck meters ('/poptart/deckMeters'): two stereo meter buses (A at .index, B at .index + 2)
 // that every track synth sums its PRE-FADER signal into (the mdeck birth arg says which, -1 for
 // neither), and one SendPeakRMS reader synth per deck while the strip is open. Pre-fader (post
@@ -3125,6 +3128,8 @@ buildTrack = { |key, birth|
             // adds a block mid-session), instead of staying dark until the mixer is reopened
             // - if Node has asked for it; the ask may have arrived while this was pending.
             if (mixOn) { mixReconcile.() };
+            // ...and a display of it already on screen starts drawing it.
+            if (viewTap[\on]) { viewTap[\reconcile].() };
             // A DJ stage born touched (a desk's trim or EQ carried over) is made now.
             birthPairs.select { |p| #[\trim, \eqlo, \eqmid, \eqhi, \djf, \djres, \cue, \mdeck].includes(p[0]) } !? { |dj|
                 if (dj.notEmpty) { djNode.(tracks[key]).set(*dj.flatten) };
@@ -3198,6 +3203,7 @@ destroyTrack = { |key|
             // real RAM) must not outlive the track.
             songs[key] !? { |e| e[\posFunc] !? { |f| f.free }; e[\buf] !? { |b| b.free }; songs[key] = nil };
             bendTracks.removeAt(track[\head].nodeID);
+            viewTap[\stop].(key); // a display's tap of it, buffers and all (a rebuilt track is tapped anew)
             track[\group].free;
             track[\inBus].free;
             track[\bendBus] !? { |b| b.free };
@@ -6376,6 +6382,121 @@ OSCdef(\poptartMixMeters, { |msg|
         mixReconcile.();
     };
 }, '/poptart/mixMeters');
+
+// --- the editor's inline audio displays ('/poptart/viewTaps' - .scope(), .spectrum() and the
+// rest; see osc-engine/view-taps.js) -------------------------------------------------------------
+//
+// Per tapped track, or the master (key '*'): a copy of the strip's output onto a private bus (a
+// strip tap of its own, \view - see stripTap), a stereo ring of that bus's latest samples with the
+// newest frame's index on a control bus, and an FFT buffer when a spectrum is drawn of it. Node
+// reads the buffers straight from scsynth with /b_getn; this side only builds and frees them, so
+// no frame ever passes through here. All of it is one event and one statement: `wanted` is what
+// Node last asked for (key -> whether it wants the FFT), `taps` what exists.
+{
+viewTap = (
+    taps: IdentityDictionary.new, wanted: IdentityDictionary.new, on: false,
+    busy: false, dirty: false, defs: false,
+    ringFrames: 1024, decim: 2, fftFrames: 2048
+);
+// The ring writer: one frame kept per `decim` samples, and the index of the newest on a control
+// bus - the phasor at the block's first sample plus the rest of the block's advance, so the reader
+// knows where the ring's seam is. The FFT sibling leaves a Hann-windowed frame of the mono sum
+// every half frame. Both only write. Built the first time a display asks (makeDefs, from a Routine).
+viewTap[\buildDefs] = {
+    SynthDef(\poptart_view_tap, {
+        var sig = In.ar(\bus.kr(0), 2);
+        var decim = \decim.ir(2);
+        var phase = Phasor.ar(0, decim.reciprocal, 0, \frames.ir(1024));
+        BufWr.ar(sig, \ring.kr(0), phase, 1);
+        Out.kr(\head.kr(0), A2K.kr(phase) + ((BlockSize.ir - 1) / decim));
+    }).add;
+    SynthDef(\poptart_view_fft, {
+        var sig = In.ar(\bus.kr(0), 2);
+        FFT(\buf.kr(0), (sig[0] + sig[1]) * 0.5, 0.5, 1);
+    }).add;
+};
+viewTap[\makeDefs] = {
+    if (viewTap[\defs].not) {
+        viewTap[\buildDefs].();
+        viewTap[\defs] = true;
+        server.sync;
+    };
+};
+// Tap one track (or the master): the buffers, then - once the server has them - the synths that
+// write them in the tail group, then the strip's \view tap pointed at the bus, and last Node is
+// told where everything is. A track that does not exist yet is skipped; its birth reconciles.
+viewTap[\start] = { |key, fft|
+    var master = key == '*';
+    if (viewTap[\taps][key].isNil and: { master or: { tracks[key].isKindOf(Event) } }) {
+        var bus = if (master) { nil } { Bus.audio(server, 2) };
+        var ring = Buffer.alloc(server, viewTap[\ringFrames], 2);
+        var head = Bus.control(server, 1);
+        var fftBuf = if (fft) { Buffer.alloc(server, viewTap[\fftFrames], 1) };
+        var reads = if (master) { 0 } { bus.index };
+        var entry = (bus: bus, ring: ring, head: head, fftBuf: fftBuf, fft: fft);
+        server.sync;
+        entry[\tap] = Synth(\poptart_view_tap, [\bus, reads, \ring, ring.bufnum, \head, head.index,
+            \frames, viewTap[\ringFrames], \decim, viewTap[\decim]], target: recGroup, addAction: \addToTail);
+        fftBuf !? { |b|
+            entry[\fftSynth] = Synth(\poptart_view_fft, [\bus, reads, \buf, b.bufnum], target: recGroup, addAction: \addToTail);
+        };
+        viewTap[\taps][key] = entry;
+        if (master.not and: { tracks[key].isKindOf(Event) }) { stripTap.(tracks[key], \view, bus.index, 1, 0) };
+        nodeAddr.sendMsg('/poptart/viewTap', key, ring.bufnum, head.index, if (fftBuf.notNil) { fftBuf.bufnum } { -1 },
+            viewTap[\ringFrames], viewTap[\decim], server.sampleRate, scsynthPort);
+    };
+};
+viewTap[\stop] = { |key|
+    viewTap[\taps][key] !? { |entry|
+        var track = tracks[key];
+        if (entry[\bus].notNil and: { track.isKindOf(Event) }) { stripTap.(track, \view, nil) };
+        entry[\tap].free;
+        entry[\fftSynth] !? { |n| n.free };
+        entry[\ring].free;
+        entry[\fftBuf] !? { |b| b.free };
+        entry[\head].free;
+        entry[\bus] !? { |b| b.free };
+        viewTap[\taps].removeAt(key);
+        nodeAddr.sendMsg('/poptart/viewTapGone', key);
+    };
+};
+// Bring the taps to what Node last asked for, a beat apart like the mixer's (see mixReconcile): a
+// tap of the wrong kind - a spectrum added or dropped - is rebuilt, a tap nobody wants goes. One
+// run at a time; an ask arriving mid-run goes round the loop again.
+viewTap[\reconcile] = {
+    if (viewTap[\busy]) { viewTap[\dirty] = true } {
+        fork {
+            viewTap[\busy] = true;
+            viewTap[\dirty] = true;
+            viewTap[\makeDefs].();
+            while { viewTap[\dirty] } {
+                viewTap[\dirty] = false;
+                viewTap[\taps].keys.asArray.do { |key|
+                    var want = viewTap[\wanted][key];
+                    if (want.isNil or: { want != viewTap[\taps][key][\fft] }) { viewTap[\stop].(key) };
+                };
+                viewTap[\wanted].keys.asArray.do { |key|
+                    if (viewTap[\taps][key].isNil and: { viewTap[\wanted][key].notNil }) {
+                        viewTap[\start].(key, viewTap[\wanted][key]);
+                        0.02.wait;
+                    };
+                };
+            };
+            viewTap[\busy] = false;
+        };
+    };
+};
+// [key, fft, key, fft, ...]: the whole set of taps Node wants, '*' being the master. Empty for none.
+OSCdef(\poptartViewTaps, { |msg|
+    var wanted = IdentityDictionary.new;
+    msg.copyRange(1, msg.size - 1).clump(2).do { |p|
+        if (p.size == 2) { wanted[p[0].asSymbol] = p[1].asInteger == 1 };
+    };
+    viewTap[\wanted] = wanted;
+    viewTap[\on] = wanted.size > 0;
+    viewTap[\reconcile].();
+}, '/poptart/viewTaps');
+}.value;
 
 // --- the headphone section: level and cue/main mix (see \poptart_headphones) ---
 //

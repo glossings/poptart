@@ -500,11 +500,15 @@ test('the whole _arrange call folds to a named chip, like a definitions run', ()
 
 /** arMakeUnique over a fake painter: which blocks get made, and which clips move onto them. */
 test('a member is colored a step off its group, so a kit reads as a family', () => {
-  const src = grab('arHsl');
-  assert.match(src, /\(hue \+ \(at \+ 1\) \* AR_MEMBER_HUE_STEP\) % 360/);
-  assert.match(src, /const parent = arGroupParents\(\)\.get\(label\) \?\? null;/,
+  // The painter draws every track in its one color (see trackColor), which is where the rules live.
+  assert.match(grab('arHsl'), /return hexToHsl\(trackColor\(arDeck, label\)\);/);
+  const src = grab('computeTrackColor');
+  assert.match(src, /\(h \+ \(at \+ 1\) \* AR_MEMBER_HUE_STEP\) % 360/);
+  assert.match(src, /const parent = info\.parents\?\.get\(label\);/);
+  assert.match(grab('deckColorSources'), /if \(open\) return \{ colors: arState\.colors \?\? \{\}, parents: arGroupParents\(\), tree: arGroupTree\(\) \};/,
     'off the tree, not the row - a folded member has no row and still needs its color');
-  assert.match(src, /const chosen = arState\?\.colors\?\.\[label\];\n\s+if \(chosen\) return hexToHsl\(chosen\);/, 'a chosen color wins');
+  assert.match(src, /const coded = cssColorHex\(codeTrackColors\[deck\]\.get\(label\)\);\n\s+if \(coded\) return coded;\n\s+const pickedHex = info\.colors\?\.\[label\];\n\s+if \(pickedHex\) return pickedHex\.toLowerCase\(\);/,
+    'the code\'s .color() wins, then a color picked in the painter');
   assert.match(SRC, /if \(state\.colors && Object\.keys\(state\.colors\)\.length\) opts\.colors = \{ \.\.\.state\.colors \};/,
     'and only chosen colors are written into the call');
 });

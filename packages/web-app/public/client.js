@@ -105,6 +105,206 @@ const coreReady = Promise.all([
   })
   .catch((e) => logLine(`pattern-core import failed (no live highlighting / lfo editor): ${e.message}`, true));
 
+// Inline widgets (public/widgets/inline-widgets.mjs): controls drawn in the code - slider(),
+// knob(), ... - and displays drawn under it - .scope(), .punchcard(), ... One instance per editor
+// pane, made the first time that pane folds or evaluates; each evaluation tells it which calls the
+// host built (see evaluate() and evalDeckB()), and every fold pass hands it the steps(), sliders()
+// and matrix() calls to draw in place of their text (see foldWidgetCalls). Until the module
+// arrives nothing is drawn and nothing folds; the buffers are refolded the moment it does.
+let inlineWidgetsMod = null;
+let widgetMathMod = null; // the track palette (see trackColor) comes from here
+const inlineWidgetsByEditor = new Map(); // editor -> its widgets
+Promise.all([import('/widgets/inline-widgets.mjs'), import('/pattern-core/widget-calls.mjs'), import('/widgets/widget-math.mjs')])
+  .then(([mod, calls, math]) => {
+    inlineWidgetsMod = { mod, calls };
+    widgetMathMod = math;
+    refoldAll();
+    if (deckBCM) refoldAll(deckBCM);
+  })
+  .catch((e) => logLine(`inline widgets failed to load: ${e.message}`, true));
+
+/** The inline widgets of a livecode deck's editor, made on first ask - or null before the module. */
+function inlineWidgetsFor(editor) {
+  if (!inlineWidgetsMod || !editor || !foldsHere(editor)) return null;
+  let iw = inlineWidgetsByEditor.get(editor);
+  if (!iw) {
+    const deck = deckOfCM(editor);
+    iw = inlineWidgetsMod.mod.createInlineWidgets({
+      cm: editor,
+      calls: inlineWidgetsMod.calls,
+      api,
+      deck,
+      cyclePos: () => currentCyclePos(deck),
+      cycleAtMs: (ms) => {
+        const t = deckClock(deck);
+        return t.paused ? t.baseCycle : t.baseCycle + Math.max(0, ms / 1000 - t.baseSec) * t.cps;
+      },
+      isPlaying: () => playing && !deckClock(deck).paused,
+      trackColor: (label) => trackColor(deck, label),
+    });
+    inlineWidgetsByEditor.set(editor, iw);
+  }
+  return iw;
+}
+
+// ---------------------------------------------------------------------------------------------
+// One color per track. A track is drawn in the same color everywhere it is drawn: the
+// arrangement's rows and clips, the ctrl+G mixer's strips, the DJ desk's stems and the editor's
+// displays. Whose color it is - the first of these that applies:
+//   1. its `.color()` in the code, as the last evaluation of its deck read it;
+//   2. a color picked for it in the arrangement (the `_arrange` call's `colors`);
+//   3. inside a group, the group's color stepped round the wheel once per member;
+//   4. its own from the theme's palette, picked by its name (widget-math's trackPalette).
+// The arrangement's picker writes into whichever of the first two the track has (see
+// arPickColor): a `.color()` in the code is rewritten, so the code keeps winning; without one,
+// the pick is kept in the arrangement as before.
+
+const codeTrackColors = { a: new Map(), b: new Map() }; // label -> what its .color() said
+const trackColorMemo = { a: { key: null, map: new Map(), info: null }, b: { key: null, map: new Map(), info: null } };
+let trackColorTheme = { at: 0, accent: '#ff7a9c', bg: '#0e0f13' };
+
+/** An evaluation of `deck` answered: what each of its tracks' `.color()` says now. */
+function noteCodeTrackColors(deck, tracks) {
+  const m = codeTrackColors[deck === 'b' ? 'b' : 'a'];
+  m.clear();
+  for (const t of tracks ?? []) if (t.color) m.set(t.label, t.color);
+  trackColorMemo[deck === 'b' ? 'b' : 'a'].key = null;
+}
+
+// Any CSS color as "#rrggbb" - what the arrangement's shades are worked out from - or null for
+// one the browser can't draw. The canvas does the reading: it says every color it takes in hex.
+let cssColorCtx = null;
+function cssColorHex(c) {
+  if (typeof c !== 'string' || !c) return null;
+  if (/^#[0-9a-f]{6}$/i.test(c)) return c.toLowerCase();
+  cssColorCtx ??= document.createElement('canvas').getContext('2d');
+  if (!cssColorCtx) return null;
+  for (const probe of ['#010203', '#040506']) {
+    cssColorCtx.fillStyle = probe;
+    cssColorCtx.fillStyle = c;
+    if (cssColorCtx.fillStyle === probe) return null; // not a color: the canvas kept the last one
+  }
+  const v = cssColorCtx.fillStyle;
+  if (v[0] === '#') return v.toLowerCase();
+  const m = /rgba?\((\d+),\s*(\d+),\s*(\d+)/.exec(v);
+  return m ? `#${[m[1], m[2], m[3]].map((x) => Number(x).toString(16).padStart(2, '0')).join('')}` : null;
+}
+
+function trackColorThemeNow() {
+  const now = Date.now();
+  if (now - trackColorTheme.at > 1000) {
+    const css = getComputedStyle(document.documentElement);
+    trackColorTheme = {
+      at: now,
+      accent: css.getPropertyValue('--accent').trim() || '#ff7a9c',
+      bg: css.getPropertyValue('--bg').trim() || '#0e0f13',
+    };
+  }
+  return trackColorTheme;
+}
+
+// A deck's arrangement colors and group tree: the open painter's when it is that deck's, else
+// read from the deck's own code.
+function deckColorSources(deck) {
+  let open = false;
+  try { open = !!arState && arDeck === deck; } catch { open = false; }
+  if (open) return { colors: arState.colors ?? {}, parents: arGroupParents(), tree: arGroupTree() };
+  const ed = deck === 'b' ? deckBCM : cm;
+  const code = ed?.getValue() ?? '';
+  let colors = {};
+  const m = /\b_arrange\s*\(/.exec(code);
+  if (m && arrangeMod) {
+    const open2 = m.index + m[0].length - 1;
+    const close = matchParen(code, open2);
+    if (close > open2) {
+      try { colors = parseArrangeCall(code.slice(open2 + 1, close)).opts.colors ?? {}; } catch { colors = {}; }
+    }
+  }
+  const tree = groupsMod && labelsMod ? groupsMod.treeOfBlocks(labelsMod.splitLabeledBlocks(code)) : new Map();
+  return { colors, parents: groupsMod ? groupsMod.parentsOf(tree) : new Map(), tree };
+}
+
+/** The "#rrggbb" track `label` of `deck` is drawn in, everywhere (see the rules above). */
+function trackColor(deck, label) {
+  const d = deck === 'b' ? 'b' : 'a';
+  const memo = trackColorMemo[d];
+  const ed = d === 'b' ? deckBCM : cm;
+  const theme = trackColorThemeNow();
+  let picked = '';
+  try { picked = arState && arDeck === d ? JSON.stringify(arState.colors ?? {}) : ''; } catch { picked = ''; }
+  const key = `${ed?.changeGeneration?.() ?? 0}|${picked}|${theme.accent}|${theme.bg}|${widgetMathMod ? 1 : 0}`;
+  if (memo.key !== key) {
+    memo.key = key;
+    memo.map = new Map();
+    memo.info = deckColorSources(d);
+  }
+  if (memo.map.has(label)) return memo.map.get(label);
+  memo.map.set(label, null); // a group can't be its own ancestor, but a typo can try
+  const v = computeTrackColor(d, String(label), memo.info, theme);
+  memo.map.set(label, v);
+  return v;
+}
+
+function computeTrackColor(deck, label, info, theme) {
+  const coded = cssColorHex(codeTrackColors[deck].get(label));
+  if (coded) return coded;
+  const pickedHex = info.colors?.[label];
+  if (pickedHex) return pickedHex.toLowerCase();
+  const parent = info.parents?.get(label);
+  if (parent != null) {
+    const pc = trackColor(deck, parent);
+    if (pc) {
+      const [h, s, l] = hexToHsl(pc);
+      const at = (info.tree?.get(parent) ?? []).indexOf(label);
+      return hslToHex((h + (at + 1) * AR_MEMBER_HUE_STEP) % 360, s, l);
+    }
+  }
+  if (widgetMathMod) {
+    const palette = widgetMathMod.trackPalette(theme.accent, theme.bg);
+    return palette[widgetMathMod.nameHash(label) % palette.length];
+  }
+  return hslToHex(arHue(label), 62, 58);
+}
+
+/**
+ * Rewrites the `.color()` a track's code already has to `hex`, and says whether there was one to
+ * rewrite. The new color holds at once, before any evaluation reads it back.
+ */
+function rewriteTrackColorCall(deck, label, hex, { record = true } = {}) {
+  const ed = deck === 'b' ? deckBCM : cm;
+  if (!ed || !labelsMod) return false;
+  const code = ed.getValue();
+  const block = labelsMod.splitLabeledBlocks(code).find((b) => b.label === label);
+  if (!block) return false;
+  const text = code.slice(block.start, block.end);
+  const re = /\.color\(\s*(["'])([^"'\n]*)\1\s*\)/g;
+  let last = null;
+  let m;
+  while ((m = re.exec(text))) last = m;
+  if (!last) return false;
+  const from = block.start + last.index + last[0].indexOf(last[1]) + 1;
+  ed.replaceRange(hex, ed.posFromIndex(from), ed.posFromIndex(from + last[2].length), record ? '+trackcolor' : '*trackcolor');
+  codeTrackColors[deck].set(label, hex);
+  trackColorMemo[deck].key = null;
+  return true;
+}
+
+/** Puts the current track colors on whatever shows them that is drawn once rather than per frame. */
+function recolorTracks() {
+  if (mixerState) {
+    for (const [label, strip] of mixerState.strips) {
+      const c = trackColor('a', label);
+      strip.color = c;
+      const sw = strip.el.querySelector('.mixer-strip-swatch');
+      if (sw) sw.style.background = c;
+    }
+  }
+  for (const sw of document.querySelectorAll('.mix-track .mix-swatch')) {
+    sw.style.background = trackColor(sw.dataset.deck, sw.dataset.label);
+  }
+  try { if (arState) drawArrange(); } catch { /* not up yet */ }
+}
+
 // ---------------------------------------------------------------------------------------------
 // The definition registries live UP HERE, against every instinct about grouping, because the
 // session restore below folds the buffer before this file's top level has run past a few hundred
@@ -1269,6 +1469,15 @@ function foldSpan(ed, fromIdx, toIdx, label, title, key = null, onOpen = null) {
   const from = ed.posFromIndex(fromIdx);
   const to = ed.posFromIndex(toIdx);
   if (ed.findMarks(from, to).some((mk) => mk.poptartFold)) return; // already folded
+  // A folded inline control (see foldWidgetCalls) is its own widget: it is pressed to be played,
+  // so the press does not open it - its call's own menu item does.
+  if (label && typeof label === 'object' && label.el) {
+    const mk = ed.markText(from, to, { replacedWith: label.el, atomic: true, handleMouseEvents: true });
+    mk.poptartFold = true;
+    mk.poptartKey = key;
+    label.attach(mk);
+    return;
+  }
   const widget = document.createElement('span');
   widget.className = 'cm-config-fold';
   widget.textContent = label;
@@ -1291,6 +1500,7 @@ function foldConfigBlobs(ed = cm) {
   foldsOf(ed).openRuns = [];
   for (const reg of DEF_REGISTRIES) foldDefRuns(ed, code, reg);
   foldGroups(ed, code);
+  foldWidgetCalls(ed, code);
   // Captured plugin state written out in full - a patch pasted in from outside, or a definition
   // typed by hand. What the editor writes is a handle into the store (see blobs.js), which is
   // short and stays on screen; this is for the ones that aren't.
@@ -1361,6 +1571,72 @@ function foldConfigBlobs(ed = cm) {
     const start = m.index + m[0].length - str.length;
     foldSpan(ed, start, start + str.length, '"⋯"', DATA_ARG_TITLES.pianoroll, `rollarg@${m.index}`);
   }
+}
+
+// steps(), sliders() and matrix(): the call folds away under the control drawn in its place - the
+// grid IS the code to read, and the text behind it is data the grid writes. Pressing the control
+// plays it, so it opens from the editor menu instead ("edit as text", see openEditorMenu), and
+// "show as cells" puts it back. Keyed like the arrangement, by which call of its kind it is, so a
+// call opened to be typed into stays open through the edits and the evaluations that follow.
+function foldWidgetCalls(ed, code) {
+  const iw = inlineWidgetsFor(ed);
+  if (!iw) return;
+  const { calls } = inlineWidgetsMod;
+  const nth = {};
+  for (const c of calls.findWidgetCalls(code)) {
+    if (!calls.FOLDED_WIDGETS.includes(c.kind)) continue;
+    const key = `widget:${c.kind}:${(nth[c.kind] = (nth[c.kind] ?? -1) + 1)}`;
+    const parsed = calls.callArgs(code, c.open);
+    if (!parsed) continue; // still being typed - nothing to draw until it closes
+    // A row written as an expression (`steps(myRow)`) stays text: only an evaluation can read it,
+    // and folding it would hide code the control can't show (see pattern-core's foldable).
+    if (calls.foldable && !calls.foldable(c.kind, parsed.args)) continue;
+    if (foldsOf(ed).expanded.has(key)) continue;
+    const fold = iw.makeFold(c.kind);
+    if (fold) foldSpan(ed, c.at, parsed.close + 1, fold, null, key);
+  }
+}
+
+/**
+ * The folded control under a right-click, or the foldable call the caret is in: `{ key, kind,
+ * folded, mark? }`, or null. What the editor menu offers to open or to fold again.
+ */
+function widgetFoldAt(ed, e) {
+  if (!inlineWidgetsMod || !foldsHere(ed)) return null;
+  const hit = e?.target?.closest?.('.iw-fold');
+  if (hit) {
+    const mk = ed.getAllMarks().find((m) => m.poptartWidget?.el === hit);
+    if (mk?.poptartKey) return { key: mk.poptartKey, kind: mk.poptartWidget.kind, folded: true, mark: mk };
+  }
+  const code = ed.getValue();
+  const at = ed.indexFromPos(ed.getCursor());
+  const { calls } = inlineWidgetsMod;
+  const nth = {};
+  for (const c of calls.findWidgetCalls(code)) {
+    if (!calls.FOLDED_WIDGETS.includes(c.kind)) continue;
+    const key = `widget:${c.kind}:${(nth[c.kind] = (nth[c.kind] ?? -1) + 1)}`;
+    const parsed = calls.callArgs(code, c.open);
+    if (!parsed || at < c.at || at > parsed.close + 1) continue;
+    const mk = ed.findMarks(ed.posFromIndex(c.at), ed.posFromIndex(parsed.close + 1)).find((m) => m.poptartKey === key);
+    return { key, kind: c.kind, folded: !!mk, mark: mk ?? null };
+  }
+  return null;
+}
+
+/** Opens a folded control onto its text, with the caret inside the call. */
+function unfoldWidget(ed, hit) {
+  foldsOf(ed).expanded.add(hit.key);
+  const range = hit.mark?.find();
+  refoldAll(ed);
+  if (range) ed.setCursor(ed.posFromIndex(ed.indexFromPos(range.from) + hit.kind.length + 1));
+  ed.focus();
+}
+
+/** Draws an opened control again over its text. */
+function refoldWidget(ed, hit) {
+  foldsOf(ed).expanded.delete(hit.key);
+  refoldAll(ed);
+  ed.focus();
 }
 
 // How many ids a chip's tooltip spells out before it starts counting instead.
@@ -1507,6 +1783,9 @@ function runLineRange(code, run) {
 // rare, unlike the per-keystroke changes this deliberately ignores.
 onEveryDeck((ed) => ed.on('changes', (_, changes) => {
   if (changes.some((c) => c.origin === 'undo' || c.origin === 'redo')) refoldAll(ed);
+  // A steps(), sliders() or matrix() pasted or dropped in is drawn at once, as it was where it was
+  // copied from, rather than sitting as text until the next evaluation.
+  else if (changes.some((c) => (c.origin === 'paste' || c.origin === 'drop') && /\b(?:steps|sliders|matrix)\s*\(/.test(c.text.join('\n')))) refoldAll(ed);
 }));
 
 // String/bracket-aware scan from an opening paren to its matching close; -1 if unbalanced. The one
@@ -18552,13 +18831,6 @@ const MIXER_METER_DB_MAX = 6;
 // console fader - linear-in-gain put the whole mix in the top centimetre.
 const MIXER_FADER_UNITY = 0.8;
 const MIXER_FADER_EXP = 2.5;
-// Track colors, assigned first-seen per label so a track keeps its color across re-evals. Chosen
-// to stay apart from each other on both dark and light themes.
-const MIXER_PALETTE = [
-  '#ff7a9c', '#63b4ff', '#7ed896', '#ffcb6b', '#c792ea', '#4dd0c4',
-  '#f78c6c', '#82aaff', '#a5d98a', '#ff8fd8', '#e6c07b', '#7fd8f7',
-];
-const mixerColorByLabel = new Map();
 
 // --- the spectrum's vertical scaling ---
 //
@@ -18618,11 +18890,9 @@ const bandAmp = (b) => (bandL(b) + bandR(b)) / 2;
 const mixerFaderToGain = (v) => (v <= 0 ? 0 : (v / MIXER_FADER_UNITY) ** MIXER_FADER_EXP);
 const mixerGainToFader = (g) => (g <= 0 ? 0 : mixerClamp(MIXER_FADER_UNITY * g ** (1 / MIXER_FADER_EXP), 0, 1));
 
+// The mixer is deck A's: its strips wear the track's one color (see trackColor).
 function mixerColorFor(label) {
-  if (!mixerColorByLabel.has(label)) {
-    mixerColorByLabel.set(label, MIXER_PALETTE[mixerColorByLabel.size % MIXER_PALETTE.length]);
-  }
-  return mixerColorByLabel.get(label);
+  return trackColor('a', label);
 }
 
 function mixerFmtDb(gain) {
@@ -19323,12 +19593,6 @@ function applyMixerRename(strip, to) {
     arApplyRename(new Map([[from, to]]));
     arRefreshRows();
     drawArrange();
-  }
-  // The strip keeps its color: it's the same track in the plots, and moving the entry rather
-  // than adding one keeps the palette handing out the same colors to everybody else.
-  if (mixerColorByLabel.has(from) && !mixerColorByLabel.has(to)) {
-    mixerColorByLabel.set(to, mixerColorByLabel.get(from));
-    mixerColorByLabel.delete(from);
   }
   // Both lists that decide who gets a strip, moved over now rather than an eval and a poll from
   // now: otherwise the track you just named loses its strip until the engine reports it back,
@@ -20294,6 +20558,7 @@ async function evaluate(start, { byHand = false } = {}) {
   // The eval request goes out FIRST and everything else follows it. Nothing about recording this
   // state - the history entry, the autosave - may sit between the keystroke and the sound.
   const pending = api('POST', '/api/evaluate', { code, start, arrangeFrom, fresh: bufferFreshOpened || undefined, name: currentSavedName ?? undefined });
+  const widgetSnap = inlineWidgetsFor(cm)?.beforeEval(code); // which calls this code's widgets are
   checkpointUrl(); // a state you played is a state worth finding again in browser history
   saveWip();       // ...and worth having on disk right now, not a debounce from now
   if (newPacks.length) openPackById(newPacks[0], {}, cm); // it has no files - here is where to pick them
@@ -20309,12 +20574,15 @@ async function evaluate(start, { byHand = false } = {}) {
     // The arrangement's song clock, for the painter's playhead - but only when the painter is on
     // THIS deck. Each deck runs its own (arrangeClocks in server.js), and there is one playhead.
     if (arDeck === 'a') arSetClock(result.arrange ?? null);
+    noteCodeTrackColors('a', result.tracks);
+    recolorTracks();
     songEndSetClock('a', result.arrange ?? null);
     renderTracks(result);
     // An evaluation can put a different device in the slot the panel is showing, or set the very
     // parameter it is showing, so the open panel is redrawn from what the engine now holds.
     refreshDevicePanel();
     setupHighlighting(result.tracks, result.gridFrom ?? 0, result.gridCount ?? 32);
+    inlineWidgetsFor(cm)?.afterEval(widgetSnap, result.widgets ?? null);
     refoldAll();
     // A pack's file list is the buffer's to change (a `_pack()` line), and an eval is when it does.
     prNamesStale();
@@ -20338,6 +20606,7 @@ async function evaluate(start, { byHand = false } = {}) {
     commitQueue.push(...filed); // the programs are in the store now; their slots can swap again
     if (mixModeOn) mixRefresh(); // the strip mirrors what's playing
   } catch (e) {
+    inlineWidgetsFor(cm)?.afterEval(widgetSnap, null); // every widget stays as it was
     commitOnEval.push(...filed); // nothing was filed, so nothing is thawed
     logLine(e.message ?? String(e), true);
   }
@@ -31809,11 +32078,13 @@ async function evalDeckB(start, how) {
   // where the scheduler reads them, as deck A's does for its own.
   const filed = commitOnEval.filter(isDeckBCommit);
   commitOnEval = commitOnEval.filter((c) => !isDeckBCommit(c));
+  let widgetSnap = null;
   try {
     // Same deal as the main pane's: for a deck that is stopped, deck B's marker - kept while the
     // painter is shut, like deck A's (see arKeptInsert) - says which bar of its song to start from.
     const arrangeFrom = start && arMarkerFor('b') != null ? arMarkerFor('b') : undefined;
     const pending = api('POST', '/api/evaluate', { code, deck: 'b', start, arrangeFrom, name: deckBFileName ?? undefined });
+    widgetSnap = inlineWidgetsFor(deckBCM)?.beforeEval(code); // as on the main pane
     if (newPacks.length) openPackById(newPacks[0], {}, deckBCM); // it has no files - here is where to pick them
     const result = await pending;
     if (byHand) replayRecord('b', code, start, deckBFileName);
@@ -31822,11 +32093,14 @@ async function evalDeckB(start, how) {
     setPatchScale(result.scale, 'b'); // deck B's own key and feel, for a roll opened on it
     setPatchGroove(result.groove ?? null, 'b');
     if (arDeck === 'b') arSetClock(result.arrange ?? null); // deck B's own song clock, for the playhead
+    noteCodeTrackColors('b', result.tracks);
+    recolorTracks();
     songEndSetClock('b', result.arrange ?? null);
     refreshDevicePanel(); // ...the open device window may be one of deck B's
     // Deck B gets the same live playback highlighting as the main pane: its regions mark the
     // split editor, keyed "b:<label>" (which is how the /api/highlight top-ups find them).
     setupHighlighting(result.tracks, result.gridFrom ?? 0, result.gridCount ?? 32, 'b', deckBCM);
+    inlineWidgetsFor(deckBCM)?.afterEval(widgetSnap, result.widgets ?? null);
     refoldAll(deckBCM);
     prNamesStale();
     if (/\bsamples\s*\(/.test(code)) loadSamples();
@@ -31843,6 +32117,7 @@ async function evalDeckB(start, how) {
     updateTransportButtons();
     mixRefresh();
   } catch (e) {
+    inlineWidgetsFor(deckBCM)?.afterEval(widgetSnap, null); // every widget stays as it was
     commitOnEval.push(...filed); // nothing was filed, so nothing is thawed
     logLine(`deck B: ${e.message ?? String(e)}`, true);
   }
@@ -33039,7 +33314,13 @@ function mixTrackRow(t, soloed, { depth = 0, group = false, carets = false } = {
   name.className = 'mix-name';
   name.textContent = t.deck === 'b' ? t.key.slice(t.key.indexOf(':') + 1) : t.key;
   name.title = t.key;
-  row.append(...[fold, gate, name].filter(Boolean));
+  // The track's one color (see trackColor), as the ctrl+G mixer's strips show it.
+  const swatch = document.createElement('span');
+  swatch.className = 'mixer-strip-swatch mix-swatch';
+  swatch.dataset.deck = t.deck === 'b' ? 'b' : 'a';
+  swatch.dataset.label = name.textContent.replace(/~M$/, '');
+  swatch.style.background = trackColor(swatch.dataset.deck, swatch.dataset.label);
+  row.append(...[fold, gate, swatch, name].filter(Boolean));
 
   for (const [ctl, min, max, title] of MIX_TRACK_CONTROLS) {
     const input = document.createElement('input');
@@ -37296,6 +37577,15 @@ function openEditorMenu(ed, e) {
   const items = [selected
     ? ['save as snippet…', () => openSnippetSave(ed), 'keep this selection - and the rolls, shapes, presets and packs it names - for every project']
     : ['insert snippet…', () => openSnippetBrowser(ed), 'put a kept phrase in here, sidecar and all']];
+  // A steps(), sliders() or matrix() drawn in place of its call opens onto the text, and closes
+  // over it again - the one way into the call behind a control that clicks play.
+  const widgetHit = selected ? null : widgetFoldAt(ed, e);
+  if (widgetHit) {
+    const shown = widgetHit.kind === 'sliders' ? 'bars' : 'cells';
+    items.unshift(widgetHit.folded
+      ? ['edit as text', () => unfoldWidget(ed, widgetHit), `the ${widgetHit.kind}() call behind these ${shown}`]
+      : [`show as ${shown}`, () => refoldWidget(ed, widgetHit), `draw this ${widgetHit.kind}() call as ${shown} again`]);
+  }
   items.push(['add an effect…', () => insertFxCall(ed), `${hotkeyLabel('fx')} — an .fx("") at the caret, with the plugin list open`]);
   // conf for the track under the caret - the sidebar's conf button, from the code, for either deck.
   if (!selected) {
@@ -39563,25 +39853,17 @@ function arHue(label) {
 const AR_MEMBER_HUE_STEP = 28;
 
 /**
- * A TRACK's color: what the person chose for that label if they chose one (see the `colors` option
- * in arrange.mjs), else its GROUP's hue stepped round the wheel once per member, in the order the
- * group lists them - so a group is a color and everything in it is a neighbor of that color, which
- * is what makes a folded row's mixed clips still read as the kit. A track in no group takes its own
- * hashed hue. Returned as [h, s, l] so a caller can dim or lighten it.
+ * A TRACK's color: the one it wears everywhere (see trackColor) - its `.color()`, else what the
+ * person picked for that label here (the `colors` option in arrange.mjs), else its GROUP's color
+ * stepped round the wheel once per member, in the order the group lists them - so a group is a
+ * color and everything in it is a neighbor of that color, which is what makes a folded row's mixed
+ * clips still read as the kit - else its own from the theme. Returned as [h, s, l] so a caller can
+ * dim or lighten it.
  *
  * What one CLIP is drawn in is arClipHsl, which starts here and may step off it.
  */
 function arHsl(label) {
-  const chosen = arState?.colors?.[label];
-  if (chosen) return hexToHsl(chosen);
-  // Off the tree, not off the row: a track folded away under its group has no row of its own, and
-  // its clips - drawn on the group's row - still have to wear the family's color.
-  const parent = arGroupParents().get(label) ?? null;
-  if (parent == null) return [arHue(label), 62, 58];
-  const chosenParent = arState?.colors?.[parent];
-  const hue = chosenParent ? hexToHsl(chosenParent)[0] : arHue(parent);
-  const at = (arGroupTree().get(parent) ?? []).indexOf(label);
-  return [(hue + (at + 1) * AR_MEMBER_HUE_STEP) % 360, 62, 58];
+  return hexToHsl(trackColor(arDeck, label));
 }
 // How a ROLL's shade steps off its track's color. Rolls vary LIGHTNESS, not hue: hue is already
 // saying which track a clip belongs to and which member of which group that track is (see the step
@@ -40914,9 +41196,18 @@ function arOpenColorInput(from, apply) {
   arColorInput.click();
 }
 
-/** The whole TRACK's color - the row menu's. */
+/**
+ * The whole TRACK's color - the row menu's. A track whose code says `.color()` has it rewritten
+ * there, so the code stays what decides; any other keeps the pick in the arrangement.
+ */
 function arPickColor(label) {
-  arOpenColorInput(arHsl(label), (hex, record) => arSetColor(label, hex, { record }));
+  arOpenColorInput(arHsl(label), (hex, record) => {
+    if (rewriteTrackColorCall(arDeck, label, hex, { record })) {
+      recolorTracks();
+      return;
+    }
+    arSetColor(label, hex, { record });
+  });
 }
 
 /** ...and one clip's, which wins over it. Opens on what those clips are drawn in now. */
@@ -40932,6 +41223,7 @@ function arSetColor(label, hex, { record = true } = {}) {
   else delete arState.colors[label];
   writeArrangeCall(record, { evaluate: false }); // nothing about a color is heard
   drawArrange();
+  recolorTracks(); // the mixer and the desk wear it too
 }
 
 /** Write (or with null, forget) a chosen color on each of `clips` - see arrange.mjs's `c` field. */

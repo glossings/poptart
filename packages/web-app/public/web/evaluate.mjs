@@ -181,6 +181,14 @@ export function createEvaluator({ patternCore, engine, transport, prebakeDefs = 
   });
   const decks = { a: newDeck(), b: newDeck() };
   const clockOf = (deck) => desk?.clockOf?.(deck) ?? transport;
+  // The editor's inline widgets: what each evaluation built and the taps its displays of sound
+  // read - the desktop server's own logic, shared through pattern-core (widget-host.mjs).
+  const widgets = patternCore.createWidgetHost?.({
+    engine: () => engine,
+    engineId: (_deck, key) => trackIds.get(key) ?? null,
+    cycleNow: (deck) => clockOf(deck).cycleAt(engine.getTime()),
+    cps: () => transport.cps,
+  }) ?? null;
 
   const say = (line) => {
     eventLog.push(line);
@@ -273,6 +281,7 @@ export function createEvaluator({ patternCore, engine, transport, prebakeDefs = 
     // sits in the buffer rather than of how many times this page has evaluated. Without it a
     // stop and a replay would come back as a different performance of the same code.
     patternCore.resetRandomSeeds();
+    patternCore.beginWidgets?.(deck); // the inline widgets this evaluation builds (see widgets)
     patternCore.setDefOwner(deck);
     const definitionsBefore = patternCore.clearRolls('buffer', deck);
     // Enter with no key in force: the buffer's own setscale is the only thing that sets one, or
@@ -417,6 +426,7 @@ export function createEvaluator({ patternCore, engine, transport, prebakeDefs = 
       // An evaluation that throws applies NOTHING: the tracks still playing must still find the
       // definitions they resolve by name each cycle.
       patternCore.setCopyResolver(null);
+      patternCore.abandonWidgets?.(); // every control keeps the value it had
       d.arrangeClips = clipsBefore;
       patternCore.restoreRolls(definitionsBefore, 'buffer', deck);
       patternCore.setGlobalScale(scaleBefore);
@@ -425,6 +435,7 @@ export function createEvaluator({ patternCore, engine, transport, prebakeDefs = 
       throw err;
     }
     patternCore.setCopyResolver(null);
+    const widgetsBuilt = patternCore.takeWidgets?.() ?? { inputs: [], views: [] };
     patternCore.setDefOwner('a');
     // What setscale() and setgroove() left in force are this deck's; the globals go back to deck A's.
     const scale = (d.scale = patternCore.globalScale());
@@ -526,6 +537,7 @@ export function createEvaluator({ patternCore, engine, transport, prebakeDefs = 
     const cuedKey = (label) => keyOfBlock(`${label}${patternCore.MONITOR_SUFFIX}`);
     const names = d.monitorPicker.names(built, (label) => schedulers.has(cuedKey(label)));
     const keyOf = (b) => keyOfBlock(names.nameOf(b));
+    const keyOfLabel = new Map(built.map((b) => [b.label, keyOf(b)]));
     const active = built.filter((b) => !isMuted(b) && (!anySolo || isSoloed(b)) && !names.shadowed.has(b));
     for (const { from, to } of names.handed.map((label) => ({ from: cuedKey(label), to: keyOfBlock(label) }))) {
       if (!active.some((b) => keyOf(b) === to)) continue;
@@ -631,6 +643,7 @@ export function createEvaluator({ patternCore, engine, transport, prebakeDefs = 
         active: playing,
         start: b.start,
         end: b.end,
+        color: b.sig.trackColor ?? null, // its .color(): how the editor draws it (see client.js's trackColor)
         instrument: b.sig.instrument ?? null,
         fxChain: [...(b.sig.fxChain ?? [])],
         route: patternCore.routeSlots?.(b.sig) ?? null,
@@ -668,6 +681,13 @@ export function createEvaluator({ patternCore, engine, transport, prebakeDefs = 
       gridFrom,
       gridCount: HL_WINDOW,
       tracks,
+      // The inline widgets: each control with what the code set it to, each display with what it
+      // shows - and, for a display worked out from its pattern, the data, from the grid's cycle.
+      widgets: widgets?.afterEval(deck, widgetsBuilt, built, {
+        keyOf: (label) => keyOfLabel.get(label) ?? keyOfBlock(label),
+        clockOf: (b) => b.trackClock ?? d.arrangeClock,
+        from: gridFrom,
+      }) ?? null,
       log: [...eventLog],
     };
   }
@@ -855,6 +875,7 @@ export function createEvaluator({ patternCore, engine, transport, prebakeDefs = 
     schedulers,
     trackIds,
     hlTracks,
+    widgets,
     claimTrack,
     dropTrack,
     rekey,

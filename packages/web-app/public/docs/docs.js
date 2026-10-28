@@ -36,6 +36,7 @@ const CHAPTERS = [
   { file: 'arrange', title: 'Arranging', blurb: 'Groups, clips, loop regions and automation: loops into a song.' },
   { file: 'mixing', title: 'Mixing & routing', blurb: 'The channel strip, buses, sidechains and the mixer.' },
   { file: 'live', title: 'Playing live', blurb: 'MIDI keyboards, the typing keyboard, recording takes.' },
+  { file: 'widgets', title: 'Controls & displays', blurb: 'Sliders, step grids and scopes drawn in the code, and displays behind it.' },
   { file: 'transforms', title: 'Transforms', blurb: 'Arithmetic, time, randomness, and whose events win.' },
   { file: 'extending', title: 'Making it yours', blurb: 'Your own methods, editing events, prebake, snippets, hotkeys.' },
   { file: 'reference', title: 'Cheat sheet', blurb: 'Everything on one page.' },
@@ -49,6 +50,133 @@ if (typeof document !== 'undefined') (function () {
   const isWeb = document.documentElement.classList.contains('web');
   const here = document.body.dataset.page ?? 'index';
   const at = CHAPTERS.findIndex((c) => c.file === here);
+
+  // ---- search -----------------------------------------------------------------------------------
+  // A box at the top of the chapter list that searches every chapter (search.js): headings, text,
+  // and the names the prose and tables mention. The pages are read the first time it is used, from
+  // wherever this one came from - so it works offline, in both builds, with nothing built for it.
+  // "/" anywhere outside a text field goes to it; the arrow keys move through what it found, Enter
+  // opens one and Escape lets go. While it holds a search, what it found stands where the chapter
+  // list was.
+  function setUpSearch(navEl, before) {
+    const box = document.createElement('div');
+    box.className = 'search';
+    box.innerHTML = '<input type="search" class="search-box" autocomplete="off" spellcheck="false" aria-label="Search the guide" placeholder="search the guide" title="search every chapter ( / )" />'
+      + '<div class="search-results" role="listbox" aria-label="Search results"></div>';
+    navEl.insertBefore(box, before);
+    const input = box.firstChild;
+    const list = box.lastChild;
+    let index = null;
+    let loading = null;
+    let hits = [];
+    let active = -1;
+
+    const load = () => {
+      if (loading) return loading;
+      loading = new Promise((resolve, reject) => {
+        if (window.poptartGuideSearch) return resolve(window.poptartGuideSearch);
+        const sc = document.createElement('script');
+        sc.src = '/docs/search.js';
+        sc.onload = () => resolve(window.poptartGuideSearch);
+        sc.onerror = reject;
+        document.head.append(sc);
+      }).then((S) => S.buildIndex(CHAPTERS, (file) => fetch(href(file)).then((r) => (r.ok ? r.text() : null)), { web: isWeb })
+        .then((sections) => { index = { S, sections }; }));
+      return loading;
+    };
+
+    const go = (hit) => {
+      if (!hit) return;
+      const url = `${href(hit.file)}${hit.anchor ? `#${hit.anchor}` : ''}`;
+      if (hit.file === here) {
+        clear();
+        input.blur();
+        if (hit.anchor) location.hash = hit.anchor;
+        else window.scrollTo(0, 0);
+      } else location.href = url;
+    };
+
+    const mark = (i) => {
+      active = i;
+      [...list.children].forEach((el, k) => el.classList.toggle('active', k === i));
+      const el = list.children[i];
+      if (el) {
+        input.setAttribute('aria-activedescendant', el.id);
+        el.scrollIntoView({ block: 'nearest' });
+      } else input.removeAttribute('aria-activedescendant');
+    };
+
+    const render = () => {
+      const q = input.value.trim();
+      navEl.classList.toggle('searching', !!q);
+      list.textContent = '';
+      if (!q) { hits = []; active = -1; return; }
+      if (!index) {
+        list.innerHTML = '<p class="search-none">reading the chapters…</p>';
+        load().then(render, () => { list.innerHTML = '<p class="search-none">the chapters could not be read</p>'; });
+        return;
+      }
+      hits = index.S.search(index.sections, q, 30);
+      if (!hits.length) {
+        list.innerHTML = '<p class="search-none">nothing found</p>';
+        return;
+      }
+      hits.forEach((h, i) => {
+        const a = document.createElement('a');
+        a.className = 'search-hit';
+        a.id = `search-hit-${i}`;
+        a.setAttribute('role', 'option');
+        a.href = `${href(h.file)}${h.anchor ? `#${h.anchor}` : ''}`;
+        const where = document.createElement('span');
+        where.className = 'where';
+        where.textContent = h.section === h.chapter ? h.chapter : `${h.chapter} › ${h.section}`;
+        const snip = document.createElement('span');
+        snip.className = 'snip';
+        const m = document.createElement('mark');
+        m.textContent = h.snippet.match;
+        snip.append(h.snippet.before, m, h.snippet.after);
+        a.append(where, snip);
+        a.addEventListener('click', (e) => {
+          if (e.metaKey || e.ctrlKey || e.shiftKey || e.button) return;
+          e.preventDefault();
+          go(h);
+        });
+        a.addEventListener('mousemove', () => { if (active !== i) mark(i); });
+        list.append(a);
+      });
+      mark(0);
+    };
+
+    const clear = () => {
+      input.value = '';
+      render();
+    };
+
+    input.addEventListener('focus', () => { load().catch(() => {}); });
+    input.addEventListener('input', render);
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        if (!hits.length) return;
+        e.preventDefault();
+        mark((active + (e.key === 'ArrowDown' ? 1 : -1) + hits.length) % hits.length);
+      } else if (e.key === 'Enter') {
+        e.preventDefault();
+        go(hits[Math.max(0, active)]);
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        if (input.value) clear();
+        else input.blur();
+      }
+    });
+    document.addEventListener('keydown', (e) => {
+      if (e.key !== '/' || e.metaKey || e.ctrlKey || e.altKey) return;
+      const t = e.target;
+      if (t && (t.closest?.('input, textarea, select, [contenteditable], .CodeMirror') || t.isContentEditable)) return;
+      e.preventDefault();
+      input.focus();
+      input.select();
+    });
+  }
 
   // ---- chords -----------------------------------------------------------------------------------
   // Every chord is written {mod+s} / {app+a} in the markup and filled in here for this platform,
@@ -118,6 +246,7 @@ if (typeof document !== 'undefined') (function () {
   back.href = '/';
   back.textContent = '← back to poptart';
   nav.append(back);
+  setUpSearch(nav, toggle);
 
   const main = document.querySelector('main');
   if (main && at >= 0) {

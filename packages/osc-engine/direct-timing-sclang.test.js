@@ -53,6 +53,7 @@ sampleDef = ${sampleDef()};
 server = Server(\\poptartDirectTiming, NetAddr("127.0.0.1", ${SCSYNTH_PORT}));
 server.options.numInputBusChannels = 0;
 server.options.numOutputBusChannels = 2;
+server.options.outputStreamsEnabled = "0"; // tests never play through the speakers
 server.options.blockSize = 256;
 server.options.memSize = 65536;
 fork { 120.wait; "FAILSAFE".postln; server.quit; 0.exit };

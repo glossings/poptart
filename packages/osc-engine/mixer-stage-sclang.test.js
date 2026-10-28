@@ -118,6 +118,7 @@ var tellRamp = { }, tellSlot = { }, tellMods = { }, tellTap = { }, shapesHandled
 var paramRoutes, unwireParamRoute; // audio patched onto parameters, which destroyTrack unwires
 var exprsOf = { |t| t[\\exprs] ?? { IdentityDictionary.new } }; // param expressions, whose buses destroyTrack frees
 var songs = IdentityDictionary.new; // the song decks' buffer registry, swept by destroyTrack
+var viewTap = (stop: { |key| }); // the editor's inline displays' taps, which destroyTrack takes down - inert here
 var freeDefsLater = { |names| }, exprDefDone = { |name| }; // the defs destroyTrack hands back - inert here
 var birthParse;
 var waitForLoad, flushNotes, clearPending, now, fired;

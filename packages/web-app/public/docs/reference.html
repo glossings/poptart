@@ -15,7 +15,7 @@
       <nav class="chapters"></nav>
       <main>
         <header class="chapter-head">
-          <p class="kicker">Chapter 13</p>
+          <p class="kicker">Chapter 14</p>
           <h1>Cheat sheet</h1>
           <p class="lede">Everything, one line each. Autocomplete has the full detail.</p>
         </header>
@@ -67,6 +67,16 @@
           <tr><td><code>lfo("shape", { rate, mode })</code> · <code>env({ attack, decay, sustain, release })</code></td><td>drawn shape · envelope per note (seconds)</td></tr>
           <tr><td><code>macro1…8</code> · <code>midicc("…")(cc)</code> · <code>auto("lane")</code><span data-build="desktop"> · <code>osc("/addr")</code></span></td><td>knobs · automation</td></tr>
           <tr><td><code>.range(lo, hi)</code> · <code>dur()</code></td><td>rescale · the note's length in seconds</td></tr>
+        </table>
+
+        <h2 id="widgets">Controls and displays</h2>
+        <table>
+          <tr><td><code>slider knob toggle button xy</code></td><td>controls drawn in the code, heard as you move them</td></tr>
+          <tr><td><code>steps("x . x .")</code> · <code>sliders("0.2 0.8")</code> · <code>matrix({ bd: "x..." })</code></td><td>cells · a bar per step · a grid of rows; a count, <code>steps(8)</code>, is that many empty</td></tr>
+          <tr><td><code>.scope .spectrum .waveform .imager .meter</code></td><td>the track's sound</td></tr>
+          <tr><td><code>.punchcard .chroma .plot</code></td><td>the pattern's events · its notes · a signal over time</td></tr>
+          <tr><td><code>punchcard()</code> · <code>spectrum()</code> … on their own line</td><td>drawn behind the code: every track, or the song's output</td></tr>
+          <tr><td><code>{ width, height }</code> · <code>{ size }</code> · <code>.color("pink")</code></td><td>a widget's size (square ones: size) · a track's color in the displays</td></tr>
         </table>
 
         <h2 id="transforms">Transforms</h2>

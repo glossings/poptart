@@ -537,6 +537,112 @@ const API_DOCS = {
   envscale: { kind: 'both', sig: 'envscale(factor)', desc: 'Multiplies the amp envelope\'s attack, decay and release times, on the sampler or a synth that has an envelope scale. Sustain is unchanged. Scaling by the note\'s length makes the envelope stretch with each note.', eg: '.attack(0.1).envscale(dur())' },
   adsr: { kind: 'method', sig: 'adsr(a, d, s, r)', desc: 'Sets the amp envelope in one call, the sampler\'s or a synth\'s: attack, decay and release in seconds, sustain as a level from 0 to 1. Double-click the name to draw it over the sample.', eg: '.adsr(0.005, 0.2, 0.6, 0.1)' },
 
+  // ----------------------------------------------------------------- inline controls
+  slider: {
+    kind: 'builder',
+    sig: 'slider(value, min?, max?, step?, { width, height }?)',
+    desc: 'A slider drawn in the code, returning a signal of its position. Drag it sideways, with shift for fine steps; it rewrites value in the code and is heard at once, without updating. min and max default to 0 and 1; step snaps it. width and height are its size in pixels; size alone sets the width.',
+    eg: 'param("Cutoff", slider(800, 100, 4000))',
+  },
+  knob: {
+    kind: 'builder',
+    sig: 'knob(value, min?, max?, step?, { size }?)',
+    desc: 'A knob drawn in the code, returning a signal of its position. Drag up or down to turn it, with shift for fine steps; it rewrites value in the code and is heard at once. min and max default to 0 and 1. size is its diameter in pixels.',
+    eg: 'gain(knob(0.8, { size: 40 }))',
+  },
+  toggle: {
+    kind: 'builder',
+    sig: 'toggle(on?, { width, height }?)',
+    desc: 'A switch drawn in the code, returning 1 while on and 0 while off. Clicking it rewrites on in the code and is heard at once. width and height are its size in pixels; size alone sets the width.',
+    eg: 's("hh*8").gain(toggle(1))',
+  },
+  button: {
+    kind: 'builder',
+    sig: 'button({ width, height }?)',
+    desc: 'A button drawn in the code, returning 1 while it is held down and 0 otherwise. width and height are its size in pixels; size alone sets the width.',
+    eg: 's("bd*4").when(button().gt(0.5), x => x.fast(2))',
+  },
+  xy: {
+    kind: 'builder',
+    sig: 'xy(x?, y?, { size }?)',
+    desc: 'A two-axis pad drawn under the line. Returns the signal of x, with .x and .y for each axis, both from 0 to 1. Dragging it rewrites x and y in the code and is heard at once. size is its side in pixels.',
+    eg: 'const pad = xy(0.3, 0.6)',
+  },
+  steps: {
+    kind: 'builder',
+    sig: 'steps(cells, { width, height }?)',
+    desc: 'A row of cells drawn in place of the call, one step each, played as a pattern. "." "~" "-" or "_" is a rest; x is 1, a number that number, a word that word. Write the cells spaced, or one character each; a count, steps(8), is that many rests. Clicking a cell switches it in the code and is heard at once. width and height are a cell\'s size in pixels; size alone sets both.',
+    eg: 's("bd").struct(steps("x . . x . . x ."))',
+  },
+  sliders: {
+    kind: 'builder',
+    sig: 'sliders(values, min?, max?, { width, height }?)',
+    desc: 'A bar per step drawn in place of the call, played as a pattern of their values. Drag a bar to set it; the values are rewritten in the code and heard at once. min and max set the bars\' range, 0 to 1 by default. A count, sliders(8), is that many bars halfway up. width and height are a bar\'s size in pixels; size alone sets the height.',
+    eg: 's("hh*8").vel(sliders("1 0.4 0.7 0.4 1 0.4 0.7 0.4"))',
+  },
+  matrix: {
+    kind: 'builder',
+    sig: 'matrix(rows, { width, height }?)',
+    desc: 'A grid of cells drawn in place of the call, one row per name, played as a pattern of the names. Each row is written as cells, like steps(), or as a count of rests: matrix({ bd: 8, sd: 8 }). Clicking or dragging across cells switches them in the code and is heard at once. width and height are a cell\'s size in pixels; size alone sets both.',
+    eg: 's(matrix({ bd: "x . . . x . . .", sd: ". . . . x . . .", hh: "x x x x x x x x" }))',
+  },
+
+  // ----------------------------------------------------------------- inline displays
+  scope: {
+    kind: 'both',
+    sig: 'scope(opts?)',
+    desc: 'An oscilloscope of the track\'s sound, drawn under the line; on a line of its own, of the song\'s output, drawn behind the code. Options: width and height in pixels, scale, and window, the span shown in milliseconds.',
+    eg: 'note("c2 c3").synth("Wavetable").scope({ window: 30 })',
+  },
+  spectrum: {
+    kind: 'both',
+    sig: 'spectrum(opts?)',
+    desc: 'The spectrum of the track\'s sound, drawn under the line on a log frequency axis with the level in dB; on a line of its own, of the song\'s output, drawn behind the code. Options: width and height in pixels, and min and max, the range shown in dB.',
+    eg: 's("bd*4, hh*8").spectrum()',
+  },
+  waveform: {
+    kind: 'both',
+    sig: 'waveform(opts?)',
+    desc: 'The level of the track\'s sound over the last few cycles, drawn under the line with a line per beat; on a line of its own, of the song\'s output, drawn behind the code. Options: width and height in pixels, and cycles shown.',
+    eg: 's("bd*4, ~ sd").waveform({ cycles: 4 })',
+  },
+  imager: {
+    kind: 'both',
+    sig: 'imager(opts?)',
+    desc: 'The stereo image of the track\'s sound, drawn under the line: mono straight up, the sides out to the left and right, with the correlation of the two channels below. On a line of its own, of the song\'s output, drawn behind the code. Option: size in pixels.',
+    eg: 'note("c3 e3 g3").synth("Wavetable").imager()',
+  },
+  meter: {
+    kind: 'both',
+    sig: 'meter({ width, height }?)',
+    desc: 'A level meter of the track\'s sound, left and right, drawn before the call; on a line of its own, of the song\'s output, drawn behind the code. width and height are its size in pixels: taller than wide it stands up, with dB marks where they fit.',
+    eg: 's("bd*4").meter({ width: 12, height: 60 })',
+  },
+  punchcard: {
+    kind: 'both',
+    sig: 'punchcard(opts?)',
+    desc: 'The pattern\'s events, drawn under the line as they will play, one row per value, with the playhead in the middle. On a line of its own, every track\'s events, a row per track, drawn behind the code. Options: width and height in pixels, and cycles shown.',
+    eg: 'note("<c3 e3> g3 [b3 d4]").punchcard()',
+  },
+  plot: {
+    kind: 'method',
+    sig: 'plot(opts?)',
+    desc: 'The signal\'s value over time, drawn under the line with the playhead in the middle. Options: width and height in pixels, cycles shown, and min and max to fix the range.',
+    eg: 'param("Cutoff", sine(0.5).range(200, 2000).plot())',
+  },
+  chroma: {
+    kind: 'both',
+    sig: 'chroma(opts?)',
+    desc: 'The notes sounding now, lit on a circle of the twelve pitch classes and joined up, drawn under the line. On a line of its own, every track\'s notes in the track\'s color, drawn behind the code. Option: size in pixels.',
+    eg: 'note("<[c3,e3,g3] [a2,c3,e3]>").chroma()',
+  },
+  color: {
+    kind: 'method',
+    sig: 'color(name)',
+    desc: 'The color the track is drawn in everywhere: the arrangement, the mixer, the DJ desk and the displays. A CSS color name or a hex color. Without one a track takes a color from the theme, picked by its name. Changes nothing about the sound.',
+    eg: 's("bd*4").color("tomato")',
+  },
+
   // ----------------------------------------------------------------- debugging
   log: {
     kind: 'method',

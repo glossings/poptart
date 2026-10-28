@@ -105,7 +105,8 @@ const LIFTED = ['matchParen', 'codeOnly', 'splitFirstArg', 'freshDefId', 'arFind
   'parseArrangeCall', 'arCallOpts', 'serializeArrangeCall', 'arBlocks', 'arLabels',
   'arClipsLabels', 'arIsClipsRow', 'arAllClips', 'arTrackOfRoll', 'arClipRefCount', 'arClipRenameEdits',
   'arRollBody', 'arMintRolls', 'arFillClipRolls', 'arUnlinkClips', 'arClipPiece',
-  'arHue', 'arHsl', 'hexToHsl', 'arRollShade', 'arRollTint', 'arClipHsl', 'arSetClipColor', 'arSetColor']
+  'arHue', 'arHsl', 'hexToHsl', 'hslToHex', 'trackColor', 'computeTrackColor', 'deckColorSources', 'trackColorThemeNow',
+  'cssColorHex', 'rewriteTrackColorCall', 'noteCodeTrackColors', 'arRollShade', 'arRollTint', 'arClipHsl', 'arSetClipColor', 'arSetColor']
   .map(grab)
   .concat([grabConst('preferredDefId'), grabConst('arClipsOfRoll'), grabConst('arMintRoll'), grabConst('arIsRowless'),
     grabConst('AR_MEMBER_HUE_STEP'), grabConst('AR_ROLL_LIGHT_STEP'),
@@ -114,7 +115,8 @@ const LIFTED = ['matchParen', 'codeOnly', 'splitFirstArg', 'freshDefId', 'arFind
 
 const RETURNS = ['arClipsLabels', 'arIsClipsRow', 'arTrackOfRoll', 'arClipRefCount', 'arClipRenameEdits',
   'arRollBody', 'arMintRolls', 'arFillClipRolls', 'arUnlinkClips', 'arClipPiece', 'arReadDef', 'arAllClips',
-  'arHsl', 'arRollShade', 'arRollTint', 'arClipHsl', 'arSetClipColor', 'arSetColor'];
+  'arHsl', 'arRollShade', 'arRollTint', 'arClipHsl', 'arSetClipColor', 'arSetColor',
+  'trackColor', 'rewriteTrackColorCall', 'noteCodeTrackColors'];
 
 /** The lifted clip-roll functions over a fake editor and (optionally) an open painter. */
 function painter({ code = '', clips = null, deck = 'a' } = {}) {
@@ -141,6 +143,18 @@ function painter({ code = '', clips = null, deck = 'a' } = {}) {
     // The track colors read off the group tree; these songs are flat, so each takes its own hue.
     arGroupParents: () => new Map(),
     arGroupTree: () => new Map(),
+    // One color per track (see client.js's trackColor): no .color() in these songs, and no palette
+    // module, so a track's own color is its hashed hue.
+    codeTrackColors: { a: new Map(), b: new Map() },
+    trackColorMemo: { a: { key: null, map: new Map(), info: null }, b: { key: null, map: new Map(), info: null } },
+    trackColorTheme: { at: 0, accent: '#ff7a9c', bg: '#0e0f13' },
+    widgetMathMod: null,
+    groupsMod: null,
+    deckBCM: cm,
+    cssColorCtx: null,
+    recolorTracks: () => {},
+    getComputedStyle: () => ({ getPropertyValue: () => '' }),
+    document: { documentElement: {} },
   };
   const keys = Object.keys(env);
   // eslint-disable-next-line no-new-func
@@ -360,3 +374,27 @@ test('coloring a clip colors THAT clip - the track\'s own color is the row\'s me
   assert.equal(fns.arClipHsl(clips[1])[0], fns.arHsl('kick')[0], 'kick is the first roll: the track color itself');
   assert.equal(wrote.n, 3);
 });
+
+test('a track is one color everywhere: its .color() first, then a pick in the painter, then its own', () => {
+  const code = 'kick: s("bd*4").color("#ff6347")\n\nhats: s("hh*8")';
+  const { fns, arState, cm } = painter({ code, clips: [] });
+  const own = fns.trackColor('a', 'hats');
+  assert.match(own, /^#[0-9a-f]{6}$/);
+  assert.equal(fns.trackColor('a', 'hats'), own, 'the same color every time it is asked');
+  fns.noteCodeTrackColors('a', [{ label: 'kick', color: '#ff6347' }, { label: 'hats', color: null }]);
+  assert.equal(fns.trackColor('a', 'kick'), '#ff6347');
+  assert.deepEqual(fns.arHsl('kick'), [9, 100, 64], 'the painter draws the same color');
+  // A pick in the painter does not beat the code...
+  arState.colors.kick = '#3366cc';
+  assert.equal(fns.trackColor('a', 'kick'), '#ff6347');
+  // ...it rewrites the code's .color() instead, and a track without one keeps the pick as before.
+  assert.equal(fns.rewriteTrackColorCall('a', 'kick', '#22aa66'), true);
+  assert.match(cm.getValue(), /kick: s\("bd\*4"\)\.color\("#22aa66"\)/);
+  assert.equal(fns.trackColor('a', 'kick'), '#22aa66');
+  assert.equal(fns.rewriteTrackColorCall('a', 'hats', '#123456'), false);
+  arState.colors.hats = '#123456';
+  assert.equal(fns.trackColor('a', 'hats'), '#123456');
+  // Deck B keeps its own.
+  assert.equal(fns.trackColor('b', 'kick') === '#22aa66', false);
+});
+

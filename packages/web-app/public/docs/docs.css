@@ -78,6 +78,39 @@ nav.chapters a.chapter .num { color: var(--accent); font-variant-numeric: tabula
 nav.chapters .back { display: block; margin-top: 24px; font-size: 12.5px; }
 nav.chapters .chapters-toggle { display: none; }
 
+/* The search box, at the top of the list, and what it found, standing where the list was while it
+   holds a search. The box wears the example bar's buttons; a result, a chapter link's. */
+nav.chapters .search { margin: 0 0 12px; }
+nav.chapters .search-box {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  font: 14px var(--sans);
+  color: var(--text);
+  background: var(--bg-panel);
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  padding: 4px 10px;
+}
+nav.chapters .search-box::placeholder { color: var(--text-dim); }
+nav.chapters .search-box:focus { outline: none; border-color: var(--accent); }
+nav.chapters.searching a.chapter,
+nav.chapters.searching .toc,
+nav.chapters.searching .back { display: none; }
+nav.chapters .search-results { margin-top: 6px; }
+nav.chapters .search-hit {
+  display: block;
+  color: var(--text-dim);
+  font-size: 12.5px;
+  padding: 4px 10px;
+  border-radius: 6px;
+}
+nav.chapters .search-hit .where { display: block; color: var(--text); font-size: 14px; }
+nav.chapters .search-hit .snip { display: block; line-height: 1.45; }
+nav.chapters .search-hit mark { background: none; color: var(--accent); }
+nav.chapters .search-hit.active { background: var(--accent-soft); text-decoration: none; }
+nav.chapters .search-none { color: var(--text-dim); font-size: 12.5px; margin: 6px 10px; }
+
 /* On-page headings, listed under the chapter you are on. */
 nav.chapters .toc { margin: 2px 0 8px 34px; padding: 0; list-style: none; border-left: 1px solid var(--border); }
 nav.chapters .toc li { margin: 0; }
@@ -345,6 +378,11 @@ nav.pager a.next { margin-left: auto; text-align: right; }
     padding: 16px 0;
   }
   nav.chapters .brand { padding: 8px 0; }
+  /* A thumb's height, and type big enough that a phone does not zoom in on the box. */
+  nav.chapters .search { margin: 4px 0 0; }
+  nav.chapters .search-box { min-height: 44px; padding: 10px 12px; font-size: 16px; border-radius: 8px; }
+  nav.chapters .search-hit { padding: 9px 10px; }
+  nav.chapters.searching .chapters-toggle { display: none; }
   nav.chapters .tagline, nav.chapters .toc { display: none; }
   nav.chapters:not(.open) a.chapter,
   nav.chapters:not(.open) .back { display: none; }

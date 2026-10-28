@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Controls &amp; displays · poptart guide</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <script src="/theme-boot.js"></script>
+    <link rel="stylesheet" href="/themes.css" />
+    <link rel="stylesheet" href="/vendor/codemirror/lib/codemirror.css" />
+    <link rel="stylesheet" href="/docs/docs.css" />
+  </head>
+  <body data-page="widgets">
+    <div class="wrap">
+      <nav class="chapters"></nav>
+      <main>
+        <header class="chapter-head">
+          <p class="kicker">Chapter 11</p>
+          <h1>Controls &amp; displays</h1>
+          <p class="lede">Sliders, knobs and step grids drawn in the code; scopes, meters and punchcards beside it.</p>
+        </header>
+
+        <p>
+          Some calls are drawn in the editor where they are written. A <strong>control</strong> is a value you
+          move by hand: moving it rewrites the call in the code and is heard at once, without evaluating. A
+          <strong>display</strong> shows what a track is doing while the song plays. Both appear once the
+          code has been evaluated.
+        </p>
+
+        <h2 id="controls">Controls</h2>
+        <table>
+          <tr><th>Call</th><th></th></tr>
+          <tr><td><code>slider(value, min, max, step)</code></td><td>a box slider, dragged sideways; min and max are 0 and 1 unless given</td></tr>
+          <tr><td><code>knob(value, min, max, step)</code></td><td>a knob, dragged up and down</td></tr>
+          <tr><td><code>toggle(1)</code></td><td>1 or 0, switched by a click</td></tr>
+          <tr><td><code>button()</code></td><td>1 while held down, 0 otherwise</td></tr>
+          <tr><td><code>xy(x, y)</code></td><td>a pad under the line; <code>.x</code> and <code>.y</code> are its two axes, 0 to 1</td></tr>
+        </table>
+        <p>
+          Shift-drag a slider or a knob for fine steps, or turn the mouse wheel over it. Each control is a
+          pattern, so it goes anywhere a value does: a gain, a device's control, an argument to
+          <code>.range()</code>. Typing a new number into the call moves the control to match.
+        </p>
+        <pre data-run><code>setbpm(120)
+keys: n("0 2 4 &lt;7 9&gt;").scale("C minor").synth("Wavetable")
+  .param("Osc 1 Position", knob(0.3))
+  .fx("Filter").param("Cutoff", slider(0.6, 0.2, 0.9))
+  .gain(toggle(1)).postgain(0.4)
+kick: s("bd*4").postgain(button().range(0.4, 0))</code></pre>
+        <pre data-run><code>const pad = xy(0.3, 0.6)
+chords: note("&lt;[c3,eb3,g3] [ab2,c3,eb3]&gt;").synth("Wavetable")
+  .param("Osc 1 Position", pad.x)
+  .fx("Filter").param("Cutoff", pad.y)
+  .postgain(0.3)</code></pre>
+
+        <h2 id="cells">Steps, bars and grids</h2>
+        <table>
+          <tr><th>Call</th><th></th></tr>
+          <tr><td><code>steps("x . x .")</code></td><td>a row of cells, one per step: <code>.</code> is a rest, <code>x</code> plays 1, a number or a word plays as itself</td></tr>
+          <tr><td><code>sliders("0.2 0.8", min, max)</code></td><td>a bar per step, each its own value</td></tr>
+          <tr><td><code>matrix({ bd: "x...", sd: "..x." })</code></td><td>a grid with a row per name; a cell plays its row's name</td></tr>
+          <tr><td><code>steps(8)</code> · <code>sliders(8)</code> · <code>matrix({ bd: 8, sd: 8 })</code></td><td>that many empty steps, bars halfway up, or empty rows, to click into</td></tr>
+        </table>
+        <p>
+          These three are drawn in place of their call: the cells stand where the text was. Click a cell to
+          switch it, or drag across a row to paint; drag a bar up or down to set it. Each change rewrites the
+          text behind the cells, so undo, copy and paste carry it like any other code. The first click on a
+          count writes the cells out, so <code>steps(8)</code> becomes <code>steps("x . . . . . . .")</code>.
+        </p>
+        <p>
+          Written with nothing inside, <code>steps()</code> and <code>sliders()</code> draw eight cells. A
+          <code>matrix()</code> needs at least one row: without one it plays nothing, stays text and says so
+          in the console. A row the grid can't read is drawn empty and named in the console; a row written as
+          a variable stays text.
+        </p>
+        <p>
+          Right-click the cells and choose <strong>edit as text</strong> to type into the call; with the caret
+          in it, <strong>show as cells</strong> (<strong>show as bars</strong> for sliders) draws it again.
+        </p>
+        <pre data-run><code>setbpm(118)
+drums: s(matrix({ bd: "x . . . x . . .", sd: ". . . . x . . .", hh: 8 })).postgain(0.4)
+kick: s("bd").struct(steps(8)).postgain(0.3)
+hats: s("hh*8").vel(sliders("1 0.4 0.7 0.4 1 0.4 0.7 0.4")).postgain(0.3)</code></pre>
+        <p>
+          A matrix row's name is what its cells play. Name the rows after drums and it is a drum grid; name
+          them with numbers and it is a note grid, here scale degrees:
+        </p>
+        <pre data-run><code>keys: n(matrix({ 0: "x . . . x . . .", 3: ". x . . . x . .", 7: ". . x . . . x .", 9: ". . . x . . . x" }))
+  .scale("C minor").synth("Wavetable").postgain(0.4)</code></pre>
+        <pre data-run><code>bass: n(steps("0 . 3 . 5 . 7 3")).scale("C minor").sub(7).synth("Wavetable")
+  .fx("Filter").param("Cutoff", sliders("0.2 0.5 0.8 0.4"))
+  .postgain(0.4)</code></pre>
+
+        <h2 id="size">Size</h2>
+        <p>
+          Drag a widget's lower right corner to resize it, in either direction. The size is written into the
+          call when you let go: <code>{ width, height }</code>, as in <code>scope({ width: 480, height: 60 })</code>.
+          A knob, a pad, <code>imager()</code> and <code>chroma()</code> stay square and take one
+          <code>{ size }</code>.
+        </p>
+        <table>
+          <tr><th>Widget</th><th>width and height are</th></tr>
+          <tr><td><code>steps</code> · <code>matrix</code></td><td>one cell's; <code>{ size }</code> sets both</td></tr>
+          <tr><td><code>sliders</code></td><td>one bar's; <code>{ size }</code> sets the height</td></tr>
+          <tr><td><code>slider</code> · <code>toggle</code> · <code>button</code></td><td>the control's; <code>{ size }</code> sets the width</td></tr>
+          <tr><td><code>knob</code> · <code>xy</code> · <code>.imager</code> · <code>.chroma</code></td><td><code>{ size }</code>: the side</td></tr>
+          <tr><td>the other displays</td><td>the display's; <code>{ height }</code> alone keeps the usual width</td></tr>
+        </table>
+        <pre data-run><code>drums: s(matrix({ bd: "x . . . x . . .", hh: "x x x x x x x x" }, { width: 22, height: 14 })).postgain(0.4)
+keys: n("0 4 7 4").scale("C minor").synth("Wavetable").gain(slider(0.7, { width: 160 }))
+  .postgain(0.4).scope({ width: 480, height: 60 })</code></pre>
+
+        <h2 id="displays">Displays on a track</h2>
+        <p>
+          Called on a track, a display draws under its line. It is the same pattern going in and coming out,
+          so it can go anywhere in the chain.
+        </p>
+        <table>
+          <tr><th>Call</th><th></th></tr>
+          <tr><td><code>.scope()</code></td><td>the waveform</td></tr>
+          <tr><td><code>.spectrum()</code></td><td>the frequencies, with their level in dB</td></tr>
+          <tr><td><code>.waveform()</code></td><td>the level over the last cycles, a line per beat</td></tr>
+          <tr><td><code>.meter()</code></td><td>the level now, beside the call; taller than wide it stands up, with dB marks</td></tr>
+          <tr><td><code>.imager()</code></td><td>the stereo image: mono straight up, the sides left and right, the correlation below</td></tr>
+          <tr><td><code>.punchcard()</code></td><td>the pattern's events as they will play, a row per value</td></tr>
+          <tr><td><code>.chroma()</code></td><td>the notes sounding, on a circle of pitch classes</td></tr>
+          <tr><td><code>.plot()</code></td><td>a signal's value over time</td></tr>
+        </table>
+        <pre data-run><code>chords: note("&lt;[c3,e3,g3] [a2,c3,e3]&gt;").synth("Wavetable").postgain(0.3).punchcard().chroma()
+bass: note("c2 ~ c2 g1").synth("Wavetable").postgain(0.4).scope().spectrum()
+hats: s("hh*8").postgain(0.3).meter({ width: 12, height: 60 })</code></pre>
+        <p>
+          The options each display takes: <code>{ cycles }</code> for how many cycles <code>.waveform()</code>,
+          <code>.punchcard()</code> and <code>.plot()</code> show; <code>{ min, max }</code> for the range of
+          <code>.plot()</code> and the dB range of <code>.spectrum()</code>; <code>{ scale, window }</code>
+          for <code>.scope()</code>'s gain and its length in milliseconds.
+        </p>
+        <p>
+          A display of sound reads a tap on the track's output, and only a few tracks are tapped at once. A
+          display past that number draws nothing and says so when you point at it.
+        </p>
+
+        <h2 id="background">Behind the code</h2>
+        <p>
+          Written on a line of its own, a display is drawn behind the code, filling the editor and staying put
+          as the code scrolls. <code>punchcard()</code> and <code>chroma()</code> show every track;
+          <code>scope()</code>, <code>spectrum()</code>, <code>waveform()</code>, <code>meter()</code> and
+          <code>imager()</code> show the whole song's output. Several share the editor in bands, top to bottom
+          in the order they are written. Delete the line and evaluate to take one away.
+        </p>
+        <pre data-run><code>setbpm(124)
+punchcard()
+spectrum()
+
+kick: s("bd*4").postgain(0.4)
+hats: s("hh*8").postgain(0.2)
+snare: s("~ sd ~ sd").postgain(0.3)
+keys: n("&lt;0 3&gt; 5 7 &lt;10 12&gt;").scale("C minor").synth("Wavetable").postgain(0.3)</code></pre>
+        <p>In DJ mode each deck draws its own, from its own code.</p>
+
+        <h2 id="colors">Track colors</h2>
+        <p>
+          <code>.color()</code> sets the color a track is drawn in, everywhere: its row in the arrangement, its
+          strip in the mixer and on the DJ desk, its row in a <code>punchcard()</code> behind the code, its
+          notes in <code>chroma()</code>, and its own displays. It takes a CSS color name or a hex color, and
+          changes nothing about the sound. A track without one gets a color from the theme, picked by its
+          name, so it stays the same from one evaluation to the next; the tracks inside a group take shades
+          of the group's color.
+        </p>
+        <p>
+          Picking a track's color in the arrangement rewrites its <code>.color()</code> when it has one, and
+          otherwise keeps the pick in the arrangement.
+        </p>
+        <pre data-run><code>punchcard()
+
+kick: s("bd*4").color('tomato').postgain(0.4)
+hats: s("hh*8").color('#63b4ff').postgain(0.2)
+keys: n("0 2 4 7").scale("C minor").synth("Wavetable").color('gold').postgain(0.3).scope()</code></pre>
+      </main>
+    </div>
+    <!-- The chapter list, the pager, chords written for this platform, colored and playable code,
+         and the timelines all come from docs.js. -->
+    <script src="/chords.js"></script>
+    <script src="/vendor/codemirror/lib/codemirror.js"></script>
+    <script src="/vendor/codemirror/mode/javascript/javascript.js"></script>
+    <script src="/vendor/codemirror/addon/runmode/runmode.js"></script>
+    <script src="/poptart-mode.js"></script>
+    <script src="/pattern-meta.js"></script>
+    <script src="/docs/docs.js"></script>
+  </body>
+</html>

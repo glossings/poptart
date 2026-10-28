@@ -1,0 +1,270 @@
+/* The editor's inline widgets (inline-widgets.mjs): controls drawn in the code, displays drawn
+   under it. The controls wear the app's own: the desk's knob (.mix-knob), the piano roll's box
+   slider (.pr-box-slider), a device window's switch (button.small.device-toggle) and its figure's
+   box (.device-figure-canvas) - so only what those rules do not say is written here. Every size is
+   fixed by the call's `{ size }` (or the kind's default), so nothing moves when a value does. */
+
+.iw {
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: none;
+  box-sizing: border-box;
+}
+
+/* ------------------------------------------------------------- inline, before a call's name */
+
+.CodeMirror-widget .iw {
+  display: inline-block;
+  vertical-align: middle;
+  margin: 1px 6px 1px 0;
+  position: relative;
+}
+
+/* The box slider: the piano roll's, at the code's font size, its digits of one width so a value
+   dragged past a power of ten does not shuffle the box's contents. */
+.CodeMirror-widget .iw-slider {
+  padding: 1px 6px;
+  font-size: 11px;
+  line-height: 16px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.iw-slider.dragging {
+  border-color: var(--accent);
+}
+
+/* The knob's pointer reaches from the center to just inside the rim at any size: the desk's 11px
+   on its 28px knob. */
+.iw-knob.mix-knob::after {
+  height: calc(50% - 3px);
+}
+.CodeMirror-widget .iw-knob {
+  cursor: ns-resize;
+}
+
+/* A device window's switch, in the code. */
+.CodeMirror-widget .iw-switch {
+  font-size: 10px;
+  line-height: 13px;
+  text-align: center;
+}
+.CodeMirror-widget .iw-switch:active {
+  transform: none; /* the editor's line must not jump under a press */
+}
+
+/* The meter is a canvas drawn like the desk's channel meters, at its call's { width, height }. */
+.CodeMirror-widget .iw-meter {
+  cursor: default;
+  line-height: 0;
+}
+
+/* ------------------------------------------------------------- the folded controls */
+
+/* steps(), sliders() and matrix() stand where their call's text was. --iw-cell and --iw-cell-h are
+   a step's width and height (a piano roll row by default), --iw-bar-w and --iw-bar-h a bar's (the
+   piano roll's value lane). */
+.CodeMirror-widget .iw-fold {
+  --iw-cell: 16px;
+  --iw-cell-h: 16px;
+  --iw-bar-w: 16px;
+  --iw-bar-h: 64px;
+  padding: 2px 3px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-raised);
+  line-height: 0;
+  cursor: pointer;
+}
+
+.iw-cells,
+.iw-bars,
+.iw-mrow {
+  display: inline-flex;
+  align-items: flex-end;
+  gap: 2px;
+}
+
+.iw-cell {
+  display: inline-block;
+  flex: none;
+  width: var(--iw-cell);
+  height: var(--iw-cell-h);
+  border-radius: 3px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  box-sizing: border-box;
+  cursor: pointer;
+}
+/* Under the pointer a cell says it can be pressed: the accent's edge, and a hint of its fill. */
+.iw-cell:hover {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 22%, var(--bg));
+}
+.iw-cell.on:hover {
+  background: var(--accent);
+}
+/* A gap before every fourth step of a row of fours: the beat, as the piano roll's heavier lines. */
+.iw-cell.beat,
+.iw-bar.beat {
+  margin-left: 3px;
+}
+.iw-cell.on {
+  background: color-mix(in srgb, var(--accent) 70%, var(--bg-raised));
+  border-color: var(--accent);
+}
+.iw-cell.now {
+  border-color: var(--text);
+}
+.iw-cell.on.now {
+  background: var(--accent);
+}
+
+.iw-bars {
+  height: var(--iw-bar-h);
+  cursor: ns-resize;
+}
+.iw-bar {
+  position: relative;
+  flex: none;
+  width: var(--iw-bar-w);
+  height: 100%;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  box-sizing: border-box;
+  overflow: hidden;
+}
+.iw-bar-fill {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: color-mix(in srgb, var(--accent) 70%, var(--bg-raised));
+}
+.iw-bar:hover {
+  border-color: var(--accent);
+}
+.iw-bar.now {
+  border-color: var(--text);
+}
+.iw-bar.now .iw-bar-fill {
+  background: var(--accent);
+}
+.iw-bar.rest {
+  opacity: 0.4;
+}
+
+.iw-matrix {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.iw-mrow {
+  align-items: center;
+}
+.iw-mlabel {
+  flex: none;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--mono);
+  font-size: 10px;
+  line-height: var(--iw-cell-h);
+  color: var(--text-dim);
+  padding-right: 4px;
+}
+
+/* ------------------------------------------------------------- blocks, under a call's line */
+
+.iw-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 6px;
+  padding-top: 2px;
+  padding-bottom: 4px;
+}
+
+.iw-block {
+  position: relative;
+  display: block;
+  flex: none;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 3px;
+  line-height: 0;
+}
+
+.iw-canvas {
+  display: block;
+}
+
+.iw-pad.device-figure-canvas {
+  position: relative;
+  box-sizing: border-box;
+  background:
+    linear-gradient(var(--border), var(--border)) center / 1px 100% no-repeat,
+    linear-gradient(var(--border), var(--border)) center / 100% 1px no-repeat,
+    var(--bg);
+}
+.iw-pad-dot {
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  margin: -5px 0 0 -5px;
+  border-radius: 50%;
+  background: var(--accent);
+  pointer-events: none;
+}
+
+/* ------------------------------------------------------------- the resize grip */
+
+/* Over the lower right corner, invisible until hovered - the app's grips are (see .org-th-grip). A
+   knob's corner is outside its circle, so the grip never covers the face being turned. */
+.iw-grip {
+  position: absolute;
+  right: -2px;
+  bottom: -2px;
+  width: 9px;
+  height: 9px;
+  z-index: 1;
+  touch-action: none;
+}
+.iw-grip-xy {
+  cursor: nwse-resize;
+}
+.iw-grip-x {
+  cursor: ew-resize;
+}
+.iw-grip-y {
+  cursor: ns-resize;
+}
+.iw-grip:hover::after,
+.iw-grip.dragging::after {
+  content: '';
+  position: absolute;
+  right: 2px;
+  bottom: 2px;
+  width: 5px;
+  height: 5px;
+  border-right: 1px solid var(--accent);
+  border-bottom: 1px solid var(--accent);
+}
+/* Mid-drag the cursor stays the grip's wherever the hand goes, and nothing under it lights up. */
+body.iw-resizing,
+body.iw-resizing * {
+  cursor: nwse-resize !important;
+}
+
+
+/* ------------------------------------------------------------- behind the code */
+
+/* A bare punchcard(), spectrum(), ... drawn behind the editor's text: under the scroller, so the
+   code and the caret paint over it, and outside it, so scrolling the code leaves it where it is. */
+.iw-bg {
+  position: absolute;
+  top: 0;
+  z-index: 0;
+  pointer-events: none;
+}

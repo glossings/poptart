@@ -25,10 +25,11 @@
 export const BUILDER_NAMES = Object.freeze(['Signal', 'n', 'note', 'mini', 's', 'se', 'sr', 'sp', 'say', 'synth', 'sine', 'saw', 'isaw', 'tri', 'square', 'rand', 'perlin', 'lfo', 'env', 'dur', 'midicc', 'midikeys', 'osc', 'macro', 'choose', 'cat', 'seq', 'irand', 'midi', 'audio', 'input', 'group', 'copy', 'pcopy', 'pianoroll', 'clips', 'auto',
   'i', 'begin', 'end', 'loop', 'loopwrap', 'loopdir', 'speed', 'flip', 'stretch', 'fit', 'slice', 'splice', 'splicemode', 'attack', 'decay', 'sustain', 'release', 'envscale', 'grain', 'vel', 'clip', 'nudge', 'swing', 'swinggrid', 'swingvel',
   'add', 'sub', 'mul', 'div', 'mod', 'set',
+  'slider', 'knob', 'toggle', 'button', 'xy', 'steps', 'sliders', 'matrix', 'scope', 'spectrum', 'waveform', 'imager', 'meter', 'punchcard', 'chroma',
   'noteToMidi', 'degreeToMidi', 'parseScaleName']);
 
 /** Builders the editor writes and nobody types: the calls behind a drawn roll, a shape, a pack. */
-export const INTERNAL_BUILDERS = Object.freeze(['_roll', '_shape', '_preset', '_pack', '_slices', '_auto', '_groove', '_arrange']);
+export const INTERNAL_BUILDERS = Object.freeze(['_roll', '_shape', '_preset', '_pack', '_slices', '_auto', '_groove', '_arrange', '_input', '_display']);
 
 /** What a `setbpm(...)` block evaluates to, so a tempo-only block is not mistaken for a pattern. */
 export const TEMPO_BLOCK = Object.freeze({ poptartTempoBlock: true });

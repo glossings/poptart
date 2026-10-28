@@ -2041,7 +2041,8 @@ li.CodeMirror-hint-active {
   text-overflow: ellipsis;
 }
 
-.device-widget .small.on {
+.device-widget .small.on,
+.iw-switch.on {
   color: var(--accent);
   border-color: var(--accent);
 }

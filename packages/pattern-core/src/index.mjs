@@ -1,3 +1,4 @@
+export { trackColorOf } from './signal.mjs';
 export { Sig, Signal, n, note, mini, s, se, sr, sp, say, synth, sine, saw, isaw, tri, square, rand, perlin, lfo, env, dur, midicc, midikeys, osc, macro, fxknob, choose, cat, seq, irand, resetRandomSeeds, midi, audio, input, group, copy, pcopy, setCopyResolver, clips, setClipsOwner, setClipsResolver, clipsOwnerNow, pianoroll, _roll, liveRoll, _shape, _preset, _pack, _slices, liveSlices, _auto, liveAuto, auto, _groove, liveGroove, grooveText, setGlobalGroove, globalGroove, restoreGlobalGroove } from './signal.mjs';
 export { normalizeSlicePositions, parseSlicePositions, serializeSlicePositions, normalizeSliceSet, normalizeSliceEntry, normalizeSliceFit, sliceSetIsEmpty, slicePositionsFor, sliceEntryFor, sliceSetKeys, parseSliceSet, serializeSliceSet, SLICE_DECIMALS } from './slices.mjs';
 // Controls as top-level builders (control patterns) - the method form of each still lives
@@ -29,3 +30,8 @@ export { clearRolls, restoreRolls, setRollLayer, setDefOwner, adoptDefs, defScop
 export { parseArrangement, serializeArrangement, looksLikeArrangeString, normalizeArrangeOpts, arrangementEnd, arrangementLoops, isWholeSongLoop, arrangementSpans, arrangementLabels, clipsOfLabel, reconcileArrangement, inSpans, ArrangeClock, ClipClock, songSteps, withClipShift, clipShiftNow, stepsUnderShift, _arrange, ARRANGE_DEFAULT_SNAP, ARRANGE_DEFAULT_LEN, ARRANGE_SONG_LOOP, ARRANGE_HOLD } from './arrange.mjs';
 export { sampleSourcesOf, fittedCycles } from './sample-source.mjs';
 export { routePlan, planRefs, routeLatencies, routeSlots, isRouteControl, routeControlDefault, CROSSOVER_DEVICE, CROSSOVER_MIN_HZ, CROSSOVER_MAX_HZ } from './route.mjs';
+// The editor's inline widgets: controls drawn in the code (slider(), steps(), ...) and displays
+// drawn under it (.scope(), .punchcard(), ...) - see widgets.mjs and widget-calls.mjs.
+export { _input, _display, slider, knob, toggle, button, xy, steps, sliders, matrix, scope, spectrum, waveform, imager, meter, punchcard, chroma, BACKGROUND_DISPLAYS, beginWidgets, takeWidgets, abandonWidgets, setWidgetValue, widgetValue, displayWindow, displayNow, PLOT_POINTS_PER_CYCLE } from './widgets.mjs';
+export { findWidgetCalls, widgetCallEdits, callArgs, parseCells, toggleCell, setCellValue, formatNumber, matrixRows, maskCode, optionsIndex, positionalArgs, optionNumber, optionEdit, optionDrop, widgetSize, widgetBox, sizeKeys, WIDGET_BOXES, rowSource, foldable, cellCount, restRow, middleRow, DEFAULT_CELL_COUNT, INPUT_SIZES, DISPLAY_SIZES, FOLDED_WIDGETS, INPUT_WIDGETS, DISPLAY_WIDGETS, AUDIO_DISPLAYS, RAW_TEXT_WIDGETS } from './widget-calls.mjs';
+export { createWidgetHost, WIDGET_WINDOW, WIDGET_TAP_IDLE_MS } from './widget-host.mjs';

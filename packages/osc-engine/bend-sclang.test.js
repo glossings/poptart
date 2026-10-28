@@ -116,6 +116,7 @@ var deckMeterBus = Bus.control(server, 4);
 var trackDefName = { |key| ("poptart_track_" ++ key).asSymbol };
 var buildHeadDef, djIsolator, def;
 server.options.numOutputBusChannels = 2;
+server.options.outputStreamsEnabled = "0"; // tests never play through the speakers
 ${extract('djIsolator')}
 ${extract('buildHeadDef')}
 def = buildHeadDef.();

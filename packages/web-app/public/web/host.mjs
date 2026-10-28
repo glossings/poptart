@@ -633,6 +633,18 @@ export function createHost({
       query.get('deck'),
     ),
 
+    // ---- the editor's inline widgets (pattern-core's widget-host.mjs, shared with the desktop) --
+
+    // A control moved: its signal reads the new value on its next poll, no evaluation needed.
+    'POST /api/widgets/set': async (body) => ({
+      ok: patternCore.setWidgetValue(body?.deck === 'b' ? 'b' : 'a', Number(body?.at), body?.value),
+    }),
+    'GET /api/widgets/window': async (_body, query) => evaluator.widgets?.window(query.get('deck') === 'b' ? 'b' : 'a', query.get('from'), query.get('count'))
+      ?? { from: 0, count: 0, views: [] },
+    // Polled while a display of sound is on screen, which is also what keeps its tap armed.
+    'GET /api/widgets/frames': async (_body, query) => evaluator.widgets?.frames(query.get('deck') === 'b' ? 'b' : 'a')
+      ?? { frames: {}, over: [], now: {} },
+
     'GET /api/arrange': async (_body, query) => ({ arrange: evaluator.arrangeClockOf?.(query?.get('deck') === 'b' ? 'b' : 'a')?.snapshot() ?? evaluator.arrangeClock?.snapshot() ?? null }),
 
     'POST /api/arrangeEnd': async (body) => {

@@ -4758,6 +4758,9 @@ const BUILDER_NAMES = ['Signal', 'n', 'note', 'mini', 's', 'se', 'sr', 'sp', 'sa
   // The binops as top-level builders - a layer piece's own verb: .set(note(30), add(note(12)))
   // pins one voice and transposes the other.
   'add', 'sub', 'mul', 'div', 'mod', 'set',
+  // The editor's inline widgets: controls drawn in the code, and the displays of the master output
+  // (a display ON a pattern is a method). See pattern-core's widgets.mjs.
+  'slider', 'knob', 'toggle', 'button', 'xy', 'steps', 'sliders', 'matrix', 'scope', 'spectrum', 'waveform', 'imager', 'meter', 'punchcard', 'chroma',
   // Pure music-theory helpers (not signal builders, but handy when writing your own): note-name
   // -> MIDI, scale-degree -> MIDI, and the raw {rootMidi, intervals} of a scale name. Exposed by
   // name so a custom `Signal.prototype.chord = ...` can call them. Real in the browser prebake too
@@ -4770,7 +4773,7 @@ const BUILDER_NAMES = ['Signal', 'n', 'note', 'mini', 's', 'se', 'sr', 'sp', 'sa
 // BUILDER_NAMES - which is what drives autocomplete and the docs - so the plain names `roll` and
 // `shape` stay free for whatever they should mean to a person later. See the underscore in
 // pattern-core: these are the editor's own calls, not part of the language.
-const INTERNAL_BUILDERS = ['_roll', '_shape', '_preset', '_pack', '_slices', '_auto', '_groove', '_arrange'];
+const INTERNAL_BUILDERS = ['_roll', '_shape', '_preset', '_pack', '_slices', '_auto', '_groove', '_arrange', '_input', '_display'];
 
 // The Macros panel's knobs, pre-bound as ready-made signals: `macro1`..`macro8` in evaluated
 // code are `macro(1)`..`macro(8)`, so a knob can be dropped straight into a control -
@@ -5386,6 +5389,26 @@ function dryRunPattern(sig) {
 const HL_WINDOW = 32; // cycles of grid shipped per track (initial window and each top-up)
 
 const hlTracks = new Map(); // label -> { sig, start, end, clock } for the last eval's active tracks
+
+// The editor's inline widgets (slider(), .scope(), ...): what each evaluation built, the display
+// data shipped with it, and the engine taps the displays of sound read - see pattern-core's
+// widget-host.mjs, which the browser build's host shares. Made on first use: patternCore is a
+// dynamic import.
+let widgetHostMade = null;
+function widgetHost() {
+  if (!widgetHostMade) {
+    widgetHostMade = patternCore.createWidgetHost({
+      engine: () => engine,
+      engineId: (_deck, key) => trackIds.get(key) ?? null,
+      cycleNow: (deck) => {
+        const clock = clockOf(deck);
+        return clock && engine ? clock.cycleAt(engine.getTime()) : 0;
+      },
+      cps: () => transport?.cps ?? DEFAULT_CPS,
+    });
+  }
+  return widgetHostMade;
+}
 
 // The files a sampler source ref names, in index order - the engine's spelling (a bare name is a
 // folder pack, "sp:" a named one, "file:" one path under the samples root, "rec:" a bounce).
@@ -7827,6 +7850,7 @@ const routes = {
     // clock to cycle 0, stop-then-play would come back as a different performance of the same
     // code. Blocks are built below in document order, which is what makes the seeds stable.
     patternCore.resetRandomSeeds();
+    patternCore.beginWidgets(deck); // the inline widgets this evaluation builds (see widgetHost)
 
     // Roll definitions are rebuilt from the buffer every time, for the reason the track teardown
     // below exists: a roll(...) call you just deleted has to stop being playable. Prebake's layer
@@ -7993,6 +8017,7 @@ const routes = {
       // still playing (which resolve them by name, lazily) fall silent on a buffer nobody meant
       // to change.
       patternCore.setCopyResolver(null);
+      patternCore.abandonWidgets(); // every control keeps the value it had
       arrangeClips[deck] = clipsBefore; // ...and the clips a clips() track is still playing by
       patternCore.restoreRolls(definitionsBefore, 'buffer', deck);
       patternCore.setDefOwner('a'); // definitions filed outside an eval (live roll edits) are the main pane's
@@ -8003,6 +8028,7 @@ const routes = {
       throw err;
     }
     patternCore.setCopyResolver(null); // copies are resolved at build time; nothing later may reach back
+    const widgetsBuilt = patternCore.takeWidgets();
     patternCore.setDefOwner('a'); // definitions filed outside an eval (live roll edits) are the main pane's
     // What setscale() left in force is this deck's key; the global goes back to holding the main
     // deck's, which is what every non-eval reader (/api/status, live-note quantization) means.
@@ -8387,6 +8413,7 @@ const routes = {
       active: active.includes(b),
       start: b.start,
       end: b.end,
+      color: b.sig.trackColor ?? null, // its .color(): how the editor draws it (see client.js's trackColor)
       instrument: b.sig.instrument,
       fxChain: b.sig.fxChain,
       // Where each slot sits in the chain's .split()/.bands() branches, or null for a plain chain.
@@ -8417,6 +8444,13 @@ const routes = {
         gridFrom,
         gridCount: HL_WINDOW,
         tracks,
+        // The inline widgets: each control with what the code set it to, each display with what it
+        // shows - and, for a display worked out from its pattern, the data, from the grid's cycle.
+        widgets: widgetHost().afterEval(deck, widgetsBuilt, built, {
+          keyOf: (label) => { const b = built.find((x) => x.label === label); return b ? keyOf(b) : keyOfBlock(label); },
+          clockOf: (b) => b.trackClock ?? arrangeClocks[deck],
+          from: gridFrom,
+        }),
       },
     };
   },
@@ -8648,6 +8682,28 @@ const routes = {
     });
     return { status: 200, body: { defs: out } };
   },
+
+  // The inline widgets (see widgetHost). A control moved - body { deck, at, value } - goes
+  // straight into the store its signal reads, so it is heard on the next poll without an
+  // evaluation; the editor has already written the new value into the code.
+  'POST /api/widgets/set': async (body) => {
+    const deck = body?.deck === 'b' ? 'b' : 'a';
+    return { status: 200, body: { ok: patternCore.setWidgetValue(deck, Number(body?.at), body?.value) } };
+  },
+
+  // The next stretch of the pattern displays' data - query { deck, from, count } - as the editor's
+  // clock nears the end of what it holds.
+  'GET /api/widgets/window': async (q) => ({
+    status: 200,
+    body: widgetHost().window(q.deck === 'b' ? 'b' : 'a', q.from, q.count),
+  }),
+
+  // The displays of sound: the latest frame per track shown, polled while they are on screen -
+  // which is also what keeps the engine's taps armed (see widget-host.mjs). Query { deck }.
+  'GET /api/widgets/frames': async (q) => ({
+    status: 200,
+    body: widgetHost().frames(q.deck === 'b' ? 'b' : 'a'),
+  }),
 
   'GET /api/highlight': async (q) => {
     const from = Math.max(0, Math.floor(Number(q.from)) || 0);

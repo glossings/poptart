@@ -57,6 +57,7 @@ var server = Server(\\poptartReportTest, NetAddr("127.0.0.1", ${SCSYNTH_PORT}));
 var said = { |tag, values| (tag ++ "<" ++ (values ? []).collect({ |v| v.round(0.0001) }).join(",") ++ ">").postln };
 server.options.numInputBusChannels = 0;
 server.options.numOutputBusChannels = 2;
+server.options.outputStreamsEnabled = "0"; // tests never play through the speakers
 server.options.memSize = 8192;
 server.options.ugenPluginsPath = [Platform.resourceDir +/+ "plugins", ${q(path.dirname(SCX))}];
 PoptartDeviceController.openTimeout = 5;
