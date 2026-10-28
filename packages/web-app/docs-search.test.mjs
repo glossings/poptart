@@ -4,6 +4,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
@@ -74,7 +75,7 @@ test('the browser build ships the search', async () => {
   assert.match(docsJs, /\/docs\/search\.js/);
   // build-web copies public/ whole, the docs folder with it.
   const { build } = await import('./build-web.mjs');
-  const out = fs.mkdtempSync(path.join(process.env.TMPDIR || '/tmp', 'guide-search-'));
+  const out = fs.mkdtempSync(path.join(os.tmpdir(), 'guide-search-'));
   try {
     build({ out, quiet: true });
     assert.ok(fs.existsSync(path.join(out, 'docs', 'search.js')));

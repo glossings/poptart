@@ -12,6 +12,8 @@ const path = require('node:path');
 const { createDroppedFiles, locateDrops, addDroppedSample } = require('./dropped-files.js');
 
 const freshDir = () => fs.mkdtempSync(path.join(os.tmpdir(), 'poptart-dropped-'));
+// The store keeps absolute paths as this platform writes them (D:\\music\\... on Windows).
+const abs = (p) => path.resolve(p);
 
 test('an empty or unreadable list is an empty pack', () => {
   const dir = freshDir();
@@ -27,9 +29,9 @@ test('files join the end, and a name already there takes that place', () => {
   assert.equal(store.add('/music/loop.wav').index, 1);
   const again = store.add('/elsewhere/kick.wav');
   assert.deepEqual(again, { index: 0, name: 'kick.wav', ref: 'files:kick.wav', replaced: true });
-  assert.deepEqual(store.read(), ['/elsewhere/kick.wav', '/music/loop.wav']);
+  assert.deepEqual(store.read(), [abs('/elsewhere/kick.wav'), abs('/music/loop.wav')]);
   // What is on disk is the list - read back by a fresh store, as a restarted server would.
-  assert.deepEqual(createDroppedFiles(store.file).read(), ['/elsewhere/kick.wav', '/music/loop.wav']);
+  assert.deepEqual(createDroppedFiles(store.file).read(), [abs('/elsewhere/kick.wav'), abs('/music/loop.wav')]);
   assert.equal(JSON.parse(fs.readFileSync(store.file, 'utf8')).version, 1);
 });
 
@@ -58,9 +60,9 @@ test('a dropped sample is listed where it was found, and says when a library fol
   const store = createDroppedFiles(path.join(dir, 'files-pack.json'));
   const deps = { store, find: async () => '/found/loop.wav', verify: async () => null };
   assert.deepEqual(await addDroppedSample({ name: 'loop.wav', size: 3, sha256: 'z' }, deps),
-    { ref: 'files:loop.wav', index: 0, name: 'loop.wav', path: '/found/loop.wav', shadowed: false });
+    { ref: 'files:loop.wav', index: 0, name: 'loop.wav', path: abs('/found/loop.wav'), shadowed: false });
   const shadowed = await addDroppedSample({ name: 'loop.wav' }, { ...deps, shadowed: () => true });
   assert.equal(shadowed.shadowed, true);
   await assert.rejects(addDroppedSample({ path: '/nowhere/x.wav' }, deps), /couldn't find where x\.wav lives on disk/);
-  assert.deepEqual(store.read(), ['/found/loop.wav']);
+  assert.deepEqual(store.read(), [abs('/found/loop.wav')]);
 });
