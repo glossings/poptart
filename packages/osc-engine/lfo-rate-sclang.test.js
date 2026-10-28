@@ -43,7 +43,7 @@ function extractHandler(name, address) {
 
 function extractLfoDef() {
   const src = scdSource();
-  const start = src.indexOf('SynthDef(("poptart_lfo_" ++ shape).asSymbol, {');
+  const start = src.indexOf('SynthDef(lfoDefName.(shape, at == \\ar), {');
   assert.ok(start >= 0, 'could not find the poptart_lfo_ defs in sc/poptart.scd');
   const end = src.indexOf('}).add;', start);
   return `${src.slice(start, end)}})`;
@@ -64,7 +64,7 @@ function runSclang(script, timeout = 60000) {
 test('an anchor with a rate sets it on the synth, by the name each shape kind uses', (t) => {
   const script = `(
 var tracks = IdentityDictionary.new;
-var server; // the swap handler names it, for a phase bus the drawn entry below already has
+var tellRamp = { }, tellSlot = { }, tellMods = { }, tellTap = { }, shapesHandled = IdentityDictionary.new, nodeAddr = (sendMsg: { }); // the direct path's id handoff (see tellTrack in sc/poptart.scd) - inert here
 var bundleNow = { |latency, func| func.value };
 var log = List.new;
 var made = 0;
@@ -77,7 +77,7 @@ var anchor = ${extractHandler('poptartAnchorParamLFO', '/poptart/anchorParamLFO'
 var swap = ${extractHandler('poptartSetParamShape', '/poptart/setParamShape')};
 var basic = (synth: stub.(\\basic), shape: \\saw);
 var drawn = (synth: stub.(\\drawn), shape: \\custom, mode: \\free, rate: 0.5, lo: 0, hi: 1,
-    defs: [\\shapeA, \\shapeB], current: 0, glide: 0, bus: 9, group: 1, phaseBus: 5);
+    def: \\shapeDef, bufs: [\\tableA, \\tableB], current: 0, glide: 0, bus: 9, group: 1);
 tracks[\\t] = (lfos: (slot0_A: basic, slot0_B: drawn));
 
 anchor.([nil, "t", 0, "A", 0.25, 0.1]);
@@ -103,9 +103,9 @@ swap.([nil, "t", 0, "B", 0, 0.1]);
   assert.match(out, /^SET<basic:t_trig,1,phase,0\.5,freq,2\.0>$/m, `a basic shape's rate is \\freq:\n${out}`);
   assert.match(out, /^SET<drawn:t_trig,1,phase,0\.75,rate,3\.0>$/m, `a drawn shape's rate is \\rate:\n${out}`);
   assert.match(out, /^DRAWN-RATE<3\.0>$/m, `the drawn entry remembers the rate for its next swap:\n${out}`);
-  assert.match(out, /^SWAP<shapeB:out,9,rate,1\.5,/m, `a swap starts the new shape at the rate it names:\n${out}`);
+  assert.match(out, /^SWAP<shapeDef:out,9,buf,tableB,rate,1\.5,/m, `a swap starts the new shape at the rate it names:\n${out}`);
   assert.match(out, /^SWAP-RATE<1\.5>$/m, `and remembers it:\n${out}`);
-  assert.match(out, /^SWAP2<out,9,rate,1\.5,/m, `a swap naming no rate keeps the one in force:\n${out}`);
+  assert.match(out, /^SWAP2<out,9,buf,tableA,rate,1\.5,/m, `a swap naming no rate keeps the one in force:\n${out}`);
 });
 
 test('the native saw, driven by the scheduler\'s anchors, plays the JS count', async (t) => {
@@ -139,7 +139,9 @@ test('the native saw, driven by the scheduler\'s anchors, plays the JS count', a
       .map((a) => `    [${a[4]}, ["/n_set", 1000, "t_trig", 1, "phase", ${a[3]}, "freq", ${a[5]}]],`)
       .join('\n');
     const script = `(
-var shape = \\saw;
+// The control-rate one: what a plugin's control is driven by.
+var shape = \\saw, at = \\kr;
+var lfoDefName = { |shape, audio| ("poptart_lfo_" ++ shape ++ if (audio) { "_ar" } { "" }).asSymbol };
 var lfoDef = ${extractLfoDef()};
 var tapDef = SynthDef(\\poptart_tap, { |in| Out.ar(0, K2A.ar(In.kr(in))) });
 ${fs.existsSync(scsynth) ? `Score.program = ${JSON.stringify(scsynth)}.quote;` : ''}

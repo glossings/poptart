@@ -31,11 +31,11 @@ const NATIVE_DIR = path.join(__dirname, 'native', 'devices');
 const SCX = path.join(NATIVE_DIR, 'bin', 'PoptartDevices.scx');
 const VSTPLUGIN_DIR = path.join(userExtensionsDir(), 'VSTPlugin', 'plugins');
 
-/** The effect slot's two halves and the choice between them, as poptart.scd has them. */
-function slotLines() {
+/** An effect's own node, its two halves and the choice between them, as poptart.scd has it. */
+function fxDef() {
   const src = fs.readFileSync(SCD, 'utf8');
-  const m = src.match(/^[ \t]*var plugin = VSTPlugin\.ar\([\s\S]*?^[ \t]*var wet = [^\n]*;$/m);
-  assert.ok(m, 'could not find the effect slot (var plugin = VSTPlugin.ar ... var wet = ...) in sc/poptart.scd');
+  const m = src.match(/^buildFxDef = \{[\s\S]*?^\};$/m);
+  assert.ok(m, 'could not find buildFxDef in sc/poptart.scd');
   return m[0];
 }
 
@@ -52,37 +52,34 @@ function render(dir) {
   const out = path.join(dir, 'slot.wav');
   const q = (s) => JSON.stringify(s);
   const script = `(
-var slot, alone, slotIndex, aloneIndex, score, options;
+var slot, alone, tone, slotIndex, aloneIndex, score, options, buildFxDef;
 ${fs.existsSync(scsynth) ? `Score.program = ${q(scsynth)}.quote;` : ''}
 ("HAS-CLASS<" ++ (\\PoptartDevice.asClass.notNil) ++ ">").postln;
-// Effect slot 1 of a track, fed a tone, with an empty sidechain.
-slot = SynthDef(\\pt_slot_kind, { |out = 0|
-    var i = 1;
-    var hasNativeDevices = true;
-    var sig = SinOsc.ar(220, 0, 0.5) ! 2;
-    var scIn = Silent.ar(2);
-${slotLines()}
-    Out.ar(out, wet);
-});
+// An effect of a track, fed a tone on a bus, with an empty sidechain.
+${fxDef()}
+slot = buildFxDef.();
+tone = SynthDef(\\pt_tone, { |out| Out.ar(out, SinOsc.ar(220, 0, 0.5) ! 2) });
 // The same device with no slot around it: what the slot should sound like.
 alone = SynthDef(\\pt_slot_alone, { |out = 0|
     var sig = SinOsc.ar(220, 0, 0.5) ! 2;
     Out.ar(out, PoptartDevice.ar([sig[0], sig[1]], 2, 0, [DC.ar(0), DC.ar(0)], \\nslot1));
 });
-slotIndex = slot.metadata[\\poptartDevices][\\nslot1][\\index];
+slotIndex = slot.metadata[\\poptartDevices][\\nslot][\\index];
 aloneIndex = alone.metadata[\\poptartDevices][\\nslot1][\\index];
 score = Score([
     [0.0, ['/d_recv', slot.asBytes]],
     [0.0, ['/d_recv', alone.asBytes]],
+    [0.0, ['/d_recv', tone.asBytes]],
+    [0.0, ['/s_new', 'pt_tone', 999, 0, 0, 'out', 100]],
     // 0/1: a device in the slot. 2/3: the device alone. 4/5: the slot on its plugin half, empty.
-    [0.0, ['/s_new', 'pt_slot_kind', 1000, 0, 0, 'out', 0, 'native1', 1]],
-    [0.0, ['/s_new', 'pt_slot_alone', 1001, 0, 0, 'out', 2]],
-    [0.0, ['/s_new', 'pt_slot_kind', 1002, 0, 0, 'out', 4, 'native1', 0]],
+    [0.0, ['/s_new', 'poptart_fx', 1000, 1, 0, 'in', 100, 'out', 0, 'scBus', 1000000, 'active', 1, 'native', 1]],
+    [0.0, ['/s_new', 'pt_slot_alone', 1001, 1, 0, 'out', 2]],
+    [0.0, ['/s_new', 'poptart_fx', 1002, 1, 0, 'in', 100, 'out', 4, 'scBus', 1000000, 'active', 1, 'native', 0]],
     [0.0, ['/u_cmd', 1000, slotIndex, '/open', 'Filter']],
     [0.0, ['/u_cmd', 1001, aloneIndex, '/open', 'Filter']],
     [0.6, ['/c_set', 0, 0]],
 ]);
-options = ServerOptions.new.numOutputBusChannels_(6);
+options = ServerOptions.new.numOutputBusChannels_(6).numAudioBusChannels_(1024);
 options.sampleRate = ${SR};
 // SuperCollider's own UGens, the committed device binary, and the installed VSTPlugin - the half
 // of the slot whose behavior when empty is the point.

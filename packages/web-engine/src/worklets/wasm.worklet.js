@@ -108,6 +108,12 @@ class WasmDeviceProcessor extends AudioWorkletProcessor {
     this.inPtr = e.pd_in();
     this.outPtr = e.pd_out();
     this.paramPtr = e.pd_params();
+    // Where a control's per-sample values go while a signal moves it (build-devices.mjs's patch
+    // layer). A module built before that layer has none, and reads its controls once a block.
+    this.bufferAt = typeof e.pd_param_buffer === 'function'
+      ? Array.from({ length: this.paramCount }, (_, i) => e.pd_param_buffer(i) / 4)
+      : null;
+    this.moving = new Uint8Array(this.paramCount);
     this.memory = e.memory;
     this.ready = true;
   }
@@ -196,10 +202,8 @@ class WasmDeviceProcessor extends AudioWorkletProcessor {
       right = inputs[1]?.[0] ?? this.silence(frames);
     }
 
-    // Controls are read once a block, as a position, and reach the module in its own units.
-    // Written once even where the block is rendered in pieces: a control did not move inside a
-    // block. The ramps a host glides them with are followed by the module's own interpolation
-    // (Mutable) or the wrapper's (see build-devices.mjs).
+    // Controls reach the module in its own units: a still one once a block, and one a signal is
+    // moving a value per sample, through its buffer (see movingPiece below).
     const mem = this.floats();
     for (let i = 0; i < this.paramCount; i++) {
       const p = this.descriptor.params[i];
@@ -238,6 +242,7 @@ class WasmDeviceProcessor extends AudioWorkletProcessor {
         before.fill(0, inR, inR + span);
       }
 
+      this.movingPiece(parameters, at, span);
       this.exports.pd_process(span);
 
       const after = this.floats();
@@ -247,6 +252,37 @@ class WasmDeviceProcessor extends AudioWorkletProcessor {
     }
     this.reporter.tick(parameters);
     return true;
+  }
+
+  /**
+   * The piece's values of every control a signal is moving, a value per sample, into the
+   * module's buffers - and the module told which move. A control whose values hold still for the
+   * piece is handed over as a number, as it would be unmoved.
+   */
+  movingPiece(parameters, at, span) {
+    const bufferAt = this.bufferAt;
+    if (!bufferAt) return;
+    const mem = this.floats();
+    const base = this.paramPtr / 4;
+    const e = this.exports;
+    for (let i = 0; i < this.paramCount; i++) {
+      const p = this.descriptor.params[i];
+      const values = p ? parameters[p.id] : null;
+      let moves = false;
+      if (values && values.length > 1) {
+        const first = denormalize(p, values[at]);
+        mem[base + i] = first;
+        const into = bufferAt[i];
+        mem[into] = first;
+        for (let k = 1; k < span; k++) {
+          const v = denormalize(p, values[at + k]);
+          mem[into + k] = v;
+          if (v !== first) moves = true;
+        }
+      }
+      const now = moves ? 1 : 0;
+      if (now !== this.moving[i]) { e.pd_param_moving(i, now); this.moving[i] = now; }
+    }
   }
 
   /** The track's two channels as one, into a buffer kept rather than made. */

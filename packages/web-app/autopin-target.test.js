@@ -48,7 +48,7 @@ function grab(name) {
   return SRC.slice(at, end);
 }
 
-const bodies = ['matchParen', 'codeOnly', 'blockOwnCode', 'firstStringLiteral', 'findChainCall', 'findChainHandleAt', 'blockForTrack', 'applyBufferEdits', 'slotOfPluginNow']
+const bodies = ['matchParen', 'codeOnly', 'blockOwnCode', 'firstStringLiteral', 'slotCalls', 'findChainCall', 'findChainHandleAt', 'blockForTrack', 'applyBufferEdits', 'slotOfPluginNow']
   .map(grab)
   .join('\n\n');
 // eslint-disable-next-line no-new-func

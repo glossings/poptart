@@ -17,6 +17,7 @@
 // exactly here, so nothing downstream has to know which form it was handed.
 
 import { TRACK_BEND_PARAM, argToValue, clampParam, defaultValues, findParam, normalize } from '../descriptor.mjs';
+import { buildRouting } from './routing.mjs';
 
 /** Channel-strip controls this engine implements. The rest warn once - see the engine. */
 export const SUPPORTED_CHANNELS = Object.freeze(['gain', 'postgain', 'pan', 'dry', 'mon', 'width', 'bassmono', 'bend', 'bendrange', 'out', 'grainsize', 'grainrate', 'grainpan', 'grainpos',
@@ -76,6 +77,12 @@ export function panCurve(side) {
 
 /** The grain controls, which each grain reads as it starts rather than a node reading them. */
 export const GRAIN_CHANNEL_FIELDS = Object.freeze({ grainsize: 'size', grainrate: 'rate', grainpan: 'pan', grainpos: 'pos' });
+
+/** A branch level or pan (rl/rp) or a crossover's frequency (xo) - the controls a routing plan adds. */
+const ROUTE_CONTROL = /^(rl|rp|xo)\d+$/;
+
+/** Where a crossover's Frequency control rests until something sets it: 1 kHz, as a position. */
+const CROSSOVER_REST = (1000 - 20) / (20000 - 20);
 
 /**
  * How long a set-by-value takes to reach its target. Long enough not to click, short enough to
@@ -220,9 +227,9 @@ export class Track {
     this.width = gain(1);                    // the `width` control scales the side
     this.sideDry = gain(1);                  // bass mono off: the side as it is
     this.sideHigh = gain(0);                 // bass mono on: the side above the cutoff
-    this.bassHp = ctx.createBiquadFilter();
-    this.bassHp.type = 'highpass';
-    this.bassHp.frequency.value = 120;
+    // Bass mono's highpass on the side, made the first time bass mono is asked for (see _bassMono):
+    // a filter nobody uses costs the same as one somebody does.
+    this.bassHp = null;
     this.sideOut = gain(1);
     this.sideInv = gain(-1);
     // The pan is ONE control - a constant from -1 to 1 - and each side's gain is read off it
@@ -254,8 +261,6 @@ export class Track {
     const half = (from, v, into) => { const g = gain(v); this.split.connect(g, from); g.connect(into); return g; };
     this._halves = [half(0, 0.5, this.mid), half(1, 0.5, this.mid), half(0, 0.5, this.width), half(1, -0.5, this.width)];
     this.width.connect(this.sideDry);
-    this.width.connect(this.bassHp);
-    this.bassHp.connect(this.sideHigh);
     this.sideDry.connect(this.sideOut);
     this.sideHigh.connect(this.sideOut);
     this.sideOut.connect(this.sideInv);
@@ -314,7 +319,35 @@ export class Track {
     this.source = null;                     // the instrument node, when there is one
     this.sidechains = new Map();            // slot index -> { from, source } feeding the slot's second input
     this.wetControls = new Map();           // slot index -> the constant its wet level is (see wetControl)
-    this.grainSink = null;                  // where a modulator on a grain control plugs in (see driveChannel)
+    // Branches (Sig#split, Sig#bands): the plan the chain is wired by, or null for the plain line;
+    // what the last wiring built, to take down before the next; and the route controls - branch
+    // levels and pans (rl/rp), crossover frequencies (xo) - kept for the track's life like the wet
+    // ones. A .bands() crossover is not one of the track's slots: it is a Crossover device the
+    // track keeps for the wiring, by crossover id ('x1'), made with makeCrossover (the engine's
+    // device builder, handed in by the engine).
+    this.routing = null;
+    this.crossovers = new Map();            // crossover id -> its built device
+    this.makeCrossover = null;
+    this.routeBuild = null;
+    this.routeControls = new Map();         // control name -> constant source
+    this.routePanLaws = new Map();          // gain index -> [left, right] pan-law shapers off rp<k>
+    this.slotJoins = [];                    // the per-slot nodes the last wiring made
+    this.grainControls = new Map();         // grain control name -> the constant its value is (see grainControl)
+  }
+
+  /**
+   * The constant a grain control's value is: what each .grain() voice reads as a grain starts,
+   * and what a modulator on the control drives. Made the first time anything asks.
+   */
+  grainControl(name) {
+    let ctl = this.grainControls.get(name);
+    if (!ctl) {
+      ctl = this.ctx.createConstantSource();
+      ctl.offset.value = this.grain[GRAIN_CHANNEL_FIELDS[name]];
+      ctl.start();
+      this.grainControls.set(name, ctl);
+    }
+    return ctl;
   }
 
   /**
@@ -337,9 +370,8 @@ export class Track {
   /**
    * The AudioParam an lfo(), env(), midicc() or osc() on a channel control drives, or null for a
    * control that has no single value to drive (out, bendrange). Driving bass mono turns it on: the
-   * modulator is its cutoff in Hz, as a set value is. The grain controls are read by each grain as
-   * it starts, off the modulator itself (see the engine's _playGrains), so theirs is a parameter
-   * nothing listens to - somewhere for the connection to plug in.
+   * modulator is its cutoff in Hz, as a set value is. A grain control's is the constant every
+   * grain voice on the track reads (see grainControl).
    */
   driveChannel(name, now) {
     switch (name) {
@@ -353,9 +385,10 @@ export class Track {
         this.bassmonoHz = this.bassmonoHz || 120;
         rampParam(this.sideDry.gain, 0, now, now);
         rampParam(this.sideHigh.gain, 1, now, now);
-        return this.bassHp.frequency;
+        return this._bassMono().frequency;
       default: {
-        if (name in GRAIN_CHANNEL_FIELDS) return (this.grainSink ??= this.ctx.createGain()).gain;
+        if (name in GRAIN_CHANNEL_FIELDS) return this.grainControl(name).offset;
+        if (ROUTE_CONTROL.test(name)) return this.routeControl(name).offset;
         const index = Number(/^wet(\d+)$/.exec(name)?.[1]);
         return index > 0 ? this.wetControl(index).offset : null;
       }
@@ -377,6 +410,20 @@ export class Track {
       slot.dryGain.disconnect();
       slot.built.output?.disconnect?.();
     }
+    this.routeBuild?.teardown();
+    this.routeBuild = null;
+    for (const node of this.slotJoins.splice(0)) { try { node.disconnect(); } catch { /* already detached */ } }
+    for (const built of this.crossovers.values()) { try { built.node.disconnect(); } catch { /* already detached */ } }
+    this._keepCrossovers(this.routing?.order ?? []);
+    if (this.routing) {
+      this.routeBuild = buildRouting(this.ctx, this.routing, {
+        input: this.chainIn,
+        output: this.postGain,
+        slotIO: (index) => this._slotIO(index),
+        gainStage: (k) => this.routeGain(k),
+      });
+      return;
+    }
     const order = [...this.slots.keys()].filter((i) => i > 0).sort((a, b) => a - b);
     let cursor = this.chainIn;
     for (const index of order) {
@@ -390,6 +437,124 @@ export class Track {
       cursor = join;
     }
     cursor.connect(this.postGain);
+  }
+
+  /**
+   * Wires the chain by a routing plan (pattern-core's route.mjs) - branches summed, bands split by
+   * crossovers - or, with null, back to the plain line. Rebuilds only the wiring: the devices, the
+   * strip and every route control stay as they are, so a modulator on a branch level carries on.
+   */
+  setRouting(plan) {
+    this.routing = plan ?? null;
+    this.rewire();
+  }
+
+  // One slot's ends for a routed chain: its device's input and dry path in, the wet/dry join out -
+  // or, for a slot with nothing in it (a device not loaded yet), a wire. A crossover ('x1') is the
+  // track's own Crossover device, with two more outputs and a key input, which the plan reads and
+  // feeds (see routing.mjs).
+  _slotIO(index) {
+    if (typeof index === 'string') return this._crossoverIO(index);
+    const slot = index > 0 ? this.slots.get(index) : null;
+    const join = this.ctx.createGain();
+    this.slotJoins.push(join);
+    if (!slot) return { input: [join], output: join };
+    slot.built.output.connect(slot.wetGain);
+    slot.wetGain.connect(join);
+    slot.dryGain.connect(join);
+    const io = { input: [slot.built.input, slot.dryGain], output: join };
+    const node = slot.built.node;
+    if (node && (slot.descriptor.channels?.outputs ?? 1) >= 3) {
+      [io.rest, io.ap] = [1, 2].map((output) => {
+        const tap = this.ctx.createGain();
+        this.slotJoins.push(tap);
+        node.connect(tap, output);
+        return tap;
+      });
+    }
+    if (node && slot.descriptor.channels?.key) io.key = { node, input: 1 };
+    return io;
+  }
+
+  // A crossover's three outputs and its key, off the device the track keeps for it.
+  _crossoverIO(id) {
+    let built = this.crossovers.get(id);
+    if (!built && this.makeCrossover) {
+      built = this.makeCrossover();
+      // Its Frequency is the plan's xo<k> control, a position, for its whole life - so a modulator
+      // on the control stays connected however often the wiring is rebuilt.
+      const freq = built.node?.parameters?.get?.('frequency');
+      if (freq) {
+        try { freq.value = 0; } catch { /* a param that refuses a direct set */ }
+        this.routeControl(`xo${id.slice(1)}`).connect(freq);
+      }
+      this.crossovers.set(id, built);
+    }
+    if (!built?.node) {
+      const join = this.ctx.createGain();
+      this.slotJoins.push(join);
+      return { input: [join], output: join };
+    }
+    const [output, rest, ap] = [0, 1, 2].map((k) => {
+      const tap = this.ctx.createGain();
+      this.slotJoins.push(tap);
+      built.node.connect(tap, k);
+      return tap;
+    });
+    return { input: [built.node], output, rest, ap, key: { node: built.node, input: 1 } };
+  }
+
+  // The crossovers the wiring still uses are kept; the rest are let go.
+  _keepCrossovers(order) {
+    const used = new Set(order.filter((p) => typeof p === 'string'));
+    for (const [id, built] of this.crossovers) {
+      if (used.has(id)) continue;
+      const freq = built.node?.parameters?.get?.('frequency');
+      try { if (freq) this.routeControls.get(`xo${id.slice(1)}`)?.disconnect(freq); } catch { /* already detached */ }
+      try { built.node?.disconnect(); } catch { /* already detached */ }
+      built.dispose?.();
+      this.crossovers.delete(id);
+    }
+  }
+
+  /** Bass mono's highpass on the side, made on first use. */
+  _bassMono() {
+    if (!this.bassHp) {
+      this.bassHp = this.ctx.createBiquadFilter();
+      this.bassHp.type = 'highpass';
+      this.bassHp.frequency.value = 120;
+      this.width.connect(this.bassHp);
+      this.bassHp.connect(this.sideHigh);
+    }
+    return this.bassHp;
+  }
+
+  /** A route control's constant (rl/rp/xo), made at its neutral value on first use. */
+  routeControl(name) {
+    let ctl = this.routeControls.get(name);
+    if (!ctl) {
+      ctl = this.ctx.createConstantSource();
+      ctl.offset.value = name.startsWith('rl') ? 1 : name.startsWith('xo') ? CROSSOVER_REST : 0;
+      ctl.start();
+      this.routeControls.set(name, ctl);
+    }
+    return ctl;
+  }
+
+  /** Gain k's level and its two sides of the pan law, which the wiring connects into each use. */
+  routeGain(k) {
+    let laws = this.routePanLaws.get(k);
+    if (!laws) {
+      const pan = this.routeControl(`rp${k}`);
+      laws = [0, 1].map((side) => {
+        const shaper = this.ctx.createWaveShaper();
+        shaper.curve = panCurve(side);
+        pan.connect(shaper);
+        return shaper;
+      });
+      this.routePanLaws.set(k, laws);
+    }
+    return { level: this.routeControl(`rl${k}`), panL: laws[0], panR: laws[1] };
   }
 
   /**
@@ -464,28 +629,33 @@ export class Track {
    * Through a gain of its own rather than straight in, because `.audio("kick", { gain: 0.5 })`
    * carries one and because a level in the middle is how a key signal is usually set.
    */
-  setSidechain(index, from, source, gain = 1) {
+  setSidechain(index, from, source, gain = 1, link = null) {
     this.clearSidechain(index);
     const slot = this.slots.get(index);
     const node = slot?.built.node;
     if (!slot?.descriptor.sidechain || !node) return false;
     const level = this.ctx.createGain();
     level.gain.value = gain;
+    let edge = null;
     try {
-      from.connect(level);
+      // `link` wires a route from another track or bus, so a loop through it can be delayed.
+      if (link) edge = link(from, level);
+      else from.connect(level);
       level.connect(node, 0, 1);
     } catch {
-      try { from.disconnect(level); } catch { /* never connected */ }
+      if (edge) edge.unlink();
+      else { try { from.disconnect(level); } catch { /* never connected */ } }
       return false;
     }
-    this.sidechains.set(index, { from, level, source, gain });
+    this.sidechains.set(index, { from, level, source, gain, edge });
     return true;
   }
 
   clearSidechain(index) {
     const held = this.sidechains.get(index);
     if (!held) return;
-    try { held.from.disconnect(held.level); } catch { /* already detached */ }
+    if (held.edge) held.edge.unlink();
+    else { try { held.from.disconnect(held.level); } catch { /* already detached */ } }
     try { held.level.disconnect(); } catch { /* already detached */ }
     this.sidechains.delete(index);
   }
@@ -524,16 +694,22 @@ export class Track {
       // since only it knows how many pairs there are (see WebAudioEngine#_routeOut).
       case 'out': this.outValue = Number(value) || 1; return true;
       // The granular voice's live controls, read by each grain as it starts (see the engine's
-      // _playGrains). Held here because a grain belongs to a voice, and the voice to the track.
-      case 'grainsize': case 'grainrate': case 'grainpan': case 'grainpos':
-        this.grain[GRAIN_CHANNEL_FIELDS[name]] = Number(value);
+      // _playGrains). Stepped, not glided, as on the desktop: a grain takes one value and keeps it.
+      case 'grainsize': case 'grainrate': case 'grainpan': case 'grainpos': {
+        const v = Number(value);
+        this.grain[GRAIN_CHANNEL_FIELDS[name]] = v;
+        const ctl = this.grainControls.get(name);
+        if (ctl && Number.isFinite(v)) {
+          try { ctl.offset.setValueAtTime(v, Math.max(now, atTime ?? now)); } catch { ctl.offset.value = v; }
+        }
         return true;
+      }
       case 'width': rampParam(this.width.gain, Math.min(4, Math.max(0, value)), atTime, now, g); return true;
       case 'bassmono': {
         // 0 is off; anything else is the cutoff in Hz, held to the desktop's 20 Hz - 2 kHz.
         const on = value > 0;
         this.bassmonoHz = on ? Math.min(2000, Math.max(20, value)) : 0;
-        if (on) rampParam(this.bassHp.frequency, this.bassmonoHz, atTime, now, g);
+        if (on) rampParam(this._bassMono().frequency, this.bassmonoHz, atTime, now, g);
         rampParam(this.sideDry.gain, on ? 0 : 1, atTime, now, g);
         rampParam(this.sideHigh.gain, on ? 1 : 0, atTime, now, g);
         return true;
@@ -553,6 +729,12 @@ export class Track {
         this._djSet(name, Number(value), atTime, now, g);
         return true;
       default:
+        if (ROUTE_CONTROL.test(name)) {
+          // A crossover frequency is a position on the Crossover's control, held to its range.
+          const v = name.startsWith('xo') ? Math.min(1, Math.max(0, value)) : value;
+          rampParam(this.routeControl(name).offset, v, atTime, now, g);
+          return true;
+        }
         if (name.startsWith('wet')) {
           // Kept for an empty slot too: the level waits for whatever device is put there.
           const index = Number(name.slice(3));
@@ -613,7 +795,7 @@ export class Track {
    * unit in is a crossfade between two paths carrying the same signal. `into` is the bus the
    * deck's return reads; null parks the send.
    */
-  setFxSend(into, level, now) {
+  setFxSend(into, level, now, link = null) {
     const amt = into ? Math.min(1, Math.max(0, Number(level) || 0)) : 0;
     if (!this.fx && amt === 0) return;
     if (!this.fx) {
@@ -626,8 +808,11 @@ export class Track {
       this.fx = { send, fader, into: null };
     }
     if (this.fx.into !== into) {
-      try { this.fx.fader.disconnect(); } catch { /* not connected */ }
-      if (into) this.fx.fader.connect(into);
+      if (this.fx.edge) this.fx.edge.unlink();
+      else { try { this.fx.fader.disconnect(); } catch { /* not connected */ } }
+      this.fx.edge = null;
+      if (into && link) this.fx.edge = link(this.fx.fader, into);
+      else if (into) this.fx.fader.connect(into);
       this.fx.into = into;
     }
     rampParam(this.fx.send.gain, amt, now, now, DJ_GLIDE_SEC);
@@ -864,12 +1049,17 @@ export class Track {
       this.bendNode = null;
       this.bendCents = null;
     }
-    // So are the pan and the wet controls.
-    for (const ctl of [this.panCtl, ...this.wetControls.values()]) {
+    // So are the pan and the wet controls, and the crossovers.
+    this.routeBuild?.teardown();
+    this._keepCrossovers([]);
+    for (const law of [...this.routePanLaws.values()].flat()) { try { law.disconnect(); } catch { /* already detached */ } }
+    for (const ctl of [this.panCtl, ...this.wetControls.values(), ...this.routeControls.values(), ...this.grainControls.values()]) {
       try { ctl.stop(); } catch { /* already stopped */ }
       try { ctl.disconnect(); } catch { /* already detached */ }
     }
     this.wetControls.clear();
+    this.routeControls.clear();
+    this.grainControls.clear();
     for (const node of [...(this.djEq?.nodes ?? []), ...(this.djFilter?.nodes ?? [])]) {
       try { node.disconnect(); } catch { /* already detached */ }
     }

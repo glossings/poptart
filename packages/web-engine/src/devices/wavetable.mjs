@@ -29,11 +29,12 @@ import { framesOf } from '../dsp/wavfile.mjs';
 /** The tables the synth offers by name. Index 0 is what a fresh patch plays. */
 export const TABLE_NAMES = Object.freeze(['Basic', 'Harmonics', 'Odd', 'PWM', 'Sync', 'Fold', 'FM', 'Organ', 'Vocal']);
 
-/** How many table slots an oscillator has in all: the shipped ones and room for loaded files. */
-export const TABLE_SLOTS = 64;
-
-/** The most voices one track will ever run, whatever the voice count is set to. */
-export const MAX_VOICES = 16;
+/**
+ * How far the Voices knob reaches. Not a most: a count typed or patterned past it plays that many
+ * voices. Before the count was open it stopped at 16, which is what an old 0..1 position on it
+ * still means (legacyMax).
+ */
+export const VOICES_KNOB = 128;
 
 const seconds = (id, name, def, group) => ({
   id, name, min: 0, max: 10, default: def, unit: 's', curve: 'pow', curveExp: 3, group,
@@ -43,7 +44,7 @@ function oscParams(n, group, levelDefault) {
   const p = `osc${n}`;
   return [
     { id: `${p}.level`, name: `Osc ${n} Level`, min: 0, max: 1, default: levelDefault, group },
-    { id: `${p}.table`, name: `Osc ${n} Table`, default: 0, options: [...TABLE_NAMES], capacity: TABLE_SLOTS, takes: 'sample', sampleAs: 'wavetable', bank: 'tables', rate: 'k', group,
+    { id: `${p}.table`, name: `Osc ${n} Table`, default: 0, options: [...TABLE_NAMES], takes: 'sample', sampleAs: 'wavetable', bank: 'tables', rate: 'k', group,
       description: 'Which stack of waveforms this oscillator reads. Name a sample to load a file as a table.' },
     { id: `${p}.position`, name: `Osc ${n} Position`, min: 0, max: 1, default: 0, group,
       description: 'Where in the table stack this oscillator reads. Sweeping it morphs one waveform into the next.' },
@@ -107,7 +108,7 @@ export const WAVETABLE = defineDevice({
     { id: 'glide.mode', name: 'Glide Mode', default: 0, options: ['legato', 'always'], rate: 'k', group: 'Voice',
       description: 'Legato slides only when a note takes over a voice that is still sounding. Always slides every note in from the nearest pitch last played, so a chord change moves each changed note to its new one.' },
     { id: 'level', name: 'Level', min: 0, max: 1, default: 0.7, group: 'Voice' },
-    { id: 'voices', name: 'Voices', min: 1, max: MAX_VOICES, default: 8, step: 1, rate: 'k', ui: 'number', group: 'Voice' },
+    { id: 'voices', name: 'Voices', min: 1, open: true, uiMax: VOICES_KNOB, legacyMax: 16, default: 8, step: 1, rate: 'k', ui: 'number', group: 'Voice' },
   ],
 
   // The pictures the panel draws, each one at the head of the section whose knobs it belongs
@@ -261,7 +262,7 @@ export class WavetableSynth {
     // A copy, so a table loaded into this instance never reaches another synth's list.
     this.tables = [...(tables ?? sharedBuiltInTables())];
     this.subTable = subTableOf(this.tables);
-    this.voices = Array.from({ length: MAX_VOICES }, () => new WavetableVoice(sampleRate));
+    this.voices = Array.from({ length: 16 }, () => new WavetableVoice(sampleRate)); // the old most, so a count up to it is there at once (and the desktop starts with the same)
     this.params = new VoiceParams();
     this.voiceCount = 8;
     this.clock = 0;          // bumped per note, so "oldest" has a meaning
@@ -295,7 +296,10 @@ export class WavetableSynth {
     }
     const voices = values.voices;
     const count = typeof voices === 'number' ? voices : voices?.[0];
-    if (Number.isFinite(count)) this.voiceCount = Math.min(MAX_VOICES, Math.max(1, Math.round(count)));
+    if (Number.isFinite(count)) this.voiceCount = Math.max(1, Math.round(count));
+    // The voices are made as the count asks for them - there is no most - so a count past what is made
+    // grows the list, once, at the new high mark.
+    while (this.voices.length < this.voiceCount) this.voices.push(new WavetableVoice(this.sampleRate));
   }
 
   /** The table an index names; a slot nothing has been loaded into plays the first table. */

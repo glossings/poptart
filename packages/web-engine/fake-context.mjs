@@ -11,6 +11,10 @@
 // a test can tell a ramp from a step, and a scheduled value from an immediate one.
 
 import { parameterDescriptorsFor } from './src/worklets/shared.mjs';
+import { CROSSOVER } from './src/devices/crossover.mjs';
+
+/** The devices the engine builds for itself, which no catalog lists. */
+const INTERNAL = [CROSSOVER];
 
 export class FakeParam {
   constructor(value = 0, name = '') {
@@ -190,11 +194,12 @@ export class FakeAudioContext {
 export function fakeWorkletFor(registry) {
   return class extends FakeWorkletNode {
     constructor(ctx, name, options = {}) {
-      const descriptor = registry.list().find((d) => d.processor === name);
+      const descriptor = registry.list().find((d) => d.processor === name) ?? INTERNAL.find((d) => d.processor === name);
       // Every parameter, k-rate ones included, because that is what the real processors declare
       // (see parameterDescriptorsFor). A rig that left the k-rate ones out would send them by
       // message here and by AudioParam in a browser, which is the wrong half to be testing.
-      const paramIds = descriptor ? parameterDescriptorsFor(descriptor).map((p) => p.name) : [];
+      // A processor that is not a device names its parameters by the values it is born with.
+      const paramIds = descriptor ? parameterDescriptorsFor(descriptor).map((p) => p.name) : Object.keys(options.parameterData ?? {});
       super(ctx, name, { ...options, paramIds });
       ctx.created.push(this);
     }

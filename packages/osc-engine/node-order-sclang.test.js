@@ -47,6 +47,8 @@ var paramRoutes = IdentityDictionary.new;
 var recGroup = Group.basicNew(srv);
 var levelGroups = [Group.basicNew(srv)];
 var trackLevels, reorderTracks;
+// The edges that close a loop, and what reorderTracks re-points at them (see trackLevels).
+var loopEdges = Set.new, routeCloses, busWriters, busIndexOf = { |b| b }, applyParamRoute = { |t, e| };
 // Never-created nodes: moveToHead / Group.before just put a message on the wire to a server that
 // isn't there. The levels are read straight off trackLevels; reorderTracks is run for its growth.
 var mkTrack = { |sends| (group: Group.basicNew(srv), busSends: sends) };
@@ -54,6 +56,8 @@ var route = { |target, source, busName| (targetKey: target, source: source, busN
 
 ${extract('trackLevels')}
 ${extract('reorderTracks')}
+${extract('routeCloses')}
+${extract('busWriters')}
 
 ("COMPILES<" ++ [trackLevels, reorderTracks].every { |f| f.isKindOf(Function) } ++ ">").postln;
 
@@ -90,7 +94,7 @@ sidechainByTarget[\\b_0] = route.(\\b, \\a, nil);
   const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'poptart-scorder-')), 'harness.scd');
   fs.writeFileSync(file, script);
   try {
-    return execFileSync(resolveSclangPath(), [file], {
+    return execFileSync(resolveSclangPath(), ['-u', '57325', file], {
       encoding: 'utf8',
       timeout: 60000,
       stdio: ['ignore', 'pipe', 'pipe'],

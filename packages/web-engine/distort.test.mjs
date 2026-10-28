@@ -419,7 +419,7 @@ test('a drawn curve is played through, and read from -1 to 1 both ways', () => {
 test('the mode control takes a drawn curve past the ones it ships with', () => {
   const mode = findParam(DISTORT, 'mode');
   assert.equal(mode.takes, 'shape');
-  assert.ok(mode.capacity > SHAPER_MODES.length);
+  assert.equal(mode.open, true, 'as many drawn curves as are drawn');
 });
 
 test('a change of curve is as smooth as the signal around it, at every oversampling, however late a drawn table arrives', () => {

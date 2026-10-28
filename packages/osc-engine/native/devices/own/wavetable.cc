@@ -28,10 +28,13 @@ namespace pd_Wavetable {
 namespace ids = pd_ids::Wavetable;
 using namespace pd_own;
 
-constexpr int kMaxVoices = 16;
-
-/** How many entries the table control has: the shipped tables, then room for loaded ones. */
-constexpr int kTableSlots = 64;   // TABLE_SLOTS
+/**
+ * The voices and table slots a fresh device has room for. Not a most: a count or a slot past
+ * them grows the room through the work round (pd_own::Pool). These are what the controls stopped
+ * at before they were open, so anything a song asked for then plays at once.
+ */
+constexpr int kFirstVoices = 16;
+constexpr int kFirstTableSlots = 64;
 
 /** A small deterministic noise source, so a patch with noise in it still renders reproducibly. */
 struct Noise {
@@ -81,6 +84,9 @@ struct VoiceParams {
   double bend = 0;
 };
 
+/** The device's base, which is where a voice reads a moving control from. */
+using Base = pd_own::Device<ids::kCount, 2>;
+
 struct Voice {
   double sampleRate = 48000.0;
   WavetableOscillator osc1;
@@ -94,6 +100,7 @@ struct Voice {
   long long age = 0;
   bool releasing = false;
   int holds = 0;  // note-ons on `note` still waiting for their offs (see Device)
+  unsigned claimMark = 0;  // which set of note-ons last took this voice (see Device::startNotes)
   double targetHz = 440;
   double currentHz = 440;
 
@@ -183,8 +190,8 @@ struct Voice {
     else osc.sample(i, bufL, bufR, 0, 1, 1 + amount * (mod - 1));
   }
 
-  /** Renders one block and adds it into the output. */
-  void process(float* outL, float* outR, int count, const VoiceParams& p) {
+  /** Renders one block and adds it into the output, reading the moving controls per sample. */
+  void process(float* outL, float* outR, int count, const VoiceParams& p, const Base& c) {
     if (!ampEnv.active()) return;
     for (int i = 0; i < count; ++i) { bufL[i] = 0; bufR[i] = 0; }
 
@@ -208,6 +215,17 @@ struct Voice {
     sub.position = p.subShape;
     sub.level = p.subLevel;
     sub.cents = 0;
+    // The moving controls, per sample, as voice.mjs's _aimOscillator hands them over.
+    auto arr = [&c](int id) -> const float* { return c.isMoving(id) ? c.pb[id] : nullptr; };
+    osc1.levelA = arr(ids::osc1_level); osc1.phaseA = arr(ids::osc1_phase);
+    osc1.semisA = arr(ids::osc1_semi); osc1.centsA = arr(ids::osc1_cents);
+    osc1.positionA = arr(ids::osc1_position); osc1.warpAmountA = arr(ids::osc1_warp);
+    osc2.levelA = arr(ids::osc2_level); osc2.phaseA = arr(ids::osc2_phase);
+    osc2.semisA = arr(ids::osc2_semi); osc2.centsA = arr(ids::osc2_cents);
+    osc2.positionA = arr(ids::osc2_position); osc2.warpAmountA = arr(ids::osc2_warp);
+    sub.levelA = arr(ids::sub_level);
+    sub.positionA = nullptr;
+    sub.centsA = nullptr;
 
     const CrossMod cross1 = crossModOf(p.osc1WarpMode);
     const CrossMod cross2 = crossModOf(p.osc2WarpMode);
@@ -215,8 +233,8 @@ struct Voice {
     osc1.heard = cross2.source == kSourceOsc;
     osc2.heard = cross1.source == kSourceOsc;
     sub.heard = cross1.source == kSourceSub || cross2.source == kSourceSub;
-    const bool wantNoise = p.noiseLevel > 0 || cross1.source == kSourceNoise
-        || cross2.source == kSourceNoise;
+    const bool wantNoise = c.isMoving(ids::noise_level) || p.noiseLevel > 0
+        || cross1.source == kSourceNoise || cross2.source == kSourceNoise;
 
     if (!cross1.is() && !cross2.is()) {
       osc1.process(bufL, bufR, count);
@@ -224,7 +242,7 @@ struct Voice {
       sub.process(bufL, bufR, count);
       if (wantNoise) {
         for (int i = 0; i < count; ++i) {
-          const double v = noise.next() * p.noiseLevel;
+          const double v = noise.next() * c.ctl(ids::noise_level, i);
           bufL[i] = static_cast<float>(static_cast<double>(bufL[i]) + v);
           bufR[i] = static_cast<float>(static_cast<double>(bufR[i]) + v);
         }
@@ -240,12 +258,12 @@ struct Voice {
       for (int i = 0; i < count; ++i) {
         if (wantNoise) {
           noiseSample = noise.next();
-          const double v = noiseSample * p.noiseLevel;
+          const double v = noiseSample * c.ctl(ids::noise_level, i);
           bufL[i] = static_cast<float>(static_cast<double>(bufL[i]) + v);
           bufR[i] = static_cast<float>(static_cast<double>(bufR[i]) + v);
         }
-        if (on1) bent(osc1, cross1, p.osc1Warp, osc2, noiseSample, i);
-        if (on2) bent(osc2, cross2, p.osc2Warp, osc1, noiseSample, i);
+        if (on1) bent(osc1, cross1, c.ctl(ids::osc1_warp, i), osc2, noiseSample, i);
+        if (on2) bent(osc2, cross2, c.ctl(ids::osc2_warp, i), osc1, noiseSample, i);
         if (onSub) sub.sample(i, bufL, bufR);
       }
     }
@@ -254,36 +272,43 @@ struct Voice {
                      p.envAttackCurve, p.envDecayCurve, p.envReleaseCurve, p.envScale);
 
     for (int i = 0; i < count; ++i) {
-      const double g = ampEnv.next() * velocity * p.level;
+      const double g = ampEnv.next() * velocity * c.ctl(ids::level, i);
       outL[i] = static_cast<float>(static_cast<double>(outL[i]) + bufL[i] * g);
       outR[i] = static_cast<float>(static_cast<double>(outR[i]) + bufR[i] * g);
     }
   }
 };
 
-struct Device : pd_own::Device<ids::kCount, 2> {
+struct Device : Base {
   VoiceParams params;
-  Voice voices[kMaxVoices];
+  Pool<Voice> voices;
   int voiceCount = 8;
+  unsigned claimSerial = 0;
   long long clock = 0;       // bumped per note, so "oldest" has a meaning
   unsigned int seed = 1;
   struct Event { int kind; double note; double velocity; };
   Event events[64];
   int eventCount = 0;
 
-  /** The tables loaded from files, by slot; null where nothing has been built yet. */
-  Table* loaded[kTableSlots] = { nullptr };
-  /** A file handed over and not yet built, by slot, newest wins. Audio thread. */
+  /** A file handed over and not yet built. Audio thread. */
   struct Pending { const float* mono = nullptr; int frames = 0; int frameLength = 0; };
-  Pending pending[kTableSlots];
+  /**
+   * One table slot: the table loaded from a file (null where nothing has been built yet), the
+   * file handed over and not yet built (newest wins), and the round in flight - what work()
+   * builds from, what it built, and what workDone retired.
+   */
+  struct Slot {
+    Table* loaded = nullptr;
+    Pending pending;
+    Pending request;
+    Table* built = nullptr;
+    Table* retired = nullptr;
+  };
+  Pool<Slot> slots;
   int pendingCount = 0;
-  /** The round in flight: what work() builds from, what it built, and what workDone retired. */
-  Pending request[kTableSlots];
-  Table* built[kTableSlots] = { nullptr };
-  Table* retired[kTableSlots] = { nullptr };
 
   ~Device() {
-    for (int i = 0; i < kTableSlots; ++i) { delete loaded[i]; delete built[i]; delete retired[i]; }
+    for (Slot& one : slots) { delete one.loaded; delete one.built; delete one.retired; }
   }
 
   void pd_init(double sr) {
@@ -292,6 +317,8 @@ struct Device : pd_own::Device<ids::kCount, 2> {
     // is the non-realtime one (a device is created there), never on the audio thread.
     builtInTables();
     subTable();
+    voices.reserve(kFirstVoices, [](Voice&) {});
+    slots.reserve(kFirstTableSlots, [](Slot&) {});
     for (auto& v : voices) v.init(sr);
     params = VoiceParams();
     voiceCount = 8;
@@ -323,7 +350,7 @@ struct Device : pd_own::Device<ids::kCount, 2> {
     const std::vector<Table>& tables = builtInTables();
     const int i = index < 0 ? 0 : index;
     if (i < static_cast<int>(tables.size())) return &tables[static_cast<size_t>(i)];
-    if (i < kTableSlots && loaded[i]) return loaded[i];
+    if (i < slots.size() && slots[i].loaded) return slots[i].loaded;
     return &tables[0];
   }
 
@@ -332,49 +359,61 @@ struct Device : pd_own::Device<ids::kCount, 2> {
    * in work(). A slot inside the shipped list is not a slot a file can take, as in the browser,
    * where the option list's own entries are the shipped tables.
    */
-  void pd_sample(int param, int slot, const PdSample& file) {
-    if (param != ids::osc1_table && param != ids::osc2_table) return;
-    if (slot < static_cast<int>(builtInTables().size()) || slot >= kTableSlots) return;
-    if (!file.mono || file.frames <= 0) return;
-    if (!pending[slot].mono) ++pendingCount;
-    pending[slot] = Pending{ file.mono, file.frames, file.frameLength };
+  bool pd_sample(int param, int slot, const PdSample& file) {
+    if (param != ids::osc1_table && param != ids::osc2_table) return true;
+    if (slot < static_cast<int>(builtInTables().size())) return true;
+    if (!file.mono || file.frames <= 0) return true;
+    // A slot past the room there is: room is asked for, and the file comes again once it is made.
+    if (slot >= slots.size()) { slots.ask(slot + 1); return false; }
+    Slot& one = slots[slot];
+    if (!one.pending.mono) ++pendingCount;
+    one.pending = Pending{ file.mono, file.frames, file.frameLength };
+    return true;
   }
 
   bool pd_work_wanted() {
-    if (pendingCount == 0) return false;
-    for (int i = 0; i < kTableSlots; ++i) {
-      request[i] = pending[i];
-      pending[i] = Pending();
+    const bool grow = voices.wanted() | slots.wanted();
+    if (pendingCount == 0) return grow;
+    for (Slot& one : slots) {
+      one.request = one.pending;
+      one.pending = Pending();
     }
     pendingCount = 0;
     return true;
   }
 
   void pd_work() {
-    for (int i = 0; i < kTableSlots; ++i) {
-      if (!request[i].mono) continue;
-      built[i] = new Table(tableFromFile("loaded", request[i].mono, request[i].frames, request[i].frameLength));
-      request[i] = Pending();
+    const double sr = sampleRate;
+    voices.build([sr](Voice& v) { v.init(sr); });
+    slots.build([](Slot&) {});
+    for (Slot& one : slots) {
+      if (!one.request.mono) continue;
+      one.built = new Table(tableFromFile("loaded", one.request.mono, one.request.frames, one.request.frameLength));
+      one.request = Pending();
     }
   }
 
   void pd_work_done() {
-    for (int i = 0; i < kTableSlots; ++i) {
-      if (!built[i]) continue;
-      retired[i] = loaded[i];
-      loaded[i] = built[i];
-      built[i] = nullptr;
+    voices.install();
+    slots.install();
+    for (Slot& one : slots) {
+      if (!one.built) continue;
+      one.retired = one.loaded;
+      one.loaded = one.built;
+      one.built = nullptr;
       // Nothing may go on reading the table being retired: a voice on this slot moves to the new
       // one now rather than at its next block, since the old one is freed on another thread.
       for (auto& v : voices) {
-        if (v.osc1.table == retired[i]) v.osc1.setTable(loaded[i]);
-        if (v.osc2.table == retired[i]) v.osc2.setTable(loaded[i]);
+        if (v.osc1.table == one.retired) v.osc1.setTable(one.loaded);
+        if (v.osc2.table == one.retired) v.osc2.setTable(one.loaded);
       }
     }
   }
 
   void pd_work_release() {
-    for (int i = 0; i < kTableSlots; ++i) { delete retired[i]; retired[i] = nullptr; }
+    voices.release();
+    slots.release();
+    for (Slot& one : slots) { delete one.retired; one.retired = nullptr; }
   }
 
   /** The controls, in real units, as the browser's setParams unpacks them into its struct. */
@@ -425,7 +464,12 @@ struct Device : pd_own::Device<ids::kCount, 2> {
     v.glide = p[ids::glide];
     v.glideMode = static_cast<int>(jsRound(p[ids::glide_mode]));
     v.level = p[ids::level];
-    voiceCount = static_cast<int>(clamp(jsRound(p[ids::voices]), 1.0, kMaxVoices));
+    // As many as asked for: past the room there is, room is asked for and the voices made so far
+    // play until it arrives.
+    const double want = jsRound(p[ids::voices]);
+    const int asked = want < 1 ? 1 : (want > 1e6 ? 1000000 : static_cast<int>(want));
+    voices.ask(asked);
+    voiceCount = asked < voices.size() ? asked : voices.size();
   }
 
   /**
@@ -470,11 +514,6 @@ struct Device : pd_own::Device<ids::kCount, 2> {
     voice->holds = holds;
   }
 
-  static bool contains(Voice* const* list, int n, const Voice* v) {
-    for (int i = 0; i < n; ++i) if (list[i] == v) return true;
-    return false;
-  }
-
   /**
    * Note-ons that start together (events[from, to)). Legato plays them in order, as they came.
    * Always deals them as a set: a note already on a voice of its own pitch first, then the rest,
@@ -487,18 +526,19 @@ struct Device : pd_own::Device<ids::kCount, 2> {
       return;
     }
     const int limit = voiceCount;
-    Voice* claimed[kMaxVoices * 2 + 2];
-    int claimedCount = 0;
+    // Which voices this set has claimed: marked on the voice rather than listed, so the set has
+    // no most either.
+    const unsigned mark = ++claimSerial;
     int later[64];
     int laterCount = 0;
     for (int i = from; i < to; ++i) {
       Voice* own = nullptr;
       for (int k = 0; k < limit && !own; ++k) {
         Voice& v = voices[k];
-        if (v.note == events[i].note && !contains(claimed, claimedCount, &v)) own = &v;  // held, releasing or just quiet
+        if (v.note == events[i].note && v.claimMark != mark) own = &v;  // held, releasing or just quiet
       }
       if (!own) { later[laterCount++] = i; continue; }
-      claimed[claimedCount++] = own;
+      own->claimMark = mark;
       play(own, events[i].note, events[i].velocity, -1);
     }
     for (int j = 0; j < laterCount; ++j) {
@@ -506,9 +546,9 @@ struct Device : pd_own::Device<ids::kCount, 2> {
       Voice* source = nullptr;
       double best = 1e300;
       int sourceIndex = -1;
-      for (int k = 0; k < kMaxVoices; ++k) {
+      for (int k = 0; k < voices.size(); ++k) {
         Voice& v = voices[k];
-        if (v.note < 0 || contains(claimed, claimedCount, &v)) continue;
+        if (v.note < 0 || v.claimMark == mark) continue;
         bool pitchInSet = false;
         for (int i = from; i < to; ++i) if (events[i].note == v.note) { pitchInSet = true; break; }
         if (pitchInSet) continue;
@@ -519,8 +559,8 @@ struct Device : pd_own::Device<ids::kCount, 2> {
       Voice* voice = reuse ? source : allocate(e.note);
       const double glideFrom = source ? midiToHz(source->note)
                                       : (voice->active() && voice->note >= 0 ? midiToHz(voice->note) : -1);
-      if (source && claimedCount < kMaxVoices * 2 + 2) claimed[claimedCount++] = source;
-      if (claimedCount < kMaxVoices * 2 + 2) claimed[claimedCount++] = voice;
+      if (source) source->claimMark = mark;
+      voice->claimMark = mark;
       play(voice, e.note, e.velocity, glideFrom);
     }
   }
@@ -561,7 +601,7 @@ struct Device : pd_own::Device<ids::kCount, 2> {
     std::memset(outr, 0, sizeof(float) * static_cast<size_t>(frames));
     // Every ACTIVE voice renders, not only the first `voiceCount`: the count limits what a new
     // note may take, and a voice above it finishes its note rather than being left silent.
-    for (auto& v : voices) if (v.active()) v.process(outl, outr, frames, params);
+    for (auto& v : voices) if (v.active()) v.process(outl, outr, frames, params, *this);
   }
 };
 

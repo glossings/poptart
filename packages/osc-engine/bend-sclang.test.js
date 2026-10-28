@@ -104,23 +104,21 @@ ${SAMPLE_DEFS.map((n) => `    report.(${JSON.stringify(n)}, nc, ${synthDef(n)});
   }
 });
 
-test('the track synth republishes its bend on a bus and posts it for MIDI', (t) => {
-  // buildTrackDef reads a handful of engine-wide values; they are supplied here at the shapes the
-  // real boot gives them. cueOffset nil is the no-cue-pair build, which is the smaller graph.
+test('the track\'s head republishes its bend on a bus and posts it for MIDI', (t) => {
+  // The head of a track (buildHeadDef) is where the bend is, beside the instrument it bends.
   const out = runSclang(`(
 var server = Server(\\poptartBendProbe, NetAddr("127.0.0.1", 57999));
-var playChannels = 2, maxSlots = 8, cueOffset = nil;
+var playChannels = 2, cueOffset = nil, routeNowhere = 1000000;
 var bendPollHz = ${/var bendPollHz = (\d+)/.exec(SRC)[1]};
-var maxBusSends = 4;
 var deckMeterBus = Bus.control(server, 4);
 // trackDefName is a one-liner in the source, so it is written out here rather than lifted: the
 // extractor matches closures that close on a line of their own.
 var trackDefName = { |key| ("poptart_track_" ++ key).asSymbol };
-var buildTrackDef, djIsolator, def;
+var buildHeadDef, djIsolator, def;
 server.options.numOutputBusChannels = 2;
 ${extract('djIsolator')}
-${extract('buildTrackDef')}
-def = buildTrackDef.(\\probe);
+${extract('buildHeadDef')}
+def = buildHeadDef.();
 ("BUILT<" ++ def.isKindOf(SynthDef) ++ ">").postln;
 [\\bend, \\bendrange, \\bendOut].do { |n|
     var c = def.allControlNames.detect({ |k| k.name == n });

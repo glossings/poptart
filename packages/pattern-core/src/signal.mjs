@@ -178,6 +178,13 @@ export class Sig {
     // see _clone().
     this.instrument = opts.instrument ?? null;
     this.fxChain = opts.fxChain ?? [];
+    // The chain as a tree, once a .split() or .bands() has made it one; null while it is a plain
+    // line through fxChain in slot order. A list of items: a slot number, `{ split: [branch] }` or
+    // `{ bands: { slots, freqs, branches } }` (the crossovers' slots and frequencies), each branch
+    // `{ items, level, pan }` (its .postgain() and .pan(), null when unset). fxChain still holds every device by slot - numbering runs straight
+    // through the branches - so everything that addresses a slot reads it as before; only the
+    // engine's wiring reads this (see route.mjs). A crossover's slot holds null in fxChain.
+    this.fxRoute = opts.fxRoute ?? null;
     // "slot:name" -> { slot, name, sig }. Keyed by slot AND name because a chain can hold two
     // plugins with a parameter of the same name - Mix, Drive, Gain and Freq are on half the
     // plugins there are - and a name-only key silently dropped the earlier one. The key is only
@@ -316,6 +323,7 @@ export class Sig {
       how: this.how,
       instrument: this.instrument,
       fxChain: this.fxChain,
+      fxRoute: this.fxRoute,
       paramSignals: this.paramSignals,
       midiInjects: this.midiInjects,
       audioInjects: this.audioInjects,
@@ -758,16 +766,130 @@ export class Sig {
   fx(pluginId, config) {
     assertPluginName('fx', pluginId);
     const slot = this.fxChain.length + 1; // this fx's chain slot (0 = instrument)
-    if (slot === MAX_FX_SLOTS + 1) {
-      // Said once, at the first effect that misses: the engine's chain has a fixed length (see
-      // maxSlots in poptart.scd), so this one and every .fx() after it never load. The rest plays.
-      warnUser(`[signal] a track holds ${MAX_FX_SLOTS} effects - .fx("${pluginId}") is effect ${slot} and won't load, nor will any after it.`);
-    }
     return this._clone({
       fxChain: [...this.fxChain, pluginId],
+      ...(this.fxRoute ? { fxRoute: [...this.fxRoute, slot] } : {}),
       ...(config?.state ? { slotStates: { ...this.slotStates, [slot]: config.state } } : {}),
       slotLabels: this._withLabel(slot, config?.label, 'fx'),
     });
+  }
+
+  /**
+   * Parallel effect branches. Each argument is a function handed the chain at this point and
+   * building an ordinary chain on it - devices, .param(), .preset(), modulators - and the branches
+   * are summed; whatever follows .split() processes the sum:
+   *
+   *   lead: note("c2 eb2 g2").synth("Wavetable")
+   *     .split(
+   *       (x) => x,                                        // the signal as it arrives
+   *       (b) => b.fx("LPG").param("Decay", 0.08),
+   *       (b) => b.fx("LPG").param("Decay", 0.6).pan(-0.5).postgain(0.7),
+   *     )
+   *     .fx("Reverb")                                      // the sum, reverberated
+   *
+   * A branch's .postgain() and .pan() are its own level and pan in the sum, taking anything a
+   * control takes. Every device in every branch is on this one track, so it hears the track's
+   * notes and modulators exactly as a device in a plain chain does, and slot numbering runs straight
+   * through the branches. Branches nest.
+   */
+  split(...branches) {
+    if (!branches.length) {
+      warnUser('[signal] .split() takes the branches as functions, e.g. .split((x) => x, (b) => b.fx("Filter")) - with none it changes nothing.');
+      return this;
+    }
+    const base = this._routed();
+    const { built, after } = base._branches(base, branches, 'split');
+    return after._clone({ fxRoute: [...base.fxRoute, { split: built }] });
+  }
+
+  /**
+   * Splits the signal into frequency bands at the crossovers given, one function per band from the
+   * lowest up (so N frequencies take N + 1 functions), and sums them back - a band left alone is
+   * passed through, and bands nobody touches sum back to the input:
+   *
+   *   drums: s("break").bands([250, 2500], (low) => low, (mid) => mid.fx("Distort").param("Drive", 0.6), (high) => high)
+   *
+   * The crossovers are Linkwitz-Riley, the DJ isolator's kind. They are the engine's, not the
+   * chain's: they take no slot number, so the devices in the bands number as if the .bands() were
+   * a .split() (see route.mjs). Each frequency, in Hz, is a control, so it takes anything a
+   * control takes - `[sine(0.1).range(200, 800)]`, `["<250 400>"]`. A band is a branch of a
+   * .split() in every other way, .postgain() and .pan() included.
+   */
+  bands(freqs, ...branches) {
+    const list = (Array.isArray(freqs) ? freqs : [freqs]).filter((f) => f != null);
+    if (!list.length) {
+      warnUser('[signal] .bands() takes its crossover frequencies first, e.g. .bands([250, 2500], (low) => low, (mid) => mid, (high) => high) - with none it changes nothing.');
+      return this;
+    }
+    const want = list.length + 1;
+    if (branches.length !== want) {
+      warnUser(`[signal] .bands() with ${list.length} crossover${list.length === 1 ? '' : 's'} makes ${want} bands, so it takes ${want} functions - it was given ${branches.length}. ${branches.length < want ? 'The missing bands pass through untouched.' : 'The extra functions are ignored.'}`);
+    }
+    const fns = Array.from({ length: want }, (_, i) => branches[i] ?? ((band) => band));
+    const base = this._routed();
+    const { built, after } = base._branches(base, fns, 'bands');
+    return after._clone({ fxRoute: [...base.fxRoute, { bands: { freqs: list, branches: built } }] });
+  }
+
+  // This chain with its tree started: the slots so far become its first items.
+  _routed() {
+    if (this.fxRoute) return this;
+    return this._clone({ fxRoute: this.fxChain.map((_, i) => i + 1) });
+  }
+
+  // Runs each branch function on the chain as it stands after the previous one, so slot numbers
+  // carry on through them, and gathers what each built. What a branch may change is its own
+  // devices and everything addressed by slot; its .postgain()/.pan() are taken off as the branch's
+  // level and pan, and the notes and the rest of the strip stay the track's.
+  _branches(start, fns, method) {
+    const built = [];
+    let acc = start;
+    const { postgain: outerLevel, pan: outerPan } = start.channel;
+    for (let i = 0; i < fns.length; i++) {
+      const fn = fns[i];
+      if (typeof fn !== 'function') {
+        warnUser(`[signal] .${method}()'s branches are functions, e.g. (b) => b.fx("Filter") - branch ${i + 1} is ${fn === null ? 'null' : typeof fn}, so it passes the signal through.`);
+        built.push({ items: [], level: null, pan: null });
+        continue;
+      }
+      const { postgain: _l, pan: _p, ...rest } = acc.channel;
+      const entry = acc._clone({ fxRoute: [], channel: rest });
+      // A branch that throws throws as the same call would in a plain chain: it is the chain.
+      let out = fn(entry);
+      if (!(out instanceof Sig)) {
+        warnUser(`[signal] .${method}() branch ${i + 1} returned ${out === undefined ? 'nothing' : typeof out} - a branch returns the chain it built, e.g. (b) => b.fx("Filter"). It passes the signal through.`);
+        out = entry;
+      }
+      if (out.sample !== entry.sample || out.instrument !== entry.instrument || out.sampler !== entry.sampler) {
+        warnUser(`[signal] .${method}() branch ${i + 1} changes the notes or the instrument, which belong to the whole track - a branch builds effects. Those changes are ignored.`);
+      }
+      for (const name of Object.keys({ ...rest, ...out.channel })) {
+        if (name === 'postgain' || name === 'pan' || /^wet\d+$/.test(name)) continue;
+        if (out.channel[name] !== rest[name]) {
+          warnUser(`[signal] .${name}() inside a .${method}() branch sets it for the whole track - a branch's own level and pan are its .postgain() and .pan().`);
+        }
+      }
+      built.push({ items: out.fxRoute ?? [], level: out.channel.postgain ?? null, pan: out.channel.pan ?? null });
+      const { postgain: _bl, pan: _bp, ...kept } = out.channel;
+      acc = acc._clone({
+        fxChain: out.fxChain,
+        paramSignals: out.paramSignals,
+        paramRoutes: out.paramRoutes,
+        midiInjects: out.midiInjects,
+        audioInjects: out.audioInjects,
+        slotStates: out.slotStates,
+        presetPatterns: out.presetPatterns,
+        slotLabels: out.slotLabels,
+        busSends: out.busSends,
+        channel: kept,
+      });
+    }
+    const channel = { ...acc.channel };
+    delete channel.postgain;
+    delete channel.pan;
+    if (outerLevel !== undefined) channel.postgain = outerLevel;
+    if (outerPan !== undefined) channel.pan = outerPan;
+    return { built, after: acc._clone({ channel }) };
   }
 
   // The slot labels with `label` given to `slot` (or taken off it, for a call with none - a
@@ -879,12 +1001,6 @@ export class Sig {
   _wetAt(slot, value) {
     if (slot === 0) {
       throw new Error('[signal] .wet() turns an effect down - put it after an .fx(...), e.g. .fx("ValhallaRoom").wet(0.3)');
-    }
-    if (slot > MAX_FX_SLOTS) {
-      // Warn rather than throw: the chain past this point doesn't run either (see maxSlots in
-      // poptart.scd), and silencing the track over it would be the worse failure.
-      warnUser(`[signal] .wet() only reaches the first ${MAX_FX_SLOTS} effects on a track - the one in slot ${slot} stays fully wet.`);
-      return this;
     }
     return this._clone({ channel: { ...this.channel, [`wet${slot}`]: toSignal(value) } });
   }
@@ -5502,7 +5618,9 @@ export function bendRangeWarning(semitones, range) {
 // rest - real controls on the track synth, addressed at pseudo-slot -1 - rather than plugin
 // parameters, which is what lets them ramp, take a modulator and reset on re-eval for free. 1 is
 // the plugin's own output, so a chain nobody has called .wet() on sounds exactly as it always did.
-export const MAX_FX_SLOTS = 20; // must match maxSlots - 1 in poptart.scd (slot 0 is the instrument)
+// How many wet controls the defaults below name. Not a limit: a chain is as long as the code makes
+// it, and every wetN past these rests at 1 as they do (see channelDefault).
+export const MAX_FX_SLOTS = 20;
 // The binops a constant can be folded into a modulator's bounds through (see _binopValues).
 const LINEAR_OPS = new Set(['add', 'sub', 'mul', 'div']);
 
@@ -5531,6 +5649,12 @@ export const CHANNEL_DEFAULTS = {
   ...Object.fromEntries(Array.from({ length: MAX_FX_SLOTS }, (_, i) => [`wet${i + 1}`, 1])),
 };
 
+/** What a channel control reads as when nothing sets it, or undefined for a name that is none. */
+export function channelDefault(name) {
+  if (name in CHANNEL_DEFAULTS) return CHANNEL_DEFAULTS[name];
+  return /^wet\d+$/.test(String(name)) ? 1 : undefined;
+}
+
 // The track channel strip (Sig#gain/#pan/#width/...) across a .when(): the same switch the
 // per-onset controls get above, with one difference. These are STREAMED values, not per-event
 // ones, so a branch that doesn't set the control can't just rest - the engine would be left
@@ -5550,7 +5674,7 @@ function condSwitchChannel(before, after, condAt, truthy) {
       if (kept != null) out[key] = kept;
       continue;
     }
-    const neutral = CHANNEL_DEFAULTS[key] ?? 0;
+    const neutral = channelDefault(key) ?? 0;
     out[key] = new Sig((t, cps, pos) => {
       const branch = truthy(condAt(pos ?? t * cps)) ? on : off;
       return branch ? branch.sample(t, cps, pos) : neutral;
@@ -6414,6 +6538,7 @@ function buildJoin(builder, options, slotsForCycle) {
     warnUser(`[signal] ${builder}() options carrying their own synth()/fx() aren't patterned yet - every option plays through the first one's chain. Put the chain after ${builder}(...) instead.`);
     joined.instrument = chained.instrument;
     joined.fxChain = chained.fxChain;
+    joined.fxRoute = chained.fxRoute;
     joined.slotStates = chained.slotStates;
     joined.presetPatterns = chained.presetPatterns; // travels with the chain it sets, like slotStates
     joined.slotLabels = chained.slotLabels;
@@ -8539,3 +8664,7 @@ export function input(...args) {
     inputSource: { io: 'audio', name: `dev:${device ?? ''}`, hw: { device, chans } },
   });
 }
+
+// For route.mjs, which turns a chain's split/bands tree into the engine's wiring and composes
+// branch levels the way .postgain() composes its own factors.
+export { toSignal, multiplyGain };

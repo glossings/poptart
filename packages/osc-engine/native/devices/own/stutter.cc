@@ -80,11 +80,6 @@ struct Device : pd_own::Device<ids::kCount> {
                                   syncedSeconds(jsRoundInt(p[ids::grid]), bpm, 0.125));
     const int seed = jsRoundInt(p[ids::seed]);
     const int wantTotal = static_cast<int>(std::fmax(1.0, jsRound(p[ids::repeats])));
-    const double chance = p[ids::chance];
-    const double decay = p[ids::decay];
-    const double pitch = p[ids::pitch];
-    const double wet = p[ids::wet];
-    const double dryLevel = p[ids::dry];
     const float* inl = inL();
     const float* inr = inR();
     float* outl = outL();
@@ -108,7 +103,7 @@ struct Device : pd_own::Device<ids::kCount> {
       const long long beat = static_cast<long long>(std::floor(transportSec / interval));
       if (beat != lastInterval) {
         const int sliceLength = static_cast<int>(std::fmax(1.0, jsRound(grid * sampleRate)));
-        if (lastInterval >= 0 && fresh >= sliceLength && hashChance(beat, seed) < chance) {
+        if (lastInterval >= 0 && fresh >= sliceLength && hashChance(beat, seed) < ctl(ids::chance, i)) {
           length = sliceLength;
           start = (write - length + size) % size;
           pos = 0;
@@ -123,6 +118,8 @@ struct Device : pd_own::Device<ids::kCount> {
       double wetR = 0;
       bool playing = false;
       if (active) {
+        const double decay = ctl(ids::decay, i);
+        const double pitch = ctl(ids::pitch, i);
         const double level = std::pow(1 - decay, count);
         const double rate = std::pow(2.0, (pitch * count) / 12.0);
         const int whole = static_cast<int>(std::floor(pos));
@@ -147,7 +144,8 @@ struct Device : pd_own::Device<ids::kCount> {
       }
       // The original at its own level only while a repeat is sounding: between repeats the
       // track plays as it is, whatever the dry control says.
-      const double dry = playing ? dryLevel : 1.0;
+      const double dry = playing ? ctl(ids::dry, i) : 1.0;
+      const double wet = ctl(ids::wet, i);
       outl[i] = static_cast<float>(l * dry + wetL * wet);
       outr[i] = static_cast<float>(r * dry + wetR * wet);
     }

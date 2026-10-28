@@ -67,8 +67,6 @@ struct Device : pd_own::Device<ids::kCount> {
     // The length approaches its target over about twenty milliseconds, which is a glide and not
     // a jump: a set that sweeps the time hears a pitch bend, as it would from a tape.
     const double k = 1.0 - std::exp(-1.0 / (0.02 * sampleRate));
-    const double fb = p[ids::feedback];
-    const double mix = p[ids::mix];
 
     const float* inl = inL();
     const float* inr = inR();
@@ -80,6 +78,8 @@ struct Device : pd_own::Device<ids::kCount> {
     for (int i = 0; i < frames; ++i) {
       lenL += (targetL - lenL) * k;
       lenR += (targetR - lenR) * k;
+      const double fb = ctl(ids::feedback, i);
+      const double mix = ctl(ids::mix, i);
       const double dryL = inl[i];
       const double dryR = inr[i];
       const double readL = lines[0].readLinear(lenL);

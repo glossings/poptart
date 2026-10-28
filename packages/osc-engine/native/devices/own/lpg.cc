@@ -72,15 +72,12 @@ struct Device : pd_own::Device<ids::kCount, 2> {
   void pd_process(int frames) {
     const double sr = sampleRate;
     const int mode = static_cast<int>(clamp(jsRound(p[ids::mode]), 0.0, kModes - 1));
-    const double level = clamp(p[ids::level], 0.0, 1.0);
-    const double decay = p[ids::decay];
-    const double res = clamp(p[ids::resonance], 0.0, 1.0);
-    const double out = dbToGain(p[ids::output]);
     const float* inl = inL();
     const float* inr = inR();
     float* outl = outL();
     float* outr = outR();
     for (int i = 0; i < frames; ++i) {
+      const double level = clamp(ctl(ids::level, i), 0.0, 1.0);
       double drive = level;
       if (noteRouted) {
         // Every strike that arrived before this block lands on its first sample.
@@ -98,11 +95,12 @@ struct Device : pd_own::Device<ids::kCount, 2> {
       if (drive > light) {
         light += (drive - light) * attackK;
       } else {
-        const double tau = (decay * 0.25) / (0.3 + 0.7 * light);
+        const double tau = (ctl(ids::decay, i) * 0.25) / (0.3 + 0.7 * light);
         light += (drive - light) / (1 + tau * sr);
       }
       if (light < kDark) light = 0;
 
+      const double res = clamp(ctl(ids::resonance, i), 0.0, 1.0);
       if (light != lastLight || res != lastRes) {
         const double cutoff = std::fmin(0.45 * sr, kCutoffLow * std::pow(kCutoffSpan, light));
         const double g = std::tan((kPi * cutoff) / sr);
@@ -114,6 +112,7 @@ struct Device : pd_own::Device<ids::kCount, 2> {
         lastLight = light;
         lastRes = res;
       }
+      const double out = dbToGain(ctl(ids::output, i));
       const double xl = inl[i];
       const double xr = inr[i];
       double yl = xl;

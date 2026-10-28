@@ -65,9 +65,12 @@ var reorderTracks, resolveParamIndex, dropRamp, feeds, released, buses, drops, n
 // The expression half of the lifted section, and what it leans on - compiled here, exercised by
 // param-expr-sclang.test.js.
 var exprLeaf, busIndexOf, paramTarget, reassertAudioDrivers, awaitTarget, awaitLoaded, channelDefault;
+var channelTarget = { |track, name| [track[\\synth], name.asSymbol] }; // every channel control on the one synth here - see channelTarget in sc/poptart.scd
 var exprDefs, exprKey, exprsOf, exprFeedsOf, exprFeed, exprFeedArgs, exprShape, exprConsts, exprInputs;
 var exprSynthDef, installExpr, clearExpr, exprQueue, reassertExprs, exprRun;
+var exprDefUse = Dictionary.new, exprDefSerial = 0, exprDefDone, freeDefsLater; // see exprDefDone in sc/poptart.scd
 var server, nodeOwns, freeModulatorLater;
+var loopEdges = Set.new, routeCloses = { false }, busWriters; // see trackLevels in sc/poptart.scd
 paramRoutes = IdentityDictionary.new;
 sidechainByTarget = IdentityDictionary.new;
 namedBuses = IdentityDictionary.new;

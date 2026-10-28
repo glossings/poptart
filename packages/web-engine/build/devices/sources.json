@@ -74,7 +74,7 @@
           "id": "Warps",
           "kind": "fx",
           "status": "retired",
-          "note": "Was built; retired from the catalog on 2026-09-23. It needs a carrier patched in with .audio(), and after two rounds of wrapper fixes (the fifo feeding it whole 96-frame blocks, and dropping the internal carrier that made it drone through rests) it still produced digital noise across most of its algorithm range. The Wavetable's FM, PM and ring warp modes cover what it was here for. The build script still compiles it."
+          "note": "Retired from the catalog on 2026-09-23, and no longer built. It needs a carrier patched in with .audio(), and after two rounds of wrapper fixes (the fifo feeding it whole 96-frame blocks, and dropping the internal carrier that made it drone through rests) it still produced digital noise across most of its algorithm range. The Wavetable's FM, PM and ring warp modes cover what it was here for."
         },
         {
           "id": "Ripples",

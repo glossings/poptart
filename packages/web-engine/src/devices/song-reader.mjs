@@ -15,6 +15,9 @@
 // A start or a seek while something is already sounding is a crossfade: the old read fades out
 // under the new one over a few milliseconds, which is what makes a seek click-free and a cue
 // press while playing a jump rather than a stop and a start.
+//
+// Every time is when the moment is HEARD. A reader with a `lead` reads that far ahead of it:
+// the keylock's read, which its shifter then delays by the same amount (see aheadBy).
 
 /** The fade a start or a seek comes in over, and the old read goes out under. */
 export const SONG_FADE_SEC = 0.005;
@@ -42,6 +45,26 @@ export class SongReader {
     this.rate = 1;
     this.voices = [];   // { pos (frames), gain, step, halt (rate multiplier) | null, haltStep }
     this.events = [];   // { frame, ...message }, soonest first
+    this.lead = 0;      // frames this reader reads ahead of the time it is heard
+  }
+
+  /**
+   * A copy of this reader, run on `lead` frames past `frameNow` and reading that far ahead from
+   * then on - so that whatever delays it by `lead` is heard exactly in step with this one.
+   */
+  aheadBy(lead, frameNow) {
+    const ahead = new SongReader(this.sampleRate);
+    ahead.planes = this.planes;
+    ahead.frames = this.frames;
+    ahead.rate = this.rate;
+    ahead.voices = this.voices.map((v) => ({ ...v }));
+    ahead.events = this.events.map((e) => ({ ...e }));
+    ahead.lead = this.lead;
+    const l = new Float32Array(128);
+    const r = new Float32Array(128);
+    for (let done = 0; done < lead; done += 128) ahead.process(l, r, Math.min(128, lead - done), frameNow + done);
+    ahead.lead = this.lead + lead;
+    return ahead;
   }
 
   receive(message) {
@@ -72,8 +95,11 @@ export class SongReader {
     else this.events.splice(at, 0, event);
   }
 
-  /** Applies one timed message, on the sample it was timed for. */
-  apply(event) {
+  /**
+   * Applies one timed message, on the sample it was timed for. `late` is how many frames after
+   * that it arrived: a start or a seek begins that much further on, so it keeps time.
+   */
+  apply(event, late = 0) {
     const sr = this.sampleRate;
     switch (event.kind) {
       case 'start':
@@ -81,7 +107,7 @@ export class SongReader {
         if (event.kind === 'start' && Number.isFinite(event.rate)) this.rate = event.rate;
         const fade = Math.max(1, Math.round(SONG_FADE_SEC * sr));
         for (const v of this.voices) v.step = -Math.max(v.gain, 1e-6) / fade;
-        this.voices.push({ pos: Number(event.pos) * sr, gain: 0, step: 1 / fade, halt: null, haltStep: 0 });
+        this.voices.push({ pos: Number(event.pos) * sr + (Number.isFinite(late) && late > 0 ? late * this.rate : 0), gain: 0, step: 1 / fade, halt: null, haltStep: 0 });
         break;
       }
       case 'rate':
@@ -110,10 +136,14 @@ export class SongReader {
   process(outL, outR, frames, frameNow) {
     outL.fill(0);
     outR?.fill(0);
+    const heard = frameNow + this.lead;
     let at = 0;
     while (at < frames) {
-      while (this.events.length && this.events[0].frame <= frameNow + at) this.apply(this.events.shift());
-      const next = this.events.length ? this.events[0].frame - frameNow : Infinity;
+      while (this.events.length && this.events[0].frame <= heard + at) {
+        const event = this.events.shift();
+        this.apply(event, heard + at - event.frame);
+      }
+      const next = this.events.length ? this.events[0].frame - heard : Infinity;
       const until = Math.min(frames, Math.max(at + 1, next));
       if (this.planes && this.voices.length) this.render(outL, outR, at, until);
       at = until;

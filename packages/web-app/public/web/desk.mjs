@@ -14,9 +14,10 @@
 //   - The engine runs on the audio context's clock, which is also the clock everything is
 //     scheduled on - so there is no drift between the song players and the model of them, and
 //     none of the desktop's drift servo.
-//   - A song is heard a fixed time after its player reads it (the keylock shifter's latency, which
-//     the plain path is delayed to match - see web-engine's song-player.mjs). The model here is
-//     kept in HEARD time, and every event is sent to the player that much early.
+//   - The player is told when each change is HEARD (see web-engine's song-player.mjs). A deck
+//     with keylock on is heard the shifter's latency after its player reads, so a change made
+//     "now" lands that lead later there, and none later with keylock off. The model here is kept
+//     in heard time, and timed events are sent the most that lead can be early.
 //   - A song comes from the music folder chosen in the settings (music-folder.mjs), decoded by
 //     the browser, and is analyzed - its waveform, its beatgrid and its key - on a worker
 //     (song-worker.mjs) with the same maths the desktop's analysis worker runs.
@@ -99,7 +100,7 @@ class Unsupported extends Error {
 export function createDesk({ patternCore, engine, transport, songSync, linkSync, store = null, songs = null, blockEvaluator = null, library = null, writeSet = null, parseMeta = null, midi = null, log = () => {} }) {
   let evaluator = null;
   const now = () => engine.getTime();
-  // How long after the player reads it a moment of a song is heard (see the header).
+  // The most a song is ever late: how far ahead a timed event is sent (see the header).
   const LAT = Number(engine.songLatency) || 0;
 
   // ---------------------------------------------------------------------------------------------
@@ -320,16 +321,18 @@ export function createDesk({ patternCore, engine, transport, songSync, linkSync,
     return Math.min(Math.max(0, pos), s.duration);
   }
 
-  /** The moment a change sent to the player now is heard - and the player's time for `heard`. */
-  const heardNow = () => now() + LAT;
-  const playerAt = (heard) => Math.max(now(), heard - LAT);
+  /** The soonest a change to a deck's song can be heard - and `heard`, held to it. */
+  const leadOf = (deck) => Number(engine.songLead?.(trackIdOf(SONG_KEYS[deck]))) || 0;
+  const heardNow = (deck) => now() + leadOf(deck);
+  const heardAt = (deck, heard) => Math.max(heardNow(deck), heard);
 
   function songPause(deck, posSec = null) {
     const s = songDecks[deck];
     if (!s?.playing) return;
-    try { engine.songPause(trackIdOf(SONG_KEYS[deck]), now()); } catch { /* torn down */ }
-    // Where the halt is heard - a pause pressed now lands a latency later.
-    songMarkPaused(deck, posSec ?? songPlayheadSec(deck, heardNow()));
+    const at = heardNow(deck);
+    try { engine.songPause(trackIdOf(SONG_KEYS[deck]), at); } catch { /* torn down */ }
+    // Where the halt is heard - a pause pressed now lands the deck's lead later.
+    songMarkPaused(deck, posSec ?? songPlayheadSec(deck, at));
   }
 
   function songMarkPaused(deck, posSec = null) {
@@ -351,7 +354,7 @@ export function createDesk({ patternCore, engine, transport, songSync, linkSync,
   function songEndOfFile(deck, endAt) {
     const s = songDecks[deck];
     if (!s?.playing) return;
-    try { engine.songStop(trackIdOf(SONG_KEYS[deck]), playerAt(endAt - SONG_RELEASE_SEC), SONG_RELEASE_SEC); } catch { /* torn down */ }
+    try { engine.songStop(trackIdOf(SONG_KEYS[deck]), heardAt(deck, endAt - SONG_RELEASE_SEC), SONG_RELEASE_SEC); } catch { /* torn down */ }
     songMarkPaused(deck, s.duration);
     mixNotify();
   }
@@ -370,8 +373,7 @@ export function createDesk({ patternCore, engine, transport, songSync, linkSync,
     const t = now();
     const begin = Math.max(t, s.startSec);
     const endAt = begin + (s.duration - songPlayheadSec(deck, begin)) / s.rate;
-    // Sent ahead of the moment the PLAYER has to begin its release, which is a latency before
-    // the release is heard.
+    // Sent ahead of the release by the most a deck's lead can be, so it is never late.
     const sendIn = endAt - SONG_RELEASE_SEC - LAT - SONG_SEND_AHEAD_SEC - t;
     s.endTimer = setTimeout(() => {
       s.endTimer = null;
@@ -398,7 +400,7 @@ export function createDesk({ patternCore, engine, transport, songSync, linkSync,
       s.loopTimer = null;
       if (!s.playing || !s.loop) return;
       const to = s.loop.from;
-      try { engine.songSeek(trackIdOf(SONG_KEYS[deck]), to, playerAt(wrapAt)); } catch { /* torn down */ }
+      try { engine.songSeek(trackIdOf(SONG_KEYS[deck]), to, heardAt(deck, wrapAt)); } catch { /* torn down */ }
       s.loopApplyTimer = setTimeout(() => {
         s.loopApplyTimer = null;
         if (!s.playing || !s.loop) return;
@@ -447,9 +449,8 @@ export function createDesk({ patternCore, engine, transport, songSync, linkSync,
 
   /**
    * Apply the current effective rate (sync x nudge x bend), rebasing the playhead model at the
-   * moment the change is HEARD - a latency after it is sent - so the model stays exact through
-   * any number of rate moves. A start that has not reached the player yet takes the new rate at
-   * its own moment instead.
+   * moment the change is HEARD - the deck's lead after it is sent - so the model stays exact
+   * through any number of rate moves. A start not heard yet takes the new rate at its own moment.
    */
   function songApplyRate(deck) {
     const s = songDecks[deck];
@@ -457,19 +458,19 @@ export function createDesk({ patternCore, engine, transport, songSync, linkSync,
     const eff = songSync.effectiveRate(songBaseRate(deck), s.nudge, s.bend ?? 0);
     if (eff === s.rate) return;
     const tid = trackIdOf(SONG_KEYS[deck]);
-    if (s.playing && now() >= s.startSec - LAT) {
-      const at = heardNow();
+    if (s.playing && heardNow(deck) >= s.startSec) {
+      const at = heardNow(deck);
       s.posSec = songPlayheadSec(deck, at);
       s.startSec = at;
       s.rateBefore = s.rate;
       s.rate = eff;
-      try { engine.songRate(tid, eff, now()); } catch { /* torn down */ }
+      try { engine.songRate(tid, eff, at); } catch { /* torn down */ }
       songArmTimers(deck);
       if (deck === songFollow.deck) clockFollowSong();
     } else {
       s.rate = eff;
       if (s.playing) {
-        try { engine.songRate(tid, eff, playerAt(s.startSec)); } catch { /* torn down */ }
+        try { engine.songRate(tid, eff, heardAt(deck, s.startSec)); } catch { /* torn down */ }
         songArmTimers(deck);
       }
     }
@@ -492,12 +493,13 @@ export function createDesk({ patternCore, engine, transport, songSync, linkSync,
     return { deck, nudge: s.nudge, pos: s.posSec, rate: s.rate };
   }
 
-  /** A seek on a playing deck: the player jumps now, and the jump is heard a latency later. */
+  /** A seek on a playing deck: heard as soon as the deck's lead allows. */
   function songSeekPlaying(deck, to) {
     const s = songDecks[deck];
-    try { engine.songSeek(trackIdOf(SONG_KEYS[deck]), to, now()); } catch { /* torn down */ }
+    const at = heardNow(deck);
+    try { engine.songSeek(trackIdOf(SONG_KEYS[deck]), to, at); } catch { /* torn down */ }
     s.posSec = to;
-    s.startSec = heardNow();
+    s.startSec = at;
     s.rateBefore = s.rate;
     songArmTimers(deck);
   }
@@ -521,7 +523,7 @@ export function createDesk({ patternCore, engine, transport, songSync, linkSync,
       s.nudge = 0;
       s.bend = 0;
       s.rate = songSync.effectiveRate(songBaseRate(deck), 0);
-      engine.songStart(tid, s.cueSec, s.rate, playerAt(startSec), !!s.keylock);
+      engine.songStart(tid, s.cueSec, s.rate, heardAt(deck, startSec), !!s.keylock);
       s.posSec = s.cueSec;
       s.startSec = startSec;
       s.rateBefore = 0;
@@ -582,7 +584,7 @@ export function createDesk({ patternCore, engine, transport, songSync, linkSync,
     s.bend = 0;
     s.cueHeld = false;
     s.rate = songSync.effectiveRate(songBaseRate(deck), 0);
-    engine.songStart(trackIdOf(SONG_KEYS[deck]), from, s.rate, playerAt(startSec), !!s.keylock);
+    engine.songStart(trackIdOf(SONG_KEYS[deck]), from, s.rate, heardAt(deck, startSec), !!s.keylock);
     s.posSec = from;
     s.startSec = startSec;
     s.rateBefore = 0;
@@ -661,7 +663,7 @@ export function createDesk({ patternCore, engine, transport, songSync, linkSync,
     }
     if ('keylock' in patch && !!patch.keylock !== !!s.keylock) {
       s.keylock = !!patch.keylock;
-      // Both paths are equally late, so the switch is a crossfade at the playhead - nothing moves.
+      // Both paths carry the same moment of the song, so the switch is a crossfade - nothing moves.
       try { engine.songKeylock(trackIdOf(SONG_KEYS[deck]), s.keylock, now()); } catch { /* torn down */ }
     }
     if ('quantize' in patch) {

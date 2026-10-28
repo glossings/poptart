@@ -65,15 +65,6 @@ struct Device : pd_own::Device<ids::kCount> {
 
   void pd_process(int frames) {
     const int sync = jsRoundInt(p[ids::sync]);
-    const double density = p[ids::density];
-    const double timeWant = p[ids::time];
-    const double sprayAmount = p[ids::spray];
-    const double sizeMs = p[ids::size];
-    const double pitch = p[ids::pitch];
-    const double randomAmount = p[ids::random];
-    const double spread = p[ids::spread];
-    const double fb = p[ids::feedback];
-    const double mix = p[ids::mix];
     const float* inl = inL();
     const float* inr = inR();
     float* outl = outL();
@@ -86,17 +77,20 @@ struct Device : pd_own::Device<ids::kCount> {
       if (--until <= 0) {
         // Guarded on the way into an int, which the browser's number does not have to be: a
         // density of zero is an infinite wait there and undefined behavior here.
+        const double density = ctl(ids::density, i);
         const double wait = jsRound(sampleRate / density * (0.7 + 0.6 * random()));
         until = (isPlayable(wait) && wait < 1e9) ? static_cast<int>(wait) : (1 << 30);
         if (until < 1) until = 1;
         DelayGrain* g = nullptr;
         for (auto& one : grains) if (!one.on) { g = &one; break; }
         if (g) {
-          const double time = std::fmin(kGrainMaxSec * 0.9, syncedSeconds(sync, bpm, timeWant));
-          const double spray = sprayAmount * time * (random() * 2 - 1);
+          const double time =
+              std::fmin(kGrainMaxSec * 0.9, syncedSeconds(sync, bpm, ctl(ids::time, i)));
+          const double spray = ctl(ids::spray, i) * time * (random() * 2 - 1);
           const double back = std::fmax(0.001, time + spray) * sampleRate;
-          double len = std::fmax(32.0, jsRound(sizeMs * 0.001 * sampleRate));
-          const double rate = std::pow(2.0, (pitch + randomAmount * (random() * 2 - 1)) / 12.0);
+          double len = std::fmax(32.0, jsRound(ctl(ids::size, i) * 0.001 * sampleRate));
+          const double rate =
+              std::pow(2.0, (ctl(ids::pitch, i) + ctl(ids::random, i) * (random() * 2 - 1)) / 12.0);
           // A grain read faster than time passes gains on the write head by (rate - 1) samples a
           // sample, and one read slower falls behind. It has to stay inside the recorded audio
           // for its whole life; one too long to fit either way is shortened.
@@ -110,7 +104,7 @@ struct Device : pd_own::Device<ids::kCount> {
           g->rate = rate;
           g->pos = std::fmod(write - start + size * 4.0, static_cast<double>(size));
           g->at = 0;
-          const double pan = (random() * 2 - 1) * spread;
+          const double pan = (random() * 2 - 1) * ctl(ids::spread, i);
           g->l = std::cos(((pan + 1) * M_PI) / 4) * M_SQRT2;
           g->r = std::sin(((pan + 1) * M_PI) / 4) * M_SQRT2;
           g->on = true;
@@ -135,6 +129,7 @@ struct Device : pd_own::Device<ids::kCount> {
         if (g.pos >= size) g.pos -= size;
         if (++g.at >= g.len) g.on = false;
       }
+      const double fb = ctl(ids::feedback, i);
       // A number that cannot be played is stored as silence: kept, it would come back round the
       // feedback for as long as the device lives.
       const double keepL = l + std::tanh(wetL * fb);
@@ -142,6 +137,7 @@ struct Device : pd_own::Device<ids::kCount> {
       bufL[write] = isPlayable(keepL) ? static_cast<float>(keepL) : 0.f;
       bufR[write] = isPlayable(keepR) ? static_cast<float>(keepR) : 0.f;
       write = (write + 1) % size;
+      const double mix = ctl(ids::mix, i);
       outl[i] = static_cast<float>(l + (wetL - l) * mix);
       outr[i] = static_cast<float>(r + (wetR - r) * mix);
     }

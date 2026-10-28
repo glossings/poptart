@@ -51,6 +51,7 @@ var srv = Server(\\poptartProbe, NetAddr("127.0.0.1", 57999));
 var tracks = IdentityDictionary.new;
 var nodeGoneSaid = IdentitySet.new, nodeOwns = { |nodeID, what| }, deadNodes = IdentitySet.new; // the engine's node bookkeeping (see nodeOwns in sc/poptart.scd) - inert here
 var clearMidiRoute, slotLive;
+var slotNode = { |track, slot| track[\\synth] }; // the node a slot is (see slotNode in sc/poptart.scd) - here the one synth
 var mk = { |name, sdk, envId| (
     midiRoute: (keys: [], sounding: IdentityDictionary[(0 * 128) + 60 -> 62, (3 * 128) + 64 -> 64]),
     loaded: ["plugin"], // slot 0 has its plugin open (see slotLive) - the one the teardown releases through

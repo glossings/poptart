@@ -29,9 +29,11 @@ import { MULTIBAND, MultibandProcessor } from '../devices/multiband.mjs';
 import { STUTTER, StutterProcessor } from '../devices/stutter.mjs';
 import { GRAINECHO, GrainEchoProcessor } from '../devices/grainecho.mjs';
 import { LPG, LpgProcessor } from '../devices/lpg.mjs';
+import { CROSSOVER, CrossoverProcessor } from '../devices/crossover.mjs';
 import { RecorderTap } from '../devices/recorder.mjs';
 import { compileExpr, exprConsts, exprInputCount, renderExpr } from '../dsp/expr.mjs';
 import { SongReader } from '../devices/song-reader.mjs';
+import { GrainCloud, WarpCloud, grainFiles } from '../devices/grain-cloud.mjs';
 import { Reporter, isDispose, parameterDescriptorsFor, realParams } from './shared.mjs';
 
 class EffectProcessor extends AudioWorkletProcessor {
@@ -73,8 +75,9 @@ class EffectProcessor extends AudioWorkletProcessor {
     const out = outputs[0];
     if (!out || out.length === 0) return true;
     const params = realParams(this.descriptor, parameters, this.real, this.scratch);
-    // The clock rides along for the devices on the grid: a ducker, a beat repeat.
-    this.fx.process(input, out, out[0].length, params, inputs[1] ?? null, currentTime);
+    // The clock rides along for the devices on the grid: a ducker, a beat repeat. A device with
+    // more than one output (the Crossover) finds the others after it.
+    this.fx.process(input, out, out[0].length, params, inputs[1] ?? null, currentTime, outputs.length > 1 ? outputs.slice(1) : null);
     this.reporter.tick(parameters, () => this.fx.report?.());
     // A quiet input is a rest, not a reason to stop: see the same note on the synth.
     return true;
@@ -87,7 +90,7 @@ const EFFECTS = [
   [EQ, EqProcessor], [CHORUS, ChorusProcessor], [FLANGER, FlangerProcessor], [PHASER, PhaserProcessor],
   [DUCKER, DuckerProcessor], [OVERDRIVE, OverdriveProcessor], [MULTIBAND, MultibandProcessor],
   [STUTTER, StutterProcessor], [GRAINECHO, GrainEchoProcessor], [FREQSHIFT, FreqShiftProcessor],
-  [VOICE, VoiceProcessor], [LPG, LpgProcessor],
+  [VOICE, VoiceProcessor], [LPG, LpgProcessor], [CROSSOVER, CrossoverProcessor],
 ];
 
 for (const [descriptor, Impl] of EFFECTS) {
@@ -150,22 +153,68 @@ registerProcessor('poptart-recorder', class extends AudioWorkletProcessor {
 });
 
 // The song player (see devices/song-reader.mjs): a DJ deck's decoded song under a playhead. Not an
-// effect either, and here for the same reason the recorder is.
+// effect either, and here for the same reason the recorder is. Output 0 is the song as heard;
+// output 1, only while keylock wants it, is the same song read a lead ahead, for the shifter.
 registerProcessor('poptart-song', class extends AudioWorkletProcessor {
   constructor(options) {
     super(options);
     this.alive = true;
     this.reader = new SongReader(sampleRate, (m) => this.port.postMessage(m));
+    this.ahead = null;
+    this.wantAhead = null;    // frames of lead to start the ahead read with, or 0 to end it
     this.port.onmessage = (event) => {
-      if (isDispose(event.data)) { this.alive = false; return; }
-      this.reader.receive(event.data);
+      const m = event.data;
+      if (isDispose(m)) { this.alive = false; return; }
+      if (m?.kind === 'ahead') { this.wantAhead = m.on ? Math.max(1, Math.round(m.lead * sampleRate)) : 0; return; }
+      this.reader.receive(m);
+      if (m?.kind !== 'query') this.ahead?.receive(m);
     };
   }
 
   process(_inputs, outputs) {
     if (!this.alive) return false;
+    if (this.wantAhead != null) {
+      if (this.wantAhead > 0 && !this.ahead) this.ahead = this.reader.aheadBy(this.wantAhead, currentFrame);
+      else if (this.wantAhead === 0) this.ahead = null;
+      this.wantAhead = null;
+    }
     const out = outputs[0] ?? [];
     if (out[0]) this.reader.process(out[0], out[1] ?? null, out[0].length, currentFrame);
+    const keyed = outputs[1] ?? [];
+    if (this.ahead && keyed[0]) this.ahead.process(keyed[0], keyed[1] ?? null, keyed[0].length, currentFrame);
     return true;
+  }
+});
+
+// The granular sample voices (see devices/grain-cloud.mjs): one per .grain() or .stretch()
+// event. The first voice of a file brings its samples in its options; later ones name it.
+registerProcessor('poptart-grains', class extends AudioWorkletProcessor {
+  static get parameterDescriptors() {
+    return ['size', 'density', 'pan', 'pos', 'detune'].map((name) => ({ name, defaultValue: 0, automationRate: 'a-rate' }));
+  }
+
+  constructor(options) {
+    super(options);
+    const o = options?.processorOptions ?? {};
+    grainFiles(o);
+    this.cloud = o.mode === 'warp' ? new WarpCloud(sampleRate, o) : new GrainCloud(sampleRate, o);
+    this.ended = false;
+    this.port.onmessage = (event) => {
+      const m = event.data;
+      if (isDispose(m)) { this.cloud.done = true; return; }
+      if (m?.kind === 'end') this.cloud.end(m.time);
+      grainFiles(m);
+    };
+  }
+
+  process(_inputs, outputs, parameters) {
+    const out = outputs[0] ?? [];
+    if (!out[0]) return !this.cloud.done;
+    const live = this.cloud.process(out[0], out[1] ?? new Float32Array(out[0].length), out[0].length, currentFrame, parameters);
+    if (!live && !this.ended) {
+      this.ended = true;
+      this.port.postMessage({ kind: 'ended' });
+    }
+    return live;
   }
 });

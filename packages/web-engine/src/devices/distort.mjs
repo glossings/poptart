@@ -19,8 +19,6 @@ import { DcBlocker, OnePole } from '../dsp/filters.mjs';
 import { Oversampler } from '../dsp/oversample.mjs';
 import { ASYMMETRIC, SHAPER_INDEX, SHAPER_MODES, TAKES_CHARACTER, autoGainFor, characterStep, chebyHarmonic, shape } from '../dsp/shapers.mjs';
 
-/** How many drawn curves the device holds at once, past the ones it ships with. */
-const SHAPE_SLOTS = 8;
 
 /** How long a change of curve takes to crossfade, in seconds: long enough not to click. */
 const CURVE_FADE_SEC = 0.01;
@@ -43,7 +41,7 @@ export const DISTORT = defineDevice({
   description: 'Waveshaping with fifteen curves or one you draw, oversampled, with a tone control and a dry/wet.',
   channels: { in: 2, out: 2 },
   params: [
-    { id: 'mode', name: 'Mode', default: 0, options: [...SHAPER_MODES], capacity: SHAPER_MODES.length + SHAPE_SLOTS,
+    { id: 'mode', name: 'Mode', default: 0, options: [...SHAPER_MODES],
       takes: 'shape', rate: 'k', group: 'Shape',
       description: 'The curve: one of these, or one you draw. Input across, output up.' },
     { id: 'drive', name: 'Drive', min: 0, max: 48, default: 6, unit: 'dB', curve: 'pow', curveExp: 2, group: 'Shape',

@@ -45,11 +45,11 @@ struct Device : pd_own::Device<ids::kCount> {
     const float* inr = inR();
     reverb.process(inl, inr, wetL, wetR, frames);
 
-    const double mix = clamp(p[ids::mix], 0.0, 1.0);
-    const double gain = dbToGain(p[ids::output]);
     float* outl = outL();
     float* outr = outR();
     for (int i = 0; i < frames; ++i) {
+      const double mix = clamp(ctl(ids::mix, i), 0.0, 1.0);
+      const double gain = dbToGain(ctl(ids::output, i));
       outl[i] = static_cast<float>((inl[i] * (1 - mix) + wetL[i] * mix) * gain);
       outr[i] = static_cast<float>((inr[i] * (1 - mix) + wetR[i] * mix) * gain);
     }

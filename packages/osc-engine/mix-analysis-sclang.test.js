@@ -1,7 +1,10 @@
 'use strict';
 
 // The mixer's analysis SynthDef (sc/poptart.scd, buildMixDef) and the tap reconcile around it.
-// What this guards: (1) both defs still BUILD against the band list the engine ships; (2) the
+// The analyzer is the PoptartSpectrum unit (native/devices/PoptartSpectrum.cpp, the browser's
+// measurement) wherever poptart's own devices are installed, and a bank of band-pass filters
+// where they are not. For the unit: the def builds around it and loads and runs in scsynth. For
+// the bank: (1) both defs still BUILD against the band list the engine ships; (2) the
 // analyzer's graph ORDER - its frame clock has to be the first UGen so sclang's sort interleaves
 // filters and followers, or every filtered band is live at once (384 wires against scsynth's
 // default 64) and the def silently fails to load, which shows up as a mixer whose plots just
@@ -19,6 +22,10 @@ const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 
 const { resolveSclangPath, MIX_BAND_FREQS } = require('./index.js');
+const { userExtensionsDir } = require('./extensions.js');
+
+const NATIVE_DIR = path.join(__dirname, 'native', 'devices');
+const SCX_DIR = path.join(NATIVE_DIR, 'bin');
 
 const SCD = path.join(__dirname, 'sc', 'poptart.scd');
 
@@ -47,13 +54,18 @@ maxWires = { |def|
     peak
 };`;
 
-function runSclang(dir) {
+// `native`: with poptart's own classes (PoptartSpectrum) or without them (the filter bank). The
+// installed copy is left out either way, so which one is built does not depend on this machine.
+function runSclang(dir, native) {
+  const conf = path.join(dir, 'sclang_conf.yaml');
+  fs.writeFileSync(conf, `${native ? `includePaths:\n  - ${NATIVE_DIR}\n` : ''}excludePaths:\n  - ${path.join(userExtensionsDir(), 'PoptartDevice.sc')}\n`);
   const script = `(
-var mixBandFreqs, buildMixDef, maxWires, analysis, meter, score, opts;
-var mixReconcile, mixReconciling = false, mixDirty = false, mixOn = false, mixPerTrack = true;
+var mixBandFreqs, buildMixDef, mixBank, maxWires, analysis, meter, score, opts;
+var mixReconcile, mixReconciling = false, mixDirty = false, mixOn = false;
 var mixTaps = IdentityDictionary.new, mixWanted = IdentitySet.new, mixMaster, tracks = IdentityDictionary.new;
 var startMixTap, stopMixTap, stopMixMaster, mixForwards, recGroup;
 ${extractClosure('buildMixDef')}
+${extractClosure('mixBank')}
 ${MAX_WIRES_SC}
 buildMixDef.(${JSON.stringify(MIX_BAND_FREQS)}.collect(_.asFloat));
 analysis = SynthDescLib.global[\\poptart_mix_analysis].def;
@@ -73,6 +85,7 @@ score.add([0.01, [\\s_new, \\src, 1000, 0, 0, \\bus, 16]]);
 score.add([0.01, [\\s_new, \\poptart_mix_analysis, 1001, 1, 0, \\bus, 16]]);
 score.add([0.5, [\\c_set, 0, 0]]);
 opts = ServerOptions.new.blockSize_(256).numOutputBusChannels_(2);
+opts.ugenPluginsPath = [Platform.resourceDir +/+ "plugins", ${JSON.stringify(SCX_DIR)}];
 score.recordNRT(${JSON.stringify(path.join(dir, 'a.osc'))}, ${JSON.stringify(path.join(dir, 'a.wav'))},
     nil, 48000, "WAV", "int16", opts, action: { "NRT-DONE".postln; 0.exit });
 )
@@ -80,9 +93,10 @@ score.recordNRT(${JSON.stringify(path.join(dir, 'a.osc'))}, ${JSON.stringify(pat
   const file = path.join(dir, 'harness.scd');
   fs.writeFileSync(file, script);
   try {
-    return execFileSync(resolveSclangPath(), [file], {
+    return execFileSync(resolveSclangPath(), ['-l', conf, '-u', native ? '57334' : '57335', file], {
       encoding: 'utf8',
       timeout: 90000,
+      killSignal: 'SIGKILL',
       stdio: ['ignore', 'pipe', 'pipe'],
     });
   } catch (err) {
@@ -90,9 +104,23 @@ score.recordNRT(${JSON.stringify(path.join(dir, 'a.osc'))}, ${JSON.stringify(pat
   }
 }
 
-test('the mixer analysis defs build, sort within the default wire buffers, and load', (t) => {
+test('the mixer analyzer is the native spectrum unit where it is installed, and it loads and runs', (t) => {
+  if (!fs.existsSync(path.join(SCX_DIR, 'PoptartDevices.scx'))) { t.skip('no PoptartDevices.scx in this checkout'); return; }
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'poptart-mixanalysis-'));
-  const out = runSclang(dir);
+  const out = runSclang(dir, true);
+  if (!out.includes('Welcome to SuperCollider')) { t.skip('sclang did not start here'); return; }
+  const built = out.match(/^BUILT<(\d+),(\d+)>$/m);
+  assert.ok(built, `the analysis defs did not build:\n${out}`);
+  assert.ok(Number(built[1]) < 20, `analysis def has ${built[1]} UGens - expected the one unit, not the filter bank`);
+  assert.match(out, /^RECONCILE-OK<true>$/m, `mixReconcile did not compile:\n${out}`);
+  assert.ok(out.includes('NRT-DONE'), `scsynth did not render:\n${out.trim().split('\n').slice(-8).join('\n')}`);
+  assert.doesNotMatch(out, /not installed|SynthDef not found|exception in GraphDef_Recv/, `the analyzer did not load:\n${out}`);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('without poptart\'s own devices, the filter-bank analyzer builds, sorts within the default wire buffers, and loads', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'poptart-mixanalysis-'));
+  const out = runSclang(dir, false);
   if (!out.includes('Welcome to SuperCollider')) {
     t.skip(`sclang did not start here, so the defs went unbuilt: ${out.trim().split('\n').pop() ?? 'no output'}`);
     return;

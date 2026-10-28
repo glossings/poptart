@@ -28,12 +28,6 @@ struct Device : pd_own::Device<ids::kCount> {
   void pd_process(int frames) {
     const int sync = jsRoundInt(p[ids::sync]);
     const int shape = jsRoundInt(p[ids::shape]);
-    const double baseSec = p[ids::delay] * 0.001;
-    const double depthSec = p[ids::depth] * 0.001;
-    const double rateHz = syncedHz(sync, bpm, p[ids::rate]);
-    const double spread = p[ids::spread];
-    const double feedback = p[ids::feedback];
-    const double mix = p[ids::mix];
     const float* inl = inL();
     const float* inr = inR();
     float* outl = outL();
@@ -42,7 +36,13 @@ struct Device : pd_own::Device<ids::kCount> {
     for (int i = 0; i < frames; ++i) {
       const double l = inl[i];
       const double r = inr[i];
+      const double baseSec = ctl(ids::delay, i) * 0.001;
+      const double depthSec = ctl(ids::depth, i) * 0.001;
+      const double rateHz = syncedHz(sync, bpm, ctl(ids::rate, i));
+      const double spread = ctl(ids::spread, i);
+      const double feedback = ctl(ids::feedback, i);
       delay.next(l, r, wet, baseSec, depthSec, rateHz, spread, feedback, shape, 1);
+      const double mix = ctl(ids::mix, i);
       outl[i] = static_cast<float>(l + (wet[0] - l) * mix);
       outr[i] = static_cast<float>(r + (wet[1] - r) * mix);
     }

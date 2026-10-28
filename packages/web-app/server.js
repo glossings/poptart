@@ -3194,6 +3194,7 @@ async function fxPinState(deck = 'a') {
   const tid = engineTrack(FX_KEYS[deck]);
   const sig = fxSchedulers[deck]?.pattern;
   const states = [];
+  // One state per .fx() call, in order: a .bands() crossover is the engine's and takes no slot.
   for (let slot = 1; slot <= (sig?.fxChain?.length ?? 0); slot++) {
     // eslint-disable-next-line no-await-in-loop
     const state = await mappedEngine.getPluginState(tid, slot);
@@ -6100,10 +6101,8 @@ function releaseRecTap(label) {
 
 let mixMonitorOn = false;
 let mixOffTimer = null; // re-armed by every status poll; firing means the mixer went away
-// What the engine was last told to tap (the playing tracks' engine ids, joined) and whether it
-// analyzes them individually - see mixArm.
+// What the engine was last told to tap (the playing tracks' engine ids, joined) - see mixArm.
 let mixArmedIds = '';
-let mixPerTrack = true;
 const mixLevels = new Map(); // key -> queued { peakL, rmsL, peakR, rmsR, at } ('*' = master bus)
 const mixSpecs = new Map(); // key -> latest band frame [[l, r], ...] in mixBandFreqs() order
 
@@ -6148,8 +6147,7 @@ let mixShownLabels = null;
 // because an idle track kept warm for its label's return would burn an analyzer on silence - and
 // on the desk, because the analysis follows what is looked at: an unfolded group's strip stands
 // aside for its members' (its summed picture says nothing theirs don't), and a folded group's
-// hidden members don't spend the budget (engine.mixSpecTrackMax) either - which is what keeps a
-// twelve-track song folded into three groups under the per-track cap. Which of those two a label
+// hidden members are not tapped either (the group's strip draws them). Which of those two a label
 // is, is the CLIENT's to say: it is a way of looking, not a fact about the song, so the poll
 // carries the set (see mixerAnalyzedLabels) and this only intersects it with what is playing.
 // In label order, so the staggered arming lights the strips up left to right.
@@ -6170,7 +6168,7 @@ function mixArm() {
   const ids = mixTapIds();
   const key = ids.join(' ');
   if (mixMonitorOn && key === mixArmedIds) return;
-  mixPerTrack = engine.mixMeters(true, ids);
+  engine.mixMeters(true, ids);
   mixArmedIds = key;
   // Forget what the tracks we just STOPPED tapping last said. A band frame is the latest one
   // rather than a queue (see handleMixSpec), so a key nothing feeds any more would go on being
@@ -6231,10 +6229,6 @@ function mixStatus() {
     master,
     spec: Object.fromEntries(mixSpecs),
     bandFreqs: engine ? engine.mixBandFreqs() : [],
-    // Whether the tracks are analyzed individually or the plots have only the master - the
-    // engine's analysis budget, see OscEngine#mixMeters. The max is what the client's note cites.
-    perTrack: mixPerTrack,
-    perTrackMax: engine ? engine.mixSpecTrackMax() : 0,
     transport: transport?.snapshot(),
   };
 }
@@ -8395,6 +8389,8 @@ const routes = {
       end: b.end,
       instrument: b.sig.instrument,
       fxChain: b.sig.fxChain,
+      // Where each slot sits in the chain's .split()/.bands() branches, or null for a plain chain.
+      route: patternCore.routeSlots(b.sig),
       sample: b.sig.sampler ? trackSampleInfo(b.sig, clockOf(deck).cps) : null,
       paramNames: paramLabels(b.sig),
       grid: active.includes(b) ? highlightGrid(b.sig, b.start, b.end, gridFrom, HL_WINDOW, b.trackClock ?? arrangeClocks[deck]) : null,
@@ -8825,8 +8821,7 @@ const routes = {
     if (!engine || !mappedEngine) throw new Error(engineError ?? 'engine not loaded');
     const slots = [];
     for (const [trackId, chain] of mappedEngine.chains) {
-      // A slot past the engine's last one never loads (.fx() already warned), so don't wait on it.
-      for (let slot = 0; slot < Math.min(chain.length, patternCore.MAX_FX_SLOTS + 1); slot++) {
+      for (let slot = 0; slot < chain.length; slot++) {
         const plugin = chain[slot];
         if (!plugin) continue;
         // One of poptart's own devices is answered from the catalog: Node already knows every

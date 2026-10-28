@@ -38,9 +38,12 @@ Delete an entry when it's done. Details: TODO-verbose.md.
 ## Native devices (desktop)
 [ ] Live figures: decide the EQ analyzer budget; reports for Chorus, Flanger, Phaser, Compressor, Limiter, Multiband, Ducker
 [ ] Audio-rate lfo/cc/polled controls
-[ ] Decide on per-control slot limits (8 drawn curves on Distort/Granular, 32 files, Wavetable tables)
 [ ] Play-test devices in a live engine
 [ ] Build for Windows/Linux
+
+## Desktop engine
+[ ] Cut sclang out: Node talks to scsynth directly (notes/params, then bookkeeping, SynthDef writer, VST control)
+[ ] Windows MIDI without sclang (timestamped clock out, as CoreMIDI does on macOS)
 
 ## DJ / songs
 [ ] Self-gate the song player at EOF

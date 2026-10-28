@@ -139,17 +139,23 @@ function defineParam(deviceId, spec, seen) {
   const sampleAs = takes === 'sample' ? (spec.sampleAs ?? 'audio') : null;
   if (sampleAs !== null && !['audio', 'wavetable'].includes(sampleAs)) fail(deviceId, `param "${id}" has unknown sampleAs "${sampleAs}"`);
 
-  // An enum's range is its option list; saying it twice is a chance to disagree. One that takes
-  // files may reserve room past its list - `capacity` slots in all - for what gets loaded.
-  let capacity = null;
-  if (options) {
-    capacity = spec.capacity ?? options.length;
-    if (!Number.isInteger(capacity) || capacity < options.length) {
-      fail(deviceId, `param "${id}": capacity must be a whole number no smaller than the option list`);
-    }
-  } else if (spec.capacity !== undefined) {
-    fail(deviceId, `param "${id}": only an enum has a capacity`);
-  }
+  // An enum's range is its option list; saying it twice is a chance to disagree.
+  //
+  // An OPEN control has no top. An enum that takes files or curves is one (what gets loaded joins
+  // its list, as many as are loaded), and so is a count a spec marks `open` (a synth's voices).
+  // What such a control holds is the choice itself - an option's index, a whole number of
+  // voices - and that is what a preset, a `.param()` and the engine carry. Its `max` is only how
+  // far a knob, a MIDI mapping or a 0..1 signal reaches (the option list as shipped; a count's
+  // `uiMax`), never a ceiling: a value past it plays.
+  if (spec.capacity !== undefined) fail(deviceId, `param "${id}": capacity is gone - an enum that takes files has no top`);
+  const open = options ? !!(spec.takes) : !!spec.open;
+  if (spec.open && options && !spec.takes) fail(deviceId, `param "${id}": an enum is open only when it takes files or curves`);
+  if (open && !options && (spec.curve ?? 'lin') !== 'lin') fail(deviceId, `param "${id}": an open count is linear`);
+  // The range a count had when it had a top, for a 0..1 position a song wrote before it was open
+  // (see argToValue).
+  if (open && !options && !(isFiniteNumber(spec.uiMax) && spec.uiMax > spec.min)) fail(deviceId, `param "${id}": an open count needs a uiMax above its min, for the knob's reach`);
+  const legacyMax = spec.legacyMax ?? null;
+  if (legacyMax !== null && !(open && !options && isFiniteNumber(legacyMax))) fail(deviceId, `param "${id}": legacyMax is for an open count`);
   // Headings over runs of an enum's options - `[{ label, from }]`, `from` the index the run starts
   // at - for a list long enough that one column of it is not something to read. The panel's
   // menu draws a heading per group, a column each.
@@ -168,13 +174,13 @@ function defineParam(deviceId, spec, seen) {
     optionGroups = Object.freeze(groups.map((g) => Object.freeze({ label: String(g.label), from: g.from })));
   }
   const min = options ? 0 : spec.min;
-  const max = options ? capacity - 1 : spec.max;
+  const max = options ? Math.max(1, options.length - 1) : (open ? spec.uiMax : spec.max);
   if (!isFiniteNumber(min) || !isFiniteNumber(max)) fail(deviceId, `param "${id}" needs numeric min and max`);
   if (!(max > min)) fail(deviceId, `param "${id}": max must be above min`);
 
   const def = spec.default;
   if (!isFiniteNumber(def)) fail(deviceId, `param "${id}" needs a numeric default`);
-  if (def < min || def > max) fail(deviceId, `param "${id}": default ${def} is outside ${min}..${max}`);
+  if (def < min || (!open && def > max)) fail(deviceId, `param "${id}": default ${def} is outside ${min}..${max}`);
 
   if (curve === 'exp' && min <= 0) {
     fail(deviceId, `param "${id}": an exp curve needs min above zero (it maps a ratio)`);
@@ -240,7 +246,8 @@ function defineParam(deviceId, spec, seen) {
     step,
     options: options ? Object.freeze(options) : null,
     optionGroups,
-    capacity,
+    open,
+    legacyMax,
     takes,
     sampleAs,
     bank,
@@ -452,12 +459,20 @@ function defineDevice(spec) {
   // device that wants phase modulation gives its phase a knob. See signalDestinations().
   if (spec.inputs !== undefined) fail(id, 'inputs are not a thing - an a-rate param is a signal destination already');
 
+  // `key` and `outputs` are the Crossover's (see devices/crossover.mjs): a second input that is
+  // not a sidechain anybody routes - the wiring of a .bands() feeds it - and more than one output,
+  // each `out` channels wide. Every other device has neither.
   const channels = {
     in: spec.channels?.in ?? (kind === 'fx' ? 2 : 0),
     out: spec.channels?.out ?? 2,
+    key: spec.channels?.key ?? 0,
+    outputs: spec.channels?.outputs ?? 1,
   };
   if (!Number.isInteger(channels.in) || channels.in < 0) fail(id, 'channels.in must be a non-negative integer');
   if (!Number.isInteger(channels.out) || channels.out < 1) fail(id, 'channels.out must be a positive integer');
+  if (!Number.isInteger(channels.key) || channels.key < 0) fail(id, 'channels.key must be a non-negative integer');
+  if (!Number.isInteger(channels.outputs) || channels.outputs < 1) fail(id, 'channels.outputs must be a positive integer');
+  if (channels.key && spec.sidechain === true) fail(id, 'a device takes a key or a sidechain, not both');
   if (kind === 'fx' && channels.in === 0) fail(id, 'an fx device needs an input');
 
   // A second audio input, fed by `.audio("other")` on the effect: the carrier for a cross-
@@ -544,7 +559,7 @@ function clampParam(param, value) {
   if (!Number.isFinite(v)) return param.default;
   if (param.step) v = Math.round(v / param.step) * param.step;
   if (v < param.min) return param.min;
-  if (v > param.max) return param.max;
+  if (v > param.max && !param.open) return param.max;
   return v;
 }
 
@@ -558,7 +573,8 @@ function clampParam(param, value) {
  * reads. The knob and the readout go through the same function, so the three can never disagree.
  */
 function denormalize(param, position) {
-  const t = Math.min(1, Math.max(0, Number(position) || 0));
+  // An open control's position runs past 1 for a value past the knob's reach (see defineParam).
+  const t = Math.min(param.open ? Infinity : 1, Math.max(0, Number(position) || 0));
   let v;
   if (param.curve === 'exp') {
     v = param.min * Math.pow(param.max / param.min, t);
@@ -581,7 +597,7 @@ function normalize(param, value) {
   } else {
     t = (v - param.min) / (param.max - param.min);
   }
-  return Math.min(1, Math.max(0, t));
+  return Math.min(param.open ? Infinity : 1, Math.max(0, t));
 }
 
 /** Whether a parameter is a two-state switch, whatever widget it asked for. */
@@ -607,7 +623,7 @@ function argToValue(param, arg) {
       const index = param.options.findIndex((o) => normalizeKey(o) === want);
       if (index >= 0) return index;
       const n = Number(arg);
-      return Number.isInteger(n) && n >= param.min && n <= param.max ? n : null;
+      return Number.isInteger(n) && n >= param.min && (param.open || n <= param.max) ? n : null;
     }
     const n = Number(arg);
     if (!Number.isFinite(n)) return null;
@@ -616,7 +632,20 @@ function argToValue(param, arg) {
   const n = Number(arg);
   if (!Number.isFinite(n)) return null;
   if (isToggle(param)) return n >= 0.5 ? 1 : 0;
+  if (param.open) return openCount(param, n);
   return denormalize(param, n);
+}
+
+/**
+ * What a number means on an open count: the count. A fraction strictly between 0 and 1 is a
+ * position written before the control was open - by hand, or by an older write-back - and means
+ * what it meant then, across the range it had (`legacyMax`), so an old song keeps its voices.
+ */
+function openCount(param, n) {
+  if (param.legacyMax !== null && n > 0 && n < 1) {
+    return clampParam(param, param.min + (param.legacyMax - param.min) * n);
+  }
+  return clampParam(param, n);
 }
 
 /**
@@ -628,6 +657,7 @@ function valueToArg(param, value) {
   const v = clampParam(param, value);
   if (param.options) return JSON.stringify(param.options[Math.round(v)] ?? String(Math.round(v)));
   if (isToggle(param)) return v >= 0.5 ? '1' : '0';
+  if (param.open) return trimNumber(v);
   return trimNumber(normalize(param, v));
 }
 
@@ -699,7 +729,7 @@ function formatValue(param, value, extras = null) {
   const v = clampParam(param, value);
   if (param.options) {
     const i = Math.round(v);
-    return param.options[i] ?? extras?.[i] ?? (i < (param.capacity ?? param.options.length) ? 'empty' : String(v));
+    return param.options[i] ?? extras?.[i] ?? (param.open ? 'empty' : String(v));
   }
   if (param.ui === 'toggle') return v >= 0.5 ? 'on' : 'off';
   // Trailing zeros kept on purpose - stripping them is the same width problem again.
@@ -2614,11 +2644,12 @@ function framesOf(samples, frameLength = DEFAULT_FRAME_LENGTH) {
 /** The tables the synth offers by name. Index 0 is what a fresh patch plays. */
 const TABLE_NAMES = Object.freeze(['Basic', 'Harmonics', 'Odd', 'PWM', 'Sync', 'Fold', 'FM', 'Organ', 'Vocal']);
 
-/** How many table slots an oscillator has in all: the shipped ones and room for loaded files. */
-const TABLE_SLOTS = 64;
-
-/** The most voices one track will ever run, whatever the voice count is set to. */
-const MAX_VOICES = 16;
+/**
+ * How far the Voices knob reaches. Not a most: a count typed or patterned past it plays that many
+ * voices. Before the count was open it stopped at 16, which is what an old 0..1 position on it
+ * still means (legacyMax).
+ */
+const VOICES_KNOB = 128;
 
 const seconds = (id, name, def, group) => ({
   id, name, min: 0, max: 10, default: def, unit: 's', curve: 'pow', curveExp: 3, group,
@@ -2628,7 +2659,7 @@ function oscParams(n, group, levelDefault) {
   const p = `osc${n}`;
   return [
     { id: `${p}.level`, name: `Osc ${n} Level`, min: 0, max: 1, default: levelDefault, group },
-    { id: `${p}.table`, name: `Osc ${n} Table`, default: 0, options: [...TABLE_NAMES], capacity: TABLE_SLOTS, takes: 'sample', sampleAs: 'wavetable', bank: 'tables', rate: 'k', group,
+    { id: `${p}.table`, name: `Osc ${n} Table`, default: 0, options: [...TABLE_NAMES], takes: 'sample', sampleAs: 'wavetable', bank: 'tables', rate: 'k', group,
       description: 'Which stack of waveforms this oscillator reads. Name a sample to load a file as a table.' },
     { id: `${p}.position`, name: `Osc ${n} Position`, min: 0, max: 1, default: 0, group,
       description: 'Where in the table stack this oscillator reads. Sweeping it morphs one waveform into the next.' },
@@ -2692,7 +2723,7 @@ const WAVETABLE = defineDevice({
     { id: 'glide.mode', name: 'Glide Mode', default: 0, options: ['legato', 'always'], rate: 'k', group: 'Voice',
       description: 'Legato slides only when a note takes over a voice that is still sounding. Always slides every note in from the nearest pitch last played, so a chord change moves each changed note to its new one.' },
     { id: 'level', name: 'Level', min: 0, max: 1, default: 0.7, group: 'Voice' },
-    { id: 'voices', name: 'Voices', min: 1, max: MAX_VOICES, default: 8, step: 1, rate: 'k', ui: 'number', group: 'Voice' },
+    { id: 'voices', name: 'Voices', min: 1, open: true, uiMax: VOICES_KNOB, legacyMax: 16, default: 8, step: 1, rate: 'k', ui: 'number', group: 'Voice' },
   ],
 
   // The pictures the panel draws, each one at the head of the section whose knobs it belongs
@@ -2846,7 +2877,7 @@ class WavetableSynth {
     // A copy, so a table loaded into this instance never reaches another synth's list.
     this.tables = [...(tables ?? sharedBuiltInTables())];
     this.subTable = subTableOf(this.tables);
-    this.voices = Array.from({ length: MAX_VOICES }, () => new WavetableVoice(sampleRate));
+    this.voices = Array.from({ length: 16 }, () => new WavetableVoice(sampleRate)); // the old most, so a count up to it is there at once (and the desktop starts with the same)
     this.params = new VoiceParams();
     this.voiceCount = 8;
     this.clock = 0;          // bumped per note, so "oldest" has a meaning
@@ -2880,7 +2911,10 @@ class WavetableSynth {
     }
     const voices = values.voices;
     const count = typeof voices === 'number' ? voices : voices?.[0];
-    if (Number.isFinite(count)) this.voiceCount = Math.min(MAX_VOICES, Math.max(1, Math.round(count)));
+    if (Number.isFinite(count)) this.voiceCount = Math.max(1, Math.round(count));
+    // The voices are made as the count asks for them - there is no most - so a count past what is made
+    // grows the list, once, at the new high mark.
+    while (this.voices.length < this.voiceCount) this.voices.push(new WavetableVoice(this.sampleRate));
   }
 
   /** The table an index names; a slot nothing has been loaded into plays the first table. */
@@ -3130,7 +3164,8 @@ function subarray(buf, at, n) {
 
 
 const OPS = 8;
-const FM_VOICES = 12;
+/** How far the Voices knob reaches, which is no most (see the Wavetable's VOICES_KNOB). It stopped at 12 before. */
+const FM_VOICES_KNOB = 128;
 
 const WAVES = Object.freeze(['sine', 'triangle', 'saw', 'square']);
 const FM_TWO_PI = Math.PI * 2;
@@ -3210,7 +3245,7 @@ const FMSYNTH = defineDevice({
       description: 'Scales the whole matrix at once: how hard everything modulates.' },
     { id: 'glide', name: 'Glide', min: 0, max: 5, default: 0, unit: 's', curve: 'pow', curveExp: 3, group: 'Voice' },
     { id: 'level', name: 'Level', min: 0, max: 1, default: 0.6, group: 'Voice' },
-    { id: 'voices', name: 'Voices', min: 1, max: FM_VOICES, default: 8, step: 1, rate: 'k', ui: 'number', group: 'Voice' },
+    { id: 'voices', name: 'Voices', min: 1, open: true, uiMax: FM_VOICES_KNOB, legacyMax: 12, default: 8, step: 1, rate: 'k', ui: 'number', group: 'Voice' },
   ],
   figures: [
     ...opFigures,
@@ -3440,7 +3475,7 @@ class FmSynth {
   constructor(sampleRate) {
     this.sampleRate = sampleRate;
     this.params = new FmParams();
-    this.voices = Array.from({ length: FM_VOICES }, () => new FmVoice(sampleRate));
+    this.voices = Array.from({ length: 12 }, () => new FmVoice(sampleRate)); // as the Wavetable's
     this.voiceCount = 8;
     this.clock = 0;
     this.events = [];
@@ -3471,7 +3506,10 @@ class FmSynth {
     const level = values.level;
     if (typeof level === 'number') { p.out = level; p.outA = null; } else if (level?.length > 1) { p.out = level[0]; p.outA = level; } else if (level?.length === 1) { p.out = level[0]; p.outA = null; }
     const voices = num(values.voices);
-    if (Number.isFinite(voices)) this.voiceCount = Math.min(FM_VOICES, Math.max(1, Math.round(voices)));
+    if (Number.isFinite(voices)) this.voiceCount = Math.max(1, Math.round(voices));
+    // The voices are made as the count asks for them - there is no most - so a count past what is made
+    // grows the list, once, at the new high mark.
+    while (this.voices.length < this.voiceCount) this.voices.push(new FmVoice(this.sampleRate));
   }
 
   queueNoteOn(note, velocity, offset = 0) { this.events.push({ at: Math.max(0, offset | 0), kind: 1, note, velocity }); }
@@ -3562,12 +3600,10 @@ class FmSynth {
 // play it from.
 
 
-const GRAIN_VOICES = 8;
+/** How far the Voices knob reaches, which is no most (see the Wavetable's VOICES_KNOB). It stopped at 8 before. */
+const GRAIN_VOICES_KNOB = 128;
 const MAX_GRAINS = 24;          // per voice
-const SAMPLE_SLOTS = 32;
 
-/** How many drawn windows a device holds at once, past the shapes it ships with. */
-const SHAPE_SLOTS = 8;
 
 // Grain windows. The order is the parameter's option list, so entries are only ever APPENDED:
 // an index is what a saved song holds, and reordering these would change what one plays.
@@ -3617,7 +3653,7 @@ const GRANULAR = defineDevice({
   description: 'A granular sampler: name a sample, and every note plays it as a cloud of grains from around a position, transposed to the note.',
   channels: { in: 0, out: 2 },
   params: [
-    { id: 'sample', name: 'Sample', default: 0, options: ['none'], capacity: SAMPLE_SLOTS, takes: 'sample', rate: 'k', group: 'Source',
+    { id: 'sample', name: 'Sample', default: 0, options: ['none'], takes: 'sample', rate: 'k', group: 'Source',
       description: 'The sample the grains are read from. With none named the synth is silent.' },
     { id: 'position', name: 'Position', min: 0, max: 1, default: 0.2, group: 'Source',
       description: 'Where in the sample the grains are read from.' },
@@ -3631,7 +3667,7 @@ const GRANULAR = defineDevice({
     { id: 'pitch', name: 'Pitch', min: -24, max: 24, default: 0, unit: 'st', group: 'Grains',
       description: 'On top of the note: a note of 60 plays the sample at its own pitch.' },
     { id: 'random', name: 'Random Pitch', min: 0, max: 12, default: 0, unit: 'st', group: 'Grains' },
-    { id: 'window', name: 'Window', default: 0, options: [...WINDOWS], capacity: WINDOWS.length + SHAPE_SLOTS,
+    { id: 'window', name: 'Window', default: 0, options: [...WINDOWS],
       takes: 'shape', rate: 'k', group: 'Grains',
       description: 'The amplitude a grain is played through: one of these shapes, or one you draw.' },
     { id: 'spread', name: 'Spread', min: 0, max: 1, default: 0.5, group: 'Grains',
@@ -3643,7 +3679,7 @@ const GRANULAR = defineDevice({
     { id: 'sustain', name: 'Sustain', min: 0, max: 1, default: 1, group: 'Amp', amp: 'sustain' },
     { id: 'release', name: 'Release', min: 0, max: 10, default: 0.3, unit: 's', curve: 'pow', curveExp: 3, group: 'Amp', amp: 'release' },
     { id: 'level', name: 'Level', min: 0, max: 1, default: 0.7, group: 'Amp' },
-    { id: 'voices', name: 'Voices', min: 1, max: GRAIN_VOICES, default: 4, step: 1, rate: 'k', ui: 'number', group: 'Amp' },
+    { id: 'voices', name: 'Voices', min: 1, open: true, uiMax: GRAIN_VOICES_KNOB, legacyMax: 8, default: 4, step: 1, rate: 'k', ui: 'number', group: 'Amp' },
   ],
   figures: [
     {
@@ -3788,7 +3824,7 @@ class GranularSynth {
       sample: 0, position: 0.2, spray: 0.05, scan: 0, size: 120, density: 30, pitch: 0, random: 0,
       window: 0, spread: 0.5, reverse: 0, attack: 0.02, decay: 0.1, sustain: 1, release: 0.3, level: 0.7, levelA: null,
     };
-    this.voices = Array.from({ length: GRAIN_VOICES }, () => new GrainVoice(sampleRate));
+    this.voices = Array.from({ length: 8 }, () => new GrainVoice(sampleRate)); // as the Wavetable's
     this.voiceCount = 4;
     this.clock = 0;
     this.seed = 7;
@@ -3808,7 +3844,10 @@ class GranularSynth {
     p.window = Math.round(p.window);
     const voices = values.voices;
     const count = typeof voices === 'number' ? voices : voices?.[0];
-    if (Number.isFinite(count)) this.voiceCount = Math.min(GRAIN_VOICES, Math.max(1, Math.round(count)));
+    if (Number.isFinite(count)) this.voiceCount = Math.max(1, Math.round(count));
+    // The voices are made as the count asks for them - there is no most - so a count past what is made
+    // grows the list, once, at the new high mark.
+    while (this.voices.length < this.voiceCount) this.voices.push(new GrainVoice(this.sampleRate));
   }
 
   /** Keeps a drawn window in a window slot, for the grains to be played through. */
@@ -3985,7 +4024,8 @@ const STEPPED = 8;
 const CHAOS = 9;
 
 /** The most voices one track will ever run, whatever the voice count is set to. */
-const NOISE_MAX_VOICES = 16;
+/** How far the Voices knob reaches, which is no most (see the Wavetable's VOICES_KNOB). It stopped at 16 before. */
+const NOISE_VOICES_KNOB = 128;
 
 /** Where the tone control stops filtering at all. */
 const TONE_TOP = 20000;
@@ -4048,7 +4088,7 @@ const NOISE = defineDevice({
       description: 'Zero is a straight line; negative drops away quickly and then hangs, positive holds the level and then cuts.' },
 
     { id: 'level', name: 'Level', min: 0, max: 1, default: 0.5, group: 'Voice' },
-    { id: 'voices', name: 'Voices', min: 1, max: NOISE_MAX_VOICES, default: 8, step: 1, rate: 'k', ui: 'number', group: 'Voice' },
+    { id: 'voices', name: 'Voices', min: 1, open: true, uiMax: NOISE_VOICES_KNOB, legacyMax: 16, default: 8, step: 1, rate: 'k', ui: 'number', group: 'Voice' },
   ],
 });
 
@@ -4330,7 +4370,8 @@ class NoiseSynth {
   constructor(sampleRate) {
     this.sampleRate = sampleRate;
     const scales = pinkScales(sampleRate);
-    this.voices = Array.from({ length: NOISE_MAX_VOICES }, () => new NoiseVoice(sampleRate, scales));
+    this.scales = scales;
+    this.voices = Array.from({ length: 16 }, () => new NoiseVoice(sampleRate, scales)); // as the Wavetable's
     this.voiceCount = 8;
     this.clock = 0;
     this.seed = 1;
@@ -4367,7 +4408,10 @@ class NoiseSynth {
     s.dcurve = first('env.dcurve', -4);
     s.rcurve = first('env.rcurve', -4);
     const count = first('voices', 8);
-    if (Number.isFinite(count)) this.voiceCount = Math.min(NOISE_MAX_VOICES, Math.max(1, Math.round(count)));
+    if (Number.isFinite(count)) this.voiceCount = Math.max(1, Math.round(count));
+    // The voices are made as the count asks for them - there is no most - so a count past what is made
+    // grows the list, once, at the new high mark.
+    while (this.voices.length < this.voiceCount) this.voices.push(new NoiseVoice(this.sampleRate, this.scales));
   }
 
   /** The track's bend in semitones, which moves the clocked colors' pitch. */
@@ -4495,7 +4539,8 @@ function parameterDescriptorsFor(descriptor) {
     name: p.id,
     defaultValue: positionOfDefault(p),
     minValue: 0,
-    maxValue: 1,
+    // An open control's position runs past 1 for a value past the knob's reach (see defineParam).
+    maxValue: p.open ? 3.4e38 : 1,
     automationRate: p.rate === 'a' ? 'a-rate' : 'k-rate',
   }));
   if (descriptor.kind === 'synth') params.push({ name: TRACK_BEND_PARAM, defaultValue: 0, automationRate: 'a-rate' });

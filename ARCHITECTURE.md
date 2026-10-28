@@ -98,6 +98,13 @@ The concrete engine implementation the scheduler drives. Bridges Node and audio.
   command set to it: load plugin into a track slot, set parameters, trigger notes, start/stop
   native LFOs and envelopes, tempo, routing. Implements the plain-object engine interface the
   scheduler expects.
+- `direct.js` — the direct path: builds and sends the per-event bundles to scsynth itself, so a busy
+  sclang cannot make a note late. sclang keeps building everything and tells Node the ids; Node never
+  guesses one, takes per-note voice ids from a node-id block sclang's allocator never reaches, and
+  sends an event the old way whenever it needs sclang's own logic (a program load in flight, a drawn
+  lfo shape's pending swap, a granular voice). sclang is told about each direct event afterwards
+  (`/poptart/direct/*`) to keep the held count, the hush list and the voice ceiling. `POPTART_DIRECT=0`
+  sends everything through sclang.
 - `samples.js` — the sampler side: reads audio folders, resolves one exact file for `se()`, expands
   a hand-picked `sp()` pack's files and folders,
   transient/slice analysis (Node-side, WAV-only), and sample event handling.
@@ -108,16 +115,17 @@ The concrete engine implementation the scheduler drives. Bridges Node and audio.
 - `analysis.js` + `analysis-worker.js` — the above two functions, off the event loop (see the
   nothing-blocks-the-music decision below).
 - `sc/poptart.scd` — the SuperCollider class/def code: hosts plugins via the `VSTPlugin~` server
-  extension, builds one `SynthDef` per track (a fixed chain of 21 slots: 1 instrument + 20
-  effects), and runs the native LFOs/envelopes sample-accurately inside the audio graph.
+  extension, builds each track as a group of nodes - one per device (the instrument, each effect,
+  each internal crossover) plus a channel strip - and runs the native LFOs/envelopes
+  sample-accurately inside the audio graph.
 - `native/devices/` — **poptart's own devices on the desktop**: the same synths and effects the
   browser build plays, compiled for scsynth instead of for WebAssembly, so `synth("Plaits")` and
   `fx("Galactic")` open the same device on either engine with the same control names and the same
   0..1 positions. `PoptartDevice` is one generic UGen that loads a device at runtime, exactly as
   `VSTPlugin` loads a plugin at runtime and for the same reason: a track's def is built at birth,
-  long before a pattern says what goes in its slots, so a UGen per device would mean rebuilding
-  the def and respawning the track to change an effect. Every slot in the track def therefore
-  carries one of each kind, and exactly one of them is ever loaded. Its sclang side
+  long before a pattern says what goes in its slots, so a UGen per device would mean a def per
+  device and a new node to change an effect. Every device node therefore carries one of each
+  kind, and exactly one of them is ever loaded. Its sclang side
   (`PoptartDevice.sc`) deliberately has a `VSTPluginController`'s method names, which is what
   lets `setParam`, the ramps, the LFOs, the envelopes, MIDI and OSC control and the note paths
   drive a native device through the code that already drives plugins. The .scx is COMMITTED and
@@ -337,7 +345,11 @@ built tree.
 2. Code is evaluated into blocks (`labels.mjs`): named blocks → patterns; anonymous/`$:` → setup.
 3. The `Scheduler` queries each pattern per cycle and emits timed events.
 4. Events cross the plain-object engine interface into `osc-engine`.
-5. `osc-engine` translates them into `/poptart/*` OSC messages to `sclang`.
+5. `osc-engine` sends the time-critical ones - notes, sample voices, polled values onto a ramp, lfo
+   phase anchors, bus-send levels, deck player starts and sets - straight to scsynth as timestamped
+   bundles (`direct.js`), using the node, bus and buffer ids sclang tells it as it makes them
+   (`/poptart/ids/*`). Everything else, and any event whose ids are not known yet, goes to `sclang`
+   as `/poptart/*` messages.
 6. SuperCollider hosts the plugins (`VSTPlugin~`), applies parameters, triggers notes, and runs
    native LFOs/envelopes on the audio thread — modulation stays continuous down to the audio thread
    with no per-note OSC traffic.
@@ -385,9 +397,43 @@ built tree.
   bending, so a patch that never bends pays nothing. Semitones rather than a normalized wheel
   position is the choice that makes one control work for both: a musical distance means the same
   thing to a sampler and to a synth, where "half a bend" does not.
-- **Fixed 8-slot chain per track (1 instrument + 7 effects).** `VSTPlugin~` instances live inside a
-  `SynthDef`'s UGen graph and can't be added to a running `Synth`, so chain length is baked in.
-  Swapping which plugin occupies a slot is fine; growing past 8 is not handled yet.
+- **A track is built the way the browser builds it: nothing pre-wired.** On the desktop each
+  device is its own node - the head (instrument), one node per effect, one per `.bands()`
+  crossover - followed by the strip, all in the track's group in signal order and joined by
+  private audio buses from the server's allocator. An unused route costs nothing: the DJ stage,
+  the bass-mono filter, sends, record/mix/cue taps and bus sends are nodes made on first use. A
+  change of structure is new bus assignments, moved nodes and a few small sum/level nodes; a node
+  that holds a device is never freed or remade by it, so no plugin reloads and no program is
+  lost. There is no ceiling on effects per track on either engine. The server is booted with its
+  audio buses, control buses, nodes and synthdef count set explicitly (`POPTART_AUDIO_BUSES`
+  overrides the audio bus count), and running out of buses warns rather than failing silently.
+- **Branches are wiring on one track, not more tracks.** `.split()` and `.bands()` keep the chain
+  as a tree on the Sig (`fxRoute`) with effect slots numbered straight through it, so every
+  device in a branch is an ordinary slot of the same track: it hears the track's notes and
+  modulators, its presets and windows work, and `.param()` reaches it as anywhere else.
+  `route.mjs` turns the tree into one engine-neutral plan (what each slot reads, which sums add
+  what, and the order to run them in), and every branch level and pan becomes a channel control
+  (`rl<k>`/`rp<k>`), so each takes anything a control takes. A `.bands()` crossover is the
+  engine's own: an LR4 split like the DJ isolator's, never a user slot, never in a list, a
+  window or the catalog, so `.bands()` does not shift slot numbers. Its frequency is a channel
+  control (`xo<k>`), and its two extra outputs - the rest above its frequency, and its key (the
+  bands summed below it) through its all-pass - are what keep the bands in phase, so they sum
+  back flat. Every read is of something before the reader, so no path is a block late on either
+  engine and nothing needs delaying or playing early.
+- **A control with audio patched onto it is read per sample.** The host hands such a control to
+  a device as a buffer of the block's values (`PdAny::paramBuffer`), and poptart's own devices read
+  it per sample exactly where their browser processors do; the block is rendered whole. A ported
+  module reads its controls once per call, so its wrapper renders a patched stretch a sample at a
+  time (`withPatchLayer` in build-devices.mjs) - one source, so the same on both engines.
+- **Lists that grow have no top.** A control that takes files or drawn curves stores the option's
+  index, and a voice count stores the count; neither has a ceiling. A knob, a MIDI mapping or a
+  0..1 signal reaches across the list as it stands (or a count's knob range), and a 0..1 position
+  a song wrote for a count before it was open is read with the range the count had then. Devices
+  grow their storage through the work round, off the audio thread.
+- **A loop between tracks reads one edge a block late.** Two tracks reading each other (or a
+  track reading a bus it writes) have no order that runs every reader after its writer. Walking
+  upstream from each track in the order the tracks were made, the edge that closes the loop
+  reads the block before; every other edge is feed-forward. Both engines pick the same edge.
 - **A file carries its plugin state; a buffer carries a handle to it.** Editing a plugin in its own
   window captures its whole program — gzip+base64, megabytes and all. Where that program *lives*
   splits on one line: anything that can leave this machine carries it in full, and anything local

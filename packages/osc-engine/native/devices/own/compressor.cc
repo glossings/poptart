@@ -44,11 +44,6 @@ struct Device : pd_own::Device<ids::kCount, 4> {
       lastAttack = attack;
       lastRelease = release;
     }
-    const double threshold = p[ids::threshold];
-    const double ratio = p[ids::ratio];
-    const double knee = p[ids::knee];
-    const double makeup = p[ids::makeup];
-    const double mix = p[ids::mix];
 
     const float* inl = inL();
     const float* inr = inR();
@@ -63,8 +58,10 @@ struct Device : pd_own::Device<ids::kCount, 4> {
       const double key = keyed ? std::fmax(std::fabs(keyl[i]), std::fabs(keyr[i]))
                                 : std::fabs(keyl[i]);
       const double env = detector.next(key);
-      const double gr = gainComputer(dbOf(env), threshold, ratio, knee);
-      const double g = dbToGain(gr + makeup);
+      const double gr = gainComputer(dbOf(env), ctl(ids::threshold, i), ctl(ids::ratio, i),
+                                     ctl(ids::knee, i));
+      const double g = dbToGain(gr + ctl(ids::makeup, i));
+      const double mix = ctl(ids::mix, i);
       outl[i] = static_cast<float>(l + (l * g - l) * mix);
       outr[i] = static_cast<float>(r + (r * g - r) * mix);
     }

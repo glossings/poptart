@@ -332,6 +332,18 @@ const API_DOCS = {
     desc: 'Dry/wet mix for the plugin just before it in the chain: 1 (the default) is fully processed, 0 bypasses it. With a device named first, it sets that effect\'s mix wherever it sits. Plugins that add latency, such as linear-phase EQs, can sound hollow at in-between values.',
     eg: '.fx("ValhallaRoom").wet(auto("breakdown"))',
   },
+  split: {
+    kind: 'method',
+    sig: 'split(...branches)',
+    desc: 'Runs the chain in parallel branches and sums them; what follows processes the sum. Each branch is a function building a chain on the signal it is handed, and its .postgain() and .pan() are its level and pan. (x) => x is the signal unprocessed.',
+    eg: '.split((x) => x, (b) => b.fx("LPG").param("Decay", 0.1)).fx("Reverb")',
+  },
+  bands: {
+    kind: 'method',
+    sig: 'bands(freqs, ...branches)',
+    desc: 'Splits the signal into frequency bands at the crossover frequencies in Hz and sums them back, one branch function per band from the lowest up, so a list of N frequencies takes N + 1 branches. The crossovers are Linkwitz-Riley, so unprocessed bands sum flat. A frequency can be a number, pattern or signal. The crossovers take no slot: the devices in the bands number as in a .split().',
+    eg: '.bands([250, 2500], (low) => low, (mid) => mid.fx("Distort"), (high) => high)',
+  },
   bsend: { kind: 'method', sig: 'bsend(name, amount)', desc: 'Sends the track\'s output to a named bus and silences its own output. Both arguments can be patterns.', eg: '.bsend("reverb")' },
   vel: {
     kind: 'both',

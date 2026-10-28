@@ -633,6 +633,7 @@ export function createEvaluator({ patternCore, engine, transport, prebakeDefs = 
         end: b.end,
         instrument: b.sig.instrument ?? null,
         fxChain: [...(b.sig.fxChain ?? [])],
+        route: patternCore.routeSlots?.(b.sig) ?? null,
         sample: b.sig.sampler ? trackSampleInfo(b.sig) : null,
         paramNames: paramLabels(b.sig),
         grid: playing ? highlightGrid(patternCore, b.sig, b.start, b.end, gridFrom, HL_WINDOW, b.trackClock ?? d.arrangeClock) : null,

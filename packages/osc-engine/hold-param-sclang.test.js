@@ -43,11 +43,13 @@ function runSclang() {
   const script = `(
 var server = Server(\\poptartProbe, NetAddr("127.0.0.1", 57999));
 var tracks = IdentityDictionary.new;
+var tellRamp = { }, tellSlot = { }, tellMods = { }, tellTap = { }, shapesHandled = IdentityDictionary.new, nodeAddr = (sendMsg: { }); // the direct path's id handoff (see tellTrack in sc/poptart.scd) - inert here
 var nodeGoneSaid = IdentitySet.new, nodeOwns = { |nodeID, what| }; // the engine's node bookkeeping (see nodeOwns in sc/poptart.scd) - inert here
 var modFreeDelay = 0.05;
 var freeModulatorLater, rampTo, dropRamp, bundleNow, resolveParamIndex;
 // What a param call is aimed at (paramTarget) and what it leans on; the expression half is unused here.
 var exprLeaf, busIndexOf, paramTarget, reassertAudioDrivers, exprFeed, channelDefault;
+var channelTarget = { |track, name| [track[\\synth], name.asSymbol] }; // every channel control on the one synth here - see channelTarget in sc/poptart.scd
 var log = List.new;
 var pendingGet = nil;
 var info = (parameters: [(name: "Mix"), (name: "Drive")], findParamIndex: { |self, name| self[\\parameters].detectIndex { |p| p[\\name] == name.asString } });

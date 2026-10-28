@@ -38,7 +38,7 @@ export { AIRWINDOWS_DEVICES } from './devices/airwindows.mjs';
 export { buildPanel, paramArgFor, paramCallFor, valueFromPosition, widgetFor } from './panel.mjs';
 export { RESPONSE_RANGE, buildFigures, figuresFor, subsumedParams } from './figures.mjs';
 
-export { WAVETABLE, WavetableSynth, MAX_VOICES, TABLE_NAMES, TABLE_SLOTS, tableFromSample } from './devices/wavetable.mjs';
+export { WAVETABLE, WavetableSynth, VOICES_KNOB, TABLE_NAMES, tableFromSample } from './devices/wavetable.mjs';
 export { FMSYNTH, FmSynth } from './devices/fmsynth.mjs';
 export { GRANULAR, GranularSynth } from './devices/granular.mjs';
 export { sharedBuiltInTables, buildMipmaps } from './dsp/tables.mjs';
@@ -57,7 +57,7 @@ export { FRAME_LENGTH, BASIC_FRAME_NAMES, buildTable, builtInTables } from './ds
 
 export { WebAudioEngine } from './engine/web-audio-engine.mjs';
 export { detectOnsets, monoOf } from './engine/sample-plan.mjs';
-export { MIX_BAND_COUNT, MIX_BAND_FREQS, MIX_BAND_VALUES, MIX_TRACK_MAX } from './engine/analysis.mjs';
+export { MIX_BAND_COUNT, MIX_BAND_FREQS, MIX_BAND_VALUES } from './engine/analysis.mjs';
 export { SUPPORTED_CHANNELS } from './engine/track.mjs';
 export { renderShape, renderRange } from './engine/modulators.mjs';
 

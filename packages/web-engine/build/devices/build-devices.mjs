@@ -29,7 +29,7 @@ import {
   braidsDescriptor, braidsWrapper, cloudsDescriptor, cloudsWrapper,
   elementsDescriptor, elementsWrapper,
   plaitsDescriptor, plaitsWrapper,
-  ringsDescriptor, ringsWrapper, warpsDescriptor, warpsWrapper,
+  ringsDescriptor, ringsWrapper,
 } from './mutable.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -324,7 +324,69 @@ void pd_process(int frames) {
 }
 `;
 
-const EXPORTS = ['_pd_init', '_pd_param_count', '_pd_max_block', '_pd_in', '_pd_out', '_pd_params', '_pd_process'];
+const EXPORTS = ['_pd_init', '_pd_param_count', '_pd_max_block', '_pd_in', '_pd_out', '_pd_params', '_pd_process',
+  '_pd_param_buffer', '_pd_param_moving'];
+
+/**
+ * AUDIO-RATE CONTROLS FOR A PORTED MODULE, added around every wrapper.
+ *
+ * A module reads its controls once per call: that is how its own DSP is written, and there is no
+ * per-sample path into it. So a control with audio patched onto it is handed over the way
+ * poptart's own devices take one - a value per sample in a buffer (pd_param_buffer) and a flag
+ * saying it moves (pd_param_moving) - and while anything moves, this renders the call a sample
+ * at a time with each moving control at its sample's value. Nothing moving costs one check.
+ * It is the same source on both engines, so a patched module sounds the same in the browser and
+ * on the desktop. The wrapper's own pd_process becomes pd_process_block, untouched.
+ */
+export function withPatchLayer(wrapper, { id, count, maxBlock }) {
+  const NS = 'namespace {\n';
+  const PROCESS = 'void pd_process(int frames) {';
+  if (!wrapper.includes(NS) || wrapper.split(PROCESS).length !== 2 || !wrapper.includes('extern "C" {\n')) {
+    throw new Error(`${id}: the wrapper is not shaped for the patch layer (one namespace, one pd_process in extern "C")`);
+  }
+  const n = Math.max(1, count);
+  const state = `${NS}const int kCtlCount = ${n};
+const int kCtlBlock = ${maxBlock};
+// A moving control's values for the call, by control; whether each moves; the call kept aside.
+float g_ctlValues[${n} * ${maxBlock}];
+int g_ctlMoving[${n}];
+int g_ctlMovingCount = 0;
+float g_ctlIn[2 * ${maxBlock}];
+float g_ctlOut[2 * ${maxBlock}];
+`;
+  const layer = `float* pd_param_buffer(int id) { return id >= 0 && id < kCtlCount ? g_ctlValues + id * kCtlBlock : nullptr; }
+
+void pd_param_moving(int id, int on) {
+  if (id < 0 || id >= kCtlCount) return;
+  const int now = on ? 1 : 0;
+  if (now != g_ctlMoving[id]) g_ctlMovingCount += now ? 1 : -1;
+  g_ctlMoving[id] = now;
+}
+
+void pd_process(int frames) {
+  if (g_ctlMovingCount == 0) { pd_process_block(frames); return; }
+  if (frames > kCtlBlock) frames = kCtlBlock;
+  float* in = pd_in();
+  float* out = pd_out();
+  float* params = pd_params();
+  for (int s = 0; s < frames; s++) { g_ctlIn[s] = in[s]; g_ctlIn[kCtlBlock + s] = in[kCtlBlock + s]; }
+  for (int s = 0; s < frames; s++) {
+    for (int i = 0; i < kCtlCount; i++) if (g_ctlMoving[i]) params[i] = g_ctlValues[i * kCtlBlock + s];
+    in[0] = g_ctlIn[s];
+    in[kCtlBlock] = g_ctlIn[kCtlBlock + s];
+    pd_process_block(1);
+    g_ctlOut[s] = out[0];
+    g_ctlOut[kCtlBlock + s] = out[kCtlBlock];
+  }
+  for (int s = 0; s < frames; s++) { out[s] = g_ctlOut[s]; out[kCtlBlock + s] = g_ctlOut[kCtlBlock + s]; }
+}
+
+`;
+  const renamed = wrapper.replace(NS, state).replace(PROCESS, 'void pd_process_block(int frames) {');
+  // The layer goes just before the extern block's closing brace, after pd_process_block.
+  const close = renamed.lastIndexOf('}');
+  return `${renamed.slice(0, close)}${layer}${renamed.slice(close)}`;
+}
 /** An instrument exports two more: it is played rather than fed. */
 const SYNTH_EXPORTS = [...EXPORTS, '_pd_note_on', '_pd_note_off', '_pd_bend'];
 
@@ -446,7 +508,7 @@ function recipe({
   return {
     id,
     descriptor,
-    wrapper,
+    wrapper: withPatchLayer(wrapper, { id, count: descriptor.params.length, maxBlock: MAX_BLOCK }),
     workDir,
     wrapperName,
     sources,
@@ -540,11 +602,7 @@ async function mutableRecipes({ lock, repin }) {
       memory: memoryFor('Plaits'),
     }),
     ringsRecipe({ euro, stmlib }),
-    mutableRecipe({
-      euro, stmlib, id: 'Warps', module: 'warps',
-      descriptor: warpsDescriptor(`https://github.com/${EURORACK_REPO} (warps)`),
-      wrapper: warpsWrapper(MAX_BLOCK), exports: EXPORTS,
-    }),
+    // Warps is retired (see sources.json): not built, and not in the catalog.
     mutableRecipe({
       euro, stmlib, id: 'Elements', module: 'elements',
       descriptor: elementsDescriptor(`https://github.com/${EURORACK_REPO} (elements)`),
@@ -686,7 +744,7 @@ export async function deviceRecipes({ lock, only = null, repin = false } = {}) {
 }
 
 /** The devices built from the Mutable checkout, for `--only` to name one of. */
-const MUTABLE_IDS = Object.freeze(['Plaits', 'Rings', 'Warps', 'Elements', 'Braids', 'Clouds']);
+const MUTABLE_IDS = Object.freeze(['Plaits', 'Rings', 'Elements', 'Braids', 'Clouds']);
 
 /** Which generated descriptor module each family is written to, and what it says about itself. */
 const DESCRIPTOR_FILES = [
@@ -730,7 +788,7 @@ const DESCRIPTOR_FILES = [
     out: MUTABLE_OUT,
     // The order the module has always been written in, which is the order it is read in too:
     // the catalog shows devices in the order the lists carry them.
-    ids: ['Plaits', 'Rings', 'Elements', 'Braids', 'Warps', 'Clouds'],
+    ids: ['Plaits', 'Rings', 'Elements', 'Braids', 'Clouds'],
     listName: 'MUTABLE_DEVICES',
     title: 'The Mutable Instruments modules, as device descriptors.',
     notes: [

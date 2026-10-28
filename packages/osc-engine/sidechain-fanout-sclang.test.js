@@ -45,7 +45,6 @@ function runSclang() {
   const script = `(
 var srv = Server(\\poptartProbe, NetAddr("127.0.0.1", 57999));
 var server = srv;
-var maxSlots = 8;
 var tracks = IdentityDictionary.new;
 var sidechainByTarget = IdentityDictionary.new;
 // Parameter patches order tracks too (trackLevels reads them); none here.
@@ -59,7 +58,12 @@ var acquireSourceFeed, releaseSourceFeed, wireAudio, unwireAudio, scKey;
 // poptart's own compressor and ducker). The real one is lifted in below; here the slots hold no
 // controllers at all, so it has nothing to tell and the routing is what is under test.
 var tellKeyPatched;
+// A slot's sidechain bus and the source's own send, which live on nodes the real track grows (see
+// setScBus and stripTap in sc/poptart.scd) - inert here, where the routing is what is under test.
+var setScBus = { |track, slot, index| }, stripTap = { |track, name, out, amp, post| };
 var awaitTrack, acquireBus, releaseBus;
+// The edges that close a loop, and what reorderTracks re-points at them (see trackLevels).
+var loopEdges = Set.new, routeCloses, busWriters, busIndexOf = { |b| b }, applyParamRoute = { |t, e| };
 var recGroup = Group.basicNew(srv), levelGroups = [Group.basicNew(srv)], trackLevels, reorderTracks;
 // Real (never-created) nodes for the track's synth and group: .set/.moveAfter just put an OSC
 // message on the wire to a server that isn't there, which is exactly the no-op this test wants.
@@ -83,6 +87,8 @@ ${extract('wireAudio')}
 ${extract('unwireAudio')}
 ${extract('trackLevels')}
 ${extract('reorderTracks')}
+${extract('routeCloses')}
+${extract('busWriters')}
 
 ("COMPILES<" ++ [acquireSourceFeed, releaseSourceFeed, wireAudio, unwireAudio].every { |f| f.isKindOf(Function) } ++ ">").postln;
 

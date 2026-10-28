@@ -135,17 +135,23 @@ function defineParam(deviceId, spec, seen) {
   const sampleAs = takes === 'sample' ? (spec.sampleAs ?? 'audio') : null;
   if (sampleAs !== null && !['audio', 'wavetable'].includes(sampleAs)) fail(deviceId, `param "${id}" has unknown sampleAs "${sampleAs}"`);
 
-  // An enum's range is its option list; saying it twice is a chance to disagree. One that takes
-  // files may reserve room past its list - `capacity` slots in all - for what gets loaded.
-  let capacity = null;
-  if (options) {
-    capacity = spec.capacity ?? options.length;
-    if (!Number.isInteger(capacity) || capacity < options.length) {
-      fail(deviceId, `param "${id}": capacity must be a whole number no smaller than the option list`);
-    }
-  } else if (spec.capacity !== undefined) {
-    fail(deviceId, `param "${id}": only an enum has a capacity`);
-  }
+  // An enum's range is its option list; saying it twice is a chance to disagree.
+  //
+  // An OPEN control has no top. An enum that takes files or curves is one (what gets loaded joins
+  // its list, as many as are loaded), and so is a count a spec marks `open` (a synth's voices).
+  // What such a control holds is the choice itself - an option's index, a whole number of
+  // voices - and that is what a preset, a `.param()` and the engine carry. Its `max` is only how
+  // far a knob, a MIDI mapping or a 0..1 signal reaches (the option list as shipped; a count's
+  // `uiMax`), never a ceiling: a value past it plays.
+  if (spec.capacity !== undefined) fail(deviceId, `param "${id}": capacity is gone - an enum that takes files has no top`);
+  const open = options ? !!(spec.takes) : !!spec.open;
+  if (spec.open && options && !spec.takes) fail(deviceId, `param "${id}": an enum is open only when it takes files or curves`);
+  if (open && !options && (spec.curve ?? 'lin') !== 'lin') fail(deviceId, `param "${id}": an open count is linear`);
+  // The range a count had when it had a top, for a 0..1 position a song wrote before it was open
+  // (see argToValue).
+  if (open && !options && !(isFiniteNumber(spec.uiMax) && spec.uiMax > spec.min)) fail(deviceId, `param "${id}": an open count needs a uiMax above its min, for the knob's reach`);
+  const legacyMax = spec.legacyMax ?? null;
+  if (legacyMax !== null && !(open && !options && isFiniteNumber(legacyMax))) fail(deviceId, `param "${id}": legacyMax is for an open count`);
   // Headings over runs of an enum's options - `[{ label, from }]`, `from` the index the run starts
   // at - for a list long enough that one column of it is not something to read. The panel's
   // menu draws a heading per group, a column each.
@@ -164,13 +170,13 @@ function defineParam(deviceId, spec, seen) {
     optionGroups = Object.freeze(groups.map((g) => Object.freeze({ label: String(g.label), from: g.from })));
   }
   const min = options ? 0 : spec.min;
-  const max = options ? capacity - 1 : spec.max;
+  const max = options ? Math.max(1, options.length - 1) : (open ? spec.uiMax : spec.max);
   if (!isFiniteNumber(min) || !isFiniteNumber(max)) fail(deviceId, `param "${id}" needs numeric min and max`);
   if (!(max > min)) fail(deviceId, `param "${id}": max must be above min`);
 
   const def = spec.default;
   if (!isFiniteNumber(def)) fail(deviceId, `param "${id}" needs a numeric default`);
-  if (def < min || def > max) fail(deviceId, `param "${id}": default ${def} is outside ${min}..${max}`);
+  if (def < min || (!open && def > max)) fail(deviceId, `param "${id}": default ${def} is outside ${min}..${max}`);
 
   if (curve === 'exp' && min <= 0) {
     fail(deviceId, `param "${id}": an exp curve needs min above zero (it maps a ratio)`);
@@ -236,7 +242,8 @@ function defineParam(deviceId, spec, seen) {
     step,
     options: options ? Object.freeze(options) : null,
     optionGroups,
-    capacity,
+    open,
+    legacyMax,
     takes,
     sampleAs,
     bank,
@@ -448,12 +455,20 @@ export function defineDevice(spec) {
   // device that wants phase modulation gives its phase a knob. See signalDestinations().
   if (spec.inputs !== undefined) fail(id, 'inputs are not a thing - an a-rate param is a signal destination already');
 
+  // `key` and `outputs` are the Crossover's (see devices/crossover.mjs): a second input that is
+  // not a sidechain anybody routes - the wiring of a .bands() feeds it - and more than one output,
+  // each `out` channels wide. Every other device has neither.
   const channels = {
     in: spec.channels?.in ?? (kind === 'fx' ? 2 : 0),
     out: spec.channels?.out ?? 2,
+    key: spec.channels?.key ?? 0,
+    outputs: spec.channels?.outputs ?? 1,
   };
   if (!Number.isInteger(channels.in) || channels.in < 0) fail(id, 'channels.in must be a non-negative integer');
   if (!Number.isInteger(channels.out) || channels.out < 1) fail(id, 'channels.out must be a positive integer');
+  if (!Number.isInteger(channels.key) || channels.key < 0) fail(id, 'channels.key must be a non-negative integer');
+  if (!Number.isInteger(channels.outputs) || channels.outputs < 1) fail(id, 'channels.outputs must be a positive integer');
+  if (channels.key && spec.sidechain === true) fail(id, 'a device takes a key or a sidechain, not both');
   if (kind === 'fx' && channels.in === 0) fail(id, 'an fx device needs an input');
 
   // A second audio input, fed by `.audio("other")` on the effect: the carrier for a cross-
@@ -540,7 +555,7 @@ export function clampParam(param, value) {
   if (!Number.isFinite(v)) return param.default;
   if (param.step) v = Math.round(v / param.step) * param.step;
   if (v < param.min) return param.min;
-  if (v > param.max) return param.max;
+  if (v > param.max && !param.open) return param.max;
   return v;
 }
 
@@ -554,7 +569,8 @@ export function clampParam(param, value) {
  * reads. The knob and the readout go through the same function, so the three can never disagree.
  */
 export function denormalize(param, position) {
-  const t = Math.min(1, Math.max(0, Number(position) || 0));
+  // An open control's position runs past 1 for a value past the knob's reach (see defineParam).
+  const t = Math.min(param.open ? Infinity : 1, Math.max(0, Number(position) || 0));
   let v;
   if (param.curve === 'exp') {
     v = param.min * Math.pow(param.max / param.min, t);
@@ -577,7 +593,7 @@ export function normalize(param, value) {
   } else {
     t = (v - param.min) / (param.max - param.min);
   }
-  return Math.min(1, Math.max(0, t));
+  return Math.min(param.open ? Infinity : 1, Math.max(0, t));
 }
 
 /** Whether a parameter is a two-state switch, whatever widget it asked for. */
@@ -603,7 +619,7 @@ export function argToValue(param, arg) {
       const index = param.options.findIndex((o) => normalizeKey(o) === want);
       if (index >= 0) return index;
       const n = Number(arg);
-      return Number.isInteger(n) && n >= param.min && n <= param.max ? n : null;
+      return Number.isInteger(n) && n >= param.min && (param.open || n <= param.max) ? n : null;
     }
     const n = Number(arg);
     if (!Number.isFinite(n)) return null;
@@ -612,7 +628,20 @@ export function argToValue(param, arg) {
   const n = Number(arg);
   if (!Number.isFinite(n)) return null;
   if (isToggle(param)) return n >= 0.5 ? 1 : 0;
+  if (param.open) return openCount(param, n);
   return denormalize(param, n);
+}
+
+/**
+ * What a number means on an open count: the count. A fraction strictly between 0 and 1 is a
+ * position written before the control was open - by hand, or by an older write-back - and means
+ * what it meant then, across the range it had (`legacyMax`), so an old song keeps its voices.
+ */
+function openCount(param, n) {
+  if (param.legacyMax !== null && n > 0 && n < 1) {
+    return clampParam(param, param.min + (param.legacyMax - param.min) * n);
+  }
+  return clampParam(param, n);
 }
 
 /**
@@ -624,6 +653,7 @@ export function valueToArg(param, value) {
   const v = clampParam(param, value);
   if (param.options) return JSON.stringify(param.options[Math.round(v)] ?? String(Math.round(v)));
   if (isToggle(param)) return v >= 0.5 ? '1' : '0';
+  if (param.open) return trimNumber(v);
   return trimNumber(normalize(param, v));
 }
 
@@ -695,7 +725,7 @@ export function formatValue(param, value, extras = null) {
   const v = clampParam(param, value);
   if (param.options) {
     const i = Math.round(v);
-    return param.options[i] ?? extras?.[i] ?? (i < (param.capacity ?? param.options.length) ? 'empty' : String(v));
+    return param.options[i] ?? extras?.[i] ?? (param.open ? 'empty' : String(v));
   }
   if (param.ui === 'toggle') return v >= 0.5 ? 'on' : 'off';
   // Trailing zeros kept on purpose - stripping them is the same width problem again.

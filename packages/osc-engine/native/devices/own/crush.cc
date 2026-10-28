@@ -53,13 +53,6 @@ struct Device : pd_own::Device<ids::kCount> {
       for (auto& c : channels) c.tone.glideTo(toneHz, frames);
       lastTone = toneHz;
     }
-    const double target = std::fmax(1.0, p[ids::rate]);
-    const double jitter = clamp(p[ids::jitter], 0.0, 1.0);
-    const double bits = clamp(p[ids::bits], 1.0, 16.0);
-    const double levels = std::pow(2.0, bits - 1.0);
-    const double mix = clamp(p[ids::mix], 0.0, 1.0);
-    const double gain = dbToGain(p[ids::output]);
-
     for (int ch = 0; ch < 2; ++ch) {
       const float* input = ch == 0 ? inL() : inR();
       float* out = ch == 0 ? outL() : outR();
@@ -69,8 +62,10 @@ struct Device : pd_own::Device<ids::kCount> {
         // Sample and hold. The phase carries across blocks, so the held rate is steady rather
         // than restarting every block. At the top of the range, or at a rate the engine already
         // runs at, every sample is taken as it comes and only the bit depth is applied.
+        const double target = std::fmax(1.0, ctl(ids::rate, i));
         bool take = true;
         if (target < kRateTop && target < sampleRate) {
+          const double jitter = clamp(ctl(ids::jitter, i), 0.0, 1.0);
           c.phase += (target * (1.0 - jitter * 0.5 * c.random())) / sampleRate;
           take = c.phase >= 1.0;
           if (take) c.phase -= std::floor(c.phase);
@@ -78,12 +73,15 @@ struct Device : pd_own::Device<ids::kCount> {
         if (take) {
           // Levels either side of zero: 2^bits - 1 steps would overshoot full scale by half a
           // step at the very top, which is a quiet click on every peak.
+          const double bits = clamp(ctl(ids::bits, i), 1.0, 16.0);
+          const double levels = std::pow(2.0, bits - 1.0);
           const double clamped = dry < -1 ? -1 : (dry > 1 ? 1 : dry);
           c.hold = jsRound(clamped * levels) / levels;
         }
         double wet = c.hold;
         if (toneHz < 19999) wet = c.tone.next(wet);
-        out[i] = static_cast<float>((dry * (1 - mix) + wet * mix) * gain);
+        const double mix = clamp(ctl(ids::mix, i), 0.0, 1.0);
+        out[i] = static_cast<float>((dry * (1 - mix) + wet * mix) * dbToGain(ctl(ids::output, i)));
       }
       if (frames > 0 && !isPlayable(out[frames - 1])) c.reset();
     }

@@ -61,11 +61,6 @@ struct Device : pd_own::Device<ids::kCount> {
       lastHigh = high;
       lastTone = tone;
     }
-    const double dyn = p[ids::dynamics];
-    const double drive = dbToGain(p[ids::drive]);
-    const double mix = p[ids::mix];
-    const double normalize = std::tanh(std::fmin(drive, 4.0) * 0.5 + 0.5);
-
     for (int ch = 0; ch < 2; ++ch) {
       const float* input = ch == 0 ? inL() : inR();
       float* out = ch == 0 ? outL() : outR();
@@ -75,10 +70,13 @@ struct Device : pd_own::Device<ids::kCount> {
         const double region = c.lp.next(c.hp.next(x));
         const double rest = x - region;
         // The dynamics: a gentle upward lift on the region toward a fixed level.
+        const double dyn = ctl(ids::dynamics, i);
         const double env = c.detector.next(std::fabs(region));
         const double lift = dyn > 0 ? std::pow(std::fmax(1e-4, env) / 0.25, -0.7 * dyn) : 1.0;
-        const double driven = std::tanh(region * std::fmin(lift, 16.0) * drive) / normalize;
+        const double drive = dbToGain(ctl(ids::drive, i));
+        const double driven = std::tanh(region * std::fmin(lift, 16.0) * drive) / std::tanh(std::fmin(drive, 4.0) * 0.5 + 0.5);
         const double wet = c.tone.next(driven) * 0.7 + rest;
+        const double mix = ctl(ids::mix, i);
         out[i] = static_cast<float>(x + (wet - x) * mix);
       }
       if (frames > 0 && (!isPlayable(out[frames - 1]) || !isPlayable(c.detector.env))) c.reset();

@@ -964,21 +964,15 @@ test('a strip the desk stops showing hands its analyzer back', () => {
   assert.deepEqual([...engine.analysis.taps.keys()], ['*']);
 });
 
-test('past the budget the tracks are not analyzed and the panel is told why', () => {
+test('every strip shown gets an analyzer of its own, however many there are', () => {
   const { engine } = makeEngine();
-  const ids = Array.from({ length: engine.mixTrackMax() + 1 }, (_, i) => `t${i}`);
+  const ids = Array.from({ length: 24 }, (_, i) => `t${i}`);
   for (const id of ids) engine.createTrack(id);
   engine.setMixMonitor(true);
 
-  const within = engine.mixRead(ids.slice(0, engine.mixTrackMax()));
-  assert.equal(within.perTrack, true);
-  assert.equal(engine.analysis.taps.size, engine.mixTrackMax() + 1);
-
-  const over = engine.mixRead(ids);
-  assert.equal(over.perTrack, false, 'the desk says the plots are the master now');
-  assert.equal(over.perTrackMax, engine.mixTrackMax());
-  assert.deepEqual(Object.keys(over.levels), ['*'], 'and nothing but the master is tapped');
-  assert.equal(engine.analysis.taps.size, 1);
+  const read = engine.mixRead(ids);
+  assert.deepEqual(Object.keys(read.levels).sort(), ['*', ...ids].sort());
+  assert.equal(engine.analysis.taps.size, ids.length + 1);
 });
 
 test('a tap reads its own track, both sides, and a band per plotted frequency', () => {
@@ -1159,7 +1153,7 @@ test('an lfo() drives a channel control in its own units, and is let go where it
   const lfo = (min, max) => ({ shape: 'sine', rateHz: 1, min, max });
   const targets = {
     gain: track.chainIn.gain, postgain: track.postGain.gain, dry: track.dryGain.gain, width: track.width.gain,
-    pan: track.panCtl.offset, wet1: track.wetControl(1).offset, bassmono: track.bassHp.frequency,
+    pan: track.panCtl.offset, wet1: track.wetControl(1).offset, bassmono: track._bassMono().frequency,
   };
   for (const [name, param] of Object.entries(targets)) {
     engine.setParamLFO('t1', -1, name, name === 'bassmono' ? lfo(80, 300) : lfo(-1, 1));
@@ -1178,17 +1172,16 @@ test('an lfo() drives a channel control in its own units, and is let go where it
   assert.ok(Math.abs(track.panValue - 1) < 1e-3, `left where the lfo had it (${track.panValue})`);
 });
 
-test('a grain control an lfo() drives is read at each grain\'s own start', () => {
-  const { ctx, engine } = makeEngine({ samples: { get: () => ({ buffer: fakeBuffer(48000), rootNote: 60 }) } });
+test('a grain control an lfo() drives is the constant every grain voice reads', () => {
+  const { engine } = makeEngine({ samples: { get: () => ({ buffer: fakeBuffer(48000), rootNote: 60 }) } });
   engine.createTrack('t1');
-  engine.setParam('t1', -1, 'grainrate', 40, 0);
-  // A saw over 100 ms from a 10 ms grain to a 90 ms one.
   engine.setParamLFO('t1', -1, 'grainsize', { shape: 'saw', rateHz: 10, min: 0.01, max: 0.09 });
-  const before = ctx.created.filter((n) => n.kind === 'bufferSource').length;
+  const track = engine.tracks.get('t1');
+  const size = track.grainControl('grainsize');
+  assert.equal(size.offset.connectedFrom.length, 1, 'the lfo drives the track\'s constant');
   engine.playSample('t1', 'pt_kit', { vel: 1, grain: 1 }, 0, 1);
-  const grains = ctx.created.filter((n) => n.kind === 'bufferSource').slice(before);
-  const sizes = grains.map((g) => Math.round((g.stopped.when - g.started.when - 0.005) * 1000));
-  assert.deepEqual(sizes, [10, 30, 50, 70], 'each grain is as long as the saw was when it started');
+  const voice = engine.ctx.created.find((n) => n.processorName === 'poptart-grains');
+  assert.ok(size.outputs.includes(voice.parameters.get('size')), 'and the voice reads it, sample by sample');
 });
 
 test('.o() puts a track on the pair it names, wrapped at the pairs the output has', () => {
@@ -1209,22 +1202,51 @@ test('.o() puts a track on the pair it names, wrapped at the pairs the output ha
   assert.equal(engine.setOutputChannels(7), 6, 'an odd count is taken down to a pair');
 });
 
-test('.grain() plays a cloud: a grain every 1/rate seconds, read where the track says, leveled by overlap', () => {
-  const { ctx, engine } = makeEngine({ samples: { get: () => ({ buffer: fakeBuffer(48000), rootNote: 60 }) } });
+test('.grain() is one worklet voice per event, with no node per grain', () => {
+  const buffer = fakeBuffer(48000);
+  const { ctx, engine } = makeEngine({ samples: { get: () => ({ buffer, rootNote: 60 }) } });
   engine.createTrack('t1');
-  engine.setParam('t1', -1, 'grainrate', 40, 0);
+  engine.setParam('t1', -1, 'grainrate', 400, 0);
   engine.setParam('t1', -1, 'grainsize', 0.05, 0);
-  const before = ctx.created.filter((n) => n.kind === 'bufferSource').length;
+  const before = ctx.created.length;
   const info = engine.playSample('t1', 'pt_kit', { vel: 1, grain: 1, begin: 0.5 }, 0, 1);
   assert.equal(info.grain, true);
-  const grains = ctx.created.filter((n) => n.kind === 'bufferSource').slice(before);
-  // The first lay reaches 100 ms ahead: at 40 a second that is grains at 0, 25, 50 and 75 ms.
-  assert.deepEqual(grains.map((g) => Math.round(g.started.when * 1000)), [0, 25, 50, 75]);
-  assert.ok(grains.every((g) => Math.abs(g.started.offset - 0.5) < 1e-9), 'read from the event\'s begin, half way into the file');
-  assert.ok(grains.every((g) => Math.abs(g.stopped.when - g.started.when - 0.055) < 1e-9), 'each as long as the grain size');
-  // An event's own seed values win for its first grains.
+  const made = ctx.created.slice(before);
+  assert.equal(made.filter((n) => n.kind === 'bufferSource' || n.kind === 'panner').length, 0);
+  const voices = made.filter((n) => n.processorName === 'poptart-grains');
+  assert.equal(voices.length, 1);
+  const [voice] = voices;
+  const o = voice.options.processorOptions;
+  assert.equal(o.begin, 0.5, 'read from the event\'s begin, half way into the file');
+  assert.equal(o.channels[0], buffer.getChannelData(0), 'the first voice of a file brings its samples');
+  const track = engine.tracks.get('t1');
+  for (const [name, id] of [['grainsize', 'size'], ['grainrate', 'density'], ['grainpan', 'pan'], ['grainpos', 'pos']]) {
+    assert.ok(track.grainControl(name).outputs.includes(voice.parameters.get(id)), `${name} reaches the voice`);
+  }
+  assert.ok(voice.reaches(track.input));
+  // A second event names the file it already sent.
   engine.playSample('t1', 'pt_kit', { vel: 1, grain: 1, grainRate: 10, grainSize: 0.2 }, 0, 1);
-  assert.equal(engine.tracks.get('t1').grain.rate, 10);
+  const second = ctx.created.filter((n) => n.processorName === 'poptart-grains')[1];
+  assert.equal(second.options.processorOptions.channels, undefined);
+  assert.equal(second.options.processorOptions.file, o.file);
+  // An event's own seed values win for its first grains.
+  assert.equal(track.grain.rate, 10);
+  assert.ok(track.grainControl('grainrate').offset.landedOn(10));
+});
+
+test('a hush ends a grain voice, and the voice lets go of the track when it is over', () => {
+  const { ctx, engine } = makeEngine({ samples: { get: () => ({ buffer: fakeBuffer(48000), rootNote: 60 }) } });
+  engine.createTrack('t1');
+  engine.playSample('t1', 'pt_kit', { vel: 1, grain: 1 }, 0, 4);
+  const voice = ctx.created.find((n) => n.processorName === 'poptart-grains');
+  ctx.advance(0.5);
+  engine.hush('t1');
+  const end = voice.messages.find((m) => m.kind === 'end');
+  assert.ok(end && end.time > 0.5 && end.time < 0.6, 'over once its fade is');
+  const size = engine.tracks.get('t1').grainControl('grainsize');
+  voice.port.onmessage({ data: { kind: 'ended' } });
+  assert.equal(size.outputs.includes(voice.parameters.get('size')), false);
+  assert.equal(voice.outputs.length, 0);
 });
 
 test('a strip control\'s first value is where the track starts; later ones glide', () => {

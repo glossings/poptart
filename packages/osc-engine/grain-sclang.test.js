@@ -101,20 +101,19 @@ var grainMaxOverlap = ${MAX_OVERLAP};
   }
 });
 
-test('the track synth carries the four grain controls and republishes them', (t) => {
+test('the track\'s head carries the four grain controls and republishes them', (t) => {
   const out = runSclang(`(
 var server = Server(\\poptartGrainProbe, NetAddr("127.0.0.1", 57998));
-var playChannels = 2, maxSlots = 8, cueOffset = nil;
+var playChannels = 2, cueOffset = nil, routeNowhere = 1000000;
 var bendPollHz = ${/var bendPollHz = (\d+)/.exec(SRC)[1]};
-var maxBusSends = 4;
 var deckMeterBus = Bus.control(server, 4);
 var trackDefName = { |key| ("poptart_track_" ++ key).asSymbol };
-var buildTrackDef, djIsolator, channelDefault, def;
+var buildHeadDef, djIsolator, channelDefault, def;
 server.options.numOutputBusChannels = 2;
 ${extract('djIsolator')}
-${extract('buildTrackDef')}
+${extract('buildHeadDef')}
 ${extract('channelDefault')}
-def = buildTrackDef.(\\probe);
+def = buildHeadDef.();
 ("BUILT<" ++ def.isKindOf(SynthDef) ++ ">").postln;
 [\\grainpos, \\grainsize, \\grainrate, \\grainpan, \\grainOut].do { |n|
     var c = def.allControlNames.detect({ |k| k.name == n });
@@ -292,6 +291,54 @@ Score.recordNRT([
 
     assert.ok(level(10, 0.1, 0.45) > 0.05, 'gated voice: sounds while its gate is open');
     assert.ok(level(10, 0.7, 1.1) < floor, `gated voice: released and gone (${level(10, 0.7, 1.1).toFixed(6)})`);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a grain plays a 44.1 kHz file at its own pitch on a 48 kHz server', (t) => {
+  // GrainBuf plays a buffer at the buffer's own rate already, so the voice must not scale by
+  // BufRateScale on top: that played a 44.1 kHz file 2.9 semitones flat (441 Hz came out at 405).
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'poptart-grain-pitch-'));
+  try {
+    const file = path.join(dir, 'tone441.wav');
+    const SR_FILE = 44100;
+    writeWav(file, { sampleRate: SR_FILE, channels: 1, frames: SR_FILE,
+      data: Float32Array.from({ length: SR_FILE }, (_, i) => 0.5 * Math.sin((2 * Math.PI * 441 * i) / SR_FILE)) });
+    const out = path.join(dir, 'grains.wav');
+    const scsynth = path.join(path.dirname(resolveSclangPath()), 'scsynth');
+    const text = runSclang(`(
+var grainMaxOverlap = ${MAX_OVERLAP};
+var def = ${grainDef(1)};
+${fs.existsSync(scsynth) ? `Score.program = ${JSON.stringify(scsynth)}.quote;` : ''}
+("DEF<ok>").postln;
+Score.recordNRT([
+    [0.0, ['/d_recv', def.asBytes]],
+    [0.0, ['/b_allocRead', 0, ${JSON.stringify(file)}]],
+    [0.05, ['/s_new', def.name, 1000, 0, 0, 'out', 0, 'bufL', 0, 'bufR', 0, 'begin', 0.5, 'rate', 1,
+        'gate', 1, 'amp', 1, 'grainsize', 0.1, 'grainrate', 20]],
+    [1.0, ['/c_set', 0, 0]]
+], ${JSON.stringify(`${out}.osc`)}, ${JSON.stringify(out)}, sampleRate: 48000, headerFormat: "WAV", sampleFormat: "float",
+    options: ServerOptions.new.numOutputBusChannels_(2), duration: 1.0, action: { "RENDER-DONE".postln; 0.exit });
+)
+`);
+    if (!/DEF<ok>/.test(text) || !text.includes('RENDER-DONE')) { t.skip(`could not render here: ${text.trim().split('\n').slice(-3).join(' | ')}`); return; }
+    const wav = readWavRaw(out);
+    const from = Math.round(0.3 * wav.sampleRate);
+    const n = Math.round(0.6 * wav.sampleRate);
+    const amp = (hz) => {
+      let c = 0; let q = 0;
+      for (let i = from; i < from + n; i++) {
+        const x = wav.data[i * wav.channels];
+        const w = (2 * Math.PI * hz * i) / wav.sampleRate;
+        c += x * Math.cos(w); q += x * Math.sin(w);
+      }
+      return (2 * Math.hypot(c, q)) / n;
+    };
+    const right = amp(441);
+    const flat = amp(441 * 2 ** (-2.9 / 12));
+    assert.ok(right > 0.05, `nothing at 441 Hz (${right.toFixed(4)})`);
+    assert.ok(right > 10 * flat, `the grains are not at the file's pitch: 441 Hz ${right.toFixed(4)}, 2.9 st flat ${flat.toFixed(4)}`);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

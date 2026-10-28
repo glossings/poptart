@@ -59,6 +59,7 @@ import { WAVETABLE } from '../../src/devices/wavetable.mjs';
 import { GRANULAR } from '../../src/devices/granular.mjs';
 import { NOISE } from '../../src/devices/noise.mjs';
 import { LPG } from '../../src/devices/lpg.mjs';
+import { CROSSOVER } from '../../src/devices/crossover.mjs';
 import { CONVOLVER } from '../../src/devices/builtins.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -134,7 +135,13 @@ const OWN = [
   { descriptor: GRANULAR, source: 'granular.cc' },
   { descriptor: NOISE, source: 'noise.cc' },
   { descriptor: LPG, source: 'lpg.cc' },
+  // The engine's own, never the user's: built into the extension, listed apart in the catalog (see
+  // catalogJson), so no name a pattern writes reaches it.
+  { descriptor: CROSSOVER, source: 'crossover.cc', internal: true },
 ];
+
+/** The ids of the devices the engine builds for itself. */
+const INTERNAL_IDS = new Set(OWN.filter((o) => o.internal).map((o) => o.descriptor.id));
 
 /** Every own device, with where its source is. Throws if a listed source is missing. */
 export function ownDevices() {
@@ -282,8 +289,8 @@ function paramTable(device) {
   const rows = device.params.map((p) => {
     const curve = CURVES[p.curve] ?? 0;
     return `    { ${cString(p.id)}, ${cString(p.name)}, ${cFloat(p.min)}, ${cFloat(p.max)}, `
-      + `${cFloat(normalize(p, p.default))}, ${cFloat(p.step ?? 0)}, ${cFloat(p.curveExp ?? 1)}, ${curve} },`;
-    // (min, max, the default as a POSITION, the step, the pow exponent, the curve)
+      + `${cFloat(normalize(p, p.default))}, ${cFloat(p.step ?? 0)}, ${cFloat(p.curveExp ?? 1)}, ${curve}, ${p.open ? 1 : 0} },`;
+    // (min, max, the default as a POSITION, the step, the pow exponent, the curve, whether it is open)
   });
   return `static const PdParamSpec k${device.id}Params[] = {\n${rows.join('\n')}\n};`;
 }
@@ -413,7 +420,7 @@ function hash(text) {
  * the desktop is drawn from the same shared descriptor the web build serves. Sorted by name so a
  * rebuild that changed nothing produces no diff.
  */
-export function catalogJson(devices) {
+export function catalogJson(devices, internal = INTERNAL_IDS) {
   const entry = (d) => ({
     id: d.id,
     name: d.name ?? d.id,
@@ -440,20 +447,26 @@ export function catalogJson(devices) {
       ...(p.options ? { options: [...p.options] } : {}),
       // What a control takes that is not a number: a FILE (a granulator's sample, a convolver's
       // impulse response) or a drawn CURVE. The engine reads this to know that `.param("sample",
-      // "break:2")` names a file to load rather than an option to look up, and the capacity is
-      // how many of them the control's option list has room for (see the sample path in
-      // osc-engine's index.js, which fills those slots the way the browser's engine does).
+      // "break:2")` names a file to load rather than an option to look up, into the next free
+      // slot past the control's own options (see the sample path in osc-engine's index.js, which
+      // fills those slots the way the browser's engine does).
       ...(p.takes ? { takes: p.takes } : {}),
-      ...(p.capacity ? { capacity: p.capacity } : {}),
+      // A control with no top (descriptor.mjs's open controls), and the range an open count had
+      // before it was one, which an old 0..1 position on it still means.
+      ...(p.open ? { open: true } : {}),
+      ...(p.legacyMax != null ? { legacyMax: p.legacyMax } : {}),
       ...(p.sampleAs ? { sampleAs: p.sampleAs } : {}),
       // Controls sharing one store of files, which hand out its slots between them.
       ...(p.bank ? { bank: p.bank } : {}),
     })),
   });
   const sorted = [...devices].sort((a, b) => a.id.localeCompare(b.id));
+  // `devices` is every name a pattern can write; `internal` the ones the engine builds for itself
+  // (a .bands() crossover), which no device list, completion or `fx()` may reach.
   return `${JSON.stringify({
     generatedBy: 'packages/web-engine/build/devices/native.mjs',
-    devices: sorted.map(entry),
+    devices: sorted.filter((d) => !internal.has(d.id)).map(entry),
+    internal: sorted.filter((d) => internal.has(d.id)).map(entry),
   }, null, 2)}\n`;
 }
 
@@ -537,7 +550,7 @@ export async function buildNative({ only = null, emitOnly = false, repin = false
     // built with the same flags, since none of them wants anything upstream.
     const ownFlags = [...base, '-I', genDir];
     const headersMs = headersChangedMs();
-    for (const source of [path.join(NATIVE_DIR, 'PoptartDevice.cpp'), path.join(NATIVE_DIR, 'pd-device.cc'), registry]) {
+    for (const source of [path.join(NATIVE_DIR, 'PoptartDevice.cpp'), path.join(NATIVE_DIR, 'PoptartSpectrum.cpp'), path.join(NATIVE_DIR, 'pd-device.cc'), registry]) {
       objects.push(compileOne({ source, objDir, flags: ownFlags, stamps, headersMs }));
     }
     for (const one of own) {

@@ -9,12 +9,10 @@
 import { defineDevice } from '../descriptor.mjs';
 import { Adsr } from '../dsp/adsr.mjs';
 
-export const GRAIN_VOICES = 8;
+/** How far the Voices knob reaches, which is no most (see the Wavetable's VOICES_KNOB). It stopped at 8 before. */
+export const GRAIN_VOICES_KNOB = 128;
 const MAX_GRAINS = 24;          // per voice
-const SAMPLE_SLOTS = 32;
 
-/** How many drawn windows a device holds at once, past the shapes it ships with. */
-const SHAPE_SLOTS = 8;
 
 // Grain windows. The order is the parameter's option list, so entries are only ever APPENDED:
 // an index is what a saved song holds, and reordering these would change what one plays.
@@ -64,7 +62,7 @@ export const GRANULAR = defineDevice({
   description: 'A granular sampler: name a sample, and every note plays it as a cloud of grains from around a position, transposed to the note.',
   channels: { in: 0, out: 2 },
   params: [
-    { id: 'sample', name: 'Sample', default: 0, options: ['none'], capacity: SAMPLE_SLOTS, takes: 'sample', rate: 'k', group: 'Source',
+    { id: 'sample', name: 'Sample', default: 0, options: ['none'], takes: 'sample', rate: 'k', group: 'Source',
       description: 'The sample the grains are read from. With none named the synth is silent.' },
     { id: 'position', name: 'Position', min: 0, max: 1, default: 0.2, group: 'Source',
       description: 'Where in the sample the grains are read from.' },
@@ -78,7 +76,7 @@ export const GRANULAR = defineDevice({
     { id: 'pitch', name: 'Pitch', min: -24, max: 24, default: 0, unit: 'st', group: 'Grains',
       description: 'On top of the note: a note of 60 plays the sample at its own pitch.' },
     { id: 'random', name: 'Random Pitch', min: 0, max: 12, default: 0, unit: 'st', group: 'Grains' },
-    { id: 'window', name: 'Window', default: 0, options: [...WINDOWS], capacity: WINDOWS.length + SHAPE_SLOTS,
+    { id: 'window', name: 'Window', default: 0, options: [...WINDOWS],
       takes: 'shape', rate: 'k', group: 'Grains',
       description: 'The amplitude a grain is played through: one of these shapes, or one you draw.' },
     { id: 'spread', name: 'Spread', min: 0, max: 1, default: 0.5, group: 'Grains',
@@ -90,7 +88,7 @@ export const GRANULAR = defineDevice({
     { id: 'sustain', name: 'Sustain', min: 0, max: 1, default: 1, group: 'Amp', amp: 'sustain' },
     { id: 'release', name: 'Release', min: 0, max: 10, default: 0.3, unit: 's', curve: 'pow', curveExp: 3, group: 'Amp', amp: 'release' },
     { id: 'level', name: 'Level', min: 0, max: 1, default: 0.7, group: 'Amp' },
-    { id: 'voices', name: 'Voices', min: 1, max: GRAIN_VOICES, default: 4, step: 1, rate: 'k', ui: 'number', group: 'Amp' },
+    { id: 'voices', name: 'Voices', min: 1, open: true, uiMax: GRAIN_VOICES_KNOB, legacyMax: 8, default: 4, step: 1, rate: 'k', ui: 'number', group: 'Amp' },
   ],
   figures: [
     {
@@ -235,7 +233,7 @@ export class GranularSynth {
       sample: 0, position: 0.2, spray: 0.05, scan: 0, size: 120, density: 30, pitch: 0, random: 0,
       window: 0, spread: 0.5, reverse: 0, attack: 0.02, decay: 0.1, sustain: 1, release: 0.3, level: 0.7, levelA: null,
     };
-    this.voices = Array.from({ length: GRAIN_VOICES }, () => new GrainVoice(sampleRate));
+    this.voices = Array.from({ length: 8 }, () => new GrainVoice(sampleRate)); // as the Wavetable's
     this.voiceCount = 4;
     this.clock = 0;
     this.seed = 7;
@@ -255,7 +253,10 @@ export class GranularSynth {
     p.window = Math.round(p.window);
     const voices = values.voices;
     const count = typeof voices === 'number' ? voices : voices?.[0];
-    if (Number.isFinite(count)) this.voiceCount = Math.min(GRAIN_VOICES, Math.max(1, Math.round(count)));
+    if (Number.isFinite(count)) this.voiceCount = Math.max(1, Math.round(count));
+    // The voices are made as the count asks for them - there is no most - so a count past what is made
+    // grows the list, once, at the new high mark.
+    while (this.voices.length < this.voiceCount) this.voices.push(new GrainVoice(this.sampleRate));
   }
 
   /** Keeps a drawn window in a window slot, for the grains to be played through. */

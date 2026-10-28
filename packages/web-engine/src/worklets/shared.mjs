@@ -30,7 +30,8 @@ export function parameterDescriptorsFor(descriptor) {
     name: p.id,
     defaultValue: positionOfDefault(p),
     minValue: 0,
-    maxValue: 1,
+    // An open control's position runs past 1 for a value past the knob's reach (see defineParam).
+    maxValue: p.open ? 3.4e38 : 1,
     automationRate: p.rate === 'a' ? 'a-rate' : 'k-rate',
   }));
   if (descriptor.kind === 'synth') params.push({ name: TRACK_BEND_PARAM, defaultValue: 0, automationRate: 'a-rate' });

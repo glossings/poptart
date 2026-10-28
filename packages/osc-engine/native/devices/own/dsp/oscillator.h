@@ -99,6 +99,14 @@ struct WavetableOscillator {
   double cents = 0;
   double position = 0;       // 0..1 across the frame stack
   double warpAmount = 0;
+  // The same controls per sample while a signal moves them, else null (set by the voice).
+  const float* levelA = nullptr;
+  const float* phaseA = nullptr;
+  const float* semisA = nullptr;
+  const float* centsA = nullptr;
+  const float* positionA = nullptr;
+  const float* warpAmountA = nullptr;
+  bool pitchMoving = false;
 
   int warpMode = 0;
   double unison = 1;
@@ -189,27 +197,46 @@ struct WavetableOscillator {
   /** Per-block setup: the unison spread, the band limit, and where the position reads. */
   bool begin(int count) {
     if (!table) return false;
-    if (level == 0 && !heard) return false;
+    if (!levelA && level == 0 && !heard) return false;
 
     n = prepare();
     topLevel = table->levels - 1;
 
+    // Pitch: taken once for the block while still, per sample while moving (pitch modulation),
+    // with the block's highest bend for the band limit.
     baseInc = frequency / sampleRate;
-    stillInc = baseInc * std::pow(2.0, semis / 12.0 + cents / 1200.0);
+    pitchMoving = semisA || centsA;
+    double peakBend = semis / 12.0 + cents / 1200.0;
+    if (pitchMoving) {
+      for (int i = 0; i < count; ++i) {
+        const double bend = (semisA ? static_cast<double>(semisA[i]) : semis) / 12.0
+                          + (centsA ? static_cast<double>(centsA[i]) : cents) / 1200.0;
+        if (i == 0 || bend > peakBend) peakBend = bend;
+      }
+    }
+    stillInc = baseInc * std::pow(2.0, peakBend);
+
+    // The warp amount, per sample when it moves, with the block's largest for the band limit.
+    double peakWarp = warpAmount;
+    if (warpAmountA) {
+      peakWarp = 0;
+      for (int i = 0; i < count; ++i) if (warpAmountA[i] > peakWarp) peakWarp = warpAmountA[i];
+    }
 
     cross = crossModOf(warpMode);
     // A cross-modulation mode is not a phase warp: its amount is a depth the voice reads, and
     // the band limit allows for the extra traversal it costs.
     const double traversal = cross.is()
-        ? stillInc * (1 + (cross.kind == kCrossFm ? fmDepth(warpAmount) : 0))
+        ? stillInc * (1 + (cross.kind == kCrossFm ? fmDepth(peakWarp) : 0))
         : stillInc;
-    const double levelEnd = bandLimit(traversal, cross.is() ? 0 : warpAmount);
+    const double levelEnd = bandLimit(traversal, cross.is() ? 0 : peakWarp);
     const double begun = started && lastLevel > 0 ? lastLevel : levelEnd;
     lastLevel = levelEnd;
     levelStart = begun;
     levelStep = count > 0 ? (levelEnd - begun) / count : 0;
 
-    placeFrames(position);
+    // Placed once while the position is still, per sample while a signal sweeps it.
+    if (!positionA) placeFrames(position);
     return true;
   }
 
@@ -226,15 +253,19 @@ struct WavetableOscillator {
     const int hi = lo == topLevel ? topLevel : lo + 1;
     const double levelMix = hi == lo ? 0 : levelNow - lo;
 
+    if (positionA) placeFrames(static_cast<double>(positionA[s]));
     const std::vector<float>& lowA = (*lowFrame)[static_cast<size_t>(lo)];
     const std::vector<float>& lowB = (*lowFrame)[static_cast<size_t>(hi)];
     const std::vector<float>& highA = (*highFrame)[static_cast<size_t>(lo)];
     const std::vector<float>& highB = (*highFrame)[static_cast<size_t>(hi)];
 
-    const double pm = phase + xpm;
-    const double amount = cross.is() ? 0 : warpAmount;
-    const double gain = level;
-    const double inc = stillInc * xinc;
+    const double pm = (phaseA ? static_cast<double>(phaseA[s]) : phase) + xpm;
+    const double amount = cross.is() ? 0 : (warpAmountA ? static_cast<double>(warpAmountA[s]) : warpAmount);
+    const double gain = levelA ? static_cast<double>(levelA[s]) : level;
+    const double inc = (pitchMoving
+        ? baseInc * std::pow(2.0, (semisA ? static_cast<double>(semisA[s]) : semis) / 12.0
+                                  + (centsA ? static_cast<double>(centsA[s]) : cents) / 1200.0)
+        : stillInc) * xinc;
 
     double sumL = 0;
     double sumR = 0;

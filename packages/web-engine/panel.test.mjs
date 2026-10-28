@@ -146,7 +146,7 @@ test('a widget says where it sits when nothing has touched it, so a panel can pu
 test('a loaded slot on an enum that takes samples is written by the name it was loaded under', () => {
   const d = defineDevice({
     id: 'T', kind: 'synth', license: 'AGPL-3.0-only',
-    params: [{ id: 'table', name: 'Table', default: 0, options: ['Basic', 'Odd'], capacity: 8, takes: 'sample', rate: 'k' }],
+    params: [{ id: 'table', name: 'Table', default: 0, options: ['Basic', 'Odd'], takes: 'sample', rate: 'k' }],
   });
   const extras = { table: { 2: 'files:kick' } };
   assert.equal(paramArgFor(d, 'table', 2, extras), '"files:kick"');

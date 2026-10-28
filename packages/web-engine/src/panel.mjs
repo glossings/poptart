@@ -163,14 +163,15 @@ export function buildPanel(descriptor, values = {}, modulated = new Map(), opts 
   };
 }
 
-/** An enum's labels with the loaded slots filled in, and the empty ones marked so. */
+/** An enum's labels with what is loaded after them, as many as there are. */
 function optionsWithExtras(param, loaded) {
   const out = [...param.options];
-  const capacity = param.capacity ?? param.options.length;
-  for (let i = param.options.length; i < capacity; i++) {
-    const name = loaded?.[i];
-    if (name !== undefined) out[i] = name;
+  for (const [at, name] of Object.entries(loaded ?? {})) {
+    const i = Number(at);
+    if (Number.isInteger(i) && i >= param.options.length && name !== undefined) out[i] = name;
   }
+  // A slot between two loaded ones that nothing holds any more reads as empty, not as a hole.
+  for (let i = param.options.length; i < out.length; i++) if (out[i] === undefined) out[i] = 'empty';
   return out;
 }
 

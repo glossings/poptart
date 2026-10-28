@@ -5,7 +5,7 @@ export { normalizeSlicePositions, parseSlicePositions, serializeSlicePositions, 
 export { i, begin, end, loop, loopwrap, loopdir, speed, flip, stretch, fit, slice, splice, splicemode, attack, decay, sustain, release, envscale, grain, vel, clip, nudge, swing, swinggrid, swingvel, SAMPLER_CONTROL_NAMES } from './signal.mjs';
 // The binops as top-level builders - a layer piece's own verb: .set(note(30), add(note(12))).
 export { add, sub, mul, div, mod, set } from './signal.mjs';
-export { channelAt, soundingEnd, timeShift, grooveAt, grooveVelScale, endEdgeStep, withSoundingSpan, MAX_FX_SLOTS, monitorSig } from './signal.mjs';
+export { channelAt, soundingEnd, timeShift, grooveAt, grooveVelScale, endEdgeStep, withSoundingSpan, MAX_FX_SLOTS, monitorSig, channelDefault } from './signal.mjs';
 export { setPatternWarn, lfoShapes, lfoPoints, withNoteGate, withEventSpan, noteGateFromGrid, sampleEnvIR, NOTE_GATE_LOOKBACK_CYCLES } from './signal.mjs';
 export { feedMidiCC, midiInUse } from './midi.mjs';
 export { feedOsc, oscInUse, latestOsc, normalizeOscAddress } from './osc.mjs';
@@ -28,3 +28,4 @@ export { parsePianoRoll, serializePianoRoll, normalizePianoRollSteps, normalizeP
 export { clearRolls, restoreRolls, setRollLayer, setDefOwner, adoptDefs, defScope, defScopeOf, withDefDeck, lookupRoll, rollIds, lookupShape, shapeIds, lookupPreset, presetIds, lookupPack, packIds, lookupSlices, sliceSetIds, lookupAuto, autoIds, lookupGroove, grooveIds } from './rolls.mjs';
 export { parseArrangement, serializeArrangement, looksLikeArrangeString, normalizeArrangeOpts, arrangementEnd, arrangementLoops, isWholeSongLoop, arrangementSpans, arrangementLabels, clipsOfLabel, reconcileArrangement, inSpans, ArrangeClock, ClipClock, songSteps, withClipShift, clipShiftNow, stepsUnderShift, _arrange, ARRANGE_DEFAULT_SNAP, ARRANGE_DEFAULT_LEN, ARRANGE_SONG_LOOP, ARRANGE_HOLD } from './arrange.mjs';
 export { sampleSourcesOf, fittedCycles } from './sample-source.mjs';
+export { routePlan, planRefs, routeLatencies, routeSlots, isRouteControl, routeControlDefault, CROSSOVER_DEVICE, CROSSOVER_MIN_HZ, CROSSOVER_MAX_HZ } from './route.mjs';

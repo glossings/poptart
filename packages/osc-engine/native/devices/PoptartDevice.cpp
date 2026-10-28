@@ -48,35 +48,24 @@ static InterfaceTable* ft;
 namespace {
 
 /**
- * The most controls any device has.
- *
- * The FM synth has 148 of them - eight operators of ten, plus a sixty-four-cell modulation
- * matrix - which is what sets this number; Cloud Seed's 45 was what set the old one. A device
- * with more than this has its extra controls IGNORED rather than overflowing anything (see
- * install), and the build says how many each device has, so a device that outgrew this would be
- * noticed; the array costs four bytes a control a slot either way.
+ * A unit's controls are held in arrays the size of the device in it, taken from real-time memory
+ * when a device is installed (see ensureControls) - so an empty unit holds none, and a device has
+ * as many controls as its descriptor says, however many that is.
  */
-const int kMaxParams = 192;
+
 
 /** How many frames an instrument is given between bend updates while a bend is moving. */
 const int kBendPiece = 32;
 
-/**
- * How many frames a device is given at a time while audio is patched onto one of its controls.
- *
- * One, because that is what patching audio onto a control MEANS: the browser's own devices read
- * a moving control per sample, and phase modulation or a cutoff swept at audio rate is nothing
- * else. The device's own `process` reads its controls once per call (the ABI), so a control that
- * changes every sample needs a call every sample. Measured on the parity harness, that costs the
- * synths about one and a half to two times their usual load and Distort - whose oversampler pays
- * per call - far more; it is paid only while something is patched.
- */
-const int kPatchPiece = 1;
+// AUDIO PATCHED ONTO A CONTROL is handed to the device a value per sample of the block it is
+// rendering (PdAny::paramBuffer), and the device reads it per sample where the browser's does.
+// The block is rendered whole: patching costs the device what reading a buffer costs, not a call
+// per sample.
 
 /**
  * The files and curves a device holds are lists with no length of their own: a device keeps
  * every one it was handed, the way the browser's option lists do, and the only bound is the
- * device's own number of slots for them (its descriptor's `capacity`). A file's entry is made on
+ * device's own room for them, which grows as they arrive (pd_own::Pool). A file's entry is made on
  * the non-realtime thread along with the frames it holds, so the audio thread only links and
  * unlinks; a curve's is made from real-time memory, which the audio thread may take.
  *
@@ -84,8 +73,8 @@ const int kPatchPiece = 1;
  */
 const int kFirstNoteRoom = 64;
 
-/** The most floats one /report answer carries: every control's position and the device's own. */
-const int kMaxReport = 1024;
+/** How many floats of its own a device may add to a /report answer (a granulator's grains). */
+const int kDeviceReport = 1024;
 
 /** Input offsets. Everything before the main signal count is fixed. */
 enum { kBendInput = 0, kNumMainInput = 1, kFirstMainInput = 2 };
@@ -142,6 +131,7 @@ struct LoadedSampleNode {
     int frameLength = 0;
     double sampleRate = 0.0;
     LoadedSampleNode* next = nullptr;
+    bool given = false;         // the device took it; false while it makes room (PdAny::sample)
     ~LoadedSampleNode() {
         free(mono);
         free(channels);
@@ -221,13 +211,6 @@ struct PoptartDevice : public SCUnit {
         if (mNumSidechain < 0) mNumSidechain = 0;
         mFirstSidechain = scCountAt + 1;
 
-        for (int i = 0; i < kMaxParams; ++i) {
-            mPosition[i] = 0.f;
-            mBus[i] = -1;
-            mAudioBus[i] = -1;
-            mAudioGain[i] = 1.f;
-            mAudioOffset[i] = 0.f;
-        }
         mNotes = (NoteEvent*)RTAlloc(mWorld, sizeof(NoteEvent) * kFirstNoteRoom);
         mNoteRoom = mNotes ? kFirstNoteRoom : 0;
 
@@ -268,6 +251,8 @@ struct PoptartDevice : public SCUnit {
         mSamples = mRetiringSamples = nullptr;
         freeShapes();
         if (mNotes) RTFree(mWorld, mNotes);
+        if (mControls) RTFree(mWorld, mControls);
+        if (mReportBuf) RTFree(mWorld, mReportBuf);
     }
 
     /**
@@ -312,14 +297,20 @@ struct PoptartDevice : public SCUnit {
         // pin being bumped.
         mParamCount = device ? device->paramCount() : 0;
         if (info && mParamCount > info->paramCount) mParamCount = info->paramCount;
-        if (mParamCount > kMaxParams) mParamCount = kMaxParams;
+        // Room for every control; with no real-time memory left, the ones there is room for.
+        if (!ensureControls(mParamCount)) mParamCount = mCapacity;
         mMaxBlock = device ? device->maxBlock() : 0;
-        for (int i = 0; i < kMaxParams; ++i) {
+        for (int i = 0; i < mCapacity; ++i) {
             mBus[i] = -1;
             mAudioBus[i] = -1;
             mPosition[i] = (info && i < info->paramCount) ? info->params[i].defaultPosition : 0.f;
+            mAudioGain[i] = 1.f;
+            mAudioOffset[i] = 0.f;
+            mSeen[i] = 0.f;
+            mMoving[i] = 0;    // a fresh device holds every control still
         }
         mAudioMapped = 0;
+        mMovingCount = 0;
     }
 
     /**
@@ -343,7 +334,8 @@ struct PoptartDevice : public SCUnit {
             fresh->next = nullptr;
         }
         *at = fresh;
-        if (mDevice) mDevice->sample(fresh->param, fresh->index, fresh->file());
+        fresh->given = mDevice && mDevice->sample(fresh->param, fresh->index, fresh->file());
+        if (mDevice && !fresh->given) mUngiven = true;
     }
 
     /**
@@ -374,7 +366,8 @@ struct PoptartDevice : public SCUnit {
         float* old = at->table;
         at->table = copy;
         at->count = count;
-        if (mDevice) mDevice->shape(param, index, copy, count);
+        at->given = mDevice && mDevice->shape(param, index, copy, count);
+        if (mDevice && !at->given) mUngiven = true;
         // The device copied it or keeps the new pointer; either way nothing reads the old one.
         if (old) RTFree(mWorld, old);
     }
@@ -388,8 +381,34 @@ struct PoptartDevice : public SCUnit {
      */
     void resendSamples() {
         if (!mDevice) return;
-        for (const LoadedSampleNode* one = mSamples; one; one = one->next) mDevice->sample(one->param, one->index, one->file());
-        for (const LoadedShape* one = mShapes; one; one = one->next) mDevice->shape(one->param, one->index, one->table, one->count);
+        mUngiven = false;
+        for (LoadedSampleNode* one = mSamples; one; one = one->next) {
+            one->given = mDevice->sample(one->param, one->index, one->file());
+            if (!one->given) mUngiven = true;
+        }
+        for (LoadedShape* one = mShapes; one; one = one->next) {
+            one->given = mDevice->shape(one->param, one->index, one->table, one->count);
+            if (!one->given) mUngiven = true;
+        }
+    }
+
+    /**
+     * Hands over again what the device had no room for when it arrived, once a work round has
+     * made the room (PdAny::sample). Audio thread, between rounds.
+     */
+    void giveUngiven() {
+        if (!mUngiven || !mDevice || mSlot->workBusy.load()) return;
+        mUngiven = false;
+        for (LoadedSampleNode* one = mSamples; one; one = one->next) {
+            if (one->given) continue;
+            one->given = mDevice->sample(one->param, one->index, one->file());
+            if (!one->given) mUngiven = true;
+        }
+        for (LoadedShape* one = mShapes; one; one = one->next) {
+            if (one->given) continue;
+            one->given = mDevice->shape(one->param, one->index, one->table, one->count);
+            if (!one->given) mUngiven = true;
+        }
     }
 
     /** The device the audio thread swapped out, for the caller's thread to free. */
@@ -415,13 +434,13 @@ struct PoptartDevice : public SCUnit {
      * While a control is patched, what these set is where it goes back to when the patch goes.
      */
     void setParam(int index, float position) {
-        if (index < 0 || index >= kMaxParams) return;
+        if (index < 0 || index >= mCapacity) return;
         mPosition[index] = position;
         mBus[index] = -1;   // an outright set takes the control back off whatever was driving it
     }
 
     void mapParam(int index, int bus) {
-        if (index < 0 || index >= kMaxParams) return;
+        if (index < 0 || index >= mCapacity) return;
         mBus[index] = bus;
     }
 
@@ -433,7 +452,7 @@ struct PoptartDevice : public SCUnit {
      * connection (its own value zeroed, the signal summed to mono, the sum clamped to the range).
      */
     void mapAudio(int index, int bus, float gain, float offset) {
-        if (index < 0 || index >= kMaxParams) return;
+        if (index < 0 || index >= mCapacity) return;
         if (bus < 0) { clearAudio(index); return; }
         if (mAudioBus[index] < 0) ++mAudioMapped;
         mAudioBus[index] = bus;
@@ -442,7 +461,7 @@ struct PoptartDevice : public SCUnit {
     }
 
     void unmapParam(int index) {
-        if (index < 0 || index >= kMaxParams) return;
+        if (index < 0 || index >= mCapacity) return;
         mBus[index] = -1;
     }
 
@@ -487,14 +506,23 @@ struct PoptartDevice : public SCUnit {
      * onto this UGen's input, read by nobody else.
      */
     void report(float id) {
+        const int count = mDevice ? mParamCount : 0;
+        // Made on the first ask, the size this device's answer can be.
+        const int room = 3 + count + kDeviceReport;
+        if (room > mReportRoom) {
+            float* more = (float*)RTAlloc(mWorld, sizeof(float) * (size_t)room);
+            if (!more) return;
+            if (mReportBuf) RTFree(mWorld, mReportBuf);
+            mReportBuf = more;
+            mReportRoom = room;
+        }
         float* out = mReportBuf;
         int n = 0;
         out[n++] = id;
-        const int count = mDevice ? mParamCount : 0;
         out[n++] = (float)count;
-        for (int i = 0; i < count && n < kMaxReport - 1; ++i) out[n++] = mSeen[i];
+        for (int i = 0; i < count; ++i) out[n++] = mSeen[i];
         const int at = n++;
-        const int got = mDevice ? mDevice->report(out + n, kMaxReport - n) : 0;
+        const int got = mDevice ? mDevice->report(out + n, mReportRoom - n) : 0;
         out[at] = (float)got;
         n += got;
         SendNodeReply(&mParent->mNode, (int)mParentIndex, "/poptart/deviceReport", n, out);
@@ -578,7 +606,8 @@ private:
     float audioPositionOf(int index, int offset) const {
         const float v = mAudioGain[index] * audioSample(mAudioBus[index], offset) + mAudioOffset[index];
         if (!(v > 0.f)) return 0.f;   // and a NaN, which compares false either way
-        return v < 1.f ? v : 1.f;
+        // An open control has no top: a position past 1 is a value past the knob's reach.
+        return v < 1.f || (mInfo && mInfo->params[index].open) ? v : 1.f;
     }
 
     void next(int inNumSamples) {
@@ -600,15 +629,21 @@ private:
             mSeen[i] = position;
             params[i] = pd_denormalize(mInfo->params[i], position);
         }
-        // With this block's controls in place, the device may ask for something to be built.
+        // What waited for room goes in, then - with this block's controls in place - the device
+        // may ask for something to be built.
+        giveUngiven();
         maybeWork(device);
-        // Which controls have audio patched onto them, for a device that reads them per sample.
-        // A ported module reads its controls once a block on both engines, so for one of those
-        // the block-start sample read above is already the whole story.
-        int patched[kMaxParams];
+        // Which controls have audio patched onto them: each is handed over a value per sample
+        // below. One that stopped being patched is told it holds still again.
+        int* patched = mPatched;
         int patchedCount = 0;
-        if (mAudioMapped > 0 && mInfo->perSample) {
+        if (mAudioMapped > 0) {
             for (int i = 0; i < paramCount; ++i) if (mAudioBus[i] >= 0) patched[patchedCount++] = i;
+        }
+        if (mMovingCount > 0) {
+            for (int i = 0; i < paramCount; ++i) {
+                if (mMoving[i] && mAudioBus[i] < 0) { device->paramMoving(i, false); mMoving[i] = 0; --mMovingCount; }
+            }
         }
 
         const bool isSynth = mInfo->isSynth != 0;
@@ -619,6 +654,7 @@ private:
         float* devIn = device->in();
         float* devOut = device->out();
         const int stride = device->maxBlock();
+        const int devOuts = device->outChannels();
 
         const bool placesNotes = device->takesNoteOffsets();
         int nextNote = 0;
@@ -629,7 +665,6 @@ private:
             // A moving bend is followed in short pieces so a vibrato is a curve and not a
             // staircase of blocks - the same BEND_PIECE the browser's host renders in.
             if (bendMoving && n > kBendPiece) n = kBendPiece;
-            if (patchedCount > 0 && n > kPatchPiece) n = kPatchPiece;
             if (placesNotes) {
                 // The device places them itself, inside the piece it is about to render.
                 while (nextNote < mNoteCount && mNotes[nextNote].offset < at + n) {
@@ -647,15 +682,28 @@ private:
                 }
                 if (nextNote < mNoteCount && mNotes[nextNote].offset < at + n) n = mNotes[nextNote].offset - at;
             }
-            // A control with audio patched onto it moves every sample, so the device is given
-            // one sample at a time with that control where the signal is at that sample.
-            if (patchedCount > 0) {
-                if (n > kPatchPiece) n = kPatchPiece;
-                for (int k = 0; k < patchedCount; ++k) {
-                    const int i = patched[k];
-                    const float position = audioPositionOf(i, at);
-                    mSeen[i] = position;
-                    params[i] = pd_denormalize(mInfo->params[i], position);
+            // A control with audio patched onto it: the piece's values, one per sample, in the
+            // device's buffer for it, and the first in params() for a device that reads once.
+            // A patched signal that holds still for the piece is handed over as a number.
+            for (int k = 0; k < patchedCount; ++k) {
+                const int i = patched[k];
+                const PdParamSpec& spec = mInfo->params[i];
+                const float position = audioPositionOf(i, at);
+                mSeen[i] = position;
+                params[i] = pd_denormalize(spec, position);
+                float* buffer = device->paramBuffer(i);
+                bool moves = false;
+                if (buffer) {
+                    buffer[0] = params[i];
+                    for (int j = 1; j < n; ++j) {
+                        buffer[j] = pd_denormalize(spec, audioPositionOf(i, at + j));
+                        if (buffer[j] != buffer[0]) moves = true;
+                    }
+                }
+                if (moves != (mMoving[i] != 0)) {
+                    device->paramMoving(i, moves);
+                    mMoving[i] = moves ? 1 : 0;
+                    mMovingCount += moves ? 1 : -1;
                 }
             }
 
@@ -671,9 +719,11 @@ private:
 
             fillInput(devIn, stride, at, n, sidechained, device->inChannels());
             device->process(n);
+            // What the device wrote, channel for channel; an output it has no channel for (the
+            // Crossover's extra pairs, under any other device) is silent.
             for (int ch = 0; ch < outs; ++ch) {
-                const float* from = devOut + (size_t)(ch < 2 ? ch : 1) * stride;
-                memcpy(out(ch) + at, from, sizeof(float) * (size_t)n);
+                if (ch < devOuts) memcpy(out(ch) + at, devOut + (size_t)ch * stride, sizeof(float) * (size_t)n);
+                else memset(out(ch) + at, 0, sizeof(float) * (size_t)n);
             }
             at += n;
         }
@@ -718,8 +768,11 @@ private:
             // No key patched means the device listens to itself, which is what an effect with
             // nothing on its sidechain does on the web too (the browser's host passes null and
             // the processor falls back to its own input).
-            const float* fromL = (mKeyPatched && scL) ? scL : (mainL ? mainL : nullptr);
-            const float* fromR = (mKeyPatched && scL) ? scR : (mainL ? mainR : nullptr);
+            // A key that is not a sidechain (the Crossover's, which the track's wiring feeds) is
+            // read as it is, silence included.
+            const bool own = mInfo->sidechain == 0;
+            const float* fromL = own ? scL : (mKeyPatched && scL) ? scL : (mainL ? mainL : nullptr);
+            const float* fromR = own ? scR : (mKeyPatched && scL) ? scR : (mainL ? mainR : nullptr);
             if (fromL) {
                 memcpy(keyL, fromL, sizeof(float) * (size_t)n);
                 memcpy(keyR, fromR, sizeof(float) * (size_t)n);
@@ -775,12 +828,19 @@ private:
     double mTransportSec = 0.0;
     /** The block this track's transport position was last told to us at. */
     int64 mTransportAtBlock = 0;
-    float mPosition[kMaxParams];
-    int mBus[kMaxParams];
+    // The controls, `mCapacity` of each, carved out of one real-time block (see ensureControls).
+    void* mControls = nullptr;
+    int mCapacity = 0;
+    float* mPosition = nullptr;
+    int* mBus = nullptr;
     /** The audio bus patched onto each control (-1 for none), and the scale and offset it rides in on. */
-    int mAudioBus[kMaxParams];
-    float mAudioGain[kMaxParams];
-    float mAudioOffset[kMaxParams];
+    int* mAudioBus = nullptr;
+    float* mAudioGain = nullptr;
+    float* mAudioOffset = nullptr;
+    int* mPatched = nullptr;
+    /** Whether the device was last told a control moves per sample (PdAny::paramMoving), and how many. */
+    int* mMoving = nullptr;
+    int mMovingCount = 0;
     /** How many controls have audio patched onto them, so a block with none pays nothing. */
     int mAudioMapped = 0;
     static void freeSamples(LoadedSampleNode* list) {
@@ -799,8 +859,10 @@ private:
         float* table = nullptr;
         int count = 0;
         LoadedShape* next = nullptr;
+        bool given = false;
     };
     LoadedShape* mShapes = nullptr;
+    bool mUngiven = false;                          // something the device has yet to make room for
     void freeShapes() {
         while (mShapes) {
             LoadedShape* next = mShapes->next;
@@ -827,8 +889,44 @@ private:
         return true;
     }
     /** Each control's position as the device last read it, for /report. */
-    float mSeen[kMaxParams] = { 0 };
-    float mReportBuf[kMaxReport];
+    float* mSeen = nullptr;
+    float* mReportBuf = nullptr;
+    int mReportRoom = 0;
+
+    /**
+     * Room for `count` controls, keeping what the ones already held were set to. Audio thread:
+     * from real-time memory, as the notes are. False when there is none left.
+     */
+    bool ensureControls(int count) {
+        if (count <= mCapacity) return true;
+        const size_t floats = sizeof(float) * (size_t)count, ints = sizeof(int) * (size_t)count;
+        char* block = (char*)RTAlloc(mWorld, 4 * floats + 4 * ints);
+        if (!block) return false;
+        float* position = (float*)block;
+        float* gain = (float*)(block + floats);
+        float* offset = (float*)(block + 2 * floats);
+        float* seen = (float*)(block + 3 * floats);
+        int* bus = (int*)(block + 4 * floats);
+        int* audioBus = (int*)(block + 4 * floats + ints);
+        int* patched = (int*)(block + 4 * floats + 2 * ints);
+        int* moving = (int*)(block + 4 * floats + 3 * ints);
+        for (int i = 0; i < count; ++i) {
+            const bool held = i < mCapacity;
+            position[i] = held ? mPosition[i] : 0.f;
+            gain[i] = held ? mAudioGain[i] : 1.f;
+            offset[i] = held ? mAudioOffset[i] : 0.f;
+            seen[i] = held ? mSeen[i] : 0.f;
+            bus[i] = held ? mBus[i] : -1;
+            audioBus[i] = held ? mAudioBus[i] : -1;
+            moving[i] = held ? mMoving[i] : 0;
+        }
+        if (mControls) RTFree(mWorld, mControls);
+        mControls = block;
+        mPosition = position; mAudioGain = gain; mAudioOffset = offset; mSeen = seen;
+        mBus = bus; mAudioBus = audioBus; mPatched = patched; mMoving = moving;
+        mCapacity = count;
+        return true;
+    }
 };
 
 // ---- the open, across the threads it has to cross --------------------------------------------
@@ -1207,9 +1305,12 @@ void cmdAllNotesOff(Unit* unit, sc_msg_iter* args) {
 
 } // namespace
 
+void registerPoptartSpectrum(InterfaceTable* table); // PoptartSpectrum.cpp: the mixer's analyzer
+
 PluginLoad(PoptartDeviceUGens) {
     ft = inTable;
     registerUnit<PoptartDevice>(ft, "PoptartDevice");
+    registerPoptartSpectrum(inTable);
     DefineUnitCmd("PoptartDevice", "/open", cmdOpen);
     DefineUnitCmd("PoptartDevice", "/close", cmdClose);
     DefineUnitCmd("PoptartDevice", "/set", cmdSet);

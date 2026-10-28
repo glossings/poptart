@@ -29,7 +29,7 @@ test('a minimal descriptor fills in the defaults a short spelling leaves out', (
   assert.equal(d.version, 1);
   assert.equal(d.vendor, 'poptart');
   assert.equal(d.build, 'worklet');
-  assert.deepEqual({ ...d.channels }, { in: 2, out: 2 });
+  assert.deepEqual({ ...d.channels }, { in: 2, out: 2, key: 0, outputs: 1 });
   const p = d.params[0];
   assert.equal(p.rate, 'a');
   assert.equal(p.ui, 'knob');
@@ -221,10 +221,11 @@ test('a param() argument is a position, a label or a switch, and comes back the 
       { id: 'semi', name: 'Semi', min: -24, max: 24, default: 0, step: 1, ui: 'number' },
       { id: 'mode', name: 'Mode', default: 0, options: ['soft', 'hard', 'fold'] },
       { id: 'on', name: 'On', min: 0, max: 1, default: 0, ui: 'toggle' },
-      { id: 'table', name: 'Table', default: 0, options: ['Basic'], capacity: 4, takes: 'sample' },
+      { id: 'table', name: 'Table', default: 0, options: ['Basic'], takes: 'sample' },
+      { id: 'voices', name: 'Voices', min: 1, open: true, uiMax: 128, legacyMax: 16, default: 8, step: 1, ui: 'number' },
     ],
   }));
-  const [freq, semi, mode, on, table] = d.params;
+  const [freq, semi, mode, on, table, voices] = d.params;
   // A sweep takes a position on its own curve.
   assert.ok(Math.abs(argToValue(freq, 0.5) - Math.sqrt(20 * 20000)) < 1e-6);
   assert.equal(argToValue(freq, 2), 20000, 'past the end is the end');
@@ -249,6 +250,19 @@ test('a param() argument is a position, a label or a switch, and comes back the 
   assert.equal(formatValue(table, 2), 'empty');
   assert.equal(formatValue(table, 2, { 2: 'files:kick' }), 'files:kick');
   assert.equal(argToValue(table, 'files:kick'), null, 'a file name is the engine\'s to resolve, not a label');
+  // An enum that takes files has no top: a loaded slot's index is a value like any other.
+  assert.equal(argToValue(table, 200), 200);
+  assert.equal(argToValue(table, '200'), 200);
+  assert.equal(formatValue(table, 200), 'empty');
+  // An open count is the count, past the knob's reach too, and written back as it is.
+  assert.equal(argToValue(voices, 8), 8);
+  assert.equal(argToValue(voices, 300), 300, 'no most');
+  assert.equal(argToValue(voices, 0), 1, 'and no fewer than one');
+  assert.equal(valueToArg(voices, 24), '24');
+  // A position written before it was open (a fraction) means what it meant then, across 1..16.
+  assert.equal(argToValue(voices, 0.4667), 8);
+  assert.equal(argToValue(voices, 0.5), 9);
+  assert.equal(argToValue(voices, 0.0667), 2);
 });
 
 test('a descriptor can lay its panel out, and a sample-taking enum reserves room past its list', () => {
@@ -256,15 +270,16 @@ test('a descriptor can lay its panel out, and a sample-taking enum reserves room
     params: [
       { id: 'a', name: 'A', min: 0, max: 1, default: 0, group: 'One' },
       { id: 'b', name: 'B', min: 0, max: 1, default: 0, group: 'Two' },
-      { id: 'ir', name: 'IR', default: 0, options: ['room', 'hall'], capacity: 8, takes: 'sample' },
+      { id: 'ir', name: 'IR', default: 0, options: ['room', 'hall'], takes: 'sample' },
     ],
     panel: { width: 800, rows: [['One', 'Two']] },
   }));
   assert.equal(d.panel.width, 800);
   assert.deepEqual(d.panel.rows, [['One', 'Two']]);
-  assert.equal(d.params[2].max, 7, 'the range reaches to the capacity');
-  assert.equal(d.params[2].capacity, 8);
+  assert.equal(d.params[2].open, true, 'what is loaded joins the list, as many as are loaded');
+  assert.equal(d.params[2].max, 1, 'a knob reaches across the list as it ships');
   assert.throws(() => defineDevice(minimal({ params: [{ id: 'x', name: 'X', min: 0, max: 1, default: 0, takes: 'sample' }] })), /needs an option list/);
   assert.throws(() => defineDevice(minimal({ params: [{ id: 'x', name: 'X', default: 0, options: ['a', 'b'], capacity: 1 }] })), /capacity/);
+  assert.throws(() => defineDevice(minimal({ params: [{ id: 'x', name: 'X', min: 1, open: true, default: 1, step: 1 }] })), /uiMax/);
   assert.throws(() => defineDevice(minimal({ sidechain: true, kind: 'synth' })), /only an effect can take a sidechain/);
 });

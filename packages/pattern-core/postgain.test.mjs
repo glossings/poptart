@@ -124,17 +124,14 @@ test('the fader rewrites the postgain literal in place, leaving the gain literal
 
 test('the track SynthDef takes gain into the chain and postgain at the strip', () => {
   const scd = fs.readFileSync(path.join(HERE, '../osc-engine/sc/poptart.scd'), 'utf8');
-  const def = scd.match(/buildTrackDef = \{[\s\S]*?\n\};/);
-  assert.ok(def, 'could not find buildTrackDef in sc/poptart.scd');
-  const src = def[0];
-
-  const inGain = src.indexOf('sig = sig * gain.lag');
-  const firstFx = src.indexOf('VSTPlugin.ar(Ref(');
-  const strip = src.indexOf('Balance2.ar');
-  assert.ok(inGain > 0, 'gain is applied to the chain input');
-  assert.ok(inGain < firstFx, 'gain lands before the first fx slot');
-  assert.ok(firstFx < strip, 'and the strip is after the whole chain');
-  assert.match(src.slice(strip, strip + 200), /postgain\.lag/, 'the strip fader is postgain');
-  assert.equal(src.slice(strip).includes('gain.lag(0.02).clip(0, 4))'), true);
-  assert.ok(!/\bBalance2\.ar\([^)]*[^t]gain\.lag/.test(src), 'the plain gain is not the strip fader');
+  const head = scd.match(/buildHeadDef = \{[\s\S]*?\n\};/)?.[0];
+  const strip = scd.match(/buildTrackDef = \{[\s\S]*?\n\};/)?.[0];
+  assert.ok(head && strip, 'could not find buildHeadDef and buildTrackDef in sc/poptart.scd');
+  // gain is applied by the head, to what goes INTO the chain; the strip is the chain's end.
+  assert.match(head, /Out\.ar\(out, sig \* gain\.lag\(0\.02\)\.clip\(0, 4\)\)/, 'gain is applied to the chain input');
+  assert.ok(!/postgain/.test(/\{ \|([^|]*)\|/.exec(head)[1]), 'the head has no postgain control');
+  const at = strip.indexOf('sig = Balance2.ar');
+  assert.ok(at > 0, 'the strip pans');
+  assert.match(strip.slice(at, at + 200), /postgain\.lag/, 'the strip fader is postgain');
+  assert.ok(!/[^t]gain\.lag/.test(strip.replace(/postgain\.lag/g, '')), 'the plain gain is not the strip fader');
 });

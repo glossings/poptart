@@ -51,14 +51,13 @@ struct Device : pd_own::Device<ids::kCount> {
         last[k] = type; last[k + 1] = hz; last[k + 2] = gain; last[k + 3] = q;
       }
     }
-    const double gain = dbToGain(p[ids::output]);
     for (int ch = 0; ch < 2; ++ch) {
       const float* input = ch == 0 ? inL() : inR();
       float* out = ch == 0 ? outL() : outR();
       for (int i = 0; i < frames; ++i) {
         double x = input[i];
         for (int n = 0; n < kBands; ++n) x = bands[n][ch].next(x);
-        out[i] = static_cast<float>(x * gain);
+        out[i] = static_cast<float>(x * dbToGain(ctl(ids::output, i)));
       }
       if (frames > 0 && !isPlayable(out[frames - 1])) for (int n = 0; n < kBands; ++n) bands[n][ch].reset();
     }

@@ -70,8 +70,7 @@
             "Particle Noise",
             "Digital Modulation",
             "Question Mark"
-          ],
-          "capacity": 48
+          ]
         },
         {
           "id": "timbre",
@@ -183,8 +182,7 @@
             "1 bar",
             "2 bars",
             "4 bars"
-          ],
-          "capacity": 17
+          ]
         },
         {
           "id": "depth",
@@ -258,8 +256,7 @@
           "options": [
             "sine",
             "triangle"
-          ],
-          "capacity": 2
+          ]
         },
         {
           "id": "mix",
@@ -302,8 +299,7 @@
             "Stretch",
             "Looping Delay",
             "Spectral"
-          ],
-          "capacity": 4
+          ]
         },
         {
           "id": "position",
@@ -1204,7 +1200,7 @@
           "id": "ir",
           "name": "Impulse",
           "min": 0,
-          "max": 31,
+          "max": 4,
           "default": 1,
           "step": 1,
           "curve": "lin",
@@ -1221,7 +1217,7 @@
             "cathedral"
           ],
           "takes": "sample",
-          "capacity": 32,
+          "open": true,
           "sampleAs": "audio"
         },
         {
@@ -1441,8 +1437,7 @@
             "1 bar",
             "2 bars",
             "4 bars"
-          ],
-          "capacity": 17
+          ]
         },
         {
           "id": "time",
@@ -1541,7 +1536,7 @@
           "id": "mode",
           "name": "Mode",
           "min": 0,
-          "max": 22,
+          "max": 14,
           "default": 0,
           "step": 1,
           "curve": "lin",
@@ -1568,7 +1563,7 @@
             "chaos"
           ],
           "takes": "shape",
-          "capacity": 23
+          "open": true
         },
         {
           "id": "drive",
@@ -1671,8 +1666,7 @@
             "1x",
             "2x",
             "4x"
-          ],
-          "capacity": 3
+          ]
         },
         {
           "id": "autogain",
@@ -1728,8 +1722,7 @@
             "1 bar",
             "2 bars",
             "4 bars"
-          ],
-          "capacity": 17
+          ]
         },
         {
           "id": "amount",
@@ -2065,8 +2058,7 @@
             "bandpass",
             "notch",
             "allpass"
-          ],
-          "capacity": 8
+          ]
         },
         {
           "id": "band1.freq",
@@ -2132,8 +2124,7 @@
             "bandpass",
             "notch",
             "allpass"
-          ],
-          "capacity": 8
+          ]
         },
         {
           "id": "band2.freq",
@@ -2199,8 +2190,7 @@
             "bandpass",
             "notch",
             "allpass"
-          ],
-          "capacity": 8
+          ]
         },
         {
           "id": "band3.freq",
@@ -2266,8 +2256,7 @@
             "bandpass",
             "notch",
             "allpass"
-          ],
-          "capacity": 8
+          ]
         },
         {
           "id": "band4.freq",
@@ -2362,8 +2351,7 @@
             "comb",
             "allpass",
             "formant"
-          ],
-          "capacity": 14
+          ]
         },
         {
           "id": "cutoff",
@@ -2489,8 +2477,7 @@
             "1 bar",
             "2 bars",
             "4 bars"
-          ],
-          "capacity": 17
+          ]
         },
         {
           "id": "depth",
@@ -2564,8 +2551,7 @@
           "options": [
             "sine",
             "triangle"
-          ],
-          "capacity": 2
+          ]
         },
         {
           "id": "mix",
@@ -2664,8 +2650,7 @@
             "triangle",
             "saw",
             "square"
-          ],
-          "capacity": 4
+          ]
         },
         {
           "id": "op1.attack",
@@ -2811,8 +2796,7 @@
             "triangle",
             "saw",
             "square"
-          ],
-          "capacity": 4
+          ]
         },
         {
           "id": "op2.attack",
@@ -2958,8 +2942,7 @@
             "triangle",
             "saw",
             "square"
-          ],
-          "capacity": 4
+          ]
         },
         {
           "id": "op3.attack",
@@ -3105,8 +3088,7 @@
             "triangle",
             "saw",
             "square"
-          ],
-          "capacity": 4
+          ]
         },
         {
           "id": "op4.attack",
@@ -3252,8 +3234,7 @@
             "triangle",
             "saw",
             "square"
-          ],
-          "capacity": 4
+          ]
         },
         {
           "id": "op5.attack",
@@ -3399,8 +3380,7 @@
             "triangle",
             "saw",
             "square"
-          ],
-          "capacity": 4
+          ]
         },
         {
           "id": "op6.attack",
@@ -3546,8 +3526,7 @@
             "triangle",
             "saw",
             "square"
-          ],
-          "capacity": 4
+          ]
         },
         {
           "id": "op7.attack",
@@ -3693,8 +3672,7 @@
             "triangle",
             "saw",
             "square"
-          ],
-          "capacity": 4
+          ]
         },
         {
           "id": "op8.attack",
@@ -4708,7 +4686,7 @@
           "id": "voices",
           "name": "Voices",
           "min": 1,
-          "max": 12,
+          "max": 128,
           "default": 8,
           "step": 1,
           "curve": "lin",
@@ -4716,7 +4694,9 @@
           "unit": "",
           "ui": "number",
           "group": "Voice",
-          "rate": "k"
+          "rate": "k",
+          "open": true,
+          "legacyMax": 12
         }
       ]
     },
@@ -4758,8 +4738,7 @@
             "up",
             "down",
             "split"
-          ],
-          "capacity": 3
+          ]
         },
         {
           "id": "feedback",
@@ -4908,8 +4887,7 @@
             "1 bar",
             "2 bars",
             "4 bars"
-          ],
-          "capacity": 17
+          ]
         },
         {
           "id": "time",
@@ -5050,7 +5028,7 @@
           "id": "sample",
           "name": "Sample",
           "min": 0,
-          "max": 31,
+          "max": 1,
           "default": 0,
           "step": 1,
           "curve": "lin",
@@ -5063,7 +5041,7 @@
             "none"
           ],
           "takes": "sample",
-          "capacity": 32,
+          "open": true,
           "sampleAs": "audio"
         },
         {
@@ -5168,7 +5146,7 @@
           "id": "window",
           "name": "Window",
           "min": 0,
-          "max": 13,
+          "max": 5,
           "default": 0,
           "step": 1,
           "curve": "lin",
@@ -5186,7 +5164,7 @@
             "blackman"
           ],
           "takes": "shape",
-          "capacity": 14
+          "open": true
         },
         {
           "id": "spread",
@@ -5294,7 +5272,7 @@
           "id": "voices",
           "name": "Voices",
           "min": 1,
-          "max": 8,
+          "max": 128,
           "default": 4,
           "step": 1,
           "curve": "lin",
@@ -5302,7 +5280,9 @@
           "unit": "",
           "ui": "number",
           "group": "Amp",
-          "rate": "k"
+          "rate": "k",
+          "open": true,
+          "legacyMax": 8
         }
       ]
     },
@@ -5409,8 +5389,7 @@
             "combined",
             "vca",
             "lowpass"
-          ],
-          "capacity": 3
+          ]
         },
         {
           "id": "resonance",
@@ -5804,8 +5783,7 @@
             "digital",
             "stepped",
             "chaos"
-          ],
-          "capacity": 10
+          ]
         },
         {
           "id": "character",
@@ -5983,7 +5961,7 @@
           "id": "voices",
           "name": "Voices",
           "min": 1,
-          "max": 16,
+          "max": 128,
           "default": 8,
           "step": 1,
           "curve": "lin",
@@ -5991,7 +5969,9 @@
           "unit": "",
           "ui": "number",
           "group": "Voice",
-          "rate": "k"
+          "rate": "k",
+          "open": true,
+          "legacyMax": 16
         }
       ]
     },
@@ -6154,8 +6134,7 @@
             "1 bar",
             "2 bars",
             "4 bars"
-          ],
-          "capacity": 17
+          ]
         },
         {
           "id": "center",
@@ -6274,8 +6253,7 @@
             "Bass Drum",
             "Snare Drum",
             "Hi-Hat"
-          ],
-          "capacity": 24
+          ]
         },
         {
           "id": "harmonics",
@@ -6553,8 +6531,7 @@
             "FM Voice",
             "Quantised Sympathetic",
             "String and Reverb"
-          ],
-          "capacity": 6
+          ]
         },
         {
           "id": "structure",
@@ -6732,8 +6709,7 @@
             "1 bar",
             "2 bars",
             "4 bars"
-          ],
-          "capacity": 17
+          ]
         },
         {
           "id": "grid",
@@ -6766,8 +6742,7 @@
             "1 bar",
             "2 bars",
             "4 bars"
-          ],
-          "capacity": 17
+          ]
         },
         {
           "id": "chance",
@@ -6932,7 +6907,7 @@
           "id": "osc1.table",
           "name": "Osc 1 Table",
           "min": 0,
-          "max": 63,
+          "max": 8,
           "default": 0,
           "step": 1,
           "curve": "lin",
@@ -6953,7 +6928,7 @@
             "Vocal"
           ],
           "takes": "sample",
-          "capacity": 64,
+          "open": true,
           "sampleAs": "wavetable",
           "bank": "tables"
         },
@@ -7010,8 +6985,7 @@
             "fm noise",
             "pm noise",
             "ring osc"
-          ],
-          "capacity": 25
+          ]
         },
         {
           "id": "osc1.warp",
@@ -7157,7 +7131,7 @@
           "id": "osc2.table",
           "name": "Osc 2 Table",
           "min": 0,
-          "max": 63,
+          "max": 8,
           "default": 0,
           "step": 1,
           "curve": "lin",
@@ -7178,7 +7152,7 @@
             "Vocal"
           ],
           "takes": "sample",
-          "capacity": 64,
+          "open": true,
           "sampleAs": "wavetable",
           "bank": "tables"
         },
@@ -7235,8 +7209,7 @@
             "fm noise",
             "pm noise",
             "ring osc"
-          ],
-          "capacity": 25
+          ]
         },
         {
           "id": "osc2.warp",
@@ -7408,8 +7381,7 @@
           "options": [
             "sine",
             "square"
-          ],
-          "capacity": 2
+          ]
         },
         {
           "id": "noise.level",
@@ -7572,8 +7544,7 @@
           "options": [
             "legato",
             "always"
-          ],
-          "capacity": 2
+          ]
         },
         {
           "id": "level",
@@ -7593,7 +7564,7 @@
           "id": "voices",
           "name": "Voices",
           "min": 1,
-          "max": 16,
+          "max": 128,
           "default": 8,
           "step": 1,
           "curve": "lin",
@@ -7601,7 +7572,34 @@
           "unit": "",
           "ui": "number",
           "group": "Voice",
-          "rate": "k"
+          "rate": "k",
+          "open": true,
+          "legacyMax": 16
+        }
+      ]
+    }
+  ],
+  "internal": [
+    {
+      "id": "Crossover",
+      "name": "Crossover",
+      "kind": "fx",
+      "version": 1,
+      "sidechain": false,
+      "params": [
+        {
+          "id": "frequency",
+          "name": "Frequency",
+          "min": 20,
+          "max": 20000,
+          "default": 1000,
+          "step": 0,
+          "curve": "lin",
+          "curveExp": 2,
+          "unit": "Hz",
+          "ui": "knob",
+          "group": "",
+          "rate": "a"
         }
       ]
     }

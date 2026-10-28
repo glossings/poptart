@@ -88,8 +88,6 @@ struct Device : pd_own::Device<ids::kCount, 4> {
     const double attackK = 1.0 - std::exp(-1.0 / std::fmax(1.0, p[ids::attack] * 0.001 * sampleRate));
     const double threshold = std::pow(10.0, p[ids::threshold] / 20.0);
     const double releaseK = 1.0 - std::exp(-1.0 / (0.05 * sampleRate));
-    const double amount = p[ids::amount];
-    const double lengthWant = p[ids::length];
     const float* inl = inL();
     const float* inr = inR();
     const float* keyl = keyL();
@@ -124,7 +122,8 @@ struct Device : pd_own::Device<ids::kCount, 4> {
           lastBeat = beat;
         }
       }
-      const double length = lengthWant * (keyed ? 2 : period);
+      const double amount = ctl(ids::amount, i);
+      const double length = ctl(ids::length, i) * (keyed ? 2 : period);
       double target = 1;
       if (dipping) {
         const double x = std::fmin(1.0, elapsed / std::fmax(0.001, length));

@@ -1014,7 +1014,7 @@ export function createHost({
       // An empty list is the first poll, before the strips are built: everything playing.
       const shown = asked.length ? asked.filter((l) => labels.includes(l)) : labels;
       const read = engine.mixRead?.(shown.map((l) => evaluator.trackIds.get(l) ?? l))
-        ?? { on: false, levels: {}, spec: {}, perTrack: true, perTrackMax: 0 };
+        ?? { on: false, levels: {}, spec: {} };
       // Back into the labels the desk knows: the engine keys everything by track id, and '*' is
       // the master, which is nobody's track.
       const byLabel = (held) => {
@@ -1032,8 +1032,6 @@ export function createHost({
         levels: byLabel(read.levels),
         spec: byLabel(read.spec),
         bandFreqs: engine.mixBandFreqs?.() ?? [],
-        perTrack: read.perTrack,
-        perTrackMax: read.perTrackMax,
         transport: evaluator.transportForEditor(),
       };
     },

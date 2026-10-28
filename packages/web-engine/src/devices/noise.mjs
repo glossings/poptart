@@ -41,7 +41,8 @@ const STEPPED = 8;
 const CHAOS = 9;
 
 /** The most voices one track will ever run, whatever the voice count is set to. */
-export const NOISE_MAX_VOICES = 16;
+/** How far the Voices knob reaches, which is no most (see the Wavetable's VOICES_KNOB). It stopped at 16 before. */
+export const NOISE_VOICES_KNOB = 128;
 
 /** Where the tone control stops filtering at all. */
 const TONE_TOP = 20000;
@@ -104,7 +105,7 @@ export const NOISE = defineDevice({
       description: 'Zero is a straight line; negative drops away quickly and then hangs, positive holds the level and then cuts.' },
 
     { id: 'level', name: 'Level', min: 0, max: 1, default: 0.5, group: 'Voice' },
-    { id: 'voices', name: 'Voices', min: 1, max: NOISE_MAX_VOICES, default: 8, step: 1, rate: 'k', ui: 'number', group: 'Voice' },
+    { id: 'voices', name: 'Voices', min: 1, open: true, uiMax: NOISE_VOICES_KNOB, legacyMax: 16, default: 8, step: 1, rate: 'k', ui: 'number', group: 'Voice' },
   ],
 });
 
@@ -386,7 +387,8 @@ export class NoiseSynth {
   constructor(sampleRate) {
     this.sampleRate = sampleRate;
     const scales = pinkScales(sampleRate);
-    this.voices = Array.from({ length: NOISE_MAX_VOICES }, () => new NoiseVoice(sampleRate, scales));
+    this.scales = scales;
+    this.voices = Array.from({ length: 16 }, () => new NoiseVoice(sampleRate, scales)); // as the Wavetable's
     this.voiceCount = 8;
     this.clock = 0;
     this.seed = 1;
@@ -423,7 +425,10 @@ export class NoiseSynth {
     s.dcurve = first('env.dcurve', -4);
     s.rcurve = first('env.rcurve', -4);
     const count = first('voices', 8);
-    if (Number.isFinite(count)) this.voiceCount = Math.min(NOISE_MAX_VOICES, Math.max(1, Math.round(count)));
+    if (Number.isFinite(count)) this.voiceCount = Math.max(1, Math.round(count));
+    // The voices are made as the count asks for them - there is no most - so a count past what is made
+    // grows the list, once, at the new high mark.
+    while (this.voices.length < this.voiceCount) this.voices.push(new NoiseVoice(this.sampleRate, this.scales));
   }
 
   /** The track's bend in semitones, which moves the clocked colors' pitch. */

@@ -91,6 +91,7 @@ test('a track build that never commits is given up on, and the key can be built 
   try {
     const { results, out } = run(sclang, dir, 'birth.scd', `
 var tracks = IdentityDictionary.new;
+var tellRamp = { }, tellSlot = { }, tellMods = { }, tellTap = { }, shapesHandled = IdentityDictionary.new, nodeAddr = (sendMsg: { }); // the direct path's id handoff (see tellTrack in sc/poptart.scd) - inert here
 var nodeGoneSaid = IdentitySet.new, nodeOwns = { |nodeID, what| }, deadNodes = IdentitySet.new; // the engine's node bookkeeping (see nodeOwns in sc/poptart.scd) - inert here
 var trackGen = IdentityDictionary.new;
 var awaitTrack, reclaimStuckTrack;
@@ -164,14 +165,20 @@ test('clearing an empty fx slot takes no routine, so a whole song\'s sweep canno
     const { results, out } = run(sclang, dir, 'sweep.scd', `
 var srv = Server(\\poptartProbe, NetAddr("127.0.0.1", 57999));
 var tracks = IdentityDictionary.new;
+var tellRamp = { }, tellSlot = { }, tellMods = { }, tellTap = { }, shapesHandled = IdentityDictionary.new, nodeAddr = (sendMsg: { }); // the direct path's id handoff (see tellTrack in sc/poptart.scd) - inert here
 var nodeGoneSaid = IdentitySet.new, nodeOwns = { |nodeID, what| }, deadNodes = IdentitySet.new; // the engine's node bookkeeping (see nodeOwns in sc/poptart.scd) - inert here
 var maxSlots = 21;
 var closed = 0, ramped = 0, bypassed = 0;
 var dropSlotRamps = { ramped = ramped + 1 };
 var slotLive;
+var slotNode = { |track, slot| track[\\nodes][slot] }; // see slotNode in sc/poptart.scd
+// A track as the engine holds one: its slots by number, each effect a node of its own. Slot 3 is
+// one the chain still runs through, so its node is bypassed and kept; the others have none.
 var live = (
-    loaded: Array.newClear(maxSlots), wanted: Array.newClear(maxSlots),
-    controllers: Array.newClear(maxSlots), editWatch: Array.newClear(maxSlots),
+    loaded: IdentityDictionary.new, wanted: IdentityDictionary.new,
+    controllers: IdentityDictionary.new, editWatch: IdentityDictionary.new,
+    nodes: IdentityDictionary[3 -> Synth.basicNew(\\x, srv, 3), 5 -> Synth.basicNew(\\x, srv, 5)],
+    wired: Set[3, 5],
     synth: Synth.basicNew(\\x, srv, 1)
 );
 var unload = { |key, slot| OSCdef(\\poptartUnloadEffect).func.value(['/poptart/unloadEffect', key, slot]) };

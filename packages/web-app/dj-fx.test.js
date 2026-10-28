@@ -152,11 +152,15 @@ const CLIENT = fs.readFileSync(path.join(__dirname, 'public/client.js'), 'utf8')
 let fxChainSlotAt;
 test.before(async () => {
   const { codeMask } = await import(url.pathToFileURL(path.join(__dirname, '../pattern-core/src/labels.mjs')).href);
-  const at = CLIENT.indexOf('function fxChainSlotAt(');
-  assert.ok(at > 0, 'fxChainSlotAt not found in public/client.js - this test needs updating');
+  // fxChainSlotAt, and the chain scan it counts slots with.
+  const body = (name) => {
+    const at = CLIENT.indexOf(`function ${name}(`);
+    assert.ok(at > 0, `${name} not found in public/client.js - this test needs updating`);
+    return CLIENT.slice(at, CLIENT.indexOf('\n}\n', at) + 3);
+  };
   // eslint-disable-next-line no-new-func
   fxChainSlotAt = new Function('codeMask', `
-    ${CLIENT.slice(at, CLIENT.indexOf('\n}\n', at) + 3)}
+    ${['matchParen', 'slotCalls', 'fxChainSlotAt'].map(body).join('\n')}
     const codeOnly = (code) => { const mask = codeMask(code); return (i) => mask[i] === 1; };
     return fxChainSlotAt;
   `)(codeMask);

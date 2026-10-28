@@ -59,23 +59,24 @@ var nodeGoneSaid = IdentitySet.new, nodeOwns = { |nodeID, what| }, deadNodes = I
 var slotKey = { |key, slot| (key ++ "_" ++ slot).asSymbol };
 var bundleNow = { |latency, func| func.value };
 var hushTrack, markSounding, slotLive, noteKey;
+var slotNode = { |track, slot| track[\\synth] }; // the node a slot is (see slotNode in sc/poptart.scd) - here the one synth
 // Slot 0 holds one note with no end known yet, one ending in five seconds and one that ended a
 // second ago - the first two are what a hush has to release.
 var mk = { |name, id, sdk = "VST 2.4"| (
     voices: Group.basicNew(srv, id),
-    loaded: ["plugin", nil], // slot 0 has its plugin open (see slotLive) - the one a hush releases
+    loaded: IdentityDictionary[0 -> "plugin"], // slot 0 has its plugin open (see slotLive) - the one a hush releases
     synth: Synth.basicNew(\\x, srv, id + 1000), // the track synth slotLive checks is still alive
-    controllers: [(
+    controllers: IdentityDictionary[0 -> (
         info: (sdkVersion: sdk),
         midi: (
             allNotesOff: { |self, ch| ("ANO<" ++ name ++ ">" ++ ch).postln },
             noteOff: { |self, ch, note| ("OFF<" ++ name ++ ">" ++ ch ++ "," ++ note).postln }
         )
-    ), nil],
+    ), 1 -> nil],
     envs: IdentityDictionary.new,
     held: 3,
-    sounding: [IdentityDictionary[60 -> inf, 64 -> (Main.elapsedTime + 5), 67 -> (Main.elapsedTime - 1)],
-        IdentityDictionary.new]
+    sounding: IdentityDictionary[0 -> IdentityDictionary[60 -> inf, 64 -> (Main.elapsedTime + 5), 67 -> (Main.elapsedTime - 1)],
+        1 -> IdentityDictionary.new]
 ) };
 srv.addr = (addr: 1, isLocal: true, hostname: "127.0.0.1", ip: "127.0.0.1", port: 57999,
     sendMsg: { |self ...msg| ("NSET<" ++ msg[1] ++ ">" ++ msg[2] ++ "," ++ msg[3]).postln });
@@ -101,7 +102,7 @@ hushTrack.(\\three, 0);
 
 // The bookkeeping a hush reads: a note is on the books until its end has passed.
 tracks[\\marked] = mk.(\\marked, 600);
-tracks[\\marked][\\sounding] = [IdentityDictionary.new, IdentityDictionary.new];
+tracks[\\marked][\\sounding] = IdentityDictionary[0 -> IdentityDictionary.new, 1 -> IdentityDictionary.new];
 markSounding.(tracks[\\marked], 0, 72, inf); // its on...
 markSounding.(tracks[\\marked], 0, 72, Main.elapsedTime - 0.5); // ...and an off that has landed
 markSounding.(tracks[\\marked], 0, 74, inf);

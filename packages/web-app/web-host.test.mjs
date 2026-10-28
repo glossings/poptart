@@ -925,7 +925,6 @@ test('the mixer is answered from the page: its tracks, its meters and its band c
   // Keyed by the labels the desk knows, not by the ids the engine gave them.
   assert.deepEqual(Object.keys(live.levels).sort(), ['*', 'bass', 'kick']);
   assert.equal(live.spec.kick.length, live.bandFreqs.length);
-  assert.equal(live.perTrack, true);
   assert.ok(live.transport, 'the desk draws a playhead, so the transport rides along');
 
   // What the desk is showing is what gets analyzed: folding a group is one fewer tap.

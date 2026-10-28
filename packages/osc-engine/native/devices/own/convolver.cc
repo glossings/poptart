@@ -45,8 +45,11 @@ using namespace pd_own;
 /** The spaces, in the order the control's option list has them. */
 enum { kRoom = 0, kHall, kPlate, kChamber, kCathedral, kSpaceCount };
 
-/** How many responses the device can hold. The browser's option list has room for this many. */
-constexpr int kSlots = 32;
+/**
+ * The response slots a fresh device has room for: what the control stopped at before it was
+ * open. Not a most - past them the room grows through the work round (pd_own::Pool).
+ */
+constexpr int kFirstSlots = 32;
 
 /** As long a response as a space is ever built with: six seconds of the longest tail. */
 constexpr double kMaxSeconds = 6.0 * 2.6 + 0.5;
@@ -161,9 +164,9 @@ struct Device : pd_own::Device<ids::kCount, 2> {
     int channelCount = 0;
     double rate = 0;
   };
-  Source sources[kSlots];
-  /** Bumped by every file handed over, so a slot refilled while it plays is rebuilt. */
-  unsigned sourceId[kSlots] = { 0 };
+  /** A slot: the file in it, and a number bumped by every file handed over, so a slot refilled while it plays is rebuilt. */
+  struct Slot { Source source; unsigned id = 0; };
+  Pool<Slot> slots;
   unsigned nextSourceId = 0;
 
   /** The response playing. */
@@ -180,10 +183,12 @@ struct Device : pd_own::Device<ids::kCount, 2> {
   /** The round in flight: what work() builds from, and what it builds into. */
   struct Request { int which = 0; double seconds = 0; Source source; };
   Request request;
+  bool building = false;   // whether this round lays out a response, or only makes room
   Convolver nextL, nextR;
 
   void pd_init(double sr) {
     sampleRate = sr;
+    slots.reserve(kFirstSlots, [](Slot&) {});
     preL.init(sr);
     preR.init(sr);
     cutL.reset();
@@ -201,11 +206,14 @@ struct Device : pd_own::Device<ids::kCount, 2> {
    * the response is laid out in work(). Both sides of a stereo file are kept apart, as the
    * browser's convolver keeps them: each channel of the input is convolved with its own side.
    */
-  void pd_sample(int param, int slot, const PdSample& file) {
-    if (param != ids::ir) return;
-    if (slot < 0 || slot >= kSlots || !file.channels || file.frames <= 0 || file.channelCount <= 0) return;
-    sources[slot] = Source{ file.channels, file.frames, file.channelCount, file.sampleRate > 0 ? file.sampleRate : sampleRate };
-    sourceId[slot] = ++nextSourceId;
+  bool pd_sample(int param, int slot, const PdSample& file) {
+    if (param != ids::ir) return true;
+    if (slot < 0 || !file.channels || file.frames <= 0 || file.channelCount <= 0) return true;
+    // A slot past the room there is: room is asked for, and the file comes again once it is made.
+    if (slot >= slots.size()) { slots.ask(slot + 1); return false; }
+    slots[slot].source = Source{ file.channels, file.frames, file.channelCount, file.sampleRate > 0 ? file.sampleRate : sampleRate };
+    slots[slot].id = ++nextSourceId;
+    return true;
   }
 
   /**
@@ -214,17 +222,22 @@ struct Device : pd_own::Device<ids::kCount, 2> {
    * the file in the slot playing is replaced.
    */
   bool pd_work_wanted() {
-    const int which = clamp(jsRoundInt(p[ids::ir]), 0, kSlots - 1);
+    const bool grow = slots.wanted();
+    const int index = jsRoundInt(p[ids::ir]);
+    const int which = index < 0 ? 0 : index;
     const double seconds = clamp(p[ids::size], 0.3, kMaxSeconds);
-    const bool loaded = sources[which].channels != nullptr;
+    const bool inRoom = which < slots.size();
+    const bool loaded = inRoom && slots[which].source.channels != nullptr;
+    const unsigned id = inRoom ? slots[which].id : 0;
     const bool same = which == askedIndex && loaded == askedLoaded
-        && (loaded ? sourceId[which] == askedSource : seconds == askedSize);
-    if (same) return false;
+        && (loaded ? id == askedSource : seconds == askedSize);
+    building = !same;
+    if (same) return grow;
     askedIndex = which;
     askedSize = seconds;
     askedLoaded = loaded;
-    askedSource = sourceId[which];
-    request = Request{ which, seconds, sources[which] };
+    askedSource = id;
+    request = Request{ which, seconds, loaded ? slots[which].source : Source() };
     return true;
   }
 
@@ -234,6 +247,8 @@ struct Device : pd_own::Device<ids::kCount, 2> {
    * The non-realtime thread, so the whole of a six-second tail is ready on the block it arrives.
    */
   void pd_work() {
+    slots.build([](Slot&) {});
+    if (!building) return;
     std::vector<float> left, right;
     const Source& src = request.source;
     if (src.channels) {
@@ -272,12 +287,14 @@ struct Device : pd_own::Device<ids::kCount, 2> {
 
   /** The new response in, the old one out to be freed: swaps, nothing allocated. */
   void pd_work_done() {
+    slots.install();
     if (!nextL.ready()) return;
     std::swap(convL, nextL);
     std::swap(convR, nextR);
   }
 
   void pd_work_release() {
+    slots.release();
     nextL = Convolver();
     nextR = Convolver();
   }

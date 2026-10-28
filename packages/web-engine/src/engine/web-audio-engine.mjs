@@ -18,18 +18,20 @@
 
 import { catalog as defaultCatalog } from '../catalog.mjs';
 import { buildNodeDevice } from '../devices/builtins.mjs';
+import { CROSSOVER } from '../devices/crossover.mjs';
 import { defaultValues, denormalize, findParam, normalize } from '../descriptor.mjs';
 import { decodeWav, framesOf } from '../dsp/wavfile.mjs';
 import { buildMipmaps, powerOfTwoAtLeast, resampleFrame } from '../dsp/tables.mjs';
 import { outlineOf } from '../dsp/outline.mjs';
 import { compileExpr, exprConsts, exprInputCount, exprInputs, exprShape } from '../dsp/expr.mjs';
-import { MIX_BAND_FREQS, MIX_TRACK_MAX, MixAnalysis, SpectrumTap } from './analysis.mjs';
+import { MIX_BAND_FREQS, MixAnalysis, SpectrumTap } from './analysis.mjs';
 import { MidiRoutes } from './midi-routes.mjs';
 import { detectOnsets, monoOf, planSample, sliceEntryFor } from './sample-plan.mjs';
 import { EnvConnection, FeedConnection, LfoConnection } from './modulators.mjs';
 import { GRAIN_CHANNEL_FIELDS, SUPPORTED_CHANNELS, Track, rampParam } from './track.mjs';
 import { DeskAudio } from './desk-audio.mjs';
 import { SONG_LATENCY_SEC, SongPlayer } from './song-player.mjs';
+import { RouteGraph } from './route-graph.mjs';
 
 const keyOf = (slot, name) => `${slot}:${name}`;
 
@@ -236,6 +238,8 @@ export class WebAudioEngine {
     // The DJ desk's half of the graph: the headphone cue and the deck meters (see desk-audio.mjs).
     this.desk = new DeskAudio(ctx, this.master);
     this.songs = new Map();         // trackId -> SongPlayer, for a track a DJ deck plays a song on
+    // Every route between tracks and buses, so a feedback loop gets the delay it needs to sound.
+    this.routes = new RouteGraph(ctx, () => [...this.tracks.keys()].map((id) => `t:${id}`));
   }
 
   // -- what the mixer reads -----------------------------------------------------------------
@@ -243,11 +247,6 @@ export class WebAudioEngine {
   /** The band centers the plots are drawn at, lowest first. */
   mixBandFreqs() {
     return [...MIX_BAND_FREQS];
-  }
-
-  /** The most tracks that get an analyzer of their own; past it only the master is drawn. */
-  mixTrackMax() {
-    return MIX_TRACK_MAX;
   }
 
   /** Turns the analysis on or off. Off takes every tap out of the graph. */
@@ -259,18 +258,15 @@ export class WebAudioEngine {
    * One reading for the mixer: a level and a band frame per strip, and the same for the master
    * under '*'.
    *
-   * `ids` is what the panel is showing, in its own order. Past the budget the tracks get no
-   * analyzer at all and only the master is read - which is what `perTrack: false` tells the
-   * panel, so it can say why the plots moved rather than appearing to lose the tracks.
+   * `ids` is what the panel is showing, in its own order; each gets an analyzer of its own.
    */
   mixRead(ids = []) {
     const wanted = ids.filter((id) => this.tracks.has(id));
-    const perTrack = wanted.length <= MIX_TRACK_MAX;
     const sources = new Map();
     sources.set('*', this.master);
-    if (perTrack) for (const id of wanted) sources.set(id, this.tracks.get(id).panner);
+    for (const id of wanted) sources.set(id, this.tracks.get(id).panner);
     const { levels, spec } = this.analysis.read(sources);
-    return { on: this.analysis.on, levels, spec, perTrack, perTrackMax: MIX_TRACK_MAX };
+    return { on: this.analysis.on, levels, spec };
   }
 
   /** The scheduling clock. Every timed argument the scheduler passes is on this. */
@@ -313,6 +309,8 @@ export class WebAudioEngine {
     let track = this.tracks.get(trackId);
     if (!track) {
       track = new Track(this.ctx, trackId, this.master, this.registry, this.desk);
+      // A .bands() crossover: the engine's own device, never a slot of the track's chain.
+      track.makeCrossover = () => this._buildDevice(CROSSOVER);
       this.tracks.set(trackId, track);
       this.modulators.set(trackId, new Map());
       this.envelopes.set(trackId, new Map());
@@ -369,6 +367,7 @@ export class WebAudioEngine {
     this.held.delete(trackId);
     this.sounding.delete(trackId);
     this.voices.delete(trackId);
+    this.routes.dropVertex(`t:${trackId}`);
     // Last, once the name no longer answers: what it fed goes back to waiting for it.
     this._orphanRoutesFrom(trackId, track.panner);
   }
@@ -399,11 +398,12 @@ export class WebAudioEngine {
         );
       }
     }
-    const inputs = (descriptor.channels.in > 0 ? 1 : 0) + (descriptor.sidechain ? 1 : 0);
+    const inputs = (descriptor.channels.in > 0 ? 1 : 0) + (descriptor.sidechain || descriptor.channels.key ? 1 : 0);
+    const outputs = descriptor.channels.outputs ?? 1;
     const node = new this.AudioWorkletNodeCtor(this.ctx, descriptor.processor, {
       numberOfInputs: inputs,
-      numberOfOutputs: 1,
-      outputChannelCount: [descriptor.channels.out],
+      numberOfOutputs: outputs,
+      outputChannelCount: Array.from({ length: outputs }, () => descriptor.channels.out),
       processorOptions: {
         descriptor: descriptor.id,
         version: descriptor.version,
@@ -565,6 +565,24 @@ export class WebAudioEngine {
     this.tracks.get(trackId).clearSlot(slot);
   }
 
+  /**
+   * Wires a track's chain by a routing plan - the branches of .split() and the bands of .bands()
+   * (pattern-core's route.mjs) - or back to the plain line with null. One track either way: the
+   * branch devices are this track's slots (each crossover of a .bands() a Crossover device), and
+   * the levels and pans are its channel controls (rl/rp), driven by setParam and the modulators
+   * like the rest of the strip.
+   */
+  setRouting(trackId, plan) {
+    const track = this.createTrack(trackId);
+    try {
+      track.setRouting(plan && typeof plan === 'object' ? plan : null);
+    } catch (err) {
+      // A plan this build cannot wire costs the branches, not the track: it plays as a line.
+      this._warnOnce(`routing:${trackId}`, `[web-engine] the branches on this track could not be wired (${err?.message ?? err}), so its effects play one after another.`);
+      track.setRouting(null);
+    }
+  }
+
   // -- tempo -------------------------------------------------------------------------------
 
   /**
@@ -675,111 +693,152 @@ export class WebAudioEngine {
 
   // -- the granular sample voice -----------------------------------------------------------------
   //
-  // The desktop's poptart_sample_grain, on the main thread: a grain every 1/rate seconds, each a
-  // piece of the file `size` long under a window, placed by `pan` and read from the position -
-  // the event's begin, or the track's streamed position when the pattern drives it. Size, rate,
-  // pan and position are the track's channel controls, READ AS EACH GRAIN STARTS, so a signal on
-  // any of them moves grain by grain (see Track#setChannel). A short lookahead timer lays the
-  // grains down on the audio clock, so each starts on its sample. Overlapping grains are copies at
-  // unrelated phases, so their power adds; the cloud is divided by the square root of half its
-  // overlap, as the desktop's is, so a denser or longer grain thickens it without turning it up.
+  // The desktop's poptart_sample_grain: a grain every 1/rate seconds, each a piece of the file
+  // `size` long under a window, placed by `pan` and read from the position - the event's begin, or
+  // the track's position control when the pattern drives it. One worklet per event lays the
+  // grains on the audio thread, on their sample (see devices/grain-cloud.mjs). Size, rate, pan and
+  // position are the track's grain constants (Track#grainControl), wired into the voice's
+  // parameters, so a grain reads a signal on any of them as it starts.
 
-  _playGrains(track, buffer, cfg, { rate, vel, onsetSec, offsetSec, fileSec, from }) {
-    const g = track.grain;
+  _playGrains(track, buffer, cfg, plan, offsetSec) {
+    const Ctor = this.AudioWorkletNodeCtor;
+    if (!Ctor) {
+      this._warnOnce('grains', '[web-engine] this build has no AudioWorkletNode, so .grain() cannot play.');
+      return { skipped: 'no worklets' };
+    }
+    const mods = this.modulators.get(track.id);
+    const start = Math.max(this.getTime(), plan.onsetSec);
     // The event's own values at its onset seed the track, so the first grain does not read
     // whatever the last event left there (the scheduler sends them for exactly this).
-    if (Number.isFinite(cfg.grainSize)) g.size = cfg.grainSize;
-    if (Number.isFinite(cfg.grainRate)) g.rate = cfg.grainRate;
-    if (Number.isFinite(cfg.grainPan)) g.pan = cfg.grainPan;
-    const posLive = cfg.grainPosLive === 1;
-    const window = this._grainWindow(cfg.grainShape);
-    const start = Math.max(this.getTime(), onsetSec);
-    const gate = Number.isFinite(offsetSec) ? Math.max(0.001, offsetSec - start) : 1;
-    const attack = Math.max(0.0005, cfg.attack ?? 0);
-    const release = Math.max(0.015, cfg.release ?? 0.05);
-    const end = start + gate + release;
-
-    const amp = this.ctx.createGain();
-    amp.gain.setValueAtTime(0, start);
-    amp.gain.linearRampToValueAtTime(vel, start + attack);
-    amp.gain.setValueAtTime(vel, Math.max(start + attack, start + gate));
-    amp.gain.linearRampToValueAtTime(0, end);
-    amp.connect(track.input);
-    let cut = false;
-    const voice = this._voice(track, { amp, start, release, onRelease: () => { cut = true; } });
-
-    const mono = buffer.numberOfChannels === 1;
-    // A grain control an lfo() or env() drives is read off the modulator at the grain's own start,
-    // as the desktop's grains read the control's bus - not at the moment the batch is laid.
-    const mods = this.modulators.get(track.id);
-    const read = (name, at) => {
-      const conn = mods?.get(keyOf(-1, name));
-      if (!conn) return g[GRAIN_CHANNEL_FIELDS[name]];
-      const v = typeof conn.valueAt === 'function' ? conn.valueAt(at) : conn.value();
-      return Number.isFinite(v) ? v : g[GRAIN_CHANNEL_FIELDS[name]];
-    };
-    let next = start;
-    let count = 0;
-    const lay = () => {
-      const horizon = cut ? next : Math.min(end, this.getTime() + 0.1);
-      while (next < horizon) {
-        const size = Math.min(4, Math.max(0.002, read('grainsize', next)));
-        const density = Math.min(1000, Math.max(0.1, read('grainrate', next)));
-        const pos = Math.min(1, Math.max(0, posLive ? read('grainpos', next) : from / Math.max(1e-9, fileSec)));
-        const level = 1 / Math.sqrt(Math.max(1, size * density * 0.5));
-        this._grain(buffer, amp, next, size, pos * fileSec, rate, read('grainpan', next), level * (mono ? Math.SQRT2 : 1), window, track);
-        next += 1 / density;
-        count += 1;
-      }
-      if (next >= end || cut) {
-        clearInterval(timer);
-        const finish = setTimeout(() => { voice.finished(); try { amp.disconnect(); } catch { /* gone */ } }, Math.max(0, (end - this.getTime()) * 1000) + 500);
-        finish?.unref?.();
-      }
-    };
-    const timer = setInterval(lay, 25);
-    timer?.unref?.(); // a node test's process need not wait on a cloud whose clock never moves
-    lay();
-    return { index: cfg.index ?? 0, grain: true, grainSize: g.size, grainRate: g.rate, durSec: gate, fileSec, amp: vel };
-  }
-
-  /** One grain: a piece of the file under the window, panned, onto the voice's envelope. */
-  _grain(buffer, into, at, size, offsetSec, rate, pan, level, window, track) {
-    const src = this.ctx.createBufferSource();
-    src.buffer = buffer;
-    src.playbackRate.value = rate;
-    // The bend, in cents, is held by the one the voice was connected to, which is the one to undo.
-    const bend = track.bendCents ?? null;
-    if (bend) { try { bend.connect(src.detune); } catch { /* no detune */ } }
-    const shape = this.ctx.createGain();
-    shape.gain.value = 0;
-    try { shape.gain.setValueCurveAtTime(window.map((v) => v * level), at, size); } catch { shape.gain.value = level; }
-    const panner = this.ctx.createStereoPanner();
-    panner.pan.value = Math.min(1, Math.max(-1, pan));
-    src.connect(shape).connect(panner).connect(into);
-    // The read wraps within the file: a grain started near the end reads on from the start.
-    const offset = ((offsetSec % buffer.duration) + buffer.duration) % buffer.duration;
-    src.start(at, offset, size * rate + 0.01);
-    src.stop(at + size + 0.005);
-    src.onended = () => {
-      try { src.disconnect(); shape.disconnect(); panner.disconnect(); } catch { /* gone */ }
-      // An inbound connection is not undone by disconnecting the voice's outputs: left in place,
-      // the track's bend constant keeps a reference to every grain it ever reached.
-      if (bend) { try { bend.disconnect(src.detune); } catch { /* never connected */ } }
-    };
-  }
-
-  /** The window each grain is shaped by: a drawn one, or a Hann bell, as the desktop's default. */
-  _grainWindow(shape) {
-    const points = 64;
-    if (shape && this.shapes?.parseShapePoints && this.shapes?.sampleShape) {
-      try {
-        const parsed = this.shapes.parseShapePoints(shape);
-        if (parsed?.length) return Float32Array.from({ length: points }, (_, i) => Math.max(0, this.shapes.sampleShape(parsed, i / (points - 1))));
-      } catch { /* not a shape; the bell */ }
+    for (const [name, field] of [['grainsize', 'grainSize'], ['grainrate', 'grainRate'], ['grainpan', 'grainPan']]) {
+      if (!Number.isFinite(cfg[field]) || mods?.has(keyOf(-1, name))) continue;
+      track.grain[GRAIN_CHANNEL_FIELDS[name]] = cfg[field];
+      const ctl = track.grainControl(name);
+      try { ctl.offset.setValueAtTime(cfg[field], start); } catch { ctl.offset.value = cfg[field]; }
     }
-    return Float32Array.from({ length: points }, (_, i) => 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / (points - 1)));
+    const gateEnd = Number.isFinite(offsetSec) ? Math.max(start + 0.001, offsetSec) : start + 1;
+    const amp = this.ctx.createGain();
+    const end = this._envelope(amp, plan, start, gateEnd);
+    const made = this._cloudVoice(track, amp, start, plan, {
+      ...this._grainFile(buffer),
+      begin: plan.begin,
+      posLive: cfg.grainPosLive === 1,
+      // Signed: a negative speed reads each grain backwards. Scaled from the file's rate.
+      rate: plan.speed * (buffer.sampleRate / this.ctx.sampleRate),
+      start,
+      end: end + 0.005,
+      table: this._grainTable(cfg.grainShape),
+    }, true);
+    if (!made) return { skipped: 'grains failed' };
+    const g = track.grain;
+    return { index: cfg.index ?? 0, grain: true, grainSize: g.size, grainRate: g.rate, durSec: gateEnd - start, fileSec: buffer.duration, amp: plan.amp };
   }
+
+  /**
+   * One worklet voice of grains (a .grain() cloud, or the .stretch() warp), on its envelope `amp`
+   * into the track. `controls` wires the track's grain constants in. Returns the node, or null.
+   */
+  _cloudVoice(track, amp, start, plan, processorOptions, controls = false) {
+    const Ctor = this.AudioWorkletNodeCtor;
+    let node;
+    try {
+      if (!Ctor) throw new Error('this build has no AudioWorkletNode');
+      node = new Ctor(this.ctx, 'poptart-grains', {
+        numberOfInputs: 0,
+        numberOfOutputs: 1,
+        outputChannelCount: [2],
+        // Every control arrives from a constant wired in below, which adds to these.
+        parameterData: { size: 0, density: 0, pan: 0, pos: 0, detune: 0 },
+        processorOptions,
+      });
+    } catch (err) {
+      this._warnOnce('grains:build', `[web-engine] a grain voice could not start - ${err?.message ?? err}`);
+      return null;
+    }
+    const wired = [];
+    const plug = (from, id) => {
+      const param = node.parameters?.get?.(id);
+      if (!from || !param) return;
+      from.connect(param);
+      wired.push([from, param]);
+    };
+    if (controls) {
+      plug(track.grainControl('grainsize'), 'size');
+      plug(track.grainControl('grainrate'), 'density');
+      plug(track.grainControl('grainpan'), 'pan');
+      plug(track.grainControl('grainpos'), 'pos');
+    }
+    // The bend, in cents, from the constant the track holds.
+    plug(track.bendCents ?? null, 'detune');
+    node.connect(amp);
+    amp.connect(track.input);
+    const post = (m) => { try { node.port.postMessage(m); } catch { /* gone */ } };
+    let voice = null;
+    let over = false;
+    const finish = () => {
+      if (over) return;
+      over = true;
+      voice?.finished();
+      for (const [from, param] of wired) { try { from.disconnect(param); } catch { /* gone */ } }
+      try { node.disconnect(); } catch { /* gone */ }
+      try { amp.disconnect(); } catch { /* gone */ }
+    };
+    voice = this._voice(track, {
+      amp,
+      start,
+      release: plan.release,
+      // A hush ends the voice once its fade is over (at once for one not begun).
+      onRelease: () => {
+        const now = this.getTime();
+        post({ kind: 'end', time: start > now ? now : now + Math.max(0.015, Number(plan.release) || 0) + 0.01 });
+      },
+    });
+    node.port.onmessage = (event) => { if (event.data?.kind === 'ended') finish(); };
+    node.addEventListener?.('processorerror', () => {
+      this._warnOnce('processorerror:grains', '[web-engine] a grain voice failed on the audio thread');
+      finish();
+    });
+    return node;
+  }
+
+  /**
+   * What a grain voice is told about its file: its id, and the samples themselves the first time
+   * (copied once onto the audio thread, and dropped there once the page lets the buffer go).
+   */
+  _grainFile(buffer) {
+    this._grainIds ??= new WeakMap();
+    this._grainDrops ??= [];
+    this._grainGone ??= typeof FinalizationRegistry === 'function'
+      ? new FinalizationRegistry((id) => this._grainDrops.push(id))
+      : null;
+    const drop = this._grainDrops.length ? this._grainDrops.splice(0) : undefined;
+    let id = this._grainIds.get(buffer);
+    if (id != null) return { file: id, ...(drop ? { drop } : {}) };
+    this._grainSerial = (this._grainSerial ?? 0) + 1;
+    id = this._grainSerial;
+    this._grainIds.set(buffer, id);
+    this._grainGone?.register(buffer, id);
+    const channels = [];
+    for (let c = 0; c < Math.min(2, buffer.numberOfChannels); c++) channels.push(buffer.getChannelData(c));
+    return { file: id, id, channels, ...(drop ? { drop } : {}) };
+  }
+
+  /** A drawn grain window as the desktop builds one (1024 points), or null for the Hann bell. */
+  _grainTable(shape) {
+    const reader = this.shapeReader;
+    if (!shape || !reader?.sampleShape) return null;
+    let points = null;
+    try {
+      points = Array.isArray(shape) ? shape : reader.parseShapePoints?.(String(shape)) ?? null;
+    } catch { points = null; }
+    if (!points?.length) return null;
+    const frames = 1024;
+    const table = new Float32Array(frames);
+    for (let i = 0; i < frames; i++) table[i] = Math.max(0, reader.sampleShape(points, i / (frames - 1)));
+    return table;
+  }
+
+
 
   // -- multichannel output ------------------------------------------------------------------------
 
@@ -950,7 +1009,7 @@ export class WebAudioEngine {
     }
     if (slot === -1) {
       if (!track.setChannel(name, value, atTime, now)) {
-        this._warnOnce(`channel:${name}`, `[web-engine] the "${name}" channel control is not implemented in the browser build yet, so it does nothing here. Implemented: ${SUPPORTED_CHANNELS.join(', ')} and wet1..wet20.`);
+        this._warnOnce(`channel:${name}`, `[web-engine] the "${name}" channel control is not implemented in the browser build yet, so it does nothing here. Implemented: ${SUPPORTED_CHANNELS.join(', ')} and wetN for each effect.`);
       }
       if (name === 'out') this._routeOut(track);
       return;
@@ -1088,30 +1147,19 @@ export class WebAudioEngine {
   }
 
   /**
-   * The next free slot on an enum's option list, past the descriptor's own entries - and, when
-   * they are all taken, the oldest one. Shared by the two things that fill them: a loaded file
-   * and a drawn shape.
+   * The next free slot on an enum's option list, past the descriptor's own entries. There is no
+   * last one: the list grows by what is loaded. Shared by the two things that fill it: a loaded
+   * file and a drawn shape.
    */
   _spareOption(filled, param, name) {
     const first = param.options.length;
-    const capacity = param.capacity;
     // Every control that loads into the same store (its bank - the Wavetable's two oscillators
     // read one set of tables) shares that store's slots, and lists what is in them.
     const bank = param.bank ?? param.id;
     const sharing = filled.descriptor.params.filter((p) => (p.bank ?? p.id) === bank);
     const extrasOf = (p) => (filled.extras[p.id] ??= {});
-    let optionIndex = -1;
-    for (let i = first; i < capacity; i++) {
-      if (!sharing.some((p) => extrasOf(p)[i] !== undefined)) { optionIndex = i; break; }
-    }
-    filled.bankLoads ??= {};
-    if (optionIndex < 0) {
-      optionIndex = first + ((filled.bankLoads[bank] ?? 0) % Math.max(1, capacity - first));
-      for (const [other, at] of filled.loaded) {
-        if (at === optionIndex && sharing.some((p) => extrasOf(p)[at] === other)) filled.loaded.delete(other);
-      }
-    }
-    filled.bankLoads[bank] = (filled.bankLoads[bank] ?? 0) + 1;
+    let optionIndex = first;
+    while (sharing.some((p) => extrasOf(p)[optionIndex] !== undefined)) optionIndex++;
     filled.loaded.set(name, optionIndex);
     for (const p of sharing) extrasOf(p)[optionIndex] = name;
     return optionIndex;
@@ -1301,6 +1349,7 @@ export class WebAudioEngine {
   }
 
   _setModulator(trackId, slot, name, ir, make, kind, method) {
+    ir = this._reachOf(trackId, slot, name, ir);
     const key = keyOf(slot, name);
     const held = this.modulators.get(trackId);
     if (!held) return;
@@ -1329,6 +1378,22 @@ export class WebAudioEngine {
       // Born open when notes are already held, as the desktop's env synth is.
       if ((this.held.get(trackId) ?? 0) > 0) connection.gateOn(this.getTime());
     }
+  }
+
+  /**
+   * A modulator's range as it reaches an enum that takes files: across the list as it stands -
+   * the shipped entries and every one loaded after them - rather than the shipped list alone,
+   * which is all a 0..1 position on the control spans (see defineParam's open controls).
+   */
+  _reachOf(trackId, slot, name, ir) {
+    const filled = this.tracks.get(trackId)?.slots.get(slot);
+    const param = filled && findParam(filled.descriptor, name);
+    if (!param?.open || !param.options || !ir) return ir;
+    const loaded = Object.keys(filled.extras?.[param.id] ?? {}).map(Number).filter(Number.isInteger);
+    const top = Math.max(param.options.length - 1, ...loaded);
+    const factor = top / (param.max - param.min);
+    if (factor === 1) return ir;
+    return { ...ir, min: (ir.min ?? 0) * factor, max: (ir.max ?? 1) * factor };
   }
 
   /** The feeds table's key for what a midicc() or osc() modulator listens to. */
@@ -1410,7 +1475,7 @@ export class WebAudioEngine {
     if (!Number.isFinite(position)) return;
     const found = this.tracks.get(trackId)?.slots.get(slot)?.paramFor(name);
     if (found?.param && found.audioParam) {
-      this.tracks.get(trackId).slots.get(slot).values[found.param.id] = denormalize(found.param, Math.min(1, Math.max(0, position)));
+      this.tracks.get(trackId).slots.get(slot).values[found.param.id] = denormalize(found.param, Math.max(0, position));
     }
   }
 
@@ -1631,8 +1696,7 @@ export class WebAudioEngine {
     const node = rec.node;
     this._route(`expr|${trackId}|${rec.key}|${i}`, name, (from) => {
       if (rec.node !== node) return;   // rebuilt while this waited
-      from.connect(node, 0, i);
-      rec.sources.set(i, { from, name });
+      rec.sources.set(i, { from, name, edge: this._link(from, node, trackId, i) });
     }, `source:${name}`, `[web-engine] there is nothing called "${name}" to patch into "${rec.name}".`);
   }
 
@@ -1643,7 +1707,7 @@ export class WebAudioEngine {
     }
     if (!rec.node) return;
     for (const source of rec.inputs.values()) { try { source.disconnect(rec.node); } catch { /* not connected */ } }
-    for (const { from } of rec.sources.values()) { try { from.disconnect(rec.node); } catch { /* not connected */ } }
+    for (const { edge } of rec.sources.values()) edge.unlink();
     rec.sources.clear();
   }
 
@@ -1722,7 +1786,7 @@ export class WebAudioEngine {
    * A bare name is a TRACK first and a bus second, which is the same order the desktop resolves
    * in: somebody who has written a track called `kick` means that track.
    */
-  _sourceNode(name) {
+  _sourceNode(name, reader = null) {
     const text = String(name ?? '');
     if (text.startsWith('bus:')) return this._bus(text.slice(4));
     if (text.startsWith('dev:')) return null;         // a hardware input; see setInputSource
@@ -1731,9 +1795,22 @@ export class WebAudioEngine {
     // The id the host gave that label, or the name itself - which is what a test that made its
     // tracks by hand passes, and what a host with no resolver leaves it as.
     const id = this.resolveTrack?.(bare) ?? bare;
-    const track = this.tracks.get(id) ?? this.tracks.get(bare);
-    if (track) return track.panner;
-    return explicit ? null : this.buses.get(bare) ?? null;
+    const found = this.tracks.has(id) ? id : this.tracks.has(bare) ? bare : null;
+    // A track reading its own name means the bus of that name, as on the desktop.
+    if (found != null && found !== reader) return this.tracks.get(found).panner;
+    return explicit && found == null ? null : this.buses.get(bare) ?? null;
+  }
+
+  /** The vertex a source node is in the route graph: a track's output or a bus. */
+  _vertexOf(node) {
+    for (const [id, track] of this.tracks) if (track.panner === node) return `t:${id}`;
+    for (const [name, bus] of this.buses) if (bus === node) return `b:${name}`;
+    return null;
+  }
+
+  /** Wires a route from another track or bus into `to`, a node of track `trackId`. */
+  _link(from, to, trackId, input = 0) {
+    return this.routes.link(from, to, { src: this._vertexOf(from), dst: `t:${trackId}`, input });
   }
 
   /**
@@ -1748,7 +1825,7 @@ export class WebAudioEngine {
    */
   _route(key, name, wire, warnKey, warning) {
     this._waiting.delete(key);
-    const from = this._sourceNode(name);
+    const from = this._sourceNode(name, key.split('|')[1]);
     if (from) {
       wire(from);
       return;
@@ -1764,7 +1841,7 @@ export class WebAudioEngine {
   /** Wires every waiting route whose source has arrived. */
   _wakeRoutes() {
     for (const [key, waiting] of [...this._waiting]) {
-      const from = this._sourceNode(waiting.name);
+      const from = this._sourceNode(waiting.name, key.split('|')[1]);
       if (!from) continue;
       this._waiting.delete(key);
       waiting.wire(from);
@@ -1783,26 +1860,24 @@ export class WebAudioEngine {
         if (held.from !== panner) continue;
         const { source, gain } = held;
         track.clearSidechain(slot);
-        this._route(`side|${id}|${slot}`, source, (from) => track.setSidechain(slot, from, source, gain),
+        this._route(`side|${id}|${slot}`, source, (from) => track.setSidechain(slot, from, source, gain, this._linker(id)),
           `source:${source}`, `[web-engine] there is nothing called "${source}" to feed into slot ${slot}.`);
       }
       if (track._headSource === panner && track._headName) {
         const name = track._headName;
-        try { panner.disconnect(track.input); } catch { /* already detached */ }
+        track._headEdge?.unlink();
+        track._headEdge = null;
         track._headSource = null;
-        this._route(`head|${id}`, name, (from) => {
-          from.connect(track.input);
-          track._headSource = from;
-          track._headName = name;
-        }, `head:${name}`, `[web-engine] there is nothing called "${name}" for this track to read.`);
+        this._route(`head|${id}`, name, (from) => this._wireHead(id, track, from, name),
+          `head:${name}`, `[web-engine] there is nothing called "${name}" for this track to read.`);
       }
     }
     for (const [id, held] of this.exprs) {
       if (id === sourceId) continue;
       for (const rec of held.values()) {
-        for (const [i, { from, name }] of [...rec.sources]) {
+        for (const [i, { from, name, edge }] of [...rec.sources]) {
           if (from !== panner) continue;
-          try { from.disconnect(rec.node); } catch { /* already detached */ }
+          edge.unlink();
           rec.sources.delete(i);
           this._wireExprSource(id, rec, i, name);
         }
@@ -1818,6 +1893,7 @@ export class WebAudioEngine {
     const wanted = Array.isArray(sends) ? sends.filter((s) => s && s.name) : [];
     for (const [name, node] of track.sends) {
       if (!wanted.some((s) => s.name === name)) {
+        node._edge?.unlink();
         try { node.disconnect(); } catch { /* already detached */ }
         track.sends.delete(name);
       }
@@ -1831,7 +1907,7 @@ export class WebAudioEngine {
         node = this.ctx.createGain();
         node.gain.value = send.amount ?? 1;
         track.sendFader.connect(node); // post-fader, and a monitored track feeds no bus (see Track's DJ stage)
-        node.connect(this._bus(send.name));
+        node._edge = this.routes.link(node, this._bus(send.name), { src: `t:${trackId}`, dst: `b:${send.name}` });
         track.sends.set(send.name, node);
         continue;
       }
@@ -1878,11 +1954,19 @@ export class WebAudioEngine {
       return;
     }
     this.clearInputSource(trackId);
-    this._route(`head|${trackId}`, name, (from) => {
-      from.connect(track.input);
-      track._headSource = from;
-      track._headName = name;
-    }, `head:${name}`, `[web-engine] there is nothing called "${name}" for this track to read.`);
+    this._route(`head|${trackId}`, name, (from) => this._wireHead(trackId, track, from, name),
+      `head:${name}`, `[web-engine] there is nothing called "${name}" for this track to read.`);
+  }
+
+  _wireHead(trackId, track, from, name) {
+    track._headEdge = this._link(from, track.input, trackId);
+    track._headSource = from;
+    track._headName = name;
+  }
+
+  /** What a track's sidechain wires a route from another track or bus with. */
+  _linker(trackId) {
+    return (from, to) => this._link(from, to, trackId);
   }
 
   clearInputSource(trackId) {
@@ -1891,7 +1975,9 @@ export class WebAudioEngine {
     this._dropHardware(`head|${trackId}`);
     const track = this.tracks.get(trackId);
     if (!track?._headSource) return;
-    try { track._headSource.disconnect(track.input); } catch { /* already detached */ }
+    if (track._headEdge) track._headEdge.unlink();
+    else { try { track._headSource.disconnect(track.input); } catch { /* already detached */ } }
+    track._headEdge = null;
     track._headSource = null;
     track._headName = null;
   }
@@ -2080,7 +2166,7 @@ export class WebAudioEngine {
       this._wireHardware(`side|${trackId}|${slot}`);
       return;
     }
-    this._route(`side|${trackId}|${slot}`, name, (from) => track.setSidechain(slot, from, name, gain),
+    this._route(`side|${trackId}|${slot}`, name, (from) => track.setSidechain(slot, from, name, gain, this._linker(trackId)),
       `source:${name}`, `[web-engine] there is nothing called "${name}" to feed into "${filled.descriptor.id}".`);
   }
 
@@ -2219,6 +2305,11 @@ export class WebAudioEngine {
    * as its `latencySec` (a spectral shifter's analysis window). The scheduler plays notes early
    * by the sum, so a device that is late by design still lands on the beat. An empty slot is 0.
    */
+  /** The highest effect slot the track has filled: as far as a fresh Scheduler has to empty. */
+  effectSlots(trackId) {
+    return Math.max(0, ...(this.tracks.get(trackId)?.slots.keys() ?? []));
+  }
+
   slotLatencies(trackId) {
     const out = [];
     for (const [index, filled] of this.tracks.get(trackId)?.slots ?? []) out[index] = filled.descriptor.latencySec ?? 0;
@@ -2383,11 +2474,7 @@ export class WebAudioEngine {
     };
 
     // .grain(): a cloud of grains read from the file, in place of the file played through.
-    if (plan.grain) {
-      const fileSec = buffer.duration;
-      const from = backwards ? fileSec * (1 - plan.begin) : fileSec * plan.begin;
-      return { ...info, ...this._playGrains(track, backwards ?? buffer, cfg, { rate: Math.abs(plan.speed), vel: plan.amp, onsetSec: plan.onsetSec, offsetSec, fileSec, from }) };
-    }
+    if (plan.grain) return { ...info, ...this._playGrains(track, buffer, cfg, plan, offsetSec) };
     // .stretch() other than one: the window played at its own pace with the pitch held.
     if (plan.stretch !== 1) {
       this._playWarp(track, buffer, plan);
@@ -2484,62 +2571,34 @@ export class WebAudioEngine {
   }
 
   /**
-   * .stretch(): the desktop's warp voice - Warp1's 100 ms Hann grains, eight overlapping, placed
-   * with a tenth of a window of random scatter, along a pointer that walks the window (or loops
-   * it) at the event's own pace while each grain plays at the rate. So the pitch is the rate's
-   * and the length is the stretch's, as on the desktop.
+   * .stretch(): the desktop's warp voice - Warp1's 100 ms Hann grains, eight overlapping, each a
+   * tenth longer or shorter at random, along a pointer that walks the window (or loops it) at the
+   * event's own pace while each grain plays at the rate. So the pitch is the rate's and the length
+   * is the stretch's, as on the desktop. Laid on the audio thread (see devices/grain-cloud.mjs).
    */
   _playWarp(track, buffer, plan) {
-    const fileSec = buffer.duration;
-    const size = 0.1;
-    const overlaps = 8;
-    const density = overlaps / size;
     const start = Math.max(this.getTime(), plan.onsetSec);
     const gateEnd = plan.loop || plan.cut ? Math.max(start, plan.offsetSec) : start + plan.durSec;
     const amp = this.ctx.createGain();
-    amp.connect(track.input);
     const end = this._envelope(amp, plan, start, gateEnd);
-    let cut = false;
-    const voice = this._voice(track, { amp, start, release: plan.release, onRelease: () => { cut = true; } });
-    const window = this._grainWindow(null);
-    const rate = Math.abs(plan.speed);
-    // Where the pointer is at a time, 0..1 of the file.
-    const span = Math.max(1e-6, plan.end - plan.begin);
-    const perSec = (span / Math.max(1e-6, plan.durSec)) * Math.sign(plan.speed);
-    const pointer = (t) => {
-      const walked = (t - start) * perSec;
-      if (!plan.loop) return Math.min(1, Math.max(0, (plan.speed < 0 ? plan.end : plan.begin) + walked));
-      const lo = plan.loopLo;
-      const width = Math.max(1e-6, plan.loopHi - plan.loopLo);
-      const from = plan.loopEntry - lo;
-      if (plan.pingpong) {
-        const ph = (((from + walked) % (2 * width)) + 2 * width) % (2 * width);
-        return lo + (width - Math.abs(ph - width));
-      }
-      return lo + ((((from + walked) % width) + width) % width);
-    };
-    const mono = buffer.numberOfChannels === 1;
-    let next = start;
-    const lay = () => {
-      const horizon = cut ? next : Math.min(end, this.getTime() + 0.1);
-      while (next < horizon) {
-        const scatter = (Math.random() - 0.5) * 0.1 * size;
-        // Scatter is kept inside the file: a grain at the very start scattered earlier would
-        // otherwise wrap round and read the file's end into the attack.
-        const at = Math.min(Math.max(0, fileSec - size * rate), Math.max(0, pointer(next) * fileSec + scatter));
-        this._grain(buffer, amp, next, size, at, rate, 0, (2 / overlaps) * (mono ? Math.SQRT2 : 1), window, track);
-        next += 1 / density;
-      }
-      if (next >= end || cut) {
-        clearInterval(timer);
-        const finish = setTimeout(() => { voice.finished(); try { amp.disconnect(); } catch { /* gone */ } }, Math.max(0, (end - this.getTime()) * 1000) + 500);
-        finish?.unref?.();
-      }
-    };
-    const timer = setInterval(lay, 25);
-    timer?.unref?.();
-    lay();
+    this._cloudVoice(track, amp, start, plan, {
+      ...this._grainFile(buffer),
+      mode: 'warp',
+      rate: Math.abs(plan.speed) * (buffer.sampleRate / this.ctx.sampleRate),
+      speed: plan.speed,
+      begin: plan.begin,
+      end01: plan.end,
+      durSec: plan.durSec,
+      loop: !!plan.loop,
+      loopLo: plan.loopLo,
+      loopHi: plan.loopHi,
+      loopEntry: plan.loopEntry,
+      pingpong: !!plan.pingpong,
+      start,
+      end: end + 0.005,
+    });
   }
+
 
   /** A file's transient slice starts, worked out once and off the tick: undefined until then. */
   _transientsOf(buffer) {
@@ -2601,7 +2660,8 @@ export class WebAudioEngine {
   setFxSend(trackId, bus, level) {
     const track = this.tracks.get(trackId);
     if (!track) return;
-    track.setFxSend(bus ? this._bus(bus) : null, level, this.getTime());
+    track.setFxSend(bus ? this._bus(bus) : null, level, this.getTime(),
+      (from, to) => this.routes.link(from, to, { src: `t:${trackId}`, dst: `b:${bus}` }));
   }
 
   /** The deck meters exist only while somebody is looking at them. */
@@ -2616,9 +2676,14 @@ export class WebAudioEngine {
 
   // -- songs on a DJ deck ----------------------------------------------------------------------
 
-  /** How long after the player reads a moment of the song it is heard (see song-player.mjs). */
+  /** The most a song is ever late: how far ahead a timed change has to be sent (see song-player.mjs). */
   get songLatency() {
     return SONG_LATENCY_SEC;
+  }
+
+  /** How soon from now a change to this track's song can be heard: 0 unless keylock is on. */
+  songLead(trackId) {
+    return this.songs.get(trackId)?.lead ?? 0;
   }
 
   _song(trackId) {
@@ -2640,7 +2705,7 @@ export class WebAudioEngine {
     return { sampleRate: this.ctx.sampleRate, frames, channels: planes.length };
   }
 
-  // The player's own times: each is the moment the PLAYER does it, which is heard songLatency later.
+  // Every time is when the change is heard, no sooner than songLead from now.
   songStart(trackId, pos, rate, at, keylock = false) { this._song(trackId).start(pos, rate, at, keylock); }
   songRate(trackId, rate, at) { this.songs.get(trackId)?.setRate(rate, at); }
   songSeek(trackId, pos, at) { this.songs.get(trackId)?.seek(pos, at); }

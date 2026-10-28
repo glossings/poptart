@@ -153,7 +153,7 @@ test('the registry carries each control as the position it rests at, and the dev
   // 20..20000, which is not at 10% of its travel.
   assert.ok(/\{ "engine", "Engine", 0.0f, 23.0f, 0\.34782/.test(src), src);
   const cutoff = src.match(/\{ "cutoff", "Cutoff", [^\n]*/)[0];
-  assert.match(cutoff, /, 1 \},$/, 'an exponential control should carry curve 1');
+  assert.match(cutoff, /, 1, 0 \},$/, 'an exponential control should carry curve 1, and no open top');
   const position = Number(cutoff.split(', ')[4].replace('f', ''));
   assert.ok(Math.abs(position - Math.log(2000 / 20) / Math.log(20000 / 20)) < 1e-6,
     `2000 Hz should sit where the log sweep puts it, got ${position}`);

@@ -377,6 +377,12 @@ class MappedEngine {
   }
   // How late each slot's device is: seconds, nothing to map. The scheduler plays notes early by it.
   slotLatencies(...a) { return this.engine.slotLatencies(...a); }
+  // A track's .split()/.bands() wiring (pattern-core's route.mjs): slot numbers and gain indices,
+  // nothing to map - the branch levels and pans it names arrive as channel controls, and each
+  // crossover's frequency as its Crossover device's own control.
+  setRouting(...a) { return this.engine.setRouting(...a); }
+  // How far a fresh Scheduler empties a track's trailing effect slots: a count, nothing to map.
+  effectSlots(...a) { return this.engine.effectSlots(...a); }
 }
 
 /**
@@ -387,6 +393,6 @@ class MappedEngine {
  * whole file exists to prevent. Kept in step with the `typeof this.engine.X === 'function'`
  * checks in scheduler.mjs by a test, not by memory.
  */
-MappedEngine.OPTIONAL = Object.freeze(['setParamExpr', 'clearParamExpr', 'paramExprs', 'slotLatencies']);
+MappedEngine.OPTIONAL = Object.freeze(['setParamExpr', 'clearParamExpr', 'paramExprs', 'slotLatencies', 'setRouting', 'effectSlots']);
 
 module.exports = { MappedEngine, loadMappings, toNormalized, toRealWorld };

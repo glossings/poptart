@@ -26,23 +26,21 @@ namespace pd_Granular {
 namespace ids = pd_ids::Granular;
 using namespace pd_own;
 
-constexpr int kVoices = 8;        // GRAIN_VOICES
-constexpr int kMaxGrains = 24;    // per voice
 /**
- * How many loaded files one of these holds.
- *
- * The browser's option list has room for 32 and the host holds frames for eight of them
- * (kMaxSamples in PoptartDevice.cpp), so this is the list, not the memory: an index past
- * anything loaded plays nothing, exactly as a slot nothing has been loaded into does there.
+ * The voices, sample slots and window slots a fresh device has room for: what the controls
+ * stopped at before they were open. Not a most - past them the room grows through the work round
+ * (pd_own::Pool). An index past anything loaded plays nothing, as an empty slot does.
  */
-constexpr int kSampleSlots = 32;
+constexpr int kFirstVoices = 8;
+constexpr int kFirstSampleSlots = 32;
+constexpr int kMaxGrains = 24;    // per voice
 
 /** The last hundredth of a grain, faded, so a window that ends loud does not click. */
 inline double grainTail(double t) { return std::fmin(1.0, (1.0 - t) * 100.0); }
 
-/** The shipped windows, and room past them for drawn ones (SHAPE_SLOTS). */
+/** The shipped windows, and the room past them a fresh device has for drawn ones. */
 constexpr int kWindows = 6;
-constexpr int kWindowSlots = kWindows + 8;
+constexpr int kFirstWindowSlots = kWindows + 8;
 /** The points a drawn window is sampled at: the browser engine's SHAPE_POINTS. */
 constexpr int kShapePoints = 256;
 /** How many grains the window is told about at once (REPORTED_GRAINS). */
@@ -83,6 +81,8 @@ struct Params {
   int window = 0;
   double spread = 0.5, reverse = 0;
   double attack = 0.02, decay = 0.1, sustain = 1, release = 0.3, level = 0.7;
+  /** The level per sample while it is moving, else null (the browser's levelA). */
+  const float* levelA = nullptr;
   /** The track's .bend(), in semitones: read as each grain starts. */
   double bend = 0;
 };
@@ -204,7 +204,7 @@ struct Voice {
           if (++g.at >= g.len) g.on = false;
         }
       }
-      const double gain = env0 * p.level * 0.5;
+      const double gain = env0 * (p.levelA ? static_cast<double>(p.levelA[i]) : p.level) * 0.5;
       // One rounding per voice, as `outL[i] += l * g` on a Float32Array gives: the sum is a
       // double there too, and only the store is a float.
       outl[i] = static_cast<float>((double)outl[i] + l * gain);
@@ -215,8 +215,8 @@ struct Voice {
 
 struct Device : pd_own::Device<ids::kCount, 2> {
   Params params;
-  Sample samples[kSampleSlots];
-  Voice voices[kVoices];
+  Pool<Sample> samples;
+  Pool<Voice> voices;
   int voiceCount = 4;
   int clock = 0;
   unsigned int seed = 7;
@@ -227,28 +227,46 @@ struct Device : pd_own::Device<ids::kCount, 2> {
 
   void pd_init(double sr) {
     sampleRate = sr;
+    voices.reserve(kFirstVoices, [](Voice&) {});
+    samples.reserve(kFirstSampleSlots, [](Sample&) {});
+    windows.reserve(kFirstWindowSlots, [](Drawn&) {});
     for (auto& v : voices) v.init(sr);
     eventCount = 0;
   }
 
-  /** The drawn windows, by window slot. Copied: the host's memory is not ours. */
-  float drawn[kWindowSlots][kShapePoints];
-  int drawnLength[kWindowSlots] = { 0 };
+  /** A drawn window, by window slot. Copied: the host's memory is not ours. */
+  struct Drawn { float table[kShapePoints]; int length = 0; };
+  Pool<Drawn> windows;
 
   /** A file the host read for us, on the control that takes one: summed to one channel. */
-  void pd_sample(int param, int slot, const PdSample& file) {
-    if (param != ids::sample) return;
-    if (slot < 0 || slot >= kSampleSlots) return;
+  bool pd_sample(int param, int slot, const PdSample& file) {
+    if (param != ids::sample || slot < 0) return true;
+    // A slot past the room there is: room is asked for, and the file comes again once it is made.
+    if (slot >= samples.size()) { samples.ask(slot + 1); return false; }
     samples[slot] = Sample{ file.mono, file.frames, file.sampleRate > 0 ? file.sampleRate : sampleRate };
+    return true;
   }
 
   /** A window somebody drew, for a window slot past the shipped ones. */
-  void pd_shape(int param, int slot, const float* table, int count) {
-    if (param != ids::window || slot < 0 || slot >= kWindowSlots || !table || count <= 0) return;
+  bool pd_shape(int param, int slot, const float* table, int count) {
+    if (param != ids::window || slot < 0 || !table || count <= 0) return true;
+    if (slot >= windows.size()) { windows.ask(slot + 1); return false; }
     const int n = count < kShapePoints ? count : kShapePoints;
-    std::memcpy(drawn[slot], table, sizeof(float) * static_cast<size_t>(n));
-    drawnLength[slot] = n;
+    Drawn& one = windows[slot];
+    std::memcpy(one.table, table, sizeof(float) * static_cast<size_t>(n));
+    one.length = n;
+    return true;
   }
+
+  bool pd_work_wanted() { return voices.wanted() | samples.wanted() | windows.wanted(); }
+  void pd_work() {
+    const double sr = sampleRate;
+    voices.build([sr](Voice& v) { v.init(sr); });
+    samples.build([](Sample&) {});
+    windows.build([](Drawn&) {});
+  }
+  void pd_work_done() { voices.install(); samples.install(); windows.install(); }
+  void pd_work_release() { voices.release(); samples.release(); windows.release(); }
 
   /**
    * The grains in flight: four floats each - where it started and how far through its life it
@@ -257,7 +275,7 @@ struct Device : pd_own::Device<ids::kCount, 2> {
    */
   int pd_report(float* out, int capacity) {
     const int which = params.sample;
-    const Sample* sample = (which >= 0 && which < kSampleSlots && samples[which].data
+    const Sample* sample = (which >= 0 && which < samples.size() && samples[which].data
                             && samples[which].frames > 0) ? &samples[which] : nullptr;
     if (!sample) return 0;
     const double len = sample->frames;
@@ -302,7 +320,12 @@ struct Device : pd_own::Device<ids::kCount, 2> {
     v.sustain = p[ids::sustain];
     v.release = p[ids::release];
     v.level = p[ids::level];
-    voiceCount = static_cast<int>(clamp(jsRound(p[ids::voices]), 1.0, kVoices));
+    v.levelA = isMoving(ids::level) ? pb[ids::level] : nullptr;
+    // As many as asked for, room grown through the work round (see the Wavetable's).
+    const double want = jsRound(p[ids::voices]);
+    const int asked = want < 1 ? 1 : (want > 1e6 ? 1000000 : static_cast<int>(want));
+    voices.ask(asked);
+    voiceCount = asked < voices.size() ? asked : voices.size();
   }
 
   /**
@@ -344,7 +367,7 @@ struct Device : pd_own::Device<ids::kCount, 2> {
     eventCount = 0;
 
     const int which = params.sample;
-    const Sample* sample = (which >= 0 && which < kSampleSlots && samples[which].data
+    const Sample* sample = (which >= 0 && which < samples.size() && samples[which].data
                             && samples[which].frames > 0) ? &samples[which] : nullptr;
     float* outl = outL();
     float* outr = outR();
@@ -353,9 +376,9 @@ struct Device : pd_own::Device<ids::kCount, 2> {
     // Every ACTIVE voice renders, not only the first `voiceCount`: the count limits what a new
     // note may take, and a voice above it finishes its note rather than being cut off.
     const int window = params.window;
-    const bool isDrawn = window >= 0 && window < kWindowSlots && drawnLength[window] > 0;
-    const float* table = isDrawn ? drawn[window] : nullptr;
-    const int tableLength = isDrawn ? drawnLength[window] : 0;
+    const bool isDrawn = window >= 0 && window < windows.size() && windows[window].length > 0;
+    const float* table = isDrawn ? windows[window].table : nullptr;
+    const int tableLength = isDrawn ? windows[window].length : 0;
     for (auto& v : voices) if (v.active()) v.process(outl, outr, frames, params, sample, table, tableLength);
   }
 };

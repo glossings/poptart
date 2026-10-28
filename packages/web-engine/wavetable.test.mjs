@@ -5,7 +5,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { defaultValues, findParam, signalDestinations } from './src/descriptor.mjs';
-import { PARAM_FIELDS, TABLE_NAMES, WAVETABLE, WavetableSynth, MAX_VOICES } from './src/devices/wavetable.mjs';
+import { PARAM_FIELDS, TABLE_NAMES, WAVETABLE, WavetableSynth } from './src/devices/wavetable.mjs';
 import { VoiceParams, midiToHz } from './src/dsp/voice.mjs';
 import { WARP_MODES } from './src/dsp/warp.mjs';
 import { Adsr, STAGE, curveShape } from './src/dsp/adsr.mjs';
@@ -43,7 +43,7 @@ test('every parameter the descriptor promises has somewhere to go', () => {
 test('the mode lists in the descriptor are the ones the code actually switches on', () => {
   assert.deepEqual([...findParam(WAVETABLE, 'osc1.warpmode').options], [...WARP_MODES]);
   assert.deepEqual([...findParam(WAVETABLE, 'osc1.table').options], [...TABLE_NAMES]);
-  assert.equal(findParam(WAVETABLE, 'osc1.table').capacity, 64, 'with room past the shipped tables for loaded ones');
+  assert.equal(findParam(WAVETABLE, 'osc1.table').open, true, 'and loaded ones join it, as many as are loaded');
 });
 
 test('parameters resolve by their display names, which is what userland types', () => {
@@ -240,10 +240,11 @@ test('a releasing voice is taken before a held one, so a chord survives a fast p
   assert.ok(held, 'the held note should have survived');
 });
 
-test('the voice count cannot be driven past what the synth can run', () => {
+test('the voice count has no most: the synth makes the voices it is asked for, and no fewer than one', () => {
   const synth = new WavetableSynth(SR);
-  synth.setParams({ ...defaultValues(WAVETABLE), voices: 999 });
-  assert.equal(synth.voiceCount, MAX_VOICES);
+  synth.setParams({ ...defaultValues(WAVETABLE), voices: 200 });
+  assert.equal(synth.voiceCount, 200);
+  assert.ok(synth.voices.length >= 200);
   synth.setParams({ ...defaultValues(WAVETABLE), voices: 0 });
   assert.equal(synth.voiceCount, 1);
 });
@@ -474,7 +475,7 @@ test('a drawn window is sampled once and read from the table, not recomputed per
 test('the window control takes a drawn curve and has room to keep several', () => {
   const window = GRANULAR.params.find((p) => p.id === 'window');
   assert.equal(window.takes, 'shape');
-  assert.ok(window.capacity > window.options.length, 'spare slots for the drawn ones');
+  assert.equal(window.open, true, 'as many drawn ones as are drawn');
   // The shipped shapes keep their indexes: a song stores an enum by its label, but the list is
   // only ever appended to so that an index written by hand still means what it meant.
   assert.deepEqual(window.options.slice(0, 3), ['hann', 'triangle', 'gate']);

@@ -43,15 +43,15 @@ struct Device : pd_own::Device<ids::kCount> {
   void pd_process(int frames) {
     const int size = look + 1;
     const double attackK = 1.0 - std::exp(-1.0 / (look * 0.5));
-    const double pre = dbToGain(p[ids::gain]);
-    const double ceiling = dbToGain(p[ids::ceiling]);
-    const double releaseK = 1.0 - std::exp(-1.0 / (p[ids::release] * 0.001 * sampleRate));
     const float* inl = inL();
     const float* inr = inR();
     float* outl = outL();
     float* outr = outR();
 
     for (int i = 0; i < frames; ++i) {
+      const double pre = dbToGain(ctl(ids::gain, i));
+      const double ceiling = dbToGain(ctl(ids::ceiling, i));
+      const double releaseK = 1.0 - std::exp(-1.0 / (ctl(ids::release, i) * 0.001 * sampleRate));
       const double l = inl[i] * pre;
       const double r = inr[i] * pre;
       const double peak = std::fmax(std::fabs(l), std::fabs(r));

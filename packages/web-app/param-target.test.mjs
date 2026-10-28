@@ -27,7 +27,7 @@ function grab(name) {
 }
 
 const names = ['matchParen', 'codeOnly', 'blockOwnCode', 'splitFirstArg', 'idLiteralValue', 'labeledBlocksFor',
-  'chainBefore', 'paramSlotAt', 'paramCallArgs', 'findParamCall', 'presetTargetAt'];
+  'slotCalls', 'chainBefore', 'paramSlotAt', 'paramCallArgs', 'findParamCall', 'presetTargetAt'];
 const lib = new Function('labelsMod', `
   let presetBlocksCache = { code: null, blocks: [] };
   ${names.map(grab).join('\n\n')}

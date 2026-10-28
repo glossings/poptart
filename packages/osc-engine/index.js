@@ -15,6 +15,7 @@ const os = require('node:os');
 const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const zlib = require('node:zlib');
+const crypto = require('node:crypto');
 const { promisify } = require('node:util');
 const { spawn } = require('node:child_process');
 const osc = require('osc');
@@ -26,10 +27,10 @@ const { speechRoot, cachedSpeech, renderSpeech, parseSpeech, voiceInstalled } = 
 const { analyzeSlices } = require('./analysis');
 const { ensurePoptartExtension, ensureDeviceExtension, userExtensionsDir, sclangStartupFile } = require('./extensions');
 const {
-  nativeDevice, deviceParam, deviceParamArgs, devicePositions, paramPosition, deviceStateText, readDeviceState,
+  nativeDevice, internalDevice, deviceParam, deviceParamArgs, devicePositions, paramPosition, deviceStateText, readDeviceState,
   readDeviceLive,
 } = require('./native-devices');
-const { wavFrameLength } = require('./wav');
+const { wavFrameLength, writeWav } = require('./wav');
 const {
   privateScInstalled,
   privateSclangPath,
@@ -39,9 +40,11 @@ const {
   writeSclangConf,
 } = require('./private-sc');
 const { advertiseOsc } = require('./bonjour');
+const { desktopRouting } = require('./route-desktop');
 const { preparePluginScan, scanWarnings, joinPathList, noteProbe, noteProbeDone, markProbeCrashed } = require('./plugin-scan');
 const { ScanProgress } = require('./scan-progress');
 const { openEngineLog, engineLogPath } = require('./engine-log');
+const { DirectPath } = require('./direct');
 
 // The name a param call uses for input i of the expression on `name` (see setParamExpr).
 const EXPR_LEAF = /^~\d+~/;
@@ -325,6 +328,33 @@ const LIVE_TIMEOUT_MS = 1000;
 // The points a drawn curve is sampled at before it is sent: the browser engine's SHAPE_POINTS,
 // so a device reads the same table on both engines.
 const SHAPE_POINTS = 256;
+
+/**
+ * A drawn shape's value at phase 0..1: its breakpoints `{ x, y, c }` joined by curves, a duplicate
+ * x a vertical step - pattern-core's sampleShape, which this package cannot import (it is an ES
+ * module and this is not).
+ */
+function sampleDrawnShape(points, phase) {
+  if (!points.length) return 0;
+  const p = Math.min(1, Math.max(0, phase));
+  const num = (v) => Number(v) || 0;
+  for (let i = 0; i < points.length - 1; i++) {
+    const a = points[i];
+    const b = points[i + 1];
+    const ax = num(a.x);
+    const bx = num(b.x);
+    if (p >= ax && (p < bx || (i === points.length - 2 && p <= bx))) {
+      const span = bx - ax;
+      if (span <= 0) continue;
+      const pos = (p - ax) / span;
+      const c = num(a.c);
+      const y1 = num(a.y);
+      const y2 = num(b.y);
+      return Math.abs(c) < 0.001 ? y1 + (y2 - y1) * pos : y1 + (y2 - y1) * ((1 - Math.exp(pos * c)) / (1 - Math.exp(c)));
+    }
+  }
+  return num(points[points.length - 1].y);
+}
 // A first-ever plugin scan probes every installed plugin (out-of-process, ~seconds each, with
 // VSTPlugin's own per-plugin timeout skipping any that hang) - can legitimately take minutes.
 const SCAN_TIMEOUT_MS = 600000;
@@ -366,13 +396,6 @@ const MIX_BAND_FREQS = Array.from({ length: MIX_BAND_COUNT }, (_, i) =>
 // mid vs side IS the phase-correlation axis, and without them a magnitude-only display can
 // never leave the in-phase ±45° wedge (see the client's imager).
 const MIX_SPEC_VALUES_PER_BAND = 4;
-// The most playing tracks that each get their own band analyzer. Every analyzer is ~1.6% of a
-// core of DSP (measured by NRT render at 48k/256, 2026-09-07 - the sc side has the numbers) on
-// the single thread the song's own plugins run on, so the analysis has a budget: this many
-// tracks plus the master is ~15%. Past it the tracks get a meter-only tap (strips still meter,
-// ~0.2% each) and only the master is analyzed. Unbudgeted, a ten-track song's worth of the
-// original analyzer overran the audio thread - full-scale digital noise, not a display glitch.
-const MIX_SPEC_TRACK_MAX = 8;
 
 // The osc package with `metadata: true` requires args as { type, value } objects - raw JS
 // values would throw. Integers map to 'i', other numbers 'f', strings 's'.
@@ -495,6 +518,12 @@ class OscEngine {
     // fresh Scheduler reads back (paramExprs) to leave an unchanged one alone and find one the
     // new pattern dropped. The engine track outlives the Scheduler that installed it.
     this._paramExprs = new Map();
+    // Each track's effect slots that have been filled, so a fresh Scheduler knows how far to empty
+    // (effectSlots): a chain is as long as the code makes it.
+    this._fxSlots = new Map();
+    // The drawn lfo() shapes the engine holds, "trackId:slot:param" -> their key (_shapeTables).
+    this._shapeKeys = new Map();
+    this._shapeFileSerial = 0;
     // Where each of those devices' controls is sitting, as "trackId:slot" -> { paramId: 0..1 },
     // and what is driving any of them -> { paramId: 'lfo' | 'env' | 'cc' | 'osc' | 'pattern' }.
     //
@@ -514,6 +543,15 @@ class OscEngine {
     this.shapeReader = null;
     // The /poptart/deviceLive questions still waiting for sclang's inline answer, by request id.
     this._liveAsks = new Map();
+    // Notes and parameter changes straight to scsynth (direct.js). POPTART_DIRECT=0 sends every
+    // event through sclang as before, which is what the timing tests compare against.
+    this._direct = new DirectPath({
+      sendRaw: (bytes) => this._port?.sendRaw(bytes, '127.0.0.1', this._direct.server.port),
+      tell: (address, args) => this._port && this._send(address, args),
+      now: () => this.getTime(),
+      warn: (key, text) => this._warnOnce(key, text),
+    });
+    this._directOn = process.env.POPTART_DIRECT !== '0';
     this._stateSeq = new Map(); // "trackId|slot" -> latest restore, so a slow inflate can't win
     this._stateAcks = new Map(); // same key -> { seq, resolve }: the one restore still unanswered
     this._stateWork = new Set(); // restores still inflating/writing, so "all sent" is awaitable (see _stateIdle)
@@ -619,8 +657,7 @@ class OscEngine {
     const held = this._routeHeld.get(`${targetTrackId}:${slot}`);
     if (!held) return;
     for (const played of held.values()) {
-      if (slot === 0) this._send('/poptart/noteOff', [targetTrackId, played, 0]);
-      else this._send('/poptart/noteOffSlot', [targetTrackId, slot, played, 0]);
+      this._note(targetTrackId, slot, played, 0, this.getTime(), false);
     }
     held.clear();
   }
@@ -631,7 +668,6 @@ class OscEngine {
   // after the source's own note.
   _fanoutMidi(sourceTrackId, note, velocity, targetTime, isOn) {
     if (this._midiRoutes.length === 0) return;
-    const latency = this._latency(targetTime);
     for (const r of this._midiRoutes) {
       if (!this._nameIsTrack(r.name, sourceTrackId)) continue;
       // The ON resolves the pitch at its own time and remembers it; the OFF releases what the ON
@@ -647,14 +683,7 @@ class OscEngine {
         if (played == null) continue; // its on was silenced (or predates the route) - nothing to release
         held.delete(note);
       }
-      if (r.slot === 0) {
-        if (isOn) this._send('/poptart/noteOn', [r.targetTrackId, played, velocity, latency]);
-        else this._send('/poptart/noteOff', [r.targetTrackId, played, latency]);
-      } else if (isOn) {
-        this._send('/poptart/noteOnSlot', [r.targetTrackId, r.slot, played, velocity, latency]);
-      } else {
-        this._send('/poptart/noteOffSlot', [r.targetTrackId, r.slot, played, latency]);
-      }
+      this._note(r.targetTrackId, r.slot, played, velocity, targetTime, isOn);
     }
   }
 
@@ -680,15 +709,8 @@ class OscEngine {
       if (!this._nameIsTrack(r.name, sourceTrackId)) continue;
       const note = this._routePitch(r, r.note ?? eventPitch ?? DEFAULT_ROUTE_NOTE, onsetSec);
       if (note == null) continue; // a rest in the map silences this event on this route
-      const onL = this._latency(onsetSec);
-      const offL = this._latency(offSec);
-      if (r.slot === 0) {
-        this._send('/poptart/noteOn', [r.targetTrackId, note, velocity, onL]);
-        this._send('/poptart/noteOff', [r.targetTrackId, note, offL]);
-      } else {
-        this._send('/poptart/noteOnSlot', [r.targetTrackId, r.slot, note, velocity, onL]);
-        this._send('/poptart/noteOffSlot', [r.targetTrackId, r.slot, note, offL]);
-      }
+      this._note(r.targetTrackId, r.slot, note, velocity, onsetSec, true);
+      this._note(r.targetTrackId, r.slot, note, 0, offSec, false);
     }
   }
 
@@ -1029,6 +1051,7 @@ class OscEngine {
       this._oscAd = null;
     }
     clearEnginePids({ file: this._pidfile });
+    this._direct.stop();
     // Normally closed by sclang's exit handler; a spawn that failed outright never emits one.
     this._log?.close();
     this._log = null;
@@ -1102,12 +1125,14 @@ class OscEngine {
    * label's track warm for its return.
    */
   destroyTrack(trackId) {
+    for (const key of this._shapeKeys.keys()) if (key.startsWith(`${trackId}:`)) this._shapeKeys.delete(key);
     // The track's slots go with it, or a track rebuilt under the same name would resolve its
     // controls against whatever the last one had in its chain.
     for (const key of this._slotDevices.keys()) {
       if (key.startsWith(`${trackId}:`)) this._forgetDevice(key);
     }
     this._paramExprs.delete(trackId);
+    this._fxSlots.delete(trackId);
     this._send('/poptart/destroyTrack', [trackId]);
   }
   loadInstrument(trackId, pluginId) {
@@ -1126,6 +1151,10 @@ class OscEngine {
     this._send('/poptart/loadInstrument', [trackId, pluginId]);
   }
   loadEffect(trackId, pluginId, position = -1) {
+    if (position >= 1) {
+      if (!this._fxSlots.has(trackId)) this._fxSlots.set(trackId, new Set());
+      this._fxSlots.get(trackId).add(position);
+    }
     const device = nativeDevice(pluginId);
     if (device) {
       if (device.kind !== 'fx') {
@@ -1146,6 +1175,7 @@ class OscEngine {
   // Empties an effect slot: re-bypasses it and closes the plugin (freeing its memory).
   // Engine-side no-op if the slot is already empty.
   unloadEffect(trackId, slot) {
+    this._fxSlots.get(trackId)?.delete(slot);
     this._forgetDevice(`${trackId}:${slot}`);
     this._send('/poptart/unloadEffect', [trackId, slot]);
   }
@@ -1201,6 +1231,29 @@ class OscEngine {
       if (Number.isInteger(slot) && slot >= 0) out[slot] = device.latencySec ?? 0;
     }
     return Array.from(out, (v) => v ?? 0);
+  }
+
+  /**
+   * Lays a track's chain out: by a routing plan (pattern-core's route.mjs - the branches of
+   * .split() and the bands of .bands()), or with none as the plain line of its `count` effects.
+   * Every effect is a node of its own that this only moves and rewires (see route-desktop.js and
+   * routeApply in poptart.scd), so the devices keep playing and keep their programs; a .bands()
+   * crossover is the engine's own Crossover device, never one of the track's slots.
+   */
+  setRouting(trackId, plan, count = 0) {
+    const device = internalDevice('Crossover');
+    const spec = desktopRouting(plan, { count, crossover: device ? deviceParamArgs(device) : null });
+    for (const line of spec.warnings) this._warnOnce(`routing:${trackId}:${line}`, `[poptart] track ${trackId}: ${line}`);
+    if (!device && spec.steps.some((st) => st.k === 'xover')) {
+      this._warnOnce('crossover-missing', '[poptart] this build of the device extension has no Crossover, so .bands() plays its bands silent');
+    }
+    const { warnings: _w, ...wire } = spec;
+    this._send('/poptart/setRouting', [trackId, JSON.stringify(wire)]);
+  }
+
+  /** The highest effect slot the track has filled. */
+  effectSlots(trackId) {
+    return Math.max(0, ...(this._fxSlots.get(trackId) ?? []));
   }
 
   deviceSlot(trackId, slot) {
@@ -1263,33 +1316,43 @@ class OscEngine {
 
   /** Load (replacing any previous song on the track). Resolves { frames, sampleRate, channels }. */
   songLoad(trackId, filePath) {
-    return this._request('/poptart/songLoad', [trackId, filePath], SONG_LOAD_TIMEOUT_MS);
+    this._direct.songLoading(trackId);
+    return this._request('/poptart/songLoad', [trackId, filePath], SONG_LOAD_TIMEOUT_MS).then((info) => {
+      this._direct.songLoaded(trackId, info);
+      return info;
+    });
   }
 
   /** Start (or restart) playback at posSec, at `rate` (1 = native). */
   songStart(trackId, posSec, rate = 1, targetTime = 0, warp = 0) {
     // warp = 1 spawns the keylock player (Rubber Band pitch shifter, or SOLA without the extension) instead of the repitch one;
     // restarting with the other flag at the current playhead is how keylock toggles mid-song.
+    if (this._directOn && this._direct.songStart(trackId, posSec, rate, targetTime, warp ? 1 : 0)) return;
+    this._direct.songStartedByLang(trackId);
     this._send('/poptart/songStart', [trackId, posSec, rate, this._latency(targetTime), warp ? 1 : 0]);
   }
 
   /** Set one player control: 'run' (0/1 = pause/resume), 'rate', 'amp'. */
   songSet(trackId, name, value, targetTime = 0) {
+    if (this._directOn && this._direct.songSet(trackId, name, value, targetTime)) return;
     this._send('/poptart/songSet', [trackId, name, value, this._latency(targetTime)]);
   }
 
   /** Jump the playhead to posSec (click-free; no-op unless playing). */
   songSeek(trackId, posSec, targetTime = 0) {
+    if (this._directOn && this._direct.songSeek(trackId, posSec, targetTime)) return;
     this._send('/poptart/songSeek', [trackId, posSec, this._latency(targetTime)]);
   }
 
   /** Stop playback (declicked). The song stays loaded for the next songStart. */
   songStop(trackId, targetTime = 0) {
+    if (this._directOn && this._direct.songStop(trackId, targetTime)) return;
     this._send('/poptart/songStop', [trackId, this._latency(targetTime)]);
   }
 
   /** Unload the song and free its buffer. The track itself is destroyTrack's business. */
   songFree(trackId) {
+    this._direct.songLoading(trackId);
     this._send('/poptart/songFree', [trackId]);
   }
   // Records the master bus to a WAV at `filePath` for `seconds`; resolves when done.
@@ -1309,18 +1372,9 @@ class OscEngine {
   // amplitudes through onMixSpec - what the editor's mixer modal draws. The band centers ride
   // along so the analyzer is built against MIX_BAND_FREQS (see there). `trackIds` is the set to
   // tap - the caller's playing tracks, re-sent whenever that set changes; a track named before it
-  // exists is tapped when it appears. Returns whether the tracks get band analysis of their own:
-  // past MIX_SPEC_TRACK_MAX of them they are metered only and the analyzer runs on the master
-  // alone (see there). Idempotent.
+  // exists is tapped when it appears. Every tapped track gets its own analyzer. Idempotent.
   mixMeters(on, trackIds = []) {
-    const perTrack = trackIds.length <= MIX_SPEC_TRACK_MAX;
-    this._send('/poptart/mixMeters', [on ? 1 : 0, JSON.stringify(MIX_BAND_FREQS), JSON.stringify(trackIds), perTrack ? 1 : 0]);
-    return perTrack;
-  }
-
-  /** The most tracks mixMeters analyzes per track before falling back to the master alone. */
-  mixSpecTrackMax() {
-    return MIX_SPEC_TRACK_MAX;
+    this._send('/poptart/mixMeters', [on ? 1 : 0, JSON.stringify(MIX_BAND_FREQS), JSON.stringify(trackIds)]);
   }
 
   // DJ deck meters: while on, one reader synth per deck streams the deck's summed PRE-FADER
@@ -1386,6 +1440,7 @@ class OscEngine {
 
   /** Restores a state from a file on disk. Fire-and-forget, like the other chain calls. */
   setPluginStateFile(trackId, slotIndex, stateFile) {
+    this._direct.loadAnnounced(trackId, slotIndex, 0, this.getTime());
     this._send('/poptart/setPluginState', [trackId, slotIndex, stateFile]);
   }
 
@@ -1457,6 +1512,7 @@ class OscEngine {
     // inflate+write below, and on a cold-opening plugin the notes that arrive in that window
     // would sound the INIT preset until it lands. Latency 0: the hold starts now, and the cold
     // path in poptart.scd keeps it up (and then drops the missed notes) until the program is in.
+    this._direct.loadAnnounced(trackId, slotIndex, seq, targetTime == null ? this.getTime() : targetTime);
     this._send('/poptart/statePending', [trackId, slotIndex, targetTime == null ? 0 : this._latency(targetTime), seq]);
     const device = this._slotDevices.get(`${trackId}:${slotIndex}`);
     const work = (async () => {
@@ -1525,6 +1581,7 @@ class OscEngine {
     const seq = (this._stateSeq.get(key) ?? 0) + 1;
     this._stateSeq.set(key, seq);
     this._settleState(key, false);
+    this._direct.loadCancelled(trackId, slotIndex);
     this._send('/poptart/cancelPluginState', [trackId, slotIndex, seq]);
   }
 
@@ -1780,6 +1837,7 @@ class OscEngine {
           path: paths[i],
           duration: m.sampleRate > 0 ? m.frames / m.sampleRate : 0,
           channels: m.channels,
+          bufnum: Number.isInteger(m.bufnum) ? m.bufnum : null, // for the direct path's voices
           // `slices` is deliberately absent: transient analysis reads the whole file, so it waits
           // until a .slice() actually asks for that one file (_slicesFor). Analyzing the pack
           // here is what used to stall the scheduler for seconds on a big break folder, and most
@@ -2000,7 +2058,13 @@ class OscEngine {
     const grainSize = finite(cfg.grainSize, 0.08);
     const grainRate = finite(cfg.grainRate, 20);
     const grainPan = finite(cfg.grainPan, 0);
-    this._send('/poptart/playSample', [
+    // A granular voice's buffers and window are made lazily sclang-side, so it stays on that path.
+    const direct = !grain && this._directOn && this._direct.playSample(trackId, {
+      bufnum: file.bufnum, channels: file.channels, begin, end, loop, rate: speed, stretch, dur: durSec,
+      onsetSec, offsetSec, amp, cut, atk: env.attack, dec: env.decay, sus: cfg.sustain ?? 1, rel: env.release,
+      loopLo, loopHi, entry: loopEntry, pingpong,
+    });
+    if (!direct) this._send('/poptart/playSample', [
       trackId,
       ref,
       idx,
@@ -2059,19 +2123,48 @@ class OscEngine {
   // tracks' routes, MIDI outputs - is MIDI, so it takes the nearest key. On and off are sent the
   // same way, so a device matches an off to its on exactly.
   noteOn(trackId, note, velocity, targetTime) {
-    this._send('/poptart/noteOn', [trackId, note, velocity, this._latency(targetTime)]);
+    this._note(trackId, 0, note, velocity, targetTime, true);
     this._fanoutMidi(trackId, Math.round(note), velocity, targetTime, true);
   }
   noteOff(trackId, note, targetTime) {
-    this._send('/poptart/noteOff', [trackId, note, this._latency(targetTime)]);
+    this._note(trackId, 0, note, 0, targetTime, false);
     this._fanoutMidi(trackId, Math.round(note), 0, targetTime, false);
   }
+  /**
+   * One note edge on a track's slot: straight to scsynth when the direct path has what it needs,
+   * through sclang's handlers otherwise (0 = the instrument, see poptartNoteOn; >0 = noteOnSlot).
+   */
+  _note(trackId, slot, note, velocity, targetTime, isOn) {
+    if (this._directOn && (isOn
+      ? this._direct.noteOn(trackId, slot, note, velocity, targetTime)
+      : this._direct.noteOff(trackId, slot, note, targetTime))) return;
+    const latency = this._latency(targetTime);
+    if (slot === 0) {
+      if (isOn) this._send('/poptart/noteOn', [trackId, note, velocity, latency]);
+      else this._send('/poptart/noteOff', [trackId, note, latency]);
+    } else if (isOn) {
+      this._send('/poptart/noteOnSlot', [trackId, slot, note, velocity, latency]);
+    } else {
+      this._send('/poptart/noteOffSlot', [trackId, slot, note, latency]);
+    }
+  }
+
+  // A value for a control, direct when sclang has already built its ramp (see DirectPath#setParam).
+  _sendParam(trackId, slotIndex, paramName, value, targetTime) {
+    if (this._directOn) {
+      const grainCtl = slotIndex === -1 && /^grain(pos|size|rate|pan)$/.test(String(paramName));
+      if (grainCtl ? this._direct.setHeadControl(trackId, String(paramName), value, targetTime)
+        : this._direct.setParam(trackId, slotIndex, String(paramName), value, targetTime)) return;
+    }
+    this._send('/poptart/setParam', [trackId, slotIndex, paramName, value, this._latency(targetTime)]);
+  }
+
   setParam(trackId, slotIndex, paramName, value, targetTime) {
     // An expression's input ("~i~name") takes a plain number: it is a term in the expression, not
     // a position on one of the device's controls.
     if (EXPR_LEAF.test(String(paramName))) {
       if (typeof value === 'number' && Number.isFinite(value)) {
-        this._send('/poptart/setParam', [trackId, slotIndex, paramName, value, this._latency(targetTime)]);
+        this._sendParam(trackId, slotIndex, paramName, value, targetTime);
       }
       return;
     }
@@ -2111,7 +2204,7 @@ class OscEngine {
         const held = this._devicePositions.get(`${trackId}:${slotIndex}`);
         if (held) held[control.id] = position;
       }
-      this._send('/poptart/setParam', [trackId, slotIndex, paramName, position, this._latency(targetTime)]);
+      this._sendParam(trackId, slotIndex, paramName, position, targetTime);
       return;
     }
     // A plugin parameter is a number. A word - an enum label the browser build's devices take -
@@ -2119,7 +2212,7 @@ class OscEngine {
     // dropped with it: it is typeof number, and it is what a unit conversion returns when it is
     // handed something that was never a quantity.
     if (typeof value !== 'number' || !Number.isFinite(value)) return;
-    this._send('/poptart/setParam', [trackId, slotIndex, paramName, value, this._latency(targetTime)]);
+    this._sendParam(trackId, slotIndex, paramName, value, targetTime);
   }
   /**
    * `.param("sample", "break:2")`: a file loaded onto a device's control, and the control pointed
@@ -2173,16 +2266,11 @@ class OscEngine {
     }
     // The slot it goes in, and the control pointed at it: the control carries a value from here
     // on, so the pattern's next poll is a lookup rather than another load.
+    // The next free one past the control's own entries: the list grows by what is loaded.
     const first = control.options ? control.options.length : 0;
-    const capacity = control.capacity ?? first + 1;
-    let index = -1;
-    for (let i = first; i < capacity; i++) {
-      if (![...held.byRef.values()].includes(i)) { index = i; break; }
-    }
-    if (index < 0) {
-      index = first + (held.loaded % Math.max(1, capacity - first));
-      for (const [other, took] of held.byRef) if (took === index) held.byRef.delete(other);
-    }
+    const taken = new Set(held.byRef.values());
+    let index = first;
+    while (taken.has(index)) index++;
     held.loaded += 1;
     held.byRef.set(ref, index);
     const paramIndex = device.params.findIndex((p) => p.id === control.id);
@@ -2255,17 +2343,12 @@ class OscEngine {
     this.setParam(trackId, slotIndex, control.id, index, targetTime);
   }
 
-  /** A control's next free option slot past its own entries, or the oldest one when all are taken. */
+  /** A control's next free option slot past its own entries. The list grows by what is loaded. */
   _spareDeviceOption(held, control, ref) {
     const first = control.options ? control.options.length : 0;
-    const capacity = control.capacity ?? first + 1;
-    let index = -1;
     const taken = new Set(held.byRef.values());
-    for (let i = first; i < capacity; i++) if (!taken.has(i)) { index = i; break; }
-    if (index < 0) {
-      index = first + (held.loaded % Math.max(1, capacity - first));
-      for (const [other, took] of held.byRef) if (took === index) held.byRef.delete(other);
-    }
+    let index = first;
+    while (taken.has(index)) index++;
     held.loaded += 1;
     held.byRef.set(ref, index);
     return index;
@@ -2360,6 +2443,7 @@ class OscEngine {
   }
   releaseParam(trackId, slotIndex, paramName, targetTime) {
     this._noteDriver(trackId, slotIndex, paramName, null);
+    this._direct.rampReleased(trackId, slotIndex, String(paramName));
     this._send('/poptart/releaseParam', [trackId, slotIndex, paramName, this._latency(targetTime)]);
   }
   // ir: { shape: 'sine'|'saw'|'isaw'|'tri'|'square'|'rand', rateHz, phaseCycles, min, max } for
@@ -2367,11 +2451,15 @@ class OscEngine {
   // signal.mjs / shape.mjs.
   // sclang maps a control bus to the VST parameter once and drives it with an internal UGen
   // (SinOsc.kr etc.) inside the track's SynthDef - the SC equivalent of the old native LFO.h,
-  // zero further OSC traffic after this call. Custom shapes go through a separate handler that
-  // compiles a small SynthDef from the breakpoints (IEnvGen driven by a Sweep phase).
+  // zero further OSC traffic after this call. Drawn shapes go through a separate handler: each
+  // shape is sampled into a table, written to a file and read into a Buffer that one generic
+  // modulator synth plays (see _shapeTables), so no SynthDef is built for one.
   setParamLFO(trackId, slotIndex, paramName, ir) {
     this._noteDriver(trackId, slotIndex, paramName, 'lfo');
     if (ir.shape === 'custom') {
+      // Every shape the pattern can reach, read up front: a swap has to be a timestamped switch
+      // between ready tables, not a file read (which is async and would land late).
+      const shapes = ir.shapes ?? [ir.points];
       this._send('/poptart/setParamShapeLFO', [
         trackId,
         slotIndex,
@@ -2381,10 +2469,7 @@ class OscEngine {
         ir.phaseCycles ?? 0,
         ir.min,
         ir.max,
-        JSON.stringify(ir.points),
-        // Every shape the pattern can reach, compiled up front: a swap has to be a timestamped
-        // switch between ready synths, not a SynthDef build (which is async and would land late).
-        JSON.stringify(ir.shapes ?? [ir.points]),
+        ...this._shapeTables(trackId, slotIndex, paramName, shapes),
         // How long a swap takes to glide, as a fraction of one LFO period. 0 jumps.
         ir.glide ?? 0,
         // 1 when the rate is a pattern whose changes arrive timestamped with the phase anchors
@@ -2411,10 +2496,39 @@ class OscEngine {
   // A patterned rate passes `rateHz`, the rate the new shape starts at (see anchorParamLFO).
   setParamShape(trackId, slotIndex, paramName, index, targetTime, rateHz = null) {
     const args = [trackId, slotIndex, paramName, index, this._latency(targetTime)];
+    this._direct.shapeSent(trackId); // note-ons wait for sclang until it has seen this (a swap may be pending)
     this._send('/poptart/setParamShape', rateHz == null ? args : [...args, rateHz]);
+  }
+  /**
+   * A drawn lfo()'s shapes as [key, pathsJSON]: the key says which shapes they are (the engine
+   * compares it to tell an edit from a re-send), and the paths are files holding each shape
+   * sampled into a table, which sclang reads into Buffers and deletes. The tables go by file
+   * because a shape has no size limit and a datagram does (about 9KB on macOS). A re-send of the
+   * shapes the engine already holds writes nothing and sends no paths.
+   *
+   * A table is at least 4096 points, and more for a shape with many breakpoints (sixteen points
+   * per breakpoint), so a step reads as a step at any rate an LFO runs at. Curves are read as the
+   * editor draws them (pattern-core's sampleShape).
+   */
+  _shapeTables(trackId, slotIndex, paramName, shapes) {
+    const at = `${trackId}:${slotIndex}:${paramName}`;
+    const key = crypto.createHash('sha1').update(JSON.stringify(shapes)).digest('hex');
+    if (this._shapeKeys.get(at) === key) return [key, '[]'];
+    this._shapeKeys.set(at, key);
+    const paths = shapes.map((points) => {
+      const list = Array.isArray(points) ? points : [];
+      const size = Math.max(4096, 2 ** Math.ceil(Math.log2(Math.max(1, list.length * 16))));
+      const data = new Float32Array(size);
+      for (let i = 0; i < size; i++) data[i] = sampleDrawnShape(list, i / (size - 1));
+      const file = path.join(os.tmpdir(), `poptart-shape-${process.pid}-${++this._shapeFileSerial}.wav`);
+      writeWav(file, { sampleRate: 48000, channels: 1, data });
+      return file;
+    });
+    return [key, JSON.stringify(paths)];
   }
   clearParamLFO(trackId, slotIndex, paramName) {
     this._noteDriver(trackId, slotIndex, paramName, null);
+    this._shapeKeys.delete(`${trackId}:${slotIndex}:${paramName}`);
     this._send('/poptart/clearParamLFO', [trackId, slotIndex, paramName]);
   }
   // Re-pins a free-running LFO's phase (0..1) to the scheduler's clock at targetTime - the
@@ -2423,6 +2537,7 @@ class OscEngine {
   // rate also passes `rateHz`, the rate it runs at from that moment: its changes travel this way,
   // on the step they belong to, rather than as an immediate setParamLFO re-send.
   anchorParamLFO(trackId, slotIndex, paramName, phase01, targetTime, rateHz = null) {
+    if (this._directOn && this._direct.anchorLfo(trackId, slotIndex, String(paramName), phase01, targetTime, rateHz)) return;
     const args = [trackId, slotIndex, paramName, phase01, this._latency(targetTime)];
     this._send('/poptart/anchorParamLFO', rateHz == null ? args : [...args, rateHz]);
   }
@@ -2534,10 +2649,12 @@ class OscEngine {
    * lookahead early, they spawn after the first release).
    */
   hush(trackId, againSec = 0) {
+    this._direct.heldReset(trackId);
     this._send('/poptart/hush', [trackId, againSec]);
   }
   clearMidiNotes(trackId) {
     this._dropDeferRoute(trackId);
+    this._direct.heldReset(trackId); // clearMidiRoute zeroes the held count sclang-side too
     this._send('/poptart/clearMidiRoute', [trackId]);
   }
 
@@ -2545,7 +2662,7 @@ class OscEngine {
   _dropDeferRoute(trackId) {
     const route = this._deferRoutes.get(trackId);
     if (!route) return;
-    for (const played of route.held.values()) this._send('/poptart/noteOff', [trackId, played, 0]);
+    for (const played of route.held.values()) this._note(trackId, 0, played, 0, this.getTime(), false);
     this._deferRoutes.delete(trackId);
   }
 
@@ -2641,6 +2758,7 @@ class OscEngine {
   // setParam: that maps a ramp synth's bus onto the control, which setBusSends' plain .set could
   // then no longer move. The SynthDef lags busSendK instead, so a poll-rate .set is already smooth.
   setBusSendAmount(trackId, index, amount, targetTime) {
+    if (this._directOn && this._direct.busSendAmount(trackId, index, amount, targetTime)) return;
     this._send('/poptart/setBusSendAmount', [trackId, index, amount, this._latency(targetTime)]);
   }
 
@@ -2795,6 +2913,17 @@ class OscEngine {
   }
 
   _handleMessage(msg) {
+    if (this._direct.handle(msg)) return;
+    if (msg.address === '/fail') {
+      // scsynth answering a command the direct path sent: the repair is sclang's (see
+      // poptartServerFail), so it hears it as if it had sent the command itself.
+      const args = (msg.args ?? []).map((a) => a?.value ?? a);
+      const m = String(args[1] ?? '').match(/[0-9]+/);
+      const id = Number.isInteger(args[2]) ? args[2] : m ? Number(m[0]) : null;
+      if (['/n_set', '/u_cmd', '/s_new'].includes(String(args[0]))) this._direct.serverFailed(id);
+      if (this._port) this._send('/poptart/fail', args.map((a) => (typeof a === 'number' || typeof a === 'string' ? a : String(a))));
+      return;
+    }
     if (msg.address === '/poptart/scanState') {
       // The engine script's own bracketing of a scan: ['started', folders] | ['folder', how many
       // are done] | ['finished', plugin count]. The
@@ -2925,12 +3054,12 @@ class OscEngine {
           played = defer.noteMap(Number(note), this.getTime());
           if (played == null) return; // a rest in the map: this key silently doesn't sound
           defer.held.set(Number(note), played);
-          this._send('/poptart/noteOn', [trackId, played, Number(vel), 0]);
+          this._note(trackId, 0, played, Number(vel), this.getTime(), true);
         } else {
           played = defer.held.get(Number(note));
           if (played == null) return; // its on was silenced - nothing sounding to release
           defer.held.delete(Number(note));
-          this._send('/poptart/noteOff', [trackId, played, 0]);
+          this._note(trackId, 0, played, 0, this.getTime(), false);
         }
         if (typeof this.onMidiNoteIn === 'function') this.onMidiNoteIn(trackId, played, Number(vel), isOn);
         return;
@@ -3013,7 +3142,6 @@ module.exports = {
   OscEngine,
   envelopeSeconds,
   MIX_BAND_FREQS,
-  MIX_SPEC_TRACK_MAX,
   resolveSclangPath,
   knownSclangLocations,
   onPath,

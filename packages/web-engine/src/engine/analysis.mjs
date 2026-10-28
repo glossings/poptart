@@ -5,11 +5,9 @@
 // because mid and side are what make the stereo image a real one - the analysers report
 // MAGNITUDES, and magnitudes cannot be added back into a sum and a difference after the fact.
 //
-// A tap exists only while the mixer is open, and there is a budget on how many: see MIX_TRACK_MAX.
-// On the desktop that budget is real DSP on the thread the song runs on; here an AnalyserNode is
-// native and costs little, and the cap is kept anyway so the two builds show the same thing at
-// the same point - a ten-track song where the plots move to the master is not a different song
-// because of which build is playing it.
+// A tap exists only while the mixer is open, one per strip shown, with no budget on how many: an
+// AnalyserNode is native and costs little, and the desktop's analyzer (PoptartSpectrum) is the
+// same measurement at a similar cost.
 
 /** How many bands the plots draw, and the range they are spread across, lowest first. */
 export const MIX_BAND_COUNT = 96;
@@ -22,9 +20,6 @@ export const MIX_BAND_FREQS = Object.freeze(Array.from({ length: MIX_BAND_COUNT 
 
 /** Values each band reports, in order: left, right, mid (L+R), side (L-R). */
 export const MIX_BAND_VALUES = 4;
-
-/** The most tracks that get an analyzer of their own at once. Past it, only the master is drawn. */
-export const MIX_TRACK_MAX = 8;
 
 /**
  * The transform's size. Four thousand points is about twelve Hertz a bin at the usual rate:

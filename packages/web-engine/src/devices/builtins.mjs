@@ -18,8 +18,6 @@ import { outlineOf } from '../dsp/outline.mjs';
 /** The built-in impulse responses, synthesized when the device is built. */
 export const IR_NAMES = Object.freeze(['room', 'hall', 'plate', 'chamber', 'cathedral']);
 
-/** How many impulse slots the device has: the synthesized ones and room for loaded files. */
-const IR_SLOTS = 32;
 
 export const CONVOLVER = defineDevice({
   id: 'Convolver',
@@ -29,7 +27,7 @@ export const CONVOLVER = defineDevice({
   build: 'nodes',
   description: 'A convolution reverb: five synthesized spaces, or any sample as the impulse response.',
   params: [
-    { id: 'ir', name: 'Impulse', default: 1, options: [...IR_NAMES], capacity: IR_SLOTS, takes: 'sample', rate: 'k', group: 'Space',
+    { id: 'ir', name: 'Impulse', default: 1, options: [...IR_NAMES], takes: 'sample', rate: 'k', group: 'Space',
       description: 'The space. Name a sample to convolve with that file instead.' },
     { id: 'size', name: 'Size', min: 0.3, max: 6, default: 2, unit: 's', curve: 'exp', rate: 'k', group: 'Space',
       description: 'The decay of a synthesized space. A loaded file has its own length and ignores this.' },

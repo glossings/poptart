@@ -81,8 +81,10 @@ function scratch() {
 function harness(body) {
   return `
 var tracks = IdentityDictionary.new;
+var tellRamp = { }, tellSlot = { }, tellMods = { }, tellTap = { }, shapesHandled = IdentityDictionary.new, nodeAddr = (sendMsg: { }); // the direct path's id handoff (see tellTrack in sc/poptart.scd) - inert here
 var nodeGone, nodeGoneSaid, nodeFailId, nodeMissing, nodeOwners, nodeOwns, deadNodes, slotLive;
 var outOfRoom, outOfRoomSaid, outOfRoomPhrases;
+var slotNode = { |track, slot| track[\\synth] }; // the node a slot is (see slotNode in sc/poptart.scd) - here the one synth
 ${extractClosure('nodeGone')}
 ${extractClosure('nodeFailId')}
 ${extractClosure('nodeMissing')}

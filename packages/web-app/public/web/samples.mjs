@@ -787,13 +787,20 @@ function filePacks(patternCore, manifests) {
   // buffer layer before it refills it from the buffer, and a pack filed there would be gone by
   // the first note of the first pattern to name it.
   patternCore.setRollLayer('prebake');
+  // Filing a pack that is already there with the same files is a no-op, and skipping it keeps
+  // the language's "defined twice" warning for real clashes rather than every re-file.
+  const file = (id, files) => {
+    const had = patternCore.lookupPack?.(id, 'prebake')?.files;
+    if (had && had.length === files.length && had.every((f, i) => f === files[i])) return;
+    patternCore._pack(id, files);
+  };
   try {
     const packIds = new Set([...(registered.get(patternCore)?.keys() ?? [])]);
     for (const short of shortNames.get(patternCore) ?? []) {
-      if (!packIds.has(short.id)) patternCore._pack(short.id, [`${short.of}/${short.file}`]);
+      if (!packIds.has(short.id)) file(short.id, [`${short.of}/${short.file}`]);
     }
     for (const manifest of manifests) {
-      patternCore._pack(manifest.id, manifest.files.map((f) => `${manifest.id}/${f.file}`));
+      file(manifest.id, manifest.files.map((f) => `${manifest.id}/${f.file}`));
     }
   } finally {
     patternCore.setRollLayer('buffer');

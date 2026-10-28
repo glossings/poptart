@@ -64,10 +64,16 @@ function fakeMidi() {
   };
 }
 
-function makeRig(facts = {}) {
+function makeRig(facts = {}, { shift = false } = {}) {
   const ctx = new FakeAudioContext({ sampleRate: SR });
   ctx.currentTime = 10;
-  const engine = new WebAudioEngine(ctx, { registry: catalog, warn: () => {}, AudioWorkletNode: fakeWorkletFor(catalog) });
+  const engine = new WebAudioEngine(ctx, {
+    registry: catalog,
+    warn: () => {},
+    AudioWorkletNode: fakeWorkletFor(catalog),
+    // The keylock's shifter, for the tests that switch it on.
+    deviceModules: shift ? new Map([['Shift', {}]]) : null,
+  });
   const transport = new patternCore.Transport(() => engine.getTime(), { cps: 0.5, paused: true });
   const songs = fakeSongs(facts);
   const store = memoryStore();
@@ -127,8 +133,8 @@ test('the first synced song takes the grid: the room plays at its tempo, on its 
   assert.equal(rig.transport.cps * 240, 126);
   assert.equal(rig.transport.paused, false);
   const start = playerMessages(rig, 'a').find((m) => m.kind === 'start');
-  // The player starts a latency before the song is heard to start.
-  assert.ok(Math.abs(start.time - (10 + 0.15 - LAT)) < 1e-9);
+  // The player is told when the start is heard.
+  assert.ok(Math.abs(start.time - (10 + 0.15)) < 1e-9);
   assert.equal(start.rate, 1);
 });
 
@@ -150,30 +156,34 @@ test('a second synced song joins on the next bar line, at the rate that matches 
 });
 
 test('a rate change is rebased where it is heard, so the playhead never jumps', async () => {
-  const rig = makeRig({ '/music/a.wav': { bpm: 120 } });
-  await rig.call('POST /api/song/load', { deck: 'a', path: '/music/a.wav' });
-  await settle();
-  await rig.call('POST /api/song/meta', { deck: 'a', sync: false });
-  await rig.call('POST /api/song/play', { deck: 'a', now: true });
-  rig.ctx.advance(2);
-  const before = rig.desk.songPlayheadSec('a', rig.ctx.currentTime + 0.5);
-  await rig.call('POST /api/mix/decktempo', { deck: 'a', frac: 1 }); // +6%
-  const s = rig.desk.state().songDecks.a;
-  assert.ok(Math.abs(s.rate - 1.06) < 1e-9);
-  assert.ok(Math.abs(s.startSec - (rig.ctx.currentTime + LAT)) < 1e-9, 'rebased at the heard moment');
-  // Continuous across the change: the old rate until it is heard, the new one after.
-  const now = rig.ctx.currentTime;
-  const at = (t) => rig.desk.songPlayheadSec('a', t);
-  assert.ok(Math.abs(at(now + LAT) - at(now + LAT - 1e-6)) < 1e-5);
-  assert.ok(Math.abs((at(now + LAT + 1) - at(now + LAT)) - 1.06) < 1e-9);
-  assert.ok(Math.abs(at(now + 0.5) - before) > 0, 'the playhead moved on');
-  const rate = playerMessages(rig, 'a').filter((m) => m.kind === 'rate').at(-1);
-  assert.equal(rate.time, now, 'the player is told now');
-  // The editor's mirror is one line: while the change is on its way it is drawn from now, so the
-  // pane's playhead keeps moving rather than waiting out the latency.
-  const desk = await rig.call('GET /api/mix');
-  assert.ok(Math.abs(desk.song.a.posSec - at(now)) < 1e-9);
-  assert.ok(Math.abs(desk.song.a.startSec - Date.now() / 1000) < 1);
+  for (const keylock of [false, true]) {
+    const rig = makeRig({ '/music/a.wav': { bpm: 120 } }, { shift: keylock });
+    await rig.call('POST /api/song/load', { deck: 'a', path: '/music/a.wav' });
+    await settle();
+    await rig.call('POST /api/song/meta', { deck: 'a', sync: false, keylock });
+    await rig.call('POST /api/song/play', { deck: 'a', now: true });
+    rig.ctx.advance(2);
+    const before = rig.desk.songPlayheadSec('a', rig.ctx.currentTime + 0.5);
+    await rig.call('POST /api/mix/decktempo', { deck: 'a', frac: 1 }); // +6%
+    const s = rig.desk.state().songDecks.a;
+    assert.ok(Math.abs(s.rate - 1.06) < 1e-9);
+    // Keylock off adds nothing; on, the change is heard the shifter's latency on.
+    const lead = keylock ? LAT : 0;
+    const now = rig.ctx.currentTime;
+    assert.ok(Math.abs(s.startSec - (now + lead)) < 1e-9, `rebased at the heard moment (keylock ${keylock})`);
+    // Continuous across the change: the old rate until it is heard, the new one after.
+    const at = (t) => rig.desk.songPlayheadSec('a', t);
+    assert.ok(Math.abs(at(now + lead) - at(now + lead - 1e-6)) < 1e-5);
+    assert.ok(Math.abs((at(now + lead + 1) - at(now + lead)) - 1.06) < 1e-9);
+    assert.ok(Math.abs(at(now + 0.5) - before) > 0, 'the playhead moved on');
+    const rate = playerMessages(rig, 'a').filter((m) => m.kind === 'rate').at(-1);
+    assert.ok(Math.abs(rate.time - (now + lead)) < 1e-9, 'the player is told when it is heard');
+    // The editor's mirror is one line: while the change is on its way it is drawn from now, so the
+    // pane's playhead keeps moving rather than waiting out the latency.
+    const desk = await rig.call('GET /api/mix');
+    assert.ok(Math.abs(desk.song.a.posSec - at(now)) < 1e-9);
+    assert.ok(Math.abs(desk.song.a.startSec - Date.now() / 1000) < 1);
+  }
 });
 
 test('a held nudge pushes the deck and the place it gained stays', async () => {
@@ -218,8 +228,8 @@ test('a song runs to its end and stops there; play from the end starts from the 
   assert.equal(s.playing, false);
   assert.equal(s.posSec, 3);
   const stop = playerMessages(rig, 'a').filter((m) => m.kind === 'stop').at(-1);
-  // Heard end = start + 0.4 s; the release is over by it, and the player does it a latency early.
-  assert.ok(Math.abs(stop.time - (10 + 0.15 + 0.4 - 0.05 - LAT)) < 1e-9);
+  // Heard end = start + 0.4 s; the release is over by it.
+  assert.ok(Math.abs(stop.time - (10 + 0.15 + 0.4 - 0.05)) < 1e-9);
   const again = await rig.call('POST /api/song/play', { deck: 'a', now: true });
   assert.equal(again.pos, 0);
 });

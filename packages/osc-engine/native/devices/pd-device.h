@@ -47,6 +47,12 @@ struct PdParamSpec {
   float step;            // 0 = continuous; 1 for an enum or a toggle
   float curveExp;        // the exponent 'pow' bends the range by; unused otherwise
   int curve;             // 0 linear, 1 exponential (a ratio sweep), 2 power
+  /**
+   * 1 = the control has no top (descriptor.mjs's open controls: an enum that takes files, a
+   * voice count). `max` is then only how far a position of 1 reaches; a position past 1 is a
+   * value past it, and plays.
+   */
+  int open;
 };
 
 /** Curve ids, matching the descriptor's own names. */
@@ -136,6 +142,12 @@ struct PdAny {
    */
   virtual int inChannels() { return 2; }
   /**
+   * How many channels the device writes into `out()`: two, or six for the Crossover, whose three
+   * pairs are the band below its frequency, the rest above it and its key through its all-pass.
+   * The UGen copies what a device writes onto its outputs and silences the rest.
+   */
+  virtual int outChannels() { return 2; }
+  /**
    * Whether anything is routed into the slot's key input, and whether a track's notes are.
    *
    * Only the ducker asks: its dip is triggered by notes if a track is routed in, by the key's
@@ -156,9 +168,14 @@ struct PdAny {
    * and who owns it: megabytes are not copied on the audio thread. A device that has to BUILD
    * something out of the frames (a wavetable's pyramid, a convolver's partitions) asks for the
    * time to do it through the work calls below.
+   *
+   * Returns false when the device has no room for that slot YET: it has asked for room through
+   * the work round, and the host hands the file over again once a round has finished. A list
+   * of files has no most, so this is never a refusal - only a wait.
    */
-  virtual void sample(int param, int slot, const PdSample& file) {
+  virtual bool sample(int param, int slot, const PdSample& file) {
     (void)param; (void)slot; (void)file;
+    return true;
   }
   /**
    * A DRAWN curve for a control that takes one (`takes: 'shape'`): Distort's transfer curve, a
@@ -167,10 +184,12 @@ struct PdAny {
    * `table` is the curve as the engine sampled it - the browser's own SHAPE_POINTS, evenly
    * spaced, read by the device the way the browser's processor reads the table it is posted. The
    * host owns the memory on the same terms as a file's frames: for as long as the device is in
-   * the slot, until a later curve for the same (param, slot) replaces it.
+   * the slot, until a later curve for the same (param, slot) replaces it. Returns false while the
+   * device is still making room for that slot, as sample() does.
    */
-  virtual void shape(int param, int slot, const float* table, int count) {
+  virtual bool shape(int param, int slot, const float* table, int count) {
     (void)param; (void)slot; (void)table; (void)count;
+    return true;
   }
   /**
    * WORK OFF THE AUDIO THREAD: building something out of a setting or a file where it is allowed
@@ -190,6 +209,16 @@ struct PdAny {
    * Until workDone, the device plays what it had: a convolver keeps its old space, a new table
    * slot plays what an empty slot plays.
    */
+  /**
+   * AUDIO-RATE CONTROLS. A control with audio patched onto it is handed over as a value per
+   * sample of the next process call, in real units: the host writes `frames` values into
+   * paramBuffer(param) and says paramMoving(param, true); p[param] holds the first of them, so a
+   * device that reads a control once a call still reads the right one. paramMoving(param, false)
+   * when nothing is patched any more. Null from paramBuffer means the device has no per-sample
+   * path for its controls, and reads them once a call.
+   */
+  virtual float* paramBuffer(int param) { (void)param; return nullptr; }
+  virtual void paramMoving(int param, bool on) { (void)param; (void)on; }
   virtual bool workWanted() { return false; }
   virtual void work() {}
   virtual void workDone() {}
@@ -203,6 +232,12 @@ struct PdAny {
   virtual int report(float* out, int capacity) { (void)out; (void)capacity; return 0; }
 };
 
+/** Whether a device takes a control per sample (PdAny::paramBuffer). */
+template <class Device, class = void>
+struct PdTakesBuffers : std::false_type {};
+template <class Device>
+struct PdTakesBuffers<Device, std::void_t<decltype(std::declval<Device&>().pd_param_buffer(0))>> : std::true_type {};
+
 /** Whether a device reads the transport. */
 template <class Device, class = void>
 struct PdTakesTransport : std::false_type {};
@@ -215,6 +250,13 @@ template <class Device, class = void>
 struct PdSaysInChannels : std::false_type {};
 template <class Device>
 struct PdSaysInChannels<Device, std::void_t<decltype(std::declval<Device&>().pd_in_channels())>>
+    : std::true_type {};
+
+/** Whether a device says how many output channels it writes, rather than writing the two. */
+template <class Device, class = void>
+struct PdSaysOutChannels : std::false_type {};
+template <class Device>
+struct PdSaysOutChannels<Device, std::void_t<decltype(std::declval<Device&>().pd_out_channels())>>
     : std::true_type {};
 
 /** Whether a device is played by notes: a synth, or an effect whose shape a note triggers. */
@@ -250,7 +292,7 @@ template <class Device, class = void>
 struct PdTakesSample : std::false_type {};
 template <class Device>
 struct PdTakesSample<Device,
-    decltype(std::declval<Device&>().pd_sample(0, 0, std::declval<const PdSample&>()))>
+    std::void_t<decltype(std::declval<Device&>().pd_sample(0, 0, std::declval<const PdSample&>()))>>
     : std::true_type {};
 
 /** Whether a device reads drawn curves. */
@@ -258,7 +300,7 @@ template <class Device, class = void>
 struct PdTakesShape : std::false_type {};
 template <class Device>
 struct PdTakesShape<Device,
-    decltype(std::declval<Device&>().pd_shape(0, 0, (const float*)nullptr, 0))>
+    std::void_t<decltype(std::declval<Device&>().pd_shape(0, 0, (const float*)nullptr, 0))>>
     : std::true_type {};
 
 /** Whether a device asks for work off the audio thread. It then has all four calls. */
@@ -336,6 +378,10 @@ struct PdAdapter : PdAny {
     if constexpr (PdSaysInChannels<Device>::value) return d.pd_in_channels();
     else return 2;
   }
+  int outChannels() override {
+    if constexpr (PdSaysOutChannels<Device>::value) return d.pd_out_channels();
+    else return 2;
+  }
   void keyPatched(bool on) override {
     if constexpr (PdTakesKeyPatched<Device>::value) d.pd_key_patched(on);
     else { (void)on; }
@@ -344,13 +390,25 @@ struct PdAdapter : PdAny {
     if constexpr (PdTakesNoteRoute<Device>::value) d.pd_note_route(on);
     else { (void)on; }
   }
-  void sample(int param, int slot, const PdSample& file) override {
-    if constexpr (PdTakesSample<Device>::value) d.pd_sample(param, slot, file);
-    else { (void)param; (void)slot; (void)file; }
+  bool sample(int param, int slot, const PdSample& file) override {
+    if constexpr (PdTakesSample<Device>::value) {
+      if constexpr (std::is_same_v<decltype(d.pd_sample(param, slot, file)), bool>) return d.pd_sample(param, slot, file);
+      else { d.pd_sample(param, slot, file); return true; }
+    } else { (void)param; (void)slot; (void)file; return true; }
   }
-  void shape(int param, int slot, const float* table, int count) override {
-    if constexpr (PdTakesShape<Device>::value) d.pd_shape(param, slot, table, count);
-    else { (void)param; (void)slot; (void)table; (void)count; }
+  bool shape(int param, int slot, const float* table, int count) override {
+    if constexpr (PdTakesShape<Device>::value) {
+      if constexpr (std::is_same_v<decltype(d.pd_shape(param, slot, table, count)), bool>) return d.pd_shape(param, slot, table, count);
+      else { d.pd_shape(param, slot, table, count); return true; }
+    } else { (void)param; (void)slot; (void)table; (void)count; return true; }
+  }
+  float* paramBuffer(int param) override {
+    if constexpr (PdTakesBuffers<Device>::value) return d.pd_param_buffer(param);
+    else { (void)param; return nullptr; }
+  }
+  void paramMoving(int param, bool on) override {
+    if constexpr (PdTakesBuffers<Device>::value) d.pd_param_moving(param, on);
+    else { (void)param; (void)on; }
   }
   bool workWanted() override {
     if constexpr (PdTakesWork<Device>::value) return d.pd_work_wanted();
@@ -372,10 +430,10 @@ struct PdDeviceInfo {
   int takesNotes;               // 1 = notes reach it even though it is an effect (the ducker)
   int sidechain;                // 1 = the second input is another signal, not this track's right channel
   /**
-   * 1 = the device reads a control a signal moves PER SAMPLE in the browser, so a control with
-   * audio patched onto it is fed per sample here too (PoptartDevice processes such a device in
-   * one-sample pieces while anything is patched). 0 = a ported module, which reads its controls
-   * once a block on both engines.
+   * 1 = one of poptart's own devices, whose DSP reads a patched control per sample where its
+   * browser processor does; 0 = a ported module, whose wrapper renders a patched stretch a sample
+   * at a time (build-devices.mjs's patch layer). Either way a patched control reaches the device
+   * through PdAny::paramBuffer.
    */
   int perSample;
   int paramCount;

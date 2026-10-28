@@ -20,24 +20,40 @@ const { DEVICE_CATALOG } = require('./extensions');
 
 /** Read once: the file ships with the engine and cannot change under a running process. */
 let cache;
+let internalCache;
 
-/** Every device this build of poptart can host, or [] where the catalog is missing. */
-function nativeDevices({ catalogPath = DEVICE_CATALOG } = {}) {
-  if (cache) return cache;
+function readCatalog(catalogPath) {
   try {
     const doc = JSON.parse(fs.readFileSync(catalogPath, 'utf8'));
     cache = Array.isArray(doc.devices) ? doc.devices : [];
+    internalCache = Array.isArray(doc.internal) ? doc.internal : [];
   } catch {
     // No catalog is a legitimate state - a checkout whose device extension was never built -
     // and it means exactly one thing: every name goes to the plugin path, as before.
     cache = [];
+    internalCache = [];
   }
+}
+
+/** Every device this build of poptart can host, or [] where the catalog is missing. */
+function nativeDevices({ catalogPath = DEVICE_CATALOG } = {}) {
+  if (!cache) readCatalog(catalogPath);
   return cache;
+}
+
+/**
+ * A device the engine builds for itself (a .bands() crossover), by id, or null. Kept apart from
+ * nativeDevices: no name a pattern writes, no device list and no completion reaches one.
+ */
+function internalDevice(id, { catalogPath = DEVICE_CATALOG } = {}) {
+  if (!internalCache) readCatalog(catalogPath);
+  return internalCache.find((d) => d.id === id) ?? null;
 }
 
 /** For tests, which write their own catalogs. */
 function forgetNativeDevices() {
   cache = undefined;
+  internalCache = undefined;
 }
 
 /**
@@ -251,7 +267,8 @@ function clampParam(param, value) {
   if (!Number.isFinite(v)) return param.default;
   if (param.step) v = Math.round(v / param.step) * param.step;
   if (v < param.min) return param.min;
-  if (v > param.max) return param.max;
+  // An open control (descriptor.mjs's: an enum that takes files, a voice count) has no top.
+  if (v > param.max && !param.open) return param.max;
   return v;
 }
 
@@ -263,11 +280,11 @@ function normalize(param, value) {
   if (param.curve === 'exp') t = Math.log(v / param.min) / Math.log(param.max / param.min);
   else if (param.curve === 'pow') t = ((v - param.min) / span) ** (1 / param.curveExp);
   else t = span === 0 ? 0 : (v - param.min) / span;
-  return Math.min(1, Math.max(0, t));
+  return Math.min(param.open ? Infinity : 1, Math.max(0, t));
 }
 
 function denormalize(param, position) {
-  const t = Math.min(1, Math.max(0, Number(position) || 0));
+  const t = Math.min(param.open ? Infinity : 1, Math.max(0, Number(position) || 0));
   let v;
   if (param.curve === 'exp') v = param.min * (param.max / param.min) ** t;
   else if (param.curve === 'pow') v = param.min + (param.max - param.min) * t ** param.curveExp;
@@ -288,6 +305,7 @@ function denormalize(param, position) {
  *     no-op: `.param("Engine", 14)` is Plaits' chord engine, and passed through as a position it
  *     would pin the control at the last engine in the list instead.
  *   - a toggle takes 0 or 1, and anything from a half up is on.
+ *   - an open count (a synth's voices) takes the count itself, past the knob's reach too.
  *   - everything else takes a position already, and comes back unchanged but for its clamping.
  *
  * A plugin parameter stays what it was - a bare number, nothing else - and goes nowhere near
@@ -304,7 +322,7 @@ function paramPosition(device, name, arg) {
       if (found >= 0) index = found;
       else {
         const n = Number(arg);
-        index = Number.isInteger(n) && n >= param.min && n <= param.max ? n : null;
+        index = Number.isInteger(n) && n >= param.min && (param.open || n <= param.max) ? n : null;
       }
     } else {
       const n = Number(arg);
@@ -315,10 +333,18 @@ function paramPosition(device, name, arg) {
   const n = Number(arg);
   if (!Number.isFinite(n)) return null;
   if (isToggle(param)) return n >= 0.5 ? 1 : 0;
+  // An open count is the count; a fraction strictly between 0 and 1 is a position written before
+  // it was open, and means what it meant then, across the range it had (descriptor.mjs's
+  // argToValue, rule for rule).
+  if (param.open) {
+    const legacy = param.legacyMax != null && n > 0 && n < 1;
+    return normalize(param, clampParam(param, legacy ? param.min + (param.legacyMax - param.min) * n : n));
+  }
   return normalize(param, denormalize(param, n));
 }
 
 module.exports = {
+  internalDevice,
   nativeDevices,
   nativeDevice,
   deviceParam,

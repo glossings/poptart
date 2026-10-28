@@ -20,7 +20,8 @@ namespace ids = pd_ids::FM;
 using namespace pd_own;
 
 constexpr int kOps = 8;
-constexpr int kVoices = 12;
+/** The voices a fresh device has room for: the old most, and no most (see the Wavetable's kFirstVoices). */
+constexpr int kFirstVoices = 12;
 
 /** A wave at a phase in cycles, in -1..1, cheap enough for eight a sample a voice. */
 inline double wave(int shape, double phase) {
@@ -87,6 +88,8 @@ struct FmParams {
   Ramped<1> depth;
   double glide = 0;
   double out = 0.6;
+  // The output level per sample while it is moving, else null.
+  const float* outA = nullptr;
   double bend = 0;
 
   void init() {
@@ -106,6 +109,7 @@ struct FmParams {
     depth.init(0.5);
     glide = 0;
     out = 0.6;
+    outA = nullptr;
     bend = 0;
   }
 
@@ -224,7 +228,7 @@ struct FmVoice {
         if (phase[o] >= 1) phase[o] -= 1;
         sum += v * level[o];
       }
-      const double g = p.out * 0.5;
+      const double g = (p.outA ? static_cast<double>(p.outA[offset + i]) : p.out) * 0.5;
       // Summed in double and rounded once, which is what `outL[i] += sum * g` does to a
       // Float32Array: rounding the voice's contribution first and adding it in float would
       // round twice, and eight voices of that is a difference from the browser for nothing.
@@ -251,7 +255,7 @@ static_assert(ids::mod_8_8 == ids::mod_1_1 + 63, "the matrix is one block of six
 
 struct Device : pd_own::Device<ids::kCount, 2> {
   FmParams params;
-  FmVoice voices[kVoices];
+  Pool<FmVoice> voices;
   int voiceCount = 8;
   long long clock = 0;
   // Notes come with their offset into the block (pd-device.h's noteOnAt), because the matrix
@@ -264,6 +268,7 @@ struct Device : pd_own::Device<ids::kCount, 2> {
   void pd_init(double sr) {
     sampleRate = sr;
     params.init();
+    voices.reserve(kFirstVoices, [](FmVoice&) {});
     for (auto& v : voices) v.init(sr);
     voiceCount = 8;
     clock = 0;
@@ -297,11 +302,17 @@ struct Device : pd_own::Device<ids::kCount, 2> {
    * control inserted in the middle of that list would otherwise quietly move every operator's
    * settings onto the operator before it.
    */
-  void readParams() {
+  /** A control's value at the END of the call: what a ramped control is aimed at. */
+  double last(int id, int frames) const {
+    return isMoving(id) && frames > 0 ? static_cast<double>(pb[id][frames - 1]) : static_cast<double>(p[id]);
+  }
+
+  void readParams(int frames) {
     FmParams& f = params;
     for (int o = 0; o < kOps; ++o) {
       const int base = ids::op1_level + o * 10;
-      f.level.aim(o, p[base + 0]);
+      // The ramped ones are aimed at where the block ends, as the browser's setParams does.
+      f.level.aim(o, last(base + 0, frames));
       f.ratio[o] = p[base + 1];
       f.detune[o] = p[base + 2];
       f.fixed[o] = p[base + 3] >= 0.5 ? 1 : 0;
@@ -311,13 +322,26 @@ struct Device : pd_own::Device<ids::kCount, 2> {
       f.sustain[o] = p[base + 7];
       f.release[o] = p[base + 8];
       f.velocity[o] = p[base + 9];
-      for (int to = 0; to < kOps; ++to) f.matrix.aim(o * kOps + to, p[ids::mod_1_1 + o * kOps + to]);
+      for (int to = 0; to < kOps; ++to) f.matrix.aim(o * kOps + to, last(ids::mod_1_1 + o * kOps + to, frames));
     }
-    f.depth.aim(0, p[ids::depth]);
+    f.depth.aim(0, last(ids::depth, frames));
     f.glide = p[ids::glide];
     f.out = p[ids::level];
-    voiceCount = static_cast<int>(clamp(jsRound(p[ids::voices]), 1.0, kVoices));
+    f.outA = isMoving(ids::level) ? pb[ids::level] : nullptr;
+    // As many as asked for, room grown through the work round (see the Wavetable's).
+    const double want = jsRound(p[ids::voices]);
+    const int asked = want < 1 ? 1 : (want > 1e6 ? 1000000 : static_cast<int>(want));
+    voices.ask(asked);
+    voiceCount = asked < voices.size() ? asked : voices.size();
   }
+
+  bool pd_work_wanted() { return voices.wanted(); }
+  void pd_work() {
+    const double sr = sampleRate;
+    voices.build([sr](FmVoice& v) { v.init(sr); });
+  }
+  void pd_work_done() { voices.install(); }
+  void pd_work_release() { voices.release(); }
 
   FmVoice* allocate(double note) {
     FmVoice* free = nullptr;
@@ -348,7 +372,7 @@ struct Device : pd_own::Device<ids::kCount, 2> {
   }
 
   void pd_process(int frames) {
-    readParams();
+    readParams(frames);
     // The ramps are worked out for the WHOLE block and committed after it.
     params.beginBlock(frames);
     // In time order, ties in arrival order - a stable sort, as the browser's Array.sort is.

@@ -14,7 +14,8 @@
 //
 // stdin, little-endian: the parameter values in REAL UNITS (the position-to-value conversion is
 // pd_denormalize's job and is tested separately), then the input as interleaved stereo floats.
-// stdout: the output as interleaved stereo floats. Notes come in on the command line, as
+// stdout: the output as interleaved floats - stereo, or as many channels as the device writes
+// (the Crossover's six). Notes come in on the command line, as
 // `-n frame:note:velocity` for an instrument, and land ON THEIR FRAME: the run is cut there and
 // the note made between the two pieces, as PoptartDevice cuts its render at a note's offset into
 // the block. `-k 0` says that nothing is routed into the slot's key input (the default for a
@@ -31,10 +32,11 @@
 // `-H` is a DRAWN curve, raw 32-bit floats, handed over as the host's /shape command does.
 //
 // `-A` is a control with a SIGNAL on it: `file` is one value per frame, in real units, raw 32-bit
-// floats. The run is then rendered a sample at a time with that control set from the file at
-// every sample, which is what PoptartDevice does while audio is patched onto a control (see
-// kPatchPiece there) - so the browser's processor, handed the same values as a block-long
-// array, should come out the same.
+// floats. It is handed over as PoptartDevice hands a patched control over - the block's values
+// in the device's buffer for it (PdAny::paramBuffer) - so the browser's processor, handed the
+// same values as a block-long array, should come out the same. `-1` instead renders the run a
+// sample at a time with the control set from the file at every sample and no buffer: the
+// reference a per-sample buffer has to match.
 //
 // A device that asks for work off the audio thread (pd-device.h's work calls) has the whole round
 // done in place, before the block that asked: what the server does over a few blocks, this does
@@ -90,6 +92,7 @@ int main(int argc, char** argv) {
   std::vector<Moving> moving;
   const char* reportFile = nullptr;
   int keyPatched = -1;
+  bool oneByOne = false;
   for (int i = 5; i < argc; ++i) {
     if (std::strcmp(argv[i], "-S") == 0 && i + 1 < argc) {
       int param = 0, slot = 0, channels = 1, frameLength = 0;
@@ -138,6 +141,10 @@ int main(int argc, char** argv) {
       reportFile = argv[++i];
       continue;
     }
+    if (std::strcmp(argv[i], "-1") == 0) {
+      oneByOne = true;
+      continue;
+    }
     if (std::strcmp(argv[i], "-k") == 0 && i + 1 < argc) {
       keyPatched = std::atoi(argv[++i]);
       continue;
@@ -156,13 +163,33 @@ int main(int argc, char** argv) {
   }
   PdAny* device = info->make();
   device->init(sampleRate);
-  for (const Loaded& one : samples) {
-    const int count = (int)one.mono.size();
-    PdSample file{ one.mono.data(), one.channels > 1 ? one.frames.data() : one.mono.data(), count,
-                   one.channels, one.rate, one.frameLength };
-    device->sample(one.param, one.slot, file);
+  // Every file and curve, handed over as the host does: what the device has no room for yet it
+  // asks room for through a work round, and is handed again after one (PdAny::sample).
+  std::vector<bool> sampleGiven(samples.size(), false), shapeGiven(shapes.size(), false);
+  for (int round = 0; round < 64; ++round) {
+    bool all = true;
+    for (size_t k = 0; k < samples.size(); ++k) {
+      if (sampleGiven[k]) continue;
+      const Loaded& one = samples[k];
+      const int count = (int)one.mono.size();
+      PdSample file{ one.mono.data(), one.channels > 1 ? one.frames.data() : one.mono.data(), count,
+                     one.channels, one.rate, one.frameLength };
+      sampleGiven[k] = device->sample(one.param, one.slot, file);
+      all = all && sampleGiven[k];
+    }
+    for (size_t k = 0; k < shapes.size(); ++k) {
+      if (shapeGiven[k]) continue;
+      const Drawn& one = shapes[k];
+      shapeGiven[k] = device->shape(one.param, one.slot, one.table.data(), (int)one.table.size());
+      all = all && shapeGiven[k];
+    }
+    if (all) break;
+    if (device->workWanted()) {
+      device->work();
+      device->workDone();
+      device->workRelease();
+    }
   }
-  for (const Drawn& one : shapes) device->shape(one.param, one.slot, one.table.data(), (int)one.table.size());
 
   std::vector<float> params(static_cast<size_t>(info->paramCount) + 1, 0.f);
   if (info->paramCount > 0
@@ -177,7 +204,8 @@ int main(int argc, char** argv) {
   std::vector<float> input(static_cast<size_t>(frames) * inChannels, 0.f);
   std::fread(input.data(), sizeof(float), input.size(), stdin);
 
-  std::vector<float> output(static_cast<size_t>(frames) * 2, 0.f);
+  const int outChannels = device->outChannels();
+  std::vector<float> output(static_cast<size_t>(frames) * outChannels, 0.f);
   const int stride = device->maxBlock();
   float* devIn = device->in();
   float* devOut = device->out();
@@ -185,8 +213,8 @@ int main(int argc, char** argv) {
   const int count = device->paramCount() < info->paramCount ? device->paramCount() : info->paramCount;
 
   size_t nextNote = 0;
-  // A control on a signal is rendered a sample at a time.
-  const int piece = moving.empty() ? blockSize : 1;
+  // A control on a signal is handed over a value per sample, as the host does (PdAny::paramBuffer).
+  const int piece = oneByOne && !moving.empty() ? 1 : blockSize;
   const bool offsets = device->takesNoteOffsets();
   int blockEnd = 0;
   for (int at = 0; at < frames;) {
@@ -213,9 +241,15 @@ int main(int argc, char** argv) {
     const int n = until - at;
     for (int i = 0; i < count; ++i) devParams[i] = params[static_cast<size_t>(i)];
     for (const Moving& one : moving) {
-      if (one.param >= 0 && one.param < count) {
-        devParams[one.param] = one.values[static_cast<size_t>(at) < one.values.size() ? static_cast<size_t>(at) : one.values.size() - 1];
-      }
+      if (one.param < 0 || one.param >= count) continue;
+      const auto valueAt = [&](int frame) {
+        return one.values[static_cast<size_t>(frame) < one.values.size() ? static_cast<size_t>(frame) : one.values.size() - 1];
+      };
+      devParams[one.param] = valueAt(at);
+      float* buffer = oneByOne ? nullptr : device->paramBuffer(one.param);
+      if (!buffer) continue;   // a device that reads its controls once a call
+      for (int i = 0; i < n; ++i) buffer[i] = valueAt(at + i);
+      device->paramMoving(one.param, true);
     }
     if (device->workWanted()) {
       device->work();
@@ -231,9 +265,8 @@ int main(int argc, char** argv) {
       }
     }
     device->process(n);
-    for (int i = 0; i < n; ++i) {
-      output[static_cast<size_t>(at + i) * 2] = devOut[i];
-      output[static_cast<size_t>(at + i) * 2 + 1] = devOut[stride + i];
+    for (int ch = 0; ch < outChannels; ++ch) {
+      for (int i = 0; i < n; ++i) output[static_cast<size_t>(at + i) * outChannels + ch] = devOut[ch * stride + i];
     }
     at += n;
   }

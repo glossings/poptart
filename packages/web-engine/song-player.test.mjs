@@ -9,7 +9,7 @@ import { FakeAudioContext, fakeWorkletFor } from './fake-context.mjs';
 import { catalog } from './src/catalog.mjs';
 import { WebAudioEngine } from './src/engine/web-audio-engine.mjs';
 import { SONG_FADE_SEC, SONG_HALT_SEC, SongReader } from './src/devices/song-reader.mjs';
-import { SONG_LATENCY_SEC, keylockSemitones } from './src/engine/song-player.mjs';
+import { KEYLOCK_WARM_SEC, SONG_LATENCY_SEC, keylockSemitones } from './src/engine/song-player.mjs';
 import { STRETCH_DEVICES } from './src/devices/stretch.mjs';
 
 const SR = 48000;
@@ -111,6 +111,37 @@ test('a query answers where the read is, for checking the model against', () => 
   assert.ok(Math.abs(said[0].pos - (4 * BLOCK) / SR) < 1e-9);
 });
 
+test('a read ahead is the same song a lead early, events and all', () => {
+  const lead = 5760;
+  const reader = new SongReader(SR);
+  reader.receive({ kind: 'load', planes: [ramp(SR)], frames: SR });
+  reader.receive({ kind: 'start', pos: 0, rate: 1, time: 0 });
+  render(reader, 10);
+  // Changes already sent for later, in heard time: one inside the lead, one past it.
+  reader.receive({ kind: 'rate', rate: 1.25, time: (10 * BLOCK + 3000) / SR });
+  reader.receive({ kind: 'seek', pos: 20000 / SR, time: (10 * BLOCK + 9000) / SR });
+  const ahead = reader.aheadBy(lead, 10 * BLOCK);
+  // One more sent after the read ahead began reaches both.
+  reader.receive({ kind: 'rate', rate: 0.8, time: (10 * BLOCK + 14000) / SR });
+  ahead.receive({ kind: 'rate', rate: 0.8, time: (10 * BLOCK + 14000) / SR });
+  const blocks = 200;
+  const plain = render(reader, blocks, 10 * BLOCK);
+  const early = render(ahead, blocks, 10 * BLOCK);
+  for (let i = 0; i + lead < blocks * BLOCK; i += 7) {
+    assert.ok(Math.abs(early[i] - plain[i + lead]) < 1e-6, `frame ${i}: ${early[i]} against ${plain[i + lead]}`);
+  }
+});
+
+test('a start that arrives late begins as far on as it is late, so it keeps time', () => {
+  const reader = new SongReader(SR);
+  reader.receive({ kind: 'load', planes: [ramp(SR)], frames: SR });
+  render(reader, 4);
+  reader.receive({ kind: 'start', pos: 1000 / SR, rate: 1, time: 100 / SR });
+  const out = render(reader, 4, 4 * BLOCK);
+  const settled = Math.ceil(SONG_FADE_SEC * SR) + 1;
+  assert.equal(asFrame(out[settled]), 1000 + (4 * BLOCK - 100) + settled);
+});
+
 // --- on a track ---------------------------------------------------------------------------------
 
 function makeEngine({ shift = true } = {}) {
@@ -125,33 +156,66 @@ function makeEngine({ shift = true } = {}) {
   return { ctx, engine, warnings };
 }
 
-test('the keylock is the Shift device, late by exactly the latency the plain path is delayed by', () => {
+test('keylock off: the player plays straight to the track, with no delay and no shifter', () => {
   const shiftLatency = STRETCH_DEVICES.find((d) => d.id === 'Shift').latencySec;
-  assert.equal(SONG_LATENCY_SEC, shiftLatency, 'one number, or toggling keylock would jump the song');
-  const { engine } = makeEngine();
+  assert.equal(SONG_LATENCY_SEC, shiftLatency, 'the read ahead is the shifter\'s latency, or toggling would jump');
+  const { ctx, engine } = makeEngine();
   engine.songLoad('t', { planes: [new Int16Array(10)], frames: 10 });
+  engine.songStart('t', 0, 1.06, 0.2, false);
   const player = engine.songs.get('t');
-  assert.equal(player.delay.delayTime.value, SONG_LATENCY_SEC);
   assert.ok(player.node.reaches(engine.tracks.get('t').input), 'the player is the track\'s source');
+  assert.equal(ctx.created.filter((n) => n.kind === 'delay').length, 0);
+  assert.equal(player.shift, null);
+  assert.equal(engine.songLead('t'), 0, 'a change is heard as soon as it is made');
+  assert.equal(player.node.messages.find((m) => m.kind === 'start').time, 0.2, 'told when it is heard');
 });
 
-test('keylock crossfades onto the shifter, transposed against the rate, everything transposed', () => {
-  const { engine } = makeEngine();
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+test('keylock crossfades onto the shifter, transposed against the rate, and lets it go after', async () => {
+  const { ctx, engine } = makeEngine();
   engine.songLoad('t', { planes: [new Int16Array(10)], frames: 10 });
-  engine.songStart('t', 0, 1.06, 0, true);
+  engine.songStart('t', 0, 1.06, 0.2, true);
   const player = engine.songs.get('t');
-  assert.ok(player.shift, 'the shifter is built the first time keylock is wanted');
-  assert.ok(player.keyed.gain.rampedTo(1) && player.plain.gain.rampedTo(0));
+  assert.ok(player.shift, 'the shifter is built when keylock is wanted');
+  assert.deepEqual(player.node.messages.find((m) => m.kind === 'ahead'), { kind: 'ahead', on: true, lead: SONG_LATENCY_SEC });
+  assert.ok(player.node.links.some((l) => l.target === player.shift.built.node && l.output === 1), 'the read ahead feeds it');
+  assert.equal(engine.songLead('t'), SONG_LATENCY_SEC);
+  // Not sounding yet, so nothing to wait for: the crossfade is done by the start.
+  assert.ok(player.keyed.gain.calls.some((c) => c.kind === 'ramp' && c.value === 1 && c.time <= 0.23 + 1e-9));
+  assert.ok(player.plain.gain.rampedTo(0));
   const pitch = player.shift.pitch;
   const spec = player.shift.spec;
-  const semis = spec.min + (spec.max - spec.min) * pitch.value;
-  assert.ok(Math.abs(semis - keylockSemitones(1.06)) < 1e-9);
+  const semis = () => spec.min + (spec.max - spec.min) * pitch.value;
+  assert.ok(Math.abs(semis() - keylockSemitones(1.06)) < 1e-9);
   assert.ok(Math.abs(keylockSemitones(1.06) - -1.00876) < 1e-4);
   assert.equal(player.shift.built.node.parameters.get('tonality').value, 0, 'partials above a limit would stay repitched');
-  engine.songRate('t', 0.94, 0);
-  assert.ok(Math.abs(spec.min + (spec.max - spec.min) * pitch.value - keylockSemitones(0.94)) < 1e-9);
-  engine.songKeylock('t', false, 0);
+  ctx.advance(1);
+  engine.songRate('t', 0.94, 1 + SONG_LATENCY_SEC);
+  assert.ok(Math.abs(semis() - keylockSemitones(0.94)) < 1e-9);
+  assert.ok(pitch.calls.at(-1).time === 1, 'the shifter takes the rate when the read ahead does');
+  const shift = player.shift.built.node;
+  engine.songKeylock('t', false, 1);
   assert.ok(player.plain.gain.rampedTo(1));
+  assert.equal(engine.songLead('t'), 0);
+  await sleep(120);
+  assert.equal(player.shift, null, 'out of the mix, the shifter is let go');
+  assert.ok(shift.messages.some((m) => m.kind === 'dispose'));
+  assert.deepEqual(player.node.messages.filter((m) => m.kind === 'ahead').at(-1), { kind: 'ahead', on: false });
+});
+
+test('keylock switched on while the song plays waits for the shifter to fill before it is heard', () => {
+  const { ctx, engine } = makeEngine();
+  engine.songLoad('t', { planes: [new Int16Array(10)], frames: 10 });
+  engine.songStart('t', 0, 1.06, 0.2, false);
+  ctx.advance(2);
+  engine.songKeylock('t', true, 2);
+  const player = engine.songs.get('t');
+  const up = player.keyed.gain.calls.find((c) => c.kind === 'ramp' && c.value === 1);
+  assert.ok(Math.abs(up.time - (2 + KEYLOCK_WARM_SEC + 0.03)) < 1e-9, `faded in at ${up.time}`);
+  // Switched off again before then, it never comes in.
+  engine.songKeylock('t', false, 2.01);
+  assert.equal(player.keyed.gain.calls.at(-1).value, 0);
 });
 
 test('without the Shift binary the deck plays repitched and says why, once', () => {

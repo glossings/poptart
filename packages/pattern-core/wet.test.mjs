@@ -59,17 +59,12 @@ test('.wet() with no effect to turn down is a mistake worth stopping for', () =>
   assert.throws(() => note('c2').synth('Serum 2').wet(0.5), /put it after an \.fx/);
 });
 
-test('past the engine\'s last fx slot it warns and leaves the pattern alone', () => {
+test('a .wet() reaches any slot, however long the chain', () => {
   let sig = note('c2').synth('Serum 2');
-  for (let i = 0; i < MAX_FX_SLOTS; i++) sig = sig.fx('ValhallaRoom');
+  for (let i = 0; i <= MAX_FX_SLOTS; i++) sig = sig.fx('ValhallaRoom');
   const ok = capture(() => sig.wet(0.5));
   assert.equal(ok.lines.length, 0);
-  assert.equal(ok.value.channel[`wet${MAX_FX_SLOTS}`].sample(0, 1, 0), 0.5);
-
-  const over = capture(() => sig.fx('Pro-C 2').wet(0.5));
-  assert.equal(over.lines.length, 2);
-  assert.match(over.lines[1], new RegExp(`only reaches the first ${MAX_FX_SLOTS} effects`));
-  assert.equal(over.value.channel[`wet${MAX_FX_SLOTS + 1}`], undefined);
+  assert.equal(ok.value.channel[`wet${MAX_FX_SLOTS + 1}`].sample(0, 1, 0), 0.5);
 });
 
 test('.wet() takes patterns and signals like any control', () => {
@@ -103,19 +98,23 @@ test('wet is polled as a slot -1 channel control', () => {
   assert.deepEqual(channelSends(callsTo, 'wet1'), [0.3]);
 });
 
-test('an .fx() past the last slot warns once, and the scheduler never loads it', () => {
+test('a chain has no slot limit: every .fx() loads, and a wet past the old twenty rests at 1', () => {
   let sig = note('c2*4').synth('Serum 2');
-  for (let i = 0; i < MAX_FX_SLOTS; i++) sig = sig.fx('ValhallaRoom');
-  const over = capture(() => sig.fx('ShaperBox 3').fx('OTT'));
-  assert.equal(over.lines.length, 1);
-  assert.match(over.lines[0], /holds 20 effects - \.fx\("ShaperBox 3"\) is effect 21/);
-
+  const long = capture(() => {
+    for (let i = 0; i < MAX_FX_SLOTS + 5; i++) sig = sig.fx('ValhallaRoom');
+    return sig.wet(0.4);
+  });
+  assert.deepEqual(long.lines, []);
   const { engine, callsTo } = mockEngine();
   const sch = new Scheduler(engine, { trackId: 'pad' });
-  sch.setPattern(over.value);
+  sch.setPattern(long.value);
   const slots = callsTo('loadEffect').map((c) => c.args[2]);
-  assert.equal(slots.length, MAX_FX_SLOTS);
-  assert.equal(Math.max(...slots), MAX_FX_SLOTS);
+  assert.equal(slots.length, MAX_FX_SLOTS + 5);
+  sch._pollGenericParams(0);
+  assert.deepEqual(channelSends(callsTo, `wet${MAX_FX_SLOTS + 5}`), [0.4]);
+  // ...and dropping it snaps it back to fully wet, as the first twenty do.
+  sch.setPattern(note('c2*4').synth('Serum 2'));
+  assert.deepEqual(channelSends(callsTo, `wet${MAX_FX_SLOTS + 5}`), [0.4, 1]);
 });
 
 test('dropping the .wet() call snaps that slot back to fully wet', () => {
@@ -140,23 +139,22 @@ test('dropping the .fx() too still resets its wet - the slot outlives the patter
 
 test('each fx slot crossfades between its input and the plugin, gated by the load switch', () => {
   const scd = fs.readFileSync(path.join(HERE, '../osc-engine/sc/poptart.scd'), 'utf8');
-  const def = scd.match(/buildTrackDef = \{[\s\S]*?\n\};/);
-  assert.ok(def, 'could not find buildTrackDef in sc/poptart.scd');
+  const def = scd.match(/buildFxDef = \{[\s\S]*?\n\};/);
+  assert.ok(def, 'could not find buildFxDef in sc/poptart.scd');
   const src = def[0];
 
   // The mix is `active` AND the user's wet: an unloaded slot outputs silence, not pass-through,
   // so it has to read as dry however the wet control is set.
-  assert.match(src, /\("active" \+\+ i\)\.asSymbol\.kr\(0\) \* \("wet" \+\+ i\)\.asSymbol\.kr\(1\)/);
-  // Linear, so the endpoints are exactly the two signals - see Sig#wet.
-  assert.match(src, /sig = \(sig \* \(1 - mix\)\) \+ \(wet \* mix\)/);
-  assert.ok(!src.includes('Select.ar(("active"'), 'the old hard bypass switch is gone');
-  // The default keeps every existing patch sounding the same.
-  assert.match(src, /"wet" \+\+ i\)\.asSymbol\.kr\(1\)/);
+  assert.match(src, /active = 0, native = 0, wet = 1\|/);
+  assert.match(src, /var mix = \(active \* wet\)/);
+  // Linear, so the endpoints are exactly the two signals - see Sig#wet. The dry side is what the
+  // slot reads.
+  assert.match(src, /Out\.ar\(out, \(jin \* \(1 - mix\)\) \+ \(pick \* mix\)\)/);
+  assert.match(src, /var jin = In\.ar\(in, 2\);/);
 });
 
-test('the JS slot ceiling matches the SynthDef scaffold', () => {
+test('the desktop has no slot ceiling to match: every effect is a node of its own', () => {
   const scd = fs.readFileSync(path.join(HERE, '../osc-engine/sc/poptart.scd'), 'utf8');
-  const maxSlots = Number(/var maxSlots = (\d+)/.exec(scd)?.[1]);
-  assert.ok(Number.isFinite(maxSlots), 'could not read maxSlots from sc/poptart.scd');
-  assert.equal(MAX_FX_SLOTS, maxSlots - 1, 'slot 0 is the instrument, so fx slots are maxSlots - 1');
+  assert.ok(!/var maxSlots = /.test(scd), 'no fixed row of slots in sc/poptart.scd');
+  assert.match(scd, /^ensureFxNode = \{/m);
 });

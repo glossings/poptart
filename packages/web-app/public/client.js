@@ -1558,6 +1558,29 @@ function blockOwnCode(code, block) {
   return (idx) => isCode(idx) && (idx < from || idx >= to);
 }
 
+// Every call in [from, to) that holds a slot of the chain, in slot order: synth(...) (slot 0) and
+// each .fx(...) - { kind, index, open, slot }, where `index` is the call's name and `open` its
+// paren. Calls `isCode` says are not live code hold no slot. A .split() or .bands() adds none: its
+// branches' effects number straight through in the order they are written, and a .bands()
+// crossover is the engine's, never one of the chain's.
+function slotCalls(code, from, to, isCode) {
+  const found = [];
+  const re = /\b(synth|fx)\s*\(/g;
+  re.lastIndex = from;
+  let m;
+  let fx = 0;
+  while ((m = re.exec(code)) && m.index < to) {
+    if (!isCode(m.index)) continue;
+    found.push({ kind: m[1], index: m.index, open: m.index + m[0].length - 1, slot: m[1] === 'synth' ? 0 : ++fx });
+  }
+  return found;
+}
+
+// The number of effect slots a stretch of chain text ends on: its .fx() calls.
+function slotsIn(text) {
+  return slotCalls(text, 0, text.length, () => true).filter((c) => c.kind !== 'synth').length;
+}
+
 // Locates the synth(...) call (slot 0) or the slot-th .fx(...) call inside a track's block and
 // returns where its `{ state }` argument goes: [afterFirstArg, closeParen). Commented-out calls -
 // and, in a group, the calls belonging to the tracks inside its braces - are skipped entirely:
@@ -1565,23 +1588,13 @@ function blockOwnCode(code, block) {
 // evaluated chain has.
 function findChainCall(code, block, slot) {
   const { start: from, end: to } = block;
-  const re = /\b(synth|fx)\s*\(/g;
-  re.lastIndex = from;
-  const isCode = blockOwnCode(code, block);
-  let m;
-  let fxSeen = 0;
-  while ((m = re.exec(code)) && m.index < to) {
-    if (!isCode(m.index)) continue;
-    const isTarget = m[1] === 'synth' ? slot === 0 : ++fxSeen === slot;
-    if (!isTarget) continue;
-    const open = m.index + m[0].length - 1;
-    const closeParen = matchParen(code, open);
-    if (closeParen < 0 || closeParen > to) return null;
-    const lit = firstStringLiteral(code, open + 1, closeParen);
-    if (!lit) return null;
-    return { afterFirstArg: lit.end, closeParen, plugin: lit.content };
-  }
-  return null;
+  const call = slotCalls(code, from, to, blockOwnCode(code, block)).find((c) => c.slot === slot);
+  if (!call) return null;
+  const closeParen = matchParen(code, call.open);
+  if (closeParen < 0 || closeParen > to) return null;
+  const lit = firstStringLiteral(code, call.open + 1, closeParen);
+  if (!lit) return null;
+  return { afterFirstArg: lit.end, closeParen, plugin: lit.content };
 }
 
 // First string literal in [from, to): its unescaped content and the index just past its closing
@@ -1887,15 +1900,9 @@ function createPresetForSlot(code, trackLabel, slot, plugin, state, ed = cm) {
 // conversion moves the offsets below it, so the caller converts and looks again.
 function findLegacyStateCall(code) {
   for (const block of labelsMod.splitLabeledBlocks(code)) {
-    const isCode = blockOwnCode(code, block); // a group's braces hold other blocks' calls, not its own
-    const re = /\b(synth|fx)\s*\(/g;
-    re.lastIndex = block.start;
-    let m;
-    let fxSeen = 0; // live .fx() calls so far in this block: the slot numbering Sig#fx gives them
-    while ((m = re.exec(code)) && m.index < block.end) {
-      if (!isCode(m.index)) continue; // a commented-out call is a sound you are not hearing - leave it
-      const slot = m[1] === 'synth' ? 0 : ++fxSeen;
-      const open = m.index + m[0].length - 1;
+    // A group's braces hold other blocks' calls, not its own; a commented-out call is a sound you
+    // are not hearing - leave it. The slots are the numbering Sig#fx and Sig#bands give them.
+    for (const { kind, open, slot } of slotCalls(code, block.start, block.end, blockOwnCode(code, block))) {
       const close = matchParen(code, open);
       if (close < 0 || close > block.end) break;
       const lit = firstStringLiteral(code, open + 1, close);
@@ -2571,7 +2578,7 @@ function paramHints(cur, typed, textBefore, editor, target = null) {
     : textBefore;
   const slot = target != null
     ? paramSlotAt(editor.getValue(), textBefore.length, target)
-    : (sinceBlockStart.match(/\.fx\s*\(/g) ?? []).length;
+    : slotsIn(sinceBlockStart);
   // This track's slot; failing that, whatever is loaded at that slot anywhere. The track as the
   // server names it, so deck B's `lead` is "b:lead" and not deck A's track of the same name.
   const track = block ? blockTrackId(editor, block) : null;
@@ -3520,15 +3527,9 @@ function findChainHandleAt(code, idx) {
   if (!labelsMod) return null;
   const block = labelsMod.splitLabeledBlocks(code).findLast((b) => idx >= b.start && idx <= b.end);
   if (!block) return null;
-  const re = /\b(synth|fx)\s*\(/g;
-  re.lastIndex = block.start;
-  const isCode = blockOwnCode(code, block);
-  let m;
-  let fxSeen = 0;
-  while ((m = re.exec(code)) && m.index < block.end) {
-    if (!isCode(m.index)) continue; // commented-out calls aren't in the chain, so they hold no slot
-    const slot = m[1] === 'synth' ? 0 : ++fxSeen;
-    if (idx >= m.index && idx <= m.index + m[1].length) return { label: block.label, monitored: !!block.monitored, slot };
+  // Commented-out calls aren't in the chain, so they hold no slot.
+  for (const { kind, index, slot } of slotCalls(code, block.start, block.end, blockOwnCode(code, block))) {
+    if (idx >= index && idx <= index + kind.length) return { label: block.label, monitored: !!block.monitored, slot };
   }
   return null;
 }
@@ -7406,17 +7407,10 @@ function chainBefore(code, idx) {
   if (!labelsMod) return [];
   const block = labeledBlocksFor(code).findLast((b) => idx >= b.start && idx <= b.end);
   if (!block) return [];
-  const isCode = blockOwnCode(code, block);
-  const re = /\b(synth|fx)\s*\(/g;
-  re.lastIndex = block.start;
-  let m;
-  let fxSeen = 0;
   const found = [];
-  while ((m = re.exec(code)) && m.index < block.end) {
-    if (!isCode(m.index)) continue; // a commented-out call holds no slot
-    if (m.index > idx) break; // past the call asking - a later .fx() is not what it aims at
-    const slot = m[1] === 'synth' ? 0 : ++fxSeen;
-    const open = m.index + m[0].length - 1;
+  // A commented-out call holds no slot.
+  for (const { kind, index, open, slot } of slotCalls(code, block.start, block.end, blockOwnCode(code, block))) {
+    if (index > idx) break; // past the call asking - a later .fx() is not what it aims at
     const close = matchParen(code, open);
     const [lit, rest] = splitFirstArg(code.slice(open + 1, close < 0 ? code.length : close));
     const labelLit = /\blabel\s*:\s*(["'])((?:\\.|(?!\1).)*)\1/.exec(rest);
@@ -18591,11 +18585,6 @@ let mixerEvalTimer = null;
 let mixerSuppressSync = false; // our own replaceRange must not bounce back through the code sync
 let mixerSyncTimer = null;
 let mixerViewMode = localStorage.getItem('poptart-mixer-view') === 'overall' ? 'overall' : 'tracks';
-// The view the plots actually draw. The engine analyzes tracks individually only up to a track
-// count (its analysis is DSP on the audio thread - see OscEngine#mixMeters); past it there are
-// no per-track frames to draw, so the plots show the master whatever the toggle says, and the
-// note explains. The toggle keeps its setting for when the song shrinks back under the cap.
-const mixerEffectiveView = () => (mixerState?.perTrack === false ? 'overall' : mixerViewMode);
 // Labels the last eval built as tracks, muted ones included (renderTracks records it). What
 // qualifies a silenced block for a strip - see the section comment.
 let mixerKnownTracks = [];
@@ -18729,8 +18718,6 @@ async function openMixer() {
     raf: 0,
     lastArmAt: 0, // last re-POST of monitor-on, so a dead engine isn't spammed at poll rate
     monitorError: null,
-    perTrack: true, // per-track band frames are coming (see mixerEffectiveView)
-    perTrackMax: 0,
   };
   updateMixerViewBtn();
   updateMixerFreezeBtn();
@@ -18769,12 +18756,8 @@ function closeMixer() {
 }
 
 function updateMixerViewBtn() {
-  const pinned = mixerEffectiveView() !== mixerViewMode;
-  mixerViewBtn.textContent = mixerEffectiveView() === 'tracks' ? 'by track' : 'overall';
-  mixerViewBtn.disabled = pinned;
-  mixerViewBtn.title = pinned
-    ? `per-track analysis is off past ${mixerState.perTrackMax} strips - the plots show the master (folding a group frees its members' share)`
-    : 'color-coded per track, or the summed master alone';
+  mixerViewBtn.textContent = mixerViewMode === 'tracks' ? 'by track' : 'overall';
+  mixerViewBtn.title = 'color-coded per track, or the summed master alone';
 }
 
 // The plots take their bitmap size from their laid-out size, at device resolution; drawing code
@@ -18813,15 +18796,6 @@ async function mixerPoll() {
     mixerState.monitorError = null;
   }
   if (s.bandFreqs?.length) mixerState.bandFreqs = s.bandFreqs;
-  const perTrack = s.perTrack !== false;
-  if (perTrack !== mixerState.perTrack) {
-    mixerState.perTrack = perTrack;
-    mixerState.perTrackMax = s.perTrackMax ?? 0;
-    // The plots' sources just changed under the toggle - same reason the toggle itself clears
-    // the freeze hold.
-    mixerState.freezeMax.clear();
-    updateMixerViewBtn();
-  }
 
   const tracks = s.tracks ?? [];
   // A renamed-away label is forgotten the moment the engine stops reporting it - i.e. as soon as
@@ -18851,7 +18825,6 @@ async function mixerPoll() {
   mixerNoteEl.textContent =
     !mixerState.order.length ? 'nothing playing — evaluate a pattern and its tracks appear here'
     : mixerState.monitorError ? `meters offline: ${mixerState.monitorError}`
-    : !mixerState.perTrack ? `${mixerAnalyzedLabels().length} tracks to analyze — per-track analysis stays off past ${mixerState.perTrackMax} (it runs on the audio thread), so the plots show the master; folding a group frees its members' share`
     : '';
 }
 
@@ -19665,7 +19638,7 @@ function mixerBandAngle(b) {
 function mixerPlotSources(colors) {
   const alive = (disp) => disp && disp.some((b) => bandAmp(b) > 1e-5);
   let out;
-  if (mixerEffectiveView() === 'overall') {
+  if (mixerViewMode === 'overall') {
     const keep = mixerState.masterDisp
       && (alive(mixerState.masterDisp) || (mixerState.freeze && mixerState.freezeMax.has('*')));
     out = keep ? [{ key: '*', disp: mixerState.masterDisp, color: colors.accent }] : [];
@@ -20153,8 +20126,14 @@ function renderTracks(result) {
       const row = document.createElement('div');
       row.className = 'chain-row';
       const name = document.createElement('span');
-      name.textContent = `${slot}  ${plugin ?? (t.sample ? sampleRowName(t.sample) : '(no instrument)')}`;
-      if (!plugin && t.sample) name.title = sampleRowTitle(t.sample);
+      // A slot inside a .split()/.bands() branch is indented by how deep it sits and says which
+      // branch it is in.
+      const at = slot > 0 ? t.route?.[slot] : null;
+      const indent = at ? '  '.repeat(at.depth) : '';
+      const what = plugin ?? (slot > 0 ? '(empty)' : t.sample ? sampleRowName(t.sample) : '(no instrument)');
+      name.textContent = `${slot}  ${indent}${at?.branch ? `${at.branch}: ` : ''}${what}`;
+      if (at?.branch) name.title = `branch ${at.branch}`;
+      if (!plugin && slot === 0 && t.sample) name.title = sampleRowTitle(t.sample);
       row.appendChild(name);
       if (plugin) {
         const uiBtn = document.createElement('button');
@@ -32824,14 +32803,8 @@ window.addEventListener('keydown', fxEditorKey, true);
  * EVALUATED chain has, and a call behind a `//` never reached the engine.
  */
 function fxChainSlotAt(code, idx) {
-  const isCode = codeOnly(code);
-  const re = /\bfx\s*\(/g;
-  let slot = 0;
-  let m;
-  while ((m = re.exec(code))) {
-    if (!isCode(m.index)) continue;
-    slot += 1;
-    if (idx >= m.index && idx <= m.index + 2) return slot; // 2 = the length of `fx`
+  for (const { kind, index, slot } of slotCalls(code, 0, code.length, codeOnly(code))) {
+    if (kind === 'fx' && idx >= index && idx <= index + 2) return slot; // 2 = the length of `fx`
   }
   return 0;
 }

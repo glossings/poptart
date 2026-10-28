@@ -62,19 +62,18 @@ struct Device : pd_own::Device<ids::kCount> {
     const int sync = jsRoundInt(p[ids::sync]);
     const int stages = static_cast<int>(clamp(jsRound(p[ids::stages] / 2) * 2, 2.0,
                                               static_cast<double>(kMaxStages)));
-    const double rateHz = syncedHz(sync, bpm, p[ids::rate]);
-    const double center = p[ids::center];
-    const double octaves = 3 * p[ids::depth];
-    const double feedback = p[ids::feedback];
-    const double spread = p[ids::spread] * 0.5;
-    const double mix = p[ids::mix];
     const float* inl = inL();
     const float* inr = inR();
     float* outl = outL();
     float* outr = outR();
     for (int i = 0; i < frames; ++i) {
-      phase += rateHz / sampleRate;
+      phase += syncedHz(sync, bpm, ctl(ids::rate, i)) / sampleRate;
       if (phase >= 1) phase -= 1;
+      const double center = ctl(ids::center, i);
+      const double octaves = 3 * ctl(ids::depth, i);
+      const double feedback = ctl(ids::feedback, i);
+      const double spread = ctl(ids::spread, i) * 0.5;
+      const double mix = ctl(ids::mix, i);
       const double hzL = center * std::pow(2.0, octaves * (lfoValue(phase, 0) * 2 - 1));
       const double hzR = center * std::pow(2.0, octaves * (lfoValue(phase + spread, 0) * 2 - 1));
       const double aL = coefficient(hzL, sampleRate);

@@ -17,7 +17,8 @@ import { Adsr } from '../dsp/adsr.mjs';
 import { midiToHz } from '../dsp/voice.mjs';
 
 export const OPS = 8;
-export const FM_VOICES = 12;
+/** How far the Voices knob reaches, which is no most (see the Wavetable's VOICES_KNOB). It stopped at 12 before. */
+export const FM_VOICES_KNOB = 128;
 
 const WAVES = Object.freeze(['sine', 'triangle', 'saw', 'square']);
 const FM_TWO_PI = Math.PI * 2;
@@ -97,7 +98,7 @@ export const FMSYNTH = defineDevice({
       description: 'Scales the whole matrix at once: how hard everything modulates.' },
     { id: 'glide', name: 'Glide', min: 0, max: 5, default: 0, unit: 's', curve: 'pow', curveExp: 3, group: 'Voice' },
     { id: 'level', name: 'Level', min: 0, max: 1, default: 0.6, group: 'Voice' },
-    { id: 'voices', name: 'Voices', min: 1, max: FM_VOICES, default: 8, step: 1, rate: 'k', ui: 'number', group: 'Voice' },
+    { id: 'voices', name: 'Voices', min: 1, open: true, uiMax: FM_VOICES_KNOB, legacyMax: 12, default: 8, step: 1, rate: 'k', ui: 'number', group: 'Voice' },
   ],
   figures: [
     ...opFigures,
@@ -327,7 +328,7 @@ export class FmSynth {
   constructor(sampleRate) {
     this.sampleRate = sampleRate;
     this.params = new FmParams();
-    this.voices = Array.from({ length: FM_VOICES }, () => new FmVoice(sampleRate));
+    this.voices = Array.from({ length: 12 }, () => new FmVoice(sampleRate)); // as the Wavetable's
     this.voiceCount = 8;
     this.clock = 0;
     this.events = [];
@@ -358,7 +359,10 @@ export class FmSynth {
     const level = values.level;
     if (typeof level === 'number') { p.out = level; p.outA = null; } else if (level?.length > 1) { p.out = level[0]; p.outA = level; } else if (level?.length === 1) { p.out = level[0]; p.outA = null; }
     const voices = num(values.voices);
-    if (Number.isFinite(voices)) this.voiceCount = Math.min(FM_VOICES, Math.max(1, Math.round(voices)));
+    if (Number.isFinite(voices)) this.voiceCount = Math.max(1, Math.round(voices));
+    // The voices are made as the count asks for them - there is no most - so a count past what is made
+    // grows the list, once, at the new high mark.
+    while (this.voices.length < this.voiceCount) this.voices.push(new FmVoice(this.sampleRate));
   }
 
   queueNoteOn(note, velocity, offset = 0) { this.events.push({ at: Math.max(0, offset | 0), kind: 1, note, velocity }); }

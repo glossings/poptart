@@ -14,7 +14,7 @@
 float pd_denormalize(const PdParamSpec& spec, float position) {
     float t = position;
     if (!(t > 0.f)) t = 0.f;        // also catches NaN, which clamps to the bottom of the range
-    if (t > 1.f) t = 1.f;
+    if (t > 1.f && !spec.open) t = 1.f;
     float v;
     switch (spec.curve) {
         case kPdExponential:
@@ -36,7 +36,7 @@ float pd_denormalize(const PdParamSpec& spec, float position) {
     // The step is what makes an enum land on an engine and a semitone knob on a whole step.
     if (spec.step > 0.f) v = std::round(v / spec.step) * spec.step;
     if (v < spec.min) return spec.min;
-    if (v > spec.max) return spec.max;
+    if (v > spec.max && !spec.open) return spec.max;
     return v;
 }
 

@@ -139,17 +139,23 @@ function defineParam(deviceId, spec, seen) {
   const sampleAs = takes === 'sample' ? (spec.sampleAs ?? 'audio') : null;
   if (sampleAs !== null && !['audio', 'wavetable'].includes(sampleAs)) fail(deviceId, `param "${id}" has unknown sampleAs "${sampleAs}"`);
 
-  // An enum's range is its option list; saying it twice is a chance to disagree. One that takes
-  // files may reserve room past its list - `capacity` slots in all - for what gets loaded.
-  let capacity = null;
-  if (options) {
-    capacity = spec.capacity ?? options.length;
-    if (!Number.isInteger(capacity) || capacity < options.length) {
-      fail(deviceId, `param "${id}": capacity must be a whole number no smaller than the option list`);
-    }
-  } else if (spec.capacity !== undefined) {
-    fail(deviceId, `param "${id}": only an enum has a capacity`);
-  }
+  // An enum's range is its option list; saying it twice is a chance to disagree.
+  //
+  // An OPEN control has no top. An enum that takes files or curves is one (what gets loaded joins
+  // its list, as many as are loaded), and so is a count a spec marks `open` (a synth's voices).
+  // What such a control holds is the choice itself - an option's index, a whole number of
+  // voices - and that is what a preset, a `.param()` and the engine carry. Its `max` is only how
+  // far a knob, a MIDI mapping or a 0..1 signal reaches (the option list as shipped; a count's
+  // `uiMax`), never a ceiling: a value past it plays.
+  if (spec.capacity !== undefined) fail(deviceId, `param "${id}": capacity is gone - an enum that takes files has no top`);
+  const open = options ? !!(spec.takes) : !!spec.open;
+  if (spec.open && options && !spec.takes) fail(deviceId, `param "${id}": an enum is open only when it takes files or curves`);
+  if (open && !options && (spec.curve ?? 'lin') !== 'lin') fail(deviceId, `param "${id}": an open count is linear`);
+  // The range a count had when it had a top, for a 0..1 position a song wrote before it was open
+  // (see argToValue).
+  if (open && !options && !(isFiniteNumber(spec.uiMax) && spec.uiMax > spec.min)) fail(deviceId, `param "${id}": an open count needs a uiMax above its min, for the knob's reach`);
+  const legacyMax = spec.legacyMax ?? null;
+  if (legacyMax !== null && !(open && !options && isFiniteNumber(legacyMax))) fail(deviceId, `param "${id}": legacyMax is for an open count`);
   // Headings over runs of an enum's options - `[{ label, from }]`, `from` the index the run starts
   // at - for a list long enough that one column of it is not something to read. The panel's
   // menu draws a heading per group, a column each.
@@ -168,13 +174,13 @@ function defineParam(deviceId, spec, seen) {
     optionGroups = Object.freeze(groups.map((g) => Object.freeze({ label: String(g.label), from: g.from })));
   }
   const min = options ? 0 : spec.min;
-  const max = options ? capacity - 1 : spec.max;
+  const max = options ? Math.max(1, options.length - 1) : (open ? spec.uiMax : spec.max);
   if (!isFiniteNumber(min) || !isFiniteNumber(max)) fail(deviceId, `param "${id}" needs numeric min and max`);
   if (!(max > min)) fail(deviceId, `param "${id}": max must be above min`);
 
   const def = spec.default;
   if (!isFiniteNumber(def)) fail(deviceId, `param "${id}" needs a numeric default`);
-  if (def < min || def > max) fail(deviceId, `param "${id}": default ${def} is outside ${min}..${max}`);
+  if (def < min || (!open && def > max)) fail(deviceId, `param "${id}": default ${def} is outside ${min}..${max}`);
 
   if (curve === 'exp' && min <= 0) {
     fail(deviceId, `param "${id}": an exp curve needs min above zero (it maps a ratio)`);
@@ -240,7 +246,8 @@ function defineParam(deviceId, spec, seen) {
     step,
     options: options ? Object.freeze(options) : null,
     optionGroups,
-    capacity,
+    open,
+    legacyMax,
     takes,
     sampleAs,
     bank,
@@ -452,12 +459,20 @@ function defineDevice(spec) {
   // device that wants phase modulation gives its phase a knob. See signalDestinations().
   if (spec.inputs !== undefined) fail(id, 'inputs are not a thing - an a-rate param is a signal destination already');
 
+  // `key` and `outputs` are the Crossover's (see devices/crossover.mjs): a second input that is
+  // not a sidechain anybody routes - the wiring of a .bands() feeds it - and more than one output,
+  // each `out` channels wide. Every other device has neither.
   const channels = {
     in: spec.channels?.in ?? (kind === 'fx' ? 2 : 0),
     out: spec.channels?.out ?? 2,
+    key: spec.channels?.key ?? 0,
+    outputs: spec.channels?.outputs ?? 1,
   };
   if (!Number.isInteger(channels.in) || channels.in < 0) fail(id, 'channels.in must be a non-negative integer');
   if (!Number.isInteger(channels.out) || channels.out < 1) fail(id, 'channels.out must be a positive integer');
+  if (!Number.isInteger(channels.key) || channels.key < 0) fail(id, 'channels.key must be a non-negative integer');
+  if (!Number.isInteger(channels.outputs) || channels.outputs < 1) fail(id, 'channels.outputs must be a positive integer');
+  if (channels.key && spec.sidechain === true) fail(id, 'a device takes a key or a sidechain, not both');
   if (kind === 'fx' && channels.in === 0) fail(id, 'an fx device needs an input');
 
   // A second audio input, fed by `.audio("other")` on the effect: the carrier for a cross-
@@ -544,7 +559,7 @@ function clampParam(param, value) {
   if (!Number.isFinite(v)) return param.default;
   if (param.step) v = Math.round(v / param.step) * param.step;
   if (v < param.min) return param.min;
-  if (v > param.max) return param.max;
+  if (v > param.max && !param.open) return param.max;
   return v;
 }
 
@@ -558,7 +573,8 @@ function clampParam(param, value) {
  * reads. The knob and the readout go through the same function, so the three can never disagree.
  */
 function denormalize(param, position) {
-  const t = Math.min(1, Math.max(0, Number(position) || 0));
+  // An open control's position runs past 1 for a value past the knob's reach (see defineParam).
+  const t = Math.min(param.open ? Infinity : 1, Math.max(0, Number(position) || 0));
   let v;
   if (param.curve === 'exp') {
     v = param.min * Math.pow(param.max / param.min, t);
@@ -581,7 +597,7 @@ function normalize(param, value) {
   } else {
     t = (v - param.min) / (param.max - param.min);
   }
-  return Math.min(1, Math.max(0, t));
+  return Math.min(param.open ? Infinity : 1, Math.max(0, t));
 }
 
 /** Whether a parameter is a two-state switch, whatever widget it asked for. */
@@ -607,7 +623,7 @@ function argToValue(param, arg) {
       const index = param.options.findIndex((o) => normalizeKey(o) === want);
       if (index >= 0) return index;
       const n = Number(arg);
-      return Number.isInteger(n) && n >= param.min && n <= param.max ? n : null;
+      return Number.isInteger(n) && n >= param.min && (param.open || n <= param.max) ? n : null;
     }
     const n = Number(arg);
     if (!Number.isFinite(n)) return null;
@@ -616,7 +632,20 @@ function argToValue(param, arg) {
   const n = Number(arg);
   if (!Number.isFinite(n)) return null;
   if (isToggle(param)) return n >= 0.5 ? 1 : 0;
+  if (param.open) return openCount(param, n);
   return denormalize(param, n);
+}
+
+/**
+ * What a number means on an open count: the count. A fraction strictly between 0 and 1 is a
+ * position written before the control was open - by hand, or by an older write-back - and means
+ * what it meant then, across the range it had (`legacyMax`), so an old song keeps its voices.
+ */
+function openCount(param, n) {
+  if (param.legacyMax !== null && n > 0 && n < 1) {
+    return clampParam(param, param.min + (param.legacyMax - param.min) * n);
+  }
+  return clampParam(param, n);
 }
 
 /**
@@ -628,6 +657,7 @@ function valueToArg(param, value) {
   const v = clampParam(param, value);
   if (param.options) return JSON.stringify(param.options[Math.round(v)] ?? String(Math.round(v)));
   if (isToggle(param)) return v >= 0.5 ? '1' : '0';
+  if (param.open) return trimNumber(v);
   return trimNumber(normalize(param, v));
 }
 
@@ -699,7 +729,7 @@ function formatValue(param, value, extras = null) {
   const v = clampParam(param, value);
   if (param.options) {
     const i = Math.round(v);
-    return param.options[i] ?? extras?.[i] ?? (i < (param.capacity ?? param.options.length) ? 'empty' : String(v));
+    return param.options[i] ?? extras?.[i] ?? (param.open ? 'empty' : String(v));
   }
   if (param.ui === 'toggle') return v >= 0.5 ? 'on' : 'off';
   // Trailing zeros kept on purpose - stripping them is the same width problem again.
@@ -1723,8 +1753,6 @@ function harmonicsOf(mode, drive, bias, character, table = null) {
 // no use for. They are their own device now (see crush.mjs).
 
 
-/** How many drawn curves the device holds at once, past the ones it ships with. */
-const SHAPE_SLOTS = 8;
 
 /** How long a change of curve takes to crossfade, in seconds: long enough not to click. */
 const CURVE_FADE_SEC = 0.01;
@@ -1747,7 +1775,7 @@ const DISTORT = defineDevice({
   description: 'Waveshaping with fifteen curves or one you draw, oversampled, with a tone control and a dry/wet.',
   channels: { in: 2, out: 2 },
   params: [
-    { id: 'mode', name: 'Mode', default: 0, options: [...SHAPER_MODES], capacity: SHAPER_MODES.length + SHAPE_SLOTS,
+    { id: 'mode', name: 'Mode', default: 0, options: [...SHAPER_MODES],
       takes: 'shape', rate: 'k', group: 'Shape',
       description: 'The curve: one of these, or one you draw. Input across, output up.' },
     { id: 'drive', name: 'Drive', min: 0, max: 48, default: 6, unit: 'dB', curve: 'pow', curveExp: 2, group: 'Shape',
@@ -5308,6 +5336,106 @@ class LpgProcessor {
   }
 }
 
+// ---- src/devices/crossover.mjs -----------------------------------
+// The Crossover: one Linkwitz-Riley split, the DJ isolator's kind. It is what `.bands()` is built
+// from, one per frequency, and it is the ENGINES' device, not the user's: it is in no catalog, no
+// chain and no device list, so `.fx("Crossover")` names nothing, and the track (or, on the desktop,
+// the engine) makes one for each crossover the wiring has. That is also why a band split costs
+// nothing on a track that has none, and adds no delay on one that does.
+//
+// Three outputs, because a band split needs all three:
+//
+//   0  the band below the frequency (fourth-order lowpass)
+//   1  the rest, above it (fourth-order highpass), which the next crossover splits again
+//   2  the KEY through the same pair's all-pass (lowpass plus highpass)
+//
+// The third is what makes the bands sum back flat. A Linkwitz-Riley pair sums to an all-pass, not
+// to a wire, so every band below a crossover has to be turned in phase exactly as that crossover
+// turns the bands above it. The bands summed so far come in as the key, and leave in step with
+// what is above. pattern-core's route.mjs wires the three; nothing else reads them.
+//
+// Translated line for line into native/devices/own/crossover.cc for the desktop, and held to it
+// by native-device-parity.test.mjs.
+
+
+/** The Frequency control's range, in Hz - pattern-core's CROSSOVER_MIN_HZ / CROSSOVER_MAX_HZ. */
+const CROSSOVER_MIN_HZ = 20;
+const CROSSOVER_MAX_HZ = 20000;
+
+const CROSSOVER = defineDevice({
+  id: 'Crossover',
+  kind: 'fx',
+  version: 1,
+  license: 'AGPL-3.0-only',
+  processor: 'poptart-crossover',
+  description: 'The Linkwitz-Riley crossover .bands() splits a signal with.',
+  channels: { in: 2, out: 2, key: 2, outputs: 3 },
+  params: [
+    // Linear, so a frequency written in Hz is one straight line from its position whatever it is
+    // - a number, a pattern or a modulator - and a modulator stays native (see route.mjs).
+    { id: 'frequency', name: 'Frequency', min: CROSSOVER_MIN_HZ, max: CROSSOVER_MAX_HZ, default: 1000, unit: 'Hz',
+      description: 'Where the signal is split.' },
+  ],
+});
+
+class CrossoverProcessor {
+  constructor(sampleRate) {
+    this.sampleRate = sampleRate;
+    // The input's pair and the key's, one per channel. The key's follow the input's, so the
+    // all-pass turns the key exactly as the split turns the input, glide and all.
+    this.main = [new Crossover(sampleRate), new Crossover(sampleRate)];
+    this.key = [new Crossover(sampleRate), new Crossover(sampleRate)];
+    this.parts = new Float64Array(2);
+    this.last = -1;
+  }
+
+  /**
+   * Moves the split to `hz` over `steps` samples. The first setting is taken outright, so a
+   * crossover opened at 250 Hz does not sweep down to it from wherever it was built.
+   */
+  retune(hz, steps) {
+    this.main[0].setFrequency(hz, this.last < 0 ? 0 : steps);
+    this.main[1].follow(this.main[0]);
+    this.key[0].follow(this.main[0]);
+    this.key[1].follow(this.main[0]);
+    this.last = hz;
+  }
+
+  /**
+   * `outputs` is the band below; `more` holds the other two outputs, [rest, all-pass], each a pair
+   * of channels. A frequency a signal moves is followed sample by sample, as the desktop host
+   * plays this device while one is patched; otherwise it glides across the block.
+   */
+  process(inputs, outputs, count, params, key, time, more) {
+    const moving = isMoving(params.frequency);
+    if (!moving) {
+      const hz = at(params.frequency, 0);
+      if (hz !== this.last) this.retune(hz, count);
+    }
+    const restOut = more?.[0] ?? null;
+    const apOut = more?.[1] ?? null;
+    const parts = this.parts;
+    for (let i = 0; i < count; i++) {
+      if (moving) {
+        const hz = at(params.frequency, i);
+        if (hz !== this.last) this.retune(hz, 1);
+      }
+      for (let ch = 0; ch < 2; ch++) {
+        const x = inputs[ch] ?? inputs[0];
+        const k = key?.[ch] ?? key?.[0];
+        this.main[ch].split(x ? x[i] : 0, parts);
+        const low = outputs[ch];
+        if (low) low[i] = parts[0];
+        const high = restOut?.[ch];
+        if (high) high[i] = parts[1];
+        this.key[ch].split(k ? k[i] : 0, parts);
+        const turned = apOut?.[ch];
+        if (turned) turned[i] = parts[0] + parts[1];
+      }
+    }
+  }
+}
+
 // ---- src/devices/recorder.mjs ------------------------------------
 // The recorder tap: what a track's record panel meters, and what a bounce captures.
 //
@@ -5546,6 +5674,9 @@ function renderExpr(fn, inputs, out, x) {
 // A start or a seek while something is already sounding is a crossfade: the old read fades out
 // under the new one over a few milliseconds, which is what makes a seek click-free and a cue
 // press while playing a jump rather than a stop and a start.
+//
+// Every time is when the moment is HEARD. A reader with a `lead` reads that far ahead of it:
+// the keylock's read, which its shifter then delays by the same amount (see aheadBy).
 
 /** The fade a start or a seek comes in over, and the old read goes out under. */
 const SONG_FADE_SEC = 0.005;
@@ -5573,6 +5704,26 @@ class SongReader {
     this.rate = 1;
     this.voices = [];   // { pos (frames), gain, step, halt (rate multiplier) | null, haltStep }
     this.events = [];   // { frame, ...message }, soonest first
+    this.lead = 0;      // frames this reader reads ahead of the time it is heard
+  }
+
+  /**
+   * A copy of this reader, run on `lead` frames past `frameNow` and reading that far ahead from
+   * then on - so that whatever delays it by `lead` is heard exactly in step with this one.
+   */
+  aheadBy(lead, frameNow) {
+    const ahead = new SongReader(this.sampleRate);
+    ahead.planes = this.planes;
+    ahead.frames = this.frames;
+    ahead.rate = this.rate;
+    ahead.voices = this.voices.map((v) => ({ ...v }));
+    ahead.events = this.events.map((e) => ({ ...e }));
+    ahead.lead = this.lead;
+    const l = new Float32Array(128);
+    const r = new Float32Array(128);
+    for (let done = 0; done < lead; done += 128) ahead.process(l, r, Math.min(128, lead - done), frameNow + done);
+    ahead.lead = this.lead + lead;
+    return ahead;
   }
 
   receive(message) {
@@ -5603,8 +5754,11 @@ class SongReader {
     else this.events.splice(at, 0, event);
   }
 
-  /** Applies one timed message, on the sample it was timed for. */
-  apply(event) {
+  /**
+   * Applies one timed message, on the sample it was timed for. `late` is how many frames after
+   * that it arrived: a start or a seek begins that much further on, so it keeps time.
+   */
+  apply(event, late = 0) {
     const sr = this.sampleRate;
     switch (event.kind) {
       case 'start':
@@ -5612,7 +5766,7 @@ class SongReader {
         if (event.kind === 'start' && Number.isFinite(event.rate)) this.rate = event.rate;
         const fade = Math.max(1, Math.round(SONG_FADE_SEC * sr));
         for (const v of this.voices) v.step = -Math.max(v.gain, 1e-6) / fade;
-        this.voices.push({ pos: Number(event.pos) * sr, gain: 0, step: 1 / fade, halt: null, haltStep: 0 });
+        this.voices.push({ pos: Number(event.pos) * sr + (Number.isFinite(late) && late > 0 ? late * this.rate : 0), gain: 0, step: 1 / fade, halt: null, haltStep: 0 });
         break;
       }
       case 'rate':
@@ -5641,10 +5795,14 @@ class SongReader {
   process(outL, outR, frames, frameNow) {
     outL.fill(0);
     outR?.fill(0);
+    const heard = frameNow + this.lead;
     let at = 0;
     while (at < frames) {
-      while (this.events.length && this.events[0].frame <= frameNow + at) this.apply(this.events.shift());
-      const next = this.events.length ? this.events[0].frame - frameNow : Infinity;
+      while (this.events.length && this.events[0].frame <= heard + at) {
+        const event = this.events.shift();
+        this.apply(event, heard + at - event.frame);
+      }
+      const next = this.events.length ? this.events[0].frame - heard : Infinity;
       const until = Math.min(frames, Math.max(at + 1, next));
       if (this.planes && this.voices.length) this.render(outL, outR, at, until);
       at = until;
@@ -5676,6 +5834,330 @@ class SongReader {
     }
     // A voice that has faded out, or has run off the end of the file, is done.
     this.voices = this.voices.filter((v) => v.gain > 0 && v.pos < last);
+  }
+}
+
+// ---- src/devices/grain-cloud.mjs ---------------------------------
+// The granular sample voice (.grain()) on the audio thread: one cloud per event.
+//
+// The browser's twin of the desktop's poptart_sample_grain_* defs, which run GrainBuf off an
+// Impulse. A grain starts on every trigger, sample-accurately, and reads its size, position, pan
+// and pitch as it starts, then keeps them. Each grain is a window over a stretch of the file,
+// read with cubic interpolation and wrapped at the file's ends, as GrainBuf reads it.
+//
+// Pan is GrainBuf's equal-power pan, and a stereo file is two grains off one trigger, one per
+// side, each panned on its own: at 0 the left side is hard left and the right hard right, so the
+// file sounds as recorded, and the pan moves both together until they meet at an edge. A mono
+// grain at center gets back the 3 dB the pan law takes from it.
+//
+// The files are held once per audio thread (GRAIN_FILES), not once per voice: the first voice of a
+// file brings its samples, and every later one names it.
+
+const GRAIN_FILES = new Map(); // id -> { channels: Float32Array[], frames }
+
+/** Takes a file in, or lets one go: `{ id, channels }` or `{ drop: [ids] }`. */
+function grainFiles(message) {
+  if (Array.isArray(message?.drop)) for (const id of message.drop) GRAIN_FILES.delete(id);
+  if (message?.id != null && Array.isArray(message.channels) && message.channels.length) {
+    GRAIN_FILES.set(message.id, { channels: message.channels, frames: message.channels[0].length });
+  }
+}
+
+/** Whether a file is held, for a test to ask. */
+function grainFileHeld(id) {
+  return GRAIN_FILES.has(id);
+}
+
+const GRAIN_HALF_PI = Math.PI / 2;
+const GRAIN_LOG001 = Math.log(0.001);
+/** How fast the cloud's level follows a change in its size or rate: the desktop's lag. */
+const GRAIN_LEVEL_LAG_SEC = 0.05;
+
+/** GrainBuf's pan for two outputs: -1 left, 1 right, equal power. */
+function grainPanGains(pan) {
+  const p = Math.min(1, Math.max(0, pan * 0.5 + 0.5)) * GRAIN_HALF_PI;
+  return [Math.cos(p), Math.sin(p)];
+}
+
+const grainClip = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
+
+/** SuperCollider's cubicinterp: four-point Hermite. */
+function grainCubic(x, a, b, c, d) {
+  const c1 = 0.5 * (c - a);
+  const c2 = a - 2.5 * b + 2 * c - 0.5 * d;
+  const c3 = 0.5 * (d - a) + 1.5 * (b - c);
+  return ((c3 * x + c2) * x + c1) * x + b;
+}
+
+/** One sample of a channel at a fractional frame, wrapping round the file as GrainBuf does. */
+function grainRead(data, frames, phase) {
+  const i = Math.floor(phase);
+  const x = phase - i;
+  const a = i - 1 < 0 ? i - 1 + frames : i - 1;
+  const c = i + 1 >= frames ? i + 1 - frames : i + 1;
+  const d = i + 2 >= frames ? i + 2 - frames : i + 2;
+  return grainCubic(x, data[a], data[i], data[c], data[d]);
+}
+
+class GrainCloud {
+  /**
+   * @param sampleRate the context's rate
+   * @param options    `file` (an id in GRAIN_FILES), `begin` (0..1), `posLive` (read the position
+   *                   control instead), `rate` (signed, in file frames per output frame at no
+   *                   bend), `start`/`end` (context seconds), `table` (a window, or null for
+   *                   GrainBuf's own Hann)
+   */
+  constructor(sampleRate, options = {}) {
+    this.sampleRate = sampleRate;
+    this.file = options.file ?? null;
+    this.begin = Number(options.begin) || 0;
+    this.posLive = !!options.posLive;
+    this.rate = Number.isFinite(options.rate) ? options.rate : 1;
+    this.startFrame = Math.round((Number(options.start) || 0) * sampleRate);
+    this.endFrame = Number.isFinite(options.end) ? Math.round(options.end * sampleRate) : Infinity;
+    this.shape = options.table && options.table.length > 1 ? options.table : null;
+    this.phase = 1;            // the trigger's: a grain on the first sample, as Impulse gives
+    this.level = null;         // the overlap leveling, lagged
+    this.lagCoef = Math.exp(GRAIN_LOG001 / (GRAIN_LEVEL_LAG_SEC * sampleRate));
+    this.grains = [];
+    this.spare = [];
+    this.done = false;
+  }
+
+  /** Ends the cloud at `time`: no grain starts after it, and the voice is over. */
+  end(time) {
+    const frame = Math.round(time * this.sampleRate);
+    if (frame < this.endFrame) this.endFrame = frame;
+  }
+
+  /**
+   * One block. `params` holds `size`, `density`, `pan`, `pos` and `detune` (cents), each one
+   * value or one per frame. Returns false once the cloud is over.
+   */
+  process(outL, outR, frames, frameNow, params) {
+    outL.fill(0);
+    outR.fill(0);
+    if (this.done) return false;
+    const file = GRAIN_FILES.get(this.file);
+    const sr = this.sampleRate;
+    for (let i = 0; i < frames; i++) {
+      const at = frameNow + i;
+      if (at >= this.endFrame) { this.done = true; break; }
+      if (at < this.startFrame) continue;
+      const size = grainClip(grainParam(params.size, i), 0.002, 4);
+      const density = grainClip(grainParam(params.density, i), 0.1, 1000);
+      const target = 1 / Math.sqrt(Math.max(1, size * density * 0.5));
+      this.level = this.level === null ? target : target + (this.level - target) * this.lagCoef;
+      if (this.phase >= 1) {
+        this.phase -= 1;
+        if (file) this._start(file, size, i, params);
+      }
+      this.phase += density / sr;
+      if (!this.grains.length) continue;
+      let l = 0;
+      let r = 0;
+      for (let g = this.grains.length - 1; g >= 0; g--) {
+        const grain = this.grains[g];
+        const amp = this._amp(grain);
+        const ch = file.channels;
+        const s0 = grainRead(ch[0], file.frames, grain.phase) * amp;
+        if (ch.length > 1) {
+          const s1 = grainRead(ch[1], file.frames, grain.phase) * amp;
+          l += s0 * grain.l0 + s1 * grain.l1;
+          r += s0 * grain.r0 + s1 * grain.r1;
+        } else {
+          l += s0 * grain.l0;
+          r += s0 * grain.r0;
+        }
+        grain.phase += grain.step;
+        if (grain.phase >= file.frames) grain.phase -= file.frames;
+        else if (grain.phase < 0) grain.phase += file.frames;
+        if (++grain.n >= grain.count) {
+          this.spare.push(grain);
+          this.grains[g] = this.grains[this.grains.length - 1];
+          this.grains.pop();
+        }
+      }
+      outL[i] = l * this.level;
+      outR[i] = r * this.level;
+    }
+    return !this.done;
+  }
+
+  _start(file, size, i, params) {
+    const sr = this.sampleRate;
+    const pos = grainClip(this.posLive ? grainParam(params.pos, i) : this.begin, 0, 1);
+    const pan = grainClip(grainParam(params.pan, i), -1, 1);
+    const step = this.rate * 2 ** ((grainParam(params.detune, i) || 0) / 1200);
+    let phase = pos * file.frames;
+    if (!Number.isFinite(phase) || !Number.isFinite(step)) return;
+    if (phase >= file.frames) phase -= file.frames;
+    const grain = this.spare.pop() ?? {};
+    grain.phase = phase;
+    grain.step = step;
+    grain.n = 0;
+    grain.count = Math.max(4, Math.floor(size * sr));
+    // GrainBuf's Hann: sin^2 by a recurrence, from its first step.
+    const w = Math.PI / grain.count;
+    grain.b1 = 2 * Math.cos(w);
+    grain.y1 = Math.sin(w);
+    grain.y2 = 0;
+    grain.winInc = this.shape ? this.shape.length / grain.count : 0;
+    if (file.channels.length > 1) {
+      [grain.l0, grain.r0] = grainPanGains(grainClip(2 * pan - 1, -1, 1));
+      [grain.l1, grain.r1] = grainPanGains(grainClip(2 * pan + 1, -1, 1));
+    } else {
+      const [gl, gr] = grainPanGains(pan);
+      grain.l0 = gl * Math.SQRT2;
+      grain.r0 = gr * Math.SQRT2;
+      grain.l1 = 0;
+      grain.r1 = 0;
+    }
+    this.grains.push(grain);
+  }
+
+  /** The grain's window at its current sample, then one step on. */
+  _amp(grain) {
+    if (!this.shape) {
+      const amp = grain.y1 * grain.y1;
+      const y0 = grain.b1 * grain.y1 - grain.y2;
+      grain.y2 = grain.y1;
+      grain.y1 = y0;
+      return amp;
+    }
+    const table = this.shape;
+    const x = grain.n * grain.winInc;
+    const k = Math.floor(x);
+    const a = table[k < table.length ? k : table.length - 1];
+    const b = table[k + 1 < table.length ? k + 1 : 0];
+    return a + (b - a) * (x - k);
+  }
+}
+
+function grainParam(param, i) {
+  if (!param) return 0;
+  return param.length > 1 ? param[i] : param[0];
+}
+
+// The warp voice (.stretch()): the desktop's Warp1 under a pointer. Each output channel lays its
+// own grains, as Warp1 does: 100 ms Hann grains, each up to a tenth longer or shorter at random,
+// the next starting an eighth of the last one's length later, read from where the pointer is
+// and linearly interpolated. The pointer walks the event's window in its own time (or round the
+// loop), so the pitch is the rate's and the length is the stretch's.
+
+const WARP_SIZE_SEC = 0.1;
+const WARP_OVERLAPS = 8;
+const WARP_SIZE_RAND = 0.1;
+
+function warpRead(data, frames, phase) {
+  const i = Math.floor(phase);
+  const x = phase - i;
+  const c = i + 1 >= frames ? i + 1 - frames : i + 1;
+  return data[i] + x * (data[c] - data[i]);
+}
+
+class WarpCloud {
+  /**
+   * @param options `file`, `start`/`end` (context seconds), `rate` (file frames per output frame,
+   *                unsigned), `speed` (signed, for the pointer's direction), `begin`/`end01`,
+   *                `durSec`, and for a loop `loop`, `loopLo`, `loopHi`, `loopEntry`, `pingpong`
+   */
+  constructor(sampleRate, options = {}, random = Math.random) {
+    this.sampleRate = sampleRate;
+    this.o = options;
+    this.file = options.file ?? null;
+    this.rate = Math.abs(Number.isFinite(options.rate) ? options.rate : 1);
+    this.random = random;
+    this.startFrame = Math.round((Number(options.start) || 0) * sampleRate);
+    this.endFrame = Number.isFinite(options.end) ? Math.round(options.end * sampleRate) : Infinity;
+    const span = Math.max(1e-6, (options.end01 ?? 1) - (options.begin ?? 0));
+    this.perSec = (span / Math.max(1e-6, options.durSec ?? 1)) * (options.speed < 0 ? -1 : 1);
+    this.channels = [];         // per output channel: { next, grains }
+    this.spare = [];
+    this.done = false;
+  }
+
+  end(time) {
+    const frame = Math.round(time * this.sampleRate);
+    if (frame < this.endFrame) this.endFrame = frame;
+  }
+
+  /** Where the pointer is `sec` after the start, 0..1 of the file. */
+  pointer(sec) {
+    const o = this.o;
+    const walked = sec * this.perSec;
+    if (!o.loop) {
+      const lo = Math.min(o.begin ?? 0, o.end01 ?? 1);
+      const hi = Math.max(o.begin ?? 0, o.end01 ?? 1);
+      return grainClip((o.speed < 0 ? o.end01 ?? 1 : o.begin ?? 0) + walked, lo, hi);
+    }
+    const lo = o.loopLo ?? 0;
+    const width = Math.max(1e-6, (o.loopHi ?? 1) - lo);
+    const from = (o.loopEntry ?? lo) - lo;
+    if (o.pingpong) {
+      const ph = (((from + walked) % (2 * width)) + 2 * width) % (2 * width);
+      return lo + (width - Math.abs(ph - width));
+    }
+    return lo + ((((from + walked) % width) + width) % width);
+  }
+
+  process(outL, outR, frames, frameNow, params) {
+    outL.fill(0);
+    outR.fill(0);
+    if (this.done) return false;
+    const file = GRAIN_FILES.get(this.file);
+    if (!file) {
+      if (frameNow + frames >= this.endFrame) this.done = true;
+      return !this.done;
+    }
+    const sr = this.sampleRate;
+    const stereo = file.channels.length > 1;
+    const outs = stereo ? [outL, outR] : [outL];
+    while (this.channels.length < outs.length) this.channels.push({ next: 1, grains: [] });
+    const level = 2 / WARP_OVERLAPS;
+    for (let n = 0; n < outs.length; n++) {
+      const out = outs[n];
+      const data = file.channels[n];
+      const ch = this.channels[n];
+      for (let i = 0; i < frames; i++) {
+        const at = frameNow + i;
+        if (at >= this.endFrame) { this.done = true; break; }
+        if (at < this.startFrame) continue;
+        if (--ch.next === 0) {
+          const c = WARP_SIZE_SEC * sr;
+          const count = Math.max(4, Math.floor(c + c * (this.random() * 2 - 1) * WARP_SIZE_RAND));
+          ch.next = Math.max(1, Math.floor(count / WARP_OVERLAPS));
+          const step = this.rate * 2 ** ((grainParam(params.detune, i) || 0) / 1200);
+          let phase = this.pointer((at - this.startFrame) / sr) * file.frames;
+          if (phase >= file.frames) phase -= file.frames;
+          const g = this.spare.pop() ?? {};
+          const w = Math.PI / count;
+          g.phase = phase; g.step = step; g.n = 0; g.count = count;
+          g.b1 = 2 * Math.cos(w); g.y1 = Math.sin(w); g.y2 = 0;
+          ch.grains.push(g);
+        }
+        let s = 0;
+        for (let k = ch.grains.length - 1; k >= 0; k--) {
+          const g = ch.grains[k];
+          const amp = g.y1 * g.y1;
+          const y0 = g.b1 * g.y1 - g.y2;
+          g.y2 = g.y1;
+          g.y1 = y0;
+          s += warpRead(data, file.frames, g.phase) * amp;
+          g.phase += g.step;
+          if (g.phase >= file.frames) g.phase -= file.frames;
+          if (++g.n >= g.count) {
+            this.spare.push(g);
+            ch.grains[k] = ch.grains[ch.grains.length - 1];
+            ch.grains.pop();
+          }
+        }
+        out[i] = s * level;
+      }
+    }
+    // A mono file is heard in both sides, as the desktop's toStereo has it.
+    if (!stereo) outR.set(outL);
+    return !this.done;
   }
 }
 
@@ -5711,7 +6193,8 @@ function parameterDescriptorsFor(descriptor) {
     name: p.id,
     defaultValue: positionOfDefault(p),
     minValue: 0,
-    maxValue: 1,
+    // An open control's position runs past 1 for a value past the knob's reach (see defineParam).
+    maxValue: p.open ? 3.4e38 : 1,
     automationRate: p.rate === 'a' ? 'a-rate' : 'k-rate',
   }));
   if (descriptor.kind === 'synth') params.push({ name: TRACK_BEND_PARAM, defaultValue: 0, automationRate: 'a-rate' });
@@ -5918,8 +6401,9 @@ class EffectProcessor extends AudioWorkletProcessor {
     const out = outputs[0];
     if (!out || out.length === 0) return true;
     const params = realParams(this.descriptor, parameters, this.real, this.scratch);
-    // The clock rides along for the devices on the grid: a ducker, a beat repeat.
-    this.fx.process(input, out, out[0].length, params, inputs[1] ?? null, currentTime);
+    // The clock rides along for the devices on the grid: a ducker, a beat repeat. A device with
+    // more than one output (the Crossover) finds the others after it.
+    this.fx.process(input, out, out[0].length, params, inputs[1] ?? null, currentTime, outputs.length > 1 ? outputs.slice(1) : null);
     this.reporter.tick(parameters, () => this.fx.report?.());
     // A quiet input is a rest, not a reason to stop: see the same note on the synth.
     return true;
@@ -5932,7 +6416,7 @@ const EFFECTS = [
   [EQ, EqProcessor], [CHORUS, ChorusProcessor], [FLANGER, FlangerProcessor], [PHASER, PhaserProcessor],
   [DUCKER, DuckerProcessor], [OVERDRIVE, OverdriveProcessor], [MULTIBAND, MultibandProcessor],
   [STUTTER, StutterProcessor], [GRAINECHO, GrainEchoProcessor], [FREQSHIFT, FreqShiftProcessor],
-  [VOICE, VoiceProcessor], [LPG, LpgProcessor],
+  [VOICE, VoiceProcessor], [LPG, LpgProcessor], [CROSSOVER, CrossoverProcessor],
 ];
 
 for (const [descriptor, Impl] of EFFECTS) {
@@ -5995,22 +6479,68 @@ registerProcessor('poptart-recorder', class extends AudioWorkletProcessor {
 });
 
 // The song player (see devices/song-reader.mjs): a DJ deck's decoded song under a playhead. Not an
-// effect either, and here for the same reason the recorder is.
+// effect either, and here for the same reason the recorder is. Output 0 is the song as heard;
+// output 1, only while keylock wants it, is the same song read a lead ahead, for the shifter.
 registerProcessor('poptart-song', class extends AudioWorkletProcessor {
   constructor(options) {
     super(options);
     this.alive = true;
     this.reader = new SongReader(sampleRate, (m) => this.port.postMessage(m));
+    this.ahead = null;
+    this.wantAhead = null;    // frames of lead to start the ahead read with, or 0 to end it
     this.port.onmessage = (event) => {
-      if (isDispose(event.data)) { this.alive = false; return; }
-      this.reader.receive(event.data);
+      const m = event.data;
+      if (isDispose(m)) { this.alive = false; return; }
+      if (m?.kind === 'ahead') { this.wantAhead = m.on ? Math.max(1, Math.round(m.lead * sampleRate)) : 0; return; }
+      this.reader.receive(m);
+      if (m?.kind !== 'query') this.ahead?.receive(m);
     };
   }
 
   process(_inputs, outputs) {
     if (!this.alive) return false;
+    if (this.wantAhead != null) {
+      if (this.wantAhead > 0 && !this.ahead) this.ahead = this.reader.aheadBy(this.wantAhead, currentFrame);
+      else if (this.wantAhead === 0) this.ahead = null;
+      this.wantAhead = null;
+    }
     const out = outputs[0] ?? [];
     if (out[0]) this.reader.process(out[0], out[1] ?? null, out[0].length, currentFrame);
+    const keyed = outputs[1] ?? [];
+    if (this.ahead && keyed[0]) this.ahead.process(keyed[0], keyed[1] ?? null, keyed[0].length, currentFrame);
     return true;
+  }
+});
+
+// The granular sample voices (see devices/grain-cloud.mjs): one per .grain() or .stretch()
+// event. The first voice of a file brings its samples in its options; later ones name it.
+registerProcessor('poptart-grains', class extends AudioWorkletProcessor {
+  static get parameterDescriptors() {
+    return ['size', 'density', 'pan', 'pos', 'detune'].map((name) => ({ name, defaultValue: 0, automationRate: 'a-rate' }));
+  }
+
+  constructor(options) {
+    super(options);
+    const o = options?.processorOptions ?? {};
+    grainFiles(o);
+    this.cloud = o.mode === 'warp' ? new WarpCloud(sampleRate, o) : new GrainCloud(sampleRate, o);
+    this.ended = false;
+    this.port.onmessage = (event) => {
+      const m = event.data;
+      if (isDispose(m)) { this.cloud.done = true; return; }
+      if (m?.kind === 'end') this.cloud.end(m.time);
+      grainFiles(m);
+    };
+  }
+
+  process(_inputs, outputs, parameters) {
+    const out = outputs[0] ?? [];
+    if (!out[0]) return !this.cloud.done;
+    const live = this.cloud.process(out[0], out[1] ?? new Float32Array(out[0].length), out[0].length, currentFrame, parameters);
+    if (!live && !this.ended) {
+      this.ended = true;
+      this.port.postMessage({ kind: 'ended' });
+    }
+    return live;
   }
 });

@@ -22,8 +22,8 @@
 
         <h2 id="chain">The chain</h2>
         <p>
-          <code>.synth("…")</code> loads an instrument; each <code>.fx("…")</code> adds an effect after it.
-          A chain holds up to twenty effects.
+          <code>.synth("…")</code> loads an instrument; each <code>.fx("…")</code> adds an effect after it,
+          as many as you like.
         </p>
         <pre data-run><code>lead: note("c4 e4 g4 b4")
   .synth("Wavetable")
@@ -108,6 +108,41 @@ pulse: note("e1*8").synth("Braids").param("Shape", "'Saw Sub'")
         <p>
           <code>.wet(v)</code> after a device blends it with what goes into it: 0 bypasses, 1 (the default) is
           fully processed. It takes a signal, so an effect can fade in over a song.
+        </p>
+
+        <h2 id="branches">Parallel branches</h2>
+        <p>
+          <code>.split()</code> runs the chain in parallel and sums the branches; anything after it
+          processes the sum. Each branch is a function that builds a chain on the signal it is handed,
+          <code>(x) =&gt; x</code> is the signal as it arrives, and a branch's <code>.postgain()</code> and
+          <code>.pan()</code> are its own level and place in the sum. Every device in every branch is on
+          the same track, so notes routed in with <code>.midi()</code> strike a gate in any of them, and
+          <code>.param()</code> reaches the device just before it, branch or not. Here two low-pass gates,
+          one short and one long, sit either side of the dry synth:
+        </p>
+        <pre data-run><code>lead: note("c2 eb2 g2 &lt;bb2 f2&gt;").synth("Wavetable")
+  .split(
+    (x) =&gt; x.postgain(0.3),
+    (b) =&gt; b.fx("LPG").midi("lead").param("Decay", 0.08).pan(-0.6),
+    (b) =&gt; b.fx("LPG").midi("lead").param("Decay", 0.6).pan(0.6).postgain(0.7),
+  )
+  .fx("Reverb").param("Mix", 0.25).postgain(0.6)</code></pre>
+        <p>
+          <code>.bands([frequencies], ...)</code> splits by frequency instead, one function per band from the
+          lowest up. The crossovers are Linkwitz-Riley, so bands left alone add back up to the input, and
+          each one is a control: a number, a pattern or a signal, swept here. The devices in the bands
+          number as they would in a <code>.split()</code>: the crossovers are not effects of the chain.
+        </p>
+        <pre data-run><code>drums: s("pt_kit:0*4, ~ pt_kit:4 ~ pt_kit:4")
+  .bands([sine(0.1).range(150, 400), 2500],
+    (low) =&gt; low,
+    (mid) =&gt; mid.fx("Distort").param("Drive", 0.6),
+    (high) =&gt; high.postgain(0.8),
+  )
+  .postgain(0.5)</code></pre>
+        <p>
+          Branches nest, and a <code>.split()</code> can sit inside a band, or a <code>.bands()</code> inside
+          a branch.
         </p>
 
         <h2 id="presets">Presets</h2>

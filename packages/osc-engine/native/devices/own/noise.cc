@@ -2,8 +2,8 @@
 //
 // Translated from web-engine/src/devices/noise.mjs, which says what each color is and why. The
 // same state, the same arithmetic in the same order, in double; the parity test holds the two
-// together. The one difference is the ABI's: a control a signal moves is read per sample in the
-// browser and per block here (see own/pd-own.h).
+// together. A control a signal moves is read per sample where the browser reads it per sample
+// (see own/pd-own.h).
 //
 // The chaotic map is the one place where the order of two multiplications decides the sound -
 // it is chaotic, so one bit of rounding becomes a different sequence within a few hundred steps
@@ -19,7 +19,8 @@ namespace pd_Noise {
 namespace ids = pd_ids::Noise;
 using namespace pd_own;
 
-constexpr int kMaxVoices = 16;
+/** The voices a fresh device has room for: the old most, and no most (see the Wavetable's kFirstVoices). */
+constexpr int kFirstVoices = 16;
 constexpr int kColors = 10;
 enum { kWhite = 0, kPink, kBrown, kBlue, kViolet, kVelvet, kCrackle, kDigital, kStepped, kChaos };
 
@@ -206,6 +207,9 @@ struct Params {
   double ring = 0, brownK = 0;
 };
 
+/** The device's base, which is where a voice reads a moving control from. */
+using Base = pd_own::Device<ids::kCount, 2>;
+
 struct Voice {
   double sampleRate = 48000.0;
   Stream a, b;
@@ -255,31 +259,38 @@ struct Voice {
     env.gateOff();
   }
 
-  void process(float* outL, float* outR, int count, const Params& p) {
+  /** Renders `count` samples, reading the moving controls per sample as noise.mjs does. */
+  void process(float* outL, float* outR, int count, const Params& p, const Base& c) {
     const double sr = sampleRate;
     env.setStages(p.attack, p.decay, p.sustain, p.release, p.acurve, p.dcurve, p.rcurve);
-    const double clock = std::fmin(0.5, std::fmax(0.1 / sr, midiToHz(note + p.pitch + p.bend) / sr));
+    const bool pitchMoving = c.isMoving(ids::pitch);
+    double clock = std::fmin(0.5, std::fmax(0.1 / sr, midiToHz(note + c.ctl(ids::pitch, 0) + p.bend) / sr));
     const double dcR = 1 - (2 * kPi * kDcHz) / sr;
-    const double character = clamp(p.character, 0.0, 1.0);
-    const double density = (20 * std::pow(1000.0, character)) / sr;
-    const double width = clamp(p.width, 0.0, 1.0);
-    const double norm = 1 / std::sqrt(1 + width * width);
-    const bool filtered = p.tone < kToneTop - 1;
-    const double toneK = filtered ? 1 - std::exp((-2 * kPi * p.tone) / sr) : 1;
+    double lastTone = -1;
+    double toneK = 1;
     for (int i = 0; i < count; ++i) {
+      if (pitchMoving && i > 0) {
+        clock = std::fmin(0.5, std::fmax(0.1 / sr, midiToHz(note + c.ctl(ids::pitch, i) + p.bend) / sr));
+      }
+      const double character = std::fmin(1.0, std::fmax(0.0, c.ctl(ids::character, i)));
+      const double density = (20 * std::pow(1000.0, character)) / sr;
       const double x = a.sample(p.color, clock, density, character, p.ring, p.brownK);
       const double y = b.sample(p.color, clock, density, character, p.ring, p.brownK);
+      const double width = std::fmin(1.0, std::fmax(0.0, c.ctl(ids::width, i)));
+      const double norm = 1 / std::sqrt(1 + width * width);
       double l = (x + width * y) * norm;
       double r = (x - width * y) * norm;
       const double dl = l - dcInL + dcR * dcOutL;
       dcInL = l; dcOutL = dl; l = dl;
       const double dr = r - dcInR + dcR * dcOutR;
       dcInR = r; dcOutR = dr; r = dr;
-      if (filtered) {
+      const double tone = c.ctl(ids::tone, i);
+      if (tone < kToneTop - 1) {
+        if (tone != lastTone) { toneK = 1 - std::exp((-2 * kPi * tone) / sr); lastTone = tone; }
         l1 += toneK * (l - l1); l2 += toneK * (l1 - l2); l = l2;
         r1 += toneK * (r - r1); r2 += toneK * (r1 - r2); r = r2;
       }
-      const double gain = env.next() * velocity * p.level;
+      const double gain = env.next() * velocity * c.ctl(ids::level, i);
       outL[i] = static_cast<float>(outL[i] + l * gain);
       outR[i] = static_cast<float>(outR[i] + r * gain);
     }
@@ -291,10 +302,10 @@ struct Voice {
   }
 };
 
-struct Device : pd_own::Device<ids::kCount, 2> {
+struct Device : Base {
   Scales scales;
   Params params;
-  Voice voices[kMaxVoices];
+  Pool<Voice> voices;
   int voiceCount = 8;
   long long clock = 0;
   unsigned int seed = 1;
@@ -305,6 +316,7 @@ struct Device : pd_own::Device<ids::kCount, 2> {
   void pd_init(double sr) {
     sampleRate = sr;
     scales.init(sr);
+    voices.reserve(kFirstVoices, [](Voice&) {});
     for (auto& v : voices) v.init(sr, &scales);
     params = Params();
     params.ring = std::exp(-1 / (kCrackleRing * sr));
@@ -348,8 +360,21 @@ struct Device : pd_own::Device<ids::kCount, 2> {
     v.dcurve = p[ids::env_dcurve];
     v.rcurve = p[ids::env_rcurve];
     v.level = p[ids::level];
-    voiceCount = static_cast<int>(clamp(jsRound(p[ids::voices]), 1.0, kMaxVoices));
+    // As many as asked for, room grown through the work round (see the Wavetable's).
+    const double want = jsRound(p[ids::voices]);
+    const int asked = want < 1 ? 1 : (want > 1e6 ? 1000000 : static_cast<int>(want));
+    voices.ask(asked);
+    voiceCount = asked < voices.size() ? asked : voices.size();
   }
+
+  bool pd_work_wanted() { return voices.wanted(); }
+  void pd_work() {
+    const double sr = sampleRate;
+    Scales* sc = &scales;
+    voices.build([sr, sc](Voice& v) { v.init(sr, sc); });
+  }
+  void pd_work_done() { voices.install(); }
+  void pd_work_release() { voices.release(); }
 
   Voice* allocate(double note) {
     Voice* free = nullptr;
@@ -397,7 +422,7 @@ struct Device : pd_own::Device<ids::kCount, 2> {
     float* outr = outR();
     std::memset(outl, 0, sizeof(float) * static_cast<size_t>(frames));
     std::memset(outr, 0, sizeof(float) * static_cast<size_t>(frames));
-    for (auto& v : voices) if (v.active()) v.process(outl, outr, frames, params);
+    for (auto& v : voices) if (v.active()) v.process(outl, outr, frames, params, *this);
   }
 };
 

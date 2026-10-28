@@ -25,11 +25,12 @@
 //    own note grid (withNoteGate), which is what the engine gates the native one from too.
 
 import { defScopeOf, withDefDeck } from './rolls.mjs';
-import { sampleBound, CHANNEL_DEFAULTS, GRAIN_CHANNELS, MAX_FX_SLOTS,DEFAULT_BEND_RANGE, bendRangeWarning, LOOP_MODES, loopModeAt, channelAt, soundingEnd, timeShift, grooveVelScale, endEdgeStep, warnPattern, lfoRateHz, lfoPhaseCount, lfoShapes, resolvePreset, paramExpr, lfoRateChanges, withNoteGate, withEventSpan, noteGateFromGrid } from './signal.mjs';
+import { sampleBound, CHANNEL_DEFAULTS, channelDefault, GRAIN_CHANNELS, DEFAULT_BEND_RANGE, bendRangeWarning, LOOP_MODES, loopModeAt, channelAt, soundingEnd, timeShift, grooveVelScale, endEdgeStep, warnPattern, lfoRateHz, lfoPhaseCount, lfoShapes, resolvePreset, paramExpr, lfoRateChanges, withNoteGate, withEventSpan, noteGateFromGrid } from './signal.mjs';
 import { scalePitchClasses, parseScaleName, degreeToMidi, quantizeToScale } from './notes.mjs';
 import { songSteps, stepsUnderShift, withClipShift } from './arrange.mjs';
 import { sliceSetIsEmpty } from './slices.mjs';
 import { resolveInputChannels } from './audio-inputs.mjs';
+import { routePlan, routeLatencies, routeControlDefault } from './route.mjs';
 
 // Resolves an input()'s channel request against the booted device's live layout (see
 // audio-inputs.mjs). Done here, per eval, rather than when input() is called: the layout changes
@@ -208,8 +209,13 @@ function lfoAnchored(ir) {
   return !(ir.shape === 'custom' && ir.mode != null && ir.mode !== 'free');
 }
 
-// Chain size, mirroring the engine (slot 0 = instrument, 1..MAX_CHAIN_SLOTS-1 = effects).
-const MAX_CHAIN_SLOTS = MAX_FX_SLOTS + 1;
+// How many effect slots a fresh Scheduler empties past its chain's end when the engine cannot say
+// how many it has (see effectSlots below): as far as the old fixed chains reached.
+const LEGACY_FX_SLOTS = 20;
+
+// What a channel control reads as when nothing sets it, route controls (branch levels and pans,
+// crossover frequencies - see route.mjs) included.
+const channelNeutral = (name) => channelDefault(name) ?? routeControlDefault(name) ?? 0;
 
 // ---------------------------------------------------------------------------------------------
 // Sig#log() - one console line per event a flagged pattern fires.
@@ -784,12 +790,12 @@ export class Scheduler {
       // it doesn't (a block with no .pan(), or a lease that expired without an eval behind it)
       // would leave the track pinned at the held value forever. Put it back by hand.
       if (!(name in (this.pattern?.channel ?? {}))) {
-        this.engine.setParam(this.trackId, CHANNEL_SLOT, name, CHANNEL_DEFAULTS[name] ?? 0,
+        this.engine.setParam(this.trackId, CHANNEL_SLOT, name, channelNeutral(name),
           this.engine.getTime() + DEFAULT_LOOKAHEAD_SEC);
       }
       return null;
     }
-    if (!(name in CHANNEL_DEFAULTS)) return `"${name}" is not a channel control`;
+    if (channelDefault(name) === undefined) return `"${name}" is not a channel control`;
     const sig = this.pattern?.channel?.[name];
     if (sig && (sig.lfoIR || sig.envIR || sig.ccIR)) {
       return `${name} is driven by a native modulator (env/lfo/midicc/osc) - edit the code instead`;
@@ -989,7 +995,7 @@ export class Scheduler {
    */
   channelNow(name) {
     const sig = this.pattern ? this._channelSigs(this.pattern)[name] : null;
-    if (!sig) return CHANNEL_DEFAULTS[name] ?? null;
+    if (!sig) return channelDefault(name) ?? null;
     const t = this.engine.getTime();
     const cycle = this.transport.cycleAt(t);
     let v;
@@ -1006,7 +1012,43 @@ export class Scheduler {
   // stream is polled, runs natively and snaps back on re-eval exactly as a control set by name.
   _channelSigs(sig) {
     const pos = grainPosSig(sig);
-    return pos ? { ...sig.channel, grainpos: pos } : sig.channel;
+    const route = this._routing(sig);
+    if (!pos && !route) return sig.channel;
+    return { ...sig.channel, ...(pos ? { grainpos: pos } : {}), ...(route?.controls ?? {}) };
+  }
+
+  // The wiring a .split()/.bands() tree asks for (see route.mjs), worked out once per pattern: the
+  // plan the engine is sent, and the branch levels, pans and crossover frequencies it adds as
+  // channel controls - which is what lets each of them take anything a control takes.
+  _routing(sig) {
+    if (!sig?.fxRoute) return null;
+    if (this._routingFor !== sig) {
+      this._routingFor = sig;
+      this._routingCache = routePlan(sig);
+    }
+    return this._routingCache;
+  }
+
+  // Hands the engine the wiring, when it changed. Null is sent too - a chain that lost its last
+  // .split() goes back to the plain line - and always by a fresh Scheduler, since the engine track
+  // outlives the one that wired it. An engine that cannot branch plays the chain as a line and the
+  // console says so once: every device still sounds, in series.
+  _sendRouting(sig) {
+    const plan = this._routing(sig)?.plan ?? null;
+    const count = sig.fxChain.length;
+    if (typeof this.engine.setRouting !== 'function') {
+      if (plan && !this._warnedNoRouting) {
+        this._warnedNoRouting = true;
+        warnPattern(`[scheduler] this engine cannot run .split()/.bands() branches, so ${this.label ?? this.trackId} plays its effects one after another.`);
+      }
+      return;
+    }
+    // The chain's length rides along: an engine with a node per effect lays out the plain line by
+    // it when there is no plan.
+    const json = JSON.stringify([plan, count]);
+    if (json === this._sentRouting) return;
+    this._sentRouting = json;
+    this.engine.setRouting(this.trackId, plan, count);
   }
 
   // Records a state as already live in the plugin, without sending it. Auto-pin captures a state
@@ -1099,8 +1141,10 @@ export class Scheduler {
     if (sig.instrument) {
       this.engine.loadInstrument(this.trackId, sig.instrument);
     }
-    // Effects past the engine's last slot were already warned about in .fx() and have nowhere to go.
-    sig.fxChain.slice(0, MAX_FX_SLOTS).forEach((pluginId, i) => this.engine.loadEffect(this.trackId, pluginId, i + 1));
+    // The wiring first: an engine that builds a node per effect lays the chain out by it, and
+    // every effect below lands where that layout puts it.
+    this._sendRouting(sig);
+    sig.fxChain.forEach((pluginId, i) => this.engine.loadEffect(this.trackId, pluginId, i + 1));
 
     // An .fx(...) removed from the code must actually stop sounding (and release its plugin):
     // empty every slot past the new chain's end. All trailing slots are cleared, not a diff
@@ -1110,7 +1154,10 @@ export class Scheduler {
     // applied-state cache for a vacated slot goes too: the closed plugin lost its state, so a
     // re-added `{ state }` must be re-sent even if the string is unchanged.
     if (typeof this.engine.unloadEffect === 'function') {
-      for (let slot = sig.fxChain.length + 1; slot < MAX_CHAIN_SLOTS; slot++) {
+      // As far as the engine has slots - a chain has no length limit - or, from an engine that
+      // cannot say, as far as the old fixed chains went.
+      const held = typeof this.engine.effectSlots === 'function' ? Number(this.engine.effectSlots(this.trackId)) || 0 : LEGACY_FX_SLOTS;
+      for (let slot = sig.fxChain.length + 1; slot <= held; slot++) {
         this.engine.unloadEffect(this.trackId, slot);
         this.forgetAppliedState(slot);
       }
@@ -1190,7 +1237,7 @@ export class Scheduler {
     const speaks = (name) => name in channel && this._withNoteGate(() => readAtReset(name), resetCycle) != null;
     for (const name of this._prevChannelNames) {
       if (!speaks(name)) {
-        this.engine.setParam(this.trackId, CHANNEL_SLOT, name, CHANNEL_DEFAULTS[name] ?? 0, resetSec);
+        this.engine.setParam(this.trackId, CHANNEL_SLOT, name, channelNeutral(name), resetSec);
       }
     }
     this._prevChannelNames = Object.keys(channel);
@@ -1628,6 +1675,10 @@ export class Scheduler {
     if (typeof this.engine.slotLatencies !== 'function') return NO_COMPENSATION;
     const per = this.engine.slotLatencies(this.trackId);
     if (!Array.isArray(per) || !per.some((s) => s > 0)) return NO_COMPENSATION;
+    // Branches: the longest way from each slot to the output, since the sum is heard when its
+    // latest term arrives (see route.mjs).
+    const plan = this._routing(this.pattern)?.plan;
+    if (plan) return routeLatencies(plan, per);
     const out = new Array(per.length + 1).fill(0);
     for (let i = per.length - 1; i >= 0; i--) out[i] = out[i + 1] + (Number(per[i]) > 0 ? Number(per[i]) : 0);
     return out;

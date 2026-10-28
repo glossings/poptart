@@ -99,17 +99,20 @@ test('an authored slice set plays its marks for the file it names', () => {
   assert.ok(near(src.started.offset, 2) && near(src.started.duration, 1));
 });
 
-test('a stretch plays through the warp voice: grains along a pointer, at the rate', () => {
-  const { engine, sources } = rig();
-  const before = sources().length;
+test('a stretch plays through the warp voice: one worklet, a pointer over the window, at the rate', () => {
+  const { engine } = rig();
+  const before = engine.ctx.created.length;
   const info = engine.playSample('t1', 'kit', { stretch: 2, begin: 0, end: 0.25 }, 0, 10);
   assert.equal(info.stretch, 2);
-  const grains = sources().slice(before);
-  // The first lay covers 100 ms: eight overlaps of a 100 ms grain is 80 a second - eight, or
-  // nine where the running sum lands a hair inside the horizon.
-  assert.ok(grains.length === 8 || grains.length === 9, `${grains.length} grains`);
-  assert.ok(grains.every((g) => g.playbackRate.value === 1), 'the pitch is the rate');
-  assert.ok(grains[7].started.offset > grains[0].started.offset - 0.01, 'the pointer walks forward');
+  const made = engine.ctx.created.slice(before);
+  assert.equal(made.filter((n) => n.kind === 'bufferSource').length, 0, 'no node per grain');
+  const voices = made.filter((n) => n.processorName === 'poptart-grains');
+  assert.equal(voices.length, 1);
+  const o = voices[0].options.processorOptions;
+  assert.equal(o.mode, 'warp');
+  assert.ok(Math.abs(o.rate - 4000 / 48000) < 1e-12, 'the pitch is the rate, in the file\'s own frames');
+  assert.deepEqual([o.begin, o.end01], [0, 0.25]);
+  assert.ok(Math.abs(o.durSec - info.durSec) < 1e-9, 'the pointer takes the event\'s own time');
 });
 
 test('a recording cut as a held note loops its sustain section until the note ends', () => {

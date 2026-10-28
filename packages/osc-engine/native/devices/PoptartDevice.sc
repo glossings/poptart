@@ -1,3 +1,17 @@
+// The mixer's band analyzer (native/devices/PoptartSpectrum.cpp): the browser's measurement - a
+// 4096-point transform of left, right, mid and side, each band the mean bin magnitude between its
+// neighbors' geometric midpoints - sent `rate` times a second as '/poptart/mixSpec', laid out
+// [l, r, mid, side] per band. No outputs.
+PoptartSpectrum : UGen {
+    *ar { |in, rate = 20, freqs|
+        var sig = in.asArray;
+        this.multiNewList([\audio, sig[0], sig[1] ? sig[0], rate] ++ freqs.asArray);
+        ^0.0
+    }
+    numOutputs { ^0 }
+    writeOutputSpecs {}
+}
+
 // Class side of the PoptartDevice UGen (native/devices/PoptartDevice.cpp) - poptart's own
 // synths and effects, the ones the browser build plays as compiled modules, running in scsynth.
 // The engine copies this file and the built .scx into the user's SuperCollider Extensions folder
@@ -153,9 +167,8 @@ PoptartDeviceController {
         synth = argSynth;
         id = argId;
         synthIndex = index;
-        // One entry per control, with room for the widest device (the FM synth's 148) and the
-        // UGen's own limit (kMaxParams in PoptartDevice.cpp) above that.
-        positions = Array.fill(192, 0);
+        // One entry per control of the device opened (see open): none until one is.
+        positions = [];
         midi = PoptartDeviceMIDIProxy(this);
     }
 
@@ -176,8 +189,7 @@ PoptartDeviceController {
         // that is where this record starts: a control nobody has touched is AT its default, and
         // `get` - what .hold()/.release() put back - has to say so. Position 0 is the bottom of
         // a control's range, not its rest.
-        positions = Array.fill(positions.size, 0);
-        (params ? []).do { |p, i| if (i < positions.size) { positions[i] = p[\default] ? 0 } };
+        positions = (params ? []).collect { |p| p[\default] ? 0 };
         resp = OSCFunc({ |msg|
             if (answered.not) {
                 answered = true;

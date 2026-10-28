@@ -31,8 +31,6 @@ const SR = 48000;
 const LANG_PORT = '57295'; // its own, like every sclang harness: only ten are tried from 57120 up
 const POSITIONS = [0, -1, 1, -0.5, 0.25];
 // Bus plan: outputs 0..9 (a pair per position), inputs 10-11, private from 12.
-const TRASH = 60;
-const SILENT = 62;
 
 function extractBuildTrackDef() {
   const src = fs.readFileSync(SCD, 'utf8');
@@ -48,16 +46,15 @@ test('the strip is unity at center and constant-power everywhere', (t) => {
   try {
     const outPath = path.join(dir, 'render.wav');
     const scsynth = path.join(path.dirname(resolveSclangPath()), 'scsynth');
-    const parked = ['scSend', 'recOut', 'mixOut', 'busOut1', 'busOut2', 'busOut3', 'busOut4'].flatMap((k) => [k, TRASH]);
-    const aux = Array.from({ length: 20 }, (_, i) => [`scBus${i + 1}`, SILENT]).flat();
     const strips = POSITIONS.map((pos, i) => {
       const inBus = 20 + i * 2;
-      const args = ['inBus', inBus, 'out', i + 1, 'pan', pos, 'bendOut', 0, 'grainOut', 4, ...parked, ...aux];
+      // The strip reads the bus its chain ends on - here the DC, straight in.
+      const args = ['in', inBus, 'post', 1000000, 'ctl', 8 + i * 6, 'out', i + 1, 'pairs', POSITIONS.length, 'pan', pos];
       return `    [0.0, ["/s_new", "poptart_dc", ${1000 + i}, 1, 0, "out", ${inBus}]],
     [0.0, ${JSON.stringify(['/s_new', 'poptart_track_t', 2000 + i, 1, 0, ...args])}],`;
     }).join('\n');
     const script = `(
-var playChannels = ${POSITIONS.length * 2}, server, maxSlots = 21, trackDefName, bendPollHz = 100, cueOffset, deckMeterBus, buildTrackDef, djIsolator;
+var playChannels = ${POSITIONS.length * 2}, server, trackDefName, bendPollHz = 100, cueOffset, deckMeterBus, buildTrackDef, djIsolator, routeNowhere = 1000000;
 var stripDef, dcDef;
 ${fs.existsSync(scsynth) ? `Score.program = ${JSON.stringify(scsynth)}.quote;` : ''}
 server = (options: (numOutputBusChannels: ${POSITIONS.length * 2}));
@@ -67,8 +64,10 @@ ${extractBuildTrackDef()}
 stripDef = buildTrackDef.(\\t);
 dcDef = SynthDef(\\poptart_dc, { |out| Out.ar(out, DC.ar(1) ! 2) });
 ("DEF-OK<" ++ stripDef.name ++ ">").postln;
+// Too big for one OSC message, so it goes by file - as SynthDef.add sends it to the engine's server.
+stripDef.writeDefFile(${JSON.stringify(dir)});
 Score.recordNRT([
-    [0.0, ["/d_recv", stripDef.asBytes]],
+    [0.0, ["/d_load", ${JSON.stringify(dir)} +/+ "poptart_track_t.scsyndef"]],
     [0.0, ["/d_recv", dcDef.asBytes]],
 ${strips}
     [0.3, ["/c_set", 0, 0]]

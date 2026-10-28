@@ -68,8 +68,10 @@ function run() {
   const q = (s) => JSON.stringify(s);
   const script = `(
 var exprLeaf, busIndexOf, paramTarget, reassertAudioDrivers, awaitTarget;
+var channelTarget = { |track, name| [track[\\synth], name.asSymbol] }; // every channel control on the one synth here - see channelTarget in sc/poptart.scd
 var exprDefs, exprKey, exprsOf, exprFeedsOf, exprFeed, exprFeedArgs, exprShape, exprConsts, exprInputs;
 var exprSynthDef, installExpr, clearExpr, exprQueue, reassertExprs, exprRun;
+var exprDefUse = Dictionary.new, exprDefSerial = 0, exprDefDone, freeDefsLater; // see exprDefDone in sc/poptart.scd
 var server, tracks, awaitLoaded, resolveParamIndex, channelDefault, nodeOwns;
 var wireParamRoute, unwireParamRoute, dropRamp, freeModulatorLater;
 var wired = List.new, unwired = List.new, freed = List.new, native, plugin, t1, t2, say, e, first, order;
@@ -167,7 +169,8 @@ test('expressions install, update in place, rebuild on a new shape, feed their l
   assert.strictEqual(tag(out, 'WIRED'), "[['t1', 0, \"~0~level\", \"src\"]]");
   assert.strictEqual(tag(out, 'DEFS'), '1');
   assert.strictEqual(tag(out, 'NUMBERS'), '[true, 1, 0, 0]');
-  assert.strictEqual(tag(out, 'SHAPE'), "[false, 2, true, [['t1', 0, \"~0~level\"]]]");
+  // The first shape's def is freed with its last expression, so only the new one is held.
+  assert.strictEqual(tag(out, 'SHAPE'), "[false, 1, true, [['t1', 0, \"~0~level\"]]]");
   assert.strictEqual(tag(out, 'FEED'), "['k1', 77, 'a1', 88]");
   assert.strictEqual(tag(out, 'CLEARED'), "[['unmapAudio', 'get', 'set'], true, 0]");
   assert.strictEqual(tag(out, 'PLUGIN'), "['plugin', ['get', 'map']]");

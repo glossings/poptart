@@ -69,9 +69,6 @@ struct Device : pd_own::Device<ids::kCount> {
         lastRelease[b] = release;
       }
     }
-    const double amount = p[ids::amount];
-    const double mix = p[ids::mix];
-    const double outGain = dbToGain(p[ids::output]);
     const float* inl = inL();
     const float* inr = inR();
     float* outl = outL();
@@ -94,15 +91,16 @@ struct Device : pd_own::Device<ids::kCount> {
       bands[1][1] = split[1][0];
       bands[1][2] = split[1][1];
 
+      const double amount = ctl(ids::amount, i);
       double sumL = 0;
       double sumR = 0;
       for (int b = 0; b < kBands; ++b) {
         const double key = std::fmax(std::fabs(bands[0][b]), std::fabs(bands[1][b]));
         const double level = dbOf(detectors[b].next(key));
-        const double threshold = p[kBandIds[b].threshold];
-        const double ratio = p[kBandIds[b].ratio];
+        const double threshold = ctl(kBandIds[b].threshold, i);
+        const double ratio = ctl(kBandIds[b].ratio, i);
         double change = gainComputer(level, threshold, ratio, 6);
-        const double upward = p[kBandIds[b].upward];
+        const double upward = ctl(kBandIds[b].upward, i);
         if (upward > 0 && level < threshold) {
           const double below = std::fmin(kUpwardReachDb, threshold - level);
           // Lifted by the same law, mirrored: the further below, the more lift, up to the reach,
@@ -110,10 +108,12 @@ struct Device : pd_own::Device<ids::kCount> {
           const double taper = below >= kUpwardReachDb ? 0 : 1 - below / kUpwardReachDb;
           change += below * (1 - 1 / ratio) * upward * taper;
         }
-        const double g = dbToGain(change * amount + p[kBandIds[b].gain]);
+        const double g = dbToGain(change * amount + ctl(kBandIds[b].gain, i));
         sumL += bands[0][b] * g;
         sumR += bands[1][b] * g;
       }
+      const double mix = ctl(ids::mix, i);
+      const double outGain = dbToGain(ctl(ids::output, i));
       outl[i] = static_cast<float>((l + (sumL - l) * mix) * outGain);
       outr[i] = static_cast<float>((r + (sumR - r) * mix) * outGain);
     }

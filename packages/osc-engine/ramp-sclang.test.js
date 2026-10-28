@@ -38,11 +38,13 @@ function runSclang() {
   const script = `(
 var server = Server(\\poptartProbe, NetAddr("127.0.0.1", 57999));
 var tracks = IdentityDictionary.new;
+var tellRamp = { }, tellSlot = { }, tellMods = { }, tellTap = { }, shapesHandled = IdentityDictionary.new, nodeAddr = (sendMsg: { }); // the direct path's id handoff (see tellTrack in sc/poptart.scd) - inert here
 var nodeGoneSaid = IdentitySet.new, nodeOwns = { |nodeID, what| }; // the engine's node bookkeeping (see nodeOwns in sc/poptart.scd) - inert here
 var modFreeDelay = 0.05;
 var freeModulatorLater, rampTo, dropRamp, dropSlotRamps;
 // What a ramp is mapped onto (paramTarget) and what it leans on; the expression half is unused here.
 var exprLeaf, busIndexOf, paramTarget, reassertAudioDrivers, exprFeed, channelDefault, resolveParamIndex;
+var channelTarget = { |track, name| [track[\\synth], name.asSymbol] }; // every channel control on the one synth here - see channelTarget in sc/poptart.scd
 var maps = List.new;
 var ctlFor = { |slot| (map: { |self, index, bus| maps.add("slot" ++ slot ++ ":" ++ index ++ "->" ++ bus.index) }) };
 var track = (

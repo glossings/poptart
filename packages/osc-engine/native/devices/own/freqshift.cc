@@ -84,19 +84,18 @@ struct Device : pd_own::Device<ids::kCount> {
     // +1 keeps the upper sideband, -1 the lower; split sends the two channels opposite ways.
     const double signL = direction == 1 ? -1 : 1;
     const double signR = direction == 0 ? 1 : -1;
-    const double freq = p[ids::freq];
-    const double feedback = p[ids::feedback];
-    const double mix = p[ids::mix];
     const float* inl = inL();
     const float* inr = inR();
     float* outl = outL();
     float* outr = outR();
     for (int i = 0; i < frames; ++i) {
-      phase += freq / sampleRate;
+      phase += ctl(ids::freq, i) / sampleRate;
       if (phase >= 1) phase -= std::floor(phase);
       const double w = 2 * M_PI * phase;
       const double c = std::cos(w);
       const double s = std::sin(w);
+      const double feedback = ctl(ids::feedback, i);
+      const double mix = ctl(ids::mix, i);
       const double l = inl[i];
       const double r = inr[i];
       const double wetL = shift(0, l, c, s * signL, feedback);

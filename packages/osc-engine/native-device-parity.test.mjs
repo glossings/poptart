@@ -48,6 +48,7 @@ import { WavetableSynth } from '../web-engine/src/devices/wavetable.mjs';
 import { GranularSynth } from '../web-engine/src/devices/granular.mjs';
 import { NoiseSynth } from '../web-engine/src/devices/noise.mjs';
 import { LpgProcessor } from '../web-engine/src/devices/lpg.mjs';
+import { CrossoverProcessor } from '../web-engine/src/devices/crossover.mjs';
 import { IR_NAMES, bufferFromChannels, synthesizeImpulse } from '../web-engine/src/devices/builtins.mjs';
 import { Biquad, BIQUAD_TYPES } from '../web-engine/src/dsp/biquad.mjs';
 
@@ -83,6 +84,7 @@ const PROCESSORS = {
   Granular: GranularSynth,
   Noise: NoiseSynth,
   LPG: LpgProcessor,
+  Crossover: CrossoverProcessor,
   // Convolver is deliberately not here: there is no JavaScript processor for it to be compared
   // against, because in the browser it IS a ConvolverNode. It has a test of its own at the end
   // of this file, against Chromium's documented behavior.
@@ -90,6 +92,10 @@ const PROCESSORS = {
 
 /** The devices whose browser side is a stock Web Audio node rather than a processor of ours. */
 const STOCK_NODES = new Set(['Convolver']);
+
+/** How many channels a device takes in (its own pair, and a key's) and puts out (every pair). */
+const inChannelsOf = (descriptor) => (descriptor.sidechain || descriptor.channels.key ? 4 : 2);
+const outChannelsOf = (descriptor) => 2 * (descriptor.channels.outputs ?? 1);
 
 // ---- the harness ------------------------------------------------------------------------------
 
@@ -127,7 +133,7 @@ function buildHarness(devices) {
 }
 
 /** One device's output: the values in real units, the input, and what comes back. */
-function runNative(binary, { id, values, input, frames, notes = [], bpm = 120, keyed = null, samples = [], moving = [], shapes = [], report = null }) {
+function runNative(binary, { id, values, input, frames, notes = [], bpm = 120, keyed = null, samples = [], moving = [], shapes = [], report = null, outs = 2 }) {
   const stdin = Buffer.alloc(values.length * 4 + input.length * 4);
   for (let i = 0; i < values.length; i++) stdin.writeFloatLE(Math.fround(values[i]), i * 4);
   for (let i = 0; i < input.length; i++) stdin.writeFloatLE(input[i], values.length * 4 + i * 4);
@@ -140,9 +146,27 @@ function runNative(binary, { id, values, input, frames, notes = [], bpm = 120, k
   for (const one of moving) args.push('-A', `${one.param}:${one.file}`);
   const run = spawnSync(binary, args, { input: stdin, maxBuffer: 1 << 28 });
   assert.equal(run.status, 0, `${id}: the harness failed - ${run.stderr?.toString()}`);
-  const out = new Float32Array(frames * 2);
+  const out = new Float32Array(frames * outs);
   for (let i = 0; i < out.length; i++) out[i] = run.stdout.readFloatLE(i * 4);
   return out;
+}
+
+/** A device's outputs for one block, as the effects worklet hands them over: the first pair, then the rest. */
+function blockOutputs(descriptor) {
+  return Array.from({ length: descriptor.channels.outputs ?? 1 }, () => [new Float32Array(BLOCK), new Float32Array(BLOCK)]);
+}
+
+/** Runs one block of an effect and writes every output pair, interleaved, into `out` at `at`. */
+function processBlock(fx, descriptor, inputs, n, params, key, at, out) {
+  const outputs = blockOutputs(descriptor);
+  fx.process(inputs, outputs[0], n, params, key, at / SAMPLE_RATE, outputs.length > 1 ? outputs.slice(1) : null);
+  const width = outputs.length * 2;
+  for (let i = 0; i < n; i++) {
+    outputs.forEach((pair, k) => {
+      out[(at + i) * width + 2 * k] = pair[0][i];
+      out[(at + i) * width + 2 * k + 1] = pair[1][i];
+    });
+  }
 }
 
 /**
@@ -161,9 +185,8 @@ function runBrowser(descriptor, { values, input, frames, notes = [], bpm = 120, 
   if (typeof fx.setTempo === 'function') fx.setTempo(bpm, 0);
   const params = {};
   descriptor.params.forEach((p, i) => { params[p.id] = Math.fround(values[i]); });
-  const out = new Float32Array(frames * 2);
+  const out = new Float32Array(frames * outChannelsOf(descriptor));
   const inputs = [new Float32Array(BLOCK), new Float32Array(BLOCK)];
-  const outputs = [new Float32Array(BLOCK), new Float32Array(BLOCK)];
   // A sidechained device is handed its key as a second input, exactly as the browser's host
   // hands it one: `inputs[1]` of the worklet node, which is a pair of its own.
   const key = channels >= 4 && keyed ? [new Float32Array(BLOCK), new Float32Array(BLOCK)] : null;
@@ -189,13 +212,7 @@ function runBrowser(descriptor, { values, input, frames, notes = [], bpm = 120, 
       inputs[1][i] = 0;
       if (key) { key[0][i] = 0; key[1][i] = 0; }
     }
-    outputs[0].fill(0);
-    outputs[1].fill(0);
-    fx.process(inputs, outputs, n, params, key, at / SAMPLE_RATE);
-    for (let i = 0; i < n; i++) {
-      out[(at + i) * 2] = outputs[0][i];
-      out[(at + i) * 2 + 1] = outputs[1][i];
-    }
+    processBlock(fx, descriptor, inputs, n, params, key, at, out);
   }
   onDone?.(fx);
   return out;
@@ -552,7 +569,8 @@ for (const one of devices.filter((d) => !STOCK_NODES.has(d.id))) {
       ? values.map((v, i) => (device.params[i].id === sampled.param ? slot : v))
       : values);
     // Four channels for a device that takes a key, two for the rest.
-    const channels = device.sidechain ? 4 : 2;
+    const channels = inChannelsOf(device);
+    const outs = outChannelsOf(device);
     const synth = device.kind === 'synth';
     let loudest = 0;
 
@@ -575,12 +593,12 @@ for (const one of devices.filter((d) => !STOCK_NODES.has(d.id))) {
         // level at the one that is not (see CHAOTIC).
         const stable = pointAtFile(thinned(device, values, runs.indexOf(runs.find(([w]) => w === when)) + 1));
         const { rmsA } = compare(one.id, `${way.what} ${when}`.trim(),
-          runNative(binary, { id: one.id, values: stable, input, frames, notes, keyed, samples }),
+          runNative(binary, { id: one.id, values: stable, input, frames, notes, keyed, samples, outs }),
           runBrowser(device, { values: stable, input, frames, notes, channels, keyed: keyed !== false, load }));
         if (rmsA > loudest) loudest = rmsA;
         if (CHAOTIC[device.id] && stable !== values) {
           compareEnvelope(one.id, `${way.what} ${when}, every path open`.trim(),
-            runNative(binary, { id: one.id, values, input, frames, notes, keyed, samples }),
+            runNative(binary, { id: one.id, values, input, frames, notes, keyed, samples, outs }),
             runBrowser(device, { values, input, frames, notes, channels, keyed: keyed !== false, load }));
         }
       }
@@ -610,7 +628,7 @@ function sweptValues(param, frames, hz = 300) {
 function runBrowserSwept(descriptor, { values, input, frames, notes, channels, sweptId, swept }) {
   const params = {};
   descriptor.params.forEach((p, i) => { params[p.id] = Math.fround(values[i]); });
-  const out = new Float32Array(frames * 2);
+  const out = new Float32Array(frames * outChannelsOf(descriptor));
   let nextNote = 0;
   const synth = descriptor.kind === 'synth';
   const dev = new PROCESSORS[descriptor.id](SAMPLE_RATE);
@@ -618,6 +636,7 @@ function runBrowserSwept(descriptor, { values, input, frames, notes, channels, s
   const left = new Float32Array(BLOCK);
   const right = new Float32Array(BLOCK);
   const inputs = [new Float32Array(BLOCK), new Float32Array(BLOCK)];
+  const key = channels >= 4 ? [new Float32Array(BLOCK), new Float32Array(BLOCK)] : null;
   for (let at = 0; at < frames; at += BLOCK) {
     const n = Math.min(BLOCK, frames - at);
     params[sweptId] = swept.subarray(at, at + n);
@@ -636,8 +655,13 @@ function runBrowserSwept(descriptor, { values, input, frames, notes, channels, s
       for (let i = 0; i < n; i++) {
         inputs[0][i] = input[(at + i) * channels];
         inputs[1][i] = input[(at + i) * channels + 1];
+        if (key) {
+          key[0][i] = input[(at + i) * channels + 2];
+          key[1][i] = input[(at + i) * channels + 3];
+        }
       }
-      dev.process(inputs, [left, right], n, params, null, at / SAMPLE_RATE);
+      processBlock(dev, descriptor, inputs, n, params, key, at, out);
+      continue;
     }
     for (let i = 0; i < n; i++) {
       out[(at + i) * 2] = left[i];
@@ -652,6 +676,11 @@ const PATCHED = [
   { id: 'LPG', param: 'level' },
   { id: 'Noise', param: 'tone' },
   { id: 'Wavetable', param: 'osc1.phase' },
+  { id: 'Crossover', param: 'frequency' },
+  { id: 'Distort', param: 'drive' },
+  { id: 'Distort', param: 'character' },
+  { id: 'FM', param: 'level' },
+  { id: 'Wavetable', param: 'osc1.semi' },
 ];
 
 for (const { id, param } of PATCHED) {
@@ -665,9 +694,9 @@ for (const { id, param } of PATCHED) {
     const values = defaultValues(device);
     const synth = device.kind === 'synth';
     const notes = synth ? [{ frame: 0, note: 48, velocity: 0.9 }, { frame: BLOCK * 12, note: 48, velocity: 0 }] : [];
-    const channels = 2;
+    const channels = inChannelsOf(device);
     const input = synth ? new Float32Array(frames * channels) : testSignal(frames, channels);
-    const native = runNative(binary, { id, values, input, frames, notes, samples: [], keyed: null, moving: [{ param: index, file }] });
+    const native = runNative(binary, { id, values, input, frames, notes, samples: [], keyed: null, moving: [{ param: index, file }], outs: outChannelsOf(device) });
     const browser = runBrowserSwept(device, { values, input, frames, notes, channels, sweptId: param, swept });
     const { rmsA } = compare(id, `with ${param} swept at audio rate`, native, browser);
     assert.ok(rmsA > 1e-3, `${id}: nothing came out`);

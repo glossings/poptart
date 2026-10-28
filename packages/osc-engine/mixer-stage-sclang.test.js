@@ -25,6 +25,14 @@ const SCD = path.join(__dirname, 'sc', 'poptart.scd');
 
 // Lift the track SynthDef out of buildTrackDef, from `SynthDef(trackDefName...` to its closing
 // `});` at 4-space indent. Throws rather than silently testing nothing if the def moves.
+// The DJ stage, which a track grows the first time it is touched (see djNode).
+function extractDjDef() {
+  const src = fs.readFileSync(SCD, 'utf8');
+  const m = src.match(/^buildDjDef = \{[\s\S]*?^\};$/m);
+  assert.ok(m, 'could not find buildDjDef in sc/poptart.scd');
+  return m[0];
+}
+
 function extractTrackDef() {
   const src = fs.readFileSync(SCD, 'utf8');
   const m = src.match(/^    SynthDef\(trackDefName\.\(key\), \{[\s\S]*?^    \}\);$/m);
@@ -102,13 +110,15 @@ const DEFAULT_CASES = [
 
 function runSclang() {
   const script = `(
-var maxSlots = 8, numPairs = 2, key = "probe";
+var numPairs = 2, key = "probe", routeNowhere = 1000000;
 var trackDefName = { |k| ("poptart_probe_" ++ k).asSymbol };
-var channelDefault, djIsolator, def;
+var channelDefault, djIsolator, buildDjDef, def;
 var destroyTrack, awaitTrack, stopMixTap, unwireAudio, sidechainBySource, releaseBus, tracks, reorderTracks;
+var tellRamp = { }, tellSlot = { }, tellMods = { }, tellTap = { }, shapesHandled = IdentityDictionary.new, nodeAddr = (sendMsg: { }); // the direct path's id handoff (see tellTrack in sc/poptart.scd) - inert here
 var paramRoutes, unwireParamRoute; // audio patched onto parameters, which destroyTrack unwires
 var exprsOf = { |t| t[\\exprs] ?? { IdentityDictionary.new } }; // param expressions, whose buses destroyTrack frees
 var songs = IdentityDictionary.new; // the song decks' buffer registry, swept by destroyTrack
+var freeDefsLater = { |names| }, exprDefDone = { |name| }; // the defs destroyTrack hands back - inert here
 var birthParse;
 var waitForLoad, flushNotes, clearPending, now, fired;
 var cueOffset; // nil = the no-cue build; reassigned before the cue-armed build below
@@ -136,6 +146,10 @@ key = "probecue";
 def = ${extractTrackDef()}
 ("DEF-CUE-OK<" ++ def.name ++ ">").postln;
 key = "probe";
+// The DJ stage, a def of its own that a track grows the first time it is touched.
+${extractDjDef()}
+def = buildDjDef.();
+("DJ-OK<" ++ def.name ++ ">").postln;
 ${extractDestroyTrack()}
 ("DESTROY-OK<" ++ destroyTrack.isKindOf(Function) ++ ">").postln;
 birthParse = { |msg|
@@ -200,6 +214,7 @@ test('the track SynthDef builds with the DJ stage, and its neutrals are really n
   }
   assert.match(out, /^DEF-OK<poptart_probe_probe>$/m, `the SynthDef did not build:\n${out}`);
   assert.match(out, /^DEF-CUE-OK<poptart_probe_probecue>$/m, `the SynthDef did not build with the cue send armed:\n${out}`);
+  assert.match(out, /^DJ-OK<poptart_dj>$/m, `the DJ stage did not build:\n${out}`);
   assert.match(out, /^DESTROY-OK<true>$/m, `the destroyTrack closure did not compile:\n${out}`);
   assert.match(out, /^BIRTH<\[ ?deck, 0\.0, fader, 0\.5 ?\]>$/m,
     'createTrack must parse trailing name/value pairs into Synth birth args');
@@ -235,15 +250,15 @@ test('the track SynthDef builds with the DJ stage, and its neutrals are really n
 // Source-shape rather than a render: the tap is one Out.ar in a 300-line graph with VSTPlugin and
 // a dozen buses in it, and the thing that can break is an edit moving a line, not the arithmetic.
 test('the deck meter and the cue tap read the channel AFTER trim', () => {
-  const def = extractTrackDef();
+  const def = extractDjDef();
   const at = (needle, what) => {
     const i = def.indexOf(needle);
     assert.ok(i > 0, `${what} not found in the track def - this test needs updating`);
     return i;
   };
-  const trim = at('djIsolator.(sig * trim', 'the trim stage');
-  const meter = at('deckMeterBus.index', 'the deck meter send');
-  const cue = at('Out.ar(cueOffset', 'the headphone cue send');
+  const trim = at('djIsolator.(In.ar(in, 2) * trim', 'the trim stage');
+  const meter = at('Out.ar(meterBus', 'the deck meter send');
+  const cue = at('Out.ar(cueBus', 'the headphone cue send');
   assert.ok(trim < meter, 'the deck meter is read BEFORE trim - it will show level on a dead channel');
   assert.ok(trim < cue, 'the headphone cue is taken before trim');
   // ...and the EQ is fed the trimmed signal in that same call: re-deriving the EQ from `sig`
@@ -255,11 +270,10 @@ test('...and both of them are read BEFORE the fader', () => {
   // The other half of the same decision, and the one that is deliberate rather than a bug: a
   // deck faded out still meters, and still feeds the headphones, which is what makes it possible
   // to line the next record up at all.
-  const def = extractTrackDef();
-  const meter = def.indexOf('deckMeterBus.index');
-  // Where the fader is APPLIED to the direct path, not where its arg is read into a var - that
-  // happens near the top, because the named-bus sends are post-fader too.
-  const applied = def.indexOf('live = live * (1 - fxAmt) * faderAmt');
+  const def = extractDjDef();
+  const meter = def.indexOf('Out.ar(meterBus');
+  // Where the fader is APPLIED to the direct path.
+  const applied = def.indexOf('live * ((1 - fxAmt) * faderAmt');
   assert.ok(applied > 0, 'the fader stage moved - this test needs updating');
   assert.ok(meter < applied, 'the meter now follows the fader, so a cued deck reads as silent');
 });
