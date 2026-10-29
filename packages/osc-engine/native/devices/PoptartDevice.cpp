@@ -73,8 +73,15 @@ const int kBendPiece = 32;
  */
 const int kFirstNoteRoom = 64;
 
-/** How many floats of its own a device may add to a /report answer (a granulator's grains). */
-const int kDeviceReport = 1024;
+/** How far behind the audio clock a transport position may be told and still be jitter rather than a relocate. */
+const double kTransportSlackSec = 0.5;
+
+/**
+ * How many floats of its own a device may add to a /report answer. The biggest is the multiband
+ * compressor's three lanes of history (own/dsp/history.h: 5 + 2 * 256 each, 1551 in all). Kept
+ * under scsynth's own ceiling on a node reply, which drops arguments past 2048.
+ */
+const int kDeviceReport = 1600;
 
 /** Input offsets. Everything before the main signal count is fixed. */
 enum { kBendInput = 0, kNumMainInput = 1, kFirstMainInput = 2 };
@@ -541,7 +548,16 @@ struct PoptartDevice : public SCUnit {
      */
     void setTransport(float bpm, float beats) {
         mBpm = bpm > 1.f ? bpm : 1.f;
-        mTransportSec = (double)beats * 60.0 / mBpm;
+        const double told = (double)beats * 60.0 / mBpm;
+        // The position is extrapolated on the audio clock between messages, and the sender's
+        // own clock is a little behind or ahead of it by the time a message lands. Told a
+        // position a little BEHIND where the audio clock has got to, the transport stays where
+        // it is rather than stepping back: a ducker synced to the beat re-dipped on every such
+        // step back across a beat line (seen live, 2026-10-28). A real relocate - a loop's
+        // start, a cue - is further back than any jitter and is taken as said.
+        const double now = transportAt(0);
+        if (told < now && now - told < kTransportSlackSec) return;
+        mTransportSec = told;
         mTransportAtBlock = mWorld->mBufCounter;
     }
 

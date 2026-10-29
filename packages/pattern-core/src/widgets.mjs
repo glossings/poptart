@@ -60,15 +60,21 @@ export function abandonWidgets() {
 /**
  * The host's side: a control moved. `value` is what the widget is now set to - a number for a
  * slider/knob/toggle/button, `[x, y]` for a pad, the row's text for steps()/sliders(), and
- * `{ row, text }` for one of a matrix's rows. False when no widget has that key.
+ * `{ row, text }` for one of a matrix's rows, or `{ [row]: text, ... }` for several of them at
+ * once (what randomizing a grid sends). False when no widget has that key.
  */
 export function setWidgetValue(deck, at, value) {
   const key = keyOf(deck === 'b' ? 'b' : 'a', Number(at));
   if (!values.has(key)) return false;
   const was = values.get(key);
   if (was && typeof was === 'object' && !Array.isArray(was) && value && typeof value === 'object' && !Array.isArray(value)) {
-    if (typeof value.row !== 'string' || typeof value.text !== 'string' || !(value.row in was)) return false;
-    values.set(key, { ...was, [value.row]: value.text });
+    const keys = Object.keys(value);
+    if (keys.length === 2 && typeof value.row === 'string' && typeof value.text === 'string' && value.row in was) {
+      values.set(key, { ...was, [value.row]: value.text });
+      return true;
+    }
+    if (!keys.length || !keys.every((r) => r in was && typeof value[r] === 'string')) return false;
+    values.set(key, { ...was, ...value });
     return true;
   }
   if (Array.isArray(was)) {

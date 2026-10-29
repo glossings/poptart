@@ -6,6 +6,7 @@
 // attack IS the lookahead.
 
 #include "own/pd-own.h"
+#include "own/dsp/history.h"
 #include "pd-own-ids.h"
 
 namespace pd_Limiter {
@@ -25,6 +26,15 @@ struct Device : pd_own::Device<ids::kCount> {
   float need[kMaxLook] = { 0 };   // the gain each delayed sample needs
   int pos = 0;
   double gain = 1;
+  // The last block's loudest input (after the gain) and deepest reduction, in decibels, and
+  // the rings of both - the panel's transfer curve and the lane beside it (see history.h).
+  double level = -120, reductionDb = 0, blockSec = 128.0 / 48000.0;
+  History levels, reductions;
+
+  /** Where the signal is on the curve, how much is held back, and the recent history of both. */
+  int pd_report(float* out, int capacity) {
+    return reportCurveLane(out, capacity, level, reductionDb, blockSec, levels, reductions);
+  }
 
   void pd_init(double sr) {
     sampleRate = sr;
@@ -33,6 +43,11 @@ struct Device : pd_own::Device<ids::kCount> {
     if (look > kMaxLook - 1) look = kMaxLook - 1;
     pos = 0;
     gain = 1;
+    level = -120;
+    reductionDb = 0;
+    blockSec = 128.0 / sr;
+    levels.init(-120.0f, kDynamicsBlocksPerEntry, History::kMax);
+    reductions.init(0.0f, kDynamicsBlocksPerEntry, History::kMin);
     // The window starts at zero rather than at unity, as the browser's buffers do: for the
     // first two milliseconds the limiter believes it has to be silent, and comes up out of it
     // at the release. That is audible exactly once, when a limiter is first put on a chain, and
@@ -47,6 +62,8 @@ struct Device : pd_own::Device<ids::kCount> {
     const float* inr = inR();
     float* outl = outL();
     float* outr = outR();
+    double reduction = 1;
+    double loudest = 0;
 
     for (int i = 0; i < frames; ++i) {
       const double pre = dbToGain(ctl(ids::gain, i));
@@ -55,6 +72,7 @@ struct Device : pd_own::Device<ids::kCount> {
       const double l = inl[i] * pre;
       const double r = inr[i] * pre;
       const double peak = std::fmax(std::fabs(l), std::fabs(r));
+      if (peak > loudest) loudest = peak;
       // Where this sample goes into the delay, and the gain it will need when it comes out.
       bufL[pos] = static_cast<float>(l);
       bufR[pos] = static_cast<float>(r);
@@ -69,6 +87,7 @@ struct Device : pd_own::Device<ids::kCount> {
       outl[i] = static_cast<float>(bufL[read] * g);
       outr[i] = static_cast<float>(bufR[read] * g);
       pos = read;
+      if (g < reduction) reduction = g;
     }
     // A gain that is not a number would stay that way through every smoothing step after it,
     // and the lookahead would hand on anything unplayable it is holding: both start again.
@@ -76,6 +95,11 @@ struct Device : pd_own::Device<ids::kCount> {
       gain = 1;
       for (int i = 0; i < kMaxLook; ++i) { bufL[i] = 0; bufR[i] = 0; need[i] = 1; }
     }
+    reductionDb = reduction < 1 ? 20.0 * std::log10(reduction) : 0.0;
+    level = loudest > 1e-6 ? 20.0 * std::log10(loudest) : -120.0;
+    levels.push(level);
+    reductions.push(reductionDb);
+    blockSec = (frames / sampleRate) * kDynamicsBlocksPerEntry;
   }
 };
 

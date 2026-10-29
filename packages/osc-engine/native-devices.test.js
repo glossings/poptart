@@ -709,6 +709,39 @@ test('a live answer is read back as positions by id and the device\'s own report
   const distort = nativeDevice('Distort');
   const m = distort.params.length;
   assert.deepStrictEqual(readDeviceLive(distort, [m, ...new Array(m).fill(0), 2, -3, 0.5]).report, { meters: { autogain: -3, level: 0.5 } });
+  // A dynamics lane, as own/dsp/history.h lays one out: the two live numbers, the count written,
+  // the seconds an entry stands for, the ring length, then the two rings.
+  const compressor = nativeDevice('Compressor');
+  const c = compressor.params.length;
+  const lane = [-12, -4, 7, 0.016, 3, -20, -15, -12, 0, -2, -4];
+  assert.deepStrictEqual(readDeviceLive(compressor, [c, ...new Array(c).fill(0), lane.length, ...lane]).report, {
+    meters: { curve: { inDb: -12, grDb: -4, history: { inDb: [-20, -15, -12], grDb: [0, -2, -4], end: 7, blockSec: 0.016 } } },
+  });
+  assert.strictEqual(readDeviceLive(compressor, [c, ...new Array(c).fill(0), 4, -12, -4, 7, 0.016]).report, null, 'an answer cut short is no answer');
+  // The limiter is the same lane; the multiband is three of them, one per band.
+  const limiter = nativeDevice('Limiter');
+  const l = limiter.params.length;
+  assert.strictEqual(readDeviceLive(limiter, [l, ...new Array(l).fill(0), lane.length, ...lane]).report.meters.curve.grDb, -4);
+  const multiband = nativeDevice('Multiband');
+  const m3 = multiband.params.length;
+  const three = [...lane, ...lane.map((v, i) => (i === 0 ? -30 : v)), ...lane.map((v, i) => (i === 0 ? -40 : v))];
+  const bands = readDeviceLive(multiband, [m3, ...new Array(m3).fill(0), three.length, ...three]).report.meters;
+  assert.deepStrictEqual(Object.keys(bands), ['low.curve', 'mid.curve', 'high.curve']);
+  assert.deepStrictEqual([bands['low.curve'].inDb, bands['mid.curve'].inDb, bands['high.curve'].inDb], [-12, -30, -40]);
+  assert.deepStrictEqual(bands['high.curve'].history.grDb, [0, -2, -4]);
+  // A ducker: what is driving the dip, and the three rings - the key's only while something keys.
+  const ducker = nativeDevice('Ducker');
+  const d = ducker.params.length;
+  const dip = [1, 2, 9, 0.005, 2, 3.25, 1, 0.4, 0.8, 0.9, 0.3, 0.6];
+  assert.deepStrictEqual(readDeviceLive(ducker, [d, ...new Array(d).fill(0), dip.length, ...dip]).report, {
+    history: { gain: [1, 0.4], out: [0.8, 0.9], key: [0.3, 0.6], end: 9, blockSec: 0.005, at: 3.25 }, keyed: true, trigger: 'audio',
+  });
+  const onClock = readDeviceLive(ducker, [d, ...new Array(d).fill(0), dip.length, 0, 0, ...dip.slice(2)]).report;
+  assert.deepStrictEqual([onClock.keyed, onClock.trigger, onClock.history.key], [false, 'clock', null]);
+  // A sweep: where its LFO is.
+  const phaser = nativeDevice('Phaser');
+  const ph = phaser.params.length;
+  assert.deepStrictEqual(readDeviceLive(phaser, [ph, ...new Array(ph).fill(0), 1, 0.25]).report, { phase: 0.25 });
   // A device with nothing to report, and no answer at all.
   const filter = nativeDevice('Filter');
   assert.strictEqual(readDeviceLive(filter, [filter.params.length, ...new Array(filter.params.length).fill(0.5), 0]).report, null);

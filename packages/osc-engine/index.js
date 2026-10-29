@@ -2478,8 +2478,15 @@ class OscEngine {
   // The pattern is about to drive this parameter by poll: sclang reads what it is now and keeps
   // it, and releaseParam puts it back - so a `.param()` that stops speaking for a parameter (the
   // off side of a .when(), a call deleted in an eval) leaves the plugin as if it had never been.
-  holdParam(trackId, slotIndex, paramName) {
-    this._noteDriver(trackId, slotIndex, paramName, 'pattern');
+  //
+  // `steady` says the value is one the code SETS rather than a pattern: `.param("Mode", "asym")`,
+  // which is what a device window's own pickers write (and evaluate) on a pick. That is a setting,
+  // and the window stays free to change it - it is not recorded as a driver. A pattern is: it
+  // would put its own value back over anything set by hand, so the window names it and refuses.
+  // Without this, picking a curve on the Distort locked the picker on the very name it had just
+  // written (hit live, 2026-10-28).
+  holdParam(trackId, slotIndex, paramName, { steady = false } = {}) {
+    this._noteDriver(trackId, slotIndex, paramName, steady ? null : 'pattern');
     this._send('/poptart/holdParam', [trackId, slotIndex, paramName]);
   }
   releaseParam(trackId, slotIndex, paramName, targetTime) {

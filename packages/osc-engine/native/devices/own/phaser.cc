@@ -58,6 +58,13 @@ struct Device : pd_own::Device<ids::kCount> {
 
   void pd_transport(double tempo, double seconds) { (void)seconds; bpm = tempo; }
 
+  /** Where the LFO is, in cycles, so the panel's playhead follows the sound. */
+  int pd_report(float* out, int capacity) {
+    if (capacity < 1) return 0;
+    out[0] = static_cast<float>(phase);
+    return 1;
+  }
+
   void pd_process(int frames) {
     const int sync = jsRoundInt(p[ids::sync]);
     const int stages = static_cast<int>(clamp(jsRound(p[ids::stages] / 2) * 2, 2.0,

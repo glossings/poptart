@@ -147,8 +147,10 @@ PoptartDeviceController {
     var <>parameterAutomated;
     var positions;      // the last position written to each control, by index
     var <>deviceName;
-    // The tempo and the beat the transport was last at, so either can be sent on its own.
-    var tempo = 120, beatPos = 0;
+    // The tempo and the beat the transport was last at, and when it was there, so either can be
+    // sent on its own - a tempo sent alone carries the position run forward to now, not the one
+    // a push four seconds ago left here, which stepped the device's transport back that far.
+    var tempo = 120, beatPos = 0, beatAt = 0;
     // Numbers the /report answers so one can be told from the next.
     var reportId = 0;
 
@@ -333,12 +335,18 @@ PoptartDeviceController {
 
     setTempo { |bpm|
         tempo = bpm ? tempo;
-        this.sendMsg('/transport', tempo.asFloat, beatPos.asFloat);
+        this.sendMsg('/transport', tempo.asFloat, this.beatsNow.asFloat);
     }
 
     setTransportPos { |beats|
         beatPos = beats ? beatPos;
+        beatAt = SystemClock.seconds;
         this.sendMsg('/transport', tempo.asFloat, beatPos.asFloat);
+    }
+
+    /** The position last given, run forward to now at the tempo. */
+    beatsNow {
+        ^beatPos + ((SystemClock.seconds - beatAt) * tempo / 60)
     }
 
     /**

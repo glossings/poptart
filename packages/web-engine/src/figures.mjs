@@ -1152,12 +1152,19 @@ function duckFigure(read, bpm, report) {
   }
   while (next < DUCK_POINTS) points[next++] = { x: 1, y: gain };
   const h = report?.history;
+  const synced = !isFree(sync);
   const history = h && Array.isArray(h.gain) && Array.isArray(h.out)
-    ? { gain: h.gain, out: h.out, key: Array.isArray(h.key) ? h.key : null, end: historyEnd(h), blockSec: Number(h.blockSec) || 128 / NOMINAL_RATE }
+    ? { gain: h.gain, out: h.out, key: Array.isArray(h.key) ? h.key : null, end: historyEnd(h), blockSec: Number(h.blockSec) || 128 / NOMINAL_RATE, at: Number.isFinite(h.at) ? h.at : null }
     : null;
+  // Dipping on the clock, the lane is laid on the beat grid rather than scrolled: a window of a
+  // bar, or two dips where one is longer than half a bar, with a mark at every dip. The pump
+  // then lands in the same place every time and can be looked at. Anything else - a key, notes
+  // - has no grid to lay it on, and scrolls.
+  const bar = (4 * 60) / Math.max(1, bpm);
+  const window = synced && trigger === 'clock' && history?.at != null ? Math.max(bar, 2 * period) : null;
   return {
-    amount, length, attack: attackMs, curve, sync, synced: !isFree(sync), syncName: SYNC_OPTIONS[sync] ?? null,
+    amount, length, attack: attackMs, curve, sync, synced, syncName: SYNC_OPTIONS[sync] ?? null,
     period, recovery, span, keyed, trigger, threshold: read('threshold') ?? -24,
-    points, history,
+    points, history, window,
   };
 }

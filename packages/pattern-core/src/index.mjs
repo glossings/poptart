@@ -6,7 +6,9 @@ export { normalizeSlicePositions, parseSlicePositions, serializeSlicePositions, 
 export { i, begin, end, loop, loopwrap, loopdir, speed, flip, stretch, fit, slice, splice, splicemode, attack, decay, sustain, release, envscale, grain, vel, clip, nudge, swing, swinggrid, swingvel, SAMPLER_CONTROL_NAMES } from './signal.mjs';
 // The binops as top-level builders - a layer piece's own verb: .set(note(30), add(note(12))).
 export { add, sub, mul, div, mod, set } from './signal.mjs';
+export { struct, hold, seg, segment, chord } from './signal.mjs';
 export { channelAt, soundingEnd, timeShift, grooveAt, grooveVelScale, endEdgeStep, withSoundingSpan, MAX_FX_SLOTS, monitorSig, channelDefault } from './signal.mjs';
+export { steadyValue } from './signal.mjs';
 export { setPatternWarn, lfoShapes, lfoPoints, withNoteGate, withEventSpan, noteGateFromGrid, sampleEnvIR, NOTE_GATE_LOOKBACK_CYCLES } from './signal.mjs';
 export { feedMidiCC, midiInUse } from './midi.mjs';
 export { feedOsc, oscInUse, latestOsc, normalizeOscAddress } from './osc.mjs';
@@ -33,5 +35,5 @@ export { routePlan, planRefs, routeLatencies, routeSlots, isRouteControl, routeC
 // The editor's inline widgets: controls drawn in the code (slider(), steps(), ...) and displays
 // drawn under it (.scope(), .punchcard(), ...) - see widgets.mjs and widget-calls.mjs.
 export { _input, _display, slider, knob, toggle, button, xy, steps, sliders, matrix, scope, spectrum, waveform, imager, meter, punchcard, chroma, BACKGROUND_DISPLAYS, beginWidgets, takeWidgets, abandonWidgets, setWidgetValue, widgetValue, displayWindow, displayNow, PLOT_POINTS_PER_CYCLE } from './widgets.mjs';
-export { findWidgetCalls, widgetCallEdits, callArgs, parseCells, toggleCell, setCellValue, formatNumber, matrixRows, maskCode, optionsIndex, positionalArgs, optionNumber, optionEdit, optionDrop, widgetSize, widgetBox, sizeKeys, WIDGET_BOXES, rowSource, foldable, cellCount, restRow, middleRow, DEFAULT_CELL_COUNT, INPUT_SIZES, DISPLAY_SIZES, FOLDED_WIDGETS, INPUT_WIDGETS, DISPLAY_WIDGETS, AUDIO_DISPLAYS, RAW_TEXT_WIDGETS, findColorCalls, findColorCallAt, colorCallEdit } from './widget-calls.mjs';
+export { findWidgetCalls, widgetCallEdits, callArgs, parseCells, toggleCell, setCellValue, randomRow, randomValues, formatNumber, matrixRows, maskCode, optionsIndex, positionalArgs, optionNumber, optionEdit, optionDrop, widgetSize, widgetBox, sizeKeys, WIDGET_BOXES, rowSource, foldable, cellCount, restRow, middleRow, DEFAULT_CELL_COUNT, INPUT_SIZES, DISPLAY_SIZES, FOLDED_WIDGETS, INPUT_WIDGETS, DISPLAY_WIDGETS, AUDIO_DISPLAYS, RAW_TEXT_WIDGETS, findColorCalls, findColorCallAt, colorCallEdit } from './widget-calls.mjs';
 export { createWidgetHost, WIDGET_WINDOW, WIDGET_TAP_IDLE_MS } from './widget-host.mjs';

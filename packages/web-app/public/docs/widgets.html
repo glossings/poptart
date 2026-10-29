@@ -74,8 +74,11 @@ chords: note("&lt;[c3,eb3,g3] [ab2,c3,eb3]&gt;").synth("Wavetable")
           a variable stays text.
         </p>
         <p>
-          Right-click the cells and choose <strong>edit as text</strong> to type into the call; with the caret
-          in it, <strong>show as cells</strong> (<strong>show as bars</strong> for sliders) draws it again.
+          Right-click the cells for <strong>randomize</strong>: as many hits as the row has now, somewhere
+          else, spelled with the row's own tokens (half the row when it has none, or nothing but); every
+          bar of a <code>sliders()</code> at a new height in its range; every row of a <code>matrix()</code>
+          at once. <strong>Edit as text</strong> opens the call to type into; with the caret in it,
+          <strong>show as cells</strong> (<strong>show as bars</strong> for sliders) draws it again.
         </p>
         <pre data-run><code>setbpm(118)
 drums: s(matrix({ bd: "x . . . x . . .", sd: ". . . . x . . .", hh: 8 })).postgain(0.4)
@@ -160,32 +163,14 @@ keys: n("&lt;0 3&gt; 5 7 &lt;10 12&gt;").scale("C minor").synth("Wavetable").pos
 
         <h2 id="colors">Track colors</h2>
         <p>
-          <code>.color()</code> sets the color a track is drawn in, everywhere: its row in the arrangement, its
-          strip in the mixer and on the DJ desk, its row in a <code>punchcard()</code> behind the code, its
-          notes in <code>chroma()</code>, and its own displays. It takes a CSS color name or a hex color, and
-          changes nothing about the sound. A track without one gets a color from the theme, picked by its
-          name, so it stays the same from one evaluation to the next; the tracks inside a group take shades
-          of the group's color.
+          <code>.color()</code> sets the color a track is drawn in everywhere: the arrangement, the mixer,
+          the displays. It takes a CSS color name or a hex color and changes nothing about the sound. A track
+          without one takes a color from the theme, picked by its name; tracks in a group take shades of the
+          group's color.
         </p>
         <p>
-          Picking a track's color in the arrangement rewrites its <code>.color()</code> when it has one, and
-          otherwise keeps the pick in the arrangement.
-        </p>
-        <p>
-          Every <code>.color()</code> in the code has a swatch before its name. A bare <code>.color()</code>
-          takes the track's automatic color until you pick one. Click the swatch, or double-click the word
-          <code>color</code>, to open the color picker on that track. The wheel sets hue and saturation, and
-          the box beside it sets lightness. While you drag, the track shows the new color everywhere it is
-          drawn. When you let go, the color is written into the call as <code>.color("#rrggbb")</code>. The
-          picker also lists your recent picks, which this browser remembers.
-        </p>
-        <p>
-          The palette tab suggests colors that go with the rest of the song. It turns this track's hue to
-          its neighbors, its opposite, either side of the opposite and the three-way split, and finds the
-          hues no other track uses. Each suggestion takes the saturation and lightness of the song's other
-          tracks and is adjusted to show up against the theme's background. The last row is the colors
-          the song uses now. Esc or a click outside closes the picker. On both DJ decks it works the same,
-          on the deck it was opened from.
+          Click the swatch before the word <code>color</code>, or double-click the word, to open the color
+          picker. Its palette tab suggests colors that go with the rest of the song.
         </p>
         <pre data-run><code>punchcard()
 

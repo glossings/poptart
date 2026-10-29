@@ -96,12 +96,9 @@ Signal.prototype.humanize = function (amount = 0.01) {
   })));
 };
 
-// hold every note until the next one starts
-Signal.prototype.legato = function () {
-  return this.events((es) =&gt; es.map((e) =&gt; ({
-    ...e,
-    end: es.find((f) =&gt; f.start &gt; e.start)?.start ?? Math.floor(e.start) + 1,
-  })));
+// lean on every nth note
+Signal.prototype.accent = function (every = 4, by = 1.25) {
+  return this.events((es) =&gt; es.map((e, i) =&gt; (i % every === 0 ? { ...e, vel: e.vel * by } : e)));
 };
 
 // spread a chord's notes out like a strummed guitar
@@ -118,8 +115,8 @@ Signal.prototype.strum = function (gap = 0.015) {
 
 chords: note("&lt;[c3,eb3,g3,bb3] [ab2,c3,eb3,g3]&gt; ~ ~ [bb2,d3,f3]")
   .strum().synth("Wavetable").postgain(0.4)
-bass: note("c2 ~ eb2 ~ ~ g1 ~ bb1").legato().synth("FM").postgain(0.4)
-hats: s("hh*16").humanize().postgain(0.4)</code></pre>
+bass: note("c2 ~ eb2 ~ ~ g1 ~ bb1").synth("FM").postgain(0.4)
+hats: s("hh*16").accent(4).humanize().postgain(0.4)</code></pre>
         <p>
           An event can move up to one cycle either way. Each cycle is worked out once and remembered, so
           <code>Math.random()</code> gives one answer per cycle rather than a new one every time the cycle

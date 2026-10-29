@@ -44,15 +44,15 @@ function constant(name) {
   return m[1];
 }
 
-const bodies = ['fieldGrab', 'figurePosition', 'adsrGrab', 'figureLevelY', 'figureLevelAt', 'figurePad', 'figureSeconds', 'figureHz', 'isPlainSetting', 'wrappedSpans', 'matrixGeometry', 'matrixCell', 'matrixGrab']
+const bodies = ['fieldGrab', 'figurePosition', 'adsrGrab', 'figureLevelY', 'figureLevelAt', 'figurePad', 'figureSeconds', 'figureHz', 'isPlainSetting', 'wrappedSpans', 'matrixGeometry', 'matrixCell', 'matrixGrab', 'figureRefuses', 'laneColumns', 'clockLaneRuns']
   .map(grab).join('\n\n');
-const { fieldGrab, figurePosition, adsrGrab, figureLevelY, figureLevelAt, figureSeconds, figureHz, isPlainSetting, wrappedSpans, matrixGeometry, matrixCell, matrixGrab } =
+const { fieldGrab, figurePosition, adsrGrab, figureLevelY, figureLevelAt, figureSeconds, figureHz, isPlainSetting, wrappedSpans, matrixGeometry, matrixCell, matrixGrab, figureRefuses, laneColumns, clockLaneRuns } =
   new Function(`
     const FIGURE_HIT_PX = ${constant('FIGURE_HIT_PX')};
     const FIGURE_PAD_Y = ${constant('FIGURE_PAD_Y')};
     const AXIS_LATCH = ${constant('AXIS_LATCH')};
     ${bodies}
-    return { fieldGrab, figurePosition, adsrGrab, figureLevelY, figureLevelAt, figureSeconds, figureHz, isPlainSetting, wrappedSpans, matrixGeometry, matrixCell, matrixGrab };
+    return { fieldGrab, figurePosition, adsrGrab, figureLevelY, figureLevelAt, figureSeconds, figureHz, isPlainSetting, wrappedSpans, matrixGeometry, matrixCell, matrixGrab, figureRefuses, laneColumns, clockLaneRuns };
   `)();
 
 const tables = sharedBuiltInTables();
@@ -374,4 +374,49 @@ test('dragging a cell upward raises it and downward lowers it', () => {
   const down = grabbed.at(0, 0.2).position;
   assert.ok(up > down, `up is more than down: ${up} against ${down}`);
   assert.ok(up <= 1 && down >= 0, 'and neither runs off the end of the control');
+});
+
+test('a driven cell refuses the hand over that cell alone, not over the whole matrix', () => {
+  const free = fmMatrix();
+  const cell = free.cells[1][0].param;
+  const f = buildFigures(FMSYNTH, defaultValues(FMSYNTH), { sampleRate: 48000, modulated: new Map([[cell, 'lfo']]) })
+    .find((x) => x.kind === 'matrix');
+  assert.ok(f.driven[cell], 'the figure knows the cell is driven');
+  const over = (row, col) => figureRefuses(f, ...centerOf(f, row, col), MATRIX_W, MATRIX_H);
+  assert.equal(over(1, 0), true, 'the driven cell');
+  assert.equal(over(0, 0), false, 'its neighbor still drags');
+  assert.equal(over(1, 8), false, 'and so does the level in its row');
+  const { gx } = matrixGeometry(f, MATRIX_W, MATRIX_H);
+  assert.equal(figureRefuses(f, gx / 2, MATRIX_H / 2, MATRIX_W, MATRIX_H), false, 'a label is nothing to refuse');
+  assert.equal(figureRefuses(free, ...centerOf(free, 1, 0), MATRIX_W, MATRIX_H), false, 'nothing driven, nothing refused');
+});
+
+// --- the lanes a history scrolls or sits in ----------------------------------------------------
+
+test('a lane wider than its history holds entries for bars and leaves gaps for lines', () => {
+  const values = [0.1, 0.2, 0.3, 0.4];
+  const held = laneColumns(values, 4, 8, 'max');
+  // The newest entry sits in the last column; before it, two columns an entry.
+  assert.deepEqual(held, [null, 0.1, 0.1, 0.2, 0.2, 0.3, 0.3, 0.4], 'both columns of an entry filled');
+  const sparse = laneColumns(values, 4, 8, 'max', false);
+  assert.deepEqual(sparse, [null, 0.1, null, 0.2, null, 0.3, null, 0.4], 'one point an entry, nothing to step between');
+  // Narrower than its history, both fold the same way.
+  assert.deepEqual(laneColumns(values, 4, 2, 'max', false), [0.2, 0.4]);
+  assert.deepEqual(laneColumns(values, 4, 2, 'min'), [0.1, 0.3]);
+});
+
+test('a lane on the clock puts each entry where its moment falls in the window, newest last', () => {
+  // Eight entries a tenth of a second apart, the newest at 1.25 s, in a one-second window 100 wide.
+  const values = [1, 2, 3, 4, 5, 6, 7, 8];
+  const runs = clockLaneRuns(values, 0.1, 1.25, 1, 100);
+  assert.equal(runs.length, 2, 'the window wraps once inside the history');
+  const flat = runs.flat();
+  assert.equal(flat.length, 8, 'every entry is within a window of the newest');
+  assert.equal(flat[flat.length - 1][1], 8, 'the newest entry is the last point');
+  assert.ok(Math.abs(flat[flat.length - 1][0] - 25) < 1e-6, 'and sits at a quarter of the window');
+  for (const run of runs) for (let i = 1; i < run.length; i++) assert.ok(run[i][0] > run[i - 1][0], 'x only grows within a run');
+  // A history longer than the window: the older part is left out rather than drawn under the newer.
+  const long = clockLaneRuns(Array.from({ length: 30 }, (_, i) => i), 0.1, 2.95, 1, 100).flat();
+  assert.equal(long.length, 10);
+  assert.equal(long[0][1], 20);
 });

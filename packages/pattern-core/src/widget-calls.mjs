@@ -350,6 +350,51 @@ export function setCellValue(text, index, value, decimals = 2) {
   return src.slice(0, cell.from) + formatNumber(value, decimals) + src.slice(cell.to);
 }
 
+/**
+ * The row thrown again at random: as many hits as it has now, in new places, each spelled with
+ * one of the row's own hit tokens (x when it has none). A row with no hits, or nothing but, gets
+ * half its cells. Written the way the row was - one character per step, or spaced - and any
+ * space around it kept, so the grid redraws in place. `random` is the generator, for tests.
+ */
+export function randomRow(text, random = Math.random) {
+  const src = String(text ?? '');
+  const cells = parseCells(src);
+  const n = cells.length;
+  if (!n) return src;
+  const compact = !/\s/.test(src.trim());
+  const hits = cells.filter((c) => c.on).map((c) => c.token);
+  const pool = hits.length ? [...new Set(hits)] : ['x'];
+  let k = hits.length;
+  if (k === 0 || k === n) k = Math.ceil(n / 2);
+  const pick = (count) => Math.min(count - 1, Math.floor(random() * count));
+  const order = cells.map((_, i) => i);
+  for (let i = 0; i < k; i++) { // a partial shuffle: the first k places are the hits
+    const j = i + pick(n - i);
+    [order[i], order[j]] = [order[j], order[i]];
+  }
+  const on = new Set(order.slice(0, k));
+  const row = cells.map((_, i) => (on.has(i) ? pool[pick(pool.length)] : '.'));
+  const lead = src.length - src.trimStart().length;
+  const trail = src.length - src.trimEnd().length;
+  return src.slice(0, lead) + row.join(compact ? '' : ' ') + src.slice(src.length - trail);
+}
+
+/**
+ * The row of values thrown again at random: as many as now, each anywhere from `min` to `max`,
+ * written with `decimals` places. `random` is the generator, for tests.
+ */
+export function randomValues(text, min = 0, max = 1, decimals = 2, random = Math.random) {
+  const src = String(text ?? '');
+  const cells = parseCells(src);
+  if (!cells.length) return src;
+  const lo = Number.isFinite(Number(min)) ? Number(min) : 0;
+  const hi = Number.isFinite(Number(max)) ? Number(max) : 1;
+  const row = cells.map(() => formatNumber(lo + (hi - lo) * random(), decimals));
+  const lead = src.length - src.trimStart().length;
+  const trail = src.length - src.trimEnd().length;
+  return src.slice(0, lead) + row.join(' ') + src.slice(src.length - trail);
+}
+
 /** A number as a widget writes it into the code: fixed decimals, no trailing zeros past one. */
 export function formatNumber(value, decimals = 2) {
   const v = Number(value);

@@ -6,6 +6,7 @@
 // keeps for its three pictures are the panel's business and are not translated.
 
 #include "own/pd-own.h"
+#include "own/dsp/history.h"
 #include "own/dsp/biquad.h"
 #include "own/dsp/dynamics.h"
 #include "pd-own-ids.h"
@@ -35,6 +36,24 @@ struct Device : pd_own::Device<ids::kCount> {
   double lastLow = -1, lastHigh = -1;
   double lastAttack[kBands] = { -1, -1, -1 };
   double lastRelease[kBands] = { -1, -1, -1 };
+  // Per band: the loudest the detector saw this block and the deepest gain change, in decibels,
+  // and the rings of both - what the panel draws on each band's curve (see history.h).
+  double levels[kBands] = { -120, -120, -120 };
+  double changes[kBands] = { 0, 0, 0 };
+  double blockSec = 128.0 / 48000.0;
+  History levelHistory[kBands];
+  History changeHistory[kBands];
+
+  /** Each band's lane in turn - low, mid, high - as the browser reports them. */
+  int pd_report(float* out, int capacity) {
+    int n = 0;
+    for (int b = 0; b < kBands; ++b) {
+      const int got = reportCurveLane(out + n, capacity - n, levels[b], changes[b], blockSec, levelHistory[b], changeHistory[b]);
+      if (!got) return 0;
+      n += got;
+    }
+    return n;
+  }
 
   void pd_init(double sr) {
     sampleRate = sr;
@@ -43,7 +62,15 @@ struct Device : pd_own::Device<ids::kCount> {
     for (auto& d : detectors) d.init(sr);
     lastLow = -1;
     lastHigh = -1;
-    for (int b = 0; b < kBands; ++b) { lastAttack[b] = -1; lastRelease[b] = -1; }
+    for (int b = 0; b < kBands; ++b) {
+      lastAttack[b] = -1;
+      lastRelease[b] = -1;
+      levels[b] = -120;
+      changes[b] = 0;
+      levelHistory[b].init(-120.0f, kDynamicsBlocksPerEntry, History::kMax);
+      changeHistory[b].init(0.0f, kDynamicsBlocksPerEntry, History::kMin);
+    }
+    blockSec = 128.0 / sr;
   }
 
   void pd_process(int frames) {
@@ -94,6 +121,7 @@ struct Device : pd_own::Device<ids::kCount> {
       const double amount = ctl(ids::amount, i);
       double sumL = 0;
       double sumR = 0;
+      if (i == 0) for (int b = 0; b < kBands; ++b) { levels[b] = -120; changes[b] = 0; }
       for (int b = 0; b < kBands; ++b) {
         const double key = std::fmax(std::fabs(bands[0][b]), std::fabs(bands[1][b]));
         const double level = dbOf(detectors[b].next(key));
@@ -108,6 +136,8 @@ struct Device : pd_own::Device<ids::kCount> {
           const double taper = below >= kUpwardReachDb ? 0 : 1 - below / kUpwardReachDb;
           change += below * (1 - 1 / ratio) * upward * taper;
         }
+        if (level > levels[b]) levels[b] = level;
+        if (change < changes[b]) changes[b] = change;
         const double g = dbToGain(change * amount + ctl(kBandIds[b].gain, i));
         sumL += bands[0][b] * g;
         sumR += bands[1][b] * g;
@@ -117,6 +147,11 @@ struct Device : pd_own::Device<ids::kCount> {
       outl[i] = static_cast<float>((l + (sumL - l) * mix) * outGain);
       outr[i] = static_cast<float>((r + (sumR - r) * mix) * outGain);
     }
+    for (int b = 0; b < kBands; ++b) {
+      levelHistory[b].push(levels[b]);
+      changeHistory[b].push(changes[b]);
+    }
+    blockSec = (frames / sampleRate) * kDynamicsBlocksPerEntry;
     if (frames > 0 && !isPlayable(outl[frames - 1])) {
       for (auto& x : lowX) x.reset();
       for (auto& x : highX) x.reset();

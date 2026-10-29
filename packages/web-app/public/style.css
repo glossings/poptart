@@ -2123,12 +2123,9 @@ li.CodeMirror-hint-active {
   touch-action: none;
 }
 
-/* Something else is moving a parameter this picture is drawn from, so the picture still moves but
-   the gesture does nothing - the same bargain a driven knob makes. */
-.device-figure.driven .device-figure-canvas {
-  cursor: not-allowed;
-}
-
+/* Something else is moving a parameter this picture is drawn from. The picture still moves, and
+   the gesture still works on every part of it that is not driven - so the ban cursor is set by the
+   client over the driven piece alone (see figureRefuses), never on the whole canvas. */
 .device-figure.driven .device-figure-read {
   color: var(--accent);
 }

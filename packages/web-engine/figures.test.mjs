@@ -683,6 +683,21 @@ test('the dip figure is the ducker\'s own recursion over one beat', () => {
   assert.equal(live.keyed, true);
   assert.deepEqual(live.history.gain, [1, 0.5]);
   assert.deepEqual(live.history.key, [0, 0.3]);
+  assert.equal(live.history.at, null);
+  assert.equal(live.window, null, 'a keyed lane scrolls');
+});
+
+test('a ducker on the clock lays its lane on the beat grid: a bar, or two dips when one is longer than half a bar', () => {
+  const report = { trigger: 'clock', history: { gain: [1, 0.5], out: [0.1, 0.2], key: null, blockSec: 0.01, at: 7.3 } };
+  const quarter = only(DUCKER, 'duck', { sync: SYNC_OPTIONS.indexOf('1/4') }, { bpm: 120, report });
+  assert.equal(quarter.history.at, 7.3);
+  assert.equal(quarter.window, 2, 'a bar at 120');
+  const bar = only(DUCKER, 'duck', { sync: SYNC_OPTIONS.indexOf('1 bar') }, { bpm: 120, report });
+  assert.equal(bar.window, 4, 'two dips of a bar each');
+  const free = only(DUCKER, 'duck', { sync: SYNC_OPTIONS.indexOf('free') }, { bpm: 120, report });
+  assert.equal(free.window, null, 'unsynced, it scrolls');
+  const still = only(DUCKER, 'duck', { sync: SYNC_OPTIONS.indexOf('1/4') }, { bpm: 120, report: { trigger: 'clock', history: { gain: [1], out: [0], key: null, blockSec: 0.01 } } });
+  assert.equal(still.window, null, 'with no place on the clock there is no grid to lay it on');
 });
 
 test('the transfer figure carries the compressor\'s history when it reports one', () => {

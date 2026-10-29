@@ -1235,6 +1235,58 @@ export class Sig {
   }
 
   /**
+   * Legato: every note rings until the next one starts. The gaps between notes close, and a note
+   * that ran past the next onset stops there, so what comes out has neither gaps nor overlaps -
+   * the way the legato command on a clip works in a DAW. Notes that start together (a chord) all
+   * reach the next onset after them, and the last note of a cycle reaches the first note of the
+   * next, so a looping line is seamless. A note with nothing after it keeps its own length.
+   *
+   * The reach is written as the event's `clip` (see Sig#clip), so nothing structural changes: the
+   * step keeps its width, and the noteOff lands where the next note starts. A clip set before
+   * .legato() is replaced - legato IS the length - and arithmetic after it composes, so
+   * `.legato().mul(clip(0.9))` leaves a sliver of air before each note.
+   */
+  legato() {
+    if (!this.stepsForCycle) {
+      warnUser('[signal] .legato() needs a pattern with events - this one has none of its own (an LFO, a live input), so it is left as it was');
+      return this;
+    }
+    const base = this.stepsForCycle;
+    const clipStamp = stampField('clip');
+    const isOnset = (s) => s.value != null && !s.cont;
+    // The first onset in the cycles after `cycle`, in that cycle's own time (so >= 1), or
+    // undefined when nothing follows within reach.
+    const firstOnsetAfter = (cycle) => {
+      for (let k = 1; k <= LEGATO_LOOKAHEAD; k++) {
+        const found = base(cycle + k).filter(isOnset);
+        if (found.length) return k + Math.min(...found.map((s) => s.start));
+      }
+      return undefined;
+    };
+    const stepsForCycle = (cycle) => {
+      const own = base(cycle);
+      const onsets = [...new Set(own.filter(isOnset).map((s) => s.start))].sort((a, b) => a - b);
+      let ahead; // looked up once per cycle, and only when a note needs it
+      let looked = false;
+      const nextAfter = (start) => {
+        for (const o of onsets) if (o > start + MIX_EPS) return o;
+        if (!looked) { ahead = firstOnsetAfter(cycle); looked = true; }
+        return ahead;
+      };
+      return own.map((s) => {
+        if (!isOnset(s)) return s;
+        const width = s.end - s.start;
+        const to = nextAfter(s.start);
+        const cleared = clipStamp.clear(s);
+        if (to === undefined || !(width > 0)) return cleared;
+        return { ...cleared, clip: (to - s.start) / width };
+      });
+    };
+    const { clip: _replaced, ...noteChannels } = this.noteChannels;
+    return this._keepCtl(this._clone({ noteChannels, stepsForCycle }));
+  }
+
+  /**
    * Moves each event off its grid position in time, as a fraction of its own step width: .nudge(0.1)
    * plays every note a tenth of a step late, .nudge(-0.05) a twentieth early. Same knob as the
    * `nudge` field in .as("note:vel:nudge"), and the channel .swing() adds to.
@@ -4084,6 +4136,10 @@ function mixEdges(step, otherSteps) {
 // remembered cycle is what keeps a Math.random() in the user's function to one answer per cycle.
 const EVENTS_CACHE_CYCLES = 64;
 
+// How far ahead .legato() looks for the note after a cycle's last one. Past this a line has a hole
+// in it rather than a gap, and the note keeps its own length.
+const LEGATO_LOOKAHEAD = 16;
+
 // Where an event keeps the step it was made from, and what it was shown as. A symbol, so a spread
 // copy of the event carries it along (the copy keeps the original's highlight and sampler config)
 // while nothing a person types can collide with it.
@@ -5906,6 +5962,43 @@ function exprSpan(node) {
   }
 }
 
+/**
+ * The one value a control signal holds for all time, or undefined where it varies - or where
+ * that can't be told, which is read as varying. What separates `.param("Mode", "asym")` (a
+ * setting written in the code, and by the panel's own pickers) from `.param("Mode", "<asym
+ * tanh>")` (a pattern that would put its own value back over anything set by hand). A number,
+ * a tagged constant, a one-step mini string that reads the same for the first cycles, or a
+ * continuous signal that samples the same at a few times, is steady; everything else is not.
+ */
+export function steadyValue(x) {
+  if (typeof x === 'number') return Number.isFinite(x) ? x : undefined;
+  if (typeof x === 'string') return x;
+  if (!(x instanceof Sig)) return undefined;
+  if (Number.isFinite(x.constVal)) return x.constVal;
+  if (x.lfoIR || x.envIR || x.ccIR) return undefined;
+  if (x.stepsForCycle) {
+    let first;
+    for (let cycle = 0; cycle < STEADY_PROBE_CYCLES; cycle++) {
+      const steps = x.stepsForCycle(cycle).filter((s) => s.value != null);
+      if (steps.length !== 1 || Math.abs(steps[0].start) > MIX_EPS || Math.abs(steps[0].end - 1) > MIX_EPS) return undefined;
+      const v = steps[0].value;
+      if (typeof v !== 'number' && typeof v !== 'string') return undefined;
+      if (cycle === 0) first = v;
+      else if (v !== first) return undefined;
+    }
+    return first;
+  }
+  if (typeof x.sample !== 'function') return undefined;
+  const first = x.sample(0, 1, 0);
+  if (typeof first !== 'number' && typeof first !== 'string') return undefined;
+  for (const t of [0.37, 1.13, 2.71]) if (x.sample(t, 1, t) !== first) return undefined;
+  return first;
+}
+
+// How many cycles steadyValue reads of a step pattern before calling it steady: enough to see an
+// alternation of any length somebody would write by hand, cheap enough to ask on every hold.
+const STEADY_PROBE_CYCLES = 8;
+
 function constantOf(x) {
   if (typeof x === 'number') return Number.isFinite(x) ? x : null;
   if (!(x instanceof Sig)) return null;
@@ -6168,6 +6261,26 @@ function samplerPattern(builder, value, kind) {
 // key, and puts a sampler's neutral note and a synth's middle on the same number, so the two
 // track kinds share one register. Same value as DEFAULT_TRIG_NOTE below, for the same reason.
 const DEFAULT_SYNTH_NOTE = 60;
+
+// A transform at the HEAD of a chain - struct("1 ~ 1 1").s("bd"), hold("t*4"), seg(8), chord("m7")
+// - has no pattern to transform yet, so it starts from what a note-less synth("X") plays: one
+// default note per cycle. That is the same grid a gridless control at the head takes (see
+// _fromHeadCtl), so vel("1!4").s("bd") and struct("1!4").s("bd") are the one idea spelled twice.
+// Only the methods whose ARGUMENT supplies the structure read naturally this way; a .fast(2) or
+// .ply(3) with nothing before it is a chain missing its source.
+function headForm(method) {
+  return (...args) => withPitchKind(note(DEFAULT_SYNTH_NOTE), 'note')[method](...args);
+}
+/** The default note, struck on a boolean pattern's rhythm: `struct("1 ~ 1 1").s("bd")`. */
+export const struct = headForm('struct');
+/** The default note, held from each trigger to the next: `hold("1 ~ 1 1").s("pad")`. */
+export const hold = headForm('hold');
+/** The default note, n times a cycle: `seg(8).s("hh")`. */
+export const seg = headForm('seg');
+/** The long spelling of seg(). */
+export const segment = headForm('segment');
+/** A chord built on the default note, once a cycle: `chord("m7").synth("Serum 2")`. */
+export const chord = headForm('chord');
 
 // Every sampler channel, by the name of the method that sets it: which key it lives under in
 // Sig#sampler, and what it's worth when nobody has set it - the value a combinator has to combine

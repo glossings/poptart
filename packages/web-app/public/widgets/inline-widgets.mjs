@@ -427,7 +427,7 @@ export function createInlineWidgets({
   // A cell's tooltip: where it is and what it does - the only words the grid carries.
   function cellTitle(rowKey, i, count, token) {
     const where = `${rowKey ? `${rowKey} · ` : ''}step ${i + 1} of ${count}`;
-    return `${where}: ${token ?? 'rest'} - click to switch, drag to paint; right-click to edit as text`;
+    return `${where}: ${token ?? 'rest'} - click to switch, drag to paint; right-click to randomize or edit as text`;
   }
 
   // A grid's cells: `--iw-cell` wide and `--iw-cell-h` tall.
@@ -702,6 +702,14 @@ export function createInlineWidgets({
         push(w, next);
         w.dirty = true;
       };
+      // "randomize" on the editor menu: the row thrown again, written and heard as a click is.
+      w.randomize = () => {
+        const r = row();
+        const next = calls.randomRow(r.text);
+        r.write(next);
+        push(w, next);
+        w.dirty = true;
+      };
       onDrag(box, {
         down: (e) => {
           const i = cellIndex(e.target);
@@ -776,6 +784,13 @@ export function createInlineWidgets({
         push(w, next);
         w.dirty = true;
       };
+      w.randomize = () => {
+        const s = state();
+        const next = calls.randomValues(s.text, s.min, s.max, M.decimalsFor(s.min, s.max));
+        s.write(next);
+        push(w, next);
+        w.dirty = true;
+      };
       onDrag(box, {
         down: (e) => { dragging = true; setAt(e); },
         move: (e) => { if (dragging) setAt(e); },
@@ -846,6 +861,22 @@ export function createInlineWidgets({
         if (row.form === 'text') replaceIdx(row.abs + row.from, row.abs + row.to, next);
         else replaceIdx(row.abs + row.from, row.abs + row.to, quoteRow(next)); // a count, written out
         push(w, { row: row.key, text: next });
+        w.dirty = true;
+      };
+      // Every row thrown again, in one edit and one value to the host (the queue in push keeps
+      // only the newest value, so a row per message would lose the middle ones).
+      w.randomize = () => {
+        const rows = rowsNow();
+        if (!rows.length) return;
+        const value = {};
+        cm.operation(() => {
+          for (const row of [...rows].reverse()) { // back to front, so the earlier spans stay put
+            const next = calls.randomRow(row.text);
+            value[row.key] = next;
+            replaceIdx(row.abs + row.from, row.abs + row.to, row.form === 'text' ? next : quoteRow(next));
+          }
+        });
+        push(w, value);
         w.dirty = true;
       };
       const hit = (target) => {

@@ -111,14 +111,21 @@ class MappedEngine {
     this.resolveTrack = fn;
   }
 
-  _trackRef(name, from) {
+  _trackRef(name, from, audio = false) {
     if (!this.resolveTrack || name == null) return name;
     const str = String(name);
     if (str.startsWith('dev:') || str.startsWith('bus:')) return name;
     if (str.startsWith('track:')) return `track:${this.resolveTrack(str.slice(6), from)}`;
     // `from` is the referencing track's engine id: the resolver scopes the lookup to that
     // track's deck first, so deck b's audio("kick") means deck b's kick.
-    return this.resolveTrack(str, from);
+    const id = this.resolveTrack(str, from);
+    // A track reading its OWN label - `delay: audio("delay")` - means the bus of that name, not
+    // itself (both engines say so; a track feeding its own input is nothing). Resolved to its id
+    // the self-reference is lost: sclang would look for a bus called "#2" and find none. Said as
+    // a bus outright, so the engine neither waits for a track of that name nor warns. Audio only:
+    // a MIDI route has no bus to mean, and is left as it was.
+    if (audio && from != null && id === from) return `bus:${str}`;
+    return id;
   }
 
   // Called on every eval, per track, with [instrument, ...fxChain]; also reload mapping files
@@ -205,10 +212,10 @@ class MappedEngine {
 
   // A hold reads the plugin, a release writes back what it read - neither carries a value of
   // ours to convert, but both have to be real methods here for the same reason anchorParamLFO is.
-  holdParam(trackId, slot, name) {
+  holdParam(trackId, slot, name, ...opts) {
     const amp = this._amp(trackId, slot, name);
     if (amp === null) return;
-    this.engine.holdParam(trackId, slot, amp ? amp.name : name);
+    this.engine.holdParam(trackId, slot, amp ? amp.name : name, ...opts);
   }
 
   releaseParam(trackId, slot, name, targetTime) {
@@ -331,13 +338,13 @@ class MappedEngine {
   // parameter mapping involved, but the scheduler feature-detects each of these (typeof
   // engine.X === 'function'), so they must exist on the wrapper to be reached - and the ones
   // that carry a routing name translate track references on the way down (see _trackRef).
-  setInputSource(trackId, io, name, ...a) { return this.engine.setInputSource(trackId, io, this._trackRef(name, trackId), ...a); }
+  setInputSource(trackId, io, name, ...a) { return this.engine.setInputSource(trackId, io, this._trackRef(name, trackId, io === 'audio'), ...a); }
   clearInputSource(...a) { return this.engine.clearInputSource(...a); }
   setBusSends(...a) { return this.engine.setBusSends(...a); }
   clearBusSends(...a) { return this.engine.clearBusSends(...a); }
   setBusSendAmount(...a) { return this.engine.setBusSendAmount(...a); }
   setFxSend(...a) { return this.engine.setFxSend(...a); }
-  injectAudio(trackId, slot, name, ...a) { return this.engine.injectAudio(trackId, slot, this._trackRef(name, trackId), ...a); }
+  injectAudio(trackId, slot, name, ...a) { return this.engine.injectAudio(trackId, slot, this._trackRef(name, trackId, true), ...a); }
   clearAudioInject(...a) { return this.engine.clearAudioInject(...a); }
   injectMidi(trackId, slot, name, ...a) { return this.engine.injectMidi(trackId, slot, this._trackRef(name, trackId), ...a); }
   clearMidiInject(...a) { return this.engine.clearMidiInject(...a); }
@@ -348,7 +355,7 @@ class MappedEngine {
   // paramExprs answers in the scheduler's own spelling and an unchanged one isn't sent again.
   setParamExpr(trackId, slot, name, tree) {
     const resolve = (node) => {
-      if (node.k === 'in' && node.source != null) return { ...node, source: this._trackRef(node.source, trackId) };
+      if (node.k === 'in' && node.source != null) return { ...node, source: this._trackRef(node.source, trackId, true) };
       return Array.isArray(node.a) ? { ...node, a: node.a.map(resolve) } : node;
     };
     let sent = resolve(tree);

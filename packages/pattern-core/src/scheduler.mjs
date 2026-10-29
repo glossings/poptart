@@ -25,7 +25,7 @@
 //    own note grid (withNoteGate), which is what the engine gates the native one from too.
 
 import { defScopeOf, withDefDeck } from './rolls.mjs';
-import { sampleBound, CHANNEL_DEFAULTS, channelDefault, GRAIN_CHANNELS, DEFAULT_BEND_RANGE, bendRangeWarning, LOOP_MODES, loopModeAt, channelAt, soundingEnd, timeShift, grooveVelScale, endEdgeStep, warnPattern, lfoRateHz, lfoPhaseCount, lfoShapes, resolvePreset, paramExpr, lfoRateChanges, withNoteGate, withEventSpan, noteGateFromGrid } from './signal.mjs';
+import { steadyValue, sampleBound, CHANNEL_DEFAULTS, channelDefault, GRAIN_CHANNELS, DEFAULT_BEND_RANGE, bendRangeWarning, LOOP_MODES, loopModeAt, channelAt, soundingEnd, timeShift, grooveVelScale, endEdgeStep, warnPattern, lfoRateHz, lfoPhaseCount, lfoShapes, resolvePreset, paramExpr, lfoRateChanges, withNoteGate, withEventSpan, noteGateFromGrid } from './signal.mjs';
 import { scalePitchClasses, parseScaleName, degreeToMidi, quantizeToScale } from './notes.mjs';
 import { songSteps, stepsUnderShift, withClipShift } from './arrange.mjs';
 import { sliceSetIsEmpty } from './slices.mjs';
@@ -2453,7 +2453,10 @@ export class Scheduler {
           const key = `${c.slot}:${c.name}`;
           const speaks = typeof value === 'number' || typeof value === 'string';
           if (speaks && !this._heldParams.has(key)) {
-            this.engine.holdParam(this.trackId, c.slot, c.name);
+            // Whether the value is one the code SETS (a number, a name - what the panel's own
+            // pickers write) or a pattern that keeps putting its value back: the engine tells a
+            // window the difference, so a setting stays editable there and a pattern is named.
+            this.engine.holdParam(this.trackId, c.slot, c.name, { steady: steadyValue(c.sig) !== undefined });
             this._heldParams.add(key);
           } else if (!speaks && this._heldParams.has(key)) {
             this.engine.releaseParam(this.trackId, c.slot, c.name, applySec);

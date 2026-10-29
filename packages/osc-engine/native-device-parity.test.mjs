@@ -51,6 +51,7 @@ import { LpgProcessor } from '../web-engine/src/devices/lpg.mjs';
 import { CrossoverProcessor } from '../web-engine/src/devices/crossover.mjs';
 import { IR_NAMES, bufferFromChannels, synthesizeImpulse } from '../web-engine/src/devices/builtins.mjs';
 import { Biquad, BIQUAD_TYPES } from '../web-engine/src/dsp/biquad.mjs';
+import { readReport } from './native-devices.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const NATIVE_DIR = path.join(here, 'native', 'devices');
@@ -1041,6 +1042,134 @@ test('a drawn grain window and the grains reported play the same on both engines
     assert.ok(Math.abs(v - theirs.grains[i][k]) < 1e-5, `grain ${i} field ${k}: ${v} against ${theirs.grains[i][k]}`);
   }));
 });
+
+test('the compressor reports where the signal is on its curve, and the same history as the browser', { skip: compiler ? false : 'no clang++' }, () => {
+  const binary = buildHarness(devices);
+  const { device } = devices.find((d) => d.id === 'Compressor');
+  const frames = BLOCK * 40;
+  // Loud enough to be well over the default threshold, so there is reduction to report. Nothing
+  // on the key: both engines then listen to the input itself (see pd_key_patched).
+  const input = testSignal(frames, inChannelsOf(device), 5, false);
+  const values = device.params.map((p) => p.default);
+  const reportFile = path.join(WORK, 'Compressor-report.f32');
+  let theirs = null;
+  runNative(binary, { id: 'Compressor', values, input, frames, keyed: false, report: reportFile });
+  runBrowser(device, { values, input, frames, channels: inChannelsOf(device), keyed: false, onDone: (fx) => { theirs = fx.report(); } });
+  const raw = fs.readFileSync(reportFile);
+  const floats = Array.from({ length: raw.length / 4 }, (_, i) => raw.readFloatLE(i * 4));
+  const mine = readReport('Compressor', floats)?.meters?.curve;
+  assert.ok(mine, 'the native compressor reported nothing');
+  const curve = theirs?.meters?.curve;
+  assert.ok(curve, 'the browser compressor reported nothing');
+  assert.ok(curve.grDb < -1, `the test signal was not compressed: ${curve.grDb} dB`);
+  const close = (a, b, what) => assert.ok(Math.abs(a - b) < 0.05, `${what}: ${a} against ${b}`);
+  close(mine.inDb, curve.inDb, 'the level in');
+  close(mine.grDb, curve.grDb, 'the reduction');
+  assert.equal(mine.history.end, curve.history.end, 'entries written');
+  close(mine.history.blockSec, curve.history.blockSec, 'seconds per entry');
+  assert.equal(mine.history.inDb.length, curve.history.inDb.length, 'ring length');
+  curve.history.inDb.forEach((v, i) => close(mine.history.inDb[i], v, `level entry ${i}`));
+  curve.history.grDb.forEach((v, i) => close(mine.history.grDb[i], v, `reduction entry ${i}`));
+});
+
+/** A device's native report, decoded as the engine decodes it. */
+function nativeReport(id, file) {
+  const raw = fs.readFileSync(file);
+  return readReport(id, Array.from({ length: raw.length / 4 }, (_, i) => raw.readFloatLE(i * 4)));
+}
+
+/** Two numbers, or two rings of them, the same to within a hair. */
+function sameNumbers(mine, theirs, what, tolerance = 0.05) {
+  const a = Array.isArray(mine) ? mine : [mine];
+  const b = Array.isArray(theirs) ? theirs : [theirs];
+  assert.equal(a.length, b.length, `${what}: ${a.length} entries against ${b.length}`);
+  // Equal first: a limiter's first entries are minus infinity on both engines, and a difference of two infinities is not a number.
+  b.forEach((v, i) => assert.ok(a[i] === v || Math.abs(a[i] - v) < tolerance, `${what}${b.length > 1 ? ` entry ${i}` : ''}: ${a[i]} against ${v}`));
+}
+
+/** A dynamics lane - the live pair and the two rings - the same on both engines. */
+function sameLane(mine, theirs, what) {
+  assert.ok(mine, `${what}: the native device reported nothing`);
+  assert.ok(theirs, `${what}: the browser device reported nothing`);
+  sameNumbers(mine.inDb, theirs.inDb, `${what} level in`);
+  sameNumbers(mine.grDb, theirs.grDb, `${what} reduction`);
+  assert.equal(mine.history.end, theirs.history.end, `${what} entries written`);
+  sameNumbers(mine.history.blockSec, theirs.history.blockSec, `${what} seconds per entry`, 1e-6);
+  sameNumbers(mine.history.inDb, theirs.history.inDb, `${what} level ring`);
+  sameNumbers(mine.history.grDb, theirs.history.grDb, `${what} reduction ring`);
+}
+
+for (const id of ['Limiter', 'Multiband']) {
+  test(`the ${id.toLowerCase()} reports the same lane${id === 'Multiband' ? 's' : ''} as the browser`, { skip: compiler ? false : 'no clang++' }, () => {
+    const binary = buildHarness(devices);
+    const { device } = devices.find((d) => d.id === id);
+    const frames = BLOCK * 40;
+    const input = testSignal(frames, 2, 5, false);
+    // Driven hard enough to work: the limiter by its gain, the multiband by its thresholds.
+    const values = device.params.map((p) => (p.id === 'gain' ? 18 : /threshold/.test(p.id) ? -40 : p.default));
+    const reportFile = path.join(WORK, `${id}-report.f32`);
+    let theirs = null;
+    runNative(binary, { id, values, input, frames, report: reportFile });
+    runBrowser(device, { values, input, frames, onDone: (fx) => { theirs = fx.report(); } });
+    const mine = nativeReport(id, reportFile);
+    assert.ok(mine, `the native ${id} reported nothing`);
+    for (const key of Object.keys(theirs.meters)) {
+      assert.ok(theirs.meters[key].grDb < -1, `${key}: the test signal was not compressed (${theirs.meters[key].grDb} dB)`);
+      sameLane(mine.meters[key], theirs.meters[key], key);
+    }
+  });
+}
+
+test('the ducker reports the dip, the output under it and what is driving it, as the browser does', { skip: compiler ? false : 'no clang++' }, () => {
+  const binary = buildHarness(devices);
+  const { device } = devices.find((d) => d.id === 'Ducker');
+  // Over a second: the clock only dips on a beat change, and the first beat seen is not one.
+  const frames = BLOCK * 400;
+  const channels = inChannelsOf(device);
+  const values = device.params.map((p) => p.default);
+  const ways = [
+    { what: 'on the clock', keyed: false, notes: [] },
+    { what: "on a routed track's notes", keyed: false, notes: [{ frame: BLOCK * 4, note: 60, velocity: 1 }, { frame: BLOCK * 200, note: 62, velocity: 1 }] },
+    { what: 'on a key', keyed: true, notes: [] },
+  ];
+  for (const way of ways) {
+    const input = testSignal(frames, channels, 11, way.keyed);
+    const reportFile = path.join(WORK, 'Ducker-report.f32');
+    let theirs = null;
+    runNative(binary, { id: 'Ducker', values, input, frames, keyed: way.keyed, notes: way.notes, report: reportFile });
+    runBrowser(device, { values, input, frames, channels, keyed: way.keyed, notes: way.notes, onDone: (fx) => { theirs = fx.report(); } });
+    const mine = nativeReport('Ducker', reportFile);
+    assert.ok(mine, `${way.what}: the native ducker reported nothing`);
+    assert.equal(mine.trigger, theirs.trigger, `${way.what}: trigger`);
+    assert.equal(mine.keyed, theirs.keyed, `${way.what}: keyed`);
+    assert.equal(mine.history.end, theirs.history.end, `${way.what}: entries written`);
+    sameNumbers(mine.history.blockSec, theirs.history.blockSec, `${way.what}: seconds per entry`, 1e-6);
+    sameNumbers(mine.history.at, theirs.history.at, `${way.what}: place on the clock`, 1e-3);
+    sameNumbers(mine.history.gain, theirs.history.gain, `${way.what}: gain ring`, 1e-3);
+    sameNumbers(mine.history.out, theirs.history.out, `${way.what}: output ring`, 1e-3);
+    if (theirs.history.key) sameNumbers(mine.history.key, theirs.history.key, `${way.what}: key ring`, 1e-3);
+    else assert.equal(mine.history.key, null, `${way.what}: no key ring`);
+    assert.ok(theirs.history.gain.some((g) => g < 0.9), `${way.what}: the browser ducker never dipped`);
+  }
+});
+
+for (const id of ['Chorus', 'Flanger', 'Phaser']) {
+  test(`the ${id.toLowerCase()} reports where its sweep is, as the browser does`, { skip: compiler ? false : 'no clang++' }, () => {
+    const binary = buildHarness(devices);
+    const { device } = devices.find((d) => d.id === id);
+    const frames = BLOCK * 25;
+    const input = testSignal(frames, 2, 3, false);
+    const values = device.params.map((p) => p.default);
+    const reportFile = path.join(WORK, `${id}-report.f32`);
+    let theirs = null;
+    runNative(binary, { id, values, input, frames, report: reportFile });
+    runBrowser(device, { values, input, frames, onDone: (fx) => { theirs = fx.report(); } });
+    const mine = nativeReport(id, reportFile);
+    assert.ok(mine && Number.isFinite(mine.phase), `the native ${id} reported no phase`);
+    assert.ok(theirs.phase > 0, `the browser ${id} did not move`);
+    sameNumbers(mine.phase, theirs.phase, 'phase', 1e-4);
+  });
+}
 
 test('a stereo file at another rate is convolved side by side, as Chromium convolves it', { skip: compiler ? false : 'no clang++' }, () => {
   const binary = buildHarness(devices);

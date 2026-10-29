@@ -4738,6 +4738,17 @@ function wireFigureDrag(canvas, entry, send) {
   const handled = new Set(['adsr', 'eq', 'band', 'matrix']);
   if (!handled.has(figure.kind) && !figure.drag) return;
 
+  // The ban cursor goes on the piece of the picture that is driven, as the hand reaches it - not
+  // on the whole picture, which still drags everywhere else (see figureRefuses). Left alone
+  // mid-drag: the drag owns the pointer.
+  canvas.addEventListener('pointermove', (e) => {
+    if (e.buttons) return;
+    const f = entry.figure();
+    const rect = canvas.getBoundingClientRect();
+    canvas.style.cursor = figureRefuses(f, e.clientX - rect.left, e.clientY - rect.top, rect.width, rect.height) ? 'not-allowed' : '';
+  });
+  canvas.addEventListener('pointerleave', () => { canvas.style.cursor = ''; });
+
   canvas.addEventListener('pointerdown', (e) => {
     const f = entry.figure();
     const rect = canvas.getBoundingClientRect();
@@ -4942,6 +4953,22 @@ function matrixGrab(f, x, y, w, h) {
 }
 
 /**
+ * Whether the thing under the pointer is one something else is driving. A picture is refused by
+ * the piece of it the hand is on, not as a whole: a matrix with one cell on an LFO is sixty-three
+ * cells that still drag, and a band whose gain is driven still slides sideways. "Refused" is told
+ * apart from "nothing there" by asking the same hit test with nothing driven.
+ */
+function figureRefuses(f, x, y, w, h) {
+  if (!Object.keys(f.driven ?? {}).length) return false;
+  const grabAt = (fig) => (fig.kind === 'adsr' ? adsrGrab(fig, x, y, w, h)
+    : fig.kind === 'eq' ? eqGrab(fig, x, y, w, h)
+      : fig.kind === 'band' ? bandGrab(fig, x, w)
+        : fig.kind === 'matrix' ? matrixGrab(fig, x, y, w, h)
+          : fieldGrab(fig));
+  return grabAt(f) === null && grabAt({ ...f, driven: {} }) !== null;
+}
+
+/**
  * An envelope handle grab.
  *
  * Times move by how far the pointer went, measured against the span the figure had when it was
@@ -5062,8 +5089,13 @@ function figureFill(ctx, pts, color, baseline) {
  * picture only ever moves by whole columns. A column that covers several entries keeps their
  * largest, or their smallest with `keep` 'min', so a transient is never dropped between two; a
  * column older than the history is null.
+ *
+ * A lane wider than its history has columns no entry falls in. Held (`hold`), they repeat the
+ * entry before them, which is what a bar per column wants; a line drawn through held columns
+ * is a staircase, so a stroke asks for them left null and lanePoints draws straight from one
+ * entry to the next.
  */
-function laneColumns(values, end, width, keep = 'max') {
+function laneColumns(values, end, width, keep = 'max', hold = true) {
   const n = values.length;
   const cols = Math.max(1, Math.floor(width));
   const out = new Array(cols).fill(null);
@@ -5076,7 +5108,10 @@ function laneColumns(values, end, width, keep = 'max') {
     const col = newest - (cols - 1 - c);
     let lo = Math.ceil(col * per);
     let hi = Math.ceil((col + 1) * per);
-    if (hi <= lo) { lo = Math.floor(col * per); hi = lo + 1; } // a lane wider than the history
+    if (hi <= lo) { // a lane wider than the history: no entry starts in this column
+      if (!hold) { out[c] = null; continue; }
+      lo = Math.floor(col * per); hi = lo + 1;
+    }
     let v = null;
     for (let a = Math.max(lo, first); a < Math.min(hi, last); a++) {
       const x = values[a - first];
@@ -5085,6 +5120,32 @@ function laneColumns(values, end, width, keep = 'max') {
     out[c] = v;
   }
   return out;
+}
+
+/**
+ * A history laid on the clock rather than scrolled: each entry where its moment falls in a window
+ * of `windowSec`, so a beat lands on the same column every time round. `at` is the transport
+ * seconds at the newest entry and `blockSec` the seconds an entry stands for; only the newest
+ * window's worth is laid out, so nothing older draws under what is current. The lane comes back
+ * as runs of [x, value] points, oldest first, broken where the window wraps; the newest entry is
+ * the last point of the last run.
+ */
+function clockLaneRuns(values, blockSec, at, windowSec, width) {
+  const n = values.length;
+  const runs = [];
+  let run = [];
+  let lastX = -1;
+  for (let i = 0; i < n; i++) {
+    const t = at - (n - 1 - i) * blockSec;
+    if (t <= at - windowSec) continue;
+    const phase = ((t % windowSec) + windowSec) % windowSec;
+    const x = (phase / windowSec) * width;
+    if (x < lastX) { if (run.length) runs.push(run); run = []; }
+    run.push([x, values[i]]);
+    lastX = x;
+  }
+  if (run.length) runs.push(run);
+  return runs;
 }
 
 /** A column's value (from laneColumns) as a point at its center, skipping the columns with none. */
@@ -5752,7 +5813,7 @@ const FIGURE_DRAWERS = {
       if (hist && hist.inDb.length > 1) {
         // One value per pixel column, pinned to its entries (see laneColumns): the lane moves in
         // whole pixels rather than re-sampling itself every frame.
-        const inCols = laneColumns(hist.inDb, hist.end, laneW, 'max');
+        const inCols = laneColumns(hist.inDb, hist.end, laneW, 'max', false);
         const grCols = laneColumns(hist.grDb, hist.end, laneW, 'min');
         const inPts = lanePoints(inCols, laneX, (db) => yOf(db));
         // In, as a filled trace; out, as the line over it - the makeup is in the output and
@@ -6014,11 +6075,39 @@ const FIGURE_DRAWERS = {
     ctx.strokeStyle = c.grid;
     ctx.lineWidth = 1;
     ctx.strokeRect(0.5, top + 0.5, w - 1, size - 1);
-    if (f.history) {
+    if (f.history && f.window) {
+      // On the clock: the lane laid on the beat grid, a mark at every dip, so the pump lands in
+      // the same place every time round (see clockLaneRuns) instead of scrolling past.
+      const { gain, out, blockSec, at } = f.history;
+      const floor = Math.round(yOf(0));
+      for (let k = 1; k * f.period < f.window - 1e-9; k++) {
+        const x = Math.round((k * f.period / f.window) * w) + 0.5;
+        figureDashed(ctx, x, top, x, top + size, c.grid);
+      }
+      const loudest = f.outScale ?? Math.max(0.05, ...out);
+      const bar = Math.max(1, Math.ceil((blockSec / f.window) * w));
+      ctx.fillStyle = c.dim;
+      ctx.globalAlpha = 0.45;
+      for (const run of clockLaneRuns(out, blockSec, at, f.window, w)) {
+        for (const [x, v] of run) {
+          const y = Math.round(yOf(v / loudest));
+          if (y < floor) ctx.fillRect(Math.floor(x), y, bar, floor - y);
+        }
+      }
+      ctx.globalAlpha = 1;
+      const runs = clockLaneRuns(gain, blockSec, at, f.window, w);
+      for (const run of runs) figureStroke(ctx, run.map(([x, g]) => [x, yOf(g)]), c.accent, 1.75);
+      // Where the newest entry is: the sweep's head.
+      const head = runs.length ? runs[runs.length - 1][runs[runs.length - 1].length - 1][0] : null;
+      if (head !== null) {
+        ctx.fillStyle = c.text;
+        ctx.fillRect(Math.round(head), top, 1, size);
+      }
+    } else if (f.history) {
       const { gain, out, key, end } = f.history;
       // One value per pixel column, pinned to its entries (see laneColumns): the lane moves in
       // whole pixels rather than re-sampling itself every frame.
-      const gainCols = laneColumns(gain, end, w, 'min');
+      const gainCols = laneColumns(gain, end, w, 'min', false);
       const outCols = laneColumns(out, end, w, 'max');
       // Scaled to the loudest, as the panel has been smoothing it (see paint): a scale that
       // followed the lane exactly would jump every time a peak scrolled off the left.
@@ -6035,12 +6124,12 @@ const FIGURE_DRAWERS = {
       // The key and its threshold, where there is an audio key; where notes trigger it, a tick
       // at each note instead - a note has no level to cross anything with.
       if (key && f.trigger === 'notes') {
-        figureStroke(ctx, lanePoints(laneColumns(key, end, w, 'max'), 0, (v) => yOf(v)), c.warn, 1);
+        figureStroke(ctx, lanePoints(laneColumns(key, end, w, 'max', false), 0, (v) => yOf(v)), c.warn, 1);
         figureLabel(ctx, 'notes', 3, 2, c.warn);
       } else if (key) {
         const threshold = Math.pow(10, f.threshold / 20);
         const scale = Math.max(f.keyScale ?? Math.max(0.05, ...key), threshold * 1.25);
-        figureStroke(ctx, lanePoints(laneColumns(key, end, w, 'max'), 0, (v) => yOf(v / scale)), c.warn, 1);
+        figureStroke(ctx, lanePoints(laneColumns(key, end, w, 'max', false), 0, (v) => yOf(v / scale)), c.warn, 1);
         figureDashed(ctx, 0, yOf(threshold / scale), w, yOf(threshold / scale), c.warn);
         figureLabel(ctx, 'key', 3, 2, c.warn);
       }
@@ -38110,6 +38199,16 @@ function openEditorMenu(ed, e) {
     items.unshift(widgetHit.folded
       ? ['edit as text', () => unfoldWidget(ed, widgetHit), `the ${widgetHit.kind}() call behind these ${shown}`]
       : [`show as ${shown}`, () => refoldWidget(ed, widgetHit), `draw this ${widgetHit.kind}() call as ${shown} again`]);
+    // The drawn control thrown again: it rewrites the text behind the cells, as a click does.
+    const fold = widgetHit.folded ? widgetHit.mark?.poptartWidget : null;
+    if (fold?.randomize) {
+      const what = {
+        steps: 'as many hits as now, somewhere else',
+        sliders: 'every bar at a new height',
+        matrix: "each row's hits somewhere else",
+      }[widgetHit.kind];
+      items.unshift(['randomize', () => { fold.randomize(); ed.focus(); }, what]);
+    }
   }
   items.push(['add an effect…', () => insertFxCall(ed), `${hotkeyLabel('fx')} — an .fx("") at the caret, with the plugin list open`]);
   // conf for the track under the caret - the sidebar's conf button, from the code, for either deck.

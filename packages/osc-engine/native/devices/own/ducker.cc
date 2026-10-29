@@ -12,6 +12,7 @@
 
 #include "own/pd-own.h"
 #include "own/dsp/adsr.h"
+#include "own/dsp/history.h"
 #include "own/dsp/sync.h"
 #include "pd-own-ids.h"
 
@@ -31,6 +32,7 @@ struct Device : pd_own::Device<ids::kCount, 4> {
   double elapsed = 0;
   double gain = 1;
   long long lastBeat = -1;
+  bool beatSeen = false;  // whether lastBeat is a beat that was seen, or the resting value
   bool armed = true;
   double env = 0;
   bool keyed = false;
@@ -38,6 +40,34 @@ struct Device : pd_own::Device<ids::kCount, 4> {
   double pending[kMaxPending] = { 0 };
   int pendingCount = 0;
   double hit = 0;
+  // The last seconds, two blocks an entry: the gain the dip left it at, the loudest the output
+  // got, and the key's envelope - what the panel draws the dip over (see history.h).
+  double blockSec = 128.0 / 48000.0;
+  double at = 0;  // transport seconds at the end of the last block (see pd_report)
+  History gains, peaks, keys;
+
+  /**
+   * The lane the panel draws: whether anything is driving the dip and what (0 the clock, 1 a
+   * routed track's notes, 2 a key's audio), how many entries the rings have written, the seconds
+   * an entry stands for, the ring length, the transport seconds at the newest entry, then the
+   * gain, output and key rings. Read by native-devices.js's duckLane in the shape the browser's
+   * ducker reports.
+   */
+  int pd_report(float* out, int capacity) {
+    const int n = kHistoryBlocks;
+    if (capacity < 6 + 3 * n) return 0;
+    const bool byNotes = noteRouted && !keyed;
+    out[0] = (keyed || byNotes) ? 1.0f : 0.0f;
+    out[1] = keyed ? 2.0f : noteRouted ? 1.0f : 0.0f;
+    out[2] = static_cast<float>(gains.written);
+    out[3] = static_cast<float>(blockSec);
+    out[4] = static_cast<float>(n);
+    out[5] = static_cast<float>(at);
+    gains.snapshot(out + 6, n);
+    peaks.snapshot(out + 6 + n, n);
+    keys.snapshot(out + 6 + 2 * n, n);
+    return 6 + 3 * n;
+  }
 
   void pd_init(double sr) {
     sampleRate = sr;
@@ -47,12 +77,18 @@ struct Device : pd_own::Device<ids::kCount, 4> {
     elapsed = 0;
     gain = 1;
     lastBeat = -1;
+    beatSeen = false;
     armed = true;
     env = 0;
     keyed = false;
     noteRouted = false;
     pendingCount = 0;
     hit = 0;
+    at = 0;
+    blockSec = 128.0 / sr;
+    gains.init(1.0f, 2, History::kMin);
+    peaks.init(0.0f, 2, History::kMax);
+    keys.init(0.0f, 2, History::kMax);
   }
 
   void pd_transport(double tempo, double seconds) { bpm = tempo; transportSec = seconds; }
@@ -93,6 +129,7 @@ struct Device : pd_own::Device<ids::kCount, 4> {
     const float* keyl = keyL();
     float* outl = outL();
     float* outr = outR();
+    double peak = 0;
 
     for (int i = 0; i < frames; ++i) {
       // Where this sample sits on the clock: a trigger fires when the beat index changes.
@@ -115,10 +152,20 @@ struct Device : pd_own::Device<ids::kCount, 4> {
         if (env < threshold * 0.5) armed = true;
       } else {
         const long long beat = static_cast<long long>(std::floor(transportSec / period));
-        if (beat != lastBeat) {
-          // The first beat seen is not a trigger: the device has only just been told where the
-          // transport is, and dipping on that would be a dip nobody asked for.
-          if (lastBeat >= 0) { elapsed = 0; dipping = true; } else { dipping = false; }
+        // A beat that ADVANCES triggers. The first seen is not a trigger: the device has only
+        // just been told where the transport is, and dipping on that would be a dip nobody asked
+        // for. A step back of less than a beat is the clock being corrected, and is not a beat
+        // at all; further back is a relocate, taken without a dip, so the next beat line is the
+        // next trigger.
+        if (!beatSeen) {
+          beatSeen = true;
+          lastBeat = beat;
+          dipping = false;
+        } else if (beat > lastBeat) {
+          elapsed = 0;
+          dipping = true;
+          lastBeat = beat;
+        } else if (beat < lastBeat - 1) {
           lastBeat = beat;
         }
       }
@@ -132,13 +179,22 @@ struct Device : pd_own::Device<ids::kCount, 4> {
       }
       // Down at the attack, up at the shape's own pace.
       gain += (target - gain) * (target < gain ? attackK : 1.0);
-      outl[i] = static_cast<float>(inl[i] * gain);
-      outr[i] = static_cast<float>(inr[i] * gain);
+      const double l = inl[i] * gain;
+      const double r = inr[i] * gain;
+      outl[i] = static_cast<float>(l);
+      outr[i] = static_cast<float>(r);
+      const double a = std::fmax(std::fabs(l), std::fabs(r));
+      if (a > peak) peak = a;
     }
     // The key's envelope follows the sidechain, and a NaN from it would hold every trigger off
     // for good. The same for the gain, which smooths toward its target from where it was.
     if (!isPlayable(env)) env = 0;
     if (!isPlayable(gain)) gain = 1;
+    gains.push(gain);
+    peaks.push(peak);
+    keys.push(keyed ? env : byNotes ? hit : 0.0);
+    blockSec = (frames / sampleRate) * 2;
+    at = transportSec + frames / sampleRate;
   }
 };
 

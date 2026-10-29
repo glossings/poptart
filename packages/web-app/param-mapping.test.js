@@ -93,6 +93,21 @@ test('MappedEngine translates track references in routing names, and only those'
   // A label no eval has seen passes through verbatim - the engine warns about it, as ever.
   mapped.setInputSource('#1', 'audio', 'nope', 0);
   assert.deepEqual(calls.pop(), ['setInputSource', '#1', 'audio', 'nope', 0]);
+  // A track reading its own label means the bus of that name: `delay: audio("delay")` reads the
+  // bus the other tracks send to, not itself. Resolved to its own id, sclang would look for a
+  // bus called "#7" and find none - so the self-reference goes out as an explicit bus.
+  mapped.setInputSource('#7', 'audio', 'kick', 0);
+  assert.deepEqual(calls.pop(), ['setInputSource', '#7', 'audio', 'bus:kick', 0]);
+  mapped.injectAudio('#7', 2, 'kick', 1);
+  assert.deepEqual(calls.pop(), ['injectAudio', '#7', 2, 'bus:kick', 1]);
+  // The explicit track form is left alone: whoever writes track:kick on kick asked for the loop.
+  mapped.setInputSource('#7', 'audio', 'track:kick', 0);
+  assert.deepEqual(calls.pop(), ['setInputSource', '#7', 'audio', 'track:#7', 0]);
+  // A MIDI self-reference has no bus to mean, so it resolves as any other track reference does.
+  mapped.setInputSource('#7', 'midi', 'kick', 0);
+  assert.deepEqual(calls.pop(), ['setInputSource', '#7', 'midi', '#7', 0]);
+  mapped.injectMidi('#7', 0, 'kick', 60);
+  assert.deepEqual(calls.pop(), ['injectMidi', '#7', 0, '#7', 60]);
 });
 
 test('MappedEngine hands the resolver the referencing track, so references scope per deck', () => {

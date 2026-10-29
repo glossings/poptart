@@ -357,6 +357,12 @@ const API_DOCS = {
     desc: 'How long each note rings, as a multiple of its step: .clip(2) holds every note for two steps. Setting it replaces the current value; in arithmetic it combines: .mul(clip(2)) doubles it.',
     eg: '.clip("<1 4 1>*4")',
   },
+  legato: {
+    kind: 'method',
+    sig: 'legato()',
+    desc: 'Holds every note until the next one starts, closing the gaps and cutting any overlap, so a line plays as one connected phrase. Notes that start together all reach the next note, and the last note of a cycle reaches the first of the next. Replaces any clip set before it; .mul(clip(0.9)) after it leaves a little air.',
+    eg: 'note("c3 ~ eb3 ~ ~ g2 ~ bb2").legato()',
+  },
   nudge: {
     kind: 'both',
     sig: 'nudge(value)',
@@ -390,18 +396,18 @@ const API_DOCS = {
   phase: { kind: 'method', sig: 'phase(offset)', desc: 'Shifts where a modulator starts, as a fraction of one pass: 0.25 starts a quarter of the way through.', eg: 'sine(0.5).phase(0.25)' },
   curve: { kind: 'method', sig: 'curve(c)', desc: 'Shapes an envelope\'s segments: negative is exponential, 0 is linear, positive bows outward.', eg: 'env().curve(-4)' },
   hold: {
-    kind: 'method',
+    kind: 'both',
     sig: 'hold(trigger)',
-    desc: 'Sample-and-hold: takes the signal\'s value at each trigger and keeps it until the next. With no trigger, it holds at the signal\'s own events, or once per cycle.',
+    desc: 'Sample-and-hold: takes the signal\'s value at each trigger and keeps it until the next. With no trigger, it holds at the signal\'s own events, or once per cycle. At the head of a chain, the default note (c3) is held from each trigger to the next.',
     eg: 'rand().hold("1*8")',
   },
   seg: {
-    kind: 'method',
+    kind: 'both',
     sig: 'seg(n)',
-    desc: 'Reads the signal n times per cycle, holding each value for its step, which turns a continuous signal into a rhythm. n can be patterned.',
+    desc: 'Reads the signal n times per cycle, holding each value for its step, which turns a continuous signal into a rhythm. n can be patterned. At the head of a chain, the default note (c3) plays n times a cycle.',
     eg: 'rand().seg(8)',
   },
-  segment: { kind: 'method', sig: 'segment(n)', desc: 'Reads the signal n times per cycle, holding each value for its step, which turns a continuous signal into a rhythm. n can be patterned.', eg: 'rand().segment(8)' },
+  segment: { kind: 'both', sig: 'segment(n)', desc: 'Reads the signal n times per cycle, holding each value for its step, which turns a continuous signal into a rhythm. n can be patterned. At the head of a chain, the default note (c3) plays n times a cycle.', eg: 'rand().segment(8)' },
   rib: {
     kind: 'method',
     sig: 'rib(cycle, length)',
@@ -434,18 +440,18 @@ const API_DOCS = {
     eg: '.mask("<1@7 0>")',
   },
   struct: {
-    kind: 'method',
+    kind: 'both',
     sig: 'struct(bool)',
-    desc: 'Takes its rhythm from a boolean pattern and its values from this one: each on step plays whatever this pattern holds at that moment.',
+    desc: 'Takes its rhythm from a boolean pattern and its values from this one: each on step plays whatever this pattern holds at that moment. At the head of a chain, the default note (c3) takes the rhythm.',
     eg: 'note("c3 g3").struct("1 ~ 1 1")',
   },
   ply: { kind: 'method', sig: 'ply(reps, fn)', desc: 'Repeats each event reps times within its own step. The optional (x, n) => pattern changes the nth repeat.', eg: '.ply(3, (x, n) => x.add(n * 12))' },
   echo: { kind: 'method', sig: 'echo(reps, time, fn)', desc: 'Repeats each event reps times, time cycles apart. The optional (x, n) => pattern changes the nth repeat.', eg: '.echo(4, 1/8, (x, n) => x.gain(0.6 ** n))' },
   arp: { kind: 'method', sig: 'arp(indices)', desc: 'Plays each chord one note at a time, in the order of the index pattern. Indices past the top note continue an octave up. On scale degrees, apply .scale() first.', eg: 'note("[c3,e3,g3]").arp("0 1 2 1")' },
   chord: {
-    kind: 'method',
+    kind: 'both',
     sig: 'chord(quality)',
-    desc: 'Builds a chord on each note, the note as its root. A quality name (m, m7, maj7, dom7, m9, sus4, dim, aug, add9) is the same chord in any key. A number stacks the key\'s thirds up to that extension: 5 is the triad (the default), 7 the seventh chord, 9, 11 and 13 taller. The key is the pattern\'s scale, else setscale().',
+    desc: 'Builds a chord on each note, the note as its root. A quality name (m, m7, maj7, dom7, m9, sus4, dim, aug, add9) is the same chord in any key. A number stacks the key\'s thirds up to that extension: 5 is the triad (the default), 7 the seventh chord, 9, 11 and 13 taller. The key is the pattern\'s scale, else setscale(). At the head of a chain, the chord is built on the default note (c3).',
     eg: 'n("0 3 4").sc().chord(7)',
   },
   inv: { kind: 'method', sig: 'inv(n)', desc: 'Inverts each chord n times, staying in the same register; a negative n inverts downward. The voicing keeps its shape.', eg: '.chord("m7").inv("<0 1 2>")' },
@@ -571,19 +577,19 @@ const API_DOCS = {
   steps: {
     kind: 'builder',
     sig: 'steps(cells, { width, height }?)',
-    desc: 'A row of cells drawn in place of the call, one step each, played as a pattern. "." "~" "-" or "_" is a rest; x is 1, a number that number, a word that word. Write the cells spaced, or one character each; a count, steps(8), is that many rests. Clicking a cell switches it in the code and is heard at once. width and height are a cell\'s size in pixels; size alone sets both.',
+    desc: 'A row of cells drawn in place of the call, one step each, played as a pattern. "." "~" "-" or "_" is a rest; x is 1, a number that number, a word that word. Write the cells spaced, or one character each; a count, steps(8), is that many rests. Clicking a cell switches it in the code and is heard at once; right-click the cells to randomize them. width and height are a cell\'s size in pixels; size alone sets both.',
     eg: 's("bd").struct(steps("x . . x . . x ."))',
   },
   sliders: {
     kind: 'builder',
     sig: 'sliders(values, min?, max?, { width, height }?)',
-    desc: 'A bar per step drawn in place of the call, played as a pattern of their values. Drag a bar to set it; the values are rewritten in the code and heard at once. min and max set the bars\' range, 0 to 1 by default. A count, sliders(8), is that many bars halfway up. width and height are a bar\'s size in pixels; size alone sets the height.',
+    desc: 'A bar per step drawn in place of the call, played as a pattern of their values. Drag a bar to set it, or right-click the bars to randomize them; the values are rewritten in the code and heard at once. min and max set the bars\' range, 0 to 1 by default. A count, sliders(8), is that many bars halfway up. width and height are a bar\'s size in pixels; size alone sets the height.',
     eg: 's("hh*8").vel(sliders("1 0.4 0.7 0.4 1 0.4 0.7 0.4"))',
   },
   matrix: {
     kind: 'builder',
     sig: 'matrix(rows, { width, height }?)',
-    desc: 'A grid of cells drawn in place of the call, one row per name, played as a pattern of the names. Each row is written as cells, like steps(), or as a count of rests: matrix({ bd: 8, sd: 8 }). Clicking or dragging across cells switches them in the code and is heard at once. width and height are a cell\'s size in pixels; size alone sets both.',
+    desc: 'A grid of cells drawn in place of the call, one row per name, played as a pattern of the names. Each row is written as cells, like steps(), or as a count of rests: matrix({ bd: 8, sd: 8 }). Clicking or dragging across cells switches them in the code and is heard at once; right-click the grid to randomize every row. width and height are a cell\'s size in pixels; size alone sets both.',
     eg: 's(matrix({ bd: "x . . . x . . .", sd: ". . . . x . . .", hh: "x x x x x x x x" }))',
   },
 
@@ -639,7 +645,7 @@ const API_DOCS = {
   color: {
     kind: 'method',
     sig: 'color(name?)',
-    desc: 'The color the track is drawn in everywhere: the arrangement, the mixer, the DJ desk and the displays. A CSS color name or a hex color. Without one, or with a bare color(), a track takes a color from the theme, picked by its name. The swatch before the name, or a double-click on it, opens a color picker. Changes nothing about the sound.',
+    desc: 'The color the track is drawn in everywhere: the arrangement, the mixer, the displays. A CSS color name or a hex color. Without one, a track takes a color from the theme, picked by its name. Changes nothing about the sound.',
     eg: 's("bd*4").color("tomato")',
   },
 

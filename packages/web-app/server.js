@@ -16,6 +16,7 @@ const { preferVst3 } = require('./plugin-filter');
 const { deviceRows, deviceParamRows, nativeDevice } = require('@poptart/osc-engine/native-devices');
 const { SNAPSHOT_DIR, putSnapshot, getSnapshot, pruneSnapshots } = require('./snapshots');
 const blobs = require('./blobs');
+const filePreview = require('./file-preview');
 const { StateCarry } = require('./state-carry');
 const pinnedDefs = require('./pinned-defs');
 const snippets = require('./snippets');
@@ -4783,6 +4784,8 @@ const BUILDER_NAMES = ['Signal', 'n', 'note', 'mini', 's', 'se', 'sr', 'sp', 'sa
   // The binops as top-level builders - a layer piece's own verb: .set(note(30), add(note(12)))
   // pins one voice and transposes the other.
   'add', 'sub', 'mul', 'div', 'mod', 'set',
+  // Structure-giving transforms at the head of a chain, on the default note: struct("1 ~ 1 1").s("bd").
+  'struct', 'hold', 'seg', 'segment', 'chord',
   // The editor's inline widgets: controls drawn in the code, and the displays of the master output
   // (a display ON a pattern is a method). See pattern-core's widgets.mjs.
   'slider', 'knob', 'toggle', 'button', 'xy', 'steps', 'sliders', 'matrix', 'scope', 'spectrum', 'waveform', 'imager', 'meter', 'punchcard', 'chroma',
@@ -6867,9 +6870,9 @@ function deviceKit() {
   if (!devicePanelKit) {
     const load = (file) => import(pathToFileURL(path.join(WEB_ENGINE_SRC, file)).href);
     devicePanelKit = Promise.all([
-      load('panel.mjs'), load('figures.mjs'), load('descriptor.mjs'), load('catalog.mjs'), load('dsp/tables.mjs'),
+      load('panel.mjs'), load('figures.mjs'), load('descriptor.mjs'), load('catalog.mjs'), load('dsp/tables.mjs'), load('dsp/wavfile.mjs'),
     ])
-      .then(([panel, figures, descriptor, catalog, tables]) => ({ panel, figures, descriptor, catalog, tables }))
+      .then(([panel, figures, descriptor, catalog, tables, wavfile]) => ({ panel, figures, descriptor, catalog, tables, wavfile }))
       .catch((err) => {
         devicePanelKit = null;
         throw new Error(`poptart's own device windows are drawn by web-engine, which could not be loaded - ${err?.message ?? err}`);
@@ -6898,7 +6901,7 @@ async function deviceInSlot(trackLabel, slot) {
     if (position !== undefined) values[p.id] = kit.descriptor.denormalize(p, position);
   }
   return {
-    kit, descriptor, values,
+    kit, descriptor, values, trackLabel,
     driven: new Map(Object.entries(at.driven ?? {})),
     // The names of whatever has been loaded onto a control that plays a file, by the option slot
     // it went into: what the control prints, and what a `.param()` written from the window says.
@@ -6917,6 +6920,9 @@ function deviceFigureOpts(state) {
     extras: state.extras,
     shapes: state.shapes ?? null,
     sampleRate: DEVICE_FIGURE_RATE,
+    // The tempo the track runs at, for a picture on the beat grid: a ducker's dip was drawn at
+    // the nominal 120 while the device dipped at the song's 138 (seen live, 2026-10-28).
+    bpm: clockOf(deckOfKey(state.trackLabel ?? '')).cps * 240,
   };
 }
 
@@ -7475,6 +7481,29 @@ const routes = {
     }
     packs.sort((a, b) => a.name.localeCompare(b.name));
     return { status: 200, body: { root, packs } };
+  },
+
+  // The file picker's three reads (client.js's filePickEntries and selectFilePick), which the
+  // browser build answers from its own store (public/web/host.mjs) and the desktop answers from
+  // the sample library. A wavetable control picks from the `wt` pack (see deviceWindow), which
+  // is a folder of that name in the library - and an empty answer where there is none, so the
+  // picker still opens on the device's own tables.
+  'GET /api/files': async (query) => {
+    const { listPackFiles } = require('@poptart/osc-engine/samples');
+    return { status: 200, body: filePreview.packFiles(String(query?.pack ?? 'files'), { listPackFiles }) };
+  },
+  'POST /api/wavetablePreview': async (body) => {
+    const { listPackFiles } = require('@poptart/osc-engine/samples');
+    const kit = await deviceKit();
+    const preview = filePreview.wavetablePreview(body?.ref, {
+      listPackFiles, decodeWav: kit.wavfile.decodeWav, framesOf: kit.wavfile.framesOf, tables: kit.tables.sharedBuiltInTables(),
+    });
+    return { status: 200, body: preview };
+  },
+  'POST /api/samplePreview': async (body) => {
+    const { listPackFiles } = require('@poptart/osc-engine/samples');
+    const { readWavRaw } = require('@poptart/osc-engine/wav');
+    return { status: 200, body: filePreview.samplePreview(body?.ref, { listPackFiles, readWavRaw }) };
   },
 
   // The sample-library folder shown/edited in the settings tab. `envOverride` is true when

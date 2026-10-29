@@ -4420,6 +4420,7 @@ class DuckerProcessor {
     this.elapsed = null;      // seconds since the last trigger, or null before the first
     this.gain = 1;
     this.lastBeat = -1;
+    this.beatSeen = false;   // whether lastBeat is a beat that was seen, or the resting value
     this.armed = true;
     this.env = 0;
     this.frames = 0;
@@ -4430,6 +4431,7 @@ class DuckerProcessor {
     this.noteRouted = false;
     this.pending = [];
     this.hit = 0;             // a marker for the picture: one at a note, falling away after it
+    this.at = 0;              // transport seconds at the end of the last block (see report)
     // The last second, one entry a block: the gain the dip left it at, the loudest the output
     // got, and the key's envelope - what the panel draws the dip over.
     // Two blocks an entry: about three beats at 120, enough to see the pump repeat.
@@ -4504,7 +4506,13 @@ class DuckerProcessor {
       } else {
         const t = (timeSec ?? this.frames / sr) - this.anchorSec;
         const beat = Math.floor(t / period);
-        if (beat !== this.lastBeat) { this.elapsed = this.lastBeat < 0 ? null : 0; this.lastBeat = beat; }
+        // A beat that ADVANCES triggers. The first seen is not a trigger - the device has only
+        // just been told where the transport is. A step back of less than a beat is the clock
+        // being corrected, and is not a beat at all; further back is a relocate, taken without
+        // a dip, so the next beat line is the next trigger.
+        if (!this.beatSeen) { this.beatSeen = true; this.lastBeat = beat; this.elapsed = null; }
+        else if (beat > this.lastBeat) { this.elapsed = 0; this.lastBeat = beat; }
+        else if (beat < this.lastBeat - 1) this.lastBeat = beat;
       }
       this.frames += 1;
       const amount = at(params.amount, i);
@@ -4533,12 +4541,14 @@ class DuckerProcessor {
     this.peaks.push(peak);
     this.keys.push(keyed ? this.env : byNotes ? this.hit : 0);
     this.blockSec = (count / sr) * 2;
+    // Where on the transport this block ends, so the picture can lay the lane on the beat grid.
+    this.at = start - this.anchorSec + count / sr;
   }
 
   /** The last second of the dip, the signal under it and the key driving it, for the picture. */
   report() {
     return {
-      history: { gain: this.gains.snapshot(), out: this.peaks.snapshot(), key: this.keyed ? this.keys.snapshot() : null, end: this.gains.written, blockSec: this.blockSec },
+      history: { gain: this.gains.snapshot(), out: this.peaks.snapshot(), key: this.keyed ? this.keys.snapshot() : null, end: this.gains.written, blockSec: this.blockSec, at: this.at },
       keyed: this.keyed,
       // What is triggering it, for the picture's label: 'notes', 'audio' or 'clock'.
       trigger: this.audioKeyed ? 'audio' : this.noteRouted ? 'notes' : 'clock',

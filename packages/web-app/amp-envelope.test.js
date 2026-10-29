@@ -28,6 +28,8 @@ test('a Wavetable decay is its Amp Decay, at the position those seconds sit at',
   assert.equal(calls.pop()[4], 0);
   mapped.holdParam('t', 0, '@amp.decay');
   assert.deepEqual(calls.pop(), ['holdParam', 't', 0, 'Amp Decay']);
+  mapped.holdParam('t', 0, '@amp.decay', { steady: true });
+  assert.deepEqual(calls.pop(), ['holdParam', 't', 0, 'Amp Decay', { steady: true }], 'what kind of hold it is travels too');
 });
 
 test('the Granular synth has the same stages under its own names', () => {

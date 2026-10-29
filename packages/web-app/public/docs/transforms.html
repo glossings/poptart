@@ -82,6 +82,7 @@ _roll("lead", "48,0,8 52,8,4 55,12,4", { grid: 16, len: 16 })</code></pre>
         <table>
           <tr><th>Write</th><th>Does</th></tr>
           <tr><td><code>.struct("1 ~ 1 1")</code></td><td>take the rhythm from another pattern</td></tr>
+          <tr><td><code>struct("1 ~ 1 1").s("bd")</code></td><td>at the head of a chain: the default note on that rhythm (also <code>hold</code>, <code>seg</code>, <code>chord</code>)</td></tr>
           <tr><td><code>.mask("1 0 1 1")</code></td><td>silence where the other pattern is off</td></tr>
           <tr><td><code>.ply(n, fn?)</code></td><td>repeat each event <code>n</code> times in its step; <code>(x, i) =&gt; …</code> changes each repeat</td></tr>
           <tr><td><code>.echo(n, dt, fn?)</code></td><td><code>n</code> copies, <code>dt</code> cycles apart</td></tr>
@@ -89,6 +90,7 @@ _roll("lead", "48,0,8 52,8,4 55,12,4", { grid: 16, len: 16 })</code></pre>
           <tr><td><code>.bite(indices)</code></td><td>cut four cycles into eighths and play them in a new order</td></tr>
           <tr><td><code>.degrade(p)</code></td><td>drop events at random</td></tr>
           <tr><td><code>.vel(v)</code> · <code>.clip(v)</code></td><td>velocity · note length as a multiple of its step</td></tr>
+          <tr><td><code>.legato()</code></td><td>hold every note until the next one starts</td></tr>
         </table>
         <figure class="timeline">
           <div class="row">note("c3 e3 g3 b3").struct("1 ~ 1 1 ~ 1 1 ~")</div>

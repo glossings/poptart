@@ -340,11 +340,22 @@ function createWindow() {
   // F12 opens and closes the developer tools, as in a browser - on every platform, since off macOS
   // there is no menu to reach them from. Taken before the page sees the key; nothing in poptart
   // binds F12.
-  win.webContents.on('before-input-event', (event, input) => {
+  const onF12 = (event, input) => {
     if (input.type === 'keyDown' && input.key === 'F12') {
       event.preventDefault();
       win?.webContents.toggleDevTools();
     }
+  };
+  win.webContents.on('before-input-event', onF12);
+  // Open, the tools have the keyboard, and what is typed into them never reaches the page's
+  // listener - so F12 opened them and then closed nothing (hit live, 2026-10-28). The tools' own
+  // contents take the same listener, each time a pane is made.
+  const heard = new WeakSet();
+  win.webContents.on('devtools-opened', () => {
+    const pane = win?.webContents.devToolsWebContents;
+    if (!pane || heard.has(pane)) return;
+    heard.add(pane);
+    pane.on('before-input-event', onF12);
   });
   // The projector is a window of its own, so without this, closing poptart would leave it
   // standing on the wall - and window-all-closed would never fire, so the app would never quit.

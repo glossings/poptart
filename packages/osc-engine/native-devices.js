@@ -184,9 +184,68 @@ function readReport(id, raw) {
     }
     case 'Distort':
       return { meters: { autogain: raw[0], level: raw[1] } };
+    case 'Compressor':
+    case 'Limiter': {
+      const curve = curveLane(raw);
+      return curve ? { meters: { curve } } : null;
+    }
+    case 'Multiband': {
+      // Three lanes in turn, low, mid, high - each under the id of the picture it is drawn on.
+      const meters = {};
+      let at = 0;
+      for (const band of ['low', 'mid', 'high']) {
+        const lane = curveLane(raw, at);
+        if (!lane) return null;
+        meters[`${band}.curve`] = lane;
+        at += 5 + 2 * lane.history.inDb.length;
+      }
+      return { meters };
+    }
+    case 'Ducker':
+      return duckLane(raw);
+    case 'Chorus':
+    case 'Flanger':
+    case 'Phaser':
+      // Where the LFO is, in cycles: the playhead on the sweep's picture.
+      return Number.isFinite(raw[0]) ? { phase: raw[0] } : null;
     default:
       return null;
   }
+}
+
+/**
+ * A ducker's lane as own/ducker.cc's pd_report lays it out - whether anything drives the dip,
+ * what does (0 the clock, 1 notes, 2 audio), the count written, the seconds an entry stands
+ * for, the ring length, the transport seconds at the newest entry, then the gain, output and
+ * key rings - in the shape the browser's ducker reports. The key ring is only there while
+ * something is keying, as in the browser.
+ */
+function duckLane(raw) {
+  const n = Number(raw[4]) | 0;
+  if (!(n > 0) || raw.length < 6 + 3 * n) return null;
+  const keyed = raw[0] >= 0.5;
+  const trigger = raw[1] >= 1.5 ? 'audio' : raw[1] >= 0.5 ? 'notes' : 'clock';
+  return {
+    history: { gain: raw.slice(6, 6 + n), out: raw.slice(6 + n, 6 + 2 * n), key: keyed ? raw.slice(6 + 2 * n, 6 + 3 * n) : null, end: raw[2], blockSec: raw[3], at: raw[5] },
+    keyed,
+    trigger,
+  };
+}
+
+/**
+ * A dynamics lane as own/dsp/history.h's reportCurveLane lays it out - the level in and the gain
+ * reduction now, how many entries the rings have written, the seconds an entry stands for, the
+ * ring length, then the level ring and the reduction ring - in the shape the browser's compressor
+ * reports (its report().meters.curve), which is what the transfer figure reads. Null for an
+ * answer cut short.
+ */
+function curveLane(raw, from = 0) {
+  const n = Number(raw[from + 4]) | 0;
+  if (!(n > 0) || raw.length < from + 5 + 2 * n) return null;
+  return {
+    inDb: raw[from], grDb: raw[from + 1],
+    history: { inDb: raw.slice(from + 5, from + 5 + n), grDb: raw.slice(from + 5 + n, from + 5 + 2 * n), end: raw[from + 2], blockSec: raw[from + 3] },
+  };
 }
 
 /**
@@ -355,6 +414,7 @@ module.exports = {
   deviceStateText,
   readDeviceState,
   readDeviceLive,
+  readReport,
   paramPosition,
   forgetNativeDevices,
 };

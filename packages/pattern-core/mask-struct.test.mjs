@@ -13,7 +13,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { n, note, mini, s, pianoroll, vel, clip, sine, rand } from './src/signal.mjs';
+import { n, note, mini, s, pianoroll, vel, clip, sine, rand, struct, hold, seg, segment, chord } from './src/signal.mjs';
 
 const close = (a, b, msg) => assert.ok(Math.abs(a - b) < 1e-6, msg ?? `${a} !~ ${b}`);
 
@@ -230,4 +230,48 @@ test('.struct() and .hold() use the same triggers different ways', () => {
   const held = grid(n('0 7').hold('1 ~ 1 ~'));
   assert.deepEqual(structed.map((st) => st.end), [0.25, 0.75]);
   assert.deepEqual(held.map((st) => st.end), [0.5, 1]);
+});
+
+// ---------------------------------------------------------------------------------------------
+// head forms - struct()/hold()/seg()/chord() with nothing before them start from the default note
+// ---------------------------------------------------------------------------------------------
+
+test('struct() at the head of a chain strikes the default note on the rhythm', () => {
+  const g = grid(struct('1 ~ 1 1'));
+  assert.deepEqual(g.map((st) => st.start), [0, 0.5, 0.75]);
+  assert.deepEqual(g.map((st) => st.value), [60, 60, 60]);
+  assert.deepEqual(g.map((st) => st.cont), [undefined, undefined, undefined], 'each trigger is its own strike');
+});
+
+test('struct() at the head reads x/t as on and ~/0/f as off, like the method', () => {
+  const starts = grid(struct('x ~ t 0 f 1')).map((st) => st.start);
+  assert.equal(starts.length, 3);
+  [0, 2 / 6, 5 / 6].forEach((want, i) => close(starts[i], want));
+});
+
+test('struct() at the head takes a sampler like any note pattern', () => {
+  const sig = struct('1 ~ 1 1').s('bd');
+  const g = grid(sig);
+  assert.equal(g.length, 3);
+  assert.deepEqual(g.map((st) => st.value), ['bd', 'bd', 'bd']);
+  assert.ok(sig.sampler, 'it is a sampler pattern');
+});
+
+test('hold() at the head holds the default note from each trigger to the next', () => {
+  const g = grid(hold('1 ~ 1 1'));
+  assert.deepEqual(g.map((st) => st.start), [0, 0.5, 0.75]);
+  close(g[0].end, 0.5, 'the first note lasts until the second trigger');
+  assert.deepEqual(g.map((st) => st.value), [60, 60, 60]);
+});
+
+test('seg() and segment() at the head play the default note n times a cycle', () => {
+  assert.deepEqual(grid(seg(4)).map((st) => st.start), [0, 0.25, 0.5, 0.75]);
+  assert.deepEqual(grid(segment(2)).map((st) => st.start), [0, 0.5]);
+  assert.deepEqual(grid(seg(4)).map((st) => st.value), [60, 60, 60, 60]);
+});
+
+test('chord() at the head builds the chord on the default note', () => {
+  const g = grid(chord('m7'));
+  assert.deepEqual(g.map((st) => st.value), [60, 63, 67, 70]);
+  assert.ok(g.every((st) => st.start === 0), 'one chord, once a cycle');
 });

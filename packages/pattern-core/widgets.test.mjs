@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import * as core from './src/index.mjs';
 
 const {
-  injectLocations, findWidgetCalls, callArgs, parseCells, toggleCell, setCellValue, formatNumber, matrixRows,
+  injectLocations, findWidgetCalls, callArgs, parseCells, toggleCell, setCellValue, randomRow, randomValues, formatNumber, matrixRows,
   beginWidgets, takeWidgets, abandonWidgets, setWidgetValue, widgetValue, displayWindow, createWidgetHost, setPatternWarn,
 } = core;
 
@@ -114,6 +114,11 @@ test('sliders() plays its numbers; matrix() plays its rows\' names', () => {
   assert.equal(setWidgetValue('a', widgets.inputs[1].at, { row: 'sd', text: 'x . . .' }), true);
   assert.deepEqual(sigs[1].stepsForCycle(0).filter((s) => s.value === 'sd').map((s) => s.start), [0]);
   assert.equal(setWidgetValue('a', widgets.inputs[1].at, { row: 'hh', text: 'x' }), false); // no such row
+  // Several rows at once, as randomizing a grid sends them - every one has to be a row it has.
+  assert.equal(setWidgetValue('a', widgets.inputs[1].at, { bd: '. . . x', sd: 'x . . .' }), true);
+  assert.deepEqual(sigs[1].stepsForCycle(0).filter((s) => s.value === 'bd').map((s) => s.start), [0.75]);
+  assert.equal(setWidgetValue('a', widgets.inputs[1].at, { bd: 'x . . .', hh: 'x' }), false); // one it hasn't
+  assert.equal(setWidgetValue('a', widgets.inputs[1].at, {}), false);
 });
 
 test('a display registers what it is called on and returns it untouched', () => {
@@ -184,6 +189,33 @@ test('a cell value is written with fixed decimals and the row left as it was', (
   assert.equal(formatNumber(2, 2), '2');
   assert.equal(formatNumber(-0.0001, 2), '0');
   assert.equal(formatNumber(440.004, 1), '440');
+});
+
+test('a row randomized keeps its count of hits and its own tokens', () => {
+  const seq = (...vals) => { let i = 0; return () => vals[i++ % vals.length]; };
+  // Two hits of eight stay two: the places come from the first draws, the tokens from the next.
+  assert.equal(randomRow('0 . 3 . . . . .', seq(0.99, 0.5, 0.1, 0.9)), '. . . . 0 . . 3');
+  const hitsOf = (row) => parseCells(row).filter((c) => c.on);
+  // A one-character row stays one character per step.
+  const compact = randomRow('x..x....');
+  assert.equal(compact.length, 8);
+  assert.equal(hitsOf(compact).length, 2);
+  // An empty row, or a full one, gets half its cells; an empty row's hits are x.
+  assert.equal(hitsOf(randomRow('. . . .')).length, 2);
+  assert.equal(hitsOf(randomRow('x x x x')).length, 2);
+  assert.ok(hitsOf(randomRow('. . . . .')).every((c) => c.token === 'x'));
+  assert.equal(hitsOf(randomRow('. . . . .')).length, 3);
+  // Space around the row is kept, and a row with nothing in it is left alone.
+  assert.match(randomRow(' x . '), /^ [x.] [x.] $/);
+  assert.equal(randomRow(''), '');
+});
+
+test('values randomized stay in range, with the decimals asked for', () => {
+  assert.equal(randomValues('0.2 0.5 0.8', 10, 20, 1, () => 0.25), '12.5 12.5 12.5');
+  const cells = parseCells(randomValues('0 0 0 0', -1, 1, 2));
+  assert.equal(cells.length, 4);
+  assert.ok(cells.every((c) => Number(c.token) >= -1 && Number(c.token) <= 1));
+  assert.equal(randomValues('  ', 0, 1), '  ');
 });
 
 test('matrix rows are found with their keys, quoted or not', () => {
