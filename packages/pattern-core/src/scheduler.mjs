@@ -97,6 +97,7 @@ function foldPitchOps(ops) {
   let scaleName = null;
   for (const e of ops) {
     if (e.op === 'scale') {
+      if (e.names) return null; // a scale that changes is read per note
       if (scaleName !== null) return null; // two scales can't fold into one static quantize
       scaleName = e.name;
       continue;
@@ -1314,6 +1315,7 @@ export class Scheduler {
     // own .scale(), else the setscale() in force when its chain was built - an evaluation's, which
     // is not always the one in force now - else the one in force now.
     this._trackScale = sig.scaleName ?? sig.buildScale ?? globalScale() ?? null;
+    this._trackScales = sig.scaleNames ?? null; // a patterned .scale(), read where the list is sent
     // The note gate every JS-sampled modulator on this track reads (see withNoteGate): the same
     // sounding spans _scheduleNoteEdges emits, so a polled env() and a native one hear the same
     // notes. Rebuilt per eval, since the grid it caches is this pattern's. Kept in TRANSPORT cycles,
@@ -1958,15 +1960,30 @@ export class Scheduler {
     // the root's key plays the root and each key up plays the next step - a keyboard has 12 keys an
     // octave and 31-EDO has 31 steps, so snapping would leave most of the tuning out of reach - unless
     // the scale asked for "nearest", which snaps each key to the tuning's nearest pitch.
+    const resolve = (name, keys) => {
+      const tuning = parseScaleName(name);
+      if (!tuning.tuned) return { pcs: scalePitchClasses(name) ?? [] };
+      return keys === 'nearest' ? { nearest: name } : { tuned: name, rootKey: Math.round(tuning.rootMidi) };
+    };
+    // A patterned scale is resolved per note, from the name in force where the note lands.
+    const byName = new Map();
     const resolved = pitchOps.map((e) => {
       if (e.op !== 'scale') return e;
-      const tuning = parseScaleName(e.name);
-      if (!tuning.tuned) return { pcs: scalePitchClasses(e.name) ?? [] };
-      return e.keys === 'nearest' ? { nearest: e.name } : { tuned: e.name, rootKey: Math.round(tuning.rootMidi) };
+      return e.names ? { names: e.names, keys: e.keys } : resolve(e.name, e.keys);
     });
     return (noteIn, sec) => this._readAt(this.transport.cycleAt(sec), (cycle) => {
       let v = noteIn;
-      for (const e of resolved) {
+      for (let e of resolved) {
+        if (e.names) {
+          const name = e.names.sample(sec, this.transport.cps, cycle);
+          if (name == null) return null;
+          const key = `${name}|${e.keys}`;
+          if (!byName.has(key)) {
+            try { byName.set(key, resolve(String(name), e.keys)); } catch { byName.set(key, null); }
+          }
+          e = byName.get(key);
+          if (!e) return null;
+        }
         if (e.tuned) {
           v = degreeToMidi(Math.round(v) - e.rootKey, e.tuned);
           continue;
@@ -2641,7 +2658,8 @@ export class Scheduler {
           // A scale name with a space in it is one name, not a two-step pattern: the literal as written.
           const literal = typeof entry?.sig?.miniText === 'string' && scaleList(entry.sig.miniText, null) ? entry.sig.miniText : null;
           const named = literal ?? (entry ? entry.sig.sample(applySec, this.transport.cps, songPos) : null);
-          const name = typeof named === 'string' && named.trim() ? named : this._trackScale;
+          const patterned = this._trackScales ? this._trackScales.sample(applySec, this.transport.cps, songPos) : null;
+          const name = typeof named === 'string' && named.trim() ? named : patterned != null ? String(patterned) : this._trackScale;
           if (!name) continue;
           list = scaleList(name, this.label ?? this.trackId);
           if (!list) continue;

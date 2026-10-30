@@ -1888,27 +1888,36 @@ function blockOwnCode(code, block) {
   return (idx) => isCode(idx) && (idx < from || idx >= to);
 }
 
-// Every call in [from, to) that holds a slot of the chain, in slot order: synth(...) (slot 0) and
-// each .fx(...) - { kind, index, open, slot }, where `index` is the call's name and `open` its
-// paren. Calls `isCode` says are not live code hold no slot. A .split() or .bands() adds none: its
-// branches' effects number straight through in the order they are written, and a .bands()
-// crossover is the engine's, never one of the chain's.
+// Every call in [from, to) that holds a slot of the chain, in the order they are written:
+// synth(...) (slot 0) and each .fx(...) - { kind, index, open, close, slot }, where `index` is the
+// call's name, `open` its paren and `close` its closing one (-1 while it has none). Calls `isCode`
+// says are not live code hold no slot. A .split() or .bands() adds none: its branches' effects
+// number straight through in the order they are written, and a .bands() crossover is the engine's,
+// never one of the chain's. The effects are numbered in the order their calls CLOSE, which is the
+// order written everywhere but a Delay's feedback loop: the loop's devices take their slots before
+// the Delay does (Sig#_fxLoop), and their calls are the ones that close inside the Delay's.
 function slotCalls(code, from, to, isCode) {
   const found = [];
   const re = /\b(synth|fx)\s*\(/g;
   re.lastIndex = from;
   let m;
-  let fx = 0;
   while ((m = re.exec(code)) && m.index < to) {
     if (!isCode(m.index)) continue;
-    found.push({ kind: m[1], index: m.index, open: m.index + m[0].length - 1, slot: m[1] === 'synth' ? 0 : ++fx });
+    const open = m.index + m[0].length - 1;
+    const close = matchParen(code, open);
+    found.push({ kind: m[1], index: m.index, open, close: close < 0 || close >= to ? -1 : close, slot: 0 });
   }
+  const unclosedLast = (c) => (c.close < 0 ? Infinity : c.close);
+  found.filter((c) => c.kind === 'fx')
+    .sort((a, b) => unclosedLast(a) - unclosedLast(b) || a.index - b.index)
+    .forEach((c, i) => { c.slot = i + 1; });
   return found;
 }
 
-// The number of effect slots a stretch of chain text ends on: its .fx() calls.
+// The number of effect slots a stretch of chain text ends on: its .fx() calls that have closed. One
+// still open around the end is a Delay whose loop is being written, and it takes its slot after.
 function slotsIn(text) {
-  return slotCalls(text, 0, text.length, () => true).filter((c) => c.kind !== 'synth').length;
+  return slotCalls(text, 0, text.length, () => true).filter((c) => c.kind !== 'synth' && c.close >= 0).length;
 }
 
 // Locates the synth(...) call (slot 0) or the slot-th .fx(...) call inside a track's block and
@@ -7969,6 +7978,8 @@ function chainBefore(code, idx) {
   for (const { kind, index, open, slot } of slotCalls(code, block.start, block.end, blockOwnCode(code, block))) {
     if (index > idx) break; // past the call asking - a later .fx() is not what it aims at
     const close = matchParen(code, open);
+    // A Delay whose loop the call is written in comes after the loop's devices, not before them.
+    if (close < 0 || close > idx) continue;
     const [lit, rest] = splitFirstArg(code.slice(open + 1, close < 0 ? code.length : close));
     const labelLit = /\blabel\s*:\s*(["'])((?:\\.|(?!\1).)*)\1/.exec(rest);
     // A synth() replaces the instrument, so a second one takes slot 0 over rather than adding one.

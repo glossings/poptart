@@ -34,7 +34,8 @@
 //                  "1.e(7,16,<0 1>)" rotates every other cycle and "1.e(<3 5>,8)" alternates the
 //                  pulse count. A rest as an argument ("1.e(<3 ~>,8)") is a silent cycle.
 //   "<a b>:x"      field suffix on a group: distributes onto every atom inside, so
-//                  "<18 16>:3" is exactly "<18:3 16:3>" (pairs with .as("n:clip") etc.)
+//                  "<18 16>:3" is exactly "<18:3 16:3>" (pairs with .as("n:clip") etc.). It chains
+//                  with the other postfix operators in either order: "<a b>*4:x" is "<a b>:x*4".
 //   "x:<a b>"      ...and the mirror of it, a patterned FIELD on a name: "breaks:<27 24>" is
 //                  exactly "<breaks:27 breaks:24>", so s("breaks:<27 24>") alternates the file
 //                  the way s("breaks").i("<27 24>") does. The group's structure is the step's -
@@ -156,6 +157,28 @@ export function stepLocs(step) {
   return step.loc ? [step.loc] : [];
 }
 
+// Highlighting has one rule: an event carries the source spans of everything that made it - its own
+// atoms, then those of every pattern read to make it (an operand, an argument, the pick of a
+// selector). A function reads a pattern argument where an event lands with readEvent (signal.mjs),
+// which hands back the spans along with the value, and joins them onto the event it shapes here.
+// joinLocs and withLocs are the only places spans are combined. Each source is a step, an event
+// ({ value, locs }), a list of spans, or nothing.
+export function joinLocs(...sources) {
+  const out = [];
+  for (const src of sources) {
+    if (!src) continue;
+    for (const loc of Array.isArray(src) ? src : stepLocs(src)) out.push(loc);
+  }
+  return out;
+}
+
+// `step` with the spans of `sources` joined after its own - the same step when they add none.
+export function withLocs(step, ...sources) {
+  const extra = joinLocs(...sources);
+  if (!extra.length) return step;
+  return { ...step, locs: [...stepLocs(step), ...extra] };
+}
+
 /**
  * Returns this cycle's steps as `[{ start, end, value, loc, cont? }]`, fractions of a cycle.
  * `value` is `null` for rests. `loc` is the `[startChar, endChar)` range of the atom this step
@@ -226,6 +249,8 @@ const FUNCTIONS = new Set(['r', 'i', 'p', 'round', 'floor', 'ceil']);
 const NULLARY = new Set(['r', 'p']);
 // atoms: note names, numbers, words, sample names - anything not whitespace/punctuation above
 const ATOM_RE = /^[A-Za-z0-9#.\-_:]+/;
+// The operators whose amount follows them glued ("*4", "!2", "@3", "?0.5").
+const POSTFIX_OPS = new Set(['*', '/', '!', '@', '?']);
 
 // A quoted atom - 'kick 01.wav' - is one literal value whatever it contains. Quoting is about
 // LEXING, not typing: it suspends every operator the tokenizer would otherwise find inside the
@@ -266,11 +291,20 @@ function tokenize(str) {
     if (!m) {
       throw miniError(`[mini] unexpected character "${ch}" in "${str}"`, { start: i, end: i + 1 });
     }
-    // ":x" pressed right up against a closing bracket is a field suffix for that whole group
-    // ("<18 16>:3"), not an atom of its own - the parser distributes it onto the group's atoms.
+    // ":x" is a postfix operator like "*" and "!", chaining with them in any order: on a bare word
+    // it is simply part of the word ("bd:3"), and after anything else it is a field suffix the
+    // parser distributes onto every atom of what it follows - a group ("<18 16>:3") or an operator
+    // and its amount ("<F1 F2>*4:minor", where the amount itself can hold no ":").
     const prev = tokens[tokens.length - 1];
-    const isSuffix = m[0][0] === ':' && prev && prev.end === i && (prev.type === '>' || prev.type === ']' || prev.type === ')');
-    tokens.push({ type: isSuffix ? 'suffix' : 'atom', text: m[0], start: i, end: i + m[0].length });
+    const glued = prev && prev.end === i;
+    const isSuffix = m[0][0] === ':' && glued && (prev.type === '>' || prev.type === ']' || prev.type === ')');
+    const colon = m[0].indexOf(':');
+    if (!isSuffix && colon > 0 && glued && POSTFIX_OPS.has(prev.type)) {
+      tokens.push({ type: 'atom', text: m[0].slice(0, colon), start: i, end: i + colon });
+      tokens.push({ type: 'suffix', text: m[0].slice(colon), start: i + colon, end: i + m[0].length });
+    } else {
+      tokens.push({ type: isSuffix ? 'suffix' : 'atom', text: m[0], start: i, end: i + m[0].length });
+    }
     i += m[0].length;
   }
   return tokens;
@@ -886,16 +920,6 @@ function euclidArg(arg, cycle, salt) {
   return { n: Math.round(n), locs: stepLocs(steps[0]) };
 }
 
-// A step plus the source spans of the pattern-valued ARGUMENT that shaped it - a euclid count or
-// rotation, a fast/slow rate. Highlighting has one rule: a value derived from a pattern lights up
-// when its trigger fires, and an argument that decides where the triggers go is such a value. So
-// the spans accumulate - the step's own first, then the argument's - and "1.e(7,16,<0 1>)" lights
-// the "1" and this cycle's rotation pick together. A literal argument has no span and changes
-// nothing (`locs` stays absent, and stepLocs falls back to the atom's own `loc` as before).
-function withArgLocs(step, argLocs) {
-  if (!argLocs || argLocs.length === 0) return step;
-  return { ...step, locs: [...stepLocs(step), ...argLocs] };
-}
 
 // A [lo, hi] range from evaluated args: [] -> [0,1], [a] -> [0,a], [a,b] -> [a,b].
 function rangeOf(vals) {
@@ -1125,7 +1149,7 @@ function astToSteps(node, cycle, salt = 0) {
           // number case below is the same arithmetic without the float, so it stays exact.
           for (const s of warpedSteps(node.item, cycle, w.rate, salt)) {
             if (s.start < w.start - RATE_EPS || s.start >= w.end - RATE_EPS) continue;
-            out.push(withArgLocs(s, w.locs));
+            out.push(withLocs(s, w.locs));
           }
           continue;
         }
@@ -1134,7 +1158,7 @@ function astToSteps(node, cycle, salt = 0) {
           for (const s of astToSteps(node.item, innerCycle, salt)) {
             const start = (i + s.start) / n;
             if (start < w.start - RATE_EPS || start >= w.end - RATE_EPS) continue;
-            out.push(withArgLocs({ ...s, start, end: (i + s.end) / n }, w.locs));
+            out.push(withLocs({ ...s, start, end: (i + s.end) / n }, w.locs));
           }
         }
       }
@@ -1150,7 +1174,7 @@ function astToSteps(node, cycle, salt = 0) {
           // "a/1.5" is fast by two thirds - the same warp, inverted.
           for (const s of warpedSteps(node.item, cycle, 1 / w.rate, salt)) {
             if (s.start < w.start - RATE_EPS || s.start >= w.end - RATE_EPS) continue;
-            out.push(withArgLocs(s, w.locs));
+            out.push(withLocs(s, w.locs));
           }
           continue;
         }
@@ -1158,7 +1182,7 @@ function astToSteps(node, cycle, salt = 0) {
         const phase = ((cycle % n) + n) % n;
         for (const s of clipAndRescale(astToSteps(node.item, innerCycle, salt), phase / n, (phase + 1) / n)) {
           if (s.start < w.start - RATE_EPS || s.start >= w.end - RATE_EPS) continue;
-          out.push(withArgLocs(s, w.locs));
+          out.push(withLocs(s, w.locs));
         }
       }
       return out;
@@ -1176,7 +1200,7 @@ function astToSteps(node, cycle, salt = 0) {
       if (pulses.n == null || steps.n == null || rotation.n == null || steps.n < 1) return [];
       // Whichever arguments were patterns light up with every hit they place, alongside the value
       // being placed - a rhythm argument is a value derived from a pattern like any other.
-      const argLocs = [...pulses.locs, ...steps.locs, ...rotation.locs];
+      const argLocs = joinLocs(pulses.locs, steps.locs, rotation.locs);
       const hits = rotateArray(bjorklund(pulses.n, steps.n), rotation.n);
       const len = hits.length;
       const onsets = [];
@@ -1206,7 +1230,7 @@ function astToSteps(node, cycle, salt = 0) {
           // An overlap always begins where one side or the other begins a fresh step, and a euclid
           // hit is always a fresh attack - so no overlap is ever a tie, not even one carried in on
           // the item's own `cont` from an earlier cycle.
-          out.push(withArgLocs({ ...s, start, end, cont: false }, argLocs));
+          out.push(withLocs({ ...s, start, end, cont: false }, argLocs));
         }
       }
       return out;

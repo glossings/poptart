@@ -8,7 +8,7 @@
 // separate continuous and discrete models to reconcile.
 
 import { warningWhere } from './eval-errors.mjs';
-import { parseMini, getStepsForCycle, warpSteps, stepLocs, DIVISION_LABEL } from './mini.mjs';
+import { parseMini, getStepsForCycle, warpSteps, stepLocs, joinLocs, withLocs, DIVISION_LABEL } from './mini.mjs';
 import {
   parseNoteValue, noteToMidi, degreeToMidi, midiToDegree, parseScaleName, quantizeToScale,
   globalScale, scaleAtOctave, scaleParts, DEFAULT_SCALE, DEFAULT_SCALE_OCTAVE,
@@ -308,6 +308,9 @@ export class Sig {
     // The scale the notes were last put through (.scale()/.sc()), or null. Metadata like pitchKind,
     // so a later .add(n(2)) knows which key to step in once the values are absolute notes.
     this.scaleName = opts.scaleName ?? null;
+    // When the scale is a pattern of names (`.scale("<F2:minor F2:major>")`), that pattern - read at
+    // each note's position. scaleName then holds the first name, for readers with no position.
+    this.scaleNames = opts.scaleNames ?? null;
     // The setscale() in force when .fx() built this chain - an evaluation's own key, which a device
     // tuned to the track's scale (the Resonator) is tuned to when the pattern names none.
     this.buildScale = opts.buildScale ?? null;
@@ -373,6 +376,7 @@ export class Sig {
       pitchKind: this.pitchKind,
       unit: this.unit,
       scaleName: this.scaleName,
+      scaleNames: this.scaleNames,
       buildScale: this.buildScale,
       logging: this.logging,
       trackColor: this.trackColor,
@@ -497,48 +501,65 @@ export class Sig {
    * plays (close to) the pitch printed on it. A pattern's own notes always snap to the nearest.
    */
   scale(scaleName, keys = 'steps') {
-    parseScaleName(scaleName); // validate now - a live-keys-only chain never samples, so a bad name would otherwise stay silent
+    // A pattern of names (`"<F2:minor F2:31edo>"`) is read at each note's onset; one name is
+    // validated now - a live-keys-only chain never samples, so a bad name would otherwise stay silent.
+    const names = scalePattern(scaleName);
+    if (!names && scaleName instanceof Sig) scaleName = typeof scaleName.miniText === 'string' ? scaleName.miniText.trim() : scaleName.constVal;
+    if (names) scaleName = firstScaleName(names) ?? DEFAULT_SCALE;
+    else parseScaleName(scaleName);
     keys = literalWord(keys); // a "nearest" literal arrives wrapped by the editor's mini() transpile
     if (keys !== 'steps' && keys !== 'nearest') {
       warnUser(`[signal] .scale(${JSON.stringify(scaleName)}, ${JSON.stringify(keys)}) - live keys in a tuning are "steps" or "nearest". Using "steps".`);
       keys = 'steps';
     }
-    const mapFor = (kind) =>
+    const by = (kind) =>
       kind === 'note'
-        ? (v) => quantizeToScale(Number(v), scaleName)
-        : (v) => degreeToMidi(Number(v), scaleName);
+        ? (v, name) => quantizeToScale(Number(v), name)
+        : (v, name) => degreeToMidi(Number(v), name);
+    // A value at cycle position `pos` through the scale in force there.
+    const at = (kind) => {
+      const f = by(kind);
+      return names ? (v, pos) => { const n = scaleNameAt(names, pos); return n == null ? null : f(v, n); } : (v) => f(v, scaleName);
+    };
+    const apply = (sig, kind) => (names ? mapByScale(sig, names, by(kind)) : sig.mapValue((v) => by(kind)(v, scaleName)));
     let out;
     if (this.sampler) {
       if (!this.sampler.note) {
         throw new Error('[signal] .scale() on a sampler needs degrees or notes first - e.g. s("pluck").n("0 2 4").scale("F minor")');
       }
-      const map = mapFor(this.sampler.note.pitchKind);
-      const mapped = withPitchKind(this.sampler.note.mapValue(map), 'note'); // the channel now holds MIDI too
+      const kind = this.sampler.note.pitchKind;
+      const map = at(kind);
+      const mapped = withPitchKind(apply(this.sampler.note, kind), 'note'); // the channel now holds MIDI too
       // The repitch note also rides on each event (step.cfg.note, see crossMerge) - that merged
       // copy is what the scheduler reads, so it has to be mapped too or .scale() would quantize
       // the channel and leave the events playing their raw degrees.
       const base = this.stepsForCycle;
       const stepsForCycle = base
         ? (cycle) =>
-            base(cycle).map((s) =>
-              s.cfg && s.cfg.note !== undefined ? { ...s, cfg: { ...s.cfg, note: Number(map(s.cfg.note)) } } : s,
-            )
+            base(cycle).map((s) => {
+              if (!s.cfg || s.cfg.note === undefined) return s;
+              const note = map(s.cfg.note, cycle + s.start);
+              if (note == null) return { ...s, value: null };
+              return withLocs({ ...s, cfg: { ...s.cfg, note: Number(note) } }, names && readEvent(names, cycle + s.start));
+            })
         : base;
       out = this._clone({ sampler: { ...this.sampler, note: mapped }, stepsForCycle });
     } else {
-      out = this.mapValue(mapFor(this.pitchKind));
+      out = apply(this, this.pitchKind);
     }
     // On a live note source the scale is one link of the route's pitch-op chain, in chain order -
     // `.scale("c minor").add(1)` quantizes then shifts, `.add(1).scale("c minor")` the reverse -
     // exactly as the same chain would read on an ordinary pattern (see Scheduler#_buildNoteMap).
+    const op = { op: 'scale', name: scaleName, keys, ...(names ? { names } : {}) };
     if (this.midiNotes) {
-      out = out._clone({ midiNotes: { ...this.midiNotes, scale: scaleName, pitchOps: [...(this.midiNotes.pitchOps ?? []), { op: 'scale', name: scaleName, keys }] } });
+      out = out._clone({ midiNotes: { ...this.midiNotes, scale: scaleName, pitchOps: [...(this.midiNotes.pitchOps ?? []), op] } });
     }
     if (this.inputSource?.io === 'midi') {
-      out = out._clone({ inputSource: { ...this.inputSource, scale: scaleName, pitchOps: [...(this.inputSource.pitchOps ?? []), { op: 'scale', name: scaleName, keys }] } });
+      out = out._clone({ inputSource: { ...this.inputSource, scale: scaleName, pitchOps: [...(this.inputSource.pitchOps ?? []), op] } });
     }
     out.pitchKind = 'note'; // the result now holds absolute MIDI notes, whichever way we got here
     out.scaleName = scaleName; // ...and remembers the key, for .add(n(...)) downstream
+    out.scaleNames = names;
     return out;
   }
 
@@ -1842,11 +1863,17 @@ export class Sig {
       warnUser(noScale);
       scale = DEFAULT_SCALE;
     }
-    return (a, b) => {
-      const degree = midiToDegree(a, scale);
-      const offKey = a - degreeToMidi(degree, scale);
-      return degreeToMidi(Math.round(fn(degree, b)), scale) + offKey;
+    const inKey = (key) => (a, b) => {
+      const degree = midiToDegree(a, key);
+      const offKey = a - degreeToMidi(degree, key);
+      return degreeToMidi(Math.round(fn(degree, b)), key) + offKey;
     };
+    const step = inKey(scale);
+    // A patterned key: the callers that know where the event is ask for the key in force there
+    // (see fnAtPos); anywhere else it is the first.
+    const names = this.scaleNames;
+    if (names) step.keyAt = (pos) => { const key = scaleNameAt(names, pos); return key ? inKey(key) : step; };
+    return step;
   }
 
   _binopValues(op, other, fn, linear) {
@@ -1916,8 +1943,8 @@ export class Sig {
                     start,
                     end,
                     cont: mixedCont(s, b, start),
-                    value: fn(numericValue(s.value), numericValue(b.value)),
-                    locs: [...stepLocs(s), ...stepLocs(b)],
+                    value: fnAtPos(fn, cycle + start)(numericValue(s.value), numericValue(b.value)),
+                    locs: joinLocs(s, b),
                     ...chainWith(s, op, fn, numericValue(b.value)),
                   });
                 }
@@ -1936,8 +1963,8 @@ export class Sig {
               }
               // Union the highlight spans of both operands, so `n("0 1").add("7 0")` lights the
               // live atom in each literal - the value that sounds genuinely propagated from both.
-              const locs = layers.length === 1 ? [...stepLocs(s), ...stepLocs(layers[0])] : stepLocs(s);
-              out.push({ ...s, start, end, cont: mixedCont(s, layers[0], start), value: fn(numericValue(s.value), numericValue(b)), locs, ...chainWith(s, op, fn, numericValue(b)) });
+              const locs = joinLocs(s, layers.length === 1 && layers[0]);
+              out.push({ ...s, start, end, cont: mixedCont(s, layers[0], start), value: fnAtPos(fn, cycle + start)(numericValue(s.value), numericValue(b)), locs, ...chainWith(s, op, fn, numericValue(b)) });
             }
           }
           return out;
@@ -1955,8 +1982,8 @@ export class Sig {
           const a = readEvent(this, cyclePos);
           if (a.value == null) return { value: null, locs: a.locs };
           const b = readEvent(otherSig, cyclePos);
-          if (b.value == null) return { value: null, locs: [...a.locs, ...b.locs] };
-          return { value: fn(numericValue(a.value), numericValue(b.value)), locs: [...a.locs, ...b.locs] };
+          if (b.value == null) return { value: null, locs: joinLocs(a, b) };
+          return { value: fnAtPos(fn, cyclePos)(numericValue(a.value), numericValue(b.value)), locs: joinLocs(a, b) };
         }
       : null;
     return new Sig(
@@ -2439,8 +2466,7 @@ export class Sig {
               const start = Math.max(s.start, c.start);
               const end = Math.min(s.end, c.end);
               if (start < end) {
-                const locs = condLocs.length ? [...stepLocs(s), ...condLocs] : undefined;
-                out.push({ ...s, start, end, ...(locs ? { locs } : {}) });
+                out.push(withLocs({ ...s, start, end }, condLocs));
               }
             }
           }
@@ -2536,7 +2562,7 @@ export class Sig {
         .sort((a, b) => a.start - b.start);
       return steps.map((s, i) => {
         const ev = readEvent(this, cycle + s.start);
-        const locs = [...ev.locs, ...stepLocs(s)];
+        const locs = joinLocs(ev, s);
         return {
           start: s.start,
           end: steps[i + 1]?.start ?? 1,
@@ -2654,7 +2680,7 @@ export class Sig {
             const locs = bandLocs(cyclePos);
             if (rc == null) return { value: null, locs };
             const ev = sig.eventAt(rc);
-            return locs.length ? { ...ev, locs: [...ev.locs, ...locs] } : ev;
+            return withLocs(ev, locs);
           }
         : null;
     // The grid is built phase-aware (remapGrid): each output cycle is walked in sub-windows split at
@@ -2827,7 +2853,7 @@ export class Sig {
         if (ev.value == null) continue;
         // A fresh attack every time, never a tie: the trigger is what says "strike now".
         const step = { ...(src ?? {}), start: t.start, end: t.end, value: ev.value, cont: undefined };
-        const locs = [...ev.locs, ...stepLocs(t)];
+        const locs = joinLocs(ev, t);
         if (locs.length) step.locs = locs;
         out.push(step);
       }
@@ -2907,18 +2933,11 @@ export class Sig {
           const count = Number.isFinite(rounded) ? Math.max(1, rounded) : 1;
           const w = (s.end - s.start) / count;
           // The count's own atom lights with the notes it multiplied (the live pick of a "<2 4>").
-          const locs = ev.locs.length ? [...stepLocs(s), ...ev.locs] : null;
           for (let i = 0; i < count; i++) {
             const start = s.start + i * w;
             if (start < from - MIX_EPS || start >= to - MIX_EPS) continue; // its onset is in another piece
             const v = variantAt(i).sample(at, 1);
-            out.push({
-              ...s,
-              start,
-              end: start + w,
-              value: v == null ? null : v,
-              ...(locs ? { locs } : {}),
-            });
+            out.push(withLocs({ ...s, start, end: start + w, value: v == null ? null : v }, ev));
           }
         }
       }
@@ -3061,7 +3080,7 @@ export class Sig {
           const cont = idx.cont && start > seg.start + CHORD_EPS ? true : undefined;
           const step = { ...tone.step, start, end, value: tone.midi + 12 * Math.floor(i / len), cont };
           // Light the chord tone that sounded and the index that chose it, as crossMerge does.
-          const locs = [...stepLocs(tone.step), ...stepLocs(idx)];
+          const locs = joinLocs(tone.step, idx);
           if (locs.length) step.locs = locs;
           out.push(step);
         }
@@ -3121,12 +3140,12 @@ export class Sig {
       }
       if (!degrees && (isExtension(v) || !chordIntervals(v))) keyStep(); // say a missing key now, not mid-play
     }
-    const tones = (root, q) => {
+    const tones = (root, q, pos) => {
       const intervals = !degrees && q != null && !isExtension(q) ? chordIntervals(q) : null;
       if (intervals) return intervals.map((iv) => root + iv);
       if (q == null) return [root];
       const stack = (isExtension(q) ? chordExtension(q) : null) ?? chordExtension(5);
-      return degrees ? stack.map((s) => root + s) : stack.map((s) => keyStep()(root, s));
+      return degrees ? stack.map((s) => root + s) : stack.map((s) => fnAtPos(keyStep(), pos)(root, s));
     };
     const base = this.stepsForCycle;
     const stepsForCycle = (cycle) => {
@@ -3138,10 +3157,8 @@ export class Sig {
           continue;
         }
         const q = chordArgAt(qSig, cycle + st.start);
-        for (const tone of tones(root, q.value)) {
-          const step = { ...st, value: tone };
-          if (q.locs.length) step.locs = [...stepLocs(st), ...q.locs];
-          out.push(step);
+        for (const tone of tones(root, q.value, cycle + st.start)) {
+          out.push(withLocs({ ...st, value: tone }, q));
         }
       }
       return out;
@@ -3394,7 +3411,7 @@ export class Sig {
         ? (cyclePos) => {
             const idx = coveringEvent(cyclePos);
             const ev = sig.eventAt(idx ? idx.src + (cyclePos - idx.onset) : cyclePos);
-            return idx?.locs?.length ? { ...ev, locs: [...ev.locs, ...idx.locs] } : ev;
+            return withLocs(ev, idx?.locs);
           }
         : null;
     // Carried control signals loop through the same jumps as the notes (see rib's remapSig):
@@ -4049,7 +4066,7 @@ export class Sig {
               const ev = readEvent(nameSig, cycle + s.start);
               if (ev.value == null) continue; // a rest in the name pattern silences the event
               step.value = String(ev.value);
-              const locs = [...stepLocs(s), ...ev.locs];
+              const locs = joinLocs(s, ev);
               if (locs.length) step.locs = locs;
             } else {
               step.value = name;
@@ -4247,7 +4264,7 @@ function warpStepsWindowed(baseStepsForCycle, factorSig) {
       if (!Number.isFinite(w.rate) || w.rate === 0) continue;
       // The rate atom driving this window (the "-1"/"1" of .fast("-1 1")) lights up with the notes
       // it warps - union its span onto each step falling in the window.
-      const tag = (s) => (w.locs && w.locs.length ? { ...s, locs: [...stepLocs(s), ...w.locs] } : s);
+      const tag = (s) => withLocs(s, w.locs);
       for (const s of warpSteps(baseStepsForCycle, w.rate)(cycle)) {
         if (s.cont) {
           if (s.start < w.end - WARP_WIN_EPS && s.end > w.start + WARP_WIN_EPS) out.push(tag(s));
@@ -4752,9 +4769,7 @@ function revoiceSteps(steps, fn) {
     const voiced = fn(g, midis) ?? midis;
     g.voices.forEach((v, i) => {
       if (voiced[i] == null) return;
-      const step = { ...v.step, value: voiced[i] };
-      if (g.locs?.length) step.locs = [...stepLocs(v.step), ...g.locs];
-      out.push(step);
+      out.push(withLocs({ ...v.step, value: voiced[i] }, g.locs));
     });
   }
   return out.sort((a, b) => a.start - b.start);
@@ -4852,7 +4867,7 @@ function biteSteps(cycle, eventsFor, srcStepsFor) {
           if (so < w0 - BITE_EPS || so >= w1 - BITE_EPS) continue;
           const outStart = ev.onset + (so - w0);
           const outEnd = outStart + (st.end - st.start);
-          const locs = [...stepLocs(st), ...ev.locs];
+          const locs = joinLocs(st, ev);
           if (outStart >= cycle - BITE_EPS && outStart < cycle + 1 - BITE_EPS) {
             out.push({ ...st, start: outStart - cycle, end: outEnd - cycle, cont: undefined, ...(locs.length ? { locs } : {}) });
           } else if (outStart < cycle - BITE_EPS && outEnd > cycle + BITE_EPS) {
@@ -5179,7 +5194,7 @@ function pieceOutcomes(target, p, inForce, cycle, at, base = null) {
           const v = numericValue(q.value);
           next.push({
             value: fn(acc.value, v),
-            locs: e.raw ? [...acc.locs, ...q.locs] : acc.locs,
+            locs: e.raw ? joinLocs(acc.locs, q.locs) : acc.locs,
             edges: e.raw && q.step ? [...acc.edges, q.step] : acc.edges,
             from: acc.from,
             chain: [...acc.chain, { op: e.op, fn, v }],
@@ -5303,7 +5318,7 @@ function applyLayer(target, plan, s, cycle, out) {
           if (o == null) continue;
           let step = applyPiece(target, p, c.step, o.value, o.chain);
           if ((p.kind === 'pitch' || p.kind === 'pack') && o.from) step = applyStamps(target, plan, step, o.from, cycle, at);
-          next.push({ step, locs: [...c.locs, ...o.locs], edges: [...c.edges, ...o.edges] });
+          next.push({ step, locs: joinLocs(c.locs, o.locs), edges: [...c.edges, ...o.edges] });
         }
       }
       combos = next;
@@ -5380,7 +5395,7 @@ function collapseRestamped(steps, keys, baseKeys) {
       continue;
     }
     const survivor = steps[seen.idx];
-    const locs = [...stepLocs(survivor), ...stepLocs(steps[i])];
+    const locs = joinLocs(survivor, steps[i]);
     if (locs.length) survivor.locs = locs;
     keep.push(false);
     dropped = true;
@@ -5410,7 +5425,7 @@ function crossMerge(baseStepsForCycle, ctlSig, stamp = null) {
         const ev = readEvent(ctlSig, cycle + s.start);
         if (ev.value == null) continue; // a rest in the control drops the event, as below
         const step = clear({ ...s });
-        const locs = [...stepLocs(s), ...ev.locs];
+        const locs = joinLocs(s, ev);
         if (locs.length) step.locs = locs;
         if (stamp) stamp(step, ev.value);
         out.push(step);
@@ -5442,7 +5457,7 @@ function crossMerge(baseStepsForCycle, ctlSig, stamp = null) {
         // Union both sides' highlight spans so the control's live atom lights alongside the note's:
         // note("c e g").vel("1 0.5 0.2") lights each velocity with its note, and s("x").note("0 2")
         // lights the repitch degrees. Same union _binop/.when() do for their operands.
-        const locs = [...stepLocs(s), ...stepLocs(c)];
+        const locs = joinLocs(s, c);
         if (locs.length) step.locs = locs;
         if (stamp) stamp(step, c.value, c);
         out.push(step);
@@ -6501,6 +6516,98 @@ export function say(text, voice) {
   return samplerPattern('say', withVoice(src, voice), 'say');
 }
 
+// A .scale() argument as a pattern of scale names, or null when it is one name. The spelling:
+// `:` joins a scale's parts ("F2:minor", "F2:31edo:major") and mini-notation patterns them
+// ("<F2:minor F2:major>"). A string with no mini-notation and no `:`-joined word next to another is
+// one name as written, spaces and all, so "F minor" and "9/8 5/4 3/2 2/1" each stay one scale.
+const SCALE_MINI_RE = /[<>[\]{}*!|?@,~'"]/;
+function scalePattern(arg) {
+  if (arg instanceof Sig) {
+    if (typeof arg.constVal === 'string') return null;
+    // A literal the editor wrapped as mini-notation keeps its text: a plain name is still one name,
+    // and a pattern keeps the source positions that light it up as it plays.
+    if (typeof arg.miniText === 'string') return isOneScaleName(arg.miniText) ? null : checkedScaleNames(arg);
+    return checkedScaleNames(arg);
+  }
+  const text = String(arg ?? '').trim();
+  return isOneScaleName(text) ? null : checkedScaleNames(mini(text));
+}
+
+function isOneScaleName(text) {
+  return !SCALE_MINI_RE.test(text) && !(/:/.test(text) && /\s/.test(text));
+}
+
+// Every name the pattern holds in its first cycles, checked now, so a misspelled one is an error
+// at evaluation like a single bad name is. One that only turns up later warns when it is reached.
+function checkedScaleNames(sig) {
+  for (let cycle = 0; cycle < 16 && sig.stepsForCycle; cycle++) {
+    for (const s of sig.stepsForCycle(cycle)) if (s.value != null) parseScaleName(String(s.value));
+  }
+  return sig;
+}
+
+function firstScaleName(names) {
+  return names.stepsForCycle?.(0).find((s) => s.value != null)?.value ?? null;
+}
+
+// The scale name in force at cycle position `pos`, or null on a rest or an unknown name.
+const badScaleNames = new Set();
+function scaleNameAt(names, pos) {
+  return validScaleName(readEvent(names, pos).value);
+}
+
+function validScaleName(v) {
+  if (v == null) return null;
+  const name = String(v);
+  try {
+    parseScaleName(name);
+    return name;
+  } catch (e) {
+    if (!badScaleNames.has(name)) {
+      badScaleNames.add(name);
+      warnUser(`[signal] .scale(): ${e.message} - those notes rest.`);
+    }
+    return null;
+  }
+}
+
+// A pitch operation that may depend on the key (see Sig#_degreeStep): the one for position `pos`.
+function fnAtPos(fn, pos) {
+  return fn.keyAt ? fn.keyAt(pos) : fn;
+}
+
+// `sig`'s values through `fn(value, name)`, with the scale name the pattern `names` holds at each
+// event's onset - and, read continuously, at the same moment.
+function mapByScale(sig, names, fn) {
+  const steps = sig.stepsForCycle
+    ? (cycle) => sig.stepsForCycle(cycle).map((s) => {
+      if (s.value == null) return s;
+      const ev = readEvent(names, cycle + s.start);
+      const name = validScaleName(ev.value);
+      // The name in force lights up alongside the note it shaped.
+      return withLocs({ ...s, value: name == null ? null : fn(s.value, name) }, ev);
+    })
+    : null;
+  const eventAt = sig.eventAt
+    ? (cyclePos) => {
+      const ev = sig.eventAt(cyclePos);
+      if (ev.value == null) return ev;
+      const at = readEvent(names, cyclePos);
+      const name = validScaleName(at.value);
+      return { value: name == null ? null : fn(ev.value, name), locs: joinLocs(ev, at) };
+    }
+    : null;
+  return new Sig(
+    (t, cps, pos) => {
+      const v = sig.sample(t, cps, pos);
+      if (v == null) return null;
+      const name = names.sample(t, cps, pos);
+      return name == null ? null : fn(v, String(name));
+    },
+    { stepsForCycle: steps, eventAt, ...sig._meta() },
+  );
+}
+
 // A one-word literal the editor's mini() transpile wrapped into a pattern ("nearest" in
 // `.scale(name, "nearest")`): the word itself, or the value as given when it is anything else.
 function literalWord(v) {
@@ -6976,7 +7083,7 @@ function selectorJoin(slotsForCycle, resolve) {
         if (s.value == null || s.start < slot.start || s.start >= slot.end) continue;
         const end = s.end > slot.end + SLOT_EPS ? takeoverAt(child, cycle, slot.end, s.end) : s.end;
         const clipped = end < s.end ? { ...s, end } : s;
-        out.push(slotLocs.length ? { ...clipped, locs: [...stepLocs(s), ...slotLocs] } : clipped);
+        out.push(withLocs(clipped, slotLocs));
       }
     }
     return out;

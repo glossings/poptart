@@ -698,3 +698,9 @@ entry here when its TODO.md line goes.
     behind a switch (POPTART_ENGINE=node); the sclang path stays the default until the Node engine
     has been played on for a while, then it becomes the default and sclang is removed.
 
+[ ] Patterned arguments. Each method in signal.mjs reads its pattern arguments itself (readEvent,
+    chordArgAt, toSignal plus its own onset logic - about 33 places), so each decides on its own
+    whose rhythm wins, what a rest does and which highlight spans the event carries. One function
+    should do that read for every method: the argument at each event's onset, a rest silencing
+    the event, the spans joined with withLocs. Move methods onto it a few at a time, each group
+    with a test that its output is unchanged, until no method reads an argument any other way.

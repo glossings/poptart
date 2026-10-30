@@ -109,3 +109,25 @@ test('the user\'s slot numbers are the same with and without .bands() - completi
   assert.equal(lib.fxChainSlotAt(unit, unit.indexOf('fx("Crush"')), 1);
   assert.equal(lib.fxChainSlotAt(unit, unit.indexOf('fx("Delay"')), 2);
 });
+
+test('a Delay\'s loop: its devices take their slots before the Delay, in the editor as in the pattern', () => {
+  const code = `echo: note("c2").synth("X")
+  .fx("Delay", (x) => x.fx("Distort").param("Drive", 0.5).fx("Delay", (y) => y.fx("Filter")))
+  .param("Mix", 0.4)
+  .fx("Reverb")
+`;
+  const b = labelsMod.splitLabeledBlocks(code).find((x) => x.label === 'echo');
+  const sig = new Function(...Object.keys(core), `return (${code.slice(b.start, b.end).replace(/^\s*\w+\s*:\s*/, '')});`)(...Object.values(core));
+  const slotOf = (needle, nth = 0) => {
+    let i = -1;
+    for (let k = 0; k <= nth; k++) i = code.indexOf(needle, i + 1);
+    return lib.findChainHandleAt(code, i + 1).slot;
+  };
+  const opened = [slotOf('fx("Delay"'), slotOf('fx("Distort"'), slotOf('fx("Delay"', 1), slotOf('fx("Filter"'), slotOf('fx("Reverb"')];
+  assert.deepEqual(opened.map((s) => sig.fxChain[s - 1]), ['Delay', 'Distort', 'Delay', 'Filter', 'Reverb']);
+  assert.deepEqual(opened, [4, 1, 3, 2, 5]);
+  sig.fxChain.forEach((device, i) => assert.equal(lib.findChainCall(code, b, i + 1)?.plugin, device));
+  const params = [code.indexOf('.param("Drive"'), code.indexOf('.param("Mix"')].map((i) => lib.paramSlotAt(code, i, null));
+  assert.deepEqual(params, Object.values(sig.paramSignals).map((e) => e.slot));
+  assert.equal(lib.slotsIn(code.slice(b.start, code.indexOf('.param("Drive"'))), 1, 'completing inside the loop is the Distort');
+});

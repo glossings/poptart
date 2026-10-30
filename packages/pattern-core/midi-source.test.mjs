@@ -174,3 +174,10 @@ test('stopping a track that reads another track\'s AUDIO leaves that route up to
   sch.stop();
   assert.equal(callsTo('clearInputSource').length, 0);
 });
+
+test('a patterned scale is read where each live note lands', () => {
+  const r = routeFor(midi('kick').scale('<C3:major C3:minor>').synth('SubLabXL'));
+  assert.equal(typeof r.noteMap, 'function', 'a scale that changes cannot fold to the static route');
+  assert.equal(r.noteMap(63, 0.5), 62, 'cycle 0, C major: eb snaps to d');
+  assert.equal(r.noteMap(63, 1.5), 63, 'cycle 1, C minor: eb stays');
+});

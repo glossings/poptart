@@ -27,12 +27,12 @@ test('injectLocations offsets by the block base (document-absolute spans)', () =
   assert.equal(injectLocations('n("0 1")', 1000), 'n(mini("0 1", 1003))');
 });
 
-test('injectLocations wraps chain-method pattern args but not plugin/scale lookups', () => {
+test('injectLocations wraps chain-method pattern args, scales included, but not plugin lookups', () => {
   const out = injectLocations('s("bd hh").speed("2 1").synth("Serum 2").scale("F minor")');
   assert.match(out, /s\(mini\("bd hh", 3\)\)/);
   assert.match(out, /\.speed\(mini\("2 1", \d+\)\)/);
   assert.ok(out.includes('.synth("Serum 2")'), 'plugin name stays a plain string');
-  assert.ok(out.includes('.scale("F minor")'), 'scale name stays a plain string');
+  assert.ok(out.includes('.scale(mini("F minor", '), 'a scale is a pattern of names, so it is located');
 });
 
 test('injectLocations leaves method-form .se()/.sr() names plain but wraps the builders', () => {
@@ -125,7 +125,6 @@ test('injectLocations leaves every name-lookup argument a plain string', () => {
   const cases = [
     ['x.synth("Serum 2")', '.synth("Serum 2")'],
     ['x.fx("Pro-Q 3")', '.fx("Pro-Q 3")'],
-    ['x.scale("F minor")', '.scale("F minor")'],
     ['setscale("F minor")', 'setscale("F minor")'],
     // setgroove() reads its own shape - name, pattern of names or table - so the string stays plain,
     // and so does the depth after it.

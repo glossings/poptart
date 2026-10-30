@@ -15,6 +15,7 @@ Delete an entry when it's done. Details: TODO-verbose.md.
 [ ] Add `rot(n)`
 [ ] Add `mutate()` for presets and patterns
 [ ] Keep children's note channels through selector joins (cat etc.)
+[ ] Read every patterned argument through one shared function
 [ ] Add Roman-numeral chords (`chord("<I vi IV V7>")`) - parked
 [ ] Add next-chord suggestions (harmony phase 5)
 [ ] Add cascara to rhythmize

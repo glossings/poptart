@@ -115,7 +115,9 @@ const NAME_ARG_CALLS = new Set([
   // say()'s METHOD form: .say("hi there") is one phrase, said on every note. The builder form is
   // speech-mode mini (see isPatternPosition). The voice (the second argument) stays a pattern.
   'say',
-  'synth', 'fx', 'scale', 'setscale', 'setgroove', 'as', 'midi', 'audio', 'env', 'input', 'copy', 'pcopy', 'lfo', 'midicc', 'midikeys', 'osc', 'pianoroll',
+  'synth', 'fx', 'setscale', 'setgroove', 'as', 'midi', 'audio', 'env', 'input', 'copy', 'pcopy', 'lfo', 'midicc', 'midikeys', 'osc', 'pianoroll',
+  // `.scale("<F2:minor F2:major>")` is deliberately NOT here: it takes a pattern of scale names, and
+  // reads a plain "F minor" back off the literal as one name (see Sig#scale).
   // `.bus("<reverb delay>")` / `.bsend(...)` are deliberately NOT here: a send's destination is a
   // pattern of names like `.preset()`'s, so its literal wants wrapping (and highlighting) too.
   // The painter's clips, then its options - drawn data, never mini (see arrange.mjs).

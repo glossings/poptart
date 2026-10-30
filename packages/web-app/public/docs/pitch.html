@@ -30,8 +30,11 @@
         <p>
           A scale is <code>"root mode"</code>: <code>"F minor"</code>, <code>"c dorian"</code>,
           <code>"Bb mixolydian"</code>. The modes, pentatonics, blues, harmonic and melodic minor and
-          chromatic are there, with the usual aliases.
+          chromatic are there, with the usual aliases. <code>"F2:minor"</code> is the same scale, and that
+          spelling can be patterned like any other argument: <code>.scale("&lt;F2:minor Ab2:major&gt;")</code>
+          changes scale each cycle.
         </p>
+        <pre data-run><code>keys: n("0 2 4 6").scale("&lt;F2:minor Ab2:major&gt;").synth("Wavetable").postgain(0.6)</code></pre>
         <p>
           On a <code>note()</code> pattern, <code>.scale()</code> <strong>snaps</strong> each note to the
           nearest one in the key: <code>note("c4 f#4").scale("C major")</code> plays c4 and f4. Notes from a
