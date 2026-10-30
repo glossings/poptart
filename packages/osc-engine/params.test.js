@@ -284,3 +284,32 @@ test('a def freed late is kept when its shape comes back inside the wait', async
   assert.ok(!sent.some((m) => m[0] === '/d_free' && m[1] === def), 'a def in use again is not freed');
   assert.ok(E.defs.has(def));
 });
+
+test('a polled input read only under a smooth() steps; the others keep the 30 ms ramp', async () => {
+  const { E, sent } = engine();
+  const t1 = addTrack(E, 't1', [mockCtl(true)]);
+  // Input 0 lagged by smooth(0); input 1 added outside it.
+  const tree = JSON.stringify({ k: 'op', op: 'add', a: [
+    { k: 'fn', op: 'smooth', a: [{ k: 'in', i: 0, rate: 'kr', step: 1 }, { k: 'const', v: 0 }] },
+    { k: 'in', i: 1, rate: 'kr' },
+  ] });
+  // A value that arrives before the expression makes its ramp at the usual time...
+  E.rampTo(t1, 'slot0_~0~level', 0, E.paramTarget(t1, 0, '~0~level'), 0.5);
+  const early = t1.ramps.get('slot0_~0~level');
+  const near = (a, b) => Math.abs(a - b) < 1e-6; // float32 on the wire
+  assert.ok(sent.some((m) => m[0] === '/s_new' && m[1] === 'poptart_ramp' && m.includes('time') && near(m[m.indexOf('time') + 1], 0.03)));
+  // ...and the expression landing takes it to a step.
+  await E.installExpr('t1', t1, 0, 'level', tree);
+  assert.ok(sent.some((m) => m[0] === '/n_set' && m[1] === early.synth.nodeID && m[2] === 'time' && m[3] === 0));
+  E.rampTo(t1, 'slot0_~0~level', 0, E.paramTarget(t1, 0, '~0~level'), 0.7);
+  const set0 = sent.filter((m) => m[0] === '/n_set' && m[1] === early.synth.nodeID).at(-1);
+  assert.deepStrictEqual([set0[2], near(set0[3], 0.7), set0[4], set0[5]], ['target', true, 'time', 0]);
+  E.rampTo(t1, 'slot0_~1~level', 0, E.paramTarget(t1, 0, '~1~level'), 0.2);
+  const other = t1.ramps.get('slot0_~1~level');
+  const made = sent.find((m) => m[0] === '/s_new' && m[1] === 'poptart_ramp' && m.includes(other.bus.index));
+  assert.ok(near(made[made.indexOf('time') + 1], 0.03), 'outside the smooth: the usual glide');
+  // A control that is not an expression input is left at the ramp synth's own default.
+  E.rampTo(t1, 'slot0_level', 0, E.paramTarget(t1, 0, 'level', 4), 0.2);
+  const plain = sent.filter((m) => m[0] === '/s_new' && m[1] === 'poptart_ramp').at(-1);
+  assert.ok(!plain.includes('time'));
+});

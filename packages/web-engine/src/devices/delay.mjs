@@ -4,6 +4,14 @@
 // tells every device the tempo, so a synced delay follows setbpm() and a free one does not. A
 // change of length is glided rather than jumped, which pitches the tail for a moment the way a
 // tape delay does and never clicks.
+//
+// A chain can run inside the feedback loop (`.fx("Delay", (x) => x.fx("Filter"))`). The repeats
+// then leave through the second output, go through the chain on the track, and come back into the
+// key input, where the Tone, the Feedback and the soft clip take them as they take the repeats of
+// a plain delay, ping-pong included. The way round takes time - a block of the engine's, and the
+// delay of any device in the chain - which the engine says with setLoop. The repeats are read
+// that much early, so they stay on the grid; a time shorter than the way round is held at it.
+// With no chain the device is the plain delay, sample for sample.
 
 import { defineDevice } from '../descriptor.mjs';
 import { at } from '../dsp/control.mjs';
@@ -20,7 +28,9 @@ export const DELAY = defineDevice({
   license: 'AGPL-3.0-only',
   processor: 'poptart-delay',
   description: 'A stereo delay with feedback and a lowpass in the loop, in seconds or synced to the tempo, with a ping-pong mode.',
-  channels: { in: 2, out: 2 },
+  // The second output and the key are the feedback loop's way out and back in (see above).
+  channels: { in: 2, out: 2, key: 2, outputs: 2 },
+  loop: true,
   params: [
     { id: 'sync', name: 'Sync', default: 0, options: [...SYNC_OPTIONS], rate: 'k',
       description: 'A division of the beat overrides the time control and follows the tempo. Free reads the time control.' },
@@ -64,16 +74,23 @@ export class DelayProcessor {
     this.length = [0, 0];       // the delay each channel is actually at, in samples
     this.bpm = 120;
     this.lastTone = -1;
+    this.loopSec = -1;          // how late the loop's chain returns, in seconds; below zero, no loop
   }
 
   setTempo(bpm) { this.bpm = bpm; }
+
+  /** How late a chain in the feedback loop comes back, in seconds, or below zero for none. */
+  setLoop(seconds) { this.loopSec = Number.isFinite(seconds) && seconds >= 0 ? seconds : -1; }
 
   reset() {
     for (const l of this.lines) l.reset();
     for (const t of this.tones) t.reset();
   }
 
-  process(inputs, outputs, count, params) {
+  process(inputs, outputs, count, params, key = null, time = 0, more = null) {
+    if (this.loopSec >= 0) { this.processLoop(inputs, outputs, count, params, key, more); return; }
+    // No chain in the loop: nothing goes out of the second output.
+    if (more?.[0]) for (const ch of more[0]) ch?.fill(0, 0, count);
     const sync = Math.round(at(params.sync, 0));
     const seconds = Math.min(DELAY_MAX_SEC, Math.max(0.001, syncedSeconds(sync, this.bpm, at(params.time, 0))));
     const pingpong = at(params.pingpong, 0) >= 0.5;
@@ -116,6 +133,72 @@ export class DelayProcessor {
         lineL.write(dryL + fedL);
         lineR.write(dryR + fedR);
       }
+      outL[i] = dryL + (readL - dryL) * mix;
+      if (outR !== outL) outR[i] = dryR + (readR - dryR) * mix;
+    }
+    this.length[0] = lenL;
+    this.length[1] = lenR;
+    if (!Number.isFinite(outL[count - 1])) this.reset();
+  }
+
+  /**
+   * The delay with a chain in its feedback loop. The same lines, glide and Tone as process(), with
+   * the repeat taken out through `more[0]` and brought back in through `key`. The output tap reads
+   * the time; the tap that goes out to the chain reads it early by the way round (`loopSec`), so
+   * what comes back is written at the time and every repeat after the first lands on the grid. A
+   * time shorter than the way round is held at it.
+   */
+  processLoop(inputs, outputs, count, params, key, more) {
+    const sync = Math.round(at(params.sync, 0));
+    const seconds = Math.min(DELAY_MAX_SEC, Math.max(0.001, syncedSeconds(sync, this.bpm, at(params.time, 0))));
+    const pingpong = at(params.pingpong, 0) >= 0.5;
+    const spread = at(params.spread, 0);
+    const most = DELAY_MAX_SEC * this.sampleRate - 2;
+    const trip = Math.min(most, this.loopSec * this.sampleRate);
+    const targetL = Math.max(trip, seconds * this.sampleRate);
+    const targetR = Math.max(trip, Math.min(most, seconds * this.sampleRate * (1 + 0.5 * spread)));
+    const tone = at(params.tone, 0);
+    if (tone !== this.lastTone) { for (const t of this.tones) t.glideTo(tone, count); this.lastTone = tone; }
+    const k = 1 - Math.exp(-1 / (0.02 * this.sampleRate));
+
+    const inL = inputs[0];
+    const inR = inputs[1] ?? inputs[0];
+    const outL = outputs[0];
+    const outR = outputs[1] ?? outputs[0];
+    const backL = key?.[0] ?? null;
+    const backR = key?.[1] ?? backL;
+    const sendL = more?.[0]?.[0] ?? null;
+    const sendR = more?.[0]?.[1] ?? null;
+    const [lineL, lineR] = this.lines;
+    const [toneL, toneR] = this.tones;
+    let lenL = this.length[0] || targetL;
+    let lenR = this.length[1] || targetR;
+
+    for (let i = 0; i < count; i++) {
+      lenL += (targetL - lenL) * k;
+      lenR += (targetR - lenR) * k;
+      const fb = at(params.feedback, i);
+      const mix = at(params.mix, i);
+      const dryL = inL ? inL[i] : 0;
+      const dryR = inR ? inR[i] : 0;
+      const readL = lineL.readLinear(lenL);
+      const readR = lineR.readLinear(lenR);
+      const retL = backL ? backL[i] : 0;
+      const retR = backR ? backR[i] : 0;
+      const fedL = clipTail(toneL.next(pingpong ? retR : retL) * fb);
+      const fedR = clipTail(toneR.next(pingpong ? retL : retR) * fb);
+      if (pingpong) {
+        lineL.write((dryL + dryR) * 0.5 + fedL);
+        lineR.write(fedR);
+      } else {
+        lineL.write(dryL + fedL);
+        lineR.write(dryR + fedR);
+      }
+      // After the write, a tap of one is the sample just written: what goes out now comes back,
+      // and is written, `trip` samples later - one length after it was written itself.
+      // A length still gliding up to a longer way round reads no nearer than that sample.
+      if (sendL) sendL[i] = lineL.readLinear(Math.max(1, lenL - trip + 1));
+      if (sendR) sendR[i] = lineR.readLinear(Math.max(1, lenR - trip + 1));
       outL[i] = dryL + (readL - dryL) * mix;
       if (outR !== outL) outR[i] = dryR + (readR - dryR) * mix;
     }

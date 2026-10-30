@@ -7,7 +7,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { s, note, sine, splice, setPatternWarn } from './src/signal.mjs';
+import { s, note, sine, splice, begin, setPatternWarn } from './src/signal.mjs';
 import { Scheduler, setEventLogger } from './src/scheduler.mjs';
 
 // Engine that plays nothing and answers playSample with whatever `resolve` says the numbers came
@@ -249,4 +249,75 @@ test('the log line says a splice is on, and names its mode', () => {
   assert.match(stretched, /splice=stretch/);
   const [plain] = linesOf(s('breaks').slice('0').log());
   assert.doesNotMatch(plain, /splice=/, 'an unspliced slice says nothing about it');
+});
+
+// ---------------------------------------------------------------------------------------------
+// .fit(n, mode)/.fitmode()/.play() - fit by stretch, and a long file played through. The
+// arithmetic is the engines' (osc-engine's play-sample.test.js, web-engine's sample-plan.test.mjs);
+// what's pinned here is what reaches them, and what the log line says.
+// ---------------------------------------------------------------------------------------------
+
+test('.fit() takes its mode in either place, and fitmode is a channel like splicemode', () => {
+  assert.equal(cfgOf(s('vox').fit('stretch')).fit, 'auto');
+  assert.equal(cfgOf(s('vox').fit('stretch')).fitMode, 1);
+  assert.equal(cfgOf(s('vox').fit(4, 'stretch')).fit, 4);
+  assert.equal(cfgOf(s('vox').fit(4, 'stretch')).fitMode, 1);
+  assert.equal(cfgOf(s('vox').fit(4)).fitMode, undefined, 'no mode set - the engine repitches');
+  assert.equal(cfgOf(s('vox').fit('<2 4>')).fit, 2, 'a mini string is still a length');
+  assert.equal(cfgOf(s('vox').fit().fitmode()).fitMode, 1, 'bare means the non-default');
+  assert.equal(cfgOf(s('vox').fit().fitmode(1.7)).fitMode, 0, 'rounds and wraps');
+});
+
+// Every sampler event from cycle `from` up to `to`, as [onset cycle, cfg].
+function cfgsOver(sig, from, to) {
+  const seen = [];
+  const engine = new Proxy(
+    { getTime: () => 0, playSample: (trackId, pack, cfg, onsetSec) => { seen.push([onsetSec, cfg]); } },
+    { get: (t, p) => (p in t ? t[p] : () => {}) },
+  );
+  const sch = new Scheduler(engine, { trackId: 't', cps: 1 });
+  sch.setPattern(sig);
+  sch._scheduleNoteEdges(from, to);
+  return seen;
+}
+const near = (a, b) => Math.abs(a - b) < 1e-9;
+
+test('.play() leaves begin to the engine, which reads it with the sample length: one slice per cycle', () => {
+  const events = cfgsOver(s('vox').fit('stretch').play(), 0, 4);
+  assert.equal(events.length, 4);
+  events.forEach(([, cfg], k) => {
+    assert.equal(cfg.begin, undefined, 'no begin until the length is known');
+    assert.ok(near(cfg.atLength(4).begin, k / 4), `cycle ${k} of a 4-cycle sample begins at ${k}/4`);
+  });
+});
+
+test('.play() from cycle 5 reads 5/L, and a fractional natural length wraps', () => {
+  const [[, cfg]] = cfgsOver(s('vox').play(), 5, 6);
+  assert.ok(near(cfg.atLength(8).begin, 5 / 8));
+  assert.ok(near(cfg.atLength(2.5).begin, 0), '5 cycles into a 2.5-cycle sample is its start again');
+  const [[, third]] = cfgsOver(s('vox').play(), 3, 4);
+  assert.ok(near(third.atLength(2.5).begin, 0.2), 'frac(3 / 2.5)');
+});
+
+test('arithmetic on begin after .play() composes with it, and a later .begin() replaces it', () => {
+  const [[, half]] = cfgsOver(s('vox').play().mul(begin(0.5)), 3, 4);
+  assert.ok(near(half.atLength(4).begin, 0.375));
+  const [[, plus]] = cfgsOver(s('vox').play().add(begin(0.25)), 1, 2);
+  assert.ok(near(plus.atLength(4).begin, 0.5));
+  const [[, replaced]] = cfgsOver(s('vox').play().begin(0.3), 1, 2);
+  assert.equal(replaced.begin, 0.3);
+  assert.equal(replaced.atLength, undefined);
+});
+
+test('.seg(4) plays four slices a cycle, each where its own onset points', () => {
+  const events = cfgsOver(s('vox').play().seg(4), 1, 2);
+  assert.deepEqual(events.map(([, cfg]) => cfg.atLength(8).begin), [1, 1.25, 1.5, 1.75].map((t) => t / 8));
+});
+
+test('the log line names the length a fit came to and its mode', () => {
+  const resolve = () => ({ index: 0, begin: 0, end: 1, loop: 0, speed: 1, stretch: 32 / 30, durSec: 32, cut: 1, amp: 1, fitCycles: 32 });
+  const [line] = linesOf(s('vox').fit('stretch').play().log(), { resolve });
+  assert.match(line, /fit=32c\+stretch/);
+  const [plain] = linesOf(s('vox').fit().log());
+  assert.match(plain, /fit=auto/, 'an engine that reports nothing leaves the request as written');
 });

@@ -112,7 +112,7 @@ function runSclang() {
   const script = `(
 var numPairs = 2, key = "probe", routeNowhere = 1000000;
 var trackDefName = { |k| ("poptart_probe_" ++ k).asSymbol };
-var channelDefault, djIsolator, buildDjDef, def;
+var channelDefault, djIsolator, chanIn, buildDjDef, def;
 var destroyTrack, awaitTrack, stopMixTap, unwireAudio, sidechainBySource, releaseBus, tracks, reorderTracks;
 var tellRamp = { }, tellSlot = { }, tellMods = { }, tellTap = { }, shapesHandled = IdentityDictionary.new, nodeAddr = (sendMsg: { }); // the direct path's id handoff (see tellTrack in sc/poptart.scd) - inert here
 var paramRoutes, unwireParamRoute; // audio patched onto parameters, which destroyTrack unwires
@@ -134,6 +134,7 @@ var stateWaitMax = 0.3;
 var slotKey = { |k, slot| (k ++ "_" ++ slot).asSymbol };
 ${extractChannelDefault()}
 ${extractDjIsolator()}
+${fs.readFileSync(SCD, 'utf8').match(/^chanIn = \{[\s\S]*?^\};$/m)[0]}
 // Building the def runs the whole UGen graph function client-side - no server needed; this is
 // where an undeclared var, a bad arg default, or a misused UGen throws. Pasted directly (like
 // resolve-plugin-sclang.test.js pastes its closure): on a machine without the VSTPlugin

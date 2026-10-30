@@ -7,6 +7,7 @@ import assert from 'node:assert/strict';
 
 import { note, synth, s, lfo, mini, sine } from './src/signal.mjs';
 import { Scheduler } from './src/scheduler.mjs';
+import { routePlan } from './src/route.mjs';
 
 // A stand-in engine: every method is a spy that records its call; getTime is 0 so the Transport a
 // Scheduler builds has a clock. `typeof engine.method === 'function'` holds for everything, which
@@ -23,19 +24,19 @@ function mockEngine() {
 
 test('.bus() appends a send; defaults amount to 1', () => {
   const sig = synth('Serum 2').bus('drums');
-  assert.deepEqual(sig.busSends, [{ name: 'drums', amount: 1 }]);
+  assert.deepEqual(sig.busSends, [{ name: 'drums', amount: 1, at: 0 }]);
 });
 
 test('.bus() takes a send amount and stacks multiple buses', () => {
   const sig = synth('Serum 2').bus('reverb', 0.3).bus('delay', 0.5);
   assert.deepEqual(sig.busSends, [
-    { name: 'reverb', amount: 0.3 },
-    { name: 'delay', amount: 0.5 },
+    { name: 'reverb', amount: 0.3, at: 0 },
+    { name: 'delay', amount: 0.5, at: 0 },
   ]);
 });
 
 test('.bus() trims the name and validates its arguments', () => {
-  assert.deepEqual(synth('Serum 2').bus('  drums  ').busSends, [{ name: 'drums', amount: 1 }]);
+  assert.deepEqual(synth('Serum 2').bus('  drums  ').busSends, [{ name: 'drums', amount: 1, at: 0 }]);
   assert.throws(() => synth('Serum 2').bus(''), /bus name/);
   assert.throws(() => synth('Serum 2').bus(42), /bus name/);
   assert.throws(() => synth('Serum 2').bus('drums', NaN), /amount must be a number/);
@@ -55,12 +56,12 @@ test('.bus() keeps a patterned name and a signal amount as signals', () => {
 test('.dry() sets a dry-level channel control, independent of bus sends', () => {
   const sig = synth('Serum 2').bus('drums').dry(0.25);
   assert.ok('dry' in sig.channel, 'dry rides the channel strip');
-  assert.deepEqual(sig.busSends, [{ name: 'drums', amount: 1 }], 'dry leaves sends untouched');
+  assert.deepEqual(sig.busSends, [{ name: 'drums', amount: 1, at: 0 }], 'dry leaves sends untouched');
 });
 
 test('.bsend() is .bus().dry(0)', () => {
   const sig = synth('Serum 2').bsend('reverb', 0.4);
-  assert.deepEqual(sig.busSends, [{ name: 'reverb', amount: 0.4 }]);
+  assert.deepEqual(sig.busSends, [{ name: 'reverb', amount: 0.4, at: 0 }]);
   const plain = synth('Serum 2').bus('reverb', 0.4).dry(0);
   // Same shape as spelling it out by hand.
   assert.deepEqual(sig.busSends, plain.busSends);
@@ -69,7 +70,7 @@ test('.bsend() is .bus().dry(0)', () => {
 
 test('bus sends survive later chaining (threaded through _clone)', () => {
   const sig = synth('Serum 2').bus('drums', 0.7).gain(0.5).pan(-1);
-  assert.deepEqual(sig.busSends, [{ name: 'drums', amount: 0.7 }]);
+  assert.deepEqual(sig.busSends, [{ name: 'drums', amount: 0.7, at: 0 }]);
 });
 
 test('scheduler forwards .bus() sends to the engine', () => {
@@ -79,7 +80,7 @@ test('scheduler forwards .bus() sends to the engine', () => {
 
   const sent = callsTo('setBusSends');
   assert.equal(sent.length, 1);
-  assert.deepEqual(sent[0].args, ['kick', [{ name: 'drums', amount: 0.8 }, { name: 'room', amount: 1 }]]);
+  assert.deepEqual(sent[0].args, ['kick', [{ name: 'drums', amount: 0.8, i: 0 }, { name: 'room', amount: 1, i: 1 }]]);
 });
 
 test('scheduler tears down sends when a re-eval drops .bus()', () => {
@@ -106,14 +107,14 @@ test('scheduler re-routes when a patterned bus name turns over, and only then', 
   sch.setPattern(note('c2*4').synth('Serum 2').bus(mini('<reverb delay>')));
 
   // Cycle 0 of the name pattern - the send goes to "reverb".
-  assert.deepEqual(callsTo('setBusSends').at(-1).args, ['kick', [{ name: 'reverb', amount: 1 }]]);
+  assert.deepEqual(callsTo('setBusSends').at(-1).args, ['kick', [{ name: 'reverb', amount: 1, i: 0 }]]);
   // Ticking inside the same cycle changes nothing: a re-route acquires and releases buses and
   // reorders the node tree, so it must not happen once per poll.
   sch._syncBusSends(0.1);
   assert.equal(callsTo('setBusSends').length, 1, 'no re-route while the name holds');
   // ...and the next cycle switches the destination.
   sch._syncBusSends(1.05);
-  assert.deepEqual(callsTo('setBusSends').at(-1).args, ['kick', [{ name: 'delay', amount: 1 }]]);
+  assert.deepEqual(callsTo('setBusSends').at(-1).args, ['kick', [{ name: 'delay', amount: 1, i: 0 }]]);
 });
 
 test('a resting name pattern drops the send entirely rather than sending at zero', () => {
@@ -121,7 +122,7 @@ test('a resting name pattern drops the send entirely rather than sending at zero
   const sch = new Scheduler(engine, { trackId: 'kick', cps: 1 });
   sch.transport.start();
   sch.setPattern(note('c2*4').synth('Serum 2').bus(mini('<reverb ~>')));
-  assert.deepEqual(callsTo('setBusSends').at(-1).args, ['kick', [{ name: 'reverb', amount: 1 }]]);
+  assert.deepEqual(callsTo('setBusSends').at(-1).args, ['kick', [{ name: 'reverb', amount: 1, i: 0 }]]);
 
   sch._syncBusSends(1.05); // the rest cycle
   assert.equal(callsTo('clearBusSends').length, 1, 'the bus is released while the name rests');
@@ -209,4 +210,77 @@ test('stop() clears active Tier-2 modulators (muting must stop the modulation)',
   const cleared = callsTo('clearParamLFO');
   assert.equal(cleared.length, 1, 'stop() clears the LFO');
   assert.deepEqual(cleared[0].args.slice(0, 3), ['lead', 0, 'cutoff']);
+});
+
+// --- a send written inside the chain taps the signal where it is written ----------------------
+//
+// After the last device a send is the track's output, as it always was: the plan says nothing
+// about it and the engine's post-strip send carries it. Before a device it is an item of the
+// chain's tree, and the plan's `sends` says what it reads.
+
+const IN = { k: 'in' };
+const slot = (p) => ({ k: 'slot', p });
+
+test('.bus() records the devices before it, and after the last device it is the plain send', () => {
+  const sig = synth('Serum 2').fx('Delay').bus('feedback').fx('Reverb').bus('room');
+  assert.deepEqual(sig.busSends.map((b) => b.at), [1, 2]);
+  assert.equal(sig.fxRoute, null, 'a line stays a line until an engine needs its tree');
+  assert.deepEqual(sig._routeItems(), [1, { send: 0 }, 2, { send: 1 }]);
+  const { plan } = routePlan(sig);
+  assert.deepEqual(plan.sends, { 0: { s: slot(1), g: 0 } }, 'the feedback send reads the delay alone');
+  assert.deepEqual(plan.out, { s: slot(2), g: 0 }, 'the strip reads the reverb');
+  assert.deepEqual(plan.reads, { 1: { s: IN, g: 0 }, 2: { s: slot(1), g: 0 } }, 'the chain is untouched by the tap');
+});
+
+test('a chain whose sends all come after its devices has no tree to send', () => {
+  assert.equal(synth('Serum 2').fx('Delay').fx('Reverb').bus('a').bus('b').postgain(0.5)._routeItems(), null);
+  assert.equal(routePlan(synth('Serum 2').bus('a').fx('Delay').bus('b').fx('Reverb').bus('c')).plan.sends[1].s.p, 1);
+  assert.equal(routePlan(synth('Serum 2').bus('a').fx('Delay')).plan.sends[0].s.k, 'in', 'before the first device: the instrument');
+  assert.equal(synth('Serum 2').bus('a')._routeItems(), null, 'no devices at all: the track output');
+});
+
+test('inside a branch a send taps that branch, at its level and pan when it ends the branch', () => {
+  const sig = synth('Serum 2')
+    .split(
+      (x) => x.bus('dry'),
+      (b) => b.fx('LPG').bus('mid').fx('Reverb').postgain(0.5).bus('wet'),
+    )
+    .fx('Comp')
+    .bus('out');
+  const { plan, controls } = routePlan(sig);
+  assert.deepEqual(plan.sends[0], { s: IN, g: 0 }, 'the clean branch, as it arrives');
+  assert.deepEqual(plan.sends[1], { s: slot(1), g: 0 }, 'mid-branch: the LPG, before the branch level');
+  assert.equal(plan.sends[2].s.p, 2, 'the end of the branch: the reverb...');
+  assert.ok(plan.sends[2].g > 0, '...at the branch level');
+  assert.equal(controls[`rl${plan.sends[2].g}`].constVal, 0.5);
+  assert.equal(plan.sends[3], undefined, 'after the last device: the plain send');
+});
+
+test('a sum only a send reads is kept for it', () => {
+  const sig = synth('Serum 2').split((x) => x, (b) => b.fx('LPG')).bus('both').fx('Reverb');
+  const { plan } = routePlan(sig);
+  assert.equal(plan.sends[0].s.k, 'sum');
+  assert.ok(plan.sums[plan.sends[0].s.id], 'the sum the send reads exists');
+  assert.deepEqual(plan.reads[2], plan.sends[0], 'and the reverb reads the same sum');
+});
+
+test('scheduler sends the tree and names each send by its index, so a rest keeps the others in place', () => {
+  const { engine, callsTo } = mockEngine();
+  const sch = new Scheduler(engine, { trackId: 'delay', cps: 1 });
+  sch.transport.start();
+  sch.setPattern(note('c2').synth('Serum 2').fx('Delay').bus(mini('<~ side>')).bus('feedback').fx('Reverb'));
+  const routed = callsTo('setRouting').at(-1).args;
+  assert.equal(routed[0], 'delay');
+  assert.deepEqual(Object.keys(routed[1].sends), ['0', '1'], 'both sends are inside the chain');
+  // Cycle 0: the patterned name rests, so only the feedback send is routed - still as send 1.
+  assert.deepEqual(callsTo('setBusSends').at(-1).args, ['delay', [{ name: 'feedback', amount: 1, i: 1 }]]);
+  sch._syncBusSends(1.05);
+  assert.deepEqual(callsTo('setBusSends').at(-1).args, ['delay', [{ name: 'side', amount: 1, i: 0 }, { name: 'feedback', amount: 1, i: 1 }]]);
+});
+
+test('a plain chain with every send at its end sends no tree', () => {
+  const { engine, callsTo } = mockEngine();
+  const sch = new Scheduler(engine, { trackId: 'kick' });
+  sch.setPattern(note('c2').synth('Serum 2').fx('Delay').bus('feedback').postgain(0.5));
+  assert.deepEqual(callsTo('setRouting').map((c) => c.args[1]), [null]);
 });

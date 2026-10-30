@@ -27,11 +27,14 @@ import { DUCKER, DuckerProcessor } from '../devices/ducker.mjs';
 import { OVERDRIVE, OverdriveProcessor } from '../devices/overdrive.mjs';
 import { MULTIBAND, MultibandProcessor } from '../devices/multiband.mjs';
 import { STUTTER, StutterProcessor } from '../devices/stutter.mjs';
+import { LOOPER, LooperProcessor } from '../devices/looper.mjs';
 import { GRAINECHO, GrainEchoProcessor } from '../devices/grainecho.mjs';
 import { LPG, LpgProcessor } from '../devices/lpg.mjs';
+import { FILTERBANK, FilterbankProcessor } from '../devices/filterbank.mjs';
+import { RESONATOR, ResonatorProcessor } from '../devices/resonator.mjs';
 import { CROSSOVER, CrossoverProcessor } from '../devices/crossover.mjs';
 import { RecorderTap } from '../devices/recorder.mjs';
-import { compileExpr, exprConsts, exprInputCount, renderExpr } from '../dsp/expr.mjs';
+import { compileExpr, exprConsts, exprHasFollower, exprInputCount, renderExpr } from '../dsp/expr.mjs';
 import { SongReader } from '../devices/song-reader.mjs';
 import { GrainCloud, WarpCloud, grainFiles } from '../devices/grain-cloud.mjs';
 import { Reporter, isDispose, parameterDescriptorsFor, realParams } from './shared.mjs';
@@ -59,6 +62,8 @@ class EffectProcessor extends AudioWorkletProcessor {
     if (message.kind === 'noteOn') { this.fx.noteOn?.(message.note, message.velocity, message.time); return; }
     if (message.kind === 'noteOff') { this.fx.noteOff?.(message.note, message.time); return; }
     if (message.kind === 'noteRoute') { this.fx.setNoteRoute?.(!!message.on); return; }
+    // How late a chain in the effect's feedback loop comes back (the Delay's), or below zero for none.
+    if (message.kind === 'loop') { this.fx.setLoop?.(Number(message.sec)); return; }
     // A curve somebody drew, already sampled into a table by the engine - see _loadShapeParam.
     if (message.kind === 'shape' && typeof this.fx.loadShape === 'function') {
       this.fx.loadShape(message.param, message.index, message.table);
@@ -90,7 +95,8 @@ const EFFECTS = [
   [EQ, EqProcessor], [CHORUS, ChorusProcessor], [FLANGER, FlangerProcessor], [PHASER, PhaserProcessor],
   [DUCKER, DuckerProcessor], [OVERDRIVE, OverdriveProcessor], [MULTIBAND, MultibandProcessor],
   [STUTTER, StutterProcessor], [GRAINECHO, GrainEchoProcessor], [FREQSHIFT, FreqShiftProcessor],
-  [VOICE, VoiceProcessor], [LPG, LpgProcessor], [CROSSOVER, CrossoverProcessor],
+  [VOICE, VoiceProcessor], [LPG, LpgProcessor], [FILTERBANK, FilterbankProcessor], [RESONATOR, ResonatorProcessor], [CROSSOVER, CrossoverProcessor],
+  [LOOPER, LooperProcessor],
 ];
 
 for (const [descriptor, Impl] of EFFECTS) {
@@ -110,11 +116,14 @@ registerProcessor('poptart-expr', class extends AudioWorkletProcessor {
     this.alive = true;
     this.consts = exprConsts(tree);
     try {
-      this.fn = compileExpr(tree, this.consts);
+      this.fn = compileExpr(tree, this.consts, { sampleRate });
     } catch {
       this.fn = () => 0; // the engine compiled this tree before building the node, so it is known good
     }
     this.x = new Float64Array(exprInputCount(tree));
+    // Each input's two sides, for an envelope follower's linked peak (see renderExpr).
+    this.l = exprHasFollower(tree) ? new Float64Array(this.x.length) : null;
+    this.r = this.l ? new Float64Array(this.x.length) : null;
     this.port.onmessage = (event) => {
       if (isDispose(event.data)) { this.alive = false; return; }
       const next = event.data?.consts;
@@ -126,7 +135,7 @@ registerProcessor('poptart-expr', class extends AudioWorkletProcessor {
   process(inputs, outputs) {
     if (!this.alive) return false;
     const out = outputs[0]?.[0];
-    if (out) renderExpr(this.fn, inputs, out, this.x);
+    if (out) renderExpr(this.fn, inputs, out, this.x, this.l, this.r);
     return true;
   }
 });

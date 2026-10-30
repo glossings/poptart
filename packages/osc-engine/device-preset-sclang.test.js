@@ -23,12 +23,12 @@ const { execFileSync } = require('node:child_process');
 
 const { OscEngine, resolveSclangPath } = require('./index.js');
 const { readWavRaw } = require('./wav.js');
-const { userExtensionsDir } = require('./extensions.js');
+const { userExtensionsDir, DEVICE_BINARY } = require('./extensions.js');
 const { nativeDevice, paramPosition } = require('./native-devices');
 
 const SR = 48000;
 const NATIVE_DIR = path.join(__dirname, 'native', 'devices');
-const SCX = path.join(NATIVE_DIR, 'bin', 'PoptartDevices.scx');
+const SCX = DEVICE_BINARY; // this platform's build (extensions.js)
 const LANG_PORT = 57303;
 
 function sclangConf(dir) {

@@ -78,7 +78,7 @@ test('a track is built, routed, filled and taken down on a real server', async (
     assert.ok(Math.abs(cap.at(0, mid) - 0.25) < 1e-5, `dst hears src through the route (${cap.at(0, mid)})`);
 
     // A send to a named bus, and a third track reading it.
-    E.dispatch('/poptart/setBusSends', ['src', 'mix', 0.5]);
+    E.dispatch('/poptart/setBusSends', ['src', 'mix', 0.5, 0]);
     E.dispatch('/poptart/createTrack', ['bus', 'dry', 0]);
     const reader = await trackOf(E, 'bus');
     E.dispatch('/poptart/setAudioInput', ['bus', 'bus:mix']);

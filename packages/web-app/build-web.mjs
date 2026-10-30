@@ -11,6 +11,7 @@
 //
 //   /                  the editor
 //   /vendor/codemirror the editor component, from node_modules
+//   /vendor/acorn      the JavaScript parser that places a syntax error, from node_modules
 //   /pattern-core      the language, as source
 //   /web-engine        the devices, the worklets and the packs that ship with the app
 //   /web               the host that stands in for the server
@@ -43,6 +44,8 @@ function sources() {
   return [
     { from: path.join(here, 'public'), to: '' },
     { from: codemirror, to: 'vendor/codemirror', only: ['lib', 'addon', 'mode', 'keymap'] },
+    // The parser that places a syntax error (see pattern-core's eval-errors.mjs).
+    { from: path.join(path.dirname(require.resolve('acorn/package.json')), 'dist'), to: 'vendor/acorn', only: ['acorn.mjs'] },
     { from: patternCore, to: 'pattern-core' },
     { from: path.join(webEngine, 'src'), to: 'web-engine/src' },
     { from: path.join(webEngine, 'public', 'worklets'), to: 'web-engine/worklets' },

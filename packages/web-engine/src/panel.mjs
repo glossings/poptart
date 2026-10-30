@@ -187,7 +187,10 @@ export function valueFromPosition(descriptor, paramId, position) {
   let v;
   if (param.curve === 'exp') v = param.min * Math.pow(param.max / param.min, t);
   else if (param.curve === 'pow') v = param.min + (param.max - param.min) * Math.pow(t, param.curveExp);
-  else v = param.min + (param.max - param.min) * t;
+  else if (param.curve === 'sym') {
+    const u = 2 * t - 1;
+    v = (param.min + param.max) / 2 + ((param.max - param.min) / 2) * Math.sign(u) * Math.pow(Math.abs(u), param.curveExp);
+  } else v = param.min + (param.max - param.min) * t;
   return clampParam(param, v);
 }
 

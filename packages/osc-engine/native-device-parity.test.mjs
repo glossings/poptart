@@ -24,6 +24,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 import { ownDevices, ownIdsSource, registrySource } from '../web-engine/build/devices/native.mjs';
+import { DSP_FLAGS, compiler as cxx, exeName, linkFlags, targetFlags } from '../web-engine/build/devices/toolchain.mjs';
 import { denormalize } from '../web-engine/src/descriptor.mjs';
 import { FilterProcessor } from '../web-engine/src/devices/filter.mjs';
 import { EqProcessor } from '../web-engine/src/devices/eq.mjs';
@@ -42,6 +43,8 @@ import { PhaserProcessor } from '../web-engine/src/devices/phaser.mjs';
 import { DelayProcessor } from '../web-engine/src/devices/delay.mjs';
 import { GrainEchoProcessor } from '../web-engine/src/devices/grainecho.mjs';
 import { StutterProcessor } from '../web-engine/src/devices/stutter.mjs';
+import { LooperProcessor } from '../web-engine/src/devices/looper.mjs';
+import { SYNC_OPTIONS } from '../web-engine/src/dsp/sync.mjs';
 import { DuckerProcessor } from '../web-engine/src/devices/ducker.mjs';
 import { FmSynth } from '../web-engine/src/devices/fmsynth.mjs';
 import { WavetableSynth } from '../web-engine/src/devices/wavetable.mjs';
@@ -49,6 +52,9 @@ import { GranularSynth } from '../web-engine/src/devices/granular.mjs';
 import { NoiseSynth } from '../web-engine/src/devices/noise.mjs';
 import { LpgProcessor } from '../web-engine/src/devices/lpg.mjs';
 import { CrossoverProcessor } from '../web-engine/src/devices/crossover.mjs';
+import { FilterbankProcessor } from '../web-engine/src/devices/filterbank.mjs';
+import { ResonatorProcessor } from '../web-engine/src/devices/resonator.mjs';
+import { parseScaleName } from '../pattern-core/src/notes.mjs';
 import { IR_NAMES, bufferFromChannels, synthesizeImpulse } from '../web-engine/src/devices/builtins.mjs';
 import { Biquad, BIQUAD_TYPES } from '../web-engine/src/dsp/biquad.mjs';
 import { readReport } from './native-devices.js';
@@ -79,6 +85,7 @@ const PROCESSORS = {
   Delay: DelayProcessor,
   GrainEcho: GrainEchoProcessor,
   Stutter: StutterProcessor,
+  Looper: LooperProcessor,
   Ducker: DuckerProcessor,
   FM: FmSynth,
   Wavetable: WavetableSynth,
@@ -86,6 +93,8 @@ const PROCESSORS = {
   Noise: NoiseSynth,
   LPG: LpgProcessor,
   Crossover: CrossoverProcessor,
+  Filterbank: FilterbankProcessor,
+  Resonator: ResonatorProcessor,
   // Convolver is deliberately not here: there is no JavaScript processor for it to be compared
   // against, because in the browser it IS a ConvolverNode. It has a test of its own at the end
   // of this file, against Chromium's documented behavior.
@@ -101,7 +110,7 @@ const outChannelsOf = (descriptor) => 2 * (descriptor.channels.outputs ?? 1);
 // ---- the harness ------------------------------------------------------------------------------
 
 function haveCompiler() {
-  return spawnSync('clang++', ['--version'], { stdio: 'ignore' }).status === 0;
+  return spawnSync(cxx(), ['--version'], { stdio: 'ignore' }).status === 0;
 }
 
 /**
@@ -116,7 +125,7 @@ function buildHarness(devices) {
   const registry = path.join(WORK, 'pd-own-registry.cc');
   fs.writeFileSync(ids, ownIdsSource(devices), 'utf8');
   fs.writeFileSync(registry, registrySource(devices.map((d) => d.device)), 'utf8');
-  const binary = path.join(WORK, 'harness');
+  const binary = path.join(WORK, exeName('harness'));
   const sources = [
     ...devices.map((d) => d.file),
     path.join(NATIVE_DIR, 'pd-device.cc'),
@@ -125,26 +134,32 @@ function buildHarness(devices) {
   ];
   const newest = Math.max(...sources.map((f) => fs.statSync(f).mtimeMs), fs.statSync(ids).mtimeMs);
   if (fs.existsSync(binary) && fs.statSync(binary).mtimeMs > newest) return binary;
-  execFileSync('clang++', [
-    '-O3', '-std=c++17', '-ffast-math', '-fno-rtti',
+  // The platform's own flags as well (toolchain.mjs): on Windows those are what make the MSVC
+  // headers spell M_PI and the runtime the shipped DLL links. No -arch: the machine's own.
+  const target = targetFlags().filter((f) => f !== '-fPIC');
+  const link = process.platform === 'win32' ? linkFlags({ out: binary }).filter((f) => !['-shared', '-Wl,/noimplib'].includes(f)) : ['-o', binary];
+  execFileSync(cxx(), [
+    ...DSP_FLAGS, ...target,
     '-I', NATIVE_DIR, '-I', WORK,
-    ...sources, '-o', binary,
+    ...sources, ...link,
   ], { stdio: ['ignore', 'pipe', 'pipe'] });
   return binary;
 }
 
 /** One device's output: the values in real units, the input, and what comes back. */
-function runNative(binary, { id, values, input, frames, notes = [], bpm = 120, keyed = null, samples = [], moving = [], shapes = [], report = null, outs = 2 }) {
+function runNative(binary, { id, values, input, frames, notes = [], bpm = 120, keyed = null, samples = [], moving = [], shapes = [], report = null, outs = 2, loop = null, extra = [] }) {
   const stdin = Buffer.alloc(values.length * 4 + input.length * 4);
   for (let i = 0; i < values.length; i++) stdin.writeFloatLE(Math.fround(values[i]), i * 4);
   for (let i = 0; i < input.length; i++) stdin.writeFloatLE(input[i], values.length * 4 + i * 4);
   const args = [id, String(SAMPLE_RATE), String(frames), String(BLOCK), String(bpm)];
   if (keyed !== null) args.push('-k', keyed ? '1' : '0');
+  if (loop !== null) args.push('-L', String(loop));
   for (const one of samples) args.push('-S', `${one.param}:${one.slot}:${one.rate}:${one.channels ?? 1}:${one.frameLength ?? 0}:${one.file}`);
   for (const one of shapes) args.push('-H', `${one.param}:${one.slot}:${one.file}`);
   if (report) args.push('-R', report);
   for (const n of notes) args.push('-n', `${n.frame}:${n.note}:${n.velocity}`);
   for (const one of moving) args.push('-A', `${one.param}:${one.file}`);
+  args.push(...extra);
   const run = spawnSync(binary, args, { input: stdin, maxBuffer: 1 << 28 });
   assert.equal(run.status, 0, `${id}: the harness failed - ${run.stderr?.toString()}`);
   const out = new Float32Array(frames * outs);
@@ -177,13 +192,14 @@ function processBlock(fx, descriptor, inputs, n, params, key, at, out) {
  * process that is handed its two output channels - exactly as the two worklets that host them do
  * (web-engine/src/worklets), so this stands in for both.
  */
-function runBrowser(descriptor, { values, input, frames, notes = [], bpm = 120, channels = 2, keyed = true, load = null, shapes = [], onDone = null }) {
+function runBrowser(descriptor, { values, input, frames, notes = [], bpm = 120, channels = 2, keyed = true, load = null, shapes = [], onDone = null, loop = null }) {
   if (descriptor.kind === 'synth') return runBrowserSynth(descriptor, { values, frames, notes, bpm, load, shapes, onDone });
   const Processor = PROCESSORS[descriptor.id];
   const fx = new Processor(SAMPLE_RATE);
   if (load) fx.loadSample(load.param, load.slot, { channels: load.channels ?? [load.data], sampleRate: load.rate, frameLength: load.frameLength || null });
   for (const one of shapes) fx.loadShape(one.param, one.slot, one.table);
   if (typeof fx.setTempo === 'function') fx.setTempo(bpm, 0);
+  if (loop !== null) fx.setLoop(loop);
   const params = {};
   descriptor.params.forEach((p, i) => { params[p.id] = Math.fround(values[i]); });
   const out = new Float32Array(frames * outChannelsOf(descriptor));
@@ -610,6 +626,38 @@ for (const one of devices.filter((d) => !STOCK_NODES.has(d.id))) {
   });
 }
 
+// ---- a chain in the Delay's feedback loop ---------------------------------------------------------
+//
+// `.fx("Delay", (x) => x.fx("Filter"))`: the repeats leave on the second output pair and come back
+// on the key, and the engine says how late (setLoop in the browser, pd_loop here). The key of the
+// test signal stands in for what comes back. Both engines must agree at any way round: a block,
+// a block and a late device, and one longer than the time, which holds the time at it.
+
+test('a looped Delay sends and takes back its repeats the same on both engines', { skip: compiler ? false : 'no clang++' }, () => {
+  const binary = buildHarness(devices);
+  const { device } = devices.find((d) => d.id === 'Delay');
+  const frames = BLOCK * 48;
+  const input = testSignal(frames, 4, 7, true);
+  const at = (pin) => device.params.map((p) => (p.id in pin ? pin[p.id] : p.default));
+  const settings = [
+    ['short', at({ time: 0.02, feedback: 0.7 })],
+    ['ping-pong, spread', at({ time: 0.03, feedback: 0.9, pingpong: 1, spread: 0.6, tone: 1500 })],
+    ['run away', at({ time: 0.015, feedback: 1.1, mix: 1 })],
+    ['synced', at({ sync: 3, feedback: 0.5 })],
+    ...[11, 29, 97].map((seed) => [`at setting ${seed}`, randomValues(device, seed)]),
+  ];
+  let loudest = 0;
+  for (const loop of [BLOCK / SAMPLE_RATE, BLOCK / SAMPLE_RATE + 0.0123, 0.05]) {
+    for (const [what, values] of settings) {
+      const native = runNative(binary, { id: 'Delay', values, input, frames, outs: 4, loop });
+      const browser = runBrowser(device, { values, input, frames, channels: 4, keyed: true, loop });
+      compare('Delay', `looped, ${loop.toFixed(5)} s round, ${what}`, native, browser);
+      for (let i = 0; i < frames; i++) loudest = Math.max(loudest, Math.abs(browser[i * 4 + 2]), Math.abs(browser[i * 4 + 3]));
+    }
+  }
+  assert.ok(loudest > 1e-3, 'the looped Delay never sent anything round its loop');
+});
+
 // ---- a control with audio patched onto it ------------------------------------------------------
 //
 // `.param("Cutoff", audio("mod"))` moves a control every sample. The browser's processor is
@@ -710,6 +758,91 @@ for (const { id, param } of PATCHED) {
     assert.ok(differs > 1e-3, `${id}: sweeping ${param} per sample sounded no different from per block`);
   });
 }
+
+// ---- the looper, played through takes ----------------------------------------------------------
+//
+// A looper does nothing worth comparing until somebody records, so it is driven the way a person
+// plays it: Record and Clear moved per sample (as a patched control, `-A` on the harness), through
+// a first take, playback, an overdub, a stretch reversed, a clear and a new take - on the grid and
+// free, at the default tempo and another, with speed and feedback moved. The edges are placed a
+// little after their lines and well after them, so the late-edge rule is played both ways.
+
+/** Noise and two tones, all the way through: a take of silence would compare two silences. */
+function loopInput(frames) {
+  const next = rng(41);
+  const sig = new Float32Array(frames * 2);
+  for (let i = 0; i < frames; i++) {
+    const t = i / SAMPLE_RATE;
+    const noise = (next() * 2 - 1) * 0.2;
+    sig[i * 2] = Math.fround(Math.sin(2 * Math.PI * 196 * t) * 0.4 + noise);
+    sig[i * 2 + 1] = Math.fround(Math.sin(2 * Math.PI * 293 * t + 0.4) * 0.4 + noise * 0.7);
+  }
+  return sig;
+}
+
+/** The browser's processor with several controls moving per sample, handed them per block. */
+function runBrowserMoving(descriptor, { values, input, frames, bpm, moving }) {
+  const fx = new PROCESSORS[descriptor.id](SAMPLE_RATE);
+  fx.setTempo(bpm, 0);
+  const params = {};
+  descriptor.params.forEach((p, i) => { params[p.id] = Math.fround(values[i]); });
+  const out = new Float32Array(frames * 2);
+  const inputs = [new Float32Array(BLOCK), new Float32Array(BLOCK)];
+  for (let at = 0; at < frames; at += BLOCK) {
+    const n = Math.min(BLOCK, frames - at);
+    for (const [id, data] of Object.entries(moving)) params[id] = data.subarray(at, at + n);
+    for (let i = 0; i < n; i++) {
+      inputs[0][i] = input[(at + i) * 2];
+      inputs[1][i] = input[(at + i) * 2 + 1];
+    }
+    processBlock(fx, descriptor, inputs, n, params, null, at, out);
+  }
+  return out;
+}
+
+test('Looper records, plays, overdubs, clears and records again the same on both engines', { skip: compiler ? false : 'no clang++' }, () => {
+  const binary = buildHarness(devices);
+  const { device } = devices.find((d) => d.id === 'Looper');
+  const index = (id) => device.params.findIndex((p) => p.id === id);
+  for (const bpm of [120, 137]) {
+    const bar = (4 * 60 / bpm) * SAMPLE_RATE;
+    const f = (bars, sec = 0) => Math.round(bars * bar + sec * SAMPLE_RATE);
+    const frames = Math.ceil(f(8) / BLOCK) * BLOCK;
+    const input = loopInput(frames);
+    const span = (pairs) => Float32Array.from({ length: frames }, (_, i) => (pairs.some(([a, b]) => i >= a && i < b) ? 1 : 0));
+    const moving = {
+      // A take on 4 ms late, off 10 ms late (cut back to the line); an overdub on 50 ms late (to
+      // the next line) and off between lines; after the clear, a take from mid-bar to just past
+      // a line.
+      record: span([[f(0, 0.004), f(1, 0.01)], [f(2, 0.05), f(3.5)], [f(5.5), f(7, 0.002)]]),
+      reverse: span([[f(4.3), f(4.6)]]),
+      clear: span([[f(5.2), f(5.2) + 100]]),
+    };
+    const files = Object.fromEntries(Object.entries(moving).map(([id, data]) => [id, writeFile(path.join(WORK, `Looper-${id}-${bpm}.f32`), data)]));
+    const settings = [
+      ['at the defaults', {}],
+      ['faster, keeping less', { speed: 1.5, feedback: 0.6 }],
+      ['slower, the loop alone', { speed: 0.7, dry: 0, wet: 0.8 }],
+    ];
+    for (const quantize of ['1 bar', 'free']) {
+      for (const [what, pin] of settings) {
+        const values = device.params.map((p) => (p.id === 'quantize' ? SYNC_OPTIONS.indexOf(quantize) : (p.id in pin ? pin[p.id] : p.default)));
+        const native = runNative(binary, {
+          id: 'Looper', values, input, frames, bpm,
+          moving: Object.keys(moving).map((id) => ({ param: index(id), file: files[id] })),
+        });
+        const browser = runBrowserMoving(device, { values, input, frames, bpm, moving });
+        compare('Looper', `at ${bpm} bpm, quantize ${quantize}, ${what}`, native, browser);
+        if (pin.dry === 0) {
+          // And the loop played: the bar after the first take is not silence.
+          let energy = 0;
+          for (let i = f(1, 0.05) * 2; i < f(2) * 2; i++) energy += browser[i] * browser[i];
+          assert.ok(Math.sqrt(energy / (f(2) - f(1, 0.05)) / 2) > 0.05, `Looper at ${bpm} bpm, quantize ${quantize}: the loop was silent`);
+        }
+      }
+    }
+  }
+});
 
 // ---- the convolver, which has no processor of ours to be compared against ----------------------
 //
@@ -1211,3 +1344,244 @@ test('a stereo file at another rate is convolved side by side, as Chromium convo
   for (let i = 0; i < mine.length; i++) differs = Math.max(differs, Math.abs(mine[i] - flat[i]));
   assert.ok(differs > 1e-3, 'a stereo response sounded the same as its mono sum');
 });
+
+// ---- the filter bank: Filterbank and Resonator --------------------------------------------------------
+//
+// Both are driven by Shape, which is a picture moved across the bands - so the runs that matter
+// are the ones where Shape MOVES, per sample, handed over the way a patched signal is (`-A`), in
+// each mode and with the sides apart. Then the lists a pattern hands over (`-H`, as /shape hands
+// a table over): a list of levels on both, and a scale on the Resonator - a diatonic one, and one
+// off the 12-tone grid - and the Resonator tuned to held notes.
+
+/** Shape as a pattern might move it: a slow sweep with something quicker riding on it. */
+function movingShape(frames) {
+  return Float32Array.from({ length: frames }, (_, i) => {
+    const t = i / SAMPLE_RATE;
+    return Math.fround(0.5 + 0.4 * Math.sin(2 * Math.PI * 7 * t) + 0.1 * Math.sin(2 * Math.PI * 190 * t));
+  });
+}
+
+/** The browser's processor with Shape on a signal, lists in its slots and notes, block by block. */
+function runBrowserBank(descriptor, { values, input, frames, notes = [], shapes = [], moving = null, changes = [] }) {
+  const fx = new PROCESSORS[descriptor.id](SAMPLE_RATE);
+  for (const one of shapes) fx.loadShape(one.param, one.slot, one.table);
+  const params = {};
+  descriptor.params.forEach((p, i) => { params[p.id] = Math.fround(values[i]); });
+  const out = new Float32Array(frames * 2);
+  const inputs = [new Float32Array(BLOCK), new Float32Array(BLOCK)];
+  let nextNote = 0;
+  for (let at = 0; at < frames; at += BLOCK) {
+    const n = Math.min(BLOCK, frames - at);
+    if (moving) params[moving.id] = moving.values.subarray(at, at + n);
+    for (const c of changes) if (c.frame === at) params[c.id] = Math.fround(c.value);
+    while (nextNote < notes.length && notes[nextNote].frame < at + n) {
+      const one = notes[nextNote++];
+      if (one.velocity > 0) fx.noteOn(one.note, one.velocity, one.frame / SAMPLE_RATE);
+      else fx.noteOff(one.note, one.frame / SAMPLE_RATE);
+    }
+    for (let i = 0; i < n; i++) {
+      inputs[0][i] = input[(at + i) * 2];
+      inputs[1][i] = input[(at + i) * 2 + 1];
+    }
+    processBlock(fx, descriptor, inputs, n, params, null, at, out);
+  }
+  return out;
+}
+
+/** A scale as the scheduler hands one over: [root, period, interval...], as floats. */
+const scaleTable = (name) => {
+  const { rootMidi, intervals, period } = parseScaleName(name);
+  return Float32Array.from([rootMidi, period, ...intervals]);
+};
+
+/** One cycle's steps as the scheduler hands them over: [start, end, value] triples, as floats. */
+const levelsTable = Float32Array.from([0, 0.25, 1, 0.25, 0.5, 0, 0.5, 0.75, 0.4, 0.875, 1, 0.8]);
+
+const BANK_RUNS = [
+  { what: 'scrolling up', set: { mode: 0, scroll: 64 } },
+  { what: 'scrolling down with the sides mirrored', set: { mode: 0, scroll: -40, stereo: 1 } },
+  { what: 'scrolling with the sides part way apart', set: { mode: 0, scroll: 50, stereo: 0.4, bands: 23 } },
+  { what: 'rippling', set: { mode: 1, wavespeed: 200, where: 0.3, damping: 0.05 } },
+  { what: 'rippling, the sides struck apart', set: { mode: 1, wavespeed: 150, where: 0.8, damping: 0.3, stereo: 0.7 } },
+  { what: 'rippling fully damped', set: { mode: 1, wavespeed: 120, where: 0.5, damping: 1 } },
+];
+
+for (const id of ['Filterbank', 'Resonator']) {
+  test(`${id} follows a moving Shape the same on both engines, in both modes`, { skip: compiler ? false : 'no clang++' }, () => {
+    const binary = buildHarness(devices);
+    const { device } = devices.find((d) => d.id === id);
+    const frames = BLOCK * 120;
+    const shapeIndex = device.params.findIndex((p) => p.id === 'shape');
+    const values = movingShape(frames);
+    const file = writeFile(path.join(WORK, `${id}-shape.f32`), values);
+    const input = testSignal(frames, 2, 5);
+    for (const { what, set } of BANK_RUNS) {
+      const settings = device.params.map((p) => (p.id in set ? set[p.id] : p.default));
+      const mine = runNative(binary, { id, values: settings, input, frames, moving: [{ param: shapeIndex, file }] });
+      const theirs = runBrowserBank(device, { values: settings, input, frames, moving: { id: 'shape', values } });
+      const { rmsA } = compare(id, `${what} with Shape moving`, mine, theirs);
+      assert.ok(rmsA > 1e-3, `${id} ${what}: nothing came out`);
+    }
+  });
+
+  test(`${id} lays a list of levels over its bands the same on both engines`, { skip: compiler ? false : 'no clang++' }, () => {
+    const binary = buildHarness(devices);
+    const { device } = devices.find((d) => d.id === id);
+    const frames = BLOCK * 48;
+    const levels = device.params.findIndex((p) => p.id === 'levels');
+    const file = writeFile(path.join(WORK, `${id}-levels.f32`), levelsTable);
+    const input = testSignal(frames, 2, 3);
+    for (const mode of [0, 1]) {
+      const settings = device.params.map((p) => (p.id === 'levels' ? 1 : p.id === 'mode' ? mode : p.default));
+      const mine = runNative(binary, { id, values: settings, input, frames, shapes: [{ param: levels, slot: 1, file }] });
+      const theirs = runBrowserBank(device, { values: settings, input, frames, shapes: [{ param: 'levels', slot: 1, table: levelsTable }] });
+      compare(id, `with a list of levels, mode ${mode}`, mine, theirs);
+      // And the list is heard: the same run with no list is a different sound.
+      const flat = runBrowserBank(device, { values: device.params.map((p) => (p.id === 'mode' ? mode : p.default)), input, frames });
+      let differs = 0;
+      for (let i = 0; i < flat.length; i++) differs = Math.max(differs, Math.abs(flat[i] - theirs[i]));
+      assert.ok(differs > 1e-3, `${id}: a list of levels changed nothing`);
+    }
+  });
+}
+
+test('Resonator tunes to a scale, and to one off the 12-tone grid, the same on both engines', { skip: compiler ? false : 'no clang++' }, () => {
+  const binary = buildHarness(devices);
+  const { device } = devices.find((d) => d.id === 'Resonator');
+  const frames = BLOCK * 48;
+  const scale = device.params.findIndex((p) => p.id === 'scale');
+  const input = testSignal(frames, 2, 13);
+  for (const [name, set] of [
+    ['D dorian', {}],
+    ['31edo major', { shift: 3.5, spread: 0.8, tilt: -9, decay: 0.4 }],
+    ['702. 1200.', { spread: 0.3, decay: 2, mode: 1, stereo: 1 }],
+  ]) {
+    const table = scaleTable(name);
+    const file = writeFile(path.join(WORK, 'Resonator-scale.f32'), table);
+    const settings = device.params.map((p) => (p.id === 'scale' ? 1 : p.id in set ? set[p.id] : p.default));
+    const mine = runNative(binary, { id: 'Resonator', values: settings, input, frames, shapes: [{ param: scale, slot: 1, file }] });
+    const theirs = runBrowserBank(device, { values: settings, input, frames, shapes: [{ param: 'scale', slot: 1, table }] });
+    const { rmsA } = compare('Resonator', `in ${name} at ${JSON.stringify(set)}`, mine, theirs);
+    assert.ok(rmsA > 1e-3, `Resonator in ${name}: nothing came out`);
+  }
+});
+
+test('Resonator follows held notes the same on both engines, ringing out what is let go', { skip: compiler ? false : 'no clang++' }, () => {
+  const binary = buildHarness(devices);
+  const { device } = devices.find((d) => d.id === 'Resonator');
+  const frames = BLOCK * 64;
+  const input = testSignal(frames, 2, 21);
+  const notes = [
+    { frame: 0, note: 57, velocity: 0.9 },
+    { frame: 0, note: 64, velocity: 0.6 },
+    { frame: BLOCK * 10 + 33, note: 69.5, velocity: 1 },
+    { frame: BLOCK * 20 + 100, note: 57, velocity: 0 },
+    { frame: BLOCK * 30 + 7, note: 52, velocity: 0.7 },
+    { frame: BLOCK * 40, note: 64, velocity: 0 },
+  ];
+  for (const set of [{}, { spread: 0.7, shift: -5, tilt: 6, decay: 3 }, { mode: 1, stereo: 0.5 }]) {
+    const settings = device.params.map((p) => (p.id in set ? set[p.id] : p.default));
+    const mine = runNative(binary, { id: 'Resonator', values: settings, input, frames, notes });
+    const theirs = runBrowserBank(device, { values: settings, input, frames, notes });
+    const { rmsA } = compare('Resonator', `on held notes at ${JSON.stringify(set)}`, mine, theirs);
+    assert.ok(rmsA > 1e-3, 'Resonator on held notes: nothing came out');
+  }
+});
+
+// ---- the desktop makes room before it is needed -------------------------------------------------
+//
+// A device on the server grows its arrays in a work round that can take many blocks. The browser
+// grows at once. So the desktop has to have asked BEFORE: a band count is said to the device when
+// it is sent (ahead of its time by the bundle's latency), a scale when its table arrives, and held
+// notes ask for more while half their room is free. Each of these is played here with every work
+// round landing 20 blocks late, and has to come out the same as the browser - no band missing.
+
+const LATE = ['-W', '20'];
+
+test('Filterbank plays every band at once when the count jumps, its room made from the early word', { skip: compiler ? false : 'no clang++' }, () => {
+  const binary = buildHarness(devices);
+  const { device } = devices.find((d) => d.id === 'Filterbank');
+  const frames = BLOCK * 80;
+  const input = testSignal(frames, 2, 9);
+  const bands = device.params.findIndex((p) => p.id === 'bands');
+  const values = device.params.map((p) => (p.id === 'bands' ? 8 : p.default));
+  const word = writeFile(path.join(WORK, 'Filterbank-room.f32'), Float32Array.from([200]));
+  const jump = ['-P', `${BLOCK * 40}:${bands}:200`];
+  const theirs = runBrowserBank(device, { values, input, frames, changes: [{ frame: BLOCK * 40, id: 'bands', value: 200 }] });
+  const mine = runNative(binary, { id: 'Filterbank', values, input, frames, extra: [...LATE, ...jump, '-T', `${BLOCK * 10}:${bands}:-1:${word}`] });
+  compare('Filterbank', 'jumping to 200 bands with the work round 20 blocks late', mine, theirs);
+  // Without the early word the same jump plays short of bands until the round lands: the test sees it.
+  const short = runNative(binary, { id: 'Filterbank', values, input, frames, extra: [...LATE, ...jump] });
+  let differs = 0;
+  for (let i = 0; i < short.length; i++) differs = Math.max(differs, Math.abs(short[i] - theirs[i]));
+  assert.ok(differs > 1e-3, 'a late work round changed nothing, so this test proves nothing');
+});
+
+test('Resonator takes a bigger scale and more held notes than its first room, with nothing dropped', { skip: compiler ? false : 'no clang++' }, () => {
+  const binary = buildHarness(devices);
+  const { device } = devices.find((d) => d.id === 'Resonator');
+  const frames = BLOCK * 80;
+  const input = testSignal(frames, 2, 4);
+  // A tuning of 31 steps to the octave, three hundred bands and more, selected at block 40.
+  const scaleIndex = device.params.findIndex((p) => p.id === 'scale');
+  const table = scaleTable('31edo');
+  const file = writeFile(path.join(WORK, 'Resonator-31edo.f32'), table);
+  const theirs = runBrowserBank(device, { values: defaultValues(device), input, frames, shapes: [{ param: 'scale', slot: 1, table }], changes: [{ frame: BLOCK * 40, id: 'scale', value: 1 }] });
+  const mine = runNative(binary, { id: 'Resonator', values: defaultValues(device), input, frames,
+    extra: [...LATE, '-T', `${BLOCK * 5}:${scaleIndex}:1:${file}`, '-P', `${BLOCK * 40}:${scaleIndex}:1`] });
+  compare('Resonator', 'switching to 31edo with the work round 20 blocks late', mine, theirs);
+  // A hundred notes held at once, then eighty more: past the 128 there is room for to start with.
+  const notes = [
+    ...Array.from({ length: 100 }, (_, k) => ({ frame: 0, note: 30 + k * 0.7, velocity: 0.5 })),
+    ...Array.from({ length: 80 }, (_, k) => ({ frame: BLOCK * 40, note: 30.35 + k * 0.7, velocity: 0.5 })),
+  ];
+  const held = runBrowserBank(device, { values: defaultValues(device), input, frames, notes });
+  const ours = runNative(binary, { id: 'Resonator', values: defaultValues(device), input, frames, notes, extra: LATE });
+  compare('Resonator', 'holding 180 notes with the work round 20 blocks late', ours, held);
+});
+
+// ---- what the device window draws of them --------------------------------------------------------
+//
+// The bands figure is drawn from the device's own report: each sounding band's frequency and the
+// level it is being fed. The desktop's report (pd_report, read back by native-devices.js's
+// readReport) has to say what the browser's processor says, or the window lies on one engine.
+
+for (const id of ['Filterbank', 'Resonator']) {
+  test(`${id} reports its bands to the window the same on both engines`, { skip: compiler ? false : 'no clang++' }, () => {
+    const binary = buildHarness(devices);
+    const { device } = devices.find((d) => d.id === id);
+    const frames = BLOCK * 30;
+    const values = movingShape(frames);
+    const shapeIndex = device.params.findIndex((p) => p.id === 'shape');
+    const file = writeFile(path.join(WORK, `${id}-report-shape.f32`), values);
+    const levels = device.params.findIndex((p) => p.id === 'levels');
+    const lv = writeFile(path.join(WORK, `${id}-report-levels.f32`), levelsTable);
+    const settings = device.params.map((p) => (p.id === 'levels' ? 1 : p.id === 'mode' ? 1 : p.id === 'tilt' ? 9 : p.default));
+    const input = testSignal(frames, 2, 8);
+    const reportFile = path.join(WORK, `${id}-report.f32`);
+    runNative(binary, { id, values: settings, input, frames, moving: [{ param: shapeIndex, file }], shapes: [{ param: levels, slot: 1, file: lv }], report: reportFile });
+    const bytes = fs.readFileSync(reportFile);
+    const raw = Array.from({ length: bytes.length / 4 }, (_, i) => bytes.readFloatLE(i * 4));
+    const mine = readReport(id, raw);
+    let theirs = null;
+    const fx = new PROCESSORS[id](SAMPLE_RATE);
+    fx.loadShape('levels', 1, levelsTable);
+    const params = {};
+    device.params.forEach((p, i) => { params[p.id] = Math.fround(settings[i]); });
+    const inputs = [new Float32Array(BLOCK), new Float32Array(BLOCK)];
+    const out = new Float32Array(frames * 2);
+    for (let at = 0; at < frames; at += BLOCK) {
+      params.shape = values.subarray(at, at + BLOCK);
+      for (let i = 0; i < BLOCK; i++) { inputs[0][i] = input[(at + i) * 2]; inputs[1][i] = input[(at + i) * 2 + 1]; }
+      processBlock(fx, device, inputs, BLOCK, params, null, at, out);
+    }
+    theirs = fx.report();
+    assert.ok(mine?.bands, `${id}: the compiled device reported nothing`);
+    assert.equal(mine.bands.hz.length, theirs.bands.hz.length);
+    for (let k = 0; k < theirs.bands.hz.length; k++) {
+      assert.ok(Math.abs(mine.bands.hz[k] - Math.fround(theirs.bands.hz[k])) <= Math.abs(theirs.bands.hz[k]) * 1e-6);
+      assert.ok(Math.abs(mine.bands.level[k] - theirs.bands.level[k]) < 1e-4, `${id} band ${k}: ${mine.bands.level[k]} against ${theirs.bands.level[k]}`);
+    }
+    assert.ok(theirs.bands.level.some((v) => v > 0.05), `${id}: every band reported silent`);
+  });
+}

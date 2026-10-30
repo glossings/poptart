@@ -212,7 +212,9 @@ function install(E) {
           'rate', rate, 'gate', 1, 'amp', amp, 'atk', atk, 'dec', dec, 'sus', sus, 'rel', rel,
           'bend', track.bendBus.asMap(), 'posLive', posLive, 'win', E.grainWindowFor(windowJson),
           // Mapped, like bend, in the bus's own order.
-          'grainpos', `c${bus}`, 'grainsize', `c${bus + 1}`, 'grainrate', `c${bus + 2}`, 'grainpan', `c${bus + 3}`];
+          'grainpos', `c${bus}`, 'grainsize', `c${bus + 1}`, 'grainrate', `c${bus + 2}`, 'grainpan', `c${bus + 3}`,
+          // ...and per sample, off its driver, a control an audio-rate driver is on (setChanAr).
+          ...['grainpos', 'grainsize', 'grainrate', 'grainpan', 'bend'].flatMap((n) => [`${n}Ar`, track.chanAr?.get(n) ?? -1])];
       } else {
         args = ['out', track.inBus.index, 'buf', buf, 'begin', begin, 'end', end,
           'rate', rate, 'dur', dur, 'gate', 1, 'amp', amp,

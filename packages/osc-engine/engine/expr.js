@@ -81,10 +81,6 @@ function install(E) {
     if (target == null) return;
     const exprs = E.exprsOf(track);
     const k = E.exprKey(slot, name);
-    let outKind;
-    if (target.kind === 'channel') outKind = 'channel';
-    else if (target.audio) outKind = 'device';
-    else outKind = 'plugin';
     const feeds = E.exprFeedsOf(track);
     // What drives each input, which decides the rate it is read at: audio where the tree says so or
     // where an audio driver is already on it.
@@ -92,6 +88,12 @@ function install(E) {
       const f = feeds.get(`${slot}|${name}|${i}`);
       return f != null && f.ar >= 0;
     });
+    let outKind;
+    // A channel control with audio in its expression is driven per sample, as the browser drives
+    // it (poptart.scd's chanIn): 'channelAr', an audio bus. Otherwise a control bus.
+    if (target.kind === 'channel') outKind = target.audio && rates.includes('ar') ? 'channelAr' : 'channel';
+    else if (target.audio) outKind = 'device';
+    else outKind = 'plugin';
     const shape = `${E.exprShape(tree)}|${outKind}|${rates.join(',')}`;
     const consts = E.exprConsts(tree);
     const inputs = E.exprInputs(tree);
@@ -115,7 +117,7 @@ function install(E) {
       }
       // The track may have gone (or the expression been cleared) while the def was built.
       if (E.tracks.get(key) === track) {
-        const out = outKind === 'device' ? Bus.audio(S, 2) : Bus.control(S, 1);
+        const out = outKind === 'device' ? Bus.audio(S, 2) : outKind === 'channelAr' ? Bus.audio(S, 1) : Bus.control(S, 1);
         // Before the chain: after every modulator feeding it (they go at the head of the group) and
         // before the device that reads it.
         const synth = Synth.new(S, defName, ['out', out.index, ...constArgs, ...E.exprFeedArgs(track, slot, name, inputs)],
@@ -132,7 +134,10 @@ function install(E) {
         } else {
           resting = existing?.resting ?? null;
         }
-        if (outKind === 'device') target.mapAudio(out, 1, 0); else target.map(out);
+        // A channel leaving the sample rate (its audio input gone) comes off the audio bus it was
+        // on; the control bus below takes over.
+        if (outKind === 'channel' && existing?.outKind === 'channelAr') E.setChanAr(track, name, -1);
+        if (outKind === 'device' || outKind === 'channelAr') target.mapAudio(out, 1, 0); else target.map(out);
         if (existing != null) {
           E.freeModulatorLater(key, track.group, existing.synth, existing.out);
           E.exprDefDone(existing.def);
@@ -146,10 +151,16 @@ function install(E) {
       }
     }
     if (entry == null) return;
+    // Inputs read only under a .smooth() take polled values as steps: their ramps, made before or
+    // after this, go to zero time; the rest keep the usual glide.
+    entry.stepped = new Set(inputs.filter((x) => x.step).map((x) => x.i));
+    for (const input of inputs) {
+      track.ramps?.get(`slot${slot}_~${input.i}~${name}`)?.synth.set('time', entry.stepped.has(input.i) ? 0 : E.LEAF_RAMP_SEC ?? 0.03);
+    }
     const wanted = new Map();
     // Even an unchanged entry re-maps: a re-opened plugin has lost its mappings.
     if (entry === existing) {
-      if (outKind === 'device') target.mapAudio(entry.out, 1, 0); else target.map(entry.out);
+      if (outKind === 'device' || outKind === 'channelAr') target.mapAudio(entry.out, 1, 0); else target.map(entry.out);
     }
     // Source inputs are audio routes onto the leaf; one whose source changed is re-wired.
     for (const input of inputs) if (input.source != null) wanted.set(input.i, input.source);
@@ -176,7 +187,7 @@ function install(E) {
     const target = E.paramTarget(track, slot, name, slot >= 0 ? e.index : null);
     for (const i of e.sources.keys()) E.unwireParamRoute(key, slot, `~${i}~${name}`);
     if (target != null) {
-      if (e.outKind === 'device') {
+      if (e.outKind === 'device' || e.outKind === 'channelAr') {
         target.unmapAudio?.();
       } else {
         target.unmap();

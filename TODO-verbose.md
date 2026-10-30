@@ -268,13 +268,6 @@ entry here when its TODO.md line goes.
     debounce to drag-end for plugin/preset loads. Alt+horizontal drag inside a mini string rotates
     its tokens.
 
-[ ] `env(source)` as an envelope follower: `env("kick")` / `env(audio("kick"), { attack, release })`
-    delivered as a control-rate signal the way midicc is. Same word as the note-driven ADSR
-    (attack/release mean the same thing in both); the source decides which it is. Unlocks ducking
-    without a compressor, `param("Cutoff", env("kick").range(...))`, etc.
-
-[ ] `smooth(t)` - exponential lag on any signal (what lfo glide does, generalized). Not `slew`.
-
 [ ] `read("label")` - another block's Signal as a signal: `.note` / `.vel` (held since its last
     onset), `.trig` (1 at its onsets, usable as struct). No event bus: both patterns are
     deterministic functions of cycle time in one scheduler, so it's a registry lookup that queries

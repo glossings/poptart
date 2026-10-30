@@ -43,12 +43,23 @@
 // at once, so the run is the one the device would play once its work had landed.
 //
 // `-R file` writes what the device reports (pd_report) at the end of the run, as raw floats.
+//
+// `-W blocks` makes every work round after the first hand-overs land that many blocks after it
+// was asked for, as a busy server's would: the device plays with the room it has meanwhile.
+// `-P frame:control:value` changes a control (real units) at a frame, and `-T frame:control:slot:file`
+// hands a table over at a frame, as the host's /shape does whenever the message arrives - ahead
+// of a control due later, which is what lets a device make room before it is needed.
 
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
+
+#ifdef _WIN32
+#include <fcntl.h>
+#include <io.h>
+#endif
 
 #include "pd-device.h"
 
@@ -61,6 +72,8 @@ struct Loaded {
 };
 struct Drawn { int param; int slot; std::vector<float> table; };
 struct Moving { int param; std::vector<float> values; };
+struct Change { int frame; int param; float value; };
+struct Timed { int frame; int param; int slot; std::vector<float> table; bool given; };
 
 /** Every float in a file, which is how the harness is handed a sample. */
 std::vector<float> readFloats(const char* path) {
@@ -76,6 +89,12 @@ std::vector<float> readFloats(const char* path) {
 }  // namespace
 
 int main(int argc, char** argv) {
+#ifdef _WIN32
+  // The parameters, the input and the output are raw floats; Windows opens stdin and stdout in
+  // text mode, which would turn a 0x0a byte into two and stop reading at the first 0x1a.
+  _setmode(_fileno(stdin), _O_BINARY);
+  _setmode(_fileno(stdout), _O_BINARY);
+#endif
   if (argc < 5) {
     std::fprintf(stderr, "usage: harness <device> <sampleRate> <frames> <blockSize> [bpm] [-n frame:note:vel ...]\n");
     return 2;
@@ -92,8 +111,29 @@ int main(int argc, char** argv) {
   std::vector<Moving> moving;
   const char* reportFile = nullptr;
   int keyPatched = -1;
+  double loopSec = -1;   // -L: how late a chain in the device's feedback loop returns, as the UGen says it
   bool oneByOne = false;
+  int workDelay = 0;
+  std::vector<Change> changes;
+  std::vector<Timed> timed;
   for (int i = 5; i < argc; ++i) {
+    if (std::strcmp(argv[i], "-W") == 0 && i + 1 < argc) {
+      workDelay = std::atoi(argv[++i]);
+      continue;
+    }
+    if (std::strcmp(argv[i], "-P") == 0 && i + 1 < argc) {
+      Change one{ 0, 0, 0 };
+      if (std::sscanf(argv[++i], "%d:%d:%f", &one.frame, &one.param, &one.value) == 3) changes.push_back(one);
+      continue;
+    }
+    if (std::strcmp(argv[i], "-T") == 0 && i + 1 < argc) {
+      int frame = 0, param = 0, slot = 0;
+      char file[1024] = { 0 };
+      if (std::sscanf(argv[++i], "%d:%d:%d:%1023s", &frame, &param, &slot, file) == 4) {
+        timed.push_back(Timed{ frame, param, slot, readFloats(file), false });
+      }
+      continue;
+    }
     if (std::strcmp(argv[i], "-S") == 0 && i + 1 < argc) {
       int param = 0, slot = 0, channels = 1, frameLength = 0;
       double rate = 48000;
@@ -143,6 +183,10 @@ int main(int argc, char** argv) {
     }
     if (std::strcmp(argv[i], "-1") == 0) {
       oneByOne = true;
+      continue;
+    }
+    if (std::strcmp(argv[i], "-L") == 0 && i + 1 < argc) {
+      loopSec = std::atof(argv[++i]);
       continue;
     }
     if (std::strcmp(argv[i], "-k") == 0 && i + 1 < argc) {
@@ -213,6 +257,9 @@ int main(int argc, char** argv) {
   const int count = device->paramCount() < info->paramCount ? device->paramCount() : info->paramCount;
 
   size_t nextNote = 0;
+  // A work round in flight under -W: the block it lands in, or -1 for none.
+  long workDue = -1;
+  long blockIndex = 0;
   // A control on a signal is handed over a value per sample, as the host does (PdAny::paramBuffer).
   const int piece = oneByOne && !moving.empty() ? 1 : blockSize;
   const bool offsets = device->takesNoteOffsets();
@@ -239,6 +286,12 @@ int main(int argc, char** argv) {
       if (nextNote < notes.size() && notes[nextNote].frame < until) until = notes[nextNote].frame;
     }
     const int n = until - at;
+    for (const Change& one : changes) {
+      if (one.frame <= at && one.param >= 0 && one.param < count) params[static_cast<size_t>(one.param)] = one.value;
+    }
+    for (Timed& one : timed) {
+      if (!one.given && one.frame <= at && !one.table.empty()) one.given = device->shape(one.param, one.slot, one.table.data(), (int)one.table.size());
+    }
     for (int i = 0; i < count; ++i) devParams[i] = params[static_cast<size_t>(i)];
     for (const Moving& one : moving) {
       if (one.param < 0 || one.param >= count) continue;
@@ -251,14 +304,30 @@ int main(int argc, char** argv) {
       for (int i = 0; i < n; ++i) buffer[i] = valueAt(at + i);
       device->paramMoving(one.param, true);
     }
-    if (device->workWanted()) {
+    if (workDelay > 0) {
+      // The round lands late, as a busy server's does; a new one is asked for only once it has.
+      if (workDue >= 0 && blockIndex >= workDue) {
+        device->workDone();
+        device->workRelease();
+        workDue = -1;
+        for (Timed& one : timed) {
+          if (!one.given && one.frame <= at && !one.table.empty()) one.given = device->shape(one.param, one.slot, one.table.data(), (int)one.table.size());
+        }
+      }
+      if (workDue < 0 && device->workWanted()) {
+        device->work();
+        workDue = blockIndex + workDelay;
+      }
+    } else if (device->workWanted()) {
       device->work();
       device->workDone();
       device->workRelease();
     }
+    if (at + n >= blockEnd || until >= frames) blockIndex += 1;
     device->transport(bpm, static_cast<double>(at) / sampleRate);
     device->keyPatched(keyPatched >= 0 ? keyPatched != 0 : inChannels >= 4);
     device->noteRoute(!notes.empty());
+    device->loop(loopSec);
     for (int ch = 0; ch < inChannels; ++ch) {
       for (int i = 0; i < n; ++i) {
         devIn[ch * stride + i] = input[static_cast<size_t>(at + i) * inChannels + ch];

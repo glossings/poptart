@@ -22,13 +22,13 @@ const { execFileSync } = require('node:child_process');
 
 const { resolveSclangPath } = require('./index.js');
 const { readWavRaw } = require('./wav.js');
-const { userExtensionsDir } = require('./extensions.js');
+const { userExtensionsDir, DEVICE_BINARY } = require('./extensions.js');
 
 const SR = 48000;
 const PORT = 57297;
 const SCD = path.join(__dirname, 'sc', 'poptart.scd');
 const NATIVE_DIR = path.join(__dirname, 'native', 'devices');
-const SCX = path.join(NATIVE_DIR, 'bin', 'PoptartDevices.scx');
+const SCX = DEVICE_BINARY; // this platform's build (extensions.js)
 const VSTPLUGIN_DIR = path.join(userExtensionsDir(), 'VSTPlugin', 'plugins');
 
 /** An effect's own node, its two halves and the choice between them, as poptart.scd has it. */
@@ -52,10 +52,11 @@ function render(dir) {
   const out = path.join(dir, 'slot.wav');
   const q = (s) => JSON.stringify(s);
   const script = `(
-var slot, alone, tone, slotIndex, aloneIndex, score, options, buildFxDef;
+var slot, alone, tone, slotIndex, aloneIndex, score, options, buildFxDef, chanIn;
 ${fs.existsSync(scsynth) ? `Score.program = ${q(scsynth)}.quote;` : ''}
 ("HAS-CLASS<" ++ (\\PoptartDevice.asClass.notNil) ++ ">").postln;
 // An effect of a track, fed a tone on a bus, with an empty sidechain.
+${fs.readFileSync(SCD, 'utf8').match(/^chanIn = \{[\s\S]*?^\};$/m)[0]}
 ${fxDef()}
 slot = buildFxDef.();
 tone = SynthDef(\\pt_tone, { |out| Out.ar(out, SinOsc.ar(220, 0, 0.5) ! 2) });

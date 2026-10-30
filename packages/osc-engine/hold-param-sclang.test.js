@@ -46,10 +46,11 @@ var tracks = IdentityDictionary.new;
 var tellRamp = { }, tellSlot = { }, tellMods = { }, tellTap = { }, shapesHandled = IdentityDictionary.new, nodeAddr = (sendMsg: { }); // the direct path's id handoff (see tellTrack in sc/poptart.scd) - inert here
 var nodeGoneSaid = IdentitySet.new, nodeOwns = { |nodeID, what| }; // the engine's node bookkeeping (see nodeOwns in sc/poptart.scd) - inert here
 var modFreeDelay = 0.05;
-var freeModulatorLater, rampTo, dropRamp, bundleNow, resolveParamIndex;
+var freeModulatorLater, rampTo, dropRamp, bundleNow, resolveParamIndex, leafRampTime; // leafRampTime: nil here, so no ramp is a leaf
 // What a param call is aimed at (paramTarget) and what it leans on; the expression half is unused here.
 var exprLeaf, busIndexOf, paramTarget, reassertAudioDrivers, exprFeed, channelDefault;
 var channelTarget = { |track, name| [track[\\synth], name.asSymbol] }; // every channel control on the one synth here - see channelTarget in sc/poptart.scd
+var chanAudio = { |name| false }, setChanAr = { |track, name, index| }; // no per-sample channel controls here - see chanIn in sc/poptart.scd
 var log = List.new;
 var pendingGet = nil;
 var info = (parameters: [(name: "Mix"), (name: "Drive")], findParamIndex: { |self, name| self[\\parameters].detectIndex { |p| p[\\name] == name.asString } });

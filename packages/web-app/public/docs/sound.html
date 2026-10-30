@@ -48,6 +48,7 @@
         <table>
           <tr><th>Effects</th><th></th></tr>
           <tr><td><code>Filter</code> · <code>EQ</code> · <code>LPG</code></td><td>multimode filter · four-band equalizer · low-pass gate, struck by notes routed in with <code>.midi()</code></td></tr>
+          <tr><td><code>Filterbank</code> · <code>Resonator</code></td><td>filter banks whose band levels <code>Shape</code> moves, scrolled across the bands or rippling across them, and <code>Levels</code> steps, a cycle of a pattern at a time · narrow ringing bands on every note of the track's scale, or on the notes another track holds, with <code>.midi()</code></td></tr>
           <tr><td><code>Distort</code> · <code>Overdrive</code> · <code>Crush</code></td><td>waveshaping, with curves you draw as named shapes · band-limited drive · bits and rate</td></tr>
           <tr><td><code>Compressor</code> · <code>Multiband</code> · <code>Limiter</code> · <code>Ducker</code></td><td>dynamics; the compressor and ducker take a sidechain</td></tr>
           <tr><td><code>Delay</code> · <code>GrainEcho</code> · <code>Stutter</code></td><td>stereo delay · grain delay · synced repeats</td></tr>
@@ -55,6 +56,7 @@
           <tr><td><code>Reverb</code> · <code>Convolver</code> · <code>CloudSeed</code> · <code>Galactic</code></td><td>algorithmic · impulse responses · two very large spaces</td></tr>
           <tr><td><code>Clouds</code> · <code>FreqShift</code></td><td>granular processing · frequency shifting</td></tr>
           <tr><td><code>Shift</code> · <code>Voice</code></td><td>pitch and formant shifting: chords and whole mixes · one voice or line, with less delay</td></tr>
+          <tr><td><code>Looper</code></td><td>records a loop on the grid while <code>Record</code> is on, then overdubs onto it; tape-style speed and reverse, and <code>Clear</code> to start again</td></tr>
         </table>
         <pre data-run><code>setscale("E minor")
 
@@ -64,6 +66,24 @@ bells: n("0 4 7 &lt;9 11&gt;").sc(4).synth("Rings")
 pulse: note("e1*8").synth("Braids").param("Shape", "'Saw Sub'")
   .fx("Filter").param("Mode", "ladder").param("Cutoff", saw(0.5).range(0.25, 0.55))
   .fx("Overdrive").postgain(0.3)</code></pre>
+
+        <p>
+          <code>Filterbank</code> and <code>Resonator</code> move their bands' levels with <code>Shape</code>. In
+          <code>scroll</code> mode each band shows what Shape was a moment before the band under it, so a
+          sweep travels up the spectrum; in <code>ripple</code> mode Shape strikes the band at
+          <code>Where</code> and the ripples bounce between the ends. <code>Levels</code> takes one cycle
+          of a pattern, laid across the bands from low to high.
+        </p>
+        <pre data-run><code>setscale("D dorian")
+
+pad: n("&lt;0 3&gt; [4 7]").sc(3).synth("Wavetable")
+  .fx("Resonator").param("Shape", sine(0.5)).param("Decay", 0.4)
+  .param("Levels", "&lt;[1 0 .5 1] [0 1 0 .3]&gt;")
+  .postgain(0.5)
+kick: s("bd*4")
+  .fx("Filterbank").param("Mode", "ripple").param("Where", 0.2)
+  .param("Shape", perlin(4)).param("Width", 0.3)
+  .postgain(0.5)</code></pre>
 
         <h2 id="params">Controls</h2>
         <p>
@@ -82,6 +102,15 @@ pulse: note("e1*8").synth("Braids").param("Shape", "'Saw Sub'")
           index; a switch takes 0 or 1. So an LFO or a macro drives any
           control as it is.
         </p>
+        <p>
+          A value written with a unit is in the control's own units: <code>"3x"</code>, <code>"800hz"</code>,
+          <code>"2khz"</code>, <code>"-6db"</code>, <code>"250ms"</code>, <code>"7st"</code>, <code>"50ct"</code>.
+          A note name on a control in hertz is its frequency. A bare number is a position.
+        </p>
+        <pre data-run><code>bell: n("0 2 4 &lt;5 7&gt;").scale("D dorian").synth("FM")
+  .param("Op 2 Level", 0.6).param("Mod 2 to 1", 0.5)
+  .param("Op 2 Ratio", "&lt;1x 2x 3.5x 7x&gt;")
+  .fx("Filter").param("Cutoff", "&lt;1.2khz 4khz&gt;").postgain(0.5)</code></pre>
         <figure class="shot framed narrow">
           <img src="/docs/img/sounds-tab.png" width="320" height="711" alt="The sounds tab: the bass track's Wavetable controls listed with their values, then the devices and the sample packs." />
         </figure>

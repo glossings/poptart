@@ -61,8 +61,13 @@ function loadCss() {
  * One editor's widgets. `cm` is the CodeMirror instance, `calls` pattern-core's widget-calls.mjs,
  * `api(method, path, body)` the editor's request helper, `deck` which deck the buffer is.
  * `cyclePos()` is the deck's clock now, `cycleAtMs(ms)` the same at a wall-clock time, and
- * `isPlaying()` whether it runs. `trackColor(label)`, when given, is the color a track is drawn
- * in across the app; without it a track takes its .color() or its name's own from the palette.
+ * `isPlaying()` whether it runs. `litSpans()` is what the playback highlighter is lighting in
+ * this document right now, as `[from, to)` offsets: the folded controls light the cells whose
+ * text it names, so a cell is lit when it sounds and not otherwise; `gridChanged()`, when given,
+ * is told once a folded control's new row has reached the host, so the highlighter can fetch the
+ * steps that row now makes (a set changes what sounds without an evaluation). `trackColor(label)`, when
+ * given, is the color a track is drawn in across the app; without it a track takes its .color()
+ * or its name's own from the palette.
  */
 export function createInlineWidgets({
   cm,
@@ -72,6 +77,8 @@ export function createInlineWidgets({
   cyclePos = () => 0,
   cycleAtMs = null,
   isPlaying = () => false,
+  litSpans = () => [],
+  gridChanged = null,
   trackColor = null,
   doc = typeof document !== 'undefined' ? document : null,
   win = typeof window !== 'undefined' ? window : null,
@@ -224,10 +231,16 @@ export function createInlineWidgets({
 
   // One value in flight per widget, and the newest one waiting behind it: a drag makes more values
   // than any host needs, and the last one is the one that matters.
-  function push(w, value) {
+  // `release` says the hand has let go with this value, which ends a take a `.record()` on the
+  // control is recording (see pattern-core's motion.mjs).
+  function push(w, value, release = false) {
     const at = keyOf(w);
     if (at == null) return; // not evaluated yet: the code is all there is, and it has been written
-    w.want = { value, at };
+    const fold = FOLDED.has(w.kind);
+    w.lastValue = value;
+    // A fold's row has just been written, so where its text is now goes with the value: a count
+    // written out as cells has a text the evaluation never saw.
+    w.want = { value, at, lit: fold ? textAt(w) : undefined, release: release || !!w.want?.release };
     if (w.sending) return;
     const send = () => {
       const next = w.want;
@@ -237,11 +250,39 @@ export function createInlineWidgets({
         return;
       }
       w.sending = true;
-      Promise.resolve(api('POST', '/api/widgets/set', { deck, at: next.at, value: next.value }))
+      const body = { deck, at: next.at, value: next.value, lit: next.lit };
+      if (next.release) body.release = true;
+      Promise.resolve(api('POST', '/api/widgets/set', body))
+        .then((res) => {
+          if (fold && res?.ok) gridChanged?.();
+        })
         .catch(() => {})
         .finally(send);
     };
     send();
+  }
+
+  /** The hand let go of a control it moved: the last value again, saying so. */
+  function release(w) {
+    if (w.lastValue === undefined) return;
+    push(w, w.lastValue, true);
+  }
+
+  // Where a fold's text starts in the document, for the host (see setWidgetValue's `lit`): the
+  // row's content for steps()/sliders(), each row's by name for a matrix. Undefined when unknown.
+  function textAt(w) {
+    const at = locate(w);
+    const a = at?.pos[0];
+    if (!a) return undefined;
+    if (w.kind === 'matrix') {
+      if (a.text[0] !== '{') return undefined;
+      const rows = {};
+      for (const r of calls.matrixRows(a.text, 0)) if (r.form === 'text' && !(r.key in rows)) rows[r.key] = at.base + a.from + r.from;
+      return rows;
+    }
+    const src = calls.rowSource(a.text);
+    if (src.form !== 'text') return undefined;
+    return at.base + a.from + (a.text.length - a.text.trimStart().length) + src.from;
   }
 
   // ---------------------------------------------------------------------------- theme
@@ -414,12 +455,39 @@ export function createInlineWidgets({
   // The row a steps() or sliders() call draws, and how a new row is written back: the content of
   // its string in place, or - for a count, or nothing written - the whole row as a string where
   // the count was (see pattern-core's rowSource). `fill(n)` makes the n cells a count stands for.
+  // `abs` is where the row's text starts in the document, or -1 when it isn't written out.
   function rowOfCall(w, fill) {
-    const a = locate(w)?.pos[0];
+    const at = locate(w);
+    const a = at?.pos[0];
     const src = calls.rowSource(a?.text);
-    if (src.form === 'text') return { text: src.text, write: (next) => writeLiteral(w, next) };
+    if (src.form === 'text') {
+      const lead = a.text.length - a.text.trimStart().length;
+      return { text: src.text, abs: at.base + a.from + lead + src.from, write: (next) => writeLiteral(w, next) };
+    }
     const n = src.form === 'count' ? src.count : calls.DEFAULT_CELL_COUNT;
-    return { text: fill(n), write: (next) => writeArgs(w, [[0, quoteRow(next)]]) };
+    return { text: fill(n), abs: -1, write: (next) => writeArgs(w, [[0, quoteRow(next)]]) };
+  }
+
+  // The lit spans that fall inside a fold's call, document-absolute - what its cells can be lit
+  // by. Read before locating the call, so a fold nothing is lighting costs nothing per tick.
+  function litWithin(w) {
+    const spans = litSpans();
+    if (!spans.length) return spans;
+    const found = w.mark?.find();
+    if (!found?.from || !found.to) return [];
+    const from = cm.indexFromPos(found.from);
+    const to = cm.indexFromPos(found.to);
+    return spans.filter(([a, b]) => a >= from && b <= to);
+  }
+
+  // Lights the cells (`'now'`) whose text is sounding, as the highlighter would light the text
+  // under the fold; `els` are the cells' elements. Cheap when nothing changed.
+  function lightCells(w, els, on) {
+    const key = on.join(',');
+    if (key === w.lit) return;
+    w.lit = key;
+    const set = new Set(on);
+    els.forEach((c, i) => c.classList.toggle('now', set.has(i)));
   }
 
   const quoteRow = (text) => `"${String(text).replace(/["\\]/g, '\\$&')}"`;
@@ -552,6 +620,7 @@ export function createInlineWidgets({
         up: () => {
           start = null;
           root.classList.remove('dragging');
+          release(w);
         },
       });
       onWheel(root, w);
@@ -589,6 +658,7 @@ export function createInlineWidgets({
         up: () => {
           start = null;
           root.classList.remove('dragging');
+          release(w);
         },
       });
       onWheel(root, w);
@@ -644,7 +714,7 @@ export function createInlineWidgets({
         },
         up: () => {
           root.classList.remove('on');
-          push(w, 0);
+          push(w, 0, true);
         },
       });
       addGrip(w, root, { box: true, current: () => boxOf(w), preview: (b) => sizeBox(root, b) });
@@ -668,7 +738,7 @@ export function createInlineWidgets({
         push(w, [Number(tx), Number(ty)]);
         w.dirty = true;
       };
-      onDrag(pad, { down: place, move: place });
+      onDrag(pad, { down: place, move: place, up: () => release(w) });
       const sizeTo = (n) => { pad.style.width = pad.style.height = `${n}px`; };
       addGrip(w, root, { axis: 'xy', range: calls.INPUT_SIZES.xy, current: () => inputSize(w), preview: sizeTo });
       w.render = () => {
@@ -746,13 +816,12 @@ export function createInlineWidgets({
         });
       };
       w.tick = (pos, running) => {
-        const at = running ? M.cellAt(pos, cells.length) : -1;
-        if (at === w.lit) return;
-        if (w.lit >= 0) cells[w.lit]?.classList.remove('now');
-        if (at >= 0) cells[at]?.classList.add('now');
-        w.lit = at;
+        const spans = running ? litWithin(w) : [];
+        if (!spans.length) return lightCells(w, cells, []);
+        const r = row();
+        lightCells(w, cells, M.litCells(spans, r.abs, calls.parseCells(r.text)));
       };
-      w.lit = -1;
+      w.lit = '';
       return root;
     },
 
@@ -826,13 +895,13 @@ export function createInlineWidgets({
         });
       };
       w.tick = (pos, running) => {
-        const at = running ? M.cellAt(pos, bars.length) : -1;
-        if (at === w.lit) return;
-        if (w.lit >= 0) bars[w.lit]?.parentNode.classList.remove('now');
-        if (at >= 0) bars[at]?.parentNode.classList.add('now');
-        w.lit = at;
+        const spans = running ? litWithin(w) : [];
+        const els = bars.map((b) => b.parentNode);
+        if (!spans.length) return lightCells(w, els, []);
+        const s = state();
+        lightCells(w, els, M.litCells(spans, s.abs, calls.parseCells(s.text)));
       };
-      w.lit = -1;
+      w.lit = '';
       return root;
     },
 
@@ -939,11 +1008,20 @@ export function createInlineWidgets({
         }));
       };
       w.tick = (pos, running) => {
-        const key = running ? rowEls.map((cells) => M.cellAt(pos, cells.length)).join(',') : '';
-        if (key === w.lit) return;
-        w.lit = key;
-        const at = key ? key.split(',').map(Number) : [];
-        rowEls.forEach((cells, ri) => cells.forEach((c, ci) => c.classList.toggle('now', at[ri] === ci)));
+        const spans = running ? litWithin(w) : [];
+        const els = rowEls.flat();
+        if (!spans.length) return lightCells(w, els, []);
+        // Row by row, each row's indices offset into the flat list of cells.
+        const rows = rowsNow();
+        const on = [];
+        let offset = 0;
+        rowEls.forEach((cells, ri) => {
+          const r = rows[ri];
+          const abs = r?.form === 'text' ? r.abs + r.from : -1;
+          for (const i of M.litCells(spans, abs, calls.parseCells(r?.text ?? ''))) on.push(offset + i);
+          offset += cells.length;
+        });
+        lightCells(w, els, on);
       };
       w.lit = '';
       return root;
@@ -1862,7 +1940,7 @@ export function createInlineWidgets({
         f.dirty = false;
         try { f.render(); } catch { /* a call half-typed */ }
       }
-      // The playhead walks a fold's cells once the call is playing - evaluated, and its deck running.
+      // A fold's cells light as they sound once the call is playing - evaluated, and its deck running.
       f.tick?.(pos, running && keyOf(f) != null);
     }
     if (!running) {
@@ -1910,10 +1988,53 @@ export function createInlineWidgets({
    */
   function beforeEval(code) {
     const found = calls.findWidgetCalls(code);
+    const mark = (at) => cm.setBookmark(cm.posFromIndex(at), { insertLeft: false });
     return {
       code,
-      marks: found.map((c) => ({ call: c, mark: cm.setBookmark(cm.posFromIndex(c.at), { insertLeft: false }) })),
+      marks: found.map((c) => ({ call: c, mark: mark(c.at) })),
+      // Every `.record(` too, so a take a control records can be written into its call however
+      // the code has moved since (see recordCallAt).
+      records: (calls.findRecordCalls?.(code) ?? []).map((c) => ({ at: c.at, mark: mark(c.at) })),
     };
+  }
+
+  let recordMarks = []; // { at, mark } - each `.record(` call of the last evaluation, by its key
+
+  /**
+   * The `.record(` call that was at `at` when its buffer was evaluated: `{ index, open, take }` -
+   * where its name is now, its `(`, and the take it names (or null). Null once it is gone.
+   */
+  function recordCallAt(at) {
+    const r = recordMarks.find((x) => x.at === at);
+    const pos = r?.mark.find();
+    if (!pos) return null;
+    const index = cm.indexFromPos(pos);
+    const code = cm.getValue();
+    const m = /^record\s*\(/.exec(code.slice(index));
+    if (!m) return null;
+    const open = index + m[0].length - 1;
+    return { index, open, take: calls.recordTakeName(code, open) };
+  }
+
+  /**
+   * The `.record(` call whose name starts at document index `index`, when the last evaluation found
+   * it recording a control's movement: `{ at, take }`, else null.
+   */
+  function motionRecordAt(index) {
+    const r = recordMarks.find((x) => x.motion && x.mark.find() && cm.indexFromPos(x.mark.find()) === index);
+    if (!r) return null;
+    return { at: r.at, take: recordCallAt(r.at)?.take ?? null };
+  }
+
+  /** Makes the `.record(` call that was at `at` name the take `name`. False when it is gone. */
+  function writeTake(at, name) {
+    const call = recordCallAt(at);
+    if (!call) return false;
+    if (call.take === name) return true;
+    const e = calls.recordTakeEdit(cm.getValue(), call.open, name);
+    if (!e) return false;
+    cm.operation(() => replaceIdx(e.from, e.to, e.text));
+    return true;
   }
 
   /**
@@ -1925,8 +2046,14 @@ export function createInlineWidgets({
     if (!snap) return;
     if (!report) {
       for (const { mark } of snap.marks) mark.clear();
+      for (const { mark } of snap.records ?? []) mark.clear();
       return;
     }
+    for (const r of recordMarks) r.mark.clear();
+    // Which of them record a control's movement rather than a track's sound: only the evaluation
+    // can tell, from what each was called on.
+    const motion = new Set(report.records ?? []);
+    recordMarks = (snap.records ?? []).map((r) => ({ ...r, motion: motion.has(r.at) }));
     const entries = [...(report.inputs ?? []), ...(report.views ?? [])];
     const byAt = new Map(entries.map((e) => [e.at, e]));
     const next = [];
@@ -1986,6 +2113,8 @@ export function createInlineWidgets({
     dropBackground();
     for (const k of keys) k.mark.clear();
     keys = [];
+    for (const r of recordMarks) r.mark.clear();
+    recordMarks = [];
     for (const row of rows.values()) row.lw?.clear();
     rows.clear();
     frames.clear();
@@ -1997,6 +2126,9 @@ export function createInlineWidgets({
     afterEval,
     makeFold,
     clear,
+    recordCallAt,
+    motionRecordAt,
+    writeTake,
     get widgets() { return widgets; },
     get folds() { return folds; },
     /** A track's color changed: the displays drawn once while stopped are drawn again in it. */

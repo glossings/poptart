@@ -46,7 +46,7 @@ struct PdParamSpec {
   float defaultPosition;
   float step;            // 0 = continuous; 1 for an enum or a toggle
   float curveExp;        // the exponent 'pow' bends the range by; unused otherwise
-  int curve;             // 0 linear, 1 exponential (a ratio sweep), 2 power
+  int curve;             // 0 linear, 1 exponential (a ratio sweep), 2 power, 3 symmetric power
   /**
    * 1 = the control has no top (descriptor.mjs's open controls: an enum that takes files, a
    * voice count). `max` is then only how far a position of 1 reaches; a position past 1 is a
@@ -56,7 +56,7 @@ struct PdParamSpec {
 };
 
 /** Curve ids, matching the descriptor's own names. */
-enum PdCurve { kPdLinear = 0, kPdExponential = 1, kPdPower = 2 };
+enum PdCurve { kPdLinear = 0, kPdExponential = 1, kPdPower = 2, kPdSymmetric = 3 };
 
 /**
  * A FILE handed to a device: a granulator's sample, a convolver's impulse response, a wavetable.
@@ -158,6 +158,13 @@ struct PdAny {
   virtual void keyPatched(bool on) { (void)on; }
   virtual void noteRoute(bool on) { (void)on; }
   /**
+   * How late a chain in the device's feedback loop comes back to its key input, in seconds, or
+   * below zero for no chain. Only the Delay asks: its repeats go out on its second output pair and
+   * come back on the key, and it reads that much early so they stay on the grid. The UGen says it
+   * every block, its own block included (the return is read a block late).
+   */
+  virtual void loop(double seconds) { (void)seconds; }
+  /**
    * A FILE the device plays: a granulator's sample, a convolver's impulse response, a table.
    * Audio thread.
    *
@@ -230,6 +237,11 @@ struct PdAny {
    * browser's processor reports (native-devices.js's readReport).
    */
   virtual int report(float* out, int capacity) { (void)out; (void)capacity; return 0; }
+  /**
+   * How many floats report() can need, for a device whose report grows with what it holds (a
+   * filter bank's bands): 0 for one that fits the host's usual room. Audio thread.
+   */
+  virtual int reportRoom() { return 0; }
 };
 
 /** Whether a device takes a control per sample (PdAny::paramBuffer). */
@@ -280,6 +292,13 @@ template <class Device>
 struct PdTakesKeyPatched<Device, decltype(std::declval<Device&>().pd_key_patched(false))>
     : std::true_type {};
 
+/** Whether a device asks how late the chain in its feedback loop comes back. */
+template <class Device, class = void>
+struct PdTakesLoop : std::false_type {};
+template <class Device>
+struct PdTakesLoop<Device, decltype(std::declval<Device&>().pd_loop(0.0))>
+    : std::true_type {};
+
 /** Whether a device asks to be told that a track's notes are routed to it. */
 template <class Device, class = void>
 struct PdTakesNoteRoute : std::false_type {};
@@ -316,6 +335,12 @@ struct PdReports : std::false_type {};
 template <class Device>
 struct PdReports<Device, std::void_t<decltype(std::declval<Device&>().pd_report((float*)nullptr, 0))>>
     : std::true_type {};
+
+/** Whether a device says how much room its report needs. */
+template <class Device, class = void>
+struct PdSaysReportRoom : std::false_type {};
+template <class Device>
+struct PdSaysReportRoom<Device, std::void_t<decltype(std::declval<Device&>().pd_report_room())>> : std::true_type {};
 
 /** Whether a device is bent. Every instrument is; nothing else is. */
 template <class Device, class = void>
@@ -390,6 +415,10 @@ struct PdAdapter : PdAny {
     if constexpr (PdTakesNoteRoute<Device>::value) d.pd_note_route(on);
     else { (void)on; }
   }
+  void loop(double seconds) override {
+    if constexpr (PdTakesLoop<Device>::value) d.pd_loop(seconds);
+    else { (void)seconds; }
+  }
   bool sample(int param, int slot, const PdSample& file) override {
     if constexpr (PdTakesSample<Device>::value) {
       if constexpr (std::is_same_v<decltype(d.pd_sample(param, slot, file)), bool>) return d.pd_sample(param, slot, file);
@@ -420,6 +449,10 @@ struct PdAdapter : PdAny {
   int report(float* out, int capacity) override {
     if constexpr (PdReports<Device>::value) return d.pd_report(out, capacity);
     else { (void)out; (void)capacity; return 0; }
+  }
+  int reportRoom() override {
+    if constexpr (PdSaysReportRoom<Device>::value) return d.pd_report_room();
+    else return 0;
   }
 };
 

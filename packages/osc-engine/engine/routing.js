@@ -336,6 +336,7 @@ function install(E) {
     const wired = new Set();
     const crossovers = new Set();
     const opening = [];
+    const sendIns = new Map();
     for (const [id, channels] of Object.entries(spec?.buses ?? {})) {
       let b = null;
       try { b = Bus.audio(S, Math.trunc(Number(channels))); } catch { b = null; }
@@ -354,7 +355,8 @@ function install(E) {
           const slot = Math.trunc(Number(st.slot));
           const node = E.ensureFxNode(key, track, slot);
           wired.add(slot);
-          node.set('in', busOf(st.in), 'out', busOf(st.out));
+          // A looped Delay's repeats go out on `loop`; its return is pointed by the ret step.
+          node.set('in', busOf(st.in), 'out', busOf(st.out), 'loop', busOf(st.loop ?? 'none'), 'ret', E.silentBus.index);
           order.push(node);
         } else if (kind === 'xover') {
           const id = String(st.id);
@@ -371,19 +373,29 @@ function install(E) {
           order.push(x.node);
         } else if (kind === 'term') {
           const g = Math.trunc(Number(st.g));
-          const gain = g === 0 ? E.unityGainBus.index : E.routeKrNode(track, 'gain', g).bus.index;
+          const gain = g === 0 ? -1 : E.routeKrNode(track, 'gain', g).bus.index;
           const node = Synth.new(S, 'poptart_term', ['in', busOf(st.in), 'out', busOf(st.out), 'gain', gain],
             track.synth, 'addBefore');
           terms.push(node);
           order.push(node);
+        } else if (kind === 'send') {
+          sendIns.set(Math.trunc(Number(st.i)), busOf(st.in));
+        } else if (kind === 'ret') {
+          // Read the block before (InFeedback in the effect def): it closes the loop.
+          track.nodes.get(Math.trunc(Number(st.slot)))?.set('ret', busOf(st.in));
         }
       }
+      // The sends written inside the chain read the bus this layout gives them; the rest, and any
+      // that was tapping a bus of the layout going, the strip's output. Set here so the taps
+      // follow in the same bundle as the buses they read.
+      track.sendIns = sendIns;
+      E.repointSends(track);
       // In the order the audio runs, each just before the strip (or the bass mono before it).
       for (const node of order) node.moveBefore(track.bassmono ?? track.synth);
       track.chainOut = busOf(spec?.out ?? 'chain');
       (track.bassmono ?? track.synth).set('in', track.chainOut);
       for (const [slot, node] of track.nodes) {
-        if (!wired.has(slot)) node.set('in', E.routeNowhere, 'out', E.routeNowhere);
+        if (!wired.has(slot)) node.set('in', E.routeNowhere, 'out', E.routeNowhere, 'loop', E.routeNowhere, 'ret', E.silentBus.index);
       }
       for (const id of [...track.xovers.keys()]) {
         if (!crossovers.has(id)) {
@@ -403,8 +415,12 @@ function install(E) {
       const ctl = E.deviceController(x.node, 'nslot', E.trackDef.xover.name);
       x.ctl = ctl;
       ctl.open('Crossover', params, (self, ok) => {
-        if (ok) self.map(0, E.routeKrNode(track, 'xo', x.k).bus);
-        else E.warn(`poptart: track ${key}: the Crossover device would not open, so its bands are silent`);
+        if (ok) {
+          // On an audio-rate driver of xo<k> when there is one (see setChanAr).
+          const driven = track.chanAr?.get(`xo${x.k}`);
+          x.open = true;
+          if (driven != null) self.mapAudio(0, driven, 1, 0); else self.map(0, E.routeKrNode(track, 'xo', x.k).bus);
+        } else E.warn(`poptart: track ${key}: the Crossover device would not open, so its bands are silent`);
       });
     }
     if (old) E.sched(0.2, () => { E.routeFree(old); return null; });
@@ -413,13 +429,42 @@ function install(E) {
     made.buses.forEach((b) => b.free());
   };
 
+  // Where send `i` (its index among the pattern's sends) reads: the bus the chain layout gives it
+  // when it is written inside the chain, otherwise null for the strip's output.
+  E.sendInput = (track, i) => track.sendIns?.get(i) ?? null;
+
+  // Every routed send's tap pointed at what the current layout says it reads.
+  E.repointSends = (track) => {
+    (track.busSendIdx ?? []).forEach((i, k) => {
+      const tap = track.taps.get(`bus${k}`);
+      if (tap) tap.set('in', E.sendInput(track, i) ?? E.stripPost(track).index);
+    });
+  };
+
+  // How late the chain in a looped device's feedback loop is, from its devices (the UGen adds its
+  // block), or below zero for none: kept per slot, and told to the device now and whenever one
+  // opens into the slot (see loadDevice).
+  E.tellLoop = (track, slot) => {
+    const ctl = track.controllers?.get(slot);
+    if (ctl && typeof ctl.loopLatency === 'function') ctl.loopLatency(track.loopSec?.get(slot) ?? -1);
+  };
+
+  // msg = [trackId, layout JSON], or [trackId, 'loop', slot, seconds] for a loop's latency (one
+  // address for both, as poptart.scd has them).
   E.on('/poptart/setRouting', (msg) => {
     const key = String(msg[1]);
     const json = String(msg[2]);
-    const spec = json === 'null' ? null : JSON.parse(json);
+    const loop = json === 'loop';
+    const spec = json === 'null' || loop ? null : JSON.parse(json);
     return E.fork(async () => {
       const track = E.builtTrack(key) ?? await E.awaitTrack(key);
-      if (E.isTrack(track)) E.routeApply(key, track, spec);
+      if (!E.isTrack(track)) return;
+      if (!loop) { E.routeApply(key, track, spec); return; }
+      const slot = Math.trunc(Number(msg[3]));
+      const sec = Number(msg[4]);
+      if (!track.loopSec) track.loopSec = new Map();
+      if (sec >= 0) track.loopSec.set(slot, sec); else track.loopSec.delete(slot);
+      E.tellLoop(track, slot);
     });
   });
 
@@ -443,27 +488,34 @@ function install(E) {
     E.unwireAudio(String(msg[1]), 0);
   });
 
-  // Output-to-bus sends (Sig#bus). msg = [trackId, name1, amount1, name2, amount2, ...]: replace the
-  // track's whole set of bus sends. Acquire-before-release, so a bus kept across the change never
-  // briefly hits zero refs. Each send is a tap of its own (see stripTap).
+  // Output-to-bus sends (Sig#bus). msg = [trackId, name1, amount1, i1, name2, amount2, i2, ...]:
+  // replace the track's whole set of bus sends. Acquire-before-release, so a bus kept across the
+  // change never briefly hits zero refs. Each send is a tap of its own (see stripTap), reading the
+  // strip's output - or, for a send the chain layout places inside the chain (`i`, the send's
+  // index among the pattern's; see routeApply), the bus it taps there. Still after the fader and
+  // the monitor either way, so a deck's crossfade applies to what a track feeds.
   E.on('/poptart/setBusSends', (msg) => {
     const key = String(msg[1]);
-    const pairs = msg.slice(2);
+    const triples = msg.slice(2);
     return E.fork(async () => {
       const track = E.builtTrack(key) ?? await E.awaitTrack(key);
       if (!track) return;
-      const requested = Math.floor(pairs.length / 2);
+      const requested = Math.floor(triples.length / 3);
       const newNames = [];
-      for (let i = 0; i < requested; i++) {
-        const name = String(pairs[i * 2]);
-        const amt = Number(pairs[i * 2 + 1]);
-        E.stripTap(track, `bus${i}`, E.acquireBus(name).index, amt, 1);
+      const newIdx = [];
+      for (let k = 0; k < requested; k++) {
+        const name = String(triples[k * 3]);
+        const amt = Number(triples[k * 3 + 1]);
+        const i = Math.trunc(Number(triples[k * 3 + 2]));
+        E.stripTap(track, `bus${k}`, E.acquireBus(name).index, amt, 1, E.sendInput(track, i));
         newNames.push(name);
+        newIdx.push(i);
       }
       const prevCount = (track.busSends ?? []).length;
-      for (let i = 0; i < prevCount; i++) if (i >= requested) E.stripTap(track, `bus${i}`, null);
+      for (let k = 0; k < prevCount; k++) if (k >= requested) E.stripTap(track, `bus${k}`, null);
       if (track.busSends) track.busSends.forEach((bn) => E.releaseBus(bn));
       track.busSends = newNames;
+      track.busSendIdx = newIdx;
       E.reorderTracks();
     });
   });
@@ -489,6 +541,7 @@ function install(E) {
       const n = (track.busSends ?? []).length;
       for (let i = 0; i < n; i++) E.stripTap(track, `bus${i}`, null);
       if (track.busSends) { track.busSends.forEach((bn) => E.releaseBus(bn)); track.busSends = null; }
+      track.busSendIdx = null;
       E.reorderTracks(); // whatever read those buses may sit shallower now
     }
   });

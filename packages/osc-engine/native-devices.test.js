@@ -448,8 +448,11 @@ test('a device preset is the browser\'s format: real units by control id, the ve
     assert.deepStrictEqual(Object.keys(doc), ['device', 'version', 'params', 'files']);
     assert.strictEqual(doc.device, theirs.id);
     assert.strictEqual(doc.version, theirs.version, `${device.id}: version`);
-    assert.deepStrictEqual(Object.keys(doc.params), Object.keys(defaultValues(theirs)), `${device.id}: control ids`);
-    for (const [id, want] of Object.entries(defaultValues(theirs))) {
+    // Less the controls a state never holds (`saved: false`), which the browser leaves out too.
+    const kept = Object.fromEntries(Object.entries(defaultValues(theirs))
+      .filter(([id]) => theirs.params.find((p) => p.id === id).saved !== false));
+    assert.deepStrictEqual(Object.keys(doc.params), Object.keys(kept), `${device.id}: control ids`);
+    for (const [id, want] of Object.entries(kept)) {
       assert.ok(Math.abs(doc.params[id] - want) < 1e-5, `${device.id}.${id}: ${doc.params[id]}, browser default ${want}`);
     }
     assert.deepStrictEqual(doc.files, {});
@@ -481,12 +484,45 @@ test('a preset reads back to the positions it was written from, on every device'
     device.params.forEach((p, i) => { positions[p.id] = paramPosition(device, p.id, ((i * 37) % 100) / 100); });
     const back = readDeviceState(device, decodeText(deviceStateText(device, positions)));
     for (const p of device.params) {
+      if (p.saved === false) {
+        assert.ok(!(p.id in back.positions), `${device.id}.${p.id} is never saved, so never restored`);
+        continue;
+      }
       // Every position here is one paramPosition produced, so a stepped control is already on
       // its step and comes back where it went in.
       const want = positions[p.id];
       assert.ok(Math.abs(back.positions[p.id] - want) < 1e-5, `${device.id}.${p.id}: ${back.positions[p.id]} vs ${want}`);
     }
   }
+});
+
+test('a looper is never saved recording: Record and Clear stay out of its state, both ways', async () => {
+  const { e } = engine();
+  e.loadEffect('t', 'Looper', 1);
+  e.setParam('t', 1, 'Record', 1);
+  const doc = decodeText(await e.getPluginState('t', 1));
+  assert.ok(!('record' in doc.params) && !('clear' in doc.params), JSON.stringify(doc.params));
+  assert.strictEqual(doc.params.feedback, 1);
+  const back = readDeviceState(nativeDevice('Looper'), { device: 'Looper', version: 1, params: { record: 1, clear: 1, wet: 0.5 } });
+  assert.deepStrictEqual(Object.keys(back.positions), ['wet']);
+});
+
+test('a FreqShift state from version 1 reads as version 2: Direction becomes the sign of Freq, and Wide', () => {
+  const device = nativeDevice('FreqShift');
+  const freq = device.params.find((p) => p.id === 'freq');
+  const wide = device.params.find((p) => p.id === 'wide');
+  const v1 = (f, direction) => ({ device: 'FreqShift', version: 1, params: { freq: f, direction, feedback: 0, mix: 1 } });
+  const read = (doc) => readDeviceState(device, doc).positions;
+  assert.ok(freq && wide && !device.params.some((p) => p.id === 'direction'), 'the catalog is version 2');
+  assert.strictEqual(read(v1(5000, 0)).freq, 1, 'up at the top of the range is the top of the knob');
+  assert.strictEqual(read(v1(5000, 0)).wide, 0);
+  assert.strictEqual(read(v1(5000, 1)).freq, 0, 'down at the top of the range is the bottom of the knob');
+  assert.strictEqual(read(v1(5000, 2)).wide, 1, 'split is wide on');
+  assert.strictEqual(read(v1(5000, 2)).freq, 1);
+  assert.strictEqual(read(v1(0.1, 1)).freq < 0.5, true, 'a small shift down sits just left of center');
+  assert.strictEqual(read({ device: 'FreqShift', params: { Freq: 100, Direction: 1 } }).freq < 0.5, true, 'by display name, and no version means version 1');
+  assert.strictEqual(read({ device: 'FreqShift', version: 2, params: { freq: -100, wide: 1 } }).wide, 1, 'a current state passes through');
+  assert.ok(!('direction' in read(v1(100, 0))), 'the old control is not left in the record');
 });
 
 test('a state names controls by id or by name, and another device\'s state is not read', () => {

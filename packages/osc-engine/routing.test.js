@@ -28,7 +28,7 @@ const { nativeDevice } = require('./native-devices');
 const SR = 48000;
 const BLOCK = 256;
 const DUR = 2.0;
-const SCX = path.join(__dirname, 'native', 'devices', 'bin', 'PoptartDevices.scx');
+const { DEVICE_BINARY: SCX } = require('./extensions.js'); // this platform's build
 const NOWHERE = 1000000;
 
 const core = () => import(path.join(__dirname, '..', 'pattern-core', 'src', 'index.mjs'));
@@ -102,7 +102,6 @@ async function scenarios() {
 const tones = [110, 330, 1000, 3300, 9000];
 
 const SinOsc = ugen('SinOsc', [440, 0]);
-const UNITY_AT = 1990;
 const F = (v) => ({ type: 'f', value: v }); // a float, as sclang's 48.0 went out
 
 /** The test's own source and modulator defs. */
@@ -135,6 +134,7 @@ async function render(list) {
   const nextAudio = (ch = 2) => { const b = audio; audio += ch; return b; };
   const nextKr = (ch = 1) => { const b = kr; kr += ch; return b; };
   const msgs = [];
+  const silent = nextAudio();
   list.forEach((s, t) => {
     const { spec } = s;
     assert.deepEqual(spec.warnings, [], `${s.name}: ${spec.warnings.join(' ')}`);
@@ -152,10 +152,12 @@ async function render(list) {
     msgs.push([0.0, ['/s_new', 'poptart_track_shared', (strip), 1, (chain), 'in', (busOf(spec.out)), 'post', (NOWHERE), 'ctl', (nextKr(6)), 'out', (t + 1), 'pairs', (list.length)]]);
     // The route controls: a level/pan publisher per gain, a frequency per crossover.
     const gains = {};
+    // A branch level is an audio pair (level, pan) since channel controls went per sample; a
+    // branch without one is -1, which the term reads as unity, as the engine sends it.
     const gainBus = (g) => {
-      if (!g) return UNITY_AT;
+      if (!g) return -1;
       if (gains[g] == null) {
-        gains[g] = nextKr(2);
+        gains[g] = nextAudio(2);
         const level = s.controls[`rl${g}`]?.sample(0, 1, 0) ?? 1;
         const pan = s.controls[`rp${g}`]?.sample(0, 1, 0) ?? 0;
         msgs.push([0.0, ['/s_new', 'poptart_gainkr', (ids++), 1, (krGroup), 'out', (gains[g]), 'level', (level), 'pan', (pan)]]);
@@ -168,7 +170,8 @@ async function render(list) {
       const id = ids++;
       if (st.k === 'fx') {
         nodeOf[st.slot] = id;
-        msgs.push([0.0, ['/s_new', 'poptart_fx', (id), 2, (strip), 'in', (busOf(st.in)), 'out', (busOf(st.out)), 'scBus', (NOWHERE)]]);
+        // No Delay loop here: its send goes nowhere and its return reads a bus nothing writes.
+        msgs.push([0.0, ['/s_new', 'poptart_fx', (id), 2, (strip), 'in', (busOf(st.in)), 'out', (busOf(st.out)), 'scBus', (NOWHERE), 'loop', (NOWHERE), 'ret', (silent)]]);
       } else if (st.k === 'xover') {
         const xbus = nextKr();
         const value = s.xo?.[st.xo] ?? s.controls[`xo${st.xo}`]?.sample(0, 1, 0) ?? 0.049;
@@ -207,7 +210,7 @@ async function render(list) {
   });
   const defs = ['poptart_track_shared', 'poptart_head', 'poptart_fx', 'poptart_xover', 'poptart_term', 'poptart_gainkr', 'poptart_xokr']
     .map((n) => def(n).def).concat(testDefs());
-  const score = [...defs.map((d) => [0, ['/d_recv', d]]), [0, ['/c_setn', UNITY_AT, 2, 1, 0]], ...msgs];
+  const score = [...defs.map((d) => [0, ['/d_recv', d]]), ...msgs];
   return renderNRT(score, {
     duration: DUR, sampleRate: SR, outChannels: list.length * 2,
     extra: ['-a', '8192', '-c', '8192', '-z', String(BLOCK), '-w', '1024', '-m', '262144', '-n', '8192'],

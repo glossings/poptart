@@ -5,10 +5,12 @@
 // plays the same window at the same rate in both builds. What it resolves:
 //
 //   - the WINDOW: begin..end of the file, or a slice of it - `.slice(n)` indexing the markers a
-//     hand-drawn set carries for this file, or else the file's own transients;
+//     hand-drawn set carries for this file, or else the file's own transients - with the controls
+//     that read the sample's length (`.play()`, through `cfg.atLength`) read once it is known;
 //   - the RATE: speed, times `.fit()` (the whole file lasting the cycles asked, 'auto' being the
-//     nearest power of two), times `.splice()` (the window fitted to its own event, by rate or by
-//     stretch), times the note's repitch around the anchor, with `.flip()` a sign and a re-anchor;
+//     nearest power of two, by rate or by stretch), times `.splice()` (the window fitted to its
+//     own event, by rate or by stretch), times the note's repitch around the anchor, with
+//     `.flip()` a sign and a re-anchor;
 //   - the LOOP: on for `.loop()`, and by default for a negative speed (the window is a circle);
 //     over the whole file or just the window; forward or ping-pong;
 //   - the ENVELOPE: attack, decay and release in seconds times `.envscale()`, sustain a level;
@@ -53,6 +55,20 @@ export function planSample(file, cfg, onsetSec, offsetSec, opts = {}) {
   const amp = cfg.vel ?? 1;
   if (amp <= 0) return { skipped: 'vel 0' };
 
+  const eventSec = offsetSec - onsetSec;
+  const spliced = (cfg.splice ?? 0) > 0.5 && eventSec > 1e-6;
+  const fit = spliced ? null : cfg.fit != null ? cfg.fit : authoredFit ?? null;
+  // The file's natural length in cycles, and the length a fit makes it (null without one).
+  const measures = cfg.secPerCycle > 0 ? file.duration / cfg.secPerCycle : NaN;
+  let fitCycles = null;
+  if (fit != null && measures > 0) {
+    const target = fit === 'auto' ? 2 ** Math.round(Math.log2(measures)) : fit;
+    if (target > 0) fitCycles = target;
+  }
+  // .play(): the controls that read the sample's length - the fitted one, or the natural one -
+  // are read now that it is known (see pattern-core's withSampleLength).
+  if (typeof cfg.atLength === 'function') cfg = { ...cfg, ...cfg.atLength(fitCycles ?? measures) };
+
   let begin = clamp01(cfg.begin ?? 0);
   let end = clamp01(cfg.end ?? 1);
   let noSlices = false;
@@ -75,19 +91,19 @@ export function planSample(file, cfg, onsetSec, offsetSec, opts = {}) {
   let stretch = !grain && cfg.stretch > 0 ? cfg.stretch : 1;
   const spanSec = file.duration * (end - begin);
   if (speed === 0 || spanSec <= 0) return { skipped: speed === 0 ? 'speed 0' : 'empty begin..end window' };
-  const eventSec = offsetSec - onsetSec;
-
-  const spliced = (cfg.splice ?? 0) > 0.5 && eventSec > 1e-6;
   if (spliced) {
     if (mode(cfg.spliceMode ?? 0, 2) === 1) stretch *= eventSec / spanSec;
     else speed *= spanSec / eventSec;
   }
-  const fit = spliced ? null : cfg.fit != null ? cfg.fit : authoredFit ?? null;
-  if (fit != null && cfg.secPerCycle > 0) {
-    // Fit is a property of the whole file, so a randomized begin does not repitch every hit.
-    const measures = file.duration / cfg.secPerCycle;
-    const target = fit === 'auto' ? 2 ** Math.round(Math.log2(measures)) : fit;
-    if (target > 0) speed *= measures / target;
+  if (fitCycles != null) {
+    // Fit is a property of the whole file, so a randomized begin does not repitch every hit. By
+    // stretch, the same factor lands on the warp voice and the pitch holds; a granular voice has
+    // nothing to stretch, so there the pitch is simply left alone.
+    if (mode(cfg.fitMode ?? 0, 2) === 1) {
+      if (!grain) stretch *= fitCycles / measures;
+    } else {
+      speed *= measures / fitCycles;
+    }
   }
   if (cfg.note != null) speed *= 2 ** ((cfg.note - (Number.isFinite(file.rootNote) ? file.rootNote : anchor)) / 12);
 
@@ -116,6 +132,7 @@ export function planSample(file, cfg, onsetSec, offsetSec, opts = {}) {
     loopLo, loopHi, loopEntry, pingpong, windowed,
     onsetSec: onset, offsetSec, grain, noSlices,
     fileSec: file.duration,
+    fitCycles,
   };
 }
 

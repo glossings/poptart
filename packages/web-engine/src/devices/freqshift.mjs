@@ -8,30 +8,47 @@
 // cosine; summing the products one way keeps only the upper sideband, the other way only the
 // lower. Feedback runs the shifted signal round again, so each pass moves it further: the
 // endlessly rising or falling spiral.
+//
+// One signed Freq knob says both how far and which way, as every hardware and plugin shifter
+// does: zero in the middle, up to the right, down to the left, on a curve that is fine near zero
+// (a shift of 2 Hz matters as much as one of 2 kHz) and still reaches thousands of hertz at the
+// ends. Wide sends the right channel the other way.
+//
+// Version 2. Version 1 had an unsigned Freq on a log curve, which cannot pass through zero, so
+// the sign lived in an up/down/split Direction menu; `migrate` reads those states.
 
 import { defineDevice } from '../descriptor.mjs';
 import { at } from '../dsp/control.mjs';
 
-export const DIRECTIONS = Object.freeze(['up', 'down', 'split']);
-
 export const FREQSHIFT = defineDevice({
   id: 'FreqShift',
   kind: 'fx',
-  version: 1,
+  version: 2,
   license: 'AGPL-3.0-only',
   processor: 'poptart-freqshift',
   description: 'A frequency shifter: moves every partial by the same number of hertz, which makes a pitched sound inharmonic.',
   channels: { in: 2, out: 2 },
   params: [
-    { id: 'freq', name: 'Freq', min: 0.1, max: 5000, default: 50, unit: 'Hz', curve: 'exp',
-      description: 'How far every partial moves. A few hertz is a slow phasing wobble; tens to hundreds turn a pitched sound metallic.' },
-    { id: 'direction', name: 'Direction', default: 0, options: [...DIRECTIONS], rate: 'k',
-      description: 'Up adds the frequency and down subtracts it; split moves the left channel up and the right down.' },
+    { id: 'freq', name: 'Freq', min: -5000, max: 5000, default: 50, unit: 'Hz', curve: 'sym', curveExp: 3, decimals: 1,
+      description: 'How far every partial moves, and which way: up to the right of center, down to the left. A few hertz is a slow phasing wobble; tens to hundreds turn a pitched sound metallic.' },
+    { id: 'wide', name: 'Wide', min: 0, max: 1, default: 0, ui: 'toggle', rate: 'k',
+      description: 'Moves the right channel the other way from the left, so the two sides pull apart.' },
     { id: 'feedback', name: 'Feedback', min: 0, max: 0.95, default: 0,
       description: 'Sends the shifted signal round again, so each repeat moves further: a rising or falling spiral.' },
     { id: 'mix', name: 'Mix', min: 0, max: 1, default: 1,
       description: 'The shifted signal against the dry one. In between, the two beat against each other.' },
   ],
+  migrate(params, from) {
+    if (from < 2) {
+      // Direction 0 was up, 1 down, 2 split (left up, right down).
+      const direction = Math.round(Number(params.direction) || 0);
+      const freq = Number(params.freq);
+      delete params.direction;
+      if (Number.isFinite(freq)) params.freq = direction === 1 ? -freq : freq;
+      params.wide = direction === 2 ? 1 : 0;
+    }
+    return params;
+  },
 });
 
 // Two chains of second-order allpasses whose outputs stay 90 degrees apart from about 20 Hz to
@@ -96,14 +113,13 @@ export class FreqShiftProcessor {
     const inR = inputs[1] ?? inputs[0];
     const outL = outputs[0];
     const outR = outputs[1] ?? outputs[0];
-    const direction = Math.round(at(params.direction, 0));
-    // +1 keeps the upper sideband, -1 the lower; split sends the two channels opposite ways.
-    const signL = direction === 1 ? -1 : 1;
-    const signR = direction === 0 ? 1 : -1;
+    // The sign of the frequency is the direction: the oscillator runs backwards for a shift
+    // down, which keeps the lower sideband. Wide runs the right channel's the other way.
+    const signR = at(params.wide, 0) >= 0.5 ? -1 : 1;
     const sr = this.sampleRate;
     for (let i = 0; i < count; i++) {
       this.phase += at(params.freq, i) / sr;
-      if (this.phase >= 1) this.phase -= Math.floor(this.phase);
+      this.phase -= Math.floor(this.phase);
       const w = 2 * Math.PI * this.phase;
       const c = Math.cos(w);
       const s = Math.sin(w);
@@ -111,7 +127,7 @@ export class FreqShiftProcessor {
       const mix = at(params.mix, i);
       const l = inL ? inL[i] : 0;
       const r = inR ? inR[i] : 0;
-      const wetL = this.shift(0, l, c, s * signL, feedback);
+      const wetL = this.shift(0, l, c, s, feedback);
       const wetR = this.shift(1, r, c, s * signR, feedback);
       outL[i] = l + (wetL - l) * mix;
       if (outR !== outL) outR[i] = r + (wetR - r) * mix;

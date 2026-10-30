@@ -5,7 +5,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { defaultValues } from './src/descriptor.mjs';
+import { defaultValues, denormalize, migrateState, normalize } from './src/descriptor.mjs';
 import { FREQSHIFT, FreqShiftProcessor } from './src/devices/freqshift.mjs';
 
 const SR = 48000;
@@ -46,7 +46,7 @@ const BY = 20; // ~117 Hz
 
 for (const [label, bin] of [['low', 8], ['mid', IN], ['high', 2000]]) {
   test(`shifting up moves a ${label} tone up by the frequency and leaves the mirror 40 dB down`, () => {
-    const { left } = run({ freq: BY * BIN, direction: 0 }, bin);
+    const { left } = run({ freq: BY * BIN }, bin);
     const wanted = magnitudeAt(left, bin + BY);
     const mirror = magnitudeAt(left, Math.abs(bin - BY));
     const original = magnitudeAt(left, bin);
@@ -56,15 +56,44 @@ for (const [label, bin] of [['low', 8], ['mid', IN], ['high', 2000]]) {
   });
 }
 
-test('shifting down subtracts the frequency', () => {
-  const { left } = run({ freq: BY * BIN, direction: 1 }, IN);
+test('a negative frequency shifts down: it subtracts, and the upper sideband is gone', () => {
+  const { left, right } = run({ freq: -BY * BIN }, IN);
   assert.ok(magnitudeAt(left, IN - BY) / magnitudeAt(left, IN + BY) > 100);
+  assert.ok(magnitudeAt(right, IN - BY) / magnitudeAt(right, IN + BY) > 100, 'both channels, with wide off');
 });
 
-test('split moves the left channel up and the right channel down', () => {
-  const { left, right } = run({ freq: BY * BIN, direction: 2 }, IN);
-  assert.ok(magnitudeAt(left, IN + BY) / magnitudeAt(left, IN - BY) > 100);
-  assert.ok(magnitudeAt(right, IN - BY) / magnitudeAt(right, IN + BY) > 100);
+test('wide moves the right channel the other way from the left', () => {
+  const up = run({ freq: BY * BIN, wide: 1 }, IN);
+  assert.ok(magnitudeAt(up.left, IN + BY) / magnitudeAt(up.left, IN - BY) > 100);
+  assert.ok(magnitudeAt(up.right, IN - BY) / magnitudeAt(up.right, IN + BY) > 100);
+  const down = run({ freq: -BY * BIN, wide: 1 }, IN);
+  assert.ok(magnitudeAt(down.left, IN - BY) / magnitudeAt(down.left, IN + BY) > 100);
+  assert.ok(magnitudeAt(down.right, IN + BY) / magnitudeAt(down.right, IN - BY) > 100);
+});
+
+test('the one knob is signed and centered: zero in the middle, fine close to it, 5 kHz at the ends', () => {
+  const freq = FREQSHIFT.params.find((p) => p.id === 'freq');
+  assert.equal(freq.min, -5000);
+  assert.equal(freq.max, 5000);
+  assert.equal(denormalize(freq, 0.5), 0);
+  assert.ok(Math.abs(denormalize(freq, 0.6) - 40) < 1e-9);
+  assert.ok(Math.abs(denormalize(freq, 0.4) + 40) < 1e-9);
+  assert.equal(denormalize(freq, 1), 5000);
+  assert.equal(denormalize(freq, 0), -5000);
+  assert.ok(!FREQSHIFT.params.some((p) => p.id === 'direction'), 'no direction menu');
+  assert.equal(FREQSHIFT.params.find((p) => p.id === 'wide').ui, 'toggle');
+});
+
+test('a version 1 state - unsigned Freq and an up/down/split Direction - reads as this version', () => {
+  const v1 = (freq, direction) => ({ device: 'FreqShift', version: 1, params: { freq, direction, feedback: 0.3, mix: 1 }, files: {} });
+  assert.deepEqual(migrateState(FREQSHIFT, v1(269.838426, 0)).params, { freq: 269.838426, feedback: 0.3, mix: 1, wide: 0 });
+  assert.deepEqual(migrateState(FREQSHIFT, v1(120, 1)).params, { freq: -120, feedback: 0.3, mix: 1, wide: 0 });
+  assert.deepEqual(migrateState(FREQSHIFT, v1(5000, 2)).params, { freq: 5000, feedback: 0.3, mix: 1, wide: 1 });
+  assert.equal(migrateState(FREQSHIFT, v1(5000, 2)).version, 2);
+  // And the migrated map lands on the knobs: a split at 5 kHz is the top of the knob with wide on.
+  const freq = FREQSHIFT.params.find((p) => p.id === 'freq');
+  assert.equal(normalize(freq, migrateState(FREQSHIFT, v1(5000, 2)).params.freq), 1);
+  assert.equal(normalize(freq, migrateState(FREQSHIFT, v1(5000, 1)).params.freq), 0);
 });
 
 test('a mix of zero is the dry signal, untouched', () => {

@@ -19,9 +19,14 @@
 //     out: Ref,                 // what the channel strip reads
 //     sums: { [id]: Ref[] },    // each sum, as its terms
 //     order: [slot, ...],       // every slot in the tree, in the order its audio runs
+//     sends: { [i]: Ref },      // what each .bus() send written inside the chain taps (by its
+//                               // index among the track's sends); absent when none is
+//     returns: { [slot]: Ref }, // what each looped device's return input reads, a block late;
+//                               // absent when none is
 //   }
 //   Ref = { s: Src, g: gain }  // a signal, at a gain (0 = unity)
-//   Src = { k: 'in' } | { k: 'slot', p } | { k: 'rest', p } | { k: 'ap', p } | { k: 'sum', id }
+//   Src = { k: 'in' } | { k: 'slot', p } | { k: 'rest', p } | { k: 'ap', p } | { k: 'loop', p }
+//       | { k: 'sum', id }
 //
 // `in` is the chain input (the instrument and the sampler, after .gain()). Gain g > 0 is a pair of
 // channel controls, rl<g> (the level) and rp<g> (the pan, the track strip's own law), which the
@@ -44,7 +49,20 @@
 //
 //   R1 = band 0       Rk = ap of crossover k (its key R(k-1)) + band k-1       out = RN + band N
 //
-// Every read is of a slot before the reader in `order`, so neither engine adds a block of delay.
+// A .bus() send is an item of the tree where it is written (`{ send: i }`, i its index among the
+// track's sends). One at the very end of the trunk is the track's post-strip send, which both
+// engines already have, and is left out of `sends`; any other taps the signal at its place - at the
+// end of a branch, at that branch's level and pan - and `sends` says what it reads.
+//
+// A device with a chain in its feedback loop (`.fx("Delay", (x) => x.fx("Filter"))`) is a loop
+// item, `{ loop: { p, items, level, pan } }`: p is the device's slot, and items the chain, whose
+// slots are numbered before p. The device's repeats leave it as `loop` (its second output), the
+// chain reads them, and what the chain ends in comes back as `returns[p]` into the device's second
+// input. The loop's .postgain() and .pan() are a level and pan on that return.
+//
+// Every read is of a slot before the reader in `order`, so neither engine adds a block of delay -
+// except a return, which closes a loop and is read a block late. The device takes that delay, and
+// the delay of any device inside the loop, off its own time (see the engines' loop latencies).
 import { Sig, toSignal, multiplyGain, warnPattern } from './signal.mjs';
 
 /** The engines' internal device a .bands() crossover is, and its Frequency control's range in Hz. */
@@ -163,11 +181,13 @@ const srcKey = (s) => (s.k === 'in' ? 'in' : s.k === 'sum' ? `m${s.id}` : `${s.k
  * the scheduler to drive.
  */
 export function routePlan(sig) {
-  const route = sig?.fxRoute;
+  const route = routeItems(sig);
   if (!route) return null;
   const reads = {};
   const keys = {};
   const sums = {};
+  const sends = {};
+  const returns = {};
   const order = [];
   const xo = {};
   let nextSum = 0;
@@ -202,12 +222,14 @@ export function routePlan(sig) {
   const branchGain = (b) => ({ level: b.level ?? null, pan: b.pan ?? null });
   const scaled = (ref, g) => ({ s: ref.s, gain: compose(ref.gain, g) });
 
-  // One branch walked from `start`, everything it ends in poured into `into` at its own level.
+  // One branch walked from `start`, everything it ends in poured into `into` at its own level -
+  // the sends written at its end included, as a send at the end of the trunk is after the strip.
   // (A function declaration, so it and walk can call each other.)
   function pour(b, start, into) {
     const g = branchGain(b);
     const end = walk(b.items, start, (ref) => into(scaled(ref, g)));
     if (end) into(scaled(end, g));
+    for (const i of tailSends(b.items)) if (sends[i]) sends[i] = scaled(sends[i], g);
   }
 
   // Walks one list of items from `from`, recording what each slot reads. Returns where the list
@@ -220,6 +242,24 @@ export function routePlan(sig) {
         reads[item] = cur;
         order.push(item);
         cur = { s: { k: 'slot', p: item }, gain: UNITY };
+        return;
+      }
+      if (item.send != null) {
+        // A send is a reader at its place and leaves the signal as it found it.
+        if (cur) sends[item.send] = cur;
+        return;
+      }
+      if (item.loop) {
+        // The device first, then its loop reading the device's loop output; what the loop ends in
+        // is the device's return. Past the item the chain goes on from the device's main output.
+        const { p } = item.loop;
+        reads[p] = cur;
+        order.push(p);
+        const g = branchGain(item.loop);
+        const end = walk(item.loop.items, { s: { k: 'loop', p }, gain: UNITY }, null);
+        returns[p] = scaled(end, g);
+        for (const i of tailSends(item.loop.items)) if (sends[i]) sends[i] = scaled(sends[i], g);
+        cur = { s: { k: 'slot', p }, gain: UNITY };
         return;
       }
       if (item.split) {
@@ -267,11 +307,13 @@ export function routePlan(sig) {
   }
 
   const out = walk(route, { s: { k: 'in' }, gain: UNITY }, null);
+  // The sends at the end of the trunk are the track's own output: the engines' post-strip send.
+  for (const i of tailSends(route)) delete sends[i];
 
   // A sum that is only ever a term of other sums - the clean branch of a split whose input is a
   // split nothing else reads - is spelled out into its own terms there, at the term's gain: the
   // same signal, and one less thing for an engine to make on its own.
-  const isRead = (id) => [...Object.values(reads), ...Object.values(keys)].some((r) => r.s.k === 'sum' && r.s.id === id)
+  const isRead = (id) => [...Object.values(reads), ...Object.values(keys), ...Object.values(sends), ...Object.values(returns)].some((r) => r.s.k === 'sum' && r.s.id === id)
     || (out?.s.k === 'sum' && out.s.id === id);
   for (let changed = true; changed;) {
     changed = false;
@@ -320,8 +362,27 @@ export function routePlan(sig) {
     out: ref(out ?? { s: { k: 'in' }, gain: UNITY }),
     sums: Object.fromEntries(Object.entries(sums).map(([id, terms]) => [id, terms.map(ref)])),
     order,
+    ...(Object.keys(sends).length ? { sends: Object.fromEntries(Object.entries(sends).map(([i, r]) => [i, ref(r)])) } : {}),
+    ...(Object.keys(returns).length ? { returns: Object.fromEntries(Object.entries(returns).map(([p, r]) => [p, ref(r)])) } : {}),
   };
   return { plan, controls };
+}
+
+/**
+ * The items of a chain's tree: the tree .split()/.bands() left, or - for a plain line with a
+ * .bus() written before one of its devices - the line itself with each send at its place. Null for
+ * a plain line with nothing to place, which every engine already plays.
+ */
+export function routeItems(sig) {
+  if (!sig) return null;
+  return typeof sig._routeItems === 'function' ? sig._routeItems() : sig.fxRoute ?? null;
+}
+
+// The sends written at the end of a list of items: the run of them after its last device.
+function tailSends(items) {
+  const out = [];
+  for (let k = items.length - 1; k >= 0 && items[k]?.send != null; k--) out.push(items[k].send);
+  return out;
 }
 
 /**
@@ -332,7 +393,7 @@ export function routePlan(sig) {
  * numbers.
  */
 export function routeSlots(sig) {
-  const route = sig?.fxRoute;
+  const route = routeItems(sig);
   if (!route) return null;
   const out = {};
   const walk = (items, depth, branch) => {
@@ -341,7 +402,8 @@ export function routeSlots(sig) {
         out[item] = { depth, branch };
         continue;
       }
-      const branches = item.split ?? item.bands?.branches ?? [];
+      const branches = item.split ?? item.bands?.branches ?? (item.loop ? [item.loop] : []);
+      if (item.loop) out[item.loop.p] = { depth, branch };
       branches.forEach((b, i) => walk(b.items, depth + 1, i + 1));
     }
   };
@@ -357,6 +419,8 @@ export function planRefs(plan) {
   for (const [p, r] of Object.entries(plan.keys ?? {})) out.push([{ k: 'key', p: slotOf(p) }, r]);
   out.push([{ k: 'out' }, plan.out]);
   for (const [id, terms] of Object.entries(plan.sums)) terms.forEach((r, t) => out.push([{ k: 'term', id, t }, r]));
+  for (const [i, r] of Object.entries(plan.sends ?? {})) out.push([{ k: 'send', i: Number(i) }, r]);
+  for (const [p, r] of Object.entries(plan.returns ?? {})) out.push([{ k: 'return', p: slotOf(p) }, r]);
   return out;
 }
 

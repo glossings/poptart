@@ -7,7 +7,8 @@
 // it is modeled as exactly that - plain data + closures, with no event object system and no
 // separate continuous and discrete models to reconcile.
 
-import { parseMini, getStepsForCycle, warpSteps, stepLocs } from './mini.mjs';
+import { warningWhere } from './eval-errors.mjs';
+import { parseMini, getStepsForCycle, warpSteps, stepLocs, DIVISION_LABEL } from './mini.mjs';
 import {
   parseNoteValue, noteToMidi, degreeToMidi, midiToDegree, parseScaleName, quantizeToScale,
   globalScale, scaleAtOctave, scaleParts, DEFAULT_SCALE, DEFAULT_SCALE_OCTAVE,
@@ -25,6 +26,7 @@ import { fxKnobValue, assertFxKnobIndex } from './fxknobs.mjs';
 import { Frac } from './frac.mjs';
 import { chordIntervals, chordExtension, invertVoices, spreadVoices, voicingVoices, leadVoices, VOICING_NAMES, justVoices, JI_LIMITS } from './harmony.mjs';
 import { rateLedger } from './lfo-rate.mjs';
+import { parseUnitValue } from './units.mjs';
 import { ENV_DEFAULTS } from './envctl.mjs';
 
 /**
@@ -69,13 +71,24 @@ function paramNameSaid(name) {
   return `a ${typeof name}`;
 }
 
-function warnUser(message) {
-  warnSink(message);
+// The sink hears where in the buffer the warning comes from as well, when a block's code is what
+// is running (see eval-errors.mjs): `{ deck, label, from, to, line, col }`, or null.
+function warnUser(message, err = null) {
+  let where = null;
+  try {
+    where = warningWhere(err);
+  } catch {
+    // a warning is still worth saying without its position
+  }
+  warnSink(message, where);
 }
 
-/** warnUser for other modules in the package (the scheduler's per-eval routing warnings). */
-export function warnPattern(message) {
-  warnUser(message);
+/**
+ * warnUser for other modules in the package (the scheduler's per-eval routing warnings). `err`,
+ * when the warning reports a caught error, is what its position is read from.
+ */
+export function warnPattern(message, err = null) {
+  warnUser(message, err);
 }
 
 /** Warn, then carry on with `sig` untouched - the shape most "that argument does nothing" cases take. */
@@ -136,6 +149,13 @@ const NO_SCALE_FOR_CHORD = `[signal] .chord() with a number stacks the key's thi
 // What CAN vary per step is the plugin's state and its parameters, which is what this points at.
 const PLUGIN_PATTERN_CHARS = /[<>[\]{}|]/;
 
+/**
+ * The devices with a feedback loop a chain can run inside: `.fx("Delay", (x) => x.fx("Filter"))`.
+ * The engines take the loop out of the device and back in (see route.mjs's loop items).
+ */
+export const LOOP_DEVICES = Object.freeze(['Delay']);
+const takesLoop = (pluginId) => LOOP_DEVICES.some((d) => d.toLowerCase() === String(pluginId).toLowerCase());
+
 function assertPluginName(builder, pluginId) {
   if (typeof pluginId === 'string' && PLUGIN_PATTERN_CHARS.test(pluginId)) {
     throw new Error(
@@ -172,6 +192,9 @@ export class Sig {
     // events), 'in' or 'squeeze'. Set only on the copy a binop modifier makes of its argument -
     // `.add.in(x)` - see binopModes and operandSteps.
     this.how = opts.how ?? null;
+    // The unit its numbers are in, when one was written on them ("3x", "800hz" - see units.mjs):
+    // the family's name ('x', 'hz', 's', 'db', 'ct', ...), or null for plain numbers.
+    this.unit = opts.unit ?? null;
 
     // Track-building metadata, threaded through by .synth()/.fx()/.param() etc. Every control
     // method returns a NEW Sig (same sample/stepsForCycle) with this metadata carried forward -
@@ -285,6 +308,9 @@ export class Sig {
     // The scale the notes were last put through (.scale()/.sc()), or null. Metadata like pitchKind,
     // so a later .add(n(2)) knows which key to step in once the values are absolute notes.
     this.scaleName = opts.scaleName ?? null;
+    // The setscale() in force when .fx() built this chain - an evaluation's own key, which a device
+    // tuned to the track's scale (the Resonator) is tuned to when the pattern names none.
+    this.buildScale = opts.buildScale ?? null;
     // Debug flag from Sig#log(): the scheduler prints one line per event this pattern fires.
     // Metadata like everything above, so it survives the rest of the chain (.log() can go
     // anywhere in it) - see _meta().
@@ -345,7 +371,9 @@ export class Sig {
       slotLabels: this.slotLabels,
       midiNotes: this.midiNotes,
       pitchKind: this.pitchKind,
+      unit: this.unit,
       scaleName: this.scaleName,
+      buildScale: this.buildScale,
       logging: this.logging,
       trackColor: this.trackColor,
       clipsHead: this.clipsHead,
@@ -560,6 +588,18 @@ export class Sig {
    * whose values only exist engine-side, take signal bounds.
    */
   range(min, max) {
+    // A bound with a unit on it ("1x", "800hz") is its number, and the range is in that unit.
+    const unit = unitOfValue(min) ?? unitOfValue(max);
+    if (unit) {
+      const plain = (b) => (typeof b === 'string' ? parseUnitValue(b)?.value ?? b : b);
+      const out = this._range(plain(min), plain(max));
+      out.unit = unit;
+      return out;
+    }
+    return this._range(min, max);
+  }
+
+  _range(min, max) {
     if (typeof min === 'number' && typeof max === 'number') {
       if (this.lfoIR) return withLfoIR({ ...this.lfoIR, min, max });
       if (this.envIR) return withEnvIR({ ...this.envIR, min, max });
@@ -578,6 +618,20 @@ export class Sig {
     const minSig = toSignal(min);
     const scaled = this.sub(lo);
     return scaled.mul(toSignal(max).sub(minSig).div(hi - lo)).add(minSig);
+  }
+
+  /**
+   * `x.smooth(0.1)` - this signal lagged: it moves toward each new value exponentially instead of
+   * jumping, reaching within 60 dB of it after `time` seconds (a pattern or signal like any other
+   * argument). Works on anything a control takes - a stepped pattern, an LFO, a knob, audio, an
+   * envelope follower, arithmetic - and runs on the engine every sample. Read in JavaScript (an
+   * engine that cannot run expressions, a value sampled for display) it is the signal unsmoothed.
+   */
+  smooth(time = 0.1) {
+    const node = { k: 'fn', op: 'smooth', a: [exprOf(this), exprTime(time)] };
+    const out = exprHasSource(node) ? new Sig(() => null, {}) : new Sig((t, cps, pos) => this.sample(t, cps, pos));
+    out.expr = node;
+    return out;
   }
 
   /**
@@ -769,12 +823,53 @@ export class Sig {
    */
   fx(pluginId, config) {
     assertPluginName('fx', pluginId);
+    // A function, or `{ loop }`, is a chain for the device's feedback loop.
+    if (typeof config === 'function') return this._fxLoop(pluginId, null, config);
+    if (config?.loop !== undefined) {
+      const { loop, ...rest } = config;
+      if (typeof loop === 'function') return this._fxLoop(pluginId, rest, loop);
+      warnUser(`[signal] fx("${pluginId}")'s loop is a function, e.g. { loop: (x) => x.fx("Filter") } - it was ${loop === null ? 'null' : typeof loop}, so ${pluginId} plays without one.`);
+      config = rest;
+    }
     const slot = this.fxChain.length + 1; // this fx's chain slot (0 = instrument)
     return this._clone({
       fxChain: [...this.fxChain, pluginId],
+      buildScale: globalScale() ?? this.buildScale,
       ...(this.fxRoute ? { fxRoute: [...this.fxRoute, slot] } : {}),
       ...(config?.state ? { slotStates: { ...this.slotStates, [slot]: config.state } } : {}),
       slotLabels: this._withLabel(slot, config?.label, 'fx'),
+    });
+  }
+
+  // A device whose feedback loop runs a chain: `fn` builds it on the chain at this point, as a
+  // .split() branch is built, and its devices take the slots before the device's own, so a
+  // .param() written after the call reaches the device. The tree gets a loop item (see route.mjs):
+  // the device's repeats leave through its loop output, run through the chain and come back into
+  // its return input. A loop with no devices in it is no loop.
+  _fxLoop(pluginId, config, fn) {
+    if (!takesLoop(pluginId)) {
+      warnUser(`[signal] fx("${pluginId}") has no feedback loop to run a chain in - only ${LOOP_DEVICES.join(', ')} has one. The function is ignored.`);
+      return this.fx(pluginId, config);
+    }
+    const said = `fx("${pluginId}")'s loop`;
+    const base = this._routed();
+    const checked = (entry) => {
+      const out = fn(entry);
+      if (out instanceof Sig) return out;
+      warnUser(`[signal] ${said} returned ${out === undefined ? 'nothing' : typeof out} - it returns the chain it built, e.g. (x) => x.fx("Filter"). ${pluginId} plays without it.`);
+      return entry;
+    };
+    const { built, after } = base._branches(base, [checked], 'fx', said);
+    const [branch] = built;
+    if (!branch.items.some((item) => typeof item === 'number' || item.split || item.bands || item.loop)) {
+      return this.fx(pluginId, config);
+    }
+    const slot = after.fxChain.length + 1;
+    return after._clone({
+      fxChain: [...after.fxChain, pluginId],
+      fxRoute: [...base.fxRoute, { loop: { p: slot, items: branch.items, level: branch.level, pan: branch.pan } }],
+      ...(config?.state ? { slotStates: { ...after.slotStates, [slot]: config.state } } : {}),
+      slotLabels: after._withLabel(slot, config?.label, 'fx'),
     });
   }
 
@@ -838,19 +933,35 @@ export class Sig {
   // This chain with its tree started: the slots so far become its first items.
   _routed() {
     if (this.fxRoute) return this;
-    return this._clone({ fxRoute: this.fxChain.map((_, i) => i + 1) });
+    return this._clone({ fxRoute: this._routeItems() ?? this.fxChain.map((_, i) => i + 1) });
+  }
+
+  // The items of this chain's tree (see route.mjs): the tree itself, or - for a plain line with a
+  // .bus() written before one of its devices - the line with each send at its place. Null for a
+  // plain line with nothing to place, which every engine plays as it is.
+  _routeItems() {
+    if (this.fxRoute) return this.fxRoute;
+    const n = this.fxChain.length;
+    if (!this.busSends.some((s) => s.at < n)) return null;
+    const items = [];
+    for (let slot = 0; slot <= n; slot++) {
+      if (slot > 0) items.push(slot);
+      this.busSends.forEach((s, i) => { if (s.at === slot) items.push({ send: i }); });
+    }
+    return items;
   }
 
   // Runs each branch function on the chain as it stands after the previous one, so slot numbers
   // carry on through them, and gathers what each built. What a branch may change is its own
   // devices and everything addressed by slot; its .postgain()/.pan() are taken off as the branch's
   // level and pan, and the notes and the rest of the strip stay the track's.
-  _branches(start, fns, method) {
+  _branches(start, fns, method, name = null) {
     const built = [];
     let acc = start;
     const { postgain: outerLevel, pan: outerPan } = start.channel;
     for (let i = 0; i < fns.length; i++) {
       const fn = fns[i];
+      const said = name ?? `.${method}() branch ${i + 1}`;
       if (typeof fn !== 'function') {
         warnUser(`[signal] .${method}()'s branches are functions, e.g. (b) => b.fx("Filter") - branch ${i + 1} is ${fn === null ? 'null' : typeof fn}, so it passes the signal through.`);
         built.push({ items: [], level: null, pan: null });
@@ -861,16 +972,16 @@ export class Sig {
       // A branch that throws throws as the same call would in a plain chain: it is the chain.
       let out = fn(entry);
       if (!(out instanceof Sig)) {
-        warnUser(`[signal] .${method}() branch ${i + 1} returned ${out === undefined ? 'nothing' : typeof out} - a branch returns the chain it built, e.g. (b) => b.fx("Filter"). It passes the signal through.`);
+        warnUser(`[signal] ${said} returned ${out === undefined ? 'nothing' : typeof out} - a branch returns the chain it built, e.g. (b) => b.fx("Filter"). It passes the signal through.`);
         out = entry;
       }
       if (out.sample !== entry.sample || out.instrument !== entry.instrument || out.sampler !== entry.sampler) {
-        warnUser(`[signal] .${method}() branch ${i + 1} changes the notes or the instrument, which belong to the whole track - a branch builds effects. Those changes are ignored.`);
+        warnUser(`[signal] ${said} changes the notes or the instrument, which belong to the whole track - a branch builds effects. Those changes are ignored.`);
       }
-      for (const name of Object.keys({ ...rest, ...out.channel })) {
-        if (name === 'postgain' || name === 'pan' || /^wet\d+$/.test(name)) continue;
-        if (out.channel[name] !== rest[name]) {
-          warnUser(`[signal] .${name}() inside a .${method}() branch sets it for the whole track - a branch's own level and pan are its .postgain() and .pan().`);
+      for (const key of Object.keys({ ...rest, ...out.channel })) {
+        if (key === 'postgain' || key === 'pan' || /^wet\d+$/.test(key)) continue;
+        if (out.channel[key] !== rest[key]) {
+          warnUser(`[signal] .${key}() inside ${name ?? `a .${method}() branch`} sets it for the whole track - a branch's own level and pan are its .postgain() and .pan().`);
         }
       }
       built.push({ items: out.fxRoute ?? [], level: out.channel.postgain ?? null, pan: out.channel.pan ?? null });
@@ -1153,6 +1264,15 @@ export class Sig {
    * turns it over, and a rest drops the send for as long as it lasts. The AMOUNT is a signal like
    * any other level: .bus("reverb", sine().range(0, 0.6)) sweeps the send, .bus("reverb", "0 .5")
    * steps it.
+   *
+   * The send leaves the chain where it is written. After the last device it is the track's output
+   * (after the strip's level and pan, and the fader); written before a device it taps the signal
+   * at that point, so what follows is not in the send -
+   *
+   *   delay: audio("delay").fx("Delay").bus("feedback").fx("Reverb")   // the reverb stays out of the loop
+   *
+   * Inside a .split()/.bands() branch it taps that branch, and at the branch's end it is after the
+   * branch's level and pan. A tapped send still wears the fader, so a deck's crossfade applies to it.
    */
   bus(name, amount = 1) {
     // A Sig name is a pattern of names - both what the editor's transpile hands us for any string
@@ -1170,7 +1290,13 @@ export class Sig {
     if (!amountSig && !Number.isFinite(amount)) {
       throw new Error('[signal] .bus() amount must be a number or a signal (a send level), e.g. .bus("reverb", 0.3)');
     }
-    return this._clone({ busSends: [...this.busSends, { name: nameSig ?? name.trim(), amount: amountSig ?? amount }] });
+    // Where in the chain the send is written: the devices so far (`at`), and, in a chain with a
+    // tree, its own item among them - a branch's too, since a branch builds on a routed chain.
+    const i = this.busSends.length;
+    return this._clone({
+      busSends: [...this.busSends, { name: nameSig ?? name.trim(), amount: amountSig ?? amount, at: this.fxChain.length }],
+      ...(this.fxRoute ? { fxRoute: [...this.fxRoute, { send: i }] } : {}),
+    });
   }
 
   /**
@@ -1506,6 +1632,14 @@ export class Sig {
       return this;
     }
     const key = `${slot}:${name}`;
+    // A tempo division written whole is that option's label. Read as mini notation, "1/8." is 1
+    // slowed by 8 (option 1, a 1/32) and "1 bar" two steps. A pattern of them quotes each one:
+    // "<'1/8.' '1/4'>".
+    const text = typeof value === 'string' ? value : value instanceof Sig ? value.miniText : null;
+    if (typeof text === 'string' && DIVISION_LABEL.test(text)) {
+      const label = text.trim();
+      value = new Sig(() => label, { stepsForCycle: () => [{ start: 0, end: 1, value: label }] });
+    }
     // Any signal is the value, audio and expressions included: `.param("Osc 1 Phase",
     // audio("mod"))` is phase modulation, and `audio("a").mul(0.2).add(0.4)` moves the control
     // around 0.4 (see Expressions). The engine is handed what can't be sampled here.
@@ -2105,8 +2239,8 @@ export class Sig {
     // meaningful though, and they are what `.param("phase", audio("mod").mul(0.5))` needs, so
     // they are carried on the handle and become a gain and an offset in the graph.
     const asExpr = this._exprBinop(op, xs, () => this._arithPlain(op, xs, fn, linear));
-    if (asExpr) return asExpr;
-    return this._arithPlain(op, xs, fn, linear);
+    if (asExpr) return withUnit(asExpr, this, ...xs);
+    return withUnit(this._arithPlain(op, xs, fn, linear), this, ...xs);
   }
 
   _arithPlain(op, xs, fn, linear) {
@@ -2115,6 +2249,58 @@ export class Sig {
     const inScale = x instanceof Sig && x.pitchKind === 'degree' && this._holdsNotes();
     return this._binop(op, x, inScale ? this._degreeStep(fn) : fn, linear, inScale);
   }
+  /**
+   * Each value moved to the nearest of a set: `.snap([1, 2, 3, 4, 6, 8])`, or the set in mini
+   * notation, its values stacked with commas: `.snap("1,2,4,8")`. A pattern of sets changes as it
+   * goes: `.snap("<[1,2,4,8] [1,3,6]>")`. A set written with a unit ("2x", "100hz") is in it.
+   *
+   *   .param("Op 2 Ratio", sine.range("1x", "8x").snap([1, 2, 3, 4, 6, 8]))
+   */
+  snap(set) {
+    const fixed = snapSet(set);
+    if (fixed && !fixed.values.length) {
+      warnUser('[signal] .snap() has no numbers to snap to - give it a list, e.g. .snap([1, 2, 4]). The values are left as they were.');
+      return this;
+    }
+    let out;
+    if (fixed && (this.expr || isNativeMod(this) || isConnection(this))) {
+      // On the engine, per sample: the lowest value, then a step up at each midpoint.
+      const v = fixed.values;
+      out = null;
+      for (let i = 0; i + 1 < v.length; i++) {
+        const step = this.gte((v[i] + v[i + 1]) / 2).mul(v[i + 1] - v[i]);
+        out = out ? out.add(step) : step;
+      }
+      out = out ? out.add(v[0]) : this.mul(0).add(v[0]);
+    } else if (fixed) {
+      out = this.mapValue((x) => (typeof x === 'number' ? nearestOf(fixed.values, x) : x));
+    } else {
+      const setSig = set instanceof Sig ? set : mini(String(set));
+      const setAt = (pos, t, cps) => {
+        const cycle = Math.floor(pos);
+        const steps = setSig.stepsForCycle?.(cycle);
+        if (!steps) {
+          const one = setSig.sample(t, cps, pos);
+          return typeof one === 'number' ? [one] : [];
+        }
+        const at = pos - cycle;
+        return steps.filter((st) => st.start <= at && at < st.end && typeof st.value === 'number').map((st) => st.value);
+      };
+      const snapAt = (x, values) => (typeof x === 'number' && values.length ? nearestOf(values, x) : x);
+      out = new Sig(
+        (t, cps, pos = t * cps) => snapAt(this.sample(t, cps, pos), setAt(pos, t, cps)),
+        {
+          ...this._meta(),
+          stepsForCycle: this.stepsForCycle
+            ? (cycle) => this.stepsForCycle(cycle).map((st) => (st.value == null ? st : { ...st, value: snapAt(st.value, setAt(cycle + st.start)) }))
+            : null,
+        },
+      );
+    }
+    out.unit = this.unit ?? (fixed ? fixed.unit : unitOfValue(set));
+    return out;
+  }
+
   round() { return this._unop('round', Math.round); }
   abs() { return this._unop('abs', Math.abs); }
   floor() { return this._unop('floor', Math.floor); }
@@ -2124,7 +2310,7 @@ export class Sig {
     const floorPlain = () => this._binop('clamp', lo, (a, b) => Math.max(a, b), false);
     const floor = this._exprBinop('max', [lo], floorPlain) ?? floorPlain();
     const ceilPlain = () => floor._binop('clamp', hi, (a, b) => Math.min(a, b), false);
-    return floor._exprBinop('min', [hi], ceilPlain) ?? ceilPlain();
+    return withUnit(floor._exprBinop('min', [hi], ceilPlain) ?? ceilPlain(), this, lo, hi);
   }
 
   /** A comparison: 1 where it holds, 0 where it doesn't. */
@@ -3291,6 +3477,20 @@ export class Sig {
   /** Playback end position within the sample, 0..1. */
   end(v) { return this._samplerOpt('end', 'end', toSignal(v)); }
   /**
+   * Plays the sample through, one event's worth per event: each event begins where its cycle points
+   * in the file - cycle k of the pattern at k / L of it, L the sample's length in cycles (its fitted
+   * length, or its natural one), wrapping at the end. It sets the begin channel, so arithmetic on
+   * begin after it composes with it and a later .begin() replaces it.
+   */
+  play() {
+    // saw().slow(L), with L the one value only the engine has: a per-event length read where the
+    // engine resolves the sample (see withSampleLength), saw().slow() built for each L it meets.
+    return this.begin(new Sig((t, cps, pos) => {
+      const length = sampleLengthNow();
+      return length > 0 ? sawSlowedBy(length).sample(t, cps, pos) : 0;
+    }));
+  }
+  /**
    * Loop the sample for the event's duration instead of playing it as a one-shot. Truthy/falsy and
    * patternable like any channel - and `.loop(0)` is also how a negative .speed() opts out of its
    * default backwards loop. HOW it loops is .loopwrap() (which region repeats) and .loopdir() (what
@@ -3353,9 +3553,25 @@ export class Sig {
    * -> 2, 3.6 -> 4). The rate is set from the full file regardless of .begin()/.end()/.slice(),
    * so those select a window within the fitted sample without changing its pitch.
    */
-  fit(measures = 'auto') {
-    return this._samplerOpt('fit', 'fit', measures === 'auto' ? 'auto' : toSignal(measures));
+  fit(measures = 'auto', mode) {
+    // The mode can stand in the length's place: `.fit("stretch")` is auto length, pitch held.
+    if (typeof measures === 'string' && modeIndex('fitMode', measures) >= 0) {
+      mode = measures;
+      measures = 'auto';
+    }
+    const out = this._samplerOpt('fit', 'fit', measures === 'auto' ? 'auto' : toSignal(measures));
+    return mode === undefined ? out : out.fitmode(mode);
   }
+  /**
+   * How `.fit()` reaches its length, as a mode number (bare `.fitmode()` means 1):
+   *
+   *   0 "repitch" (default) - bend the playback rate; pitch follows.
+   *   1 "stretch"           - granular timestretch; pitch holds. Best on rhythmic material, like
+   *                           .stretch() itself.
+   *
+   * Named like .splicemode()'s, and a channel like it: values round and wrap, so any signal drives it.
+   */
+  fitmode(v = 1) { return this._samplerOpt('fitmode', 'fitMode', modeSignal('fitMode', v)); }
   /** Play the nth detected transient slice (wraps past the last one). Needs a WAV sample. */
   slice(v) { return this._samplerOpt('slice', 'slice', toSignal(v)); }
   /**
@@ -3386,7 +3602,7 @@ export class Sig {
    * The mode names are accepted as strings, and it is a channel like .loopwrap(): values round to
    * the nearest mode and wrap, so any signal drives it - .splicemode("<0 1>").
    */
-  splicemode(v = 1) { return this._samplerOpt('splicemode', 'spliceMode', spliceModeSignal(v)); }
+  splicemode(v = 1) { return this._samplerOpt('splicemode', 'spliceMode', modeSignal('spliceMode', v)); }
   /**
    * WHERE the slices are, replacing the sample's own transient analysis: the start positions
    * `.slice(n)` indexes into, as fractions of the file (`.slices([0, 0.131, 0.27])`). Slice k runs
@@ -5626,15 +5842,22 @@ export const LOOP_MODES = {
   loopWrap: ['file', 'window'],
   loopDir: ['forward', 'pingpong'],
   spliceMode: ['repitch', 'stretch'],
+  fitMode: ['repitch', 'stretch'],
 };
 
+/** The index a mode name selects on a named-mode channel, or -1 for anything that isn't one. */
+function modeIndex(key, v) {
+  return typeof v === 'string' ? LOOP_MODES[key].indexOf(v.trim().toLowerCase()) : -1;
+}
+
 /**
- * A splicemode value as the channel wants it: the mode names are accepted as strings ('repitch',
- * 'stretch') and become their index; anything else - a number, a mini string of numbers, an LFO -
- * goes through toSignal like every other channel and is rounded/wrapped per event (loopModeAt).
+ * A splicemode/fitmode value as the channel wants it: the mode names are accepted as strings
+ * ('repitch', 'stretch') and become their index; anything else - a number, a mini string of
+ * numbers, an LFO - goes through toSignal like every other channel and is rounded/wrapped per
+ * event (loopModeAt).
  */
-function spliceModeSignal(v) {
-  const named = typeof v === 'string' ? LOOP_MODES.spliceMode.indexOf(v.trim().toLowerCase()) : -1;
+function modeSignal(key, v) {
+  const named = modeIndex(key, v);
   return toSignal(named >= 0 ? named : v);
 }
 
@@ -5820,6 +6043,9 @@ function multiplyGain(a, b) {
   if (ac != null && bc != null) return toSignal(ac * bc); // constant * constant
   if (aMod && bc != null) return a.mul(bc); // modulator * scalar -> rewrite bounds (either order)
   if (bMod && ac != null) return b.mul(ac);
+  // An expression (audio, a follower, modulators combined) only has a value on the engine, so the
+  // product has to be one too.
+  if (a.expr || b.expr || isConnection(a) || isConnection(b)) return a.mul(b);
   return productGain(a, b);
 }
 
@@ -5865,7 +6091,9 @@ function withPitchKind(sig, kind) {
 //
 // Nodes: { k: 'const', v } | { k: 'src', source } (an audio source) | { k: 'leaf', sig } (any
 // other signal - the engine is fed it as an input, natively when it is a single modulator and
-// polled otherwise) | { k: 'op', op, a: [x, y] } | { k: 'fn', op, a: [x] }.
+// polled otherwise) | { k: 'op', op, a: [x, y] } | { k: 'fn', op, a: [x] } |
+// { k: 'fn', op: 'env', a: [x, attack, release] } (the level of x - the follower, env("x")) |
+// { k: 'fn', op: 'smooth', a: [x, time] } (x lagged - see Sig#smooth).
 
 // The sampler envelope's options, and the amp-envelope stage each one is on a synth.
 const AMP_STAGE_OF = { attack: 'attack', decay: 'decay', sustain: 'sustain', release: 'release', envScale: 'scale' };
@@ -5874,6 +6102,7 @@ const EXPR_OPS = new Set(['add', 'sub', 'mul', 'div', 'mod', 'gt', 'gte', 'lt', 
 const EXPR_FNS = new Set(['abs', 'round', 'floor', 'ceil']);
 
 const isNativeMod = (s) => s instanceof Sig && Boolean(s.lfoIR || s.envIR || s.ccIR);
+const isEnvFollowNode = (node) => node.k === 'fn' && node.op === 'env';
 
 /** A signal that carries audio: a bare audio("x") handle, or an expression with one in it. */
 function isConnection(s) {
@@ -5893,7 +6122,8 @@ export function paramExpr(sig) {
 }
 
 function exprHasSource(node) {
-  if (node.k === 'src') return true;
+  // An envelope follower's level, like audio itself, exists only on the engine.
+  if (node.k === 'src' || isEnvFollowNode(node)) return true;
   return Array.isArray(node.a) && node.a.some(exprHasSource);
 }
 
@@ -5953,6 +6183,7 @@ function exprSpan(node) {
       return [0, 1];
     }
     case 'fn':
+      if (node.op === 'env') return [0, 1];
       if (node.op === 'abs') {
         const [lo, hi] = exprSpan(node.a[0]);
         return lo >= 0 ? [lo, hi] : hi <= 0 ? [-hi, -lo] : [0, Math.max(-lo, hi)];
@@ -5999,11 +6230,22 @@ export function steadyValue(x) {
 // alternation of any length somebody would write by hand, cheap enough to ask on every hold.
 const STEADY_PROBE_CYCLES = 8;
 
+// How many times a live control (a macro or FX knob, an inline widget) has been read. A signal
+// that reads one is never a constant, however still the control happens to be while it is probed.
+let liveReads = 0;
+export function noteLiveRead() { liveReads += 1; }
+
 function constantOf(x) {
   if (typeof x === 'number') return Number.isFinite(x) ? x : null;
   if (!(x instanceof Sig)) return null;
   if (Number.isFinite(x.constVal)) return x.constVal;
-  if (x.stepsForCycle || typeof x.sample !== 'function') return null;
+  if (x.widgetLive || x.stepsForCycle || typeof x.sample !== 'function') return null;
+  const reads = liveReads;
+  const probed = probeConstant(x);
+  return liveReads === reads ? probed : null;
+}
+
+function probeConstant(x) {
   // The POSITION moves with the time. A continuous signal is a function of its position - the
   // third argument - and probing it with that held at zero is what makes a sine look like the
   // constant 0.5, which is exactly the reading this exists to refuse.
@@ -6092,12 +6334,89 @@ export function mini(str, offset = 0, mode) {
     return new Sig(miniStepSampler(ast), { stepsForCycle: miniStepsForCycle(ast) });
   }
   const ast = parseMini(String(str), offset);
-  const valueFn = (v) => (Number.isNaN(Number(v)) ? v : Number(v));
-  const sig = new Sig(miniStepSampler(ast, valueFn), { stepsForCycle: miniStepsForCycle(ast, valueFn) });
+  const plainValue = (v) => (Number.isNaN(Number(v)) ? v : Number(v));
+  // A number with a unit on it ("3x", "-6db") is the number, in the family's base unit, and the
+  // signal says which unit (see units.mjs).
+  const unit = miniUnit(String(str));
+  const valueFn = unit ? (v) => parseUnitValue(v)?.value ?? plainValue(v) : plainValue;
+  const sig = new Sig(miniStepSampler(ast, valueFn), { stepsForCycle: miniStepsForCycle(ast, valueFn), unit });
   // The text it was written as, for the one reader that needs the literal back: a modulator's
   // rate, where the editor's location transpile hands `sine("0.5hz")` over as mini("0.5hz", …).
   sig.miniText = String(str);
   return sig;
+}
+
+/** The member of sorted `values` nearest `x`, the lower on a tie. */
+function nearestOf(values, x) {
+  let best = values[0];
+  for (const v of values) if (Math.abs(v - x) < Math.abs(best - x)) best = v;
+  return best;
+}
+
+/**
+ * A .snap() set that holds still - a list, or a mini string of plain values separated by commas -
+ * as `{ values, unit }`, sorted. null for one that changes as it goes (a pattern of sets).
+ */
+function snapSet(set) {
+  // The editor hands a literal over as mini("1,2,4", …); the text is what says whether it is fixed.
+  if (set instanceof Sig && typeof set.miniText === 'string') set = set.miniText;
+  let parts;
+  if (Array.isArray(set)) parts = set;
+  else if (typeof set === 'string' && /^[\s\d.,+\-a-z]*$/i.test(set)) parts = set.split(',').filter((p) => p.trim());
+  else if (typeof set === 'number') parts = [set];
+  else return null;
+  const values = [];
+  let unit = null;
+  for (const p of parts) {
+    const u = typeof p === 'string' ? parseUnitValue(p) : null;
+    const n = u ? u.value : Number(p);
+    if (u) unit ??= u.unit;
+    if (typeof p === 'string' && !u && !/^\s*-?[\d.]+\s*$/.test(p)) return null;
+    if (Number.isFinite(n)) values.push(n);
+  }
+  return { values: [...new Set(values)].sort((a, b) => a - b), unit };
+}
+
+
+/** A mini string with every value as written, units and all. */
+function miniAsWritten(text) {
+  const ast = parseMini(text);
+  const valueFn = (v) => (Number.isNaN(Number(v)) ? v : Number(v));
+  return new Sig(miniStepSampler(ast, valueFn), { stepsForCycle: miniStepsForCycle(ast, valueFn) });
+}
+
+// The unit a mini string's numbers are written in, or null. Two units in one pattern can't both
+// reach one control, so the first is the pattern's and the others are said.
+function miniUnit(text) {
+  const found = [];
+  for (const token of text.split(/[\s<>[\]{}(),|!@?~;]+/)) {
+    const u = parseUnitValue(token.replace(/[*/:].*$/, ''));
+    if (u && !found.includes(u.unit)) found.push(u.unit);
+  }
+  if (found.length > 1) {
+    warnUser(`[signal] ${JSON.stringify(text)} mixes units (${found.join(', ')}) - one control reads one, so its numbers are all read as ${found[0]}.`);
+  }
+  return found[0] ?? null;
+}
+
+/** The unit `x` carries: a Sig's tag, or the one written on a string. */
+function unitOfValue(x) {
+  if (x instanceof Sig) return x.unit;
+  if (typeof x === 'string') return parseUnitValue(x)?.unit ?? miniUnit(x);
+  return null;
+}
+
+/** `out` tagged with the unit its operands carry, the first one that has one. */
+function withUnit(out, ...from) {
+  if (!(out instanceof Sig) || out.unit) return out;
+  for (const x of from) {
+    const u = unitOfValue(x);
+    if (u) {
+      out.unit = u;
+      break;
+    }
+  }
+  return out;
 }
 
 /** Scale-degree control - degrees are plain numbers until `.scale(...)` turns them into MIDI notes. */
@@ -6297,6 +6616,7 @@ const SAMPLER_CONTROLS = {
   flip: { key: 'flip', unset: 0 },
   stretch: { key: 'stretch', unset: 1 },
   fit: { key: 'fit', unset: 1 },
+  fitmode: { key: 'fitMode', unset: 0 },
   slice: { key: 'slice', unset: 0 },
   splice: { key: 'splice', unset: 0 },
   splicemode: { key: 'spliceMode', unset: 0 },
@@ -6418,8 +6738,14 @@ export const slice = controlBuilder('slice');
 export const splice = controlBuilder('splice');
 /** How splice() fits: 0 = repitch (default), 1 = stretch - the top-level form of `.splicemode()`. */
 export const splicemode = (v = 1) => {
-  const out = bareSig(spliceModeSignal(v));
+  const out = bareSig(modeSignal('spliceMode', v));
   out.ctl = 'splicemode';
+  return out;
+};
+/** How fit() reaches its length: 0 = repitch (default), 1 = stretch - the top-level form of `.fitmode()`. */
+export const fitmode = (v = 1) => {
+  const out = bareSig(modeSignal('fitMode', v));
+  out.ctl = 'fitmode';
   return out;
 };
 /** Attack, in seconds - the top-level form of `.attack()`. */
@@ -7822,11 +8148,15 @@ function rateLedgerOf(sig) {
   let ledger = rateLedgers.get(sig);
   if (!ledger) {
     let warnedHz = false;
-    ledger = rateLedger(sig, (value) => {
-      if (typeof value === 'string' && /hz\s*$/i.test(value) && !warnedHz) {
+    // Read as written: a rate's "3hz" step is not the number 3 (see units.mjs), it is a mistake.
+    const read = sig.unit && typeof sig.miniText === 'string' ? miniAsWritten(sig.miniText) : sig;
+    ledger = rateLedger(read, (value) => {
+      const hz = typeof value === 'string' && /hz\s*$/i.test(value);
+      if (hz && !warnedHz) {
         warnedHz = true;
-        warnUser(`[signal] a patterned rate counts in cycles - ${JSON.stringify(value)} holds the rate before it. A free-running "hz" rate has to be a single value.`);
+        warnUser(`[signal] a patterned rate counts in cycles - ${JSON.stringify(sig.miniText ?? value)} holds the rate before it. A free-running "hz" rate has to be a single value.`);
       }
+
       const n = typeof value === 'number' ? value : Number(String(value).trim());
       return Number.isFinite(n) ? n : null;
     });
@@ -8314,10 +8644,50 @@ export function noteGateFromGrid(stepsForCycle, spanOf) {
   };
 }
 
+// The length, in cycles, of the sample the event being resolved plays - fitted, or natural without a
+// fit - which .play() reads (see Sig#play). Only the engine knows it, once the event's file is
+// resolved, so the scheduler samples the controls that read it again inside withSampleLength with
+// the engine's number (see Scheduler#_sampleConfigAt). `read` records that one did.
+let lengthScope = null;
+
+/** Runs `fn` with `length` (cycles) as the sample length .play() reads; returns { value, read }. */
+export function withSampleLength(length, fn) {
+  const prev = lengthScope;
+  const scope = { length, read: false };
+  lengthScope = scope;
+  try {
+    return { value: fn(), read: scope.read };
+  } finally {
+    lengthScope = prev;
+  }
+}
+
+function sampleLengthNow() {
+  if (!lengthScope) return null;
+  lengthScope.read = true;
+  return lengthScope.length;
+}
+
+// saw().slow(L) for each length met, built once: a sampler plays a handful of files.
+const sawsByLength = new Map();
+function sawSlowedBy(length) {
+  let sig = sawsByLength.get(length);
+  if (!sig) {
+    sig = saw().slow(length);
+    sawsByLength.set(length, sig);
+  }
+  return sig;
+}
+
 // The event being emitted right now, as { onsetSec, endSec }: the scheduler binds it while it
 // samples one event's config (withEventSpan), so dur() reads the length of exactly that note - a
 // chord whose notes ring for different lengths included. Null outside an emission.
 let eventSpan = null;
+
+/** The event span in force (see withEventSpan), or null - for reading it again later. */
+export function currentEventSpan() {
+  return eventSpan;
+}
 
 /** Runs `fn` with `span` ({ onsetSec, endSec }) as the note dur() measures (see above). */
 export function withEventSpan(span, fn) {
@@ -8443,7 +8813,10 @@ export function sampleEnvIR(ir, pos, cps = 1) {
  * `retrigger: true` restarts the attack on every note, not only on the first of a run that
  * overlaps.
  */
-export function env(opts = {}) {
+export function env(opts = {}, followOpts) {
+  // A source - a name, or a signal - makes it the envelope follower instead (see envFollower).
+  if (typeof opts === 'string' || opts instanceof Sig) return envFollower(opts, followOpts);
+  if (opts == null || typeof opts !== 'object') opts = {};
   const d = ENV_DEFAULTS; // the env() editor draws a missing setting at the same value (envctl.mjs)
   const { attack = d.attack, decay = d.decay, sustain = d.sustain, release = d.release, curve = d.curve, retrigger = false } = opts;
   return withEnvIR({ attack, decay, sustain, release, curve, retrigger: retrigger === true, min: 0, max: 1 });
@@ -8531,7 +8904,9 @@ export function osc(address, index = 0) {
  */
 export function macro(index) {
   assertMacroIndex(index);
-  return new Sig(() => macroValue(index));
+  const sig = new Sig(() => { noteLiveRead(); return macroValue(index); });
+  sig.motionSource = { key: null, range: [0, 1] }; // what .record() records (see motion.mjs)
+  return sig;
 }
 
 /**
@@ -8545,7 +8920,7 @@ export function macro(index) {
  */
 export function fxknob(index) {
   assertFxKnobIndex(index);
-  return new Sig(() => fxKnobValue(index));
+  return new Sig(() => { noteLiveRead(); return fxKnobValue(index); });
 }
 
 /**
@@ -8619,6 +8994,47 @@ export function midi(name, channel = null) {
 export function audio(name) {
   assertInputName('audio', name);
   return new Sig(() => null, { inputSource: { io: 'audio', name: String(name).trim() } });
+}
+
+// The envelope follower's defaults (env("x")), in seconds: an attack quick enough to catch a drum's
+// transient within about ten milliseconds, and a release long enough that a sustained low note does
+// not ripple through whatever the level drives, short enough to let go between beats.
+export const ENV_FOLLOW_DEFAULTS = Object.freeze({ attack: 0.01, release: 0.25 });
+
+/**
+ * A time argument of an expression node (an envelope follower's attack and release, smooth()'s
+ * time). One that never changes - `0.3`, or "0.3" as the editor passes it - is a constant of the
+ * expression, so changing it later is an update in place rather than an input polled forever.
+ */
+function exprTime(v) {
+  const steady = v instanceof Sig && !v.widgetLive ? steadyValue(v) : undefined;
+  return typeof steady === 'number' ? { k: 'const', v: steady } : exprOf(v);
+}
+
+/**
+ * `env("drums", { attack: 0.01, release: 0.25 })` - the level of a track, bus or hardware input
+ * as a signal from 0 to 1: the source's rectified peak level, clipped at full scale (1), smoothed
+ * so it rises over `attack` seconds and falls over `release`, each the time to get within 60 dB of
+ * the new level. A stereo source is read by its linked peak, max(|L|, |R|), so an out-of-phase
+ * pair reads its level; a source inside other arithmetic is read as audio() is there. The source
+ * is named as audio() names it, or is any signal. Like audio(), it only has a value on the engine,
+ * which runs it every sample: in JavaScript it reads as resting (null), so a control it reaches
+ * holds its value.
+ */
+function envFollower(source, opts) {
+  let src = source;
+  if (typeof source === 'string') {
+    if (!source.trim()) {
+      warnPattern('[signal] env("") names no source - give a track, a bus or an audio input, e.g. env("drums") - so it reads 0');
+      return toSignal(0);
+    }
+    src = audio(source);
+  }
+  const o = opts && typeof opts === 'object' && !(opts instanceof Sig) ? opts : {};
+  const { attack = ENV_FOLLOW_DEFAULTS.attack, release = ENV_FOLLOW_DEFAULTS.release } = o;
+  const out = new Sig(() => null, {});
+  out.expr = { k: 'fn', op: 'env', a: [exprOf(src), exprTime(attack), exprTime(release)] };
+  return out;
 }
 
 /**

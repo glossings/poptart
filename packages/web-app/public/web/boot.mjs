@@ -41,6 +41,8 @@ import { libraryTracks } from './library-doc.mjs';
 /** Where the pieces are served from. One place, so moving a folder is one edit. */
 export const PATHS = Object.freeze({
   patternCore: '/pattern-core/index.mjs',
+  // The JavaScript parser that finds where a syntax error is (see pattern-core's eval-errors.mjs).
+  acorn: '/vendor/acorn/acorn.mjs',
   engine: '/web-engine/src/index.mjs',
   worklets: '/web-engine/worklets',
   builtInPacks: '/web-engine/packs',
@@ -174,6 +176,13 @@ export async function boot({
 } = {}) {
   const patternCore = await import(PATHS.patternCore);
   const webEngine = await import(PATHS.engine);
+  // The devices' ranges and curves, for values written in their units ("3x", "800hz").
+  patternCore.registerDeviceParams(webEngine.DEVICES);
+  // Without it a syntax error is still reported, just without its line and column.
+  const acorn = await import(PATHS.acorn).catch((err) => {
+    warn(`syntax errors will be reported without a position - ${err?.message ?? err}`);
+    return null;
+  });
 
   const context = new AudioContextCtor({ latencyHint: 'interactive' });
   resumeOnGesture(context);
@@ -238,6 +247,12 @@ export async function boot({
     (m.level === 'warn' ? warn : say)(m.text);
     if (notes.length > 200) notes.splice(0, notes.length - 200);
   };
+  // Userland warnings (a pattern asking for something that no longer exists keeps playing - see
+  // pattern-core's "Warnings, not exceptions") reach the editor's console the way the desktop's
+  // do, with the position of the code that gave them when a block's builders were running.
+  patternCore.setPatternWarn((line, where) => note(where
+    ? { level: 'info', text: patternCore.withPosition(line, where), where }
+    : { level: 'info', text: line }));
   const remotePacks = createRemotePacks({
     fetchImpl,
     store,
@@ -303,7 +318,11 @@ export async function boot({
     blockEvaluator: (builders) => createBlockEvaluator(patternCore, { defs: new Map(prebakeDefs), hostBuilders: builders }),
     log: (line) => note(typeof line === 'string' ? { level: 'info', text: line } : line),
   });
-  const evaluator = createEvaluator({ patternCore, engine, transport, prebakeDefs, log: say, remotePacks, desk });
+  // The real builder and method names, for "did you mean" - api-docs.js's lists, which the editor
+  // loads as a plain script before this runs; a page without it suggests nothing.
+  /* global BUILDERS, METHODS */
+  const apiNames = () => (typeof BUILDERS !== 'undefined' && typeof METHODS !== 'undefined' ? { builder: BUILDERS, method: METHODS } : null);
+  const evaluator = createEvaluator({ patternCore, engine, transport, prebakeDefs, log: say, remotePacks, desk, parse: acorn?.parse ?? null, names: apiNames });
   desk.attach(evaluator);
   await desk.restore();
   if (!isolated) await musicLibrary.restore();
@@ -456,7 +475,7 @@ export async function boot({
 
   const host = createHost({
     patternCore, engine, transport, evaluator, storage, samples, outputs, midi, inputs,
-    drainNotes: () => notes.splice(0).map((m) => (m.fix || m.level === 'warn' ? m : m.text)),
+    drainNotes: () => notes.splice(0).map((m) => (m.fix || m.where || m.level === 'warn' ? m : m.text)),
     slicing: { detectOnsets: webEngine.detectOnsets, monoOf: webEngine.monoOf },
     prebake,
     catalog: webEngine.catalog,

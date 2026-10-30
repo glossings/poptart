@@ -19,7 +19,7 @@ const { MIX_BAND_FREQS } = require('./index.js');
 const { renderNRT, ugen, G } = require('./test-support/nrt');
 const U = require('./synthdef/ugens');
 
-const SCX = path.join(__dirname, 'native', 'devices', 'bin', 'PoptartDevices.scx');
+const { DEVICE_BINARY: SCX } = require('./extensions.js'); // this platform's build
 const PinkNoise = ugen('PinkNoise', [], G.UGen);
 
 const defs = (spectrum) => synthdef.mixDefsFor(MIX_BAND_FREQS, { nativeDevices: spectrum, spectrum });

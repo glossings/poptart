@@ -98,7 +98,8 @@ function install(E) {
     let node;
     S.makeBundle(null, () => {
       node = Synth.new(S, E.trackDef.dj.name, ['in', post.index, 'ctl', track.ctlBus.index,
-        'cueBus', E.cueOffset ?? E.routeNowhere, 'meterBus', E.deckMeterBus.index, 'fxOut', E.routeNowhere],
+        'cueBus', E.cueOffset ?? E.routeNowhere, 'meterBus', E.deckMeterBus.index, 'fxOut', E.routeNowhere,
+        'dryAr', track.chanAr?.get('dry') ?? -1],
       track.postGroup, 'addToHead');
       track.synth.set('direct', 0);
     });
@@ -108,10 +109,12 @@ function install(E) {
   };
 
   // A copy of the strip's output to `out` at `amp` (post: after the fader and the monitor), as tap
-  // `name` - made, moved or (with a null `out`) freed.
-  E.stripTap = (track, name, out, amp = 1, post = 0) => {
+  // `name` - made, moved or (with a null `out`) freed. `inBus` reads somewhere else instead: a
+  // bus of the chain, for a .bus() send written inside it (see routeApply's send steps).
+  E.stripTap = (track, name, out, amp = 1, post = 0, inBus = null) => {
     const taps = track.taps;
     const held = taps.get(name);
+    const input = inBus ?? E.stripPost(track).index;
     if (out == null) {
       if (held) {
         held.free();
@@ -119,13 +122,13 @@ function install(E) {
         E.tellTap(track, name, null);
       }
     } else if (!held) {
-      const node = Synth.new(S, E.trackDef.tap.name, ['in', E.stripPost(track).index, 'out', out, 'ctl', track.ctlBus.index,
+      const node = Synth.new(S, E.trackDef.tap.name, ['in', input, 'out', out, 'ctl', track.ctlBus.index,
         'amp', amp, 'post', post], track.postGroup, 'addToTail');
       E.nodeOwns?.(node.nodeID, `a track's ${name} tap`);
       taps.set(name, node);
       E.tellTap(track, name, node);
     } else {
-      held.set('out', out, 'amp', amp, 'post', post);
+      held.set('in', input, 'out', out, 'amp', amp, 'post', post);
     }
   };
 
@@ -135,7 +138,8 @@ function install(E) {
     const bus = Bus.audio(S, 2);
     let node;
     S.makeBundle(null, () => {
-      node = Synth.new(S, E.trackDef.bassmono.name, ['in', track.chainOut ?? track.chainIn.index, 'out', bus.index],
+      node = Synth.new(S, E.trackDef.bassmono.name, ['in', track.chainOut ?? track.chainIn.index, 'out', bus.index,
+        'bassmonoAr', track.chanAr?.get('bassmono') ?? -1],
         track.synth, 'addBefore');
       track.synth.set('in', bus.index);
     });
@@ -155,8 +159,10 @@ function install(E) {
     const have = track.nodes.get(slot);
     if (have) return have;
     const wet = track.wet.get(slot);
+    const wetAr = track.chanAr?.get(`wet${slot}`);
     const node = Synth.new(S, E.trackDef.fx.name, ['in', E.routeNowhere, 'out', E.routeNowhere,
-      'scBus', track.scBus.get(slot) ?? E.silentBus.index, ...(wet != null ? ['wet', wet] : [])],
+      'scBus', track.scBus.get(slot) ?? E.silentBus.index, 'ret', E.silentBus.index, 'loop', E.routeNowhere, ...(wet != null ? ['wet', wet] : []),
+      ...(wetAr != null ? ['wetAr', wetAr] : [])],
     track.synth, 'addBefore');
     E.nodeOwns?.(node.nodeID, `${key}'s effect ${slot}`);
     track.nodes.set(slot, node);
@@ -169,18 +175,20 @@ function install(E) {
     track.nodes.get(slot)?.set('scBus', index);
   };
 
-  // The control-rate publisher of one route control: a branch level and pan pair (rl<k>/rp<k>) or a
-  // crossover frequency (xo<k>), made when first wanted and kept for the track's life, in the
-  // chain group's head so everything after it reads this block's value. `kind` is 'gain' or 'xo'.
+  // The publisher of one route control: a branch level and pan pair (rl<k>/rp<k>, on an audio bus,
+  // per sample under an audio-rate driver) or a crossover frequency (xo<k>, a control bus), made
+  // when first wanted and kept for the track's life, in the chain group's head so everything after
+  // it reads this block's value. `kind` is 'gain' or 'xo'.
   E.routeKrNode = (track, kind, k) => {
     const all = kind === 'gain' ? track.gains : track.xos;
     const have = all.get(k);
     if (have) return have;
-    const bus = Bus.control(S, kind === 'gain' ? 2 : 1);
+    const bus = kind === 'gain' ? Bus.audio(S, 2) : Bus.control(S, 1);
     let node;
     if (kind === 'gain') {
-      bus.setn([1, 0]);
-      node = Synth.new(S, 'poptart_gainkr', ['out', bus.index], track.krGroup, 'addToTail');
+      // Audio-rate drivers already on this pair (see setChanAr) carry over to it.
+      node = Synth.new(S, 'poptart_gainkr', ['out', bus.index,
+        'levelAr', track.chanAr?.get(`rl${k}`) ?? -1, 'panAr', track.chanAr?.get(`rp${k}`) ?? -1], track.krGroup, 'addToTail');
     } else {
       bus.set(E.channelDefault('xo1'));
       node = Synth.new(S, 'poptart_xokr', ['out', bus.index, 'value', E.channelDefault('xo1')], track.krGroup, 'addToTail');
@@ -213,6 +221,63 @@ function install(E) {
     // A monitored track plays to the cue pair, which the DJ stage does.
     if (str === 'mon' && E.cueOffset != null) E.djNode(track);
     return [track.synth, str];
+  };
+
+  // Whether a channel control has a way to be read per sample (poptart.scd's chanIn): the ones the
+  // browser hands a modulator as an AudioParam. The grain controls stay at control rate.
+  E.chanAudio = (name) => ['gain', 'bend', 'postgain', 'pan', 'width', 'dry', 'bassmono', 'grainpos', 'grainsize', 'grainrate', 'grainpan'].includes(String(name))
+    || /^(rl|rp|xo|wet)[0-9]+$/.test(String(name));
+
+  // Puts a channel control on the audio bus `index` (its driver's), or with -1 takes it off, back
+  // to its control - remembered per track for a node made later (see poptart.scd's setChanAr).
+  E.setChanAr = (track, name, index) => {
+    const str = String(name);
+    const m = str.match(/^(rl|rp|xo|wet)([0-9]+)$/);
+    if (!track.chanAr) track.chanAr = new Map();
+    if (index >= 0) track.chanAr.set(str, index); else track.chanAr.delete(str);
+    if (m) {
+      const which = m[1];
+      const k = Number(m[2]);
+      if (which === 'wet') track.nodes.get(k)?.set('wetAr', index);
+      else if (which === 'xo') {
+        for (const x of track.xovers.values()) {
+          if (x.k !== k || x.open !== true) continue;
+          if (index >= 0) x.ctl.mapAudio(0, index, 1, 0);
+          else {
+            x.ctl.unmapAudio(0);
+            x.ctl.map(0, E.routeKrNode(track, 'xo', k).bus);
+          }
+        }
+      } else track.gains.get(k)?.node.set(which === 'rl' ? 'levelAr' : 'panAr', index);
+    } else if (['grainpos', 'grainsize', 'grainrate', 'grainpan'].includes(str)) {
+      // The granular voices read it themselves (see the voices' set below).
+    } else if (str === 'pan') {
+      // The strip reads the pan law's two gains, worked out per sample by a node made for as long
+      // as there is a driver (poptart_panlaw).
+      let law = track.panLaw;
+      if (index >= 0) {
+        if (!law) {
+          const bus = Bus.audio(S, 2);
+          const node = Synth.new(S, 'poptart_panlaw', ['in', index, 'out', bus.index], track.synth, 'addBefore');
+          E.nodeOwns?.(node.nodeID, "a track's pan law");
+          law = { node, bus };
+          track.panLaw = law;
+        } else law.node.set('in', index);
+        track.synth.set('panAr', law.bus.index);
+      } else if (law) {
+        track.synth.set('panAr', -1);
+        track.panLaw = null;
+        law.node.free();
+        E.sched(0.2, () => { law.bus.free(); return null; });
+      }
+    } else {
+      const at = E.channelTarget(track, str);
+      if (at) at[0].set(`${str}Ar`, index);
+    }
+    // The DJ stage plays the direct output once it is made, so it reads dry's driver too.
+    if (str === 'dry') track.dj?.set('dryAr', index);
+    // The granular voices sounding now read a driven grain control or bend per sample too.
+    if (['bend', 'grainpos', 'grainsize', 'grainrate', 'grainpan'].includes(str)) track.voices?.set(`${str}Ar`, index);
   };
 
   // --- node order between tracks ---------------------------------------------------------------
@@ -439,12 +504,14 @@ function install(E) {
         ctlBus, // what the strip publishes
         postGroup, // the DJ stage, taps and sends
         taps: new Map(), // name -> tap node (see stripTap)
+        sendIns: new Map(), // send index -> the chain bus a .bus() written inside the chain taps (see routeApply)
         nodes: new Map(), // slot -> its effect node (see ensureFxNode)
         xovers: new Map(), // crossover id -> { node, ctl } (see routeApply)
         terms: [], // the level/sum nodes of the current wiring
         gains: new Map(), // k -> { node, bus } for rl<k>/rp<k>
         xos: new Map(), // k -> { node, bus } for xo<k>
         scBus: new Map(), // slot -> its sidechain bus (see setScBus)
+        loopSec: new Map(), // slot -> how late its feedback loop's chain is, from its devices (see tellLoop)
         wet: new Map(), // slot -> a wetN set before its node was made
         controllers: new Map(),
         loaded: new Map(), // slot -> pluginId once open() succeeds
@@ -553,7 +620,7 @@ function install(E) {
     track.bendBus?.free();
     track.grainBus?.free();
     // The chain's buses are ours to hand back (its nodes went with the group).
-    [track.chainIn, track.ctlBus, track.post, track.bassmonoBus].forEach((b) => b?.free());
+    [track.chainIn, track.ctlBus, track.post, track.bassmonoBus, track.panLaw?.bus].forEach((b) => b?.free());
     for (const all of [track.gains, track.xos]) for (const e of all.values()) e.bus.free();
     if (track.route) track.route.buses.forEach((b) => b.free());
     E.tracks.delete(key);

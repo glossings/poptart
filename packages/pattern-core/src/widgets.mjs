@@ -17,7 +17,7 @@
 // Like macros.mjs this keeps its own store, apart from signal.mjs: the host writes it (POST
 // /api/widgets/set) and every widget signal reads it when it is sampled.
 
-import { Sig, channelAt, soundingEnd, timeShift, warnPattern } from './signal.mjs';
+import { Sig, channelAt, soundingEnd, timeShift, warnPattern, noteLiveRead } from './signal.mjs';
 import { songSteps } from './arrange.mjs';
 import {
   INPUT_WIDGETS, DISPLAY_WIDGETS, AUDIO_DISPLAYS, INPUT_SIZES, DISPLAY_SIZES, WIDGET_BOXES,
@@ -27,15 +27,30 @@ import {
 export { INPUT_WIDGETS, DISPLAY_WIDGETS, AUDIO_DISPLAYS };
 
 const values = new Map(); // `${deck}:${at}` -> the live value (a number, a row's text, ...)
+// `${deck}:${at}` -> where a row widget's text starts in the document: a number for steps() and
+// sliders(), `{ [row]: offset }` for a matrix. Seeded by the evaluation from the transpile's tag,
+// moved by a set that says where the text is now (the editor writing a count out as cells), so a
+// row's cells carry the spans the highlighter lights without waiting for the next evaluation.
+const lits = new Map();
 let currentDeck = 'a';
 let registry = null; // { inputs, views } for the evaluation in progress, else null
+let generation = 0; // counts evaluations, so what one built can tell itself from the last one's
 
 const keyOf = (deck, at) => `${deck}:${at}`;
 
 /** Start collecting the widgets an evaluation of `deck`'s buffer builds. */
 export function beginWidgets(deck = 'a') {
   currentDeck = deck === 'b' ? 'b' : 'a';
-  registry = { inputs: [], views: [], seen: new Set() };
+  registry = { inputs: [], views: [], seen: new Set(), records: new Set() };
+  generation++;
+}
+
+/** The deck whose buffer is being evaluated (or was last), and which evaluation of it this is. */
+export function evaluatingDeck() {
+  return currentDeck;
+}
+export function widgetGeneration() {
+  return generation;
 }
 
 /**
@@ -43,13 +58,14 @@ export function beginWidgets(deck = 'a') {
  * widgets that the evaluation no longer has are forgotten, so a deleted slider's key can't be set.
  */
 export function takeWidgets() {
-  const r = registry ?? { inputs: [], views: [], seen: new Set() };
+  const r = registry ?? { inputs: [], views: [], seen: new Set(), records: new Set() };
   registry = null;
   const live = new Set(r.inputs.map((w) => keyOf(currentDeck, w.at)));
   for (const k of [...values.keys()]) if (k.startsWith(`${currentDeck}:`) && !live.has(k)) values.delete(k);
+  for (const k of [...lits.keys()]) if (k.startsWith(`${currentDeck}:`) && !live.has(k)) lits.delete(k);
   r.inputs.sort((a, b) => a.at - b.at);
   r.views.sort((a, b) => a.at - b.at);
-  return { inputs: r.inputs, views: r.views };
+  return { inputs: r.inputs, views: r.views, records: [...r.records].sort((a, b) => a - b) };
 }
 
 /** An evaluation that threw built nothing: stop collecting, and keep every control as it was. */
@@ -61,11 +77,20 @@ export function abandonWidgets() {
  * The host's side: a control moved. `value` is what the widget is now set to - a number for a
  * slider/knob/toggle/button, `[x, y]` for a pad, the row's text for steps()/sliders(), and
  * `{ row, text }` for one of a matrix's rows, or `{ [row]: text, ... }` for several of them at
- * once (what randomizing a grid sends). False when no widget has that key.
+ * once (what randomizing a grid sends). False when no widget has that key. `lit` is where the
+ * row's text now starts in the document, when the host knows: a number, or `{ [row]: offset }`
+ * for a matrix's rows (see `lits`).
  */
-export function setWidgetValue(deck, at, value) {
+export function setWidgetValue(deck, at, value, lit = undefined) {
   const key = keyOf(deck === 'b' ? 'b' : 'a', Number(at));
   if (!values.has(key)) return false;
+  if (typeof lit === 'number' && Number.isFinite(lit)) lits.set(key, lit);
+  else if (lit && typeof lit === 'object' && !Array.isArray(lit)) {
+    const was = lits.get(key);
+    const rows = was && typeof was === 'object' ? { ...was } : {};
+    for (const [r, v] of Object.entries(lit)) if (Number.isFinite(Number(v))) rows[r] = Number(v);
+    lits.set(key, rows);
+  }
   const was = values.get(key);
   if (was && typeof was === 'object' && !Array.isArray(was) && value && typeof value === 'object' && !Array.isArray(value)) {
     const keys = Object.keys(value);
@@ -136,9 +161,17 @@ function textOf(x) {
 // A signal whose value is read from the store at every sample - polled by the scheduler like a
 // macro knob, so a moved control is heard within a poll and a lookahead.
 function liveSig(read) {
-  const sig = new Sig(() => read());
+  const sig = new Sig(() => { noteLiveRead(); return read(); });
   sig.widgetLive = true;
   return sig;
+}
+
+/**
+ * A `.record(` call at `at` that records a control's movement rather than a track's sound (see
+ * motion.mjs) - which the editor cannot tell from the text, and opens a different panel for.
+ */
+export function registerMotionRecord(at) {
+  if (registry && Number.isFinite(at)) registry.records.add(at);
 }
 
 function register(entry) {
@@ -150,9 +183,10 @@ function register(entry) {
   (entry.input ? registry.inputs : registry.views).push(entry);
 }
 
-// The key a transpiled call carries: [at, lit] for an input, at for a display.
+// The key a transpiled call carries: [at, lit] for an input (a matrix adds where each row's text
+// starts, by row name), at for a display.
 function locOf(loc) {
-  if (Array.isArray(loc)) return { at: Number(loc[0]), lit: Number(loc[1] ?? -1) };
+  if (Array.isArray(loc)) return { at: Number(loc[0]), lit: Number(loc[1] ?? -1), rows: loc[2] ?? null };
   if (typeof loc === 'number') return { at: loc, lit: -1 };
   return null;
 }
@@ -160,11 +194,15 @@ function locOf(loc) {
 // Seeds the store from what the code says. The buffer is the truth: an evaluation replaces whatever
 // a control had been moved to with the value written in the call, which is the same number unless
 // the code was edited by hand since.
-function seed(at, value) {
+function seed(at, value, lit = undefined) {
   const key = keyOf(currentDeck, at);
   values.set(key, value);
+  if (lit !== undefined) lits.set(key, lit);
   return key;
 }
+
+// Where a row widget's text starts now (see `lits`): a number, a matrix's `{ [row]: offset }`, or -1.
+const litOf = (key) => lits.get(key) ?? -1;
 
 // ---------------------------------------------------------------------------------------------
 // Input widgets
@@ -257,7 +295,9 @@ function rangedWidget(kind, where, [value, min, max, step]) {
   if (!where) return new Sig(() => v);
   const key = seed(where.at, v);
   register({ input: true, kind, at: where.at, value: v, min: lo, max: hi, step: st, opts: where.opts ?? {} });
-  return liveSig(() => values.get(key) ?? v);
+  const sig = liveSig(() => values.get(key) ?? v);
+  sig.motionSource = { key, range: [lo, hi] }; // what .record() records (see motion.mjs)
+  return sig;
 }
 
 /** `slider(value, min, max, step)` - a slider drawn in the code; the signal of where it is set. */
@@ -275,7 +315,9 @@ function toggleWidget(where, [on]) {
   if (!where) return new Sig(() => v);
   const key = seed(where.at, v);
   register({ input: true, kind: 'toggle', at: where.at, value: v, opts: where.opts ?? {} });
-  return liveSig(() => (values.get(key) ? 1 : 0));
+  const sig = liveSig(() => (values.get(key) ? 1 : 0));
+  sig.motionSource = { key, range: [0, 1] };
+  return sig;
 }
 
 /** `toggle(on)` - a switch drawn in the code: 1 while on, 0 while off. */
@@ -287,7 +329,9 @@ function buttonWidget(where) {
   if (!where) return new Sig(() => 0);
   const key = seed(where.at, 0);
   register({ input: true, kind: 'button', at: where.at, value: 0, opts: where.opts ?? {} });
-  return liveSig(() => (values.get(key) ? 1 : 0));
+  const sig = liveSig(() => (values.get(key) ? 1 : 0));
+  sig.motionSource = { key, range: [0, 1] };
+  return sig;
 }
 
 /** `button()` - a button drawn in the code: 1 while it is held down, 0 otherwise. */
@@ -300,8 +344,9 @@ function xyWidget(where, [x, y]) {
   const vy = numberOf(y, 0.5);
   let readX = () => vx;
   let readY = () => vy;
+  let key = null;
   if (where) {
-    const key = seed(where.at, [vx, vy]);
+    key = seed(where.at, [vx, vy]);
     register({ input: true, kind: 'xy', at: where.at, value: [vx, vy], opts: where.opts ?? {} });
     readX = () => values.get(key)?.[0] ?? vx;
     readY = () => values.get(key)?.[1] ?? vy;
@@ -311,6 +356,11 @@ function xyWidget(where, [x, y]) {
   // The pad IS its x axis, so `xy()` goes anywhere a value does; `.x` and `.y` name the two axes.
   sx.x = sx;
   sx.y = sy;
+  if (where) {
+    // .record() on the pad records both axes; on .y alone, that axis (see motion.mjs).
+    sx.motionSource = { key, range: [0, 1], pad: [sx, sy] };
+    sy.motionSource = { key, range: [0, 1] };
+  }
   return sx;
 }
 
@@ -327,15 +377,19 @@ function tokenValue(token) {
 }
 
 // A step pattern read off text that can change under it: every cycle is the same one cycle of
-// cells, parsed once per distinct text. `litBase` is the document offset of the text, so each cell
-// carries the span the highlighter lights; -1 for text that isn't in the buffer as written.
-function cellPattern(readText, litBase, valueOf = tokenValue) {
+// cells, parsed once per distinct text and position. `litAt()` is the document offset of the text,
+// so each cell carries the span the highlighter lights; -1 for text that isn't in the buffer as
+// written.
+function cellPattern(readText, litAt, valueOf = tokenValue) {
   let lastText = null;
+  let lastBase = null;
   let steps = [];
   const current = () => {
     const text = readText();
-    if (text !== lastText) {
+    const litBase = litAt();
+    if (text !== lastText || litBase !== lastBase) {
       lastText = text;
+      lastBase = litBase;
       const cells = parseCells(text ?? '');
       const w = cells.length ? 1 / cells.length : 1;
       steps = cells.map((c, i) => {
@@ -359,10 +413,10 @@ function cellPattern(readText, litBase, valueOf = tokenValue) {
 
 function stepsWidget(where, [cells]) {
   const text = rowOf('steps', cells, restRow, 'steps("x . x . x . . x") or steps(8)');
-  if (!where) return cellPattern(() => text, -1);
-  const key = seed(where.at, text);
+  if (!where) return cellPattern(() => text, () => -1);
+  const key = seed(where.at, text, where.lit);
   register({ input: true, kind: 'steps', at: where.at, value: text, opts: where.opts ?? {} });
-  const sig = cellPattern(() => values.get(key) ?? text, where.lit);
+  const sig = cellPattern(() => values.get(key) ?? text, () => litOf(key));
   sig.widgetLive = true;
   return sig;
 }
@@ -380,10 +434,10 @@ function slidersWidget(where, [cells, min, max]) {
     const n = Number(token);
     return Number.isNaN(n) ? null : n;
   };
-  if (!where) return cellPattern(() => text, -1, valueOf);
-  const key = seed(where.at, text);
+  if (!where) return cellPattern(() => text, () => -1, valueOf);
+  const key = seed(where.at, text, where.lit);
   register({ input: true, kind: 'sliders', at: where.at, value: text, min: lo, max: hi, opts: where.opts ?? {} });
-  const sig = cellPattern(() => values.get(key) ?? text, where.lit, valueOf);
+  const sig = cellPattern(() => values.get(key) ?? text, () => litOf(key), valueOf);
   sig.widgetLive = true;
   return sig;
 }
@@ -419,12 +473,14 @@ function matrixWidget(where, [rows]) {
     }
   }
   let read = () => initial;
+  let litOfRow = () => -1;
   if (where) {
-    const key = seed(where.at, { ...initial });
+    const key = seed(where.at, { ...initial }, where.rows ?? {});
     register({ input: true, kind: 'matrix', at: where.at, value: { ...initial }, opts: where.opts ?? {} });
     read = () => values.get(key) ?? initial;
+    litOfRow = (k) => litOf(key)?.[k] ?? -1;
   }
-  const lanes = Object.keys(initial).map((k) => cellPattern(() => read()[k] ?? '', -1, () => rowValue(k)));
+  const lanes = Object.keys(initial).map((k) => cellPattern(() => read()[k] ?? '', () => litOfRow(k), () => rowValue(k)));
   const stepsForCycle = (cycle) => lanes.flatMap((l) => l.stepsForCycle(cycle)).sort((a, b) => a.start - b.start);
   const sample = (t, cps, pos) => {
     for (const l of lanes) {

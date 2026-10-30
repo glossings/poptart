@@ -13,7 +13,7 @@ const os = require('node:os');
 const { MappedEngine, toRealWorld } = require('./param-mapping');
 const { blockReason, isLoopbackHostname, embedRefusal } = require('./request-guard');
 const { preferVst3 } = require('./plugin-filter');
-const { deviceRows, deviceParamRows, nativeDevice } = require('@poptart/osc-engine/native-devices');
+const { deviceRows, deviceParamRows, nativeDevice, nativeDevices } = require('@poptart/osc-engine/native-devices');
 const { SNAPSHOT_DIR, putSnapshot, getSnapshot, pruneSnapshots } = require('./snapshots');
 const blobs = require('./blobs');
 const filePreview = require('./file-preview');
@@ -61,6 +61,13 @@ const CODEMIRROR_DIR = path.dirname(require.resolve('codemirror/package.json'));
 // Resolved by package name like CodeMirror, not as a sibling folder: in the desktop build
 // pattern-core is a real folder under node_modules, not a neighbor (desktop/stage.js).
 const PATTERN_CORE_SRC_DIR = path.join(path.dirname(require.resolve('@poptart/pattern-core/package.json')), 'src');
+// The JavaScript parser that finds where a syntax error is (see pattern-core's eval-errors.mjs) -
+// here, and served to the page under /vendor/acorn/ for the browser build's evaluator.
+const acorn = require('acorn');
+const ACORN_DIST_DIR = path.join(path.dirname(require.resolve('acorn/package.json')), 'dist');
+// The real builder and method names, which "did you mean" suggests from.
+const { BUILDERS: API_BUILDERS, METHODS: API_METHODS } = require('./public/api-docs.js');
+const API_NAMES = { builder: API_BUILDERS, method: API_METHODS };
 
 const DEFAULT_CPS = 0.5; // 120 bpm at 4 beats/cycle - overridable from code via setbpm()
 
@@ -4671,6 +4678,8 @@ function audioInputLayout() {
 async function init() {
   patternCore = await import('@poptart/pattern-core');
   extendStringPrototype(patternCore);
+  // The devices' ranges and curves, for values written in their units ("3x", "800hz").
+  patternCore.registerDeviceParams(nativeDevices());
   // Sig#log() event lines go to the browser, not this terminal: the editor drains the queue on
   // its existing 500ms poll (see POST /api/pluginEdits) and prints each line in the in-app
   // console, which mirrors it to devtools. Livecoding happens in the browser, so that's where a
@@ -4682,8 +4691,9 @@ async function init() {
   // Userland warnings ride the same queue for the same reason: a pattern that asks for something
   // that no longer exists keeps playing (see pattern-core's "Warnings, not exceptions"), so the
   // only way the player learns about it is a line in the console they're already watching.
-  patternCore.setPatternWarn((line) => {
-    eventLogQueue.push(line);
+  // A warning given while a block's builders run says where in the buffer (see eval-errors.mjs).
+  patternCore.setPatternWarn((line, where) => {
+    eventLogQueue.push(where ? { text: patternCore.withPosition(line, where), where } : line);
     if (eventLogQueue.length > EVENT_LOG_MAX) eventLogQueue.splice(0, eventLogQueue.length - EVENT_LOG_MAX);
   });
   installClipsResolver(); // how a clips() track reads its own row of the arrangement, from now on
@@ -4780,7 +4790,7 @@ function syncUserStringMethods() {
 const BUILDER_NAMES = ['Signal', 'n', 'note', 'mini', 's', 'se', 'sr', 'sp', 'say', 'synth', 'sine', 'saw', 'isaw', 'tri', 'square', 'rand', 'perlin', 'lfo', 'env', 'dur', 'midicc', 'midikeys', 'osc', 'macro', 'choose', 'cat', 'seq', 'irand', 'midi', 'audio', 'input', 'group', 'copy', 'pcopy', 'pianoroll', 'clips', 'auto',
   // Every control method also as a top-level control builder - speed("-1"), begin(0.5), clip(2) -
   // so a combinator can aim at one channel of a pattern it was handed: x.mul(speed("-1")).
-  'i', 'begin', 'end', 'loop', 'loopwrap', 'loopdir', 'speed', 'flip', 'stretch', 'fit', 'slice', 'splice', 'splicemode', 'attack', 'decay', 'sustain', 'release', 'envscale', 'grain', 'vel', 'clip', 'nudge', 'swing', 'swinggrid', 'swingvel',
+  'i', 'begin', 'end', 'loop', 'loopwrap', 'loopdir', 'speed', 'flip', 'stretch', 'fit', 'fitmode', 'slice', 'splice', 'splicemode', 'attack', 'decay', 'sustain', 'release', 'envscale', 'grain', 'vel', 'clip', 'nudge', 'swing', 'swinggrid', 'swingvel',
   // The binops as top-level builders - a layer piece's own verb: .set(note(30), add(note(12)))
   // pins one voice and transposes the other.
   'add', 'sub', 'mul', 'div', 'mod', 'set',
@@ -5122,10 +5132,24 @@ const PREBAKE_BROWSER_SHIMS = {
   },
 };
 
-function makeBlockEvaluator(defs = new Map(), hostBuilders = { ...HOST_BUILDERS }, { miniOff = [] } = {}) {
+/**
+ * The error /api/evaluate throws for a block that failed: its message is the console line,
+ * position first, and `where` (when the position is known) the buffer span the editor marks.
+ * `detail` is the original stack, for the developer console only. The browser build makes the
+ * same thing (public/web/evaluate.mjs's blockError).
+ */
+function blockError(err, ctx) {
+  const { message, where } = patternCore.describeEvalError(err, ctx);
+  const out = new Error(message);
+  if (where) out.where = where;
+  out.detail = err?.stack ?? String(err);
+  return out;
+}
+
+function makeBlockEvaluator(defs = new Map(), hostBuilders = { ...HOST_BUILDERS }, { miniOff = [], deck = 'a', doc = null } = {}) {
   // defs: name -> value, accumulated down the buffer. Seeded from the prebake file so its
   // top-level bindings are in scope for every user block too (see runPrebake).
-  const evalBlock = function evalBlock(code, locBase) {
+  const evalBlock = function evalBlock(code, locBase, label = null) {
     const declNames = [
       ...new Set([...code.matchAll(/^[ \t]*(?:const|let|var)\s+([A-Za-z_$][\w$]*)/gm)].map((m) => m[1])),
     ];
@@ -5135,8 +5159,9 @@ function makeBlockEvaluator(defs = new Map(), hostBuilders = { ...HOST_BUILDERS 
     // base and stay untagged. The wrapping only touches string literals inside expressions, so the
     // decl-name harvest above and the const/let->var rewrite below are unaffected. `miniOff` is the
     // buffer's `// mini-off` … `// mini-on` stretches (patternCore.miniOffRanges).
-    const located = typeof locBase === 'number' ? patternCore.injectLocations(code, locBase, { miniOff }) : code;
-    const body = located.replace(/^([ \t]*)(?:const|let)(\s+)/gm, '$1var$2');
+    // The rewritten block is registered under a name its stack frames carry, so an error inside it
+    // can be traced back to the line and column typed (pattern-core's eval-errors.mjs).
+    const { body, id } = patternCore.blockSource(code, locBase, { miniOff, label, deck, doc });
     const macroNames = macroSigNames();
     const baseNames = [...BUILDER_NAMES, ...INTERNAL_BUILDERS, ...macroNames, ...Object.keys(hostBuilders)].filter((n) => !defs.has(n)); // defs may shadow builders
     const baseValues = baseNames.map((n) => {
@@ -5158,7 +5183,13 @@ function makeBlockEvaluator(defs = new Map(), hostBuilders = { ...HOST_BUILDERS 
       '__blockCode',
       `var __value = eval(__blockCode); return { __value: __value, __defs: { ${harvest} } };`,
     );
-    const { __value, __defs } = build(...baseValues, ...shimValues, ...defs.values(), body);
+    let result;
+    try {
+      result = patternCore.withDeepStacks(() => build(...baseValues, ...shimValues, ...defs.values(), body));
+    } catch (err) {
+      throw patternCore.noteBlockFailure(err, id, acorn.parse);
+    }
+    const { __value, __defs } = result;
     for (const [n, v] of Object.entries(__defs)) if (v !== undefined) defs.set(n, v);
     syncUserStringMethods(); // the block may have extended Signal.prototype - strings follow
     return __value;
@@ -6927,7 +6958,7 @@ function deviceFigureOpts(state) {
 }
 
 /** The figures that draw what a device is DOING rather than how it is set, and so always follow. */
-const LIVE_DEVICE_FIGURES = new Set(['sample', 'meter', 'transfer', 'eq', 'shaper', 'sweep', 'duck']);
+const LIVE_DEVICE_FIGURES = new Set(['sample', 'meter', 'transfer', 'eq', 'shaper', 'sweep', 'duck', 'bands']);
 
 /**
  * A device's live answer as the window reads it: each driven control's value, position and
@@ -6998,6 +7029,8 @@ function widgetsOf(panel) {
  * (osc-engine's deviceStateText), and `.preset()` restores them.
  */
 function noteDeviceEdit(trackLabel, slot, param, arg) {
+  // A control a state never holds (a looper's Record) is played, not edited: nothing to file.
+  if (param.saved === false) return;
   if (conf && conf.trackId === trackLabel) {
     if (!conf.seen.has(param.name)) {
       conf.seen.add(param.name);
@@ -7962,7 +7995,9 @@ const routes = {
         return deck === 'a' && !clockHeldByDesk(deck) ? declareTempo(value, v) : TEMPO_BLOCK;
       },
     };
-    const evalBlock = makeBlockEvaluator(new Map(prebakeDefs), hostBuilders, { miniOff: patternCore.miniOffRanges(body.code ?? '') });
+    const evalBlock = makeBlockEvaluator(new Map(prebakeDefs), hostBuilders, { miniOff: patternCore.miniOffRanges(body.code ?? ''), deck, doc: body.code ?? '' });
+    // What a block's failure says, and where in the buffer it points (see blockError).
+    const failed = (err, b) => blockError(err, { source: body.code ?? '', block: b, deck, names: API_NAMES });
 
     // Which row a `clips()` written in this block plays (see pattern-core's clips()). Restores
     // whatever was in force rather than clearing, because these nest: a copy() resolves inside the
@@ -7995,7 +8030,7 @@ const routes = {
       try {
         // As the TARGET block: a copy of a clips() track plays the clips painted on that track's
         // row, which is what "a full duplicate of the track" has to mean here.
-        const value = evalAsBlock(target, () => evalBlock(target.code, target.start));
+        const value = evalAsBlock(target, () => evalBlock(target.code, target.start, target.label));
         if (!(value instanceof patternCore.Sig) || value.isDef) {
           throw new Error(`copy(${JSON.stringify(label)}): that block isn't a pattern`);
         }
@@ -8016,7 +8051,7 @@ const routes = {
       for (const b of blocks) {
         if (!patternCore.isBareCallBlock(b.code, 'setscale')) continue;
         try {
-          evalBlock(b.code, b.start);
+          evalBlock(b.code, b.start, b.label);
           hoisted.set(b, SCALE_BLOCK);
         } catch {
           // not evaluable up here - it keeps its place in the pass below (and reports errors there)
@@ -8027,7 +8062,7 @@ const routes = {
       for (const b of blocks) {
         if (!patternCore.isBareCallBlock(b.code, 'setgroove')) continue;
         try {
-          evalBlock(b.code, b.start);
+          evalBlock(b.code, b.start, b.label);
           hoisted.set(b, GROOVE_BLOCK);
         } catch {
           // as above - it runs in its own position instead
@@ -8036,7 +8071,7 @@ const routes = {
 
       evaluated = blocks.map((b) => {
         try {
-          const value = hoisted.has(b) ? hoisted.get(b) : evalAsBlock(b, () => evalBlock(b.code, b.start));
+          const value = hoisted.has(b) ? hoisted.get(b) : evalAsBlock(b, () => evalBlock(b.code, b.start, b.label));
           // Only an explicitly *named* block promises sound. Anything anonymous (bare code
           // outside labels, or `$:`) that doesn't produce a pattern is a setup block:
           // declarations shared with the blocks below (const kb = midikeys("...")),
@@ -8057,7 +8092,7 @@ const routes = {
           }
           return { ...b, sig: value };
         } catch (err) {
-          throw new Error(`${b.label}: ${err.message ?? err}`);
+          throw failed(err, b);
         }
       });
 
@@ -8078,9 +8113,9 @@ const routes = {
       for (const b of evaluated) {
         if (!(b.sig instanceof patternCore.Sig)) continue;
         try {
-          dryRunPattern(b.sig);
+          patternCore.withDeepStacks(() => dryRunPattern(b.sig));
         } catch (err) {
-          throw new Error(`${b.label}: ${err.message ?? err}`);
+          throw failed(err, b);
         }
       }
     } catch (err) {
@@ -8765,7 +8800,10 @@ const routes = {
   // evaluation; the editor has already written the new value into the code.
   'POST /api/widgets/set': async (body) => {
     const deck = body?.deck === 'b' ? 'b' : 'a';
-    return { status: 200, body: { ok: patternCore.setWidgetValue(deck, Number(body?.at), body?.value) } };
+    const ok = patternCore.setWidgetValue(deck, Number(body?.at), body?.value, body?.lit);
+    // The hand let go: a .record() on this control ends its take (see pattern-core's motion.mjs).
+    if (body?.release) patternCore.releaseWidget(deck, Number(body?.at));
+    return { status: 200, body: { ok } };
   },
 
   // The next stretch of the pattern displays' data - query { deck, from, count } - as the editor's
@@ -9025,7 +9063,10 @@ const routes = {
     // What is held right now, every poll, so the editor can draw it on the code and stop lighting
     // names that are not playing. Sent whole rather than as changes: it is a handful of entries,
     // and a poll that drops (or a tab that reloads) then costs nothing to recover from.
-    return { status: 200, body: { edits, logs, pending: holding, holds: currentHolds() } };
+    // Takes a control's .record() finished since the last poll, for the editor to write into the
+    // code (see pattern-core's motion.mjs).
+    const motionTakes = patternCore.takeMotionTakes();
+    return { status: 200, body: { edits, logs, pending: holding, holds: currentHolds(), motionTakes } };
   },
 
   // Hold one chain slot on a named preset while the editor's preset panel is open on it, so what
@@ -10796,6 +10837,7 @@ const OSC_ENGINE_DIR = path.dirname(require.resolve('@poptart/osc-engine/package
 
 const STATIC_ROOTS = [
   { prefix: '/vendor/codemirror/', root: CODEMIRROR_DIR },
+  { prefix: '/vendor/acorn/', root: ACORN_DIST_DIR, only: ['acorn.mjs'] },
   { prefix: '/pattern-core/', root: PATTERN_CORE_SRC_DIR },
   { prefix: '/web-engine/src/', root: WEB_ENGINE_SRC },
   { prefix: '/web-engine/worklets/', root: path.join(WEB_ENGINE_PUBLIC, 'worklets') },
@@ -11092,7 +11134,9 @@ const server = http.createServer(async (req, res) => {
     res.end(JSON.stringify(responseBody));
   } catch (err) {
     res.writeHead(500, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: err.message ?? String(err) }));
+    // An evaluation's error also says where in the buffer it points, and carries the stack for
+    // the developer console (see blockError).
+    res.end(JSON.stringify({ error: err.message ?? String(err), ...(err?.where ? { where: err.where } : {}), ...(err?.detail ? { detail: err.detail } : {}) }));
   }
 });
 

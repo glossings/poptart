@@ -25,7 +25,7 @@ test('every chapter is indexed, a section per heading, each anchor a heading on 
     assert.ok(page(s.file).includes(`id="${s.anchor}"`), `${s.file}#${s.anchor} is not a heading`);
   }
   const widgets = sections.filter((s) => s.file === 'widgets').map((s) => s.anchor);
-  assert.deepEqual(widgets, ['', 'controls', 'cells', 'size', 'displays', 'background', 'colors']);
+  assert.deepEqual(widgets, ['', 'controls', 'record', 'cells', 'size', 'displays', 'background', 'colors']);
 });
 
 test('a name the guide mentions finds the section about it first', async () => {

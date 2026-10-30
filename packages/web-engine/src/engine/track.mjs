@@ -17,7 +17,7 @@
 // exactly here, so nothing downstream has to know which form it was handed.
 
 import { TRACK_BEND_PARAM, argToValue, clampParam, defaultValues, findParam, normalize } from '../descriptor.mjs';
-import { buildRouting } from './routing.mjs';
+import { buildRouting, loopLatencies } from './routing.mjs';
 
 /** Channel-strip controls this engine implements. The rest warn once - see the engine. */
 export const SUPPORTED_CHANNELS = Object.freeze(['gain', 'postgain', 'pan', 'dry', 'mon', 'width', 'bassmono', 'bend', 'bendrange', 'out', 'grainsize', 'grainrate', 'grainpan', 'grainpos',
@@ -316,6 +316,7 @@ export class Track {
 
     this.slots = new Map();                 // slot index -> Slot
     this.sends = new Map();                 // bus name -> GainNode
+    this.sendPoints = new Map();            // send index -> { mon, fader }: the gates a send written inside the chain leaves through (see sendFrom)
     this.source = null;                     // the instrument node, when there is one
     this.sidechains = new Map();            // slot index -> { from, source } feeding the slot's second input
     this.wetControls = new Map();           // slot index -> the constant its wet level is (see wetControl)
@@ -333,6 +334,7 @@ export class Track {
     this.routePanLaws = new Map();          // gain index -> [left, right] pan-law shapers off rp<k>
     this.slotJoins = [];                    // the per-slot nodes the last wiring made
     this.grainControls = new Map();         // grain control name -> the constant its value is (see grainControl)
+    this.heldDrives = new Map();            // 'width' / 'bassmono' -> the clamped constant they move through (see _heldControl)
   }
 
   /**
@@ -378,14 +380,14 @@ export class Track {
       case 'gain': return this.chainIn.gain;
       case 'postgain': return this.postGain.gain;
       case 'dry': return this.dryGain.gain;
-      case 'width': return this.width.gain;
+      case 'width': return this._heldControl('width', this.width.gain, 0, 4, 8, 5);
       case 'pan': return this.panCtl.offset;
       case 'bend': return this.bendSource().offset;
       case 'bassmono':
         this.bassmonoHz = this.bassmonoHz || 120;
         rampParam(this.sideDry.gain, 0, now, now);
         rampParam(this.sideHigh.gain, 1, now, now);
-        return this._bassMono().frequency;
+        return this._heldControl('bassmono', this._bassMono().frequency, 20, 2000, 4000, 401);
       default: {
         if (name in GRAIN_CHANNEL_FIELDS) return this.grainControl(name).offset;
         if (ROUTE_CONTROL.test(name)) return this.routeControl(name).offset;
@@ -393,6 +395,43 @@ export class Track {
         return index > 0 ? this.wetControl(index).offset : null;
       }
     }
+  }
+
+  /**
+   * The constant a driven control moves through where a bare AudioParam would not hold it to the
+   * range a set value is held to: width to 0..4, bass mono's cutoff to 20 Hz - 2 kHz (a filter at
+   * 0 Hz or below breaks) - the desktop's ranges for both, set and driven. The constant goes
+   * through a shaper whose curve is that clamp into the real parameter, which rests at 0 from then
+   * on, and set values move the constant too (see _stripParam), so a set value and a driven one
+   * are one value. The curve's points fall on the clamp's corners, so the shaper's linear
+   * interpolation IS the clamp; past `reach` either way the shaper holds its end, which is too.
+   */
+  _heldControl(name, param, lo, hi, reach, points) {
+    let held = this.heldDrives.get(name);
+    if (!held) {
+      const ctl = this.ctx.createConstantSource();
+      ctl.offset.value = param.value;
+      const scale = this.ctx.createGain();
+      scale.gain.value = 1 / reach;
+      const shaper = this.ctx.createWaveShaper();
+      const curve = new Float32Array(points);
+      for (let i = 0; i < points; i++) curve[i] = Math.min(hi, Math.max(lo, -reach + (2 * reach * i) / (points - 1)));
+      shaper.curve = curve;
+      ctl.connect(scale);
+      scale.connect(shaper);
+      shaper.connect(param);
+      try { param.cancelScheduledValues(0); } catch { /* nothing scheduled */ }
+      try { param.value = 0; } catch { /* a param that refuses a direct set */ }
+      ctl.start();
+      held = { ctl, scale, shaper };
+      this.heldDrives.set(name, held);
+    }
+    return held.ctl.offset;
+  }
+
+  /** Where a strip control's value goes: its held constant once it has been driven, else the parameter. */
+  _stripParam(name, param) {
+    return this.heldDrives.get(name)?.ctl.offset ?? param;
   }
 
   /**
@@ -415,15 +454,19 @@ export class Track {
     for (const node of this.slotJoins.splice(0)) { try { node.disconnect(); } catch { /* already detached */ } }
     for (const built of this.crossovers.values()) { try { built.node.disconnect(); } catch { /* already detached */ } }
     this._keepCrossovers(this.routing?.order ?? []);
+    this._keepSendPoints();
     if (this.routing) {
       this.routeBuild = buildRouting(this.ctx, this.routing, {
         input: this.chainIn,
         output: this.postGain,
         slotIO: (index) => this._slotIO(index),
         gainStage: (k) => this.routeGain(k),
+        sendPoint: (i) => this.sendPoint(i).mon,
       });
+      this._tellLoops();
       return;
     }
+    this._tellLoops();
     const order = [...this.slots.keys()].filter((i) => i > 0).sort((a, b) => a - b);
     let cursor = this.chainIn;
     for (const index of order) {
@@ -447,6 +490,40 @@ export class Track {
   setRouting(plan) {
     this.routing = plan ?? null;
     this.rewire();
+  }
+
+  /**
+   * What .bus() send `i` (its index among the pattern's sends) leaves from: the post-fader send
+   * output, or - for a send the plan places inside the chain - the gates of its own point, fed by
+   * the wiring with what the send taps. Those gates are the monitor's and the fader's, as the
+   * post-fader send's are: a tapped send still wears the fader, so a deck's crossfade applies to
+   * what a track feeds and a monitored track feeds no bus.
+   */
+  sendFrom(i) {
+    return this.routing?.sends?.[i] ? this.sendPoint(i).fader : this.sendFader;
+  }
+
+  // The point for send `i`, made on first use, with the gates at the track's current values.
+  sendPoint(i) {
+    let point = this.sendPoints.get(i);
+    if (!point) {
+      const gain = (v) => { const g = this.ctx.createGain(); g.gain.value = v; return g; };
+      point = { mon: gain(1 - this.dj.mon), fader: gain(this.dj.fader) };
+      point.mon.connect(point.fader);
+      this.sendPoints.set(i, point);
+    }
+    return point;
+  }
+
+  // The points the wiring still feeds are kept; the rest are let go (the engine moves any send
+  // leaving from one back to the post-fader output, see WebAudioEngine#setRouting).
+  _keepSendPoints() {
+    const sends = this.routing?.sends ?? {};
+    for (const [i, point] of this.sendPoints) {
+      if (sends[i]) continue;
+      for (const node of [point.mon, point.fader]) { try { node.disconnect(); } catch { /* already detached */ } }
+      this.sendPoints.delete(i);
+    }
   }
 
   // One slot's ends for a routed chain: its device's input and dry path in, the wet/dry join out -
@@ -473,7 +550,34 @@ export class Track {
       });
     }
     if (node && slot.descriptor.channels?.key) io.key = { node, input: 1 };
+    // A feedback loop's way out (the second output) and back in (the key).
+    if (node && slot.descriptor.loop) {
+      const tap = this.ctx.createGain();
+      this.slotJoins.push(tap);
+      node.connect(tap, 1);
+      io.loop = tap;
+      io.ret = { node, input: 1 };
+    }
     return io;
+  }
+
+  /**
+   * Tells each device with a feedback loop how late its loop's chain comes back - the render
+   * quantum the return is held to, and the delay of the devices in the chain - or that it has none
+   * (-1), whenever that changes. Every wiring passes through here, so a device opening into a slot
+   * of the chain, or the chain going, is told.
+   */
+  _tellLoops() {
+    const returns = this.routing?.returns ?? {};
+    const quantum = (this.ctx.renderQuantumSize ?? 128) / this.ctx.sampleRate;
+    const chain = loopLatencies(this.routing, (p) => this.slots.get(p)?.descriptor.latencySec ?? 0);
+    for (const [index, slot] of this.slots) {
+      if (!slot.descriptor.loop) continue;
+      const sec = returns[index] ? quantum + (chain[index] ?? 0) : -1;
+      if (slot.loopSec === sec) continue;
+      slot.loopSec = sec;
+      try { slot.built.node?.port?.postMessage({ kind: 'loop', sec }); } catch { /* a node already torn down */ }
+    }
   }
 
   // A crossover's three outputs and its key, off the device the track keeps for it.
@@ -704,12 +808,12 @@ export class Track {
         }
         return true;
       }
-      case 'width': rampParam(this.width.gain, Math.min(4, Math.max(0, value)), atTime, now, g); return true;
+      case 'width': rampParam(this._stripParam('width', this.width.gain), Math.min(4, Math.max(0, value)), atTime, now, g); return true;
       case 'bassmono': {
         // 0 is off; anything else is the cutoff in Hz, held to the desktop's 20 Hz - 2 kHz.
         const on = value > 0;
         this.bassmonoHz = on ? Math.min(2000, Math.max(20, value)) : 0;
-        if (on) rampParam(this._bassMono().frequency, this.bassmonoHz, atTime, now, g);
+        if (on) rampParam(this._stripParam('bassmono', this._bassMono().frequency), this.bassmonoHz, atTime, now, g);
         rampParam(this.sideDry.gain, on ? 0 : 1, atTime, now, g);
         rampParam(this.sideHigh.gain, on ? 1 : 0, atTime, now, g);
         return true;
@@ -721,6 +825,7 @@ export class Track {
         this.dj.mon = value > 0 ? 1 : 0;
         rampParam(this.monGate.gain, 1 - this.dj.mon, atTime, now, g);
         rampParam(this.sendMain.gain, 1 - this.dj.mon, atTime, now, g);
+        for (const point of this.sendPoints.values()) rampParam(point.mon.gain, 1 - this.dj.mon, atTime, now, g);
         this._djCue(atTime, now, g);
         return true;
       }
@@ -769,6 +874,7 @@ export class Track {
         this.dj.fader = clamp(0, 1);
         rampParam(this.faderGain.gain, this.dj.fader, atTime, now, g ?? DJ_GLIDE_SEC);
         rampParam(this.sendFader.gain, this.dj.fader, atTime, now, g ?? DJ_GLIDE_SEC);
+        for (const point of this.sendPoints.values()) rampParam(point.fader.gain, this.dj.fader, atTime, now, g ?? DJ_GLIDE_SEC);
         if (this.fx) rampParam(this.fx.fader.gain, this.dj.fader, atTime, now, g ?? DJ_GLIDE_SEC);
         break;
       case 'deck':
@@ -1039,6 +1145,8 @@ export class Track {
     for (const index of [...this.slots.keys()]) this.clearSlot(index, { rewire: false });
     for (const g of this.sends.values()) g.disconnect();
     this.sends.clear();
+    for (const point of this.sendPoints.values()) for (const node of [point.mon, point.fader]) { try { node.disconnect(); } catch { /* already detached */ } }
+    this.sendPoints.clear();
     for (const index of [...this.sidechains.keys()]) this.clearSidechain(index);
     // The bend constant is a started source: unplugged but not stopped, it runs for the life of
     // the page.
@@ -1053,6 +1161,11 @@ export class Track {
     this.routeBuild?.teardown();
     this._keepCrossovers([]);
     for (const law of [...this.routePanLaws.values()].flat()) { try { law.disconnect(); } catch { /* already detached */ } }
+    for (const { ctl, scale, shaper } of this.heldDrives.values()) {
+      try { ctl.stop(); } catch { /* already stopped */ }
+      for (const n of [ctl, scale, shaper]) { try { n.disconnect(); } catch { /* already detached */ } }
+    }
+    this.heldDrives.clear();
     for (const ctl of [this.panCtl, ...this.wetControls.values(), ...this.routeControls.values(), ...this.grainControls.values()]) {
       try { ctl.stop(); } catch { /* already stopped */ }
       try { ctl.disconnect(); } catch { /* already detached */ }

@@ -9,6 +9,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
+// A send as a group writes it: its name and amount (`at` is where in the chain it is written).
+const sends = (sig) => sig.busSends.map(({ name, amount }) => ({ name, amount }));
+
 import { s, group, audio } from './src/signal.mjs';
 import {
   isGroupSig, routeGroups, treeOfBlocks, normalizeGroupTree, parentsOf, ancestorsOf, descendantsOf, markerResolver,
@@ -144,10 +147,10 @@ test('routeGroups: the group reads its own bus, its members send into it and go 
   const by = byLabel(blocks);
   assert.deepEqual(by.kick.inputSource, { io: 'audio', name: 'bus:kick' });
   assert.equal(isGroupSig(by.kick), false, 'resolved: the marker has done its job');
-  assert.deepEqual(by.kickMain.busSends, [{ name: 'kick', amount: 1 }]);
-  assert.deepEqual(by.kickFill.busSends, [{ name: 'kick', amount: 1 }]);
+  assert.deepEqual(sends(by.kickMain), [{ name: 'kick', amount: 1 }]);
+  assert.deepEqual(sends(by.kickFill), [{ name: 'kick', amount: 1 }]);
   assert.equal(by.kickMain.channel.dry.sample(0), 0);
-  assert.deepEqual(by.hat.busSends, [], 'a track in no group is untouched');
+  assert.deepEqual(sends(by.hat), [], 'a track in no group is untouched');
   assert.equal(by.hat.channel.dry, undefined);
 });
 
@@ -155,7 +158,7 @@ test("routeGroups: the bus is named by busOf, so two decks' groups do not share 
   const blocks = blocksOf({ kick: group(), kickMain: s('bd*4') });
   routeGroups(blocks, (label) => `b:${label}`, { kick: ['kickMain'] });
   assert.equal(blocks[0].sig.inputSource.name, 'bus:b:kick');
-  assert.deepEqual(blocks[1].sig.busSends, [{ name: 'b:kick', amount: 1 }]);
+  assert.deepEqual(sends(blocks[1].sig), [{ name: 'b:kick', amount: 1 }]);
 });
 
 test('routeGroups: a member of a track that is NOT a group plays as it always did', () => {
@@ -163,7 +166,7 @@ test('routeGroups: a member of a track that is NOT a group plays as it always di
   const { groups, members } = routeGroups(blocks, undefined, { kick: ['kickFill'] });
   assert.equal(groups.size, 0);
   assert.equal(members.size, 0);
-  assert.deepEqual(blocks[1].sig.busSends, [], 'losing a group frees its members, never silences them');
+  assert.deepEqual(sends(blocks[1].sig), [], 'losing a group frees its members, never silences them');
   assert.equal(blocks[1].sig.channel.dry, undefined);
 });
 
@@ -171,7 +174,7 @@ test("routeGroups: a member's own .dry() and an existing send to the bus are res
   const blocks = blocksOf({ kick: group(), kickMain: s('bd*4').dry(1), kickWet: s('bd*8').bus('kick', 0.5) });
   routeGroups(blocks, undefined, { kick: ['kickMain', 'kickWet'] });
   assert.equal(blocks[1].sig.channel.dry.sample(0), 1, 'an explicit dry stands');
-  assert.deepEqual(blocks[2].sig.busSends, [{ name: 'kick', amount: 0.5 }], 'not sent twice');
+  assert.deepEqual(sends(blocks[2].sig), [{ name: 'kick', amount: 0.5 }], 'not sent twice');
   assert.equal(blocks[2].sig.channel.dry.sample(0), 0);
 });
 
@@ -180,11 +183,11 @@ test('routeGroups: a SUBGROUP reads its own bus and sends into its parent', () =
   const { members } = routeGroups(blocks, undefined, { drums: ['kick', 'snare'], kick: ['kickMain'] });
   const by = byLabel(blocks);
   assert.deepEqual(by.kick.inputSource, { io: 'audio', name: 'bus:kick' }, 'still reads its own');
-  assert.deepEqual(by.kick.busSends, [{ name: 'drums', amount: 1 }], '...and sends into its parent');
+  assert.deepEqual(sends(by.kick), [{ name: 'drums', amount: 1 }], '...and sends into its parent');
   assert.equal(by.kick.channel.dry.sample(0), 0);
-  assert.deepEqual(by.kickMain.busSends, [{ name: 'kick', amount: 1 }], 'two levels down, one hop up');
-  assert.deepEqual(by.snare.busSends, [{ name: 'drums', amount: 1 }]);
-  assert.deepEqual(by.drums.busSends, [], 'the top of the tree plays out');
+  assert.deepEqual(sends(by.kickMain), [{ name: 'kick', amount: 1 }], 'two levels down, one hop up');
+  assert.deepEqual(sends(by.snare), [{ name: 'drums', amount: 1 }]);
+  assert.deepEqual(sends(by.drums), [], 'the top of the tree plays out');
   assert.equal(members.has('kick'), true);
   assert.equal(members.has('drums'), false);
 });
@@ -193,10 +196,10 @@ test('routeGroups: with a `main:` group, everything ungrouped reaches it', () =>
   const blocks = blocksOf({ main: group(), drums: group(), kick: s('bd*4'), bass: s('bass') });
   const { routedParents } = routeGroups(blocks, undefined, { drums: ['kick'] });
   const by = byLabel(blocks);
-  assert.deepEqual(by.bass.busSends, [{ name: 'main', amount: 1 }], 'a loose track goes to the root');
-  assert.deepEqual(by.drums.busSends, [{ name: 'main', amount: 1 }], '...and so does a top-level group');
-  assert.deepEqual(by.kick.busSends, [{ name: 'drums', amount: 1 }], 'a grouped track keeps its own group');
-  assert.deepEqual(by.main.busSends, [], 'the root itself plays out');
+  assert.deepEqual(sends(by.bass), [{ name: 'main', amount: 1 }], 'a loose track goes to the root');
+  assert.deepEqual(sends(by.drums), [{ name: 'main', amount: 1 }], '...and so does a top-level group');
+  assert.deepEqual(sends(by.kick), [{ name: 'drums', amount: 1 }], 'a grouped track keeps its own group');
+  assert.deepEqual(sends(by.main), [], 'the root itself plays out');
   assert.deepEqual(by.main.inputSource, { io: 'audio', name: 'bus:main' });
   assert.equal(routedParents.get('bass'), GROUP_ROOT);
   assert.equal(routedParents.get('kick'), 'drums');
@@ -207,7 +210,7 @@ test('routeGroups: no `main:` block, no root routing - tracks play straight out'
   const blocks = blocksOf({ kick: s('bd*4'), bass: s('bass') });
   const { members } = routeGroups(blocks, undefined, {});
   assert.equal(members.size, 0);
-  assert.deepEqual(blocks[0].sig.busSends, []);
+  assert.deepEqual(sends(blocks[0].sig), []);
   assert.equal(blocks[0].sig.channel.dry, undefined, 'a mastering chain costs nothing until it is asked for');
 });
 
@@ -219,6 +222,6 @@ test("routeGroups: with no tree given, the blocks' own parent fields route", () 
   ];
   const { members } = routeGroups(blocks);
   assert.deepEqual([...members], ['kickMain']);
-  assert.deepEqual(blocks[1].sig.busSends, [{ name: 'kick', amount: 1 }]);
-  assert.deepEqual(blocks[2].sig.busSends, []);
+  assert.deepEqual(sends(blocks[1].sig), [{ name: 'kick', amount: 1 }]);
+  assert.deepEqual(sends(blocks[2].sig), []);
 });

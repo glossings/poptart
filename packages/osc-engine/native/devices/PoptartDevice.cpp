@@ -14,7 +14,7 @@
 //   inputs:  [bend (kr), numMain, main0..., numSidechain, sidechain0...]
 //   outputs: numChannels audio channels
 //   unit commands: /open /close /set /map /mapa /unmap /noteOn /noteOff /allNotesOff
-//                  /sample /shape /report /sidechain /noteRoute /transport
+//                  /sample /shape /report /sidechain /noteRoute /transport /loopLatency
 //
 // which is what lets sc/poptart.scd treat a native device and a plugin as the same kind of thing
 // (see PoptartDeviceController in classes/PoptartDevice.sc): one `.set`, one `.map`, one
@@ -220,6 +220,7 @@ struct PoptartDevice : public SCUnit {
 
         mNotes = (NoteEvent*)RTAlloc(mWorld, sizeof(NoteEvent) * kFirstNoteRoom);
         mNoteRoom = mNotes ? kFirstNoteRoom : 0;
+        mBendCopy = (float*)RTAlloc(mWorld, sizeof(float) * (size_t)mWorld->mBufLength);
 
         // Shared with every open this unit ever asks for, and outliving the unit if one is
         // still in flight when it goes.
@@ -258,6 +259,7 @@ struct PoptartDevice : public SCUnit {
         mSamples = mRetiringSamples = nullptr;
         freeShapes();
         if (mNotes) RTFree(mWorld, mNotes);
+        if (mBendCopy) RTFree(mWorld, mBendCopy);
         if (mControls) RTFree(mWorld, mControls);
         if (mReportBuf) RTFree(mWorld, mReportBuf);
     }
@@ -515,7 +517,9 @@ struct PoptartDevice : public SCUnit {
     void report(float id) {
         const int count = mDevice ? mParamCount : 0;
         // Made on the first ask, the size this device's answer can be.
-        const int room = 3 + count + kDeviceReport;
+        // A device whose report grows with what it holds (a filter bank's bands) says how far.
+        const int wants = mDevice ? mDevice->reportRoom() : 0;
+        const int room = 3 + count + (wants > kDeviceReport ? wants : kDeviceReport);
         if (room > mReportRoom) {
             float* more = (float*)RTAlloc(mWorld, sizeof(float) * (size_t)room);
             if (!more) return;
@@ -540,6 +544,7 @@ struct PoptartDevice : public SCUnit {
 
     void setKeyPatched(bool on) { mKeyPatched = on; }
     void setNoteRoute(bool on) { mNoteRoute = on; }
+    void setLoopLatency(float seconds) { mLoopSec = seconds; }
 
     /**
      * The tempo, and the beat the transport is at. Turned into seconds here because that is
@@ -664,8 +669,20 @@ private:
 
         const bool isSynth = mInfo->isSynth != 0;
         const bool sidechained = mInfo->sidechain != 0;
-        const float* bendIn = in(kBendInput);
-        const bool bendMoving = isSynth && inRate(kBendInput) == calc_FullRate;
+        const float* bendWire = in(kBendInput);
+        // A bend at the sample rate that holds still for the block (the track's head hands every
+        // instrument one - see poptart.scd's chanIn) is a number for this block, and the device
+        // renders it whole; only one that moves is followed in pieces.
+        // Copied first (see mBendCopy): the device's pieces write the outputs as they go.
+        const float bendHeld = bendWire[0];
+        bool bendMoving = isSynth && inRate(kBendInput) == calc_FullRate && mBendCopy;
+        if (bendMoving) {
+            bendMoving = false;
+            for (int j = 1; j < inNumSamples; ++j) {
+                if (bendWire[j] != bendHeld) { bendMoving = true; break; }
+            }
+            if (bendMoving) for (int j = 0; j < inNumSamples; ++j) mBendCopy[j] = bendWire[j];
+        }
 
         float* devIn = device->in();
         float* devOut = device->out();
@@ -723,12 +740,18 @@ private:
                 }
             }
 
-            if (isSynth) device->bend(bendMoving ? bendIn[at] : bendIn[0]);
+            if (isSynth) device->bend(bendMoving ? mBendCopy[at] : bendHeld);
             // What is routed into this slot. Said every block rather than on the change: the
             // device that asks is one device, the call is a virtual one per block, and a flag
             // that arrives while a device is being swapped would otherwise be lost.
             device->keyPatched(mKeyPatched);
             device->noteRoute(mNoteRoute);
+            // How late a chain in the device's feedback loop comes back: the chain's own devices,
+            // as the engine says, and this server's block, since the return is read a block late
+            // (InFeedback in the track's effect def).
+            device->loop(mLoopSec >= 0.f
+                ? (double)mLoopSec + (double)mWorld->mBufLength / (double)mWorld->mSampleRate
+                : -1.0);
             // Where the transport is at the start of this piece: the position we were last told,
             // plus the time since. A device that is not synced to anything ignores it.
             device->transport(mBpm, transportAt(at));
@@ -839,6 +862,11 @@ private:
     bool mKeyPatched = false;
     /** Whether a track's notes are routed to this slot (.midi(...)), for the ducker. */
     bool mNoteRoute = false;
+    /**
+     * The delay of the devices in a chain run inside this device's feedback loop, in seconds, or
+     * below zero for none (see PdAny::loop). The node outlives the device in it, so this does too.
+     */
+    float mLoopSec = -1.f;
     /** The tempo and the transport, for the devices that are synced to it. */
     double mBpm = 120.0;
     double mTransportSec = 0.0;
@@ -890,6 +918,9 @@ private:
     /** The notes for the coming block, soonest first: room for mNoteRoom, doubled when full. */
     struct NoteEvent { int offset; int kind; float note; float velocity; };
     NoteEvent* mNotes = nullptr;
+    // The block's bend at the sample rate, read before anything is written: scsynth may hand this
+    // unit's output the very buffer its bend input arrives in, so it is gone once a piece renders.
+    float* mBendCopy = nullptr;
     int mNoteRoom = 0;
     int mNoteCount = 0;
     bool growNotes() {
@@ -1111,6 +1142,11 @@ void cmdUnmap(Unit* unit, sc_msg_iter* args) {
  */
 void cmdSidechain(Unit* unit, sc_msg_iter* args) {
     ((PoptartDevice*)unit)->setKeyPatched(args->geti(0) != 0);
+}
+
+/** "a chain in the feedback loop is this late, or gone (< 0)", from whoever wired the chain. */
+void cmdLoopLatency(Unit* unit, sc_msg_iter* args) {
+    ((PoptartDevice*)unit)->setLoopLatency(args->getf(-1.f));
 }
 
 /** "a track's notes are (no longer) routed into this slot", from whoever wired that route. */
@@ -1338,6 +1374,7 @@ PluginLoad(PoptartDeviceUGens) {
     DefineUnitCmd("PoptartDevice", "/allNotesOff", cmdAllNotesOff);
     DefineUnitCmd("PoptartDevice", "/sidechain", cmdSidechain);
     DefineUnitCmd("PoptartDevice", "/noteRoute", cmdNoteRoute);
+    DefineUnitCmd("PoptartDevice", "/loopLatency", cmdLoopLatency);
     DefineUnitCmd("PoptartDevice", "/transport", cmdTransport);
     DefineUnitCmd("PoptartDevice", "/sample", cmdSample);
     DefineUnitCmd("PoptartDevice", "/shape", cmdShape);

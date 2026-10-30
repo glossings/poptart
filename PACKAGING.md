@@ -300,10 +300,12 @@ packaging and nothing about sound. Each platform needs a person with that machin
 short checklist (installs, boots, scans plugins, a note plays, a VST editor opens) on every
 release candidate.
 
-Windows gap to close first: the keylock UGen and the Link helper are built for macOS only
-(one binary in each `bin/`), and `poptart-audio` is Swift. Keylock falls back to the SOLA def
-and Link disables itself when its helper is absent, so a first Windows installer can ship
-without them, but their `build.sh` scripts need Windows counterparts before parity.
+Windows gap to close first: the Link helper is built for macOS only, and `poptart-audio` is
+Swift; Link disables itself when its helper is absent. The two scsynth extensions (the devices
+and the keylock UGen) are committed for macOS only, in their `bin/`; for Windows the release
+workflow builds them with the runner's LLVM into `bin/win32-x64/` and `stage.js` ships them from
+there (`POPTART_REQUIRE_EXTENSIONS=1` stops the build without them). `tests.yml` builds and tests
+them on Windows and on Linux (`bin/linux-x64/`, `.so`) on every push.
 
 ### One-time setup outside the repo
 

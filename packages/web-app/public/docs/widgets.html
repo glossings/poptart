@@ -53,6 +53,21 @@ chords: note("&lt;[c3,eb3,g3] [ab2,c3,eb3]&gt;").synth("Wavetable")
   .fx("Filter").param("Cutoff", pad.y)
   .postgain(0.3)</code></pre>
 
+        <h2 id="record">Recording a movement</h2>
+        <p>
+          <code>.record({ cycles })</code> on a control records how you move it while the music plays. Let go, or leave a MIDI or
+          OSC controller still for a cycle, and the movement loops, <code>cycles</code> long, on the same
+          beats it was played on. The take is kept as a drawn shape: the call gains
+          <code>take: "name"</code>, the shape opens in the shape editor, and moving the control again
+          records a new take in its place. It works the same on <code>slider()</code>, <code>knob()</code>,
+          <code>toggle()</code>, <code>button()</code>, <code>xy()</code> (both axes),
+          <code>midicc()</code>, <code>osc()</code> and <code>macro()</code>.
+        </p>
+        <pre data-run><code>setbpm(120)
+pad: note("&lt;c3 eb3 g3 bb2&gt;").synth("Wavetable")
+  .fx("Filter").param("Cutoff", knob(0.5, 0.2, 0.9).record({ cycles: 2 }))
+  .postgain(0.3)</code></pre>
+
         <h2 id="cells">Steps, bars and grids</h2>
         <table>
           <tr><th>Call</th><th></th></tr>
@@ -62,10 +77,14 @@ chords: note("&lt;[c3,eb3,g3] [ab2,c3,eb3]&gt;").synth("Wavetable")
           <tr><td><code>steps(8)</code> · <code>sliders(8)</code> · <code>matrix({ bd: 8, sd: 8 })</code></td><td>that many empty steps, bars halfway up, or empty rows, to click into</td></tr>
         </table>
         <p>
-          These three are drawn in place of their call: the cells stand where the text was. Click a cell to
+          These three are drawn in place of their call: the cells stand where the text was, with a wider gap
+          every four steps in a row of fours, so the beats can be counted. Click a cell to
           switch it, or drag across a row to paint; drag a bar up or down to set it. Each change rewrites the
           text behind the cells, so undo, copy and paste carry it like any other code. The first click on a
           count writes the cells out, so <code>steps(8)</code> becomes <code>steps("x . . . . . . .")</code>.
+          A cell lights while it sounds, as the text under it would: through <code>cat()</code> only the
+          row that is playing lights, and through <code>bite()</code> the cells light in the order they
+          are played.
         </p>
         <p>
           Written with nothing inside, <code>steps()</code> and <code>sliders()</code> draw eight cells. A

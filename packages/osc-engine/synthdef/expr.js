@@ -10,9 +10,14 @@ const G = require('./graph.js');
 const U = require('./ugens.js');
 
 const { SynthDef, add, sub, mul, div, mod, min, max, pow, gt, ge, lt, le, abs, neg, round, floor, ceil, log, sum, dup } = G;
-const { In, Out, K2A, A2K, DC, Select, clip } = U;
+const { In, Out, K2A, A2K, DC, Select, Lag, LagUD, clip } = U;
 
 const kids = (node) => node.a ?? [];
+
+// A lag in the tree - the envelope follower (op 'env') or smooth() - is computed at audio rate
+// whatever its inputs are, so a tree with one is an audio-rate def (hasLag).
+const isLag = (node) => String(node.k) === 'fn' && ['env', 'smooth'].includes(String(node.op));
+const hasLag = (node) => isLag(node) || kids(node).some(hasLag);
 
 /** The tree's shape: what decides the SynthDef (exprShape). */
 function exprShape(node) {
@@ -44,7 +49,7 @@ function exprInputs(node, into = []) {
     case 'const': break;
     case 'in': {
       const i = Math.trunc(Number(node.i));
-      if (!into.some((e) => e.i === i)) into.push({ i, source: node.source == null ? null : String(node.source), rate: node.rate == null ? null : String(node.rate) });
+      if (!into.some((e) => e.i === i)) into.push({ i, source: node.source == null ? null : String(node.source), rate: node.rate == null ? null : String(node.rate), ...(Number(node.step) === 1 ? { step: true } : {}) });
       break;
     }
     default: for (const a of kids(node)) exprInputs(a, into);
@@ -85,9 +90,12 @@ function treeRates(tree) {
 /** The SynthDef for a tree (exprSynthDef). outKind: 'device', 'plugin' or 'channel'. */
 function buildExprSynthDef(defName, tree, outKind, rates, warn = () => {}) {
   const rs = rates ?? treeRates(tree);
-  const audio = rs.includes('ar');
+  const audio = rs.includes('ar') || hasLag(tree);
   return new SynthDef(defName, { out: 0 }, (c, def) => {
     let n = 0;
+    // null: an audio input reads as its pair's mid, (L + R) / 2. 0 or 1: inside an envelope
+    // follower's input, which is walked once per side for its linked peak - that side alone.
+    let chan = null;
     const kr = (name, v) => def.namedKr(name, v);
     const walk = (node) => {
       switch (String(node.k)) {
@@ -101,8 +109,11 @@ function buildExprSynthDef(defName, tree, outKind, rates, warn = () => {}) {
           if (rs[i] === 'ar') {
             const kb = kr(`k${i}`, -1);
             const ab = kr(`a${i}`, -1);
-            return add(K2A.ar(Select.kr(ge(kb, 0), [0, In.kr(max(kb, 0))])),
-              Select.ar(ge(ab, 0), [DC.ar(0), mul(sum(In.ar(max(ab, 0), 2)), 0.5)]));
+            const kpart = K2A.ar(Select.kr(ge(kb, 0), [0, In.kr(max(kb, 0))]));
+            const on = ge(ab, 0);
+            const off = DC.ar(0);
+            const pair = In.ar(max(ab, 0), 2);
+            return add(kpart, Select.ar(on, [off, chan == null ? mul(sum(pair), 0.5) : pair[chan]]));
           }
           const kb = kr(`k${i}`, -1);
           const kv = Select.kr(ge(kb, 0), [0, In.kr(max(kb, 0))]);
@@ -119,6 +130,40 @@ function buildExprSynthDef(defName, tree, outKind, rates, warn = () => {}) {
           return clip(div(sub(x, lo), sub(hi, lo)), 0, 1);
         }
         case 'fn': {
+          if (isLag(node)) {
+            // The envelope follower: the rectified level, clipped at full scale, rising over the
+            // attack time and falling over the release (LagUD). smooth(): the input lagged by one
+            // time both ways (Lag). Each time is how long it takes to get within 60 dB of a new
+            // value, read once per block, at control rate.
+            // A follower takes its input's linked peak, max(|L|, |R|): the input is walked once
+            // per side, every audio input in it reading that side alone, so an out-of-phase pair
+            // reads its level and not the 0 of its mid. The constants are the same controls both
+            // times. smooth() lags the input as it reads, mid and all.
+            const src = node.a[0];
+            const follow = String(node.op) === 'env';
+            let x;
+            if (follow) {
+              const outer = chan;
+              const from = n;
+              chan = 0;
+              let l = walk(src);
+              n = from;
+              chan = 1;
+              let r = walk(src);
+              chan = outer;
+              if (G.rateOf(l) !== 'audio') l = K2A.ar(l);
+              if (G.rateOf(r) !== 'audio') r = K2A.ar(r);
+              x = max(abs(l), abs(r));
+            } else {
+              x = walk(src);
+              if (G.rateOf(x) !== 'audio') x = K2A.ar(x);
+            }
+            const perBlock = (y) => (G.rateOf(y) === 'audio' ? A2K.kr(y) : y);
+            if (String(node.op) === 'smooth') return Lag.ar(x, max(perBlock(walk(node.a[1])), 0));
+            const atk = perBlock(walk(node.a[1]));
+            const rel = perBlock(walk(node.a[2]));
+            return LagUD.ar(min(x, 1), max(atk, 0), max(rel, 0));
+          }
           const x = walk(node.a[0]);
           switch (String(node.op)) {
             case 'abs': return abs(x);
@@ -164,6 +209,7 @@ function buildExprSynthDef(defName, tree, outKind, rates, warn = () => {}) {
     if (typeof v === 'number') v = audio ? DC.ar(v) : DC.kr(v);
     if (audio) {
       if (outKind === 'device') Out.ar(c.out, [v, v]);
+      else if (outKind === 'channelAr') Out.ar(c.out, v);
       else if (outKind === 'plugin') Out.kr(c.out, clip(A2K.kr(v), 0, 1));
       else Out.kr(c.out, A2K.kr(v));
     } else if (outKind === 'device') Out.ar(c.out, dup(K2A.ar(v)));

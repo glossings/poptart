@@ -25,7 +25,7 @@ const { execFileSync } = require('node:child_process');
 
 const { resolveSclangPath } = require('./index.js');
 const { readWavRaw } = require('./wav.js');
-const { userExtensionsDir } = require('./extensions.js');
+const { userExtensionsDir, DEVICE_BINARY } = require('./extensions.js');
 const { desktopRouting } = require('./route-desktop');
 const { nativeDevice } = require('./native-devices');
 
@@ -35,7 +35,7 @@ const DUR = 2.0;
 const PORT = 57321; // its own: a package run's sclangs race for any shared port
 const SCD = path.join(__dirname, 'sc', 'poptart.scd');
 const NATIVE_DIR = path.join(__dirname, 'native', 'devices');
-const SCX = path.join(NATIVE_DIR, 'bin', 'PoptartDevices.scx');
+const SCX = DEVICE_BINARY; // this platform's build (extensions.js)
 const VSTPLUGIN_DIR = path.join(userExtensionsDir(), 'VSTPlugin', 'plugins');
 const NOWHERE = 1000000;
 
@@ -60,6 +60,7 @@ function liftedSource() {
   return {
     routeNowhere,
     code: [
+      lift(src, /^chanIn = \{[\s\S]*?^\};$/m, 'chanIn'),
       lift(src, /^djIsolator = \{[\s\S]*?^\};$/m, 'djIsolator'),
       lift(src, /^buildHeadDef = \{[\s\S]*?^\};$/m, 'buildHeadDef'),
       lift(src, /^buildFxDef = \{[\s\S]*?^\};$/m, 'buildFxDef'),
@@ -174,9 +175,9 @@ async function render(dir, list) {
     // The route controls: a level/pan publisher per gain, a frequency per crossover.
     const gains = {};
     const gainBus = (g) => {
-      if (!g) return 'unityBus';
+      if (!g) return -1; // a term at no gain: unity, center
       if (gains[g] == null) {
-        gains[g] = nextKr(2);
+        gains[g] = nextAudio(); // the publisher's level and pan, per sample (see chanIn)
         const level = s.controls[`rl${g}`]?.sample(0, 1, 0) ?? 1;
         const pan = s.controls[`rp${g}`]?.sample(0, 1, 0) ?? 0;
         msgs.push(`[0.0, ['/s_new', 'poptart_gainkr', ${ids++}, 1, ${krGroup}, 'out', ${gains[g]}, 'level', ${level}, 'pan', ${pan}]]`);
@@ -230,7 +231,7 @@ async function render(dir, list) {
   const script = `(
 var playChannels = ${list.length * 2}, server, trackDefName, bendPollHz = 100, cueOffset, deckMeterBus;
 var routeNowhere = ${NOWHERE};
-var buildTrackDef, buildHeadDef, buildFxDef, buildXoverDef, djIsolator;
+var buildTrackDef, buildHeadDef, buildFxDef, buildXoverDef, djIsolator, chanIn;
 var strip, defs, score, options, fxIx, xoIx, fx, xover;
 ${fs.existsSync(scsynth) ? `Score.program = ${q(scsynth)}.quote;` : ''}
 server = (options: (numOutputBusChannels: ${list.length * 2}));

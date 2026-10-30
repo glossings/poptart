@@ -62,12 +62,13 @@ test('params and modulators drive their buses on a real server and come off clea
     await wait(0.15);
     assert.ok(Math.abs((await busValue(ramp.bus)) - 0.8) < 1e-6, 'the ramp glides to the next value');
 
-    // An LFO on pan takes the ramp's place: a flat square at 0.3 is 0.3.
+    // An LFO on gain takes the ramp's place - at the sample rate, on an audio bus the head reads
+    // per sample (gainAr), as the browser drives a channel control.
     E.dispatch('/poptart/setParamLFO', ['t', -1, 'gain', 'square', 1, 0, 0.3, 0.3]);
     const lfo = await until(() => track.lfos.get('slot-1_gain'), 'the lfo');
     assert.ok(!track.ramps.has('slot-1_gain'), 'the native modulator took over from the ramp');
-    await wait(0.1);
-    assert.ok(Math.abs((await busValue(lfo.bus)) - 0.3) < 1e-6, `the lfo writes its bus: ${await busValue(lfo.bus)}`);
+    assert.strictEqual(lfo.audio, true, 'a channel control is driven at the sample rate');
+    assert.strictEqual(track.chanAr?.get('gain'), lfo.bus.index, 'the head reads the lfo\'s audio bus');
 
     // A drawn shape on pan, from the table files the engine writes: a flat line at 0.6.
     const engineLike = { _shapeKeys: new Map(), _shapeFileSerial: 9000 };
@@ -75,7 +76,10 @@ test('params and modulators drive their buses on a real server and come off clea
     E.dispatch('/poptart/setParamShapeLFO', ['t', -1, 'pan', 'free', 1, 0, 0, 1, 'k1', paths]);
     const shape = await until(() => track.lfos.get('slot-1_pan'), 'the shape lfo');
     await wait(0.15);
-    assert.ok(Math.abs((await busValue(shape.bus)) - 0.6) < 1e-3, `the shape writes its bus: ${await busValue(shape.bus)}`);
+    assert.strictEqual(shape.audio, true);
+    // A driven pan is read through a pan-law node of its own, made for the driver.
+    assert.ok(track.panLaw && await nodeExists(S, track.panLaw.node.nodeID), 'the pan law node runs');
+    assert.strictEqual(track.chanAr?.get('pan'), shape.bus.index);
     for (const p of JSON.parse(paths)) assert.ok(!fs.existsSync(p), 'the table files are read and deleted');
 
     // An envelope on width, born closed (nothing held): at 0.
@@ -83,7 +87,8 @@ test('params and modulators drive their buses on a real server and come off clea
     const env = await until(() => track.envs.get('slot-1_width'), 'the env');
     assert.ok(await nodeExists(S, env.synth.nodeID));
     await wait(0.05);
-    assert.strictEqual(await busValue(env.bus), 0);
+    assert.strictEqual(env.audio, true);
+    assert.strictEqual(track.chanAr?.get('width'), env.bus.index);
 
     // An expression on postgain: its def is built and loaded on the fly, its output is the constant.
     E.dispatch('/poptart/setParamExpr', ['t', -1, 'postgain', JSON.stringify({ k: 'op', op: 'add', a: [{ k: 'const', v: 0.25 }, { k: 'const', v: 0.5 }] })]);
@@ -103,6 +108,7 @@ test('params and modulators drive their buses on a real server and come off clea
     E.dispatch('/poptart/clearParamExpr', ['t', -1, 'postgain']);
     await wait(0.6);
     for (const n of [lfo.synth, shape.synth, env.synth, expr.synth]) assert.ok(!(await nodeExists(S, n.nodeID)), `node ${n.nodeID} was freed`);
+    assert.ok(!track.panLaw && !track.chanAr.size, 'every channel control is back on its control');
     await wait(2.2);
     assert.ok(!E.defs.has(expr.def), "the expression's def went once nothing used it");
     assert.ok(!/FAILURE IN SERVER/.test(output), `the server failed a command:\n${output.split('\n').filter((l) => /FAILURE/.test(l)).join('\n')}`);

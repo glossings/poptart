@@ -29,7 +29,7 @@ function liftedSource() {
   const probe = lift(src, /SynthDef\(\\poptart_rbprobe, \{[\s\S]*?\n\s*\}\)/, 'poptart_rbprobe');
   const view = lift(src, /^viewTap\[\\buildDefs\] = \{[\s\S]*?^\};$/m, 'viewTap[\\buildDefs]');
   return {
-    functions: [...['djIsolator', 'buildHeadDef', 'buildFxDef', 'buildXoverDef', 'buildTrackDef', 'buildDjDef',
+    functions: [...['chanIn', 'djIsolator', 'buildHeadDef', 'buildFxDef', 'buildXoverDef', 'buildTrackDef', 'buildDjDef',
       'buildTapDef', 'buildBassMonoDef', 'buildMixDef', 'mixBank', 'exprSynthDef'].map(fn), view].join('\n'),
     boot: lines.slice(from, to + 1).join('\n'),
     probe,
@@ -59,7 +59,7 @@ var cueOffset = ${cfg.cueOffset ?? 'nil'};
 var lfoDefName = { |shape, audio| ("poptart_lfo_" ++ shape ++ if (audio) { "_ar" } { "" }).asSymbol };
 var trackDefName = { |key| ("poptart_track_" ++ key).asSymbol };
 var bendPollHz = 100, grainMaxOverlap = 128, mixBandFreqs;
-var djIsolator, buildHeadDef, buildFxDef, buildXoverDef, buildTrackDef, buildDjDef, buildTapDef, buildBassMonoDef;
+var chanIn, djIsolator, buildHeadDef, buildFxDef, buildXoverDef, buildTrackDef, buildDjDef, buildTapDef, buildBassMonoDef;
 var buildMixDef, mixBank, exprSynthDef, viewTap = ();
 var defs = List.new, dir = ${JSON.stringify(dir)};
 ${text}

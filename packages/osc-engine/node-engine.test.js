@@ -24,11 +24,24 @@ const OSC_IN_PORT = 57442;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// The sclang processes THIS test started: descendants of this process only. Other suites running
+// at the same time start sclang of their own, and counting those failed the test for nothing.
 function sclangRunning(pidsBefore) {
   try {
-    const out = execFileSync('ps', ['-axo', 'pid=,comm='], { encoding: 'utf8' });
-    return out.split('\n').filter((l) => /sclang/.test(l)).map((l) => Number(l.trim().split(/\s+/)[0]))
-      .filter((pid) => !pidsBefore.has(pid));
+    const out = execFileSync('ps', ['-axo', 'pid=,ppid=,comm='], { encoding: 'utf8' });
+    const parent = new Map();
+    const sclang = [];
+    for (const line of out.split('\n')) {
+      const [pid, ppid, ...comm] = line.trim().split(/\s+/);
+      if (!pid) continue;
+      parent.set(Number(pid), Number(ppid));
+      if (/sclang/.test(comm.join(' '))) sclang.push(Number(pid));
+    }
+    const mine = (pid) => {
+      for (let p = parent.get(pid), n = 0; p > 1 && n < 64; p = parent.get(p), n++) if (p === process.pid) return true;
+      return false;
+    };
+    return sclang.filter((pid) => mine(pid) && !pidsBefore.has(pid));
   } catch {
     return [];
   }

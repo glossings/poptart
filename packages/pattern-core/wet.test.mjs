@@ -145,8 +145,9 @@ test('each fx slot crossfades between its input and the plugin, gated by the loa
 
   // The mix is `active` AND the user's wet: an unloaded slot outputs silence, not pass-through,
   // so it has to read as dry however the wet control is set.
-  assert.match(src, /active = 0, native = 0, wet = 1\|/);
-  assert.match(src, /var mix = \(active \* wet\)/);
+  // wet is a channel control read per sample under an audio-rate driver (chanIn), held to 0..1.
+  assert.match(src, /active = 0, native = 0[,|]/);
+  assert.match(src, /var mix = active\.lag\(0\.02\) \* chanIn\.\(\\wet, 1, 0\.02, 0, 1\);/);
   // Linear, so the endpoints are exactly the two signals - see Sig#wet. The dry side is what the
   // slot reads.
   assert.match(src, /Out\.ar\(out, \(jin \* \(1 - mix\)\) \+ \(pick \* mix\)\)/);

@@ -99,7 +99,22 @@ function lagClass(name) {
   return C;
 }
 const Lag = lagClass('Lag');
+// LagUD skips only a scalar input (its class method); the times are its own.
+const LagUD = { [Symbol.toStringTag]: 'LagUD' };
+class LagUDU extends Filter {
+  static get scName() { return 'LagUD'; }
+}
+LagUD.ar = (input = 0, up = 0.1, down = 0.1) => (rateOf(input) === 'scalar' ? input : LagUDU.multiNew('audio', input, up, down));
+LagUD.kr = (input = 0, up = 0.1, down = 0.1) => (rateOf(input) === 'scalar' ? input : LagUDU.multiNew('control', input, up, down));
 const Ramp = lagClass('Ramp');
+// VarLag with a linear warp is its own UGen (sclang builds an EnvGen for every other warp): in,
+// time, start - start being the input itself, as sclang's default is.
+const VarLag = { [Symbol.toStringTag]: 'VarLag' };
+class VarLagU extends Filter {
+  static get scName() { return 'VarLag'; }
+}
+VarLag.kr = (input = 0, time = 0.1) => VarLagU.multiNew('control', input, time, input);
+VarLag.ar = (input = 0, time = 0.1) => VarLagU.multiNew('audio', input, time, input);
 
 class Select extends PureUGen {
   static ar(which, array) { return this.multiNewList(['audio', which, ...array]); }
@@ -294,6 +309,7 @@ const LinXFade2 = {
 
 class Balance2 extends MultiOutUGen {
   static ar(l, r, pos = 0, level = 1) { return this.multiNew('audio', l, r, pos, level); }
+  static kr(l, r, pos = 0, level = 1) { return this.multiNew('control', l, r, pos, level); }
   init(...inputs) {
     this.inputs = inputs;
     this.channels = [OutputProxy.new(this.rate, this, 0), OutputProxy.new(this.rate, this, 1)];
@@ -449,7 +465,7 @@ function wrap(x, lo = 0, hi = 1) {
 module.exports = {
   Impulse, Sweep, Phasor, LFDNoise0, LFDNoise3, Latch, Gate, Trig1, PulseCount, ToggleFF, Peak,
   RunningMax, RunningSum, OnePole, LPF, HPF, RLPF, RHPF, BPF, Line, K2A, A2K, Convolution2, Clip,
-  Wrap, Delay1, DelayN, Lag, Ramp, Select, SampleRate, SampleDur, ControlRate, ControlDur,
+  Wrap, Delay1, DelayN, Lag, LagUD, Ramp, VarLag, Select, SampleRate, SampleDur, ControlRate, ControlDur,
   BlockSize, NumOutputBuses, BufFrames, BufRateScale, BufSampleRate, PlayBuf, BufRd, Warp1,
   GrainBuf, DC, Silent, In, InFeedback, LocalIn, Out, ReplaceOut, OffsetOut, LocalOut, BufWr,
   DiskOut, LocalBuf, EnvGen, Env, LinXFade2, Balance2, SendReply, SendPeakRMS, SoundIn, Mix,

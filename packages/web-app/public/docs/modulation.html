@@ -43,7 +43,17 @@
   .param("Resonance", tri(0.5).range(0.2, 0.7)).postgain(1)</code></pre>
         <p>
           <code>.range()</code>'s bounds can move too: <code>sine().range("0.2 0.3", 0.8)</code>
-          sweeps from a stepped floor. An LFO drives the channel strip as well as a device:
+          sweeps from a stepped floor. Bounds with a unit sweep in that unit
+          (<code>sine().range("1x", "8x")</code>), and <code>.snap()</code> moves every value to the
+          nearest of a set: a list, or values stacked with commas (<code>"1,2,4"</code>), which can
+          pattern (<code>"&lt;[1,2,4] [1,3,6]&gt;"</code>).
+        </p>
+        <pre data-run><code>bell: n("0 4 7 4").scale("C minor").synth("FM")
+  .param("Op 2 Level", 0.7).param("Mod 2 to 1", 0.6)
+  .param("Op 2 Ratio", sine(0.5).range("1x", "8x").snap([1, 2, 3, 4, 6, 8]))
+  .postgain(0.5)</code></pre>
+        <p>
+          An LFO drives the channel strip as well as a device:
         </p>
         <pre data-run><code>pad: note("&lt;[c3,eb3,g3] [ab2,c3,eb3]&gt;").synth("Wavetable")
   .param("Osc 1 Table", "PWM").param("Osc 1 Position", tri('0.3hz'))
@@ -126,6 +136,24 @@ bell: note("&lt;c3 eb3&gt;").synth("Wavetable").param("Osc 1 Phase Rand", 0).ads
           Turning a patched control's knob in its device window moves the resting point, the number in
           the last <code>.add()</code>.
         </p>
+
+        <h2 id="following">Following a level</h2>
+        <p>
+          Given a track, bus or audio input instead of an object, <code>env("name")</code> is that
+          source's level, from 0 to 1: it rises over <code>attack</code> and falls over
+          <code>release</code>, in seconds. Turned upside down it ducks one track under another:
+        </p>
+        <pre data-run><code>kick: s("bd*4").postgain(0.5)
+pad: note("&lt;c3 eb3&gt;").synth("Wavetable").adsr(0.3, 0, 1, 1).postgain(0.3)
+  .gain(env("kick", { release: 0.3 }).mul(-1).add(1))</code></pre>
+
+        <h2 id="smoothing">Smoothing</h2>
+        <p>
+          <code>.smooth(t)</code> glides any signal toward each new value instead of jumping, arriving
+          after about <code>t</code> seconds: a stepped pattern, an LFO, a knob, audio or a level.
+        </p>
+        <pre data-run><code>bass: note("c2*8").synth("Wavetable")
+  .fx("Filter").param("Cutoff", "&lt;0.2 0.7 0.4 0.9&gt;*2".smooth(0.15)).postgain(0.45)</code></pre>
 
         <h2 id="knobs">Knobs</h2>
         <table>

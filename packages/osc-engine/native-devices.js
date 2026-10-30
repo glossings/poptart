@@ -110,6 +110,9 @@ function deviceStateText(device, positions = {}, files = {}) {
   const params = {};
   const refs = {};
   for (const p of device.params) {
+    // A control that is a gesture rather than part of the sound (a looper's Record) is never
+    // saved: a song saved mid-gesture would replay it when opened.
+    if (p.saved === false) continue;
     const value = denormalize(p, positions[p.id] ?? normalize(p, p.default));
     // Trimmed to what a control can mean, so a linear 0 does not come back as -1.8e-15.
     params[p.id] = Number(value.toFixed(6));
@@ -120,6 +123,31 @@ function deviceStateText(device, positions = {}, files = {}) {
   }
   const json = JSON.stringify({ device: device.id, version: device.version, params, files: refs });
   return Buffer.from(json, 'utf8').toString('base64');
+}
+
+/**
+ * A state saved by an earlier version of a device, as the current version would have saved it:
+ * the parameter map with renamed, merged or split controls brought across.
+ *
+ * The browser's descriptors carry this as each device's `migrate` (descriptor.mjs's
+ * migrateState), which this engine cannot load - the catalog it reads is data. So the mappings
+ * are written out again here, one per device version that changed shape, and
+ * native-devices.test.js holds them to the browser's. A state at the current version, or of a
+ * device that never changed, passes through untouched.
+ */
+function migrateDeviceState(device, doc) {
+  const from = Number.isInteger(doc.version) && doc.version >= 1 ? doc.version : 1;
+  const params = { ...doc.params };
+  if (device.id === 'FreqShift' && from < 2) {
+    // v1 had an unsigned Freq and an up/down/split Direction; v2 has a signed Freq and a Wide
+    // switch (split = the right channel the other way).
+    const direction = Math.round(Number(params.direction ?? params.Direction) || 0);
+    const freq = Number(params.freq ?? params.Freq);
+    delete params.direction; delete params.Direction;
+    if (Number.isFinite(freq)) params.freq = direction === 1 ? -freq : freq;
+    params.wide = direction === 2 ? 1 : 0;
+  }
+  return params;
 }
 
 /**
@@ -135,15 +163,15 @@ function readDeviceState(device, doc) {
   if (!doc || typeof doc !== 'object' || !doc.params || typeof doc.params !== 'object') return null;
   if (doc.device != null && String(doc.device).toLowerCase() !== device.id.toLowerCase()) return null;
   const positions = {};
-  for (const [name, value] of Object.entries(doc.params)) {
+  for (const [name, value] of Object.entries(migrateDeviceState(device, doc))) {
     const p = deviceParam(device, name);
-    if (!p || typeof value !== 'number' || !Number.isFinite(value)) continue;
+    if (!p || p.saved === false || typeof value !== 'number' || !Number.isFinite(value)) continue;
     positions[p.id] = normalize(p, value);
   }
   const files = {};
   for (const [name, ref] of Object.entries(doc.files ?? {})) {
     const p = deviceParam(device, name);
-    if (p?.takes && typeof ref === 'string' && ref) files[p.id] = ref;
+    if (p?.takes && p.saved !== false && typeof ref === 'string' && ref) files[p.id] = ref;
   }
   return { positions, files };
 }
@@ -203,6 +231,14 @@ function readReport(id, raw) {
     }
     case 'Ducker':
       return duckLane(raw);
+    case 'Filterbank':
+    case 'Resonator': {
+      // Every sounding band: the count, then each one's frequency, then each one's level
+      // (own/dsp/filterbank.h's BandBank::report) - the browser's { bands: { hz, level } }.
+      const n = Number(raw[0]) | 0;
+      if (!(n >= 0) || raw.length < 1 + 2 * n) return null;
+      return { bands: { hz: raw.slice(1, 1 + n), level: raw.slice(1 + n, 1 + 2 * n) } };
+    }
     case 'Chorus':
     case 'Flanger':
     case 'Phaser':
@@ -338,7 +374,10 @@ function normalize(param, value) {
   let t;
   if (param.curve === 'exp') t = Math.log(v / param.min) / Math.log(param.max / param.min);
   else if (param.curve === 'pow') t = ((v - param.min) / span) ** (1 / param.curveExp);
-  else t = span === 0 ? 0 : (v - param.min) / span;
+  else if (param.curve === 'sym') {
+    const u = (v - (param.min + param.max) / 2) / (span / 2);
+    t = (1 + Math.sign(u) * Math.abs(u) ** (1 / param.curveExp)) / 2;
+  } else t = span === 0 ? 0 : (v - param.min) / span;
   return Math.min(param.open ? Infinity : 1, Math.max(0, t));
 }
 
@@ -347,7 +386,10 @@ function denormalize(param, position) {
   let v;
   if (param.curve === 'exp') v = param.min * (param.max / param.min) ** t;
   else if (param.curve === 'pow') v = param.min + (param.max - param.min) * t ** param.curveExp;
-  else v = param.min + (param.max - param.min) * t;
+  else if (param.curve === 'sym') {
+    const u = 2 * t - 1;
+    v = (param.min + param.max) / 2 + ((param.max - param.min) / 2) * Math.sign(u) * Math.abs(u) ** param.curveExp;
+  } else v = param.min + (param.max - param.min) * t;
   return clampParam(param, v);
 }
 

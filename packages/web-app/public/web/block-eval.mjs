@@ -23,7 +23,7 @@
  * language, and the difference is the whole reason this list is written out.
  */
 export const BUILDER_NAMES = Object.freeze(['Signal', 'n', 'note', 'mini', 's', 'se', 'sr', 'sp', 'say', 'synth', 'sine', 'saw', 'isaw', 'tri', 'square', 'rand', 'perlin', 'lfo', 'env', 'dur', 'midicc', 'midikeys', 'osc', 'macro', 'choose', 'cat', 'seq', 'irand', 'midi', 'audio', 'input', 'group', 'copy', 'pcopy', 'pianoroll', 'clips', 'auto',
-  'i', 'begin', 'end', 'loop', 'loopwrap', 'loopdir', 'speed', 'flip', 'stretch', 'fit', 'slice', 'splice', 'splicemode', 'attack', 'decay', 'sustain', 'release', 'envscale', 'grain', 'vel', 'clip', 'nudge', 'swing', 'swinggrid', 'swingvel',
+  'i', 'begin', 'end', 'loop', 'loopwrap', 'loopdir', 'speed', 'flip', 'stretch', 'fit', 'fitmode', 'slice', 'splice', 'splicemode', 'attack', 'decay', 'sustain', 'release', 'envscale', 'grain', 'vel', 'clip', 'nudge', 'swing', 'swinggrid', 'swingvel',
   'add', 'sub', 'mul', 'div', 'mod', 'set',
   // Structure-giving transforms at the head of a chain, on the default note: struct("1 ~ 1 1").s("bd").
   'struct', 'hold', 'seg', 'segment', 'chord',
@@ -119,11 +119,14 @@ export function createBlockEvaluator(patternCore, {
   utils = PREBAKE_UTILS,
   builtins = null,
   miniOff = [],
+  parse = null,
+  deck = 'a',
+  doc = null,
 } = {}) {
   const known = builtins ?? builtinSigMethods(patternCore);
   const macroNames = Array.from({ length: patternCore.MACRO_COUNT }, (_, i) => `macro${i + 1}`);
 
-  const evalBlock = function evalBlock(code, locBase) {
+  const evalBlock = function evalBlock(code, locBase, label = null) {
     const declNames = [
       ...new Set([...code.matchAll(/^[ \t]*(?:const|let|var)\s+([A-Za-z_$][\w$]*)/gm)].map((m) => m[1])),
     ];
@@ -131,8 +134,10 @@ export function createBlockEvaluator(patternCore, {
     // pattern-position string literals are wrapped in mini("…", OFFSET) and the steps they emit
     // can be traced back to the characters that made them. A prebake block passes none.
     // `miniOff` is the buffer's `// mini-off` … `// mini-on` stretches (patternCore.miniOffRanges).
-    const located = typeof locBase === 'number' ? patternCore.injectLocations(code, locBase, { miniOff }) : code;
-    const body = located.replace(/^([ \t]*)(?:const|let)(\s+)/gm, '$1var$2');
+    // The rewritten block is registered under a name its stack frames carry, so an error inside it
+    // can be traced back to the line and column typed (pattern-core's eval-errors.mjs). `label` is
+    // the block's, for that report; `parse` (acorn) is what finds where a syntax error is.
+    const { body, id } = patternCore.blockSource(code, locBase, { miniOff, label, deck, doc });
 
     const baseNames = [...BUILDER_NAMES, ...INTERNAL_BUILDERS, ...macroNames, ...Object.keys(hostBuilders)]
       .filter((n) => !defs.has(n));      // a userland definition may shadow a builder
@@ -155,7 +160,13 @@ export function createBlockEvaluator(patternCore, {
       '__blockCode',
       `var __value = eval(__blockCode); return { __value: __value, __defs: { ${harvest} } };`,
     );
-    const { __value, __defs } = build(...baseValues, ...utilValues, ...defs.values(), body);
+    let result;
+    try {
+      result = patternCore.withDeepStacks(() => build(...baseValues, ...utilValues, ...defs.values(), body));
+    } catch (err) {
+      throw patternCore.noteBlockFailure(err, id, parse);
+    }
+    const { __value, __defs } = result;
     for (const [n, v] of Object.entries(__defs)) if (v !== undefined) defs.set(n, v);
     syncUserStringMethods(patternCore, known);   // the block may have extended Signal's prototype
     return __value;

@@ -15,7 +15,7 @@ const U = require('./synthdef/ugens');
 const { renderNRT, ugen, G } = require('./test-support/nrt');
 
 const SR = 48000;
-const SCX = path.join(__dirname, 'native', 'devices', 'bin', 'PoptartDevices.scx');
+const { DEVICE_BINARY: SCX } = require('./extensions.js'); // this platform's build
 const SinOsc = ugen('SinOsc', [440, 0]);
 
 test('an effect slot with a native device in it plays the device and not the dry signal', (t) => {

@@ -4,9 +4,13 @@
 //   node build/devices/native.mjs --only Plaits      (one device, for a quick compile)
 //   node build/devices/native.mjs --emit-only        (write the generated C++, compile nothing)
 //
-// Run by hand, like the WebAssembly build beside it, and for the same reason: the output is
-// COMMITTED (packages/osc-engine/native/devices/bin/PoptartDevices.scx), so a clone, a test run
-// and a release need the devices and none of them needs a compiler. Everything about which
+// Run by hand on macOS, like the WebAssembly build beside it, and for the same reason: the Mac
+// output is COMMITTED (packages/osc-engine/native/devices/bin/PoptartDevices.scx), so a clone, a
+// test run and a release need the devices and none of them needs a compiler. On Windows and
+// Linux the same command builds that platform's plugin into bin/<platform>-<arch>/ (see
+// toolchain.mjs); CI does that on its runners (tests.yml, release.yml) and nothing commits it.
+//
+//   node build/devices/native.mjs --out <dir>       (build somewhere other than bin/) Everything about which
 // sources a device is built from, which upstream switches it needs and which shimmed headers
 // shadow which pinned ones is in build-devices.mjs's recipes - this file only says what to do
 // with a recipe to get a server plugin rather than a module.
@@ -31,6 +35,9 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 import { deviceRecipes } from './build-devices.mjs';
+import {
+  DSP_FLAGS, binSubdir, compiler, linkFlags, pluginSuffix, runCompiler, targetFlags, extractTarGz,
+} from './toolchain.mjs';
 import { AIRWINDOWS_DEVICES } from '../../src/devices/airwindows.mjs';
 import { CLOUDSEED_DEVICES } from '../../src/devices/cloudseed.mjs';
 import { STRETCH_DEVICES } from '../../src/devices/stretch.mjs';
@@ -53,12 +60,15 @@ import { PHASER } from '../../src/devices/phaser.mjs';
 import { DELAY } from '../../src/devices/delay.mjs';
 import { GRAINECHO } from '../../src/devices/grainecho.mjs';
 import { STUTTER } from '../../src/devices/stutter.mjs';
+import { LOOPER } from '../../src/devices/looper.mjs';
 import { DUCKER } from '../../src/devices/ducker.mjs';
 import { FMSYNTH } from '../../src/devices/fmsynth.mjs';
 import { WAVETABLE } from '../../src/devices/wavetable.mjs';
 import { GRANULAR } from '../../src/devices/granular.mjs';
 import { NOISE } from '../../src/devices/noise.mjs';
 import { LPG } from '../../src/devices/lpg.mjs';
+import { FILTERBANK } from '../../src/devices/filterbank.mjs';
+import { RESONATOR } from '../../src/devices/resonator.mjs';
 import { CROSSOVER } from '../../src/devices/crossover.mjs';
 import { CONVOLVER } from '../../src/devices/builtins.mjs';
 
@@ -69,13 +79,20 @@ const LOCK_PATH = path.join(here, 'devices.lock.json');
 /** Where the UGen, the ABI header and the built bundle live: the desktop engine's own folder. */
 const NATIVE_DIR = path.join(repoRoot, 'packages', 'osc-engine', 'native', 'devices');
 const WORK = path.join(engineRoot, '.pack-cache', 'devices', 'native');
-const OUT_NAME = 'PoptartDevices.scx';
+/** What the plugin is called: .scx on macOS and Windows, .so on Linux - scsynth goes by the suffix. */
+const OUT_NAME = `PoptartDevices${pluginSuffix()}`;
 
 /** The SuperCollider the installed app ships, which is what the plugin must match. */
 const SC_VERSION = process.env.SC_VERSION ?? '3.14.1';
 
-/** Both Macs: the committed bundle has to load on an Intel machine as well as this one. */
-const ARCHES = (process.env.ARCHES ?? 'arm64,x86_64').split(',').filter(Boolean);
+/**
+ * Both Macs: the committed bundle has to load on an Intel machine as well as this one. Elsewhere
+ * one architecture, the machine's own (x64 is all SuperCollider ships for Windows and what Linux
+ * runners are).
+ */
+const ARCHES = process.platform === 'darwin'
+  ? (process.env.ARCHES ?? 'arm64,x86_64').split(',').filter(Boolean)
+  : [process.arch];
 
 const log = (...a) => console.log(...a);                  // eslint-disable-line no-console
 
@@ -128,6 +145,7 @@ const OWN = [
   { descriptor: DELAY, source: 'delay.cc' },
   { descriptor: GRAINECHO, source: 'grainecho.cc' },
   { descriptor: STUTTER, source: 'stutter.cc' },
+  { descriptor: LOOPER, source: 'looper.cc' },
   { descriptor: DUCKER, source: 'ducker.cc' },
   { descriptor: CONVOLVER, source: 'convolver.cc' },
   { descriptor: FMSYNTH, source: 'fm.cc' },
@@ -135,6 +153,8 @@ const OWN = [
   { descriptor: GRANULAR, source: 'granular.cc' },
   { descriptor: NOISE, source: 'noise.cc' },
   { descriptor: LPG, source: 'lpg.cc' },
+  { descriptor: FILTERBANK, source: 'filterbank.cc' },
+  { descriptor: RESONATOR, source: 'resonator.cc' },
   // The engine's own, never the user's: built into the extension, listed apart in the catalog (see
   // catalogJson), so no name a pattern writes reaches it.
   { descriptor: CROSSOVER, source: 'crossover.cc', internal: true },
@@ -276,7 +296,7 @@ const cFloat = (v) => {
 
 const cString = (s) => JSON.stringify(String(s));
 
-const CURVES = { lin: 0, exp: 1, pow: 2 };
+const CURVES = { lin: 0, exp: 1, pow: 2, sym: 3 };
 
 /**
  * One device's control table: the descriptor, as data the audio thread can read.
@@ -347,7 +367,7 @@ async function scHeaders() {
   if (!res.ok) throw new Error(`could not fetch the SC headers: ${res.status} ${res.statusText}`);
   const archive = path.join(deps, 'sc.tgz');
   fs.writeFileSync(archive, Buffer.from(await res.arrayBuffer()));
-  execFileSync('tar', ['xzf', archive, '-C', deps, '--include=*/include/*']);
+  extractTarGz(archive, deps, { include: '*/include/*' });
   fs.rmSync(archive, { force: true });
   return root;
 }
@@ -355,8 +375,8 @@ async function scHeaders() {
 /** Compiler flags every translation unit here is built with, whatever device it belongs to. */
 function baseFlags({ sc, arch }) {
   return [
-    '-c', '-O3', '-std=c++17', '-ffast-math', '-fno-rtti',
-    '-fPIC', '-arch', arch, '-mmacosx-version-min=11', '-DSC_DARWIN',
+    '-c', ...DSP_FLAGS,
+    ...targetFlags({ arch: process.platform === 'darwin' ? arch : undefined }),
     '-I', path.join(sc, 'include', 'plugin_interface'),
     '-I', path.join(sc, 'include', 'common'),
     '-I', path.join(sc, 'include', 'server'),
@@ -379,7 +399,13 @@ function compileOne({ source, objDir, flags, stamps, headersMs = 0 }) {
   stamps.add(stampKey);
   const newest = Math.max(fs.statSync(source).mtimeMs, headersMs);
   if (fs.existsSync(obj) && fs.statSync(obj).mtimeMs > newest) return obj;
-  execFileSync('clang++', [...flags, source, '-o', obj], { stdio: ['ignore', 'pipe', 'pipe'] });
+  try {
+    execFileSync(compiler(), [...flags, source, '-o', obj], { stdio: ['ignore', 'pipe', 'pipe'] });
+  } catch (err) {
+    // Which file, as well as what the compiler said: on a CI runner that is the whole report.
+    err.message = `compiling ${source}:\n${err.stderr?.toString() ?? err.message}`;
+    throw err;
+  }
   return obj;
 }
 
@@ -458,6 +484,8 @@ export function catalogJson(devices, internal = INTERNAL_IDS) {
       ...(p.sampleAs ? { sampleAs: p.sampleAs } : {}),
       // Controls sharing one store of files, which hand out its slots between them.
       ...(p.bank ? { bank: p.bank } : {}),
+      // A control a captured state leaves out (a looper's Record): see deviceStateText.
+      ...(p.saved === false ? { saved: false } : {}),
     })),
   });
   const sorted = [...devices].sort((a, b) => a.id.localeCompare(b.id));
@@ -470,7 +498,7 @@ export function catalogJson(devices, internal = INTERNAL_IDS) {
   }, null, 2)}\n`;
 }
 
-export async function buildNative({ only = null, emitOnly = false, repin = false } = {}) {
+export async function buildNative({ only = null, emitOnly = false, repin = false, outDir = null } = {}) {
   const lock = JSON.parse(fs.readFileSync(LOCK_PATH, 'utf8'));
   const all = await deviceRecipes({ lock, only, repin });
   const recipes = all.filter((r) => SHIPPED.has(r.id));
@@ -557,35 +585,41 @@ export async function buildNative({ only = null, emitOnly = false, repin = false
       objects.push(compileOne({ source: one.file, objDir, flags: ownFlags, stamps, headersMs }));
     }
 
-    const out = path.join(WORK, `${arch}.scx`);
+    const out = path.join(WORK, `${arch}${pluginSuffix()}`);
     log(`linking ${objects.length} objects for ${arch}`);
-    execFileSync('clang++', [
-      '-bundle', '-undefined', 'dynamic_lookup',
-      '-arch', arch, '-mmacosx-version-min=11',
-      ...objects, '-o', out,
-    ], { stdio: ['ignore', 'pipe', 'pipe'] });
+    if (process.platform === 'darwin') {
+      execFileSync(compiler(), [...objects, ...linkFlags({ arch, out })], { stdio: ['ignore', 'pipe', 'pipe'] });
+    } else {
+      // Through a response file: every object's path on one Windows command line is close to its
+      // 32767-character limit.
+      runCompiler([...objects, ...linkFlags({ arch, out })], { responseFile: path.join(WORK, `link-${arch}.rsp`) });
+    }
     thin.push(out);
   }
 
-  const binDir = path.join(NATIVE_DIR, 'bin');
+  // macOS's build goes where it always has, bin/ itself; another platform's into its own folder
+  // there (toolchain.mjs's binSubdir), so neither is ever handed to the other's scsynth.
+  const binDir = outDir ? path.resolve(outDir) : path.join(NATIVE_DIR, 'bin', binSubdir());
   fs.mkdirSync(binDir, { recursive: true });
   const outFile = path.join(binDir, OUT_NAME);
   if (thin.length === 1) fs.copyFileSync(thin[0], outFile);
   else execFileSync('lipo', ['-create', ...thin, '-output', outFile]);
   log(`\nbuilt ${path.relative(repoRoot, outFile)} (${(fs.statSync(outFile).size / 1024).toFixed(0)} kB)`);
-  log(execFileSync('lipo', ['-info', outFile]).toString().trim());
+  if (process.platform === 'darwin') log(execFileSync('lipo', ['-info', outFile]).toString().trim());
   return { outFile, devices: everything.map((d) => d.id) };
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url))) {
   const argv = process.argv.slice(2);
   const at = argv.indexOf('--only');
+  const outAt = argv.indexOf('--out');
   buildNative({
     only: at >= 0 ? argv[at + 1] : null,
+    outDir: outAt >= 0 ? argv[outAt + 1] : null,
     emitOnly: argv.includes('--emit-only'),
     repin: argv.includes('--repin'),
   }).catch((err) => {
-    console.error(err.stderr?.toString() || err.message);  // eslint-disable-line no-console
+    console.error(err.message || err.stderr?.toString());  // eslint-disable-line no-console
     process.exit(1);
   });
 }

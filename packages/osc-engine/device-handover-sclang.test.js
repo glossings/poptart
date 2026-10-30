@@ -21,13 +21,13 @@ const { execFileSync } = require('node:child_process');
 
 const { resolveSclangPath } = require('./index.js');
 const { readWavRaw, writeWav, encodeWav } = require('./wav.js');
-const { userExtensionsDir } = require('./extensions.js');
+const { userExtensionsDir, DEVICE_BINARY } = require('./extensions.js');
 const { nativeDevice, paramPosition, deviceParam } = require('./native-devices');
 
 const SR = 48000;
 const BLOCK = 64; // scsynth's default block, which Score.recordNRT renders with
 const NATIVE_DIR = path.join(__dirname, 'native', 'devices');
-const SCX = path.join(NATIVE_DIR, 'bin', 'PoptartDevices.scx');
+const SCX = DEVICE_BINARY; // this platform's build (extensions.js)
 const LANG_PORT = '57301';
 
 const index = (id, param) => nativeDevice(id).params.findIndex((p) => p.id === param);

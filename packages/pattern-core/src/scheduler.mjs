@@ -25,12 +25,15 @@
 //    own note grid (withNoteGate), which is what the engine gates the native one from too.
 
 import { defScopeOf, withDefDeck } from './rolls.mjs';
-import { steadyValue, sampleBound, CHANNEL_DEFAULTS, channelDefault, GRAIN_CHANNELS, DEFAULT_BEND_RANGE, bendRangeWarning, LOOP_MODES, loopModeAt, channelAt, soundingEnd, timeShift, grooveVelScale, endEdgeStep, warnPattern, lfoRateHz, lfoPhaseCount, lfoShapes, resolvePreset, paramExpr, lfoRateChanges, withNoteGate, withEventSpan, noteGateFromGrid } from './signal.mjs';
-import { scalePitchClasses, parseScaleName, degreeToMidi, quantizeToScale } from './notes.mjs';
+import { steadyValue, sampleBound, CHANNEL_DEFAULTS, channelDefault, GRAIN_CHANNELS, DEFAULT_BEND_RANGE, bendRangeWarning, LOOP_MODES, loopModeAt, channelAt, soundingEnd, timeShift, grooveVelScale, endEdgeStep, warnPattern, lfoRateHz, lfoPhaseCount, lfoShapes, resolvePreset, paramExpr, lfoRateChanges, withNoteGate, withEventSpan, noteGateFromGrid, withSampleLength, currentEventSpan } from './signal.mjs';
+import { scalePitchClasses, parseScaleName, degreeToMidi, quantizeToScale, globalScale } from './notes.mjs';
 import { songSteps, stepsUnderShift, withClipShift } from './arrange.mjs';
 import { sliceSetIsEmpty } from './slices.mjs';
 import { resolveInputChannels } from './audio-inputs.mjs';
-import { routePlan, routeLatencies, routeControlDefault } from './route.mjs';
+import { withLiveReads } from './motion.mjs';
+import { routePlan, routeLatencies, routeControlDefault, routeItems } from './route.mjs';
+import { deviceParamSpec, unitConversion, unitPosition, unitTree, noteHz } from './units.mjs';
+import { plainText } from './eval-errors.mjs';
 
 // Resolves an input()'s channel request against the booted device's live layout (see
 // audio-inputs.mjs). Done here, per eval, rather than when input() is called: the layout changes
@@ -277,6 +280,12 @@ function formatSampleEvent(pack, cfg, info, eventCycles) {
     bits.push(`loop=${mode('loopWrap')}${dir === 'pingpong' ? '+pingpong' : ''}`);
   }
   if ((cfg.splice ?? 0) > 0.5) bits.push(`splice=${mode('spliceMode')}`);
+  // The fitted length is the one number a .fit() hides: the engine reports what 'auto' came to
+  // in cycles, so the line says fit=32 and not fit=auto. A stretch fit says so.
+  if (cfg.fit !== undefined && (cfg.splice ?? 0) <= 0.5) {
+    const fitLen = res.fitCycles ?? cfg.fit;
+    bits.push(`fit=${typeof fitLen === 'number' ? `${num(fitLen)}c` : fitLen}${mode('fitMode') === 'stretch' ? '+stretch' : ''}`);
+  }
   if (stretch !== 1) bits.push(`stretch=${num(stretch)}`);
   // Size and rate as the voice STARTS with them; both are live controls and may move under it.
   if (res.grain ?? ((cfg.grain ?? 0) > 0.5)) {
@@ -693,12 +702,78 @@ export class DeckClock extends Transport {
 }
 
 /** The name an expression's input `i` is fed under, on the same slot as the control it belongs to. */
+/**
+ * Marks `step: 1` on every input the tree reads only inside what a .smooth() lags: the engine then
+ * feeds it a polled value as a step rather than through its usual short ramp, so the smooth's own
+ * time is the only glide and smooth(0) is a step. An input also read outside one keeps its ramp.
+ */
+export function markStepped(tree) {
+  const inside = new Map(); // input index -> whether every reading of it is under a smooth
+  const look = (node, under) => {
+    if (node.k === 'in') {
+      if (node.source == null) inside.set(node.i, (inside.get(node.i) ?? true) && under);
+      return;
+    }
+    (node.a ?? []).forEach((child, j) => look(child, under || (node.k === 'fn' && node.op === 'smooth' && j === 0)));
+  };
+  look(tree, false);
+  const mark = (node) => {
+    if (node.k === 'in') return inside.get(node.i) ? { ...node, step: 1 } : node;
+    return Array.isArray(node.a) ? { ...node, a: node.a.map(mark) } : node;
+  };
+  return mark(tree);
+}
+
 export function leafName(i, name) {
   return `~${i}~${name}`;
 }
 
 function exprHasAudio(node) {
-  return node.k === 'src' || (Array.isArray(node.a) && node.a.some(exprHasAudio));
+  // An envelope follower's level is as engine-only as the audio it follows.
+  if (node.k === 'src' || (node.k === 'fn' && node.op === 'env')) return true;
+  return Array.isArray(node.a) && node.a.some(exprHasAudio);
+}
+
+/**
+ * One cycle of a pattern as a list: the [start, end, value] triples of its steps within the cycle,
+ * a rest or a non-number left out. With no steps to read, the value at `atSec` over the whole
+ * cycle. A cycle with nothing in it is [] - every band at 0.
+ */
+export function cycleList(sig, cycle, atSec, cps) {
+  const out = [];
+  if (typeof sig.stepsForCycle === 'function') {
+    for (const st of sig.stepsForCycle(cycle) ?? []) {
+      if (st.value == null) continue;
+      const v = typeof st.value === 'number' ? st.value : Number(st.value);
+      if (!Number.isFinite(v)) continue;
+      const start = Math.max(0, st.start);
+      const end = Math.min(1, st.end);
+      if (end > start) out.push(start, end, v);
+    }
+    return out;
+  }
+  const v = sig.sample(atSec, cps, cycle);
+  const n = typeof v === 'number' ? v : Number(v);
+  if (v != null && Number.isFinite(n)) out.push(0, 1, n);
+  return out;
+}
+
+const warnedScales = new Set();
+
+/** A scale name as a list - [root, period, interval...] - or null, said once, for one that is not a scale. */
+export function scaleList(name, who = '') {
+  try {
+    const { rootMidi, intervals, period } = parseScaleName(name);
+    return [rootMidi, period, ...intervals];
+  } catch (err) {
+    if (who === null) return null; // only asking
+    const key = `${who}|${name}`;
+    if (!warnedScales.has(key)) {
+      warnedScales.add(key);
+      warnPattern(`[scheduler] ${who ? `track "${who}": ` : ''}${err.message ?? err} - the device stays on the scale it had.`);
+    }
+    return null;
+  }
 }
 
 export class Scheduler {
@@ -731,6 +806,8 @@ export class Scheduler {
     // when an eval drops the call, and either way the plugin should sound as if the call were
     // never there, rather than parked wherever it was last sent.
     this._heldParams = new Set();
+    // What each list control was last sent (see _pollListParams): "slot:id" -> { epoch, text }.
+    this._sentLists = new Map();
     this._sentAudioInjects = new Map(); // fx slot -> audioRouteKey last wired, for diffing and teardown
     this._sentExprs = new Map();        // "slot:name" -> JSON of the expression last sent (see _expanded)
     this._adoptedExprs = false;         // whether the expressions the engine already held have been read in
@@ -983,13 +1060,76 @@ export class Scheduler {
    * name (leafName): each input is then polled, or run as a native modulator, exactly as a control
    * of its own would be, and the engine adds them up. Worked out once per pattern.
    */
+  /**
+   * How control `c`'s values in units reach it, null when they are plain positions, or false when
+   * they cannot (said once): a unit of another kind, or a control that has no unit.
+   */
+  _unitConversion(sig, c) {
+    if (c.slot === CHANNEL_SLOT || typeof c.name !== 'string') return null;
+    const unit = c.sig?.unit;
+    const device = c.slot === 0 ? sig.instrument : sig.fxChain?.[c.slot - 1];
+    const spec = deviceParamSpec(typeof device === 'string' ? device : null, c.name);
+    if (!spec) return null; // a plugin: a mapping file is what gives its numbers units
+    if (!unit) {
+      // A note name on a control in hertz is that note's frequency.
+      const own = String(spec.unit ?? '').toLowerCase();
+      return own === 'hz' && !spec.options ? { spec, divide: 1, notes: true } : null;
+    }
+    const conv = unitConversion(spec, unit);
+    if (typeof conv === 'object') return conv;
+    const key = `${c.slot}:${c.name}:${unit}`;
+    if (!this._warnedUnits) this._warnedUnits = new Set();
+    if (!this._warnedUnits.has(key)) {
+      this._warnedUnits.add(key);
+      warnPattern(`[scheduler] "${c.name}" on ${device} can't take a value in ${unit}: ${conv}. It is left where it was; everything else on ${this.label ?? this.trackId} plays.`);
+    }
+    return false;
+  }
+
+  /**
+   * Says so when an option's name with a space in it was written bare: `.param("Mode", "lowpass
+   * 24")` is two steps, `lowpass` then `24`. Quoted inside, `"'lowpass 24'"`, it is the option.
+   */
+  _warnSplitOption(sig, c) {
+    const text = c.sig?.miniText;
+    if (c.slot === CHANNEL_SLOT || typeof text !== 'string' || !/\s/.test(text.trim())) return;
+    const device = c.slot === 0 ? sig.instrument : sig.fxChain?.[c.slot - 1];
+    const spec = deviceParamSpec(typeof device === 'string' ? device : null, c.name);
+    const want = text.trim().toLowerCase();
+    const option = spec?.options?.find((o) => String(o).trim().toLowerCase() === want);
+    if (!option) return;
+    const key = `${c.slot}:${c.name}:${want}`;
+    if (!this._warnedOptions) this._warnedOptions = new Set();
+    if (this._warnedOptions.has(key)) return;
+    this._warnedOptions.add(key);
+    warnPattern(`[scheduler] "${text.trim()}" on ${device}'s ${c.name} plays as separate steps. For the option, quote it inside: "'${option}'".`);
+  }
+
   _expanded(sig) {
     if (this._expandedFor === sig && this._expandedCache) return this._expandedCache;
     const entries = [];
     const exprs = new Map();
     const canEval = typeof this.engine.setParamExpr === 'function';
-    for (const c of this._controlEntries(sig)) {
-      const node = paramExpr(c.sig);
+    for (const raw of this._controlEntries(sig)) {
+      this._warnSplitOption(sig, raw);
+      // A value in units ("3x", sine.range("1x", "8x")) reaches the control as its position: a
+      // plain value converted as it is sent, anything the engine runs - a modulator, an expression
+      // - as an expression with the conversion at its root (see units.mjs).
+      const conv = this._unitConversion(sig, raw);
+      if (conv === false) continue;
+      const engineSide = Boolean(paramExpr(raw.sig) || raw.sig.lfoIR || raw.sig.envIR || raw.sig.ccIR);
+      let c = raw;
+      if (conv?.notes) {
+        // Only a pattern can hold a note name, and its numbers stay positions.
+        if (!engineSide && raw.sig.stepsForCycle) {
+          c = { ...raw, sig: raw.sig.mapValue((v) => { const hz = noteHz(v); return hz == null ? v : unitPosition(conv, hz); }) };
+        }
+      } else if (conv) {
+        c = { ...raw, sig: raw.sig.mapValue((v) => unitPosition(conv, v)) };
+      }
+      let node = paramExpr(raw.sig);
+      if (conv && !conv.notes && !node && canEval && engineSide) node = { k: 'leaf', sig: raw.sig };
+      if (conv && !conv.notes && node) node = unitTree(conv, node);
       if (!node) { entries.push(c); continue; }
       if (!canEval) {
         // Without the engine's help an expression is still its JavaScript - except audio, which
@@ -1018,10 +1158,11 @@ export class Scheduler {
             }
             return { k: 'in', i: inputs.get(n.sig), rate: n.sig.envIR ? 'ar' : 'kr' };
           }
-          default: return { k: n.k, op: n.op, a: n.a.map(wire) };
+          // A node's own fields (a map's range and curve) travel with it.
+          default: return { ...n, a: n.a.map(wire) };
         }
       };
-      exprs.set(`${c.slot}:${c.name}`, { slot: c.slot, name: c.name, tree: wire(node) });
+      exprs.set(`${c.slot}:${c.name}`, { slot: c.slot, name: c.name, tree: markStepped(wire(node)) });
     }
     this._expandedFor = sig;
     this._expandedCache = { entries, exprs };
@@ -1062,7 +1203,7 @@ export class Scheduler {
   // plan the engine is sent, and the branch levels, pans and crossover frequencies it adds as
   // channel controls - which is what lets each of them take anything a control takes.
   _routing(sig) {
-    if (!sig?.fxRoute) return null;
+    if (!routeItems(sig)) return null;
     if (this._routingFor !== sig) {
       this._routingFor = sig;
       this._routingCache = routePlan(sig);
@@ -1169,6 +1310,10 @@ export class Scheduler {
 
   setPattern(sig) {
     this.pattern = sig;
+    // The track's key, for a device tuned to it (a control that takes a 'scale'): the pattern's
+    // own .scale(), else the setscale() in force when its chain was built - an evaluation's, which
+    // is not always the one in force now - else the one in force now.
+    this._trackScale = sig.scaleName ?? sig.buildScale ?? globalScale() ?? null;
     // The note gate every JS-sampled modulator on this track reads (see withNoteGate): the same
     // sounding spans _scheduleNoteEdges emits, so a polled env() and a native one hear the same
     // notes. Rebuilt per eval, since the grid it caches is this pattern's. Kept in TRANSPORT cycles,
@@ -1778,6 +1923,9 @@ export class Scheduler {
       this.stop();
       // eslint-disable-next-line no-console
       console.error(`[scheduler] track "${this.label}" stopped - pattern threw during playback: ${err.message ?? err}`);
+      // ...and on the editor's console, pointing at the code that threw when a frame of it is on
+      // the stack (a callback written in the block), since the terminal is not where anyone looks.
+      warnPattern(`track "${this.label}" stopped - ${plainText(err?.message ?? err)}`, err);
     }
   }
 
@@ -2206,20 +2354,42 @@ export class Scheduler {
     };
     const src = this.pattern.sampler;
     const merged = step.cfg;
+    const deferred = [];
     // vel is not here - it's a note channel (see _velAt), read the same way as on a synth track.
-    for (const key of ['index', 'begin', 'end', 'loop', 'loopWrap', 'loopDir', 'speed', 'flip', 'stretch',
+    for (const key of ['index', 'begin', 'end', 'loop', 'loopWrap', 'loopDir', 'speed', 'flip', 'stretch', 'fitMode',
       'slice', 'splice', 'spliceMode', 'note', 'attack', 'decay', 'sustain', 'release', 'envScale', 'grain']) {
-      if (merged && merged[key] !== undefined) {
+      // A control that reads the sample's length (.play() - see withSampleLength) has no value
+      // until the engine knows which file plays: it is read again there, with that length, through
+      // cfg.atLength. Every control is read inside the scope that finds out.
+      const read = src[key] ? withSampleLength(undefined, () => at(src[key])) : null;
+      if (read?.read) {
+        deferred.push(key);
+      } else if (merged && merged[key] !== undefined) {
         cfg[key] = merged[key];
-      } else if (src[key]) {
-        const v = at(src[key]);
+      } else if (read) {
+        const v = read.value;
         if (v !== undefined && !Number.isNaN(v)) cfg[key] = v;
       }
+    }
+    if (deferred.length) {
+      // The engine calls this with the event's sample length in cycles - the fitted length, or the
+      // natural one - and takes the numbers it answers, read at this event's onset.
+      // Read later, outside this event's emission, so the event's span goes with it: a control
+      // that mixes the length with dur() reads the dur() it would read here.
+      const span = currentEventSpan();
+      cfg.atLength = (length) => {
+        const out = {};
+        for (const key of deferred) {
+          const v = withEventSpan(span, () => withSampleLength(length, () => at(src[key]))).value;
+          if (v !== undefined && !Number.isNaN(v)) out[key] = v;
+        }
+        return out;
+      };
     }
     // .loopwrap()/.loopdir()/.splicemode() carry mode NUMBERS rather than amounts, so whatever
     // the channel produced picks a mode by rounding and wrapping (see loopModeAt) - that's what
     // lets a continuous signal drive them. Done here so the engine and the .log() line agree.
-    for (const key of ['loopWrap', 'loopDir', 'spliceMode']) {
+    for (const key of ['loopWrap', 'loopDir', 'spliceMode', 'fitMode']) {
       if (cfg[key] !== undefined) cfg[key] = loopModeAt(key, cfg[key]);
     }
     // The slice SET is the odd one out: its value is a positions array (or a map of them, keyed by
@@ -2347,16 +2517,16 @@ export class Scheduler {
     const applySec = nowSec + DEFAULT_LOOKAHEAD_SEC;
     const sends = [];
     this._readAt(this.transport.cycleAt(applySec), (applyCycle) => {
-      for (const send of this.pattern?.busSends ?? []) {
+      (this.pattern?.busSends ?? []).forEach((send, i) => {
         // A patterned name resting (a `~` step, or a value the pattern doesn't cover) means no send
         // at all for as long as the rest lasts - the send drops out of the set, which frees the bus
         // if nothing else feeds it, rather than sending to it at zero.
         let name = send.name;
         if (typeof name !== 'string') {
           const v = name.sample(applySec, this.transport.cps, applyCycle);
-          if (v == null) continue;
+          if (v == null) return;
           name = String(v).trim();
-          if (!name) continue;
+          if (!name) return;
         }
         let amount = send.amount;
         if (typeof amount !== 'number') {
@@ -2366,8 +2536,10 @@ export class Scheduler {
           // louder mistake than staying where it was.
           amount = Number.isNaN(v) ? this._sentAmountFor(sends.length, name) : v;
         }
-        sends.push({ name, amount });
-      }
+        // `i` is the send's index among the pattern's: what the routing plan names a send written
+        // inside the chain by (see route.mjs), so the engine can tap it where it is written.
+        sends.push({ name, amount, i });
+      });
     });
 
     if (sends.length === 0) {
@@ -2377,7 +2549,7 @@ export class Scheduler {
       return;
     }
     const prev = this._sentBusSends;
-    const rerouted = !prev || prev.length !== sends.length || sends.some((s, i) => s.name !== prev[i].name);
+    const rerouted = !prev || prev.length !== sends.length || sends.some((s, k) => s.name !== prev[k].name || s.i !== prev[k].i);
     if (rerouted) {
       // setBusSends carries the levels with it, so nothing more is needed this tick.
       this.engine.setBusSends(this.trackId, sends);
@@ -2431,6 +2603,62 @@ export class Scheduler {
     warnPattern(`[scheduler] track "${this.label}": ${bendRangeWarning(value, range).replace(/^\[signal\] /, '')}`);
   }
 
+  /**
+   * The controls that take a LIST (a device's takes 'list' or 'scale' - the engine says which,
+   * see listParams), sent as `{ list }` rather than polled as numbers. Returns the "slot:name" keys
+   * of the pattern's entries this has handled, for the poll to leave alone.
+   *
+   *   'list'   one CYCLE of the pattern, as the [start, end, value] triples of its steps (a rest,
+   *            or a word that is not a number, is a gap), due at the cycle's start: the levels of
+   *            a filter bank's bands, stepped cycle by cycle. A signal with no steps is its value
+   *            at the cycle's start across the whole of it.
+   *   'scale'  the scale the pattern names on the control, or else the track's key, as
+   *            [root, period, interval...] - what a device tuned to a scale is tuned to.
+   *
+   * A list is sent when it changes (or the device in the slot does), never every poll.
+   */
+  _pollListParams(applySec, songPos) {
+    if (typeof this.engine.listParams !== 'function') return null;
+    const sig = this.pattern;
+    const handled = new Set();
+    const norm = (k) => String(k).trim().toLowerCase();
+    for (let slot = sig.instrument ? 0 : 1; slot <= sig.fxChain.length; slot++) {
+      const wants = this.engine.listParams(this.trackId, slot);
+      if (!wants?.length) continue;
+      for (const w of wants) {
+        const entry = Object.values(sig.paramSignals).find((e) => e.slot === slot && (norm(e.name) === norm(w.id) || norm(e.name) === norm(w.name)));
+        if (entry) handled.add(`${slot}:${entry.name}`);
+        let list = null;
+        let at = applySec;
+        // What the window prints on the control: the scale's name, or that a pattern is laying it.
+        let label = 'pattern';
+        if (w.takes === 'list') {
+          if (!entry) continue;
+          const cycle = Math.floor(songPos);
+          at = this.transport.secAt(this.transport.cycleAt(applySec) - (songPos - cycle));
+          list = cycleList(entry.sig, cycle, at, this.transport.cps);
+        } else if (w.takes === 'scale') {
+          // A scale name with a space in it is one name, not a two-step pattern: the literal as written.
+          const literal = typeof entry?.sig?.miniText === 'string' && scaleList(entry.sig.miniText, null) ? entry.sig.miniText : null;
+          const named = literal ?? (entry ? entry.sig.sample(applySec, this.transport.cps, songPos) : null);
+          const name = typeof named === 'string' && named.trim() ? named : this._trackScale;
+          if (!name) continue;
+          list = scaleList(name, this.label ?? this.trackId);
+          if (!list) continue;
+          label = String(name).trim().replace(/:/g, ' ');
+        }
+        if (!list) continue;
+        const key = `${slot}:${w.id}`;
+        const text = `${label}|${list.join(',')}`;
+        const sent = this._sentLists.get(key);
+        if (sent && sent.epoch === w.epoch && sent.text === text) continue;
+        this._sentLists.set(key, { epoch: w.epoch, text });
+        this.engine.setParam(this.trackId, slot, w.id, { list, label }, at);
+      }
+    }
+    return handled;
+  }
+
   _pollGenericParams(nowSec) {
     // Sample each signal at the time the value will actually be applied (the engine schedules
     // setParam in a timestamped bundle at applySec) - sampling at nowSec instead would put
@@ -2439,13 +2667,16 @@ export class Scheduler {
     // Read in song time (see setSongClock) - which on a painted track is the clip's own, with the
     // way back to the song bound for the lanes that want it (see _readAt).
     this._readAt(this.transport.cycleAt(applySec), (applyCycle) => {
+      const lists = this._pollListParams(applySec, applyCycle);
       for (const c of this._expanded(this.pattern).entries) {
         if (c.sig.lfoIR || c.sig.envIR || c.sig.ccIR) continue; // runs natively, programmed once in setPattern()
+        if (lists?.has(`${c.slot}:${c.name}`)) continue; // sent whole, above
         // A mixer control being dragged holds this one at the value under your finger (see
         // holdChannel); the pattern's own value is what it returns to when you let go. Read with a
         // conditional rather than `&&` so a plugin param can't come out as `false ?? sample`.
         const held = c.slot === CHANNEL_SLOT ? this._channelHold.get(c.name) : undefined;
-        const value = held ?? c.sig.sample(applySec, this.transport.cps, applyCycle);
+        // The read that is applied - the one a control's .record() records from (see motion.mjs).
+        const value = held ?? withLiveReads(() => c.sig.sample(applySec, this.transport.cps, applyCycle));
         if (c.slot !== CHANNEL_SLOT) {
           // The first value the pattern sends a plugin parameter takes it over; a null after that
           // hands it back (see _heldParams). A channel control needs neither: its off side is a

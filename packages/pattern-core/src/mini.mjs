@@ -83,20 +83,49 @@
 import { Frac } from './frac.mjs';
 import { noteToMidi } from './notes.mjs';
 
+/**
+ * A sync option's label (`1/8.`, `1/16T`, `1/4`, `1 bar`, `4 bars`). As mini notation "1/8." is 1
+ * slowed by 8 and "1/16T" does not parse, so .param() and the location transpile keep one whole.
+ */
+export const DIVISION_LABEL = /^\s*(\d+\/\d+[.Tt]?|\d+\s+bars?)\s*$/;
+
 // `offset` shifts every source span (`loc`/`subLocs`, derived from token positions) by a fixed
 // amount, so the atom spans a step reports resolve against the ORIGINAL document rather than the
 // bare mini string - this is how playback highlighting places an atom inside a `n("…")` literal
 // sitting anywhere in the editor buffer (see web-app's location transpile). Only the highlight
 // spans move; decorrelating seeds (`?`/`|`, r/i/p) stay string-relative and untouched, so a
 // pattern degrades/chooses identically no matter where in the buffer it lives.
+//
+// A string that does not parse throws with `poptartSpan` on the error - the buffer span to point
+// at (the token it stopped on where that is known, the whole string where not) - whenever it has
+// an offset to place it by, which every string the location transpile wrapped does.
 export function parseMini(str, offset = 0, { speech = false } = {}) {
-  const tokens = speech ? tokenizeSpeech(str) : tokenize(str);
-  const { node, rest } = parseLayers(tokens, /* stopType */ null);
-  if (rest.length > 0) {
-    throw new Error(`[mini] unexpected token "${rest[0].text}" while parsing "${str}"`);
+  try {
+    const tokens = speech ? tokenizeSpeech(str) : tokenize(str);
+    const { node, rest } = parseLayers(tokens, /* stopType */ null);
+    if (rest.length > 0) {
+      throw miniError(`[mini] unexpected token "${rest[0].text}" while parsing "${str}"`, rest[0]);
+    }
+    if (offset) offsetLocs(node, offset);
+    return node;
+  } catch (err) {
+    if (offset > 0 && err && typeof err === 'object' && !err.poptartSpan) {
+      err.poptartSpan = Number.isInteger(err.miniAt)
+        ? [offset + err.miniAt, offset + err.miniAt + Math.max(1, err.miniLen ?? 1)]
+        : [offset, offset + String(str).length];
+    }
+    throw err;
   }
-  if (offset) offsetLocs(node, offset);
-  return node;
+}
+
+// A parse error that knows the token it stopped on, so the editor can mark that token.
+function miniError(message, tok) {
+  const err = new Error(message);
+  if (tok && Number.isInteger(tok.start)) {
+    err.miniAt = tok.start;
+    err.miniLen = (tok.end ?? tok.start + 1) - tok.start;
+  }
+  return err;
 }
 
 // Shifts every `loc` in the AST by `offset`, in place. Walks the same child shapes as spanOf.
@@ -206,7 +235,7 @@ const ATOM_RE = /^[A-Za-z0-9#.\-_:]+/;
 // Single quotes only: mini strings are written inside JS double quotes or backticks.
 function readQuoted(str, i) {
   const close = str.indexOf("'", i + 1);
-  if (close < 0) throw new Error(`[mini] unterminated '...' quoted name in "${str}"`);
+  if (close < 0) throw miniError(`[mini] unterminated '...' quoted name in "${str}"`, { start: i, end: i + 1 });
   return { text: str.slice(i + 1, close), end: close + 1 };
 }
 
@@ -231,11 +260,11 @@ function tokenize(str) {
       continue;
     }
     if (ch === '{' || ch === '}') {
-      throw new Error(`[mini] "${ch}" (polymeter) is not supported yet, in "${str}"`);
+      throw miniError(`[mini] "${ch}" (polymeter) is not supported yet, in "${str}"`, { start: i, end: i + 1 });
     }
     const m = ATOM_RE.exec(str.slice(i));
     if (!m) {
-      throw new Error(`[mini] unexpected character "${ch}" in "${str}"`);
+      throw miniError(`[mini] unexpected character "${ch}" in "${str}"`, { start: i, end: i + 1 });
     }
     // ":x" pressed right up against a closing bracket is a field suffix for that whole group
     // ("<18 16>:3"), not an atom of its own - the parser distributes it onto the group's atoms.
@@ -409,7 +438,7 @@ function buildLayers(seqs, seps, seed) {
 function parseGroup(tokens) {
   // tokens[0] is '['
   const { node, rest } = parseLayers(tokens.slice(1), ']');
-  if (rest[0]?.type !== ']') throw new Error('[mini] expected closing "]"');
+  if (rest[0]?.type !== ']') throw miniError('[mini] expected closing "]"', tokens[0]);
   return { node, rest: rest.slice(1), end: rest[0].end };
 }
 
@@ -419,7 +448,7 @@ function parseGroup(tokens) {
 function parseParenGroup(tokens) {
   // tokens[0] is '('
   const { node, rest } = parseLayers(tokens.slice(1), ')', parseArithElement);
-  if (rest[0]?.type !== ')') throw new Error('[mini] expected ")" to close "(...)"');
+  if (rest[0]?.type !== ')') throw miniError('[mini] expected ")" to close "(...)"', tokens[0]);
   return { node, rest: rest.slice(1), end: rest[0].end };
 }
 
@@ -433,7 +462,7 @@ function parseAngle(tokens) {
     pushElement(items, element);
     tokens = rest;
   }
-  if (tokens[0]?.type !== '>') throw new Error('[mini] expected closing ">"');
+  if (tokens[0]?.type !== '>') throw miniError('[mini] expected closing ">"', open);
   const end = tokens[0].end;
   tokens = tokens.slice(1);
   return { node: { type: 'alt', items, loc: [open.start, end] }, rest: tokens, end };
@@ -484,7 +513,7 @@ function parseElement(tokens, arith = false) {
       rest = rest.slice(1);
       lastEnd = t.end;
     } else {
-      throw new Error(`[mini] "${t.text}" needs arguments, e.g. ${t.text}(0,7)`);
+      throw miniError(`[mini] "${t.text}" needs arguments, e.g. ${t.text}(0,7)`, t);
     }
   } else if (t.type === 'quoted') {
     // `quoted` marks it as a literal for the two places that read INTO an atom's text: the "_"
@@ -507,7 +536,7 @@ function parseElement(tokens, arith = false) {
     rest = rest.slice(1);
     lastEnd = t.end;
   } else {
-    throw new Error(`[mini] unexpected token "${t.text}"`);
+    throw miniError(`[mini] unexpected token "${t.text}"`, t);
   }
 
   let weight = 1;
@@ -538,7 +567,7 @@ function parseElement(tokens, arith = false) {
         rest = parsed.rest;
         lastEnd = parsed.end;
       } else {
-        throw new Error(`[mini] "${op.type}" must be followed by a number or a pattern like <2 3> or [1 2]`);
+        throw miniError(`[mini] "${op.type}" must be followed by a number or a pattern like <2 3> or [1 2]`, op);
       }
       node = { type: op.type === '*' ? 'fast' : 'slow', item: node, amount };
       continue;
@@ -565,7 +594,7 @@ function parseElement(tokens, arith = false) {
     if (op.type === '@') {
       const amountTok = rest[1];
       if (!amountTok || Number.isNaN(Number(amountTok.text))) {
-        throw new Error('[mini] "@" must be followed by a number');
+        throw miniError('[mini] "@" must be followed by a number', op);
       }
       weight *= Number(amountTok.text);
       rest = rest.slice(2);

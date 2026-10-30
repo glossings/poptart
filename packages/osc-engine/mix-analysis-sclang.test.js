@@ -22,10 +22,10 @@ const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 
 const { resolveSclangPath, MIX_BAND_FREQS } = require('./index.js');
-const { userExtensionsDir } = require('./extensions.js');
+const { userExtensionsDir, DEVICE_BINARY } = require('./extensions.js');
 
 const NATIVE_DIR = path.join(__dirname, 'native', 'devices');
-const SCX_DIR = path.join(NATIVE_DIR, 'bin');
+const SCX_DIR = path.dirname(DEVICE_BINARY); // this platform's build (extensions.js)
 
 const SCD = path.join(__dirname, 'sc', 'poptart.scd');
 
@@ -105,7 +105,7 @@ score.recordNRT(${JSON.stringify(path.join(dir, 'a.osc'))}, ${JSON.stringify(pat
 }
 
 test('the mixer analyzer is the native spectrum unit where it is installed, and it loads and runs', (t) => {
-  if (!fs.existsSync(path.join(SCX_DIR, 'PoptartDevices.scx'))) { t.skip('no PoptartDevices.scx in this checkout'); return; }
+  if (!fs.existsSync(DEVICE_BINARY)) { t.skip('no PoptartDevices.scx in this checkout'); return; }
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'poptart-mixanalysis-'));
   const out = runSclang(dir, true);
   if (!out.includes('Welcome to SuperCollider')) { t.skip('sclang did not start here'); return; }

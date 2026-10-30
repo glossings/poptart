@@ -42,8 +42,12 @@
  */
 const TRACK_BEND_PARAM = 'track.bend';
 
-/** Parameter value curves: how a 0..1 position maps onto the parameter's real range. */
-const CURVES = new Set(['lin', 'exp', 'pow']);
+/**
+ * Parameter value curves: how a 0..1 position maps onto the parameter's real range. `sym` is
+ * `pow` mirrored about the middle of the range - a signed control that is fine around zero and
+ * still reaches both ends (a frequency shift of a few hertz either way, or thousands).
+ */
+const CURVES = new Set(['lin', 'exp', 'pow', 'sym']);
 // The stages of an instrument's amp envelope a parameter can stand for, which the sampler's own
 // envelope methods (.attack() .decay() .sustain() .release() .envscale()) reach on any instrument.
 const AMP_STAGES = new Set(['attack', 'decay', 'sustain', 'release', 'scale']);
@@ -72,8 +76,15 @@ const KINDS = new Set(['synth', 'fx']);
  *
  * Only an enum can take either, since what the string becomes is a new entry on the option
  * list - which is what makes a loaded file or a drawn curve nameable in the code afterwards.
+ *
+ * 'list' means a LIST of numbers per step of the pattern rather than one: the scheduler reads one
+ * cycle of the pattern on it and hands its steps over as [start, end, value] triples - a level per
+ * band across a filter bank, stepped from cycle to cycle. 'scale' is a list the scheduler fills
+ * with the track's scale, [root, period, interval...], unless the pattern names one. Either is
+ * handed to the device the way a drawn curve is, in an option slot of its own, and the control is
+ * pointed at that slot when the list is due, so a list lands on time on both engines.
  */
-const TAKES = new Set(['sample', 'shape']);
+const TAKES = new Set(['sample', 'shape', 'list', 'scale']);
 
 /**
  * Units we attach meaning to. The string is what a readout prints, so it is the real symbol and
@@ -186,8 +197,8 @@ function defineParam(deviceId, spec, seen) {
     fail(deviceId, `param "${id}": an exp curve needs min above zero (it maps a ratio)`);
   }
   const curveExp = spec.curveExp ?? 2;
-  if (curve === 'pow' && !(isFiniteNumber(curveExp) && curveExp > 0)) {
-    fail(deviceId, `param "${id}": a pow curve needs a positive curveExp`);
+  if ((curve === 'pow' || curve === 'sym') && !(isFiniteNumber(curveExp) && curveExp > 0)) {
+    fail(deviceId, `param "${id}": a ${curve} curve needs a positive curveExp`);
   }
 
   // When this control is live at all.
@@ -224,6 +235,11 @@ function defineParam(deviceId, spec, seen) {
   if (bank !== null && !takes) fail(deviceId, `param "${id}": only a control that takes a file or a curve has a bank`);
   const amp = spec.amp ?? null;
   if (amp !== null && !AMP_STAGES.has(amp)) fail(deviceId, `param "${id}" has unknown amp stage "${amp}"`);
+  // Whether a captured state holds this control. A control that is a performance gesture rather
+  // than part of the sound - a looper's Record - says `saved: false`, so a song saved mid-gesture
+  // does not replay the gesture when it is opened.
+  const saved = spec.saved ?? true;
+  if (typeof saved !== 'boolean') fail(deviceId, `param "${id}": saved is true or false`);
 
   if (seen.has(normalizeKey(id))) fail(deviceId, `duplicate param id "${id}"`);
   if (seen.has(normalizeKey(name))) fail(deviceId, `param name "${name}" collides with another param's id or name`);
@@ -252,6 +268,7 @@ function defineParam(deviceId, spec, seen) {
     sampleAs,
     bank,
     amp,
+    saved,
     group: String(spec.group ?? '').trim() || null,
     description: String(spec.description ?? '').trim() || null,
   });
@@ -306,6 +323,9 @@ const FIGURE_KINDS = new Map([
   ['sweep', ['rate', 'depth']],
   // A ducker's dip: the shape over a beat, and the signal it is pumping.
   ['duck', ['amount', 'length']],
+  // A filter bank's bands: a bar per band at its frequency, as loud as it is being fed - which the
+  // device reports, since Shape moves it every sample.
+  ['bands', ['levels']],
 ]);
 
 /**
@@ -459,9 +479,9 @@ function defineDevice(spec) {
   // device that wants phase modulation gives its phase a knob. See signalDestinations().
   if (spec.inputs !== undefined) fail(id, 'inputs are not a thing - an a-rate param is a signal destination already');
 
-  // `key` and `outputs` are the Crossover's (see devices/crossover.mjs): a second input that is
-  // not a sidechain anybody routes - the wiring of a .bands() feeds it - and more than one output,
-  // each `out` channels wide. Every other device has neither.
+  // `key` and `outputs` are the Crossover's (see devices/crossover.mjs) and the Delay's loop (see
+  // `loop` below): a second input that is not a sidechain anybody routes - the track's wiring
+  // feeds it - and more than one output, each `out` channels wide. Every other device has neither.
   const channels = {
     in: spec.channels?.in ?? (kind === 'fx' ? 2 : 0),
     out: spec.channels?.out ?? 2,
@@ -497,10 +517,24 @@ function defineDevice(spec) {
   const latencySec = spec.latencySec ?? 0;
   if (!isFiniteNumber(latencySec) || latencySec < 0 || latencySec > 1) fail(id, 'latencySec is seconds, 0 to 1');
 
+  // A feedback loop a chain can run inside (`.fx("Delay", (x) => x.fx("Filter"))`): the device's
+  // second output is its repeats going out to the chain, and its key is the chain coming back. The
+  // engine tells the processor how late the chain returns (setLoop), and wires the two only when
+  // the code puts a chain there.
+  const loop = spec.loop === true;
+  if (loop && !(channels.key === channels.out && channels.outputs >= 2)) fail(id, 'a loop needs a key as wide as the output and a second output');
+
+  // How a state saved by an earlier version reads on this one (see migrateState). Only a device
+  // past version 1 can have anything to migrate from.
+  const migrate = spec.migrate ?? null;
+  if (migrate !== null && typeof migrate !== 'function') fail(id, 'migrate is a function of (params, fromVersion)');
+  if (migrate && version === 1) fail(id, 'version 1 has nothing to migrate from');
+
   return Object.freeze({
     id,
     kind,
     version,
+    migrate,
     license,
     vendor: String(spec.vendor ?? 'poptart').trim(),
     source: String(spec.source ?? '').trim() || null,
@@ -513,6 +547,7 @@ function defineDevice(spec) {
     channels: Object.freeze(channels),
     sidechain,
     notes,
+    loop,
     latencySec,
     params: Object.freeze(params),
     figures: Object.freeze(figures),
@@ -566,7 +601,8 @@ function clampParam(param, value) {
 /**
  * 0..1 position to a real value. `exp` is the ratio sweep a frequency wants (20 Hz to 20 kHz
  * feels linear on a log knob); `pow` bends a linear range so the useful end gets more travel (a
- * 0..1 depth where everything happens below 0.2).
+ * 0..1 depth where everything happens below 0.2); `sym` is `pow` from the middle out, so a signed
+ * control rests at zero and gets most of its travel close to it.
  *
  * This is the one function that gives a `.param()` value its meaning, and every device applies
  * it on the audio thread: a control arrives as a position and leaves this as the number the DSP
@@ -580,6 +616,9 @@ function denormalize(param, position) {
     v = param.min * Math.pow(param.max / param.min, t);
   } else if (param.curve === 'pow') {
     v = param.min + (param.max - param.min) * Math.pow(t, param.curveExp);
+  } else if (param.curve === 'sym') {
+    const u = 2 * t - 1;
+    v = (param.min + param.max) / 2 + ((param.max - param.min) / 2) * Math.sign(u) * Math.pow(Math.abs(u), param.curveExp);
   } else {
     v = param.min + (param.max - param.min) * t;
   }
@@ -594,10 +633,34 @@ function normalize(param, value) {
     t = Math.log(v / param.min) / Math.log(param.max / param.min);
   } else if (param.curve === 'pow') {
     t = Math.pow((v - param.min) / (param.max - param.min), 1 / param.curveExp);
+  } else if (param.curve === 'sym') {
+    const u = (v - (param.min + param.max) / 2) / ((param.max - param.min) / 2);
+    t = (1 + Math.sign(u) * Math.pow(Math.abs(u), 1 / param.curveExp)) / 2;
   } else {
     t = (v - param.min) / (param.max - param.min);
   }
   return Math.min(param.open ? Infinity : 1, Math.max(0, t));
+}
+
+/**
+ * A saved state's parameter map brought up to this version of the device, or returned as it is
+ * when nothing has to change.
+ *
+ * A device whose controls change shape between versions declares `migrate(params, fromVersion)`
+ * and returns the map a device of ITS version would have saved: a state carries the version that
+ * wrote it, and a control that was renamed, merged or split would otherwise be silently skipped
+ * on restore and the song would change under the person who saved it. Both engines call this
+ * before reading a state (the desktop mirrors the same mappings in osc-engine's native-devices.js,
+ * which cannot load this module).
+ */
+function migrateState(descriptor, doc) {
+  if (!doc || typeof doc !== 'object' || !descriptor?.migrate) return doc;
+  const params = doc.params ?? doc;
+  if (!params || typeof params !== 'object') return doc;
+  const from = Number.isInteger(doc.version) && doc.version >= 1 ? doc.version : 1;
+  if (from >= descriptor.version) return doc;
+  const migrated = descriptor.migrate({ ...params }, from);
+  return doc.params ? { ...doc, version: descriptor.version, params: migrated } : migrated;
 }
 
 /** Whether a parameter is a two-state switch, whatever widget it asked for. */
@@ -2646,6 +2709,11 @@ const BEATS = Object.freeze([
   2, 4 / 3, 3, 4, 8, 16,
 ]);
 
+/** The length of a sync setting in beats, or null when it is free. */
+function syncBeats(syncIndex) {
+  return BEATS[Math.round(syncIndex)] ?? null;
+}
+
 /** Whether a sync setting is `free`. */
 function isFree(syncIndex) {
   return BEATS[Math.round(syncIndex)] == null;
@@ -2672,6 +2740,14 @@ function syncedHz(syncIndex, bpm, fallbackHz) {
 // tells every device the tempo, so a synced delay follows setbpm() and a free one does not. A
 // change of length is glided rather than jumped, which pitches the tail for a moment the way a
 // tape delay does and never clicks.
+//
+// A chain can run inside the feedback loop (`.fx("Delay", (x) => x.fx("Filter"))`). The repeats
+// then leave through the second output, go through the chain on the track, and come back into the
+// key input, where the Tone, the Feedback and the soft clip take them as they take the repeats of
+// a plain delay, ping-pong included. The way round takes time - a block of the engine's, and the
+// delay of any device in the chain - which the engine says with setLoop. The repeats are read
+// that much early, so they stay on the grid; a time shorter than the way round is held at it.
+// With no chain the device is the plain delay, sample for sample.
 
 
 const DELAY_MAX_SEC = 4;
@@ -2683,7 +2759,9 @@ const DELAY = defineDevice({
   license: 'AGPL-3.0-only',
   processor: 'poptart-delay',
   description: 'A stereo delay with feedback and a lowpass in the loop, in seconds or synced to the tempo, with a ping-pong mode.',
-  channels: { in: 2, out: 2 },
+  // The second output and the key are the feedback loop's way out and back in (see above).
+  channels: { in: 2, out: 2, key: 2, outputs: 2 },
+  loop: true,
   params: [
     { id: 'sync', name: 'Sync', default: 0, options: [...SYNC_OPTIONS], rate: 'k',
       description: 'A division of the beat overrides the time control and follows the tempo. Free reads the time control.' },
@@ -2727,16 +2805,23 @@ class DelayProcessor {
     this.length = [0, 0];       // the delay each channel is actually at, in samples
     this.bpm = 120;
     this.lastTone = -1;
+    this.loopSec = -1;          // how late the loop's chain returns, in seconds; below zero, no loop
   }
 
   setTempo(bpm) { this.bpm = bpm; }
+
+  /** How late a chain in the feedback loop comes back, in seconds, or below zero for none. */
+  setLoop(seconds) { this.loopSec = Number.isFinite(seconds) && seconds >= 0 ? seconds : -1; }
 
   reset() {
     for (const l of this.lines) l.reset();
     for (const t of this.tones) t.reset();
   }
 
-  process(inputs, outputs, count, params) {
+  process(inputs, outputs, count, params, key = null, time = 0, more = null) {
+    if (this.loopSec >= 0) { this.processLoop(inputs, outputs, count, params, key, more); return; }
+    // No chain in the loop: nothing goes out of the second output.
+    if (more?.[0]) for (const ch of more[0]) ch?.fill(0, 0, count);
     const sync = Math.round(at(params.sync, 0));
     const seconds = Math.min(DELAY_MAX_SEC, Math.max(0.001, syncedSeconds(sync, this.bpm, at(params.time, 0))));
     const pingpong = at(params.pingpong, 0) >= 0.5;
@@ -2779,6 +2864,72 @@ class DelayProcessor {
         lineL.write(dryL + fedL);
         lineR.write(dryR + fedR);
       }
+      outL[i] = dryL + (readL - dryL) * mix;
+      if (outR !== outL) outR[i] = dryR + (readR - dryR) * mix;
+    }
+    this.length[0] = lenL;
+    this.length[1] = lenR;
+    if (!Number.isFinite(outL[count - 1])) this.reset();
+  }
+
+  /**
+   * The delay with a chain in its feedback loop. The same lines, glide and Tone as process(), with
+   * the repeat taken out through `more[0]` and brought back in through `key`. The output tap reads
+   * the time; the tap that goes out to the chain reads it early by the way round (`loopSec`), so
+   * what comes back is written at the time and every repeat after the first lands on the grid. A
+   * time shorter than the way round is held at it.
+   */
+  processLoop(inputs, outputs, count, params, key, more) {
+    const sync = Math.round(at(params.sync, 0));
+    const seconds = Math.min(DELAY_MAX_SEC, Math.max(0.001, syncedSeconds(sync, this.bpm, at(params.time, 0))));
+    const pingpong = at(params.pingpong, 0) >= 0.5;
+    const spread = at(params.spread, 0);
+    const most = DELAY_MAX_SEC * this.sampleRate - 2;
+    const trip = Math.min(most, this.loopSec * this.sampleRate);
+    const targetL = Math.max(trip, seconds * this.sampleRate);
+    const targetR = Math.max(trip, Math.min(most, seconds * this.sampleRate * (1 + 0.5 * spread)));
+    const tone = at(params.tone, 0);
+    if (tone !== this.lastTone) { for (const t of this.tones) t.glideTo(tone, count); this.lastTone = tone; }
+    const k = 1 - Math.exp(-1 / (0.02 * this.sampleRate));
+
+    const inL = inputs[0];
+    const inR = inputs[1] ?? inputs[0];
+    const outL = outputs[0];
+    const outR = outputs[1] ?? outputs[0];
+    const backL = key?.[0] ?? null;
+    const backR = key?.[1] ?? backL;
+    const sendL = more?.[0]?.[0] ?? null;
+    const sendR = more?.[0]?.[1] ?? null;
+    const [lineL, lineR] = this.lines;
+    const [toneL, toneR] = this.tones;
+    let lenL = this.length[0] || targetL;
+    let lenR = this.length[1] || targetR;
+
+    for (let i = 0; i < count; i++) {
+      lenL += (targetL - lenL) * k;
+      lenR += (targetR - lenR) * k;
+      const fb = at(params.feedback, i);
+      const mix = at(params.mix, i);
+      const dryL = inL ? inL[i] : 0;
+      const dryR = inR ? inR[i] : 0;
+      const readL = lineL.readLinear(lenL);
+      const readR = lineR.readLinear(lenR);
+      const retL = backL ? backL[i] : 0;
+      const retR = backR ? backR[i] : 0;
+      const fedL = clipTail(toneL.next(pingpong ? retR : retL) * fb);
+      const fedR = clipTail(toneR.next(pingpong ? retL : retR) * fb);
+      if (pingpong) {
+        lineL.write((dryL + dryR) * 0.5 + fedL);
+        lineR.write(fedR);
+      } else {
+        lineL.write(dryL + fedL);
+        lineR.write(dryR + fedR);
+      }
+      // After the write, a tap of one is the sample just written: what goes out now comes back,
+      // and is written, `trip` samples later - one length after it was written itself.
+      // A length still gliding up to a longer way round reads no nearer than that sample.
+      if (sendL) sendL[i] = lineL.readLinear(Math.max(1, lenL - trip + 1));
+      if (sendR) sendR[i] = lineR.readLinear(Math.max(1, lenR - trip + 1));
       outL[i] = dryL + (readL - dryL) * mix;
       if (outR !== outL) outR[i] = dryR + (readR - dryR) * mix;
     }
@@ -3788,28 +3939,45 @@ function coefficient(hz, sampleRate) {
 // cosine; summing the products one way keeps only the upper sideband, the other way only the
 // lower. Feedback runs the shifted signal round again, so each pass moves it further: the
 // endlessly rising or falling spiral.
+//
+// One signed Freq knob says both how far and which way, as every hardware and plugin shifter
+// does: zero in the middle, up to the right, down to the left, on a curve that is fine near zero
+// (a shift of 2 Hz matters as much as one of 2 kHz) and still reaches thousands of hertz at the
+// ends. Wide sends the right channel the other way.
+//
+// Version 2. Version 1 had an unsigned Freq on a log curve, which cannot pass through zero, so
+// the sign lived in an up/down/split Direction menu; `migrate` reads those states.
 
-
-const DIRECTIONS = Object.freeze(['up', 'down', 'split']);
 
 const FREQSHIFT = defineDevice({
   id: 'FreqShift',
   kind: 'fx',
-  version: 1,
+  version: 2,
   license: 'AGPL-3.0-only',
   processor: 'poptart-freqshift',
   description: 'A frequency shifter: moves every partial by the same number of hertz, which makes a pitched sound inharmonic.',
   channels: { in: 2, out: 2 },
   params: [
-    { id: 'freq', name: 'Freq', min: 0.1, max: 5000, default: 50, unit: 'Hz', curve: 'exp',
-      description: 'How far every partial moves. A few hertz is a slow phasing wobble; tens to hundreds turn a pitched sound metallic.' },
-    { id: 'direction', name: 'Direction', default: 0, options: [...DIRECTIONS], rate: 'k',
-      description: 'Up adds the frequency and down subtracts it; split moves the left channel up and the right down.' },
+    { id: 'freq', name: 'Freq', min: -5000, max: 5000, default: 50, unit: 'Hz', curve: 'sym', curveExp: 3, decimals: 1,
+      description: 'How far every partial moves, and which way: up to the right of center, down to the left. A few hertz is a slow phasing wobble; tens to hundreds turn a pitched sound metallic.' },
+    { id: 'wide', name: 'Wide', min: 0, max: 1, default: 0, ui: 'toggle', rate: 'k',
+      description: 'Moves the right channel the other way from the left, so the two sides pull apart.' },
     { id: 'feedback', name: 'Feedback', min: 0, max: 0.95, default: 0,
       description: 'Sends the shifted signal round again, so each repeat moves further: a rising or falling spiral.' },
     { id: 'mix', name: 'Mix', min: 0, max: 1, default: 1,
       description: 'The shifted signal against the dry one. In between, the two beat against each other.' },
   ],
+  migrate(params, from) {
+    if (from < 2) {
+      // Direction 0 was up, 1 down, 2 split (left up, right down).
+      const direction = Math.round(Number(params.direction) || 0);
+      const freq = Number(params.freq);
+      delete params.direction;
+      if (Number.isFinite(freq)) params.freq = direction === 1 ? -freq : freq;
+      params.wide = direction === 2 ? 1 : 0;
+    }
+    return params;
+  },
 });
 
 // Two chains of second-order allpasses whose outputs stay 90 degrees apart from about 20 Hz to
@@ -3874,14 +4042,13 @@ class FreqShiftProcessor {
     const inR = inputs[1] ?? inputs[0];
     const outL = outputs[0];
     const outR = outputs[1] ?? outputs[0];
-    const direction = Math.round(at(params.direction, 0));
-    // +1 keeps the upper sideband, -1 the lower; split sends the two channels opposite ways.
-    const signL = direction === 1 ? -1 : 1;
-    const signR = direction === 0 ? 1 : -1;
+    // The sign of the frequency is the direction: the oscillator runs backwards for a shift
+    // down, which keeps the lower sideband. Wide runs the right channel's the other way.
+    const signR = at(params.wide, 0) >= 0.5 ? -1 : 1;
     const sr = this.sampleRate;
     for (let i = 0; i < count; i++) {
       this.phase += at(params.freq, i) / sr;
-      if (this.phase >= 1) this.phase -= Math.floor(this.phase);
+      this.phase -= Math.floor(this.phase);
       const w = 2 * Math.PI * this.phase;
       const c = Math.cos(w);
       const s = Math.sin(w);
@@ -3889,7 +4056,7 @@ class FreqShiftProcessor {
       const mix = at(params.mix, i);
       const l = inL ? inL[i] : 0;
       const r = inR ? inR[i] : 0;
-      const wetL = this.shift(0, l, c, s * signL, feedback);
+      const wetL = this.shift(0, l, c, s, feedback);
       const wetR = this.shift(1, r, c, s * signR, feedback);
       outL[i] = l + (wetL - l) * mix;
       if (outR !== outL) outR[i] = r + (wetR - r) * mix;
@@ -5035,6 +5202,272 @@ class StutterProcessor {
   }
 }
 
+// ---- src/devices/looper.mjs --------------------------------------
+// The Looper: records what is playing into a loop, plays it back, and layers more on top.
+//
+// Record on starts a take, record off ends it, and the first take sets the loop's length. With a
+// loop there, record overdubs into it instead. Both edges land on the Quantize grid: an edge that
+// arrives within LATE_SEC after a grid line counts as on that line (a press a little late, or a
+// control that reached the device a block late), and any other waits for the next line. A loop
+// taken on the grid is LOCKED to it: its length is a whole number of grid steps in beats, and its
+// playhead is worked out from the transport's beat every sample, so the loop stays on the bar
+// across a relocate and follows a tempo change like tape, pitch and all. On `free` a take starts
+// and stops on the spot and the loop runs at its own length, the way a tape loop would.
+//
+// Speed and Reverse move the playhead like tape. On a locked loop they bend an offset that
+// accumulates beside the transport's beat, so changing either never jumps the playhead, and at
+// speed 1 forwards the loop is exactly where the bar says it is.
+//
+// An overdub writes where the playhead is, through a short punch-in ramp: Feedback is how much of
+// what was there an overdub keeps - 1 layers the new on the old, 0 replaces it.
+//
+// There is no length cap. The loop lives in chunks that are added as a first take runs, so a take
+// is as long as somebody holds Record. It lives until Clear, or until the device leaves its slot:
+// an evaluation that keeps the same device in the slot keeps the device, and with it the loop.
+//
+// Record and Clear are never part of a saved state (`saved: false`): they are gestures, and a song
+// saved while recording would otherwise start recording the moment it is opened.
+
+
+/** Frames per chunk of loop memory, each chunk one array per channel. */
+const LOOPER_CHUNK = 65536;
+/** How late after a grid line an edge may arrive and still count as on that line. */
+const LOOPER_LATE_SEC = 0.03;
+/** Samples of fade at the loop's seam, and of the overdub's punch ramp. */
+const FADE = 64;
+/** How close under a whole sample the playhead may be and still write to it (see the overdub). */
+const SNAP = 1e-6;
+
+const LOOPER = defineDevice({
+  id: 'Looper',
+  kind: 'fx',
+  version: 1,
+  license: 'AGPL-3.0-only',
+  processor: 'poptart-looper',
+  description: 'A live looper: record a take on the grid, play it back, and overdub onto it, with tape-style speed and reverse.',
+  channels: { in: 2, out: 2 },
+  params: [
+    { id: 'record', name: 'Record', min: 0, max: 1, default: 0, ui: 'toggle', saved: false,
+      description: 'While on, records. The first take sets the loop length; with a loop there, it overdubs.' },
+    { id: 'quantize', name: 'Quantize', default: SYNC_OPTIONS.indexOf('1 bar'), options: [...SYNC_OPTIONS], rate: 'k',
+      description: 'The grid recording starts and stops on, and the loop locks to. Free starts and stops on the spot, and the loop runs at its own length.' },
+    { id: 'feedback', name: 'Feedback', min: 0, max: 1, default: 1,
+      description: 'How much of the loop an overdub keeps where it writes: 1 layers, 0 replaces.' },
+    { id: 'speed', name: 'Speed', min: 0.25, max: 4, default: 1, curve: 'exp', unit: 'x',
+      description: 'Playback speed, like tape: pitch moves with it.' },
+    { id: 'reverse', name: 'Reverse', min: 0, max: 1, default: 0, ui: 'toggle',
+      description: 'Plays the loop backwards.' },
+    { id: 'clear', name: 'Clear', min: 0, max: 1, default: 0, ui: 'button', saved: false,
+      description: 'Empties the loop.' },
+    { id: 'dry', name: 'Dry', min: 0, max: 1, default: 1,
+      description: 'The level of the input.' },
+    { id: 'wet', name: 'Wet', min: 0, max: 1, default: 1,
+      description: 'The level of the loop.' },
+  ],
+});
+
+class LooperProcessor {
+  constructor(sampleRate) {
+    this.sampleRate = sampleRate;
+    this.bpm = 120;
+    this.anchorSec = 0;
+    this.frames = 0;
+    // The loop's memory: chunks of LOOPER_CHUNK frames, added as a take needs them.
+    this.chunksL = [];
+    this.chunksR = [];
+    this.length = 0;         // the loop, in samples; 0 = no loop
+    this.locked = false;     // locked to the grid, or running at its own length
+    this.origin = 0;         // a locked loop's start, in beats
+    this.loopBeats = 0;      // a locked loop's length, in beats
+    this.offset = 0;         // beats the playhead is ahead of the transport, from speed and reverse
+    this.freePos = 0;        // a free loop's playhead, in samples
+    // Recording.
+    this.state = false;      // recording now (a take, or an overdub)
+    this.lastRecord = false; // Record as the last sample read it
+    this.lastClear = false;
+    this.taking = false;     // the first take is running
+    this.takeLocked = false;
+    this.count = 0;          // samples the first take has written
+    this.countAtLine = 0;    // ... as of the last grid line it crossed
+    this.lastLine = null;    // the grid line the last sample was on, or null
+    this.lastGrid = null;    // the grid that line was on
+    this.punch = 0;          // the overdub's gain, ramped
+    this.lastWritten = -1;   // the index the overdub last wrote
+  }
+
+  setTempo(bpm, anchorSec = null) {
+    this.bpm = bpm;
+    if (anchorSec != null) this.anchorSec = anchorSec;
+  }
+
+  /** Writes one frame of a first take, making room for it. */
+  _writeTake(index, l, r) {
+    const c = Math.floor(index / LOOPER_CHUNK);
+    while (this.chunksL.length <= c) {
+      this.chunksL.push(new Float32Array(LOOPER_CHUNK));
+      this.chunksR.push(new Float32Array(LOOPER_CHUNK));
+    }
+    const k = index - c * LOOPER_CHUNK;
+    this.chunksL[c][k] = l;
+    this.chunksR[c][k] = r;
+  }
+
+  _read(chunks, index) {
+    const c = Math.floor(index / LOOPER_CHUNK);
+    return c < chunks.length ? chunks[c][index - c * LOOPER_CHUNK] : 0;
+  }
+
+  _write(chunks, index, value) {
+    const c = Math.floor(index / LOOPER_CHUNK);
+    if (c < chunks.length) chunks[c][index - c * LOOPER_CHUNK] = value;
+  }
+
+  /** Record turns on or off, `late` seconds after the grid line it counts as on. */
+  _apply(on, late, free, beat, line, grid) {
+    this.state = on;
+    if (on) {
+      if (this.length > 0 || this.taking) return;   // an overdub: the punch ramp does the rest
+      this.taking = true;
+      this.takeLocked = !free;
+      this.origin = free ? 0 : line * grid;
+      this.count = free ? 0 : Math.round(late * this.sampleRate);
+      // The part of the first grid step that went by before the press is silence.
+      for (let k = 0; k < this.count; k++) this._writeTake(k, 0, 0);
+      this.countAtLine = this.count;
+      return;
+    }
+    if (!this.taking) return;
+    this.taking = false;
+    // A take that ends on a line is as long as it was AT that line: a late release is cut back.
+    const length = free ? this.count : this.countAtLine;
+    if (this.takeLocked) {
+      const beats = (free ? beat : line * grid) - this.origin;
+      if (beats > 0 && length > 0) {
+        this.length = length;
+        this.loopBeats = beats;
+        this.locked = true;
+      }
+    } else if (length > 0) {
+      this.length = length;
+      this.locked = false;
+    }
+    this.offset = 0;
+    this.freePos = 0;
+    this.punch = 0;
+    this.lastWritten = -1;
+  }
+
+  process(inputs, outputs, count, params, sidechain, timeSec = null) {
+    const inL = inputs[0];
+    const inR = inputs[1] ?? inputs[0];
+    const outL = outputs[0];
+    const outR = outputs[1] ?? outputs[0];
+    const sr = this.sampleRate;
+    const bpm = this.bpm;
+    const grid = syncBeats(Math.round(at(params.quantize, 0)));
+    const free = grid == null;
+    const transportSec = (timeSec ?? this.frames / sr) - this.anchorSec;
+    for (let i = 0; i < count; i++) {
+      const rawL = inL ? inL[i] : 0;
+      const rawR = inR ? inR[i] : 0;
+      const l = Number.isFinite(rawL) ? rawL : 0;
+      const r = Number.isFinite(rawR) ? rawR : 0;
+      const beat = (transportSec + i / sr) * bpm / 60;
+
+      // Clear: the loop goes, and a take in progress with it. Record still held starts over.
+      const clear = at(params.clear, i) >= 0.5;
+      if (clear && !this.lastClear) {
+        this.length = 0;
+        this.taking = false;
+        this.state = false;
+        this.punch = 0;
+        this.lastWritten = -1;
+      }
+      this.lastClear = clear;
+
+      // Record, on the grid.
+      const record = at(params.record, i) >= 0.5;
+      const edge = record !== this.lastRecord;
+      this.lastRecord = record;
+      if (free) {
+        this.lastLine = null;
+        if (record !== this.state) this._apply(record, 0, true, beat, 0, 0);
+      } else {
+        const line = Math.floor(beat / grid + 1e-9);
+        const late = (beat - line * grid) * 60 / bpm;
+        // A line crossed. A grid that changed is not a crossing: the index means another line.
+        if (this.lastGrid === grid && this.lastLine !== null && line !== this.lastLine) {
+          if (this.taking) this.countAtLine = this.count;
+          if (record !== this.state) this._apply(record, 0, false, beat, line, grid);
+        }
+        this.lastLine = line;
+        this.lastGrid = grid;
+        if (edge && record !== this.state && late < LOOPER_LATE_SEC) this._apply(record, late, false, beat, line, grid);
+      }
+
+      let wetL = 0;
+      let wetR = 0;
+      const speed = at(params.speed, i);
+      const s = at(params.reverse, i) >= 0.5 ? -speed : speed;
+      if (this.taking) {
+        this._writeTake(this.count, l, r);
+        this.count += 1;
+      } else if (this.length > 0) {
+        const L = this.length;
+        let p;
+        if (this.locked) {
+          const x = beat - this.origin + this.offset;
+          const phase = x - Math.floor(x / this.loopBeats) * this.loopBeats;
+          p = (phase / this.loopBeats) * L;
+        } else {
+          p = this.freePos;
+        }
+        if (p >= L) p -= L;
+        if (p < 0) p = 0;
+        const a = Math.floor(p);
+        const frac = p - a;
+        const b = a + 1 >= L ? 0 : a + 1;
+        const seam = Math.min(1, Math.min(p, L - p) / FADE);
+        const aL = this._read(this.chunksL, a);
+        const aR = this._read(this.chunksR, a);
+        wetL = (aL + (this._read(this.chunksL, b) - aL) * frac) * seam;
+        wetR = (aR + (this._read(this.chunksR, b) - aR) * frac) * seam;
+
+        // The overdub, read after the loop was: punched in and out over FADE samples, and each
+        // index written once however slowly the playhead crosses it. A playhead a hair under a
+        // whole sample is on it: the beat arithmetic rounds, and at speed 1 a sample read as
+        // 128.9999999 would otherwise be written as 128 twice and leave 129 a hole.
+        if (this.state) this.punch = Math.min(1, this.punch + 1 / FADE);
+        else this.punch = Math.max(0, this.punch - 1 / FADE);
+        let idx = Math.floor(p + SNAP);
+        if (idx >= L) idx = 0;
+        if (this.punch > 0 && idx !== this.lastWritten) {
+          const g = this.punch;
+          const keep = 1 - g * (1 - at(params.feedback, i));
+          this._write(this.chunksL, idx, this._read(this.chunksL, idx) * keep + l * g);
+          this._write(this.chunksR, idx, this._read(this.chunksR, idx) * keep + r * g);
+          this.lastWritten = idx;
+        }
+
+        if (!this.locked) {
+          let pos = this.freePos + s;
+          pos -= Math.floor(pos / L) * L;
+          this.freePos = pos;
+        }
+      }
+      this.offset += (s - 1) * bpm / (60 * sr);
+      // Kept inside one loop length, where it means the same and keeps its precision.
+      if (this.length > 0 && this.locked) this.offset -= Math.floor(this.offset / this.loopBeats) * this.loopBeats;
+
+      const dry = at(params.dry, i);
+      const wet = at(params.wet, i);
+      outL[i] = rawL * dry + wetL * wet;
+      if (outR !== outL) outR[i] = rawR * dry + wetR * wet;
+    }
+    this.frames += count;
+  }
+}
+
 // ---- src/devices/grainecho.mjs -----------------------------------
 // The Grain Echo effect: a delay whose repeats are grains.
 //
@@ -5346,6 +5779,810 @@ class LpgProcessor {
   }
 }
 
+// ---- src/dsp/filterbank.mjs --------------------------------------
+// The filter bank under Filterbank and Resonator: many band-passes side by side, each with its own level
+// every sample, and the moving picture those levels are read from.
+//
+// THE PICTURE. A row of cells, one per band (Resonator: one per note of its scale), holds a level
+// each, and the cells are driven by one control, Shape - any signal: an lfo, noise, a drawn curve,
+// a MIDI knob, audio patched onto it. How a signal that moves in TIME becomes a shape across the
+// SPECTRUM is the mode:
+//
+//   scroll   The cells remember Shape's recent past and cell k shows what Shape was k steps ago,
+//            so whatever Shape does travels up the bank. `Scroll` is how many cells a second it
+//            travels; a negative speed runs it down instead. The past is kept as one snapshot per
+//            cell crossed (not every sample), and read between snapshots, so a slow scroll needs
+//            no more memory than a fast one.
+//   ripple   A damped wave equation runs across the cells. Shape holds the cell at `Where` (a
+//            point between two cells holds both, in proportion), and what it does there spreads
+//            outwards as ripples that bounce off both ends - the ends reflect - cross and die
+//            away. `Wave speed` is cells per second, `Damping` how much of a ripple is lost as it
+//            travels. Held still, Shape settles the whole bank at its own level.
+//
+// STABILITY. The wave is the explicit scheme u' = u + λ(u - u_prev) + C²·(left + right - 2u),
+// where λ = e^(-damping) per step and C (the Courant number) is the cells a ripple crosses in one
+// step. Its von Neumann condition is C² ≤ (1 + λ)/2, which λ ≥ 0 makes C ≤ 1/√2 sufficient at
+// every damping. C is wave speed / sample rate, so a speed that would break it is run in as many
+// sub-steps per sample as it takes to bring C under 1/√2: stable at every setting and every rate.
+//
+// STEREO. One control, Stereo, moves the right side's picture towards the left's mirror image: at
+// 0 the two sides are one picture, at 1 the right side scrolls the other way, or (ripple) is its
+// own wave, struck at the mirror of Where. Between, the right side reads the past from part way
+// between the two, or is struck part way between the two points.
+//
+// THE BANDS. A band is a two-pole band-pass (the trapezoidal state-variable filter, so its tuning
+// can be anything up to Nyquist) whose INPUT is scaled by its level: a band turned down mid-ring
+// rings out rather than clicking off, and a stepped level needs no smoothing. Each band is scaled
+// so that a bank of them, every level at 1, passes pink noise at about the level it came in: a
+// band given a share `dln` of the spectrum (in natural-log units) and a damping k = 1/Q passes
+// pink power in proportion to k·(its peak gain)², so it is scaled by sqrt(2/π · dln · k).
+//
+// LEVELS. On top of Shape, a band's level is multiplied by a list of levels a pattern hands in:
+// one cycle of the pattern, laid across the bank low to high - band k of n reads the step under
+// (k + 0.5) / n, a rest reads 0. The list arrives as [start, end, value] triples (the cycle's
+// steps), in an option slot of its own control, the way a drawn curve does (see the engines'
+// list path); with none, every band is at 1.
+//
+// Translated line for line into osc-engine/native/devices/own/dsp/filterbank.h, and held to it
+// by native-device-parity.test.mjs through devices/filterbank.mjs and devices/resonator.mjs.
+
+/** The modes, as the controls name them. */
+const BANK_MODES = Object.freeze(['scroll', 'ripple']);
+
+/** The ends of the audible range, which a scale is laid across. */
+const AUDIBLE_LOW = 20;
+const AUDIBLE_HIGH = 20000;
+
+const TWO_OVER_PI = 2 / Math.PI;
+
+const clamp01 = (x) => (x < 0 ? 0 : (x > 1 ? 1 : x));
+
+/**
+ * Arrays of doubles that grow and keep what they held. The native side grows its arrays off the
+ * audio thread; what it keeps is the same, which is what the parity test needs.
+ */
+class Store {
+  constructor(names) {
+    this.cap = 0;
+    this.names = names;
+    for (const n of names) this[n] = new Float64Array(0);
+  }
+
+  ensure(n) {
+    if (n <= this.cap) return;
+    for (const name of this.names) {
+      const next = new Float64Array(n);
+      next.set(this[name]);
+      this[name] = next;
+    }
+    this.cap = n;
+  }
+}
+
+/**
+ * The value of a list of levels at `pos` (0..1 across the bank): the last [start, end, value]
+ * triple that covers it, 0 where none does, and 1 everywhere when there is no list.
+ */
+function listLevel(table, pos) {
+  if (!table) return 1;
+  let v = 0;
+  for (let t = 0; t + 2 < table.length; t += 3) {
+    if (pos >= table[t] && pos < table[t + 1]) v = table[t + 2];
+  }
+  return v;
+}
+
+/** A pitch, as a fractional MIDI note, in hertz. */
+function pitchHz(pitch) {
+  return 440 * Math.pow(2, (pitch - 69) / 12);
+}
+
+/** The moving picture: one level per cell for each side, every sample. */
+class ShapeField {
+  constructor() {
+    // hist holds n + 1 snapshots (scroll); u/p/x the wave now, a step ago and the next step,
+    // per side (ripple); lvL/lvR what each cell reads this sample.
+    this.cells = new Store(['hist', 'uL', 'pL', 'xL', 'uR', 'pR', 'xR', 'lvL', 'lvR']);
+    this.n = 0;
+    this.phase = 0;
+    this.mode = 0;
+    this.adv = 0;
+    this.reverse = false;
+    this.stereo = 0;
+    this.whereL = 0;
+    this.whereR = 0;
+    this.sub = 1;
+    this.c2 = 0;
+    this.lambda = 1;
+    this.primed = false;
+  }
+
+  reset() {
+    const c = this.cells;
+    for (const name of c.names) c[name].fill(0);
+    this.phase = 0;
+    this.primed = false;
+  }
+
+  /** Room for n cells (and the n + 1 snapshots a scroll keeps). */
+  ensure(n) { this.cells.ensure(n + 1); }
+
+  /**
+   * The settings for a block. `scroll` is cells per second, `speed` too; `where` and `stereo` are
+   * 0..1 and `damping` the share of a ripple lost per cell it crosses, 0..1.
+   */
+  setup(n, sampleRate, mode, scroll, where, speed, damping, stereo) {
+    this.n = n;
+    this.mode = mode;
+    this.adv = Math.abs(scroll) / sampleRate;
+    this.reverse = scroll < 0;
+    this.stereo = clamp01(stereo);
+    this.whereL = clamp01(where);
+    this.whereR = this.whereL + this.stereo * ((1 - this.whereL) - this.whereL);
+    const raw = Math.max(0, speed) / sampleRate;
+    this.sub = Math.max(1, Math.ceil(raw * Math.SQRT2));
+    const c = raw / this.sub;
+    this.c2 = c * c;
+    // A ripple crosses 1/c steps per cell; over them its speed is kept by λ^(1/c) = (1 - damping)².
+    this.lambda = Math.pow(1 - clamp01(damping), 2 * c);
+  }
+
+  /** One sample: Shape's value now in, every cell's level out (cells.lvL / cells.lvR). */
+  tick(shape) {
+    const n = this.n;
+    if (n <= 0) return;
+    const c = this.cells;
+    if (!this.primed) {
+      // A device that has only just started has a past of Shape's first value, not of silence:
+      // a bank held at one level is at that level from its first sample.
+      for (let k = 0; k <= n; k++) {
+        c.hist[k] = shape;
+        c.uL[k] = shape; c.pL[k] = shape; c.uR[k] = shape; c.pR[k] = shape;
+      }
+      this.primed = true;
+    }
+    if (this.mode === 1) {
+      for (let s = 0; s < this.sub; s++) {
+        this.stepSide(c.uL, c.pL, c.xL, this.whereL, shape);
+        if (this.stereo > 0) this.stepSide(c.uR, c.pR, c.xR, this.whereR, shape);
+      }
+      for (let k = 0; k < n; k++) {
+        c.lvL[k] = clamp01(c.uL[k]);
+        if (this.stereo > 0) {
+          c.lvR[k] = clamp01(c.uR[k]);
+        } else {
+          // One wave for both sides, and the right side's ready to part from it where it is.
+          c.uR[k] = c.uL[k];
+          c.pR[k] = c.pL[k];
+          c.lvR[k] = c.lvL[k];
+        }
+      }
+      return;
+    }
+    const hist = c.hist;
+    this.phase += this.adv;
+    while (this.phase >= 1) {
+      this.phase -= 1;
+      for (let j = n; j > 0; j--) hist[j] = hist[j - 1];
+      hist[0] = shape;
+    }
+    const last = n - 1;
+    for (let k = 0; k < n; k++) {
+      const fwd = this.reverse ? last - k : k;
+      const back = last - fwd;
+      c.lvL[k] = clamp01(this.ageValue(shape, fwd));
+      c.lvR[k] = clamp01(this.ageValue(shape, fwd + this.stereo * (back - fwd)));
+    }
+  }
+
+  /** What Shape was `age` cells ago: now, the snapshots, and straight lines between them. */
+  ageValue(shape, age) {
+    const ph = this.phase;
+    const hist = this.cells.hist;
+    if (age <= ph) return ph > 0 ? shape + (hist[0] - shape) * (age / ph) : shape;
+    const x = age - ph;
+    const j = Math.floor(x);
+    const f = x - j;
+    const a = hist[j];
+    return a + (hist[j + 1] - a) * f;
+  }
+
+  /** One step of one side's wave, struck at `where` by `drive`. The ends reflect. */
+  stepSide(u, p, nx, where, drive) {
+    const n = this.n;
+    const last = n - 1;
+    const lam = this.lambda;
+    const c2 = this.c2;
+    for (let k = 0; k < n; k++) {
+      const left = k > 0 ? u[k - 1] : (n > 1 ? u[1] : u[0]);
+      const right = k < last ? u[k + 1] : (n > 1 ? u[last - 1] : u[last]);
+      const uk = u[k];
+      nx[k] = uk + lam * (uk - p[k]) + c2 * (left + right - 2 * uk);
+    }
+    const at = where * last;
+    const j = Math.floor(at);
+    const f = at - j;
+    nx[j] += (1 - f) * (drive - nx[j]);
+    if (j < last) nx[j + 1] += f * (drive - nx[j + 1]);
+    for (let k = 0; k < n; k++) {
+      p[k] = u[k];
+      u[k] = nx[k];
+    }
+  }
+
+  /** A cell's level at a fractional cell `x` (0..n-1), or 1 with no cells. */
+  levelAt(lv, x) {
+    const n = this.n;
+    if (n <= 0) return 1;
+    const j = Math.floor(x);
+    const f = x - j;
+    if (f === 0 || j >= n - 1) return lv[j < n ? j : n - 1];
+    return lv[j] + (lv[j + 1] - lv[j]) * f;
+  }
+
+  /** Whether the wave has gone somewhere a number cannot follow. */
+  playable() {
+    const c = this.cells;
+    let s = this.phase;
+    for (let k = 0; k < this.n; k++) s += c.uL[k] + c.uR[k] + c.hist[k];
+    return Number.isFinite(s);
+  }
+}
+
+/**
+ * The bands: a tuning and a level each, and a stereo band-pass apiece.
+ *
+ * `x` is the cell a band reads its level from, `amp` what multiplies it (the list, a tilt, a
+ * note's velocity), `gL`/`gR` the band's output scale on each side, and `on` whether it is below
+ * Nyquist - a band at or past it cannot be tuned there, and plays nothing.
+ */
+class BandBank {
+  constructor() {
+    this.bands = new Store(['a1', 'a2', 'a3', 'gL', 'gR', 'x', 'amp', 'on',
+      'ic1L', 'ic2L', 'ic1R', 'ic2R', 'note', 'vel', 'held', 'hz']);
+    this.count = 0;
+  }
+
+  reset() {
+    const b = this.bands;
+    for (const name of ['ic1L', 'ic2L', 'ic1R', 'ic2R']) b[name].fill(0);
+  }
+
+  ensure(n) { this.bands.ensure(n); }
+
+  /**
+   * Band `i` tuned to `freq` with damping `k` (1/Q), given a share `dln` of the spectrum, panned
+   * by `pan` (-1..1: unity in the middle, +3 dB at either side).
+   */
+  tune(i, freq, k, dln, pan, sampleRate) {
+    const b = this.bands;
+    b.hz[i] = freq;
+    if (!(freq > 0 && freq < sampleRate * 0.5)) {
+      b.on[i] = 0;
+      return;
+    }
+    const g = Math.tan((Math.PI * freq) / sampleRate);
+    b.a1[i] = 1 / (1 + g * (g + k));
+    b.a2[i] = g * b.a1[i];
+    b.a3[i] = g * b.a2[i];
+    const norm = Math.sqrt(TWO_OVER_PI * dln * k);
+    const angle = ((pan + 1) * Math.PI) / 4;
+    b.gL[i] = norm * Math.SQRT2 * Math.cos(angle);
+    b.gR[i] = norm * Math.SQRT2 * Math.sin(angle);
+    b.on[i] = 1;
+  }
+
+  /**
+   * One sample through every band: `xl`/`xr` in, the sum of the bands out on `out[0]`/`out[1]`.
+   * Each band's level is the field's cell at its `x`, times its `amp`.
+   */
+  run(field, xl, xr, out) {
+    const b = this.bands;
+    const lvL = field.cells.lvL;
+    const lvR = field.cells.lvR;
+    let yl = 0;
+    let yr = 0;
+    for (let i = 0; i < this.count; i++) {
+      if (b.on[i] === 0) continue;
+      const levL = field.levelAt(lvL, b.x[i]) * b.amp[i];
+      const levR = field.levelAt(lvR, b.x[i]) * b.amp[i];
+      const a1 = b.a1[i];
+      const a2 = b.a2[i];
+      const a3 = b.a3[i];
+      let ic1 = b.ic1L[i];
+      let ic2 = b.ic2L[i];
+      let v3 = xl * levL - ic2;
+      let v1 = a1 * ic1 + a2 * v3;
+      let v2 = ic2 + a2 * ic1 + a3 * v3;
+      b.ic1L[i] = 2 * v1 - ic1;
+      b.ic2L[i] = 2 * v2 - ic2;
+      yl += v1 * b.gL[i];
+      ic1 = b.ic1R[i];
+      ic2 = b.ic2R[i];
+      v3 = xr * levR - ic2;
+      v1 = a1 * ic1 + a2 * v3;
+      v2 = ic2 + a2 * ic1 + a3 * v3;
+      b.ic1R[i] = 2 * v1 - ic1;
+      b.ic2R[i] = 2 * v2 - ic2;
+      yr += v1 * b.gR[i];
+    }
+    out[0] = yl;
+    out[1] = yr;
+  }
+
+  /**
+   * What the bands are doing, for the device window's picture: each sounding band's frequency and
+   * the level it is being fed at, both sides averaged - Shape's picture times the band's own `amp`.
+   */
+  report(field) {
+    const b = this.bands;
+    const hz = [];
+    const level = [];
+    for (let i = 0; i < this.count; i++) {
+      if (b.on[i] === 0) continue;
+      hz.push(b.hz[i]);
+      level.push(((field.levelAt(field.cells.lvL, b.x[i]) + field.levelAt(field.cells.lvR, b.x[i])) / 2) * b.amp[i]);
+    }
+    return { hz, level };
+  }
+
+  playable() {
+    const b = this.bands;
+    let s = 0;
+    for (let i = 0; i < this.count; i++) s += b.ic1L[i] + b.ic2L[i] + b.ic1R[i] + b.ic2R[i];
+    return Number.isFinite(s);
+  }
+}
+
+// ---- src/devices/filterbank.mjs ----------------------------------
+// The Filterbank effect: band-passes spread evenly across the spectrum, each band's level driven every
+// sample by a moving picture - Shape scrolled across the bank, or rippling across it.
+//
+// The bands divide the range from Low to High into equal shares on a log scale, one band at the
+// middle of each. Width is a band's bandwidth as a share of that spacing: at 1 the bands just meet
+// and a flat bank is close to the dry tone, below 1 they narrow until each one rings, above it they
+// overlap. Shape, the modes, Stereo and Levels are the shared filter bank's (dsp/filterbank.mjs).
+//
+// Translated line for line into native/devices/own/filterbank.cc for the desktop, and held to it by
+// native-device-parity.test.mjs.
+
+
+/** How far the band count's number box reaches. A count past it plays: the control is open. */
+const BANDS_KNOB = 64;
+
+/**
+ * The controls every device on the filter bank has, in the order they are listed: Shape and how
+ * it moves, and the levels a pattern lays over it. Shared with the Resonator.
+ */
+function shapeParams() {
+  return [
+    { id: 'shape', name: 'Shape', min: 0, max: 1, default: 1, group: 'Shape',
+      description: 'The level the bands are driven by. Patch a signal onto it - an lfo, noise, a drawn curve, a MIDI control, audio - and the mode spreads it across the bands.' },
+    { id: 'mode', name: 'Mode', default: 0, options: [...BANK_MODES], rate: 'k', group: 'Shape',
+      description: 'Scroll moves Shape across the bands as it changes, each band showing it a step later. Ripple strikes the band at Where with Shape and lets the ripples spread, bounce off the ends and die away.' },
+    { id: 'scroll', name: 'Scroll', min: -64, max: 64, default: 8, curve: 'sym', curveExp: 2, rate: 'k', group: 'Shape',
+      active: { param: 'mode', is: 'scroll' },
+      description: 'How fast Shape travels across the bands, in bands per second. Negative runs from the top down.' },
+    { id: 'where', name: 'Where', min: 0, max: 1, default: 0.5, rate: 'k', group: 'Shape',
+      active: { param: 'mode', is: 'ripple' },
+      description: 'Where across the bands Shape strikes, 0 the lowest band and 1 the highest.' },
+    { id: 'wavespeed', name: 'Wave speed', min: 0, max: 200, default: 20, curve: 'pow', curveExp: 2, rate: 'k', group: 'Shape',
+      active: { param: 'mode', is: 'ripple' },
+      description: 'How fast ripples travel, in bands per second.' },
+    { id: 'damping', name: 'Damping', min: 0, max: 1, default: 0.1, rate: 'k', group: 'Shape',
+      active: { param: 'mode', is: 'ripple' },
+      description: 'How much of a ripple is lost as it travels. At 0 ripples bounce between the ends for ever; at 1 they spread out without traveling.' },
+    { id: 'stereo', name: 'Stereo', min: 0, max: 1, default: 0, rate: 'k', group: 'Shape',
+      description: 'How far the right side moves towards a mirror image of the left: scrolling the other way, or struck at the mirror of Where.' },
+    { id: 'levels', name: 'Levels', default: 0, options: ['flat'], takes: 'list', saved: false, rate: 'k', group: 'Shape',
+      description: 'A level per band, laid over Shape: one cycle of a pattern spread across the bands from low to high, a rest at 0. With none, every band is at 1.' },
+  ];
+}
+
+/** The settings the shared field is run with, read once a block. */
+function fieldSettings(params) {
+  return {
+    mode: Math.min(BANK_MODES.length - 1, Math.max(0, Math.round(at(params.mode, 0)))),
+    scroll: at(params.scroll, 0),
+    where: at(params.where, 0),
+    speed: at(params.wavespeed, 0),
+    damping: at(params.damping, 0),
+    stereo: at(params.stereo, 0),
+  };
+}
+
+const FILTERBANK = defineDevice({
+  id: 'Filterbank',
+  kind: 'fx',
+  version: 1,
+  license: 'AGPL-3.0-only',
+  processor: 'poptart-filterbank',
+  description: 'A filter bank: band-passes spread evenly across the spectrum, each band\'s level moved every sample by Shape - scrolled across the bands, or rippling across them - and by a pattern of levels.',
+  channels: { in: 2, out: 2 },
+  params: [
+    ...shapeParams(),
+    { id: 'bands', name: 'Bands', min: 1, open: true, uiMax: BANDS_KNOB, default: 16, step: 1, rate: 'k', ui: 'number', group: 'Bands',
+      description: 'How many bands.' },
+    { id: 'low', name: 'Low', min: 20, max: 20000, default: 80, unit: 'Hz', curve: 'exp', rate: 'k', group: 'Bands',
+      description: 'The bottom of the range the bands share.' },
+    { id: 'high', name: 'High', min: 20, max: 20000, default: 8000, unit: 'Hz', curve: 'exp', rate: 'k', group: 'Bands',
+      description: 'The top of the range the bands share.' },
+    { id: 'width', name: 'Width', min: 0.05, max: 4, default: 1, unit: 'x', curve: 'exp', rate: 'k', group: 'Bands',
+      description: 'Each band\'s width as a share of the space between bands. Wide shapes the tone; narrow rings.' },
+    { id: 'mix', name: 'Mix', min: 0, max: 1, default: 1, group: 'Bands' },
+  ],
+  panel: { rows: [['Shape', 'Bands']] },
+  figures: [
+    {
+      id: 'bands',
+      kind: 'bands',
+      group: 'Shape',
+      description: 'Every band at its frequency, as loud as it is being fed right now: Shape as the mode moves it, times Levels.',
+      params: { levels: 'levels', shape: 'shape', count: 'bands', low: 'low', high: 'high' },
+      subsumes: ['levels'],
+    },
+  ],
+});
+
+class FilterbankProcessor {
+  constructor(sampleRate) {
+    this.sampleRate = sampleRate;
+    this.field = new ShapeField();
+    this.bank = new BandBank();
+    this.tables = { levels: [] };
+    this.out = [0, 0];
+  }
+
+  /** A list of levels, already in its option slot (see the engines' list path). */
+  loadShape(paramId, index, table) {
+    if (paramId === 'levels') this.tables.levels[index] = table;
+  }
+
+  reset() {
+    this.field.reset();
+    this.bank.reset();
+  }
+
+  /** For the device window: every sounding band's frequency and level (see BandBank#report). */
+  report() {
+    return { bands: this.bank.report(this.field) };
+  }
+
+  /** The bands and the cells for this block. */
+  configure(params) {
+    const sr = this.sampleRate;
+    const n = Math.max(1, Math.round(at(params.bands, 0)));
+    const lo = at(params.low, 0);
+    const hi = at(params.high, 0);
+    const width = at(params.width, 0);
+    const slot = Math.round(at(params.levels, 0));
+    const table = slot >= 1 ? (this.tables.levels[slot] ?? null) : null;
+    const set = fieldSettings(params);
+    this.field.ensure(n);
+    this.field.setup(n, sr, set.mode, set.scroll, set.where, set.speed, set.damping, set.stereo);
+    const bank = this.bank;
+    bank.ensure(n);
+    bank.count = n;
+    const span = Math.log(hi / lo);
+    const share = Math.abs(span) / n;
+    const k = 2 * Math.sinh((width * share) / 2);
+    const b = bank.bands;
+    for (let i = 0; i < n; i++) {
+      bank.tune(i, lo * Math.exp((span * (i + 0.5)) / n), k, share, 0, sr);
+      b.x[i] = i;
+      b.amp[i] = listLevel(table, (i + 0.5) / n);
+    }
+  }
+
+  process(inputs, outputs, count, params) {
+    const inL = inputs[0];
+    const inR = inputs[1] ?? inputs[0];
+    const outL = outputs[0];
+    const outR = outputs[1] ?? outputs[0];
+    this.configure(params);
+    const out = this.out;
+    for (let i = 0; i < count; i++) {
+      this.field.tick(at(params.shape, i));
+      const xl = inL ? inL[i] : 0;
+      const xr = inR ? inR[i] : 0;
+      this.bank.run(this.field, xl, xr, out);
+      const mix = at(params.mix, i);
+      outL[i] = xl + (out[0] - xl) * mix;
+      if (outR !== outL) outR[i] = xr + (out[1] - xr) * mix;
+    }
+    if (!this.field.playable() || !this.bank.playable()) this.reset();
+  }
+}
+
+// ---- src/devices/resonator.mjs -----------------------------------
+// The Resonator effect: narrow, ringing band-passes tuned to notes, their levels moved by the
+// filter bank's picture (dsp/filterbank.mjs) - Shape scrolled across the notes, or rippling.
+//
+// WHAT IT IS TUNED TO. By default, the track's scale - `.scale()` on the pattern, or the buffer's
+// `setscale()`, the key `chord()` reads - with a band on every note of it across the audible
+// range. The scheduler hands the scale over as a list on the Scale control ([root, period,
+// interval...], the root a MIDI note and the rest semitones, so a tuning off the
+// 12-tone grid - 31 steps to the octave, ratios, a .scl file - is tuned exactly), into an option
+// slot the way a list of levels goes in. With no scale anywhere, it is tuned to every semitone.
+//
+// `.fx("Resonator").midi("keys")` tunes it to notes instead: while a track's notes are routed in,
+// there is a band on each note that track is holding. A released note's band stops being fed and
+// rings out over Decay; its place is taken by the next new note. The scale still lays out the
+// picture Shape and Levels are read from - a held note reads it at its own pitch.
+//
+// Shift transposes every band; Tilt slopes the levels from the lowest band to the highest; Spread
+// pans the bands apart (each its own way, the same way every time) and detunes them, up to half
+// the way to the next note of the scale (half a semitone for a held note); Decay is how long a
+// band rings, which sets how narrow it is.
+//
+// Translated line for line into native/devices/own/resonator.cc for the desktop, and held to it
+// by native-device-parity.test.mjs.
+
+
+const LN1000 = Math.log(1000);
+const PHI = (1 + Math.sqrt(5)) / 2;
+
+/** Where a band sits across the audible range, 0..1 on a log scale - what Tilt slopes along. */
+const audiblePos = (freq) => Math.log2(freq / AUDIBLE_LOW) / Math.log2(AUDIBLE_HIGH / AUDIBLE_LOW);
+
+/** Each band's own direction for Spread, -1..1: the same for the same note every time. */
+const spreadSign = (x) => {
+  const v = x * PHI;
+  return 2 * (v - Math.floor(v)) - 1;
+};
+
+const RESONATOR = defineDevice({
+  id: 'Resonator',
+  kind: 'fx',
+  version: 1,
+  license: 'AGPL-3.0-only',
+  processor: 'poptart-resonator',
+  description: 'Narrow, ringing band-passes on every note of the track\'s scale - or on the notes another track is holding, with .midi() - their levels moved every sample by Shape and by a pattern of levels.',
+  channels: { in: 2, out: 2 },
+  notes: true,
+  params: [
+    ...shapeParams(),
+    { id: 'scale', name: 'Scale', default: 0, options: ['chromatic'], takes: 'scale', saved: false, rate: 'k', group: 'Tuning',
+      description: 'The scale the bands are on: the track\'s own (.scale(), or setscale() in the buffer) unless a scale name is given here. Chromatic with no scale anywhere.' },
+    { id: 'shift', name: 'Shift', min: -24, max: 24, default: 0, unit: 'st', rate: 'k', group: 'Tuning',
+      description: 'Transposes every band.' },
+    { id: 'tilt', name: 'Tilt', min: -24, max: 24, default: 0, unit: 'dB', rate: 'k', group: 'Tuning',
+      description: 'How much louder the top of the audible range is than the bottom, sloping between.' },
+    { id: 'spread', name: 'Spread', min: 0, max: 1, default: 0, rate: 'k', group: 'Tuning',
+      description: 'Pans the bands apart and detunes them, up to half the way to the next note.' },
+    { id: 'decay', name: 'Decay', min: 0.05, max: 10, default: 1, unit: 's', curve: 'pow', curveExp: 2, rate: 'k', group: 'Tuning',
+      description: 'How long a band rings. Longer is narrower.' },
+    { id: 'mix', name: 'Mix', min: 0, max: 1, default: 0.5, group: 'Tuning' },
+  ],
+  panel: { rows: [['Shape', 'Tuning']] },
+  figures: [
+    {
+      id: 'bands',
+      kind: 'bands',
+      group: 'Shape',
+      description: 'Every band at its frequency, as loud as it is being fed right now: Shape as the mode moves it, times Levels, Tilt and each held note\'s velocity.',
+      params: { levels: 'levels', shape: 'shape', scale: 'scale' },
+      subsumes: ['levels', 'scale'],
+    },
+  ],
+});
+
+class ResonatorProcessor {
+  constructor(sampleRate) {
+    this.sampleRate = sampleRate;
+    this.field = new ShapeField();
+    this.bank = new BandBank();
+    this.tables = { levels: [], scale: [] };
+    this.out = [0, 0];
+    this.frames = 0;
+    this.noteRouted = false;
+    this.slots = 0;           // note slots in use, held or ringing out
+    this.pending = [];        // [time, note, velocity] not yet reached, oldest first; velocity 0 is an off
+    this.pitch = new Float64Array(0);   // the scale's notes this block, lowest first
+    this.step = new Float64Array(0);    // and which step of the scale each is
+    this.cellCount = 0;
+  }
+
+  loadShape(paramId, index, table) {
+    if (paramId === 'levels' || paramId === 'scale') this.tables[paramId][index] = table;
+  }
+
+  setNoteRoute(on) {
+    this.noteRouted = !!on;
+    if (!this.noteRouted) {
+      this.pending.length = 0;
+      this.slots = 0;
+    }
+  }
+
+  noteOn(note, velocity, time) {
+    this.noteRouted = true;
+    this.queue(Number.isFinite(time) ? time : 0, note, velocity > 0 ? velocity : 0);
+  }
+
+  noteOff(note, time) {
+    this.queue(Number.isFinite(time) ? time : 0, note, 0);
+  }
+
+  queue(t, note, velocity) {
+    let i = this.pending.length;
+    while (i > 0 && this.pending[i - 1][0] > t) i -= 1;
+    this.pending.splice(i, 0, [t, note, velocity]);
+  }
+
+  /** A note lands: a band on it, or its band let go. */
+  play(note, velocity) {
+    const b = this.bank.bands;
+    if (velocity <= 0) {
+      for (let i = 0; i < this.slots; i++) {
+        if (b.note[i] === note && b.held[i] !== 0) b.held[i] = 0;
+      }
+      return;
+    }
+    let at = -1;
+    for (let i = 0; i < this.slots && at < 0; i++) if (b.note[i] === note) at = i;
+    for (let i = 0; i < this.slots && at < 0; i++) if (b.held[i] === 0) at = i;
+    if (at < 0) {
+      this.bank.ensure(this.slots + 1);
+      at = this.slots;
+      this.slots += 1;
+    }
+    const s = this.bank.bands;
+    s.note[at] = note;
+    s.vel[at] = velocity;
+    s.held[at] = 1;
+  }
+
+  reset() {
+    this.field.reset();
+    this.bank.reset();
+  }
+
+  /** For the device window: every sounding band's frequency and level (see BandBank#report). */
+  report() {
+    return { bands: this.bank.report(this.field) };
+  }
+
+  /** The scale's notes across the audible range, shifted: the cells, lowest first. */
+  layScale(table, shift) {
+    let root = 0;
+    let period = 12;
+    let count = 12;
+    if (table && table.length >= 3) {
+      root = table[0];
+      period = table[1];
+      count = table.length - 2;
+    }
+    const interval = (i) => (table && table.length >= 3 ? table[2 + i] : i);
+    const pLo = 69 + 12 * Math.log2(AUDIBLE_LOW / 440);
+    const pHi = 69 + 12 * Math.log2(Math.min(AUDIBLE_HIGH, this.sampleRate * 0.5) / 440);
+    let n = 0;
+    if (period > 0 && count > 0) {
+      let lowest = interval(0);
+      for (let i = 1; i < count; i++) if (interval(i) < lowest) lowest = interval(i);
+      const base = root + shift;
+      // Every period of the scale that has a note in range, and each note of it that is.
+      for (let o = Math.floor((pLo - base - lowest) / period) - 1; base + o * period + lowest < pHi; o++) {
+        for (let i = 0; i < count; i++) {
+          const p = base + o * period + interval(i);
+          if (!(p >= pLo && p < pHi)) continue;
+          if (n >= this.pitch.length) this.growScale(n + 1);
+          // In order of pitch, a note sorted in as it comes.
+          let j = n;
+          while (j > 0 && this.pitch[j - 1] > p) {
+            this.pitch[j] = this.pitch[j - 1];
+            this.step[j] = this.step[j - 1];
+            j -= 1;
+          }
+          this.pitch[j] = p;
+          this.step[j] = o * count + i;
+          n += 1;
+        }
+      }
+    }
+    this.cellCount = n;
+    return { period, count };
+  }
+
+  growScale(n) {
+    const pitch = new Float64Array(n);
+    const step = new Float64Array(n);
+    pitch.set(this.pitch);
+    step.set(this.step);
+    this.pitch = pitch;
+    this.step = step;
+  }
+
+  /** Where a pitch falls among the cells, as a fractional cell. */
+  cellOf(p) {
+    const n = this.cellCount;
+    if (n <= 1 || p <= this.pitch[0]) return 0;
+    if (p >= this.pitch[n - 1]) return n - 1;
+    let c = 0;
+    while (this.pitch[c + 1] <= p) c += 1;
+    return c + (p - this.pitch[c]) / (this.pitch[c + 1] - this.pitch[c]);
+  }
+
+  /** The bands and the cells for this block, and again whenever a note lands. */
+  configure(params) {
+    const sr = this.sampleRate;
+    const shift = at(params.shift, 0);
+    const tilt = at(params.tilt, 0);
+    const spread = Math.min(1, Math.max(0, at(params.spread, 0)));
+    const decay = at(params.decay, 0);
+    const levelsSlot = Math.round(at(params.levels, 0));
+    const levels = levelsSlot >= 1 ? (this.tables.levels[levelsSlot] ?? null) : null;
+    const scaleSlot = Math.round(at(params.scale, 0));
+    const scale = scaleSlot >= 1 ? (this.tables.scale[scaleSlot] ?? null) : null;
+    const { period, count } = this.layScale(scale, shift);
+    const n = this.cellCount;
+    const set = fieldSettings(params);
+    this.field.ensure(n);
+    this.field.setup(n, sr, set.mode, set.scroll, set.where, set.speed, set.damping, set.stereo);
+    const bank = this.bank;
+    const b = bank.bands;
+    if (this.noteRouted) {
+      bank.count = this.slots;
+      const dln = Math.LN2 / 12;
+      for (let i = 0; i < this.slots; i++) {
+        const p = b.note[i] + shift;
+        const sign = spreadSign(b.note[i]);
+        const freq = pitchHz(p + spread * sign * 0.5);
+        bank.tune(i, freq, LN1000 / (Math.PI * freq * decay), dln, spread * sign, sr);
+        b.x[i] = this.cellOf(p);
+        const pos = n > 0 ? (b.x[i] + 0.5) / n : 0.5;
+        b.amp[i] = b.held[i] !== 0
+          ? listLevel(levels, pos) * Math.pow(10, (tilt * (audiblePos(freq) - 0.5)) / 20) * b.vel[i]
+          : 0;
+      }
+      return;
+    }
+    bank.ensure(n);
+    bank.count = n;
+    const dln = ((period / count) * Math.LN2) / 12;
+    for (let i = 0; i < n; i++) {
+      const sign = spreadSign(this.step[i]);
+      const up = i < n - 1 ? this.pitch[i + 1] - this.pitch[i] : (i > 0 ? this.pitch[i] - this.pitch[i - 1] : 0);
+      const down = i > 0 ? this.pitch[i] - this.pitch[i - 1] : up;
+      const half = (sign > 0 ? up : down) / 2;
+      const freq = pitchHz(this.pitch[i] + spread * sign * half);
+      bank.tune(i, freq, LN1000 / (Math.PI * freq * decay), dln, spread * sign, sr);
+      b.x[i] = i;
+      b.amp[i] = listLevel(levels, (i + 0.5) / n) * Math.pow(10, (tilt * (audiblePos(freq) - 0.5)) / 20);
+    }
+  }
+
+  process(inputs, outputs, count, params, _sidechain = null, timeSec = null) {
+    const inL = inputs[0];
+    const inR = inputs[1] ?? inputs[0];
+    const outL = outputs[0];
+    const outR = outputs[1] ?? outputs[0];
+    const sr = this.sampleRate;
+    const start = timeSec ?? this.frames / sr;
+    this.configure(params);
+    const out = this.out;
+    for (let i = 0; i < count; i++) {
+      // A note lands on its own sample: the one its time rounds to inside this block.
+      if (this.pending.length && Math.round((this.pending[0][0] - start) * sr) <= i) {
+        while (this.pending.length && Math.round((this.pending[0][0] - start) * sr) <= i) {
+          const [, note, velocity] = this.pending.shift();
+          this.play(note, velocity);
+        }
+        this.configure(params);
+      }
+      this.field.tick(at(params.shape, i));
+      const xl = inL ? inL[i] : 0;
+      const xr = inR ? inR[i] : 0;
+      this.bank.run(this.field, xl, xr, out);
+      const mix = at(params.mix, i);
+      outL[i] = xl + (out[0] - xl) * mix;
+      if (outR !== outL) outR[i] = xr + (out[1] - xr) * mix;
+    }
+    this.frames += count;
+    if (!this.field.playable() || !this.bank.playable()) this.reset();
+  }
+}
+
 // ---- src/devices/crossover.mjs -----------------------------------
 // The Crossover: one Linkwitz-Riley split, the DJ isolator's kind. It is what `.bands()` is built
 // from, one per frequency, and it is the ENGINES' device, not the user's: it is in no catalog, no
@@ -5541,6 +6778,10 @@ class RecorderTap {
 //   { k: 'op', op, a: [x, y] }              add sub mul div mod min max pow gt gte lt lte eq neq
 //   { k: 'fn', op, a: [x] }                 abs neg round floor ceil
 //   { k: 'map', min, max, curve, a: [x] }   real units to a 0..1 position, 'lin' or 'log', clipped
+//   { k: 'fn', op: 'env', a: [x, attack, release] }
+//                                           the level of x: |x| clipped at 1, rising over `attack`
+//                                           seconds and falling over `release` (see exprLag)
+//   { k: 'fn', op: 'smooth', a: [x, time] } x lagged by `time` seconds both ways (see exprLag)
 
 const exprFinite = (v) => (Number.isFinite(v) ? v : 0);
 
@@ -5578,6 +6819,47 @@ function exprMapUnit(x, min, max, curve) {
   return t < 0 ? 0 : t > 1 ? 1 : t;
 }
 
+// ln(0.001): a lag's times (the envelope follower's attack and release, smooth()'s time) are the
+// time to get within 60 dB of a new value.
+const LOG001 = Math.log(0.001);
+
+/**
+ * The coefficient one sample of a lag moves by, for a time in seconds - the desktop's Lag/LagUD
+ * formula, which reads its time as a 32-bit float. 0 (no lag) for a time of 0 or less.
+ */
+function lagCoef(seconds, sampleRate) {
+  const t = Math.fround(seconds);
+  return t > 0 ? Math.exp(LOG001 / (t * sampleRate)) : 0;
+}
+
+/**
+ * One exponential lag's state, as the desktop's LagUD keeps it: `step(x, up, down)` takes one
+ * sample and returns the lagged value, which moves toward x by the `up` time's coefficient while
+ * rising and the `down` time's while falling. It starts at its first input, so a lag put on a
+ * steady value does not glide up to it from 0. Lag is LagUD with both times equal.
+ */
+function exprLag(sampleRate) {
+  let y = null;
+  let up = NaN;
+  let down = NaN;
+  let cu = 0;
+  let cd = 0;
+  return (x, tUp, tDown) => {
+    if (tUp !== up) { up = tUp; cu = lagCoef(tUp, sampleRate); }
+    if (tDown !== down) { down = tDown; cd = lagCoef(tDown, sampleRate); }
+    const v = Number.isFinite(x) ? Math.fround(x) : 0;
+    if (y === null) y = v;
+    else y = v > y ? v + cu * (y - v) : v + cd * (y - v);
+    return y;
+  };
+}
+
+/** An envelope follower's input: rectified and clipped at full scale (a NaN reads 0). */
+function followInput(x) {
+  const v = x < 0 ? -x : x;
+  return v <= 1 ? v : v > 1 ? 1 : 0;
+}
+
 /** The constants of a tree, depth first and left to right - the order compileExpr reads them in. */
 function exprConsts(tree, out = []) {
   if (!tree || typeof tree !== 'object') return out;
@@ -5609,12 +6891,19 @@ function exprInputCount(tree) {
 
 /**
  * Compiles a tree into `(x) => value`, where `x[i]` is input i at this sample. `consts` is read
- * live, so writing new numbers into the same array changes the result without recompiling.
+ * live, so writing new numbers into the same array changes the result without recompiling. A
+ * lag keeps state, so the function is called once per sample, in order, at `sampleRate`.
  * Throws on a node it does not know, by name.
  */
-function compileExpr(tree, consts = exprConsts(tree)) {
+function compileExpr(tree, consts = exprConsts(tree), { sampleRate = 48000 } = {}) {
   let next = 0;
-  const build = (node) => {
+  // This sample's inputs side by side, where the caller has them (see renderExpr); without them
+  // each side reads as the mid.
+  let left = null;
+  let right = null;
+  // side 0 reads each input as its mid, (L + R) / 2; 1 and 2 read the left and right alone - an
+  // envelope follower's input is built once per side, for its linked peak.
+  const build = (node, side) => {
     switch (node?.k) {
       case 'const': {
         const at = next++;
@@ -5622,23 +6911,56 @@ function compileExpr(tree, consts = exprConsts(tree)) {
       }
       case 'in': {
         const i = Number(node.i) | 0;
+        if (side === 1) return (x) => (left ?? x)[i] ?? 0;
+        if (side === 2) return (x) => (right ?? x)[i] ?? 0;
         return (x) => x[i] ?? 0;
       }
       case 'op': {
         const f = EXPR_BINARY[node.op];
         if (!f) throw new Error(`unknown operation "${node.op}"`);
-        const a = build(node.a?.[0]);
-        const b = build(node.a?.[1]);
+        const a = build(node.a?.[0], side);
+        const b = build(node.a?.[1], side);
         return (x) => f(a(x), b(x));
       }
       case 'fn': {
+        if (node.op === 'env') {
+          // The envelope follower: its input's linked peak, max(|L|, |R|) - the input built once
+          // per side, every input in it reading that side alone, so an out-of-phase pair reads its
+          // level and not the 0 of its mid - clipped at full scale, lagged by attack rising and
+          // release falling. Both sides read the same constants.
+          const from = next;
+          const l = build(node.a?.[0], 1);
+          next = from;
+          const r = build(node.a?.[0], 2);
+          const up = build(node.a?.[1], side);
+          const down = build(node.a?.[2], side);
+          const lag = exprLag(sampleRate);
+          return (x) => {
+            const vl = Math.fround(l(x));
+            const vr = Math.fround(r(x));
+            const v = Math.max(vl < 0 ? -vl : vl, vr < 0 ? -vr : vr);
+            const tu = up(x);
+            const td = down(x);
+            return lag(followInput(v), tu > 0 ? tu : 0, td > 0 ? td : 0);
+          };
+        }
+        if (node.op === 'smooth') {
+          // smooth(): its input lagged by one time both ways.
+          const a = build(node.a?.[0], side);
+          const t = build(node.a?.[1], side);
+          const lag = exprLag(sampleRate);
+          return (x) => {
+            const tt = t(x);
+            return lag(a(x), tt > 0 ? tt : 0, tt > 0 ? tt : 0);
+          };
+        }
         const f = EXPR_UNARY[node.op];
         if (!f) throw new Error(`unknown function "${node.op}"`);
-        const a = build(node.a?.[0]);
+        const a = build(node.a?.[0], side);
         return (x) => f(a(x));
       }
       case 'map': {
-        const a = build(node.a?.[0]);
+        const a = build(node.a?.[0], side);
         const { min, max, curve } = node;
         return (x) => exprMapUnit(a(x), min, max, curve);
       }
@@ -5646,23 +6968,39 @@ function compileExpr(tree, consts = exprConsts(tree)) {
         throw new Error(`unknown node ${JSON.stringify(node?.k)}`);
     }
   };
-  const fn = build(tree);
-  return (x) => exprFinite(fn(x));
+  const fn = build(tree, 0);
+  return (x, l, r) => {
+    left = l ?? null;
+    right = r ?? null;
+    return exprFinite(fn(x));
+  };
+}
+
+/** Whether a tree has an envelope follower, which reads its inputs side by side. */
+function exprHasFollower(tree) {
+  if (!tree || typeof tree !== 'object') return false;
+  if (tree.k === 'fn' && tree.op === 'env') return true;
+  return (tree.a ?? []).some(exprHasFollower);
 }
 
 /**
  * Runs a compiled expression over one block. `inputs` is the worklet's inputs (each a list of
- * channels; a mono input is its first channel, an unconnected one has none and reads 0), `x` a
- * scratch array as long as the input count.
+ * channels; an unconnected one has none and reads 0), `x` a scratch array as long as the input
+ * count, where an input with two channels reads as (L + R) / 2. Given `l` and `r`, two more
+ * scratch arrays, each input's left and right go there too, for an envelope follower to read
+ * side by side (a mono input is the same on both).
  */
-function renderExpr(fn, inputs, out, x) {
+function renderExpr(fn, inputs, out, x, l = null, r = null) {
   const count = x.length;
   for (let n = 0; n < out.length; n++) {
     for (let i = 0; i < count; i++) {
-      const ch = inputs[i]?.[0];
-      x[i] = ch ? ch[n] : 0;
+      const chans = inputs[i];
+      const a = chans?.[0] ? chans[0][n] : 0;
+      const b = chans?.[1] ? chans[1][n] : a;
+      x[i] = chans?.[1] ? Math.fround((a + b) * 0.5) : a;
+      if (l) { l[i] = a; r[i] = b; }
     }
-    out[n] = fn(x);
+    out[n] = fn(x, l, r);
   }
 }
 
@@ -6231,6 +7569,10 @@ function bendOf(parameters) {
 function positionOfDefault(p) {
   if (p.curve === 'exp') return Math.log(p.default / p.min) / Math.log(p.max / p.min);
   if (p.curve === 'pow') return Math.pow((p.default - p.min) / (p.max - p.min), 1 / p.curveExp);
+  if (p.curve === 'sym') {
+    const u = (p.default - (p.min + p.max) / 2) / ((p.max - p.min) / 2);
+    return (1 + Math.sign(u) * Math.pow(Math.abs(u), 1 / p.curveExp)) / 2;
+  }
   return (p.default - p.min) / (p.max - p.min);
 }
 
@@ -6395,6 +7737,8 @@ class EffectProcessor extends AudioWorkletProcessor {
     if (message.kind === 'noteOn') { this.fx.noteOn?.(message.note, message.velocity, message.time); return; }
     if (message.kind === 'noteOff') { this.fx.noteOff?.(message.note, message.time); return; }
     if (message.kind === 'noteRoute') { this.fx.setNoteRoute?.(!!message.on); return; }
+    // How late a chain in the effect's feedback loop comes back (the Delay's), or below zero for none.
+    if (message.kind === 'loop') { this.fx.setLoop?.(Number(message.sec)); return; }
     // A curve somebody drew, already sampled into a table by the engine - see _loadShapeParam.
     if (message.kind === 'shape' && typeof this.fx.loadShape === 'function') {
       this.fx.loadShape(message.param, message.index, message.table);
@@ -6426,7 +7770,8 @@ const EFFECTS = [
   [EQ, EqProcessor], [CHORUS, ChorusProcessor], [FLANGER, FlangerProcessor], [PHASER, PhaserProcessor],
   [DUCKER, DuckerProcessor], [OVERDRIVE, OverdriveProcessor], [MULTIBAND, MultibandProcessor],
   [STUTTER, StutterProcessor], [GRAINECHO, GrainEchoProcessor], [FREQSHIFT, FreqShiftProcessor],
-  [VOICE, VoiceProcessor], [LPG, LpgProcessor], [CROSSOVER, CrossoverProcessor],
+  [VOICE, VoiceProcessor], [LPG, LpgProcessor], [FILTERBANK, FilterbankProcessor], [RESONATOR, ResonatorProcessor], [CROSSOVER, CrossoverProcessor],
+  [LOOPER, LooperProcessor],
 ];
 
 for (const [descriptor, Impl] of EFFECTS) {
@@ -6446,11 +7791,14 @@ registerProcessor('poptart-expr', class extends AudioWorkletProcessor {
     this.alive = true;
     this.consts = exprConsts(tree);
     try {
-      this.fn = compileExpr(tree, this.consts);
+      this.fn = compileExpr(tree, this.consts, { sampleRate });
     } catch {
       this.fn = () => 0; // the engine compiled this tree before building the node, so it is known good
     }
     this.x = new Float64Array(exprInputCount(tree));
+    // Each input's two sides, for an envelope follower's linked peak (see renderExpr).
+    this.l = exprHasFollower(tree) ? new Float64Array(this.x.length) : null;
+    this.r = this.l ? new Float64Array(this.x.length) : null;
     this.port.onmessage = (event) => {
       if (isDispose(event.data)) { this.alive = false; return; }
       const next = event.data?.consts;
@@ -6462,7 +7810,7 @@ registerProcessor('poptart-expr', class extends AudioWorkletProcessor {
   process(inputs, outputs) {
     if (!this.alive) return false;
     const out = outputs[0]?.[0];
-    if (out) renderExpr(this.fn, inputs, out, this.x);
+    if (out) renderExpr(this.fn, inputs, out, this.x, this.l, this.r);
     return true;
   }
 });

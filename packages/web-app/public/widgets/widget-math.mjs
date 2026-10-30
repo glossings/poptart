@@ -177,11 +177,19 @@ export function plotRange(values, min = null, max = null) {
   return [min !== null ? lo : lo - pad, max !== null ? hi : hi + pad];
 }
 
-/** The cell a cycle position is on, in a row of `count` cells that spans one cycle. */
-export function cellAt(pos, count) {
-  if (!count) return -1;
-  const phase = pos - Math.floor(pos);
-  return Math.min(count - 1, Math.floor(phase * count));
+/**
+ * The cells of a row that are sounding: those whose text the playback highlighter is lighting.
+ * `spans` are the lit `[from, to)` document ranges, `abs` where the row's text starts in the
+ * document (-1 for a row not written out, which has no text to light), `cells` parseCells' read
+ * of that text. The indices, in row order.
+ */
+export function litCells(spans, abs, cells) {
+  if (abs < 0 || !spans.length) return [];
+  const out = [];
+  cells.forEach((c, i) => {
+    if (spans.some(([a, b]) => a < abs + c.to && b > abs + c.from)) out.push(i);
+  });
+  return out;
 }
 
 /** Smooths a column toward its new reading: up at once, down by `release` dB per frame. */

@@ -128,7 +128,6 @@ class Engine {
     this.bendTracks = new Map();
     this.rbDelay = 0;
     // Made at boot (see boot()): the shared buses and groups every track uses.
-    this.unityGainBus = null;
     this.silentBus = null;
     this.trashBus = null;
     this.deckMeterBus = null;

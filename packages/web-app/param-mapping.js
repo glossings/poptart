@@ -390,6 +390,8 @@ class MappedEngine {
   setRouting(...a) { return this.engine.setRouting(...a); }
   // How far a fresh Scheduler empties a track's trailing effect slots: a count, nothing to map.
   effectSlots(...a) { return this.engine.effectSlots(...a); }
+  // Which of a slot's device controls take a list (a cycle of levels, a scale): names, nothing to map.
+  listParams(...a) { return this.engine.listParams(...a); }
 }
 
 /**
@@ -400,6 +402,6 @@ class MappedEngine {
  * whole file exists to prevent. Kept in step with the `typeof this.engine.X === 'function'`
  * checks in scheduler.mjs by a test, not by memory.
  */
-MappedEngine.OPTIONAL = Object.freeze(['setParamExpr', 'clearParamExpr', 'paramExprs', 'slotLatencies', 'setRouting', 'effectSlots']);
+MappedEngine.OPTIONAL = Object.freeze(['setParamExpr', 'clearParamExpr', 'paramExprs', 'slotLatencies', 'setRouting', 'effectSlots', 'listParams']);
 
 module.exports = { MappedEngine, loadMappings, toNormalized, toRealWorld };

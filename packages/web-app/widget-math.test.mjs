@@ -81,10 +81,12 @@ test('a plot is padded so a flat line sits mid-height, unless the range is fixed
   assert.deepEqual(M.plotRange([null, NaN]), [0, 1]);
 });
 
-test('the cell under the playhead, and a meter that falls back slowly', () => {
-  assert.equal(M.cellAt(3.5, 8), 4);
-  assert.equal(M.cellAt(0.999, 8), 7);
-  assert.equal(M.cellAt(2, 0), -1);
+test('the cells the highlighter is lighting, and a meter that falls back slowly', () => {
+  const cells = [{ from: 0, to: 1 }, { from: 2, to: 3 }, { from: 4, to: 6 }];
+  assert.deepEqual(M.litCells([[102, 103]], 100, cells), [1]);
+  assert.deepEqual(M.litCells([[100, 101], [104, 106]], 100, cells), [0, 2]);
+  assert.deepEqual(M.litCells([[90, 91]], 100, cells), []); // another atom's span
+  assert.deepEqual(M.litCells([[100, 101]], -1, cells), []); // steps(8): no text to light
   const prev = Float32Array.from([-10, -10]);
   assert.deepEqual([...M.decay(prev, [-5, -40], 2)], [-5, -12]);
 });

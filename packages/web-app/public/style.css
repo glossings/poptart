@@ -1139,6 +1139,11 @@ footer#console {
   color: var(--warn);
 }
 
+/* A line about a span of code: clicking it puts the cursor there (see client.js's attachLogPlace). */
+#log .log-at {
+  cursor: pointer;
+}
+
 [data-console-collapsed] #log {
   display: none;
 }
@@ -1305,6 +1310,28 @@ footer#console {
   background: color-mix(in srgb, var(--warn) 25%, transparent);
   box-shadow: 0 0 0 1.5px var(--warn);
   border-radius: 2px;
+}
+
+/* Where the last evaluation failed, or a warning points (see eval-marks.js): a wavy underline on
+   the span, and the line number in the same color. Neither takes any room, so nothing moves. */
+.cm-eval-error {
+  text-decoration: underline wavy var(--err);
+  text-decoration-skip-ink: none;
+  text-underline-offset: 3px;
+}
+
+.cm-eval-warn {
+  text-decoration: underline wavy var(--warn);
+  text-decoration-skip-ink: none;
+  text-underline-offset: 3px;
+}
+
+.cm-s-poptart .cm-eval-error-line .CodeMirror-linenumber {
+  color: var(--err);
+}
+
+.cm-s-poptart .cm-eval-warn-line .CodeMirror-linenumber {
+  color: var(--warn);
 }
 
 /* The name of a call that opens an editor - `pianoroll`, `lfo`, a chain's `synth` - while the

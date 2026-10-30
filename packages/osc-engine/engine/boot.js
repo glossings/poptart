@@ -90,8 +90,6 @@ async function startEngine({ server, config, tell, output, defs, vst = null, dev
   S.send(['/g_new', 1, 0, 0]);
   E.installed = installSections(E, sections);
 
-  E.unityGainBus = Bus.control(S, 2);
-  E.unityGainBus.setn([1, 0]);
   E.silentBus = Bus.audio(S, 2);
   E.trashBus = Bus.audio(S, 2);
   E.deckMeterBus = Bus.audio(S, 4);

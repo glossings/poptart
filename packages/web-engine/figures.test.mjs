@@ -718,3 +718,48 @@ test('the wavetable\'s unison controls sit under the picture of the spread', () 
   assert.deepEqual(panel.rows.map((row) => row.map((i) => panel.sections[i].title)),
     [['Osc 1', 'Osc 2'], ['Osc 1 Unison', 'Osc 2 Unison'], ['Sub', 'Amp Env', 'Voice']]);
 });
+
+// ---- a filter bank's bands ----------------------------------------------------------------------
+
+test('a filter bank draws a bar per band at its frequency, laid out by its controls until it reports', async () => {
+  const { FILTERBANK } = await import('./src/devices/filterbank.mjs');
+  const values = { ...defaultValues(FILTERBANK), bands: 4, low: 100, high: 1600, shape: 0.5 };
+  const [fig] = buildFigures(FILTERBANK, values);
+  assert.equal(fig.kind, 'bands');
+  assert.equal(fig.live, false);
+  assert.deepEqual(fig.bars.map((b) => Math.round(b.hz)), [141, 283, 566, 1131]);
+  assert.ok(fig.bars.every((b) => b.level === 0.5));
+});
+
+test('while it plays, the bars are what the device says it is feeding each band', async () => {
+  const { FILTERBANK, FilterbankProcessor } = await import('./src/devices/filterbank.mjs');
+  const fx = new FilterbankProcessor(48000);
+  fx.loadShape('levels', 1, Float32Array.from([0, 0.5, 1, 0.5, 1, 0.25]));
+  const params = { ...defaultValues(FILTERBANK), bands: 4, levels: 1, shape: 0.8 };
+  const silence = [new Float32Array(128), new Float32Array(128)];
+  fx.process(silence, [new Float32Array(128), new Float32Array(128)], 128, params);
+  const report = fx.report();
+  const [fig] = buildFigures(FILTERBANK, params, { report });
+  assert.equal(fig.live, true);
+  assert.deepEqual(fig.bars.map((b) => Math.round(b.level * 1000) / 1000), [0.8, 0.8, 0.2, 0.2]);
+});
+
+test('the bands figure heads the Shape section and takes Levels (and the Resonator\'s Scale) into its heading', async () => {
+  const { FILTERBANK } = await import('./src/devices/filterbank.mjs');
+  const { RESONATOR, ResonatorProcessor } = await import('./src/devices/resonator.mjs');
+  for (const [d, taken] of [[FILTERBANK, ['levels']], [RESONATOR, ['levels', 'scale']]]) {
+    const panel = buildPanel(d, defaultValues(d));
+    const shape = panel.sections.find((s) => s.title === 'Shape');
+    const fig = shape.figures.find((f) => f.kind === 'bands');
+    assert.ok(fig, `${d.id} has no bands figure`);
+    assert.deepEqual(fig.widgets.map((w) => w.id), taken);
+    for (const s of panel.sections) for (const id of taken) assert.ok(!s.widgets.some((w) => w.id === id), `${d.id}.${id} is drawn twice`);
+  }
+  // The Resonator's bars sit on its notes, with Tilt in their levels.
+  const fx = new ResonatorProcessor(48000);
+  const params = { ...defaultValues(RESONATOR), tilt: 12 };
+  fx.process([new Float32Array(128), new Float32Array(128)], [new Float32Array(128), new Float32Array(128)], 128, params);
+  const { bands } = fx.report();
+  assert.ok(bands.hz.length > 100);
+  assert.ok(bands.level.at(-1) > bands.level[0], 'tilted up');
+});

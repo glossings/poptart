@@ -72,7 +72,8 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SO
 ## Compiled into the desktop engine
 
 The native helpers under `packages/osc-engine/native/` are built from the sources below by the
-`build.sh` beside each, and the built binaries are committed.
+build script beside each. The macOS binaries are committed; the Windows builds of the two
+scsynth extensions are made by the release workflow and ship inside the Windows app.
 
 ### Rubber Band Library 4.0.0
 

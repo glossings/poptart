@@ -74,8 +74,8 @@ const API_DOCS = {
   },
   record: {
     kind: 'method',
-    sig: 'record({ cycles, name, wrapTail, normalize })',
-    desc: 'Marks the track for recording; double-click the name, or press {app+b} inside the block, to open the recorder. cycles is the length (4 by default), name the file name (the track label by default), wrapTail: true folds the release tail back onto the start, and normalize: false keeps the recorded level instead of scaling to a −1 dBFS peak.',
+    sig: 'record({ cycles, name, wrapTail, normalize, take })',
+    desc: 'On a track, marks it for recording to audio; double-click the name, or press {app+b} inside the block, to open the recorder. name is the file name (the track label by default), wrapTail: true folds the release tail back onto the start, and normalize: false keeps the recorded level instead of a −1 dBFS peak. On a knob, slider, toggle, button, xy, midicc, osc or macro, records the control\'s movement and loops it once it is let go or still for a cycle; take names the shape the loop is kept in. cycles is the length, 4 by default.',
     eg: 'note("c2 eb2").synth("Serum 2").record({ cycles: 8 })',
   },
   mini: {
@@ -197,9 +197,9 @@ const API_DOCS = {
   },
   env: {
     kind: 'builder',
-    sig: 'env({ attack, decay, sustain, release, curve, retrigger })',
-    desc: 'An ADSR envelope, triggered by the track\'s notes; double-click the name to open the envelope editor. attack, decay and release are in seconds; sustain is a level from 0 to 1. curve shapes each segment: negative is exponential, 0 is linear, positive bows outward. With retrigger: true every note restarts the attack, including notes that overlap the one before.',
-    eg: 'gain(env({ attack: 0.01, release: 0.3 }))',
+    sig: 'env({ attack, decay, sustain, release, curve, retrigger }) | env(source, { attack, release })',
+    desc: 'With an object or nothing: an ADSR envelope triggered by the track\'s notes; double-click the name to open the envelope editor. sustain is a level from 0 to 1; curve shapes each segment (negative exponential, 0 linear, positive bowed); retrigger: true restarts the attack on every note. With a source - a track, bus or audio input name, or a signal with audio in it - the level of that source from 0 to 1, clipped at full scale, rising over attack and falling over release (defaults 0.01 and 0.25). Times are in seconds; a follower\'s are the time to get within 60 dB of a new level.',
+    eg: 'gain(env("kick", { release: 0.3 }).mul(-1).add(1))',
   },
   dur: {
     kind: 'builder',
@@ -273,8 +273,8 @@ const API_DOCS = {
   // ----------------------------------------------------------------- chain & channel strip
   fx: {
     kind: 'method',
-    sig: 'fx(plugin, { label, state })',
-    desc: 'Adds an effect plugin to the end of the track\'s chain. Double-click the name to open the plugin\'s window; {app+f} inserts one at the cursor. .param() calls after it set this plugin\'s parameters, and the optional label is a name .param() and .wet() can reach this device by from anywhere in the chain.',
+    sig: 'fx(plugin, { label, state, loop })',
+    desc: 'Adds an effect plugin to the end of the track\'s chain. Double-click the name to open the plugin\'s window; {app+f} inserts one at the cursor. .param() calls after it set this plugin\'s parameters, and the optional label is a name .param() and .wet() can reach this device by from anywhere in the chain. On the Delay, a function (in place of the options, or as loop) builds a chain inside its feedback loop, so every repeat goes through it again. The way round is taken off the delay time, so the repeats stay on the beat; a time shorter than the way round is held at it.',
     eg: '.fx("ValhallaRoom").param("Mix", 0.3)',
   },
   param: {
@@ -322,8 +322,8 @@ const API_DOCS = {
   bus: {
     kind: 'method',
     sig: 'bus(name, amount)',
-    desc: 'Sends the track\'s output to a named bus, which another track plays with audio("name"). The track\'s own output is unaffected. Both arguments can be patterns: a patterned name moves the send between buses, and a rest turns it off.',
-    eg: '.bus("reverb", sine().range(0, 0.6))',
+    desc: 'Sends the track to a named bus, which another track plays with audio("name"). The send leaves the chain where it is written: after the last device it is the track\'s output; before a device it taps the signal there, so what follows stays out of the send. The track\'s own output is unaffected. Both arguments can be patterns: a patterned name moves the send between buses, and a rest turns it off.',
+    eg: '.fx("Delay").bus("feedback").fx("Reverb")',
   },
   dry: { kind: 'method', sig: 'dry(value)', desc: 'The level of the track\'s own output alongside its bus sends. 1 by default; 0 leaves only the sends.', eg: '.dry(0)' },
   wet: {
@@ -389,6 +389,7 @@ const API_DOCS = {
   },
 
   // ----------------------------------------------------------------- shaping
+  smooth: { kind: 'method', sig: 'smooth(time)', desc: 'Glides toward each new value instead of jumping: an exponential lag that gets within 60 dB of a change after time seconds, the same both ways. Works on any signal, including stepped patterns, modulators, knobs and audio. time can be a pattern or signal.', eg: 'param("Cutoff", "<0.2 0.8 0.5>".smooth(0.2))' },
   range: { kind: 'method', sig: 'range(min, max)', desc: 'Rescales a signal to run from min to max: from 0 to 1, or from -1 to 1 for audio. Both bounds can be patterns or signals.', eg: '.range(200, 5000)' },
   fast: { kind: 'method', sig: 'fast(factor)', desc: 'Speeds the pattern up by factor; a negative factor also reverses it. On a modulator, it multiplies the rate, and a patterned factor patterns the rate.', eg: '.fast("<1 2>")' },
   slow: { kind: 'method', sig: 'slow(factor)', desc: 'Slows the pattern down, stretching it over factor cycles; a negative factor also reverses it. On a modulator, it divides the rate.', eg: '.slow(4)' },
@@ -527,7 +528,9 @@ const API_DOCS = {
   flip: { kind: 'both', sig: 'flip(on)', desc: 'Reverses the sample so it ends on the beat: above 0.5, it plays backwards and is delayed so it reaches begin at the end of the step.', eg: '.flip("<0 1>*2")' },
   stretch: { kind: 'both', sig: 'stretch(factor)', desc: 'Time-stretches the sample without changing its pitch: 2 is twice as long. Works best on rhythmic material.', eg: '.stretch(2)' },
   bank: { kind: 'method', sig: 'bank(name)', desc: 'Plays each sample name from a bank of drum packs: s("bd").bank("808") plays the pack 808_bd. Where the bank has no pack for a name, the name plays as written.', eg: 's("bd*4, [~ sd]*2").bank("808")' },
-  fit: { kind: 'both', sig: 'fit(measures)', desc: 'Changes playback speed so the sample lasts exactly this many cycles. With no argument, uses the nearest power of two.', eg: 's("breaks:19").fit()' },
+  fit: { kind: 'both', sig: 'fit(measures, mode?)', desc: 'Changes playback speed so the sample lasts exactly this many cycles. With no argument, uses the nearest power of two. mode is "repitch" (the default, pitch follows) or "stretch" (pitch holds), and can stand alone: .fit("stretch"). .log() prints the length it came to.', eg: 's("breaks:19").fit()' },
+  play: { kind: 'method', sig: 'play()', desc: 'Plays the sample through, one slice per cycle: each event begins where its cycle points in the file, over the fitted length or the natural one, wrapping at the end. It sets begin, so begin arithmetic after it composes with it.', eg: 's("files:vocal.wav").fit("stretch").play()' },
+  fitmode: { kind: 'both', sig: 'fitmode(mode)', desc: 'How fit reaches its length: 0 or "repitch" changes speed and pitch together, 1 or "stretch" keeps the pitch. Values are rounded and wrap around, so any signal works.', eg: '.fit().fitmode("stretch")' },
   slice: { kind: 'both', sig: 'slice(n)', desc: 'Plays the nth slice of the sample, cut at its detected transients, wrapping past the last. WAV files only.', eg: '.slice(irand(8))' },
   splice: { kind: 'both', sig: 'splice(n, mode?)', desc: 'Plays the nth transient slice, fitted to the length of its event: splice("<0 1 2>*8") plays each slice as an eighth note. Fits by changing speed unless mode is "stretch". With no n, fits the current begin..end window. speed and note apply on top, and fit is ignored.', eg: '.splice("<0 1 2>*8")' },
   splicemode: { kind: 'both', sig: 'splicemode(mode)', desc: 'How splice fits a slice to its event: 0 or "repitch" changes speed and pitch together, 1 or "stretch" keeps the pitch. Values are rounded and wrap around, so any signal works.', eg: '.splice("0 1 2 3").splicemode("stretch")' },

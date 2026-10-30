@@ -98,9 +98,9 @@ function fakeRepo({ tracked = TRACKED } = {}) {
   return root;
 }
 
-function run(root, { tracked = TRACKED, untracked = [] } = {}) {
+function run(root, { tracked = TRACKED, untracked = [], ...opts } = {}) {
   const outDir = path.join(scratch(), 'stage');
-  const result = stage({ repoRoot: root, outDir, listTracked: () => tracked, listUntracked: () => untracked });
+  const result = stage({ repoRoot: root, outDir, listTracked: () => tracked, listUntracked: () => untracked, ...opts });
   const has = (rel) => fs.existsSync(path.join(outDir, ...rel.split('/')));
   return { outDir, result, has };
 }
@@ -290,4 +290,35 @@ test('electron-builder packages the Electron version the lockfile installs', () 
   const lock = JSON.parse(fs.readFileSync(path.join(__dirname, 'package-lock.json'), 'utf8'));
   const [, configured] = config.match(/^electronVersion: (\S+)$/m) ?? [];
   assert.strictEqual(configured, lock.packages['node_modules/electron'].version);
+});
+
+test('the Windows and Linux extensions CI built ship beside the committed macOS ones', () => {
+  const root = fakeRepo();
+  // Ignored by git, so in neither listing: what CI's build step leaves in the checkout.
+  write(root, 'packages/osc-engine/native/devices/bin/win32-x64/PoptartDevices.scx', 'MZ devices');
+  write(root, 'packages/osc-engine/native/rubberband/bin/win32-x64/PoptartPitchShift.scx', 'MZ keylock');
+  write(root, 'packages/osc-engine/native/rubberband/bin/linux-x64/PoptartPitchShift.so', 'ELF keylock');
+  write(root, 'packages/osc-engine/native/rubberband/bin/not-a-platform/junk', 'left behind');
+  const { has, result } = run(root, { requireBuilt: true, platform: 'win32', arch: 'x64' });
+  assert.ok(has('node_modules/@poptart/osc-engine/native/devices/bin/win32-x64/PoptartDevices.scx'));
+  assert.ok(has('node_modules/@poptart/osc-engine/native/rubberband/bin/win32-x64/PoptartPitchShift.scx'));
+  assert.ok(has('node_modules/@poptart/osc-engine/native/rubberband/bin/linux-x64/PoptartPitchShift.so'));
+  assert.ok(!has('node_modules/@poptart/osc-engine/native/rubberband/bin/not-a-platform/junk'));
+  // The committed macOS build is where it always was.
+  assert.ok(has('node_modules/@poptart/osc-engine/native/rubberband/bin/Shift.scx'));
+  assert.strictEqual(result.built.length, 3);
+  assert.deepStrictEqual(result.untracked, []);
+});
+
+test('a Windows build that must carry the extensions stops when one was not built; a Mac build does not', () => {
+  const root = fakeRepo();
+  write(root, 'packages/osc-engine/native/rubberband/bin/win32-x64/PoptartPitchShift.scx', 'MZ keylock');
+  assert.throws(
+    () => run(root, { requireBuilt: true, platform: 'win32', arch: 'x64' }),
+    /native\/devices\/bin\/win32-x64\/PoptartDevices\.scx is not there/,
+  );
+  // Not asked to: stages what there is, as a developer's `npm run pack` does.
+  assert.ok(run(root, { platform: 'win32', arch: 'x64' }).has('node_modules/@poptart/osc-engine/native/rubberband/bin/win32-x64/PoptartPitchShift.scx'));
+  // macOS's are committed and staged from git, so there is nothing to require.
+  assert.doesNotThrow(() => run(root, { requireBuilt: true, platform: 'darwin', arch: 'arm64' }));
 });

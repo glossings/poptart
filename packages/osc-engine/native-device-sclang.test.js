@@ -21,11 +21,11 @@ const { execFileSync } = require('node:child_process');
 
 const { resolveSclangPath } = require('./index.js');
 const { readWavRaw } = require('./wav.js');
-const { userExtensionsDir } = require('./extensions.js');
+const { userExtensionsDir, DEVICE_BINARY } = require('./extensions.js');
 
 const SR = 48000;
 const NATIVE_DIR = path.join(__dirname, 'native', 'devices');
-const SCX = path.join(NATIVE_DIR, 'bin', 'PoptartDevices.scx');
+const SCX = DEVICE_BINARY; // this platform's build (extensions.js)
 const CLASS_FILE = path.join(NATIVE_DIR, 'PoptartDevice.sc');
 
 /** Plaits' engine control is its first, 0..23 in whole steps; this is where one engine sits. */

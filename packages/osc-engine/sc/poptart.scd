@@ -185,9 +185,11 @@ var trackPlace = IdentityDictionary.new, trackBeats;
 var jsonEscape, toJson, replyOk, replyErr, pluginList, runScan, trackDefName, buildTrackDef, channelDefault;
 var djIsolator; // the DJ stage's 3-band EQ (see its definition above buildTrackDef)
 var buildHeadDef, buildFxDef, buildXoverDef, buildDjDef, buildTapDef, buildBassMonoDef; // the defs a track is made of (see sharedTrackDef)
+var chanIn, chanAudio, setChanAr; // a channel control read per sample when an audio-rate driver is on it (see chanIn)
 var djNode, stripTap, stripPost, bassMonoNode, trackPairs; // a track's optional stages (see djNode)
 var loopEdges = Set.new, routeCloses, busWriters, trackSerial = 0; // the edges that close a loop (see trackLevels)
-var routeApply, routeFree, slotNode, ensureFxNode, channelTarget, setScBus, routeKrNode, unityGainBus; // a track's chain (see routeApply)
+var routeApply, routeFree, slotNode, ensureFxNode, channelTarget, setScBus, routeKrNode; // a track's chain (see routeApply)
+var sendInput, repointSends; // where a .bus() send written inside the chain reads (see routeApply)
 var sharedTrackDef, trackDef, trackDefState; // the one track SynthDef this engine builds (see sharedTrackDef)
 var awaitTrack, awaitLoaded, reclaimStuckTrack, resolvePlugin, resolveParamIndex, watchPluginEdits;
 var pluginOpenLock, openQueued, slotKindGuard;
@@ -296,7 +298,7 @@ var tellTrack, tellSlot, tellMods, tellRamp, tellTap, heldBy, shapesHandled = Id
 // clearParamLFO.
 var modFreeDelay = 0.3, freeModulatorLater;
 // The ramp behind every polled control - see poptartSetParam.
-var rampTo, dropRamp, dropSlotRamps;
+var rampTo, dropRamp, dropSlotRamps, leafRampSec, leafRampTime;
 // ...and what happens when the server says that ramp's node is not there - see nodeGone.
 var nodeGone, nodeGoneSaid, nodeFailId, nodeMissing, nodeOwners, nodeOwns, deadNodes;
 var outOfRoom, outOfRoomSaid, outOfRoomPhrases;
@@ -477,6 +479,10 @@ sharedTrackDef = {
     };
 };
 
+// The track defs' building blocks are defined inside a block of their own: the file's top level
+// is one function, and sclang caps how many literals one function may hold ("Selector table too
+// big"), which every closure assigned at the top level counts toward. Nothing here runs yet.
+{
 // The DJ stage's 3-band isolator EQ (see the DJ stage in the track def): `in` split into
 // low / mid / high by a Linkwitz-Riley crossover tree at 250 Hz and 2.5 kHz, each band scaled by
 // its gain (0 = a kill, 1 = unity, 2 = +6 dB), summed back.
@@ -506,13 +512,110 @@ djIsolator = { |in, lo, mid, hi|
     LinXFade2.ar(in, wet, (on * 2 - 1).lag(0.05));
 };
 
+// A channel control as a track def reads it, at the sample rate. It has two ways in:
+//   - its control `name`: a value set on it, a polled value's ramp, a cc mapped onto it - lagged;
+//   - while an audio-rate driver is on it (a native lfo() or env(), an expression with audio in
+//     it - see setChanAr), that driver's audio bus, named by the control `<name>Ar` (-1 for none)
+//     and read every sample, not lagged. The browser hands such a driver the AudioParam itself
+//     (Track#driveChannel), so `.gain(sine("300hz").range(-1, 1))` is a ring modulator there -
+//     and here, rather than a 300 Hz sine read once a block.
+// A set value is held to setLo..setHi and a driven one to drivenLo..drivenHi, the browser's own
+// ranges for each (Track#setChannel, Track#driveChannel); nil is not held. With `both`, answers
+// [audio, control]: the value at control rate too, for a reader that takes one a block (a bus a
+// sample voice maps, a MIDI message). What a control nothing drives costs, measured offline: see
+// channel-audio-sclang.test.js.
+chanIn = { |name, default, lag = 0, setLo, setHi, drivenLo, drivenHi, both = false|
+    var k = NamedControl.kr(name, default);
+    var bus = NamedControl.kr((name ++ "Ar").asSymbol, -1);
+    var on = bus >= 0;
+    var set = if (lag > 0) { k.lag(lag) } { k };
+    var driven = In.ar(bus.max(0), 1);
+    var ar;
+    if (setLo.notNil) { set = set.clip(setLo, setHi) };
+    if (drivenLo.notNil) { driven = driven.clip(drivenLo, drivenHi) };
+    ar = Select.ar(on, [K2A.ar(set), driven]);
+    if (both) { [ar, Select.kr(on, [set, A2K.kr(driven)])] } { ar };
+};
+
+// Whether a channel control has a way to be read per sample (see chanIn): the ones the browser
+// hands a modulator as an AudioParam (Track#driveChannel). The grain controls are read by the
+// granular voices themselves (see the poptart_sample_grain_ defs), the bend by those and the head.
+chanAudio = { |name|
+    #[\gain, \bend, \postgain, \pan, \width, \dry, \bassmono, \grainpos, \grainsize, \grainrate, \grainpan].includes(name.asSymbol)
+        or: { name.asString.findRegexp("^(rl|rp|xo|wet)[0-9]+$").notEmpty }
+};
+
+// Puts a channel control on the audio bus `index` (its driver's - an lfo(), env() or expression
+// at the sample rate), or with -1 takes it off, back to its control. Remembered per track, so a
+// node made later (an effect's, the DJ stage, a route control's publisher, a crossover) starts on
+// it. A crossover's frequency is the Crossover device's own control, so the device takes the
+// audio bus directly (PoptartDeviceController's mapAudio), as any device control does.
+setChanAr = { |track, name, index|
+    var str = name.asString, sym = str.asSymbol;
+    var m = str.findRegexp("^(rl|rp|xo|wet)([0-9]+)$");
+    var held = track[\chanAr] ?? { track[\chanAr] = IdentityDictionary.new; track[\chanAr] };
+    if (index >= 0) { held[sym] = index } { held.removeAt(sym) };
+    if (m.size >= 3) {
+        var which = m[1][1], k = m[2][1].asInteger;
+        case
+        { which == "wet" } { track[\nodes][k] !? { |n| n.set(\wetAr, index) } }
+        { which == "xo" } {
+            track[\xovers].do { |x|
+                if ((x[\k] == k) and: { x[\open] == true }) {
+                    if (index >= 0) { x[\ctl].mapAudio(0, index, 1, 0) } {
+                        x[\ctl].unmapAudio(0);
+                        x[\ctl].map(0, routeKrNode.(track, \xo, k)[\bus]);
+                    };
+                };
+            };
+        }
+        { track[\gains][k] !? { |e| e[\node].set(if (which == "rl") { \levelAr } { \panAr }, index) } }
+    } {
+        // The granular voices read a driven grain control or bend per sample, the ones sounding
+        // now (a group set reaches every voice; the others have no such control) and the ones
+        // spawned later (see poptartPlaySample).
+        if (#[\bend, \grainpos, \grainsize, \grainrate, \grainpan].includes(sym)) {
+            track[\voices] !? { |g| g.set((str ++ "Ar").asSymbol, index) };
+        };
+        case
+        { #[\grainpos, \grainsize, \grainrate, \grainpan].includes(sym) } { }
+        { sym == \pan } {
+            // The strip reads the pan law's two gains, not the pan: worked out per sample from the
+            // driver by a node made for as long as there is one (see the strip's panAr).
+            var law = track[\panLaw];
+            if (index >= 0) {
+                if (law.isNil) {
+                    var bus = Bus.audio(server, 2);
+                    var node = Synth(\poptart_panlaw, [\in, index, \out, bus.index], target: track[\synth], addAction: \addBefore);
+                    nodeOwns.(node.nodeID, "a track's pan law");
+                    law = (node: node, bus: bus);
+                    track[\panLaw] = law;
+                } { law[\node].set(\in, index) };
+                track[\synth].set(\panAr, law[\bus].index);
+            } {
+                law !? {
+                    track[\synth].set(\panAr, -1);
+                    track[\panLaw] = nil;
+                    law[\node].free;
+                    // After the strip has stopped reading it.
+                    SystemClock.sched(0.2, { law[\bus].free; nil });
+                };
+            };
+        } {
+            channelTarget.(track, str) !? { |at| at[0].set((str ++ "Ar").asSymbol, index) };
+        };
+        // The DJ stage plays the direct output once it is made, so it reads dry's driver too.
+        if (sym == \dry) { track[\dj] !? { |n| n.set(\dryAr, index) } };
+    };
+};
+
 // The head of a track (see sharedTrackDef): its instrument, its sample voices and its input gain,
 // written to the track's chain bus for the first effect, or the strip, to read.
 buildHeadDef = {
-    SynthDef(\poptart_head, { |inBus, out, gain = 1, bend = 0, bendrange = 2, bendOut,
+    SynthDef(\poptart_head, { |inBus, out, bendrange = 2, bendOut,
         grainpos = 0, grainsize = 0.08, grainrate = 20, grainpan = 0, grainOut|
         var hasNativeDevices = \PoptartDevice.asClass.notNil; // see buildFxDef
-        var sig, bendV, bendOn;
+        var sig, bendV, bendKr, bendOn;
         // Pitch bend (Sig#bend), in semitones - a channel control like gain/pan, reaching this
         // synth by whichever route the control is driven from (a ramp for a polled signal, a
         // native LFO's bus, a plain set). Three things read it:
@@ -525,17 +628,22 @@ buildHeadDef = {
         //
         // ReplaceOut rather than Out: a control bus is not cleared between blocks, so Out would
         // accumulate the value forever. There is exactly one writer per track.
-        bendV = bend.lag(0.01).clip(-48, 48);
-        ReplaceOut.kr(bendOut, bendV);
+        //
+        // Driven by an audio-rate modulator it is read per sample (see chanIn), as the browser's
+        // bend is: the native instrument follows it in short pieces (PoptartDevice.cpp's
+        // kBendPiece); the granular voices read its driver per sample themselves (setChanAr);
+        // the plain sample voices and the plugin take it once a block, as they must.
+        #bendV, bendKr = chanIn.(\bend, 0, 0.01, -48, 48, both: true);
+        ReplaceOut.kr(bendOut, bendKr);
         // A VST takes pitch bend as a MIDI message, so something has to turn the bus back into
         // messages - sclang, at bendPollHz (see the bendOut OSCFunc). Sent only while the track is
         // actually bending, plus a tail after it centres so the centring message is never the one
         // that gets dropped: a track that never calls .bend() posts nothing at all. bendrange rides
         // along because the 14-bit encoding depends on it and it is a control like any other.
-        bendOn = (bendV.abs > 1e-4);
+        bendOn = (bendKr.abs > 1e-4);
         SendReply.kr(
             Impulse.kr(bendPollHz) * (bendOn + Trig1.kr(1 - bendOn, 0.1)).min(1),
-            '/poptart/bendOut', [bendV, bendrange]);
+            '/poptart/bendOut', [bendKr, bendrange]);
         // The granular voice's live controls (Sig#grainsize and friends, and a streamed .begin()
         // as grainpos): channel controls for the same reason bend is one, and republished the
         // same way, four wide, for the track's granular voices to map. Unlagged on purpose: a
@@ -554,15 +662,18 @@ buildHeadDef = {
         // Input gain (Sig#gain, pseudo-slot -1 like the strip's controls): the level going INTO
         // the fx chain, which is where a channel strip's gain knob sits - turn a track down and
         // it drives its own compressor, saturator and reverb less hard. The level on the way OUT
-        // of the chain is postgain, at the strip.
-        Out.ar(out, sig * gain.lag(0.02).clip(0, 4));
+        // of the chain is postgain, at the strip. Negative turns the signal over, as a gain node
+        // does in the browser - which is what makes a bipolar modulator on it a ring modulator.
+        Out.ar(out, sig * chanIn.(\gain, 1, 0.02));
     })
 };
 
 // One effect of a track: what it reads (`in`, and its sidechain on `scBus`), and what it writes
-// (`out`), all buses, set by routeApply and by the sidechain wiring.
+// (`out`), all buses, set by routeApply and by the sidechain wiring. A device with a chain in its
+// feedback loop (the Delay) also writes its repeats to `loop` and reads the chain's end back on
+// `ret`, a block late (see routeApply's loop steps).
 buildFxDef = {
-    SynthDef(\poptart_fx, { |in, out, scBus, active = 0, native = 0, wet = 1|
+    SynthDef(\poptart_fx, { |in, out, scBus, active = 0, native = 0, ret, loop|
         // Whether poptart's own devices are available (the PoptartDevice extension -
         // native/devices/, installed into the user's SC Extensions folder by extensions.js
         // before sclang starts). False on a platform nobody has built it for: the node then
@@ -578,15 +689,19 @@ buildFxDef = {
         // A native device reads the sidechain as a second signal rather than a second bus, and
         // only the ones that cross-modulate read it at all.
         var plugin = VSTPlugin.ar(Ref([[jin[0], jin[1]], [scIn[0], scIn[1]]]), 2, id: \slot);
+        // Four channels: its own pair, and the pair a looped Delay sends round its loop. The loop's
+        // return closes a cycle through the chain's later nodes, so it is the block before
+        // (InFeedback), and it rides on the key, which no device with a loop listens to otherwise.
         var device = if (hasNativeDevices) {
-            \PoptartDevice.asClass.ar([jin[0], jin[1]], 2, 0, [scIn[0], scIn[1]], \nslot)
-        } { Silent.ar(2) };
+            var back = InFeedback.ar(ret, 2);
+            \PoptartDevice.asClass.ar([jin[0], jin[1]], 4, 0, [scIn[0] + back[0], scIn[1] + back[1]], \nslot)
+        } { Silent.ar(4) };
         // Which of the two is this slot's output: 1 while a native device is in it, set by the
         // load that put it there (see loadDevice and loadEffect). NOT a sum, as the head is: an
         // empty VSTPlugin passes its input through (measured, VSTPlugin 0.6.2, NRT), so summing
         // would play the dry signal under every native effect. Not lagged: it only ever changes in
         // the message that also flips `active`, whose own lag is the fade.
-        var pick = (plugin * (1 - native)) + (device * native);
+        var pick = (plugin * (1 - native)) + (device[0..1] * native);
         // How much of this slot reaches the rest of the chain. Two things multiplied: `active`,
         // the bypass flipped on only once a plugin actually loads (so an unloaded slot reads as
         // fully dry), and `wet`, the user's own mix control (Sig#wet, the channel control wetN).
@@ -594,9 +709,10 @@ buildFxDef = {
         // Linear rather than equal-power: a wet knob's endpoints have to be EXACTLY the dry
         // signal and EXACTLY the plugin's, which is what makes wet 0 a true bypass. Lagged like
         // the other streamed controls (the Tier-1 poll steps at ~30ms), which also turns a plugin
-        // load/close into a short fade.
-        var mix = (active * wet).lag(0.02).clip(0, 1);
+        // load/close into a short fade. An audio-rate driver on wet is read per sample (chanIn).
+        var mix = active.lag(0.02) * chanIn.(\wet, 1, 0.02, 0, 1);
         Out.ar(out, (jin * (1 - mix)) + (pick * mix));
+        Out.ar(loop, device[2..3]);
     })
 };
 
@@ -629,7 +745,7 @@ buildTrackDef = { |key|
     // numOutputBusChannels sent .o(2) into the silent tail of poptart's aggregate, and wrapping at
     // the interface's full width sends it to a back-panel jack nobody is monitoring. An argument,
     // so a change of output pairs reaches a running track (see trackPairs).
-    SynthDef(trackDefName.(key), { |in, post, ctl, postgain = 1, pan = 0, width = 1, out = 1, pairs = 1, dry = 1,
+    SynthDef(trackDefName.(key), { |in, post, ctl, out = 1, pairs = 1,
         fader = 1, deck = 1, mon = 0, direct = 1|
         // The channel's DJ fader: it applies to the named-bus SENDS as well as to the direct
         // output - a post-fader send, the way a desk's are. A stem gated out of a mix has to go
@@ -644,7 +760,9 @@ buildTrackDef = { |key|
         // the room hears. The taps keep reading it: they are listening, not playing.
         var mainAmt = 1 - mon.lag(0.05).clip(0, 1);
         var deckAmt = deck.lag(0.08).clip(0, 1);
-        var dryAmt = dry.lag(0.02);
+        // dry, width, pan and postgain are read per sample while an audio-rate driver is on them
+        // (see chanIn); dry's control-rate value is what the DJ stage reads when it has no driver.
+        var dryAmt, dryKr;
         var sig = In.ar(in, 2);
         // Width is mid/side: the sum is left alone and the difference is scaled, so 0 is mono, 1
         // is untouched, and 4 quadruples the stereo difference. It sits BEFORE the pan because the
@@ -652,12 +770,20 @@ buildTrackDef = { |key|
         // difference out, is a node of its own before this one, made the first time it is asked
         // for - see bassMonoNode.)
         var mid = (sig[0] + sig[1]) * 0.5;
-        var side = (sig[0] - sig[1]) * 0.5 * width.lag(0.02).clip(0, 4);
+        var side = (sig[0] - sig[1]) * 0.5 * chanIn.(\width, 1, 0.02, 0, 4, 0, 4);
         // Postgain + equal-power pan (Sig#postgain/#pan), referenced to the center: Balance2's
         // sides at x sqrt(2), so a centered track is untouched and one panned all the way out is
-        // +3 dB on its side - the web engine's law too.
-        sig = Balance2.ar(mid + side, mid - side, pan.lag(0.02).clip(-1, 1), postgain.lag(0.02).clip(0, 4)) * 2.sqrt;
-        ReplaceOut.kr(ctl, [faderAmt, mainAmt, deckAmt, dryAmt, out, pairs]);
+        // +3 dB on its side - the web engine's law too. The law's two gains are Balance2's own,
+        // worked out once a block from the pan control - or, under an audio-rate driver, per
+        // sample by a pan-law node of the driver's (poptart_panlaw, see setChanAr) on the audio
+        // bus panAr: a track nothing pans pays for no per-sample law. Postgain is a level like
+        // gain: negative turns the signal over, as the browser's gain node does.
+        var panBus = \panAr.kr(-1);
+        var panGains = Select.ar(panBus >= 0, [K2A.ar(Balance2.kr(1, 1, \pan.kr(0).lag(0.02).clip(-1, 1), 1)),
+            In.ar(panBus.max(0), 2)]);
+        sig = [(mid + side) * panGains[0], (mid - side) * panGains[1]] * (chanIn.(\postgain, 1, 0.02) * 2.sqrt);
+        #dryAmt, dryKr = chanIn.(\dry, 1, 0.02, both: true);
+        ReplaceOut.kr(ctl, [faderAmt, mainAmt, deckAmt, dryKr, out, pairs]);
         Out.ar(post, sig);
         // The direct output, unless the DJ stage has taken it over (`direct` 0, see djNode).
         Out.ar((out.round - 1).mod(pairs.max(1)) * 2, sig * (faderAmt * deckAmt * mainAmt * dryAmt * direct));
@@ -677,7 +803,11 @@ buildDjDef = {
     SynthDef(\poptart_dj, { |in, ctl, trim = 1, eqlo = 1, eqmid = 1, eqhi = 1, djf = 0, djres = 0,
         cue = 0, cueBus, mdeck = -1, meterBus, fxOut, fxSend = 0|
         var c = In.kr(ctl, 6);
-        var faderAmt = c[0], mainAmt = c[1], deckAmt = c[2], dryAmt = c[3], out = c[4], pairs = c[5];
+        var faderAmt = c[0], mainAmt = c[1], deckAmt = c[2], out = c[4], pairs = c[5];
+        // The strip's dry, as the strip publishes it - or, under an audio-rate driver, that driver
+        // itself, per sample, as the strip reads it (see chanIn and setChanAr).
+        var dryBus = \dryAr.kr(-1);
+        var dryAmt = Select.ar(dryBus >= 0, [K2A.ar(c[3]), In.ar(dryBus.max(0), 1)]);
         var live = djIsolator.(In.ar(in, 2) * trim.lag(0.08).clip(0, 4),
             eqlo.lag(0.08).clip(0, 2), eqmid.lag(0.08).clip(0, 2), eqhi.lag(0.08).clip(0, 2));
         var djv = djf.lag(0.15).clip(-1, 1);
@@ -708,11 +838,18 @@ buildTapDef = {
 // Bass mono (Sig#bassmono): the stereo difference below the frequency taken out, between the chain
 // and the strip - made the first time it is asked for (see bassMonoNode).
 buildBassMonoDef = {
-    SynthDef(\poptart_bassmono, { |in, out, bassmono = 0|
+    SynthDef(\poptart_bassmono, { |in, out|
         var sig = In.ar(in, 2);
         var mid = (sig[0] + sig[1]) * 0.5;
         var side = (sig[0] - sig[1]) * 0.5;
-        side = LinXFade2.ar(side, HPF.ar(side, bassmono.lag(0.05).clip(20, 2000)), ((bassmono > 0) * 2 - 1).lag(0.05));
+        // The cutoff in Hz, 0 for off - read per sample while an audio-rate driver is on it, as
+        // chanIn reads one (written out here because off is decided from the value unlagged).
+        // Driven, it is on: a modulator on bass mono is its cutoff, held to 20 Hz - 2 kHz, as
+        // the browser's Track#driveChannel has it - not a switch flipped by the modulator's sign.
+        var k = \bassmono.kr(0), bus = \bassmonoAr.kr(-1), driven = In.ar(bus.max(0), 1);
+        var freq = Select.ar(bus >= 0, [K2A.ar(k.lag(0.05)), driven]).clip(20, 2000);
+        var on = Select.ar(bus >= 0, [K2A.ar(k > 0), DC.ar(1)]);
+        side = LinXFade2.ar(side, HPF.ar(side, freq), (on * 2 - 1).lag(0.05));
         Out.ar(out, [mid + side, mid - side]);
     })
 };
@@ -746,6 +883,7 @@ channelDefault = { |name|
             or: { name.asString.beginsWith("wet") }) { 1 } { 0 };
     };
 };
+}.value;
 
 // Parked sidechain args for a freshly created track synth: every fx-slot aux input reads the
 // silent bus (so plugins see silence until routed), and the track's own send is parked to the
@@ -779,7 +917,8 @@ djNode = { |track|
         var node;
         server.makeBundle(nil, {
             node = Synth(trackDef[\dj].name, [\in, post.index, \ctl, track[\ctlBus].index,
-                \cueBus, cueOffset ? routeNowhere, \meterBus, deckMeterBus.index, \fxOut, routeNowhere],
+                \cueBus, cueOffset ? routeNowhere, \meterBus, deckMeterBus.index, \fxOut, routeNowhere,
+                \dryAr, (track[\chanAr] ? ()).at(\dry) ? -1],
                 target: track[\postGroup], addAction: \addToHead);
             track[\synth].set(\direct, 0);
         });
@@ -790,21 +929,23 @@ djNode = { |track|
 };
 
 // A copy of the strip's output to `out` at `amp` (post: after the fader and the monitor), as tap
-// `name` - made, moved or (with a nil `out`) freed.
-stripTap = { |track, name, out, amp = 1, post = 0|
+// `name` - made, moved or (with a nil `out`) freed. `inBus` reads somewhere else instead: a bus
+// of the chain, for a .bus() send written inside it (see routeApply's send steps).
+stripTap = { |track, name, out, amp = 1, post = 0, inBus|
     var taps = track[\taps];
     var held = taps[name];
+    var input = inBus ? stripPost.(track).index;
     if (out.isNil) {
         held !? { held.free; taps.removeAt(name); tellTap.(track, name, nil) };
     } {
         if (held.isNil) {
-            var node = Synth(trackDef[\tap].name, [\in, stripPost.(track).index, \out, out, \ctl, track[\ctlBus].index,
+            var node = Synth(trackDef[\tap].name, [\in, input, \out, out, \ctl, track[\ctlBus].index,
                 \amp, amp, \post, post], target: track[\postGroup], addAction: \addToTail);
             nodeOwns.(node.nodeID, "a track's " ++ name ++ " tap");
             taps[name] = node;
             tellTap.(track, name, node);
         } {
-            held.set(\out, out, \amp, amp, \post, post);
+            held.set(\in, input, \out, out, \amp, amp, \post, post);
         };
     };
 };
@@ -815,7 +956,8 @@ bassMonoNode = { |track|
         var bus = Bus.audio(server, 2);
         var node;
         server.makeBundle(nil, {
-            node = Synth(trackDef[\bassmono].name, [\in, track[\chainOut] ? track[\chainIn].index, \out, bus.index],
+            node = Synth(trackDef[\bassmono].name, [\in, track[\chainOut] ? track[\chainIn].index, \out, bus.index,
+                \bassmonoAr, (track[\chanAr] ? ()).at(\bassmono) ? -1],
                 target: track[\synth], addAction: \addBefore);
             track[\synth].set(\in, bus.index);
         });
@@ -835,7 +977,8 @@ slotNode = { |track, slot| if (slot == 0) { track[\head] } { track[\nodes][slot]
 ensureFxNode = { |key, track, slot|
     track[\nodes][slot] ?? {
         var node = Synth(trackDef[\fx].name, [\in, routeNowhere, \out, routeNowhere,
-            \scBus, track[\scBus][slot] ? silentBus.index] ++ (track[\wet][slot] !? { |w| [\wet, w] } ? []),
+            \scBus, track[\scBus][slot] ? silentBus.index, \ret, silentBus.index, \loop, routeNowhere] ++ (track[\wet][slot] !? { |w| [\wet, w] } ? [])
+            ++ ((track[\chanAr] ? ()).at(("wet" ++ slot).asSymbol) !? { |b| [\wetAr, b] } ? []),
             target: track[\synth], addAction: \addBefore);
         nodeOwns.(node.nodeID, key ++ "'s effect " ++ slot);
         track[\nodes][slot] = node;
@@ -849,16 +992,20 @@ setScBus = { |track, slot, index|
     track[\nodes][slot] !? { |n| n.set(\scBus, index) };
 };
 
-// The control-rate publisher of one route control: a branch level and pan pair (rl<k>/rp<k>) or a
-// crossover frequency (xo<k>), made when first wanted and kept for the track's life, in the chain
-// group's head so everything after it reads this block's value. `kind` is \gain or \xo.
+// The publisher of one route control: a branch level and pan pair (rl<k>/rp<k>, on an audio bus,
+// per sample under an audio-rate driver - see chanIn) or a crossover frequency (xo<k>, a control
+// bus), made when first wanted and kept for the track's life, in the chain group's head so
+// everything after it reads this block's value. `kind` is \gain or \xo.
 routeKrNode = { |track, kind, k|
     var all = track[if (kind == \gain) { \gains } { \xos }];
     all[k] ?? {
-        var bus = Bus.control(server, if (kind == \gain) { 2 } { 1 });
+        var bus = if (kind == \gain) { Bus.audio(server, 2) } { Bus.control(server, 1) };
         var node = if (kind == \gain) {
-            bus.setn([1, 0]);
-            Synth(\poptart_gainkr, [\out, bus.index], target: track[\krGroup], addAction: \addToTail)
+            // Audio-rate drivers already on this pair (see setChanAr) carry over to it.
+            var driven = [\levelAr, "rl", \panAr, "rp"].clump(2).collect { |p|
+                [p[0], (track[\chanAr] ? ()).at((p[1] ++ k).asSymbol) ? -1]
+            }.flatten;
+            Synth(\poptart_gainkr, [\out, bus.index] ++ driven, target: track[\krGroup], addAction: \addToTail)
         } {
             bus.set(channelDefault.("xo1"));
             Synth(\poptart_xokr, [\out, bus.index, \value, channelDefault.("xo1")], target: track[\krGroup], addAction: \addToTail)
@@ -1268,10 +1415,21 @@ paramTarget = { |track, slot, paramName, index|
     { slot == -1 } {
         var at = channelTarget.(track, paramName);
         var wetSlot = paramName.asString.findRegexp("^wet([0-9]+)$");
-        (kind: \channel, index: paramName.asSymbol, audio: false,
+        var perSample = chanAudio.(paramName);
+        (kind: \channel, index: paramName.asSymbol, audio: perSample,
             map: { |bus| at !? { at[0].map(at[1], bus) } },
             // Unmapping leaves a control at whatever the bus last wrote, so it goes back to neutral.
             unmap: { at !? { at[0].map(at[1], -1); at[0].set(at[1], channelDefault.(paramName)) } },
+            // An audio-rate driver, read per sample where the browser's is (see chanIn). Gain and
+            // offset are a device's (an audio route's); every driver of a channel sends 1 and 0.
+            mapAudio: if (perSample) { { |bus, gain = 1, offset = 0| setChanAr.(track, paramName, busIndexOf.(bus)) } },
+            unmapAudio: if (perSample) { {
+                setChanAr.(track, paramName, -1);
+                // Back to neutral, as unmap leaves it - and onto whichever audio-rate driver is
+                // still wanted there (the caller has already dropped its own).
+                at !? { at[0].set(at[1], channelDefault.(paramName)) };
+                reassertAudioDrivers.(track, -1, paramName);
+            } },
             // A plain value, kept for an effect node made later where it has none yet.
             set: { |value|
                 if (wetSlot.size >= 2) { track[\wet][wetSlot[1][1].asInteger] = value };
@@ -1304,6 +1462,15 @@ reassertAudioDrivers = { |track, slot, paramName|
     var k = ("slot" ++ slot ++ "_" ++ paramName).asSymbol;
     var ctl = track[\controllers][slot];
     var index = ctl !? { ctl.info !? { |info| resolveParamIndex.(info, paramName) } };
+    // A channel control's, likewise (see setChanAr).
+    if (slot == -1) {
+        case
+        { track[\envs][k].notNil and: { track[\envs][k][\audio] == true } } { setChanAr.(track, paramName, track[\envs][k][\bus].index) }
+        { track[\lfos][k].notNil and: { track[\lfos][k][\audio] == true } } { setChanAr.(track, paramName, track[\lfos][k][\bus].index) }
+        { (track[\exprs] ? ()).at(k).notNil and: { track[\exprs][k][\outKind] == \channelAr } } {
+            setChanAr.(track, paramName, track[\exprs][k][\out].index)
+        };
+    };
     if (index.notNil and: { ctl.respondsTo(\mapAudio) }) {
         case
         { track[\envs][k].notNil and: { track[\envs][k][\audio] == true } } { ctl.mapAudio(index, track[\envs][k][\bus], 1, 0) }
@@ -1413,7 +1580,8 @@ exprInputs = { |node, into|
         "in", {
             var i = node["i"].asInteger;
             if (into.detect { |e| e[\i] == i }.isNil) {
-                into.add((i: i, source: node["source"] !? { |s| s.asString }, rate: node["rate"] !? { |r| r.asSymbol }));
+                into.add((i: i, source: node["source"] !? { |s| s.asString }, rate: node["rate"] !? { |r| r.asSymbol },
+                    step: node["step"].asString == "1"));
             };
         },
         { node["a"].do { |a| exprInputs.(a, into) } }
@@ -1444,8 +1612,17 @@ exprSynthDef = { |defName, tree, outKind, rates|
         said;
     };
     SynthDef(defName, { |out|
-        var c = 0, walk, v;
-        var audio = rates.includes(\ar);
+        // chan nil: an audio input reads as its pair's mid, (L + R) / 2. 0 or 1: inside an envelope
+        // follower's input, which is walked once per side for its linked peak - that side alone.
+        var c = 0, walk, v, hasLag, chan;
+        var audio;
+        // A lag - the envelope follower (op "env") or smooth() - is computed at audio rate whatever
+        // its inputs are, so a tree with one is an audio-rate def.
+        hasLag = { |node|
+            ((node["k"].asString == "fn") and: { ["env", "smooth"].includesEqual(node["op"].asString) })
+                or: { (node["a"] ? []).any { |a| hasLag.(a) } };
+        };
+        audio = rates.includes(\ar) or: { hasLag.(tree) };
         walk = { |node|
             var k = node["k"].asString;
             switch(k,
@@ -1459,7 +1636,7 @@ exprSynthDef = { |defName, tree, outKind, rates|
                     if ((rates ? [])[i] == \ar) {
                         var kb = ("k" ++ i).asSymbol.kr(-1), ab = ("a" ++ i).asSymbol.kr(-1);
                         K2A.ar(Select.kr(kb >= 0, [0, In.kr(kb.max(0))]))
-                            + Select.ar(ab >= 0, [DC.ar(0), In.ar(ab.max(0), 2).sum * 0.5]);
+                            + Select.ar(ab >= 0, [DC.ar(0), if (chan.isNil) { In.ar(ab.max(0), 2).sum * 0.5 } { In.ar(ab.max(0), 2)[chan] }]);
                     } {
                         var kb = ("k" ++ i).asSymbol.kr(-1);
                         var kv = Select.kr(kb >= 0, [0, In.kr(kb.max(0))]);
@@ -1477,12 +1654,48 @@ exprSynthDef = { |defName, tree, outKind, rates|
                     };
                 },
                 "fn", {
-                    var x = walk.(node["a"][0]);
-                    switch(node["op"].asString,
-                        "abs", { x.abs }, "neg", { x.neg }, "round", { x.round(1) },
-                        "floor", { x.floor }, "ceil", { x.ceil },
-                        { ("poptart: setParamExpr: unknown function '" ++ node["op"] ++ "' - read as its input").warn; x }
-                    );
+                    if (["env", "smooth"].includesEqual(node["op"].asString)) {
+                        // The envelope follower: the rectified level, clipped at full scale,
+                        // rising over the attack time and falling over the release (LagUD).
+                        // smooth(): the input lagged by one time both ways (Lag). Each time is how
+                        // long it takes to get within 60 dB of a new value, read once per block.
+                        // A follower takes its input's linked peak, max(|L|, |R|): the input is
+                        // walked once per side, every audio input in it reading that side alone,
+                        // so an out-of-phase pair reads its level, not its mid's 0. The constants
+                        // are the same controls both times. smooth() lags the input as it reads.
+                        var src = node["a"][0], x, atk, rel, l, r, outer, from;
+                        var perBlock = { |y| if (y.rate == \audio) { A2K.kr(y) } { y } };
+                        if (node["op"].asString == "env") {
+                            outer = chan;
+                            from = c;
+                            chan = 0;
+                            l = walk.(src);
+                            c = from;
+                            chan = 1;
+                            r = walk.(src);
+                            chan = outer;
+                            if (l.rate != \audio) { l = K2A.ar(l) };
+                            if (r.rate != \audio) { r = K2A.ar(r) };
+                            x = l.abs.max(r.abs);
+                        } {
+                            x = walk.(src);
+                            if (x.rate != \audio) { x = K2A.ar(x) };
+                        };
+                        if (node["op"].asString == "smooth") {
+                            Lag.ar(x, perBlock.(walk.(node["a"][1])).max(0));
+                        } {
+                            atk = perBlock.(walk.(node["a"][1]));
+                            rel = perBlock.(walk.(node["a"][2]));
+                            LagUD.ar(x.min(1), atk.max(0), rel.max(0));
+                        };
+                    } {
+                        var x = walk.(node["a"][0]);
+                        switch(node["op"].asString,
+                            "abs", { x.abs }, "neg", { x.neg }, "round", { x.round(1) },
+                            "floor", { x.floor }, "ceil", { x.ceil },
+                            { ("poptart: setParamExpr: unknown function '" ++ node["op"] ++ "' - read as its input").warn; x }
+                        );
+                    };
                 },
                 {
                     var a = walk.(node["a"][0]), b = walk.(node["a"][1]);
@@ -1506,6 +1719,7 @@ exprSynthDef = { |defName, tree, outKind, rates|
         if (audio) {
             switch(outKind,
                 \device, { Out.ar(out, [v, v]) },
+                \channelAr, { Out.ar(out, v) },
                 \plugin, { Out.kr(out, A2K.kr(v).clip(0, 1)) },
                 { Out.kr(out, A2K.kr(v)) }
             );
@@ -1527,7 +1741,7 @@ installExpr = { |key, track, slot, name, json|
     target !? {
         var exprs = exprsOf.(track);
         var k = exprKey.(slot, name);
-        var outKind = case { target[\kind] == \channel } { \channel } { target[\audio] } { \device } { \plugin };
+        var outKind;
         var feeds = exprFeedsOf.(track);
         // What drives each input, which decides the rate it is read at: audio where the tree says so
         // or where an audio driver is already on it.
@@ -1537,12 +1751,18 @@ installExpr = { |key, track, slot, name, json|
             var said = declared.detect { |in| in[\i] == i } !? { |in| in[\rate] };
             if ((said == \ar) or: { f.notNil and: { f[\ar] >= 0 } }) { \ar } { \kr };
         });
-        var shape = exprShape.(tree) ++ "|" ++ outKind ++ "|" ++ rates.join(",");
-        var consts = exprConsts.(tree).asArray;
-        var inputs = exprInputs.(tree).asArray;
-        var constArgs = consts.collect { |v, j| [("c" ++ j).asSymbol, v] }.flatten;
-        var existing = exprs[k];
-        var defName, out, synth, entry, resting;
+        var shape, consts, inputs, constArgs, existing, defName, out, synth, entry, resting;
+        // A channel control with audio in its expression is driven per sample, as the browser
+        // drives it (see chanIn): \channelAr, an audio bus. Otherwise a control bus, as before.
+        outKind = case
+            { target[\kind] == \channel } { if (target[\audio] and: { rates.includes(\ar) }) { \channelAr } { \channel } }
+            { target[\audio] } { \device }
+            { \plugin };
+        shape = exprShape.(tree) ++ "|" ++ outKind ++ "|" ++ rates.join(",");
+        consts = exprConsts.(tree).asArray;
+        inputs = exprInputs.(tree).asArray;
+        constArgs = consts.collect { |v, j| [("c" ++ j).asSymbol, v] }.flatten;
+        existing = exprs[k];
         if (existing.notNil and: { existing[\shape] == shape }) {
             // Only numbers (or nothing) changed: in place, no rebuild.
             existing[\synth].set(*constArgs);
@@ -1558,7 +1778,7 @@ installExpr = { |key, track, slot, name, json|
             };
             // The track may have gone (or the expression been cleared) while the def was built.
             if (tracks[key] === track) {
-                out = if (outKind == \device) { Bus.audio(server, 2) } { Bus.control(server, 1) };
+                out = case { outKind == \device } { Bus.audio(server, 2) } { outKind == \channelAr } { Bus.audio(server, 1) } { Bus.control(server, 1) };
                 // Before the chain: after every modulator feeding it (they go at the head of the
                 // group) and before the device that reads it.
                 synth = Synth(defName, [\out, out] ++ constArgs ++ exprFeedArgs.(track, slot, name, inputs),
@@ -1574,7 +1794,12 @@ installExpr = { |key, track, slot, name, json|
                 } {
                     resting = existing !? { existing[\resting] };
                 };
-                if (outKind == \device) { target[\mapAudio].(out, 1, 0) } { target[\map].(out) };
+                // A channel leaving the sample rate (its audio input gone) comes off the audio bus
+                // it was on; the control bus below takes over.
+                if ((outKind == \channel) and: { existing.notNil } and: { existing[\outKind] == \channelAr }) {
+                    setChanAr.(track, name, -1);
+                };
+                if ((outKind == \device) or: { outKind == \channelAr }) { target[\mapAudio].(out, 1, 0) } { target[\map].(out) };
                 if (existing.notNil) {
                     freeModulatorLater.(key, track[\group], existing[\synth], existing[\out]);
                     exprDefDone.(existing[\def]);
@@ -1589,9 +1814,17 @@ installExpr = { |key, track, slot, name, json|
         };
         entry !? {
             var wanted = IdentityDictionary.new;
+            // Inputs read only under a .smooth() take polled values as steps: their ramps, made
+            // before or after this, go to zero time; the rest keep the usual glide.
+            entry[\stepped] = inputs.select { |in| in[\step] == true }.collect { |in| in[\i] };
+            inputs.do { |in|
+                (track[\ramps] ? ())[("slot" ++ slot ++ "_~" ++ in[\i] ++ "~" ++ name).asSymbol] !? { |rp|
+                    rp[\synth].set(\time, if (entry[\stepped].includes(in[\i])) { 0 } { leafRampSec });
+                };
+            };
             // Even an unchanged entry re-maps: a re-opened plugin has lost its mappings.
             if (entry === existing) {
-                if (outKind == \device) { target[\mapAudio].(entry[\out], 1, 0) } { target[\map].(entry[\out]) };
+                if ((outKind == \device) or: { outKind == \channelAr }) { target[\mapAudio].(entry[\out], 1, 0) } { target[\map].(entry[\out]) };
             };
             // Source inputs are audio routes onto the leaf; one whose source changed is re-wired.
             inputs.do { |in| in[\source] !? { |src| wanted[in[\i]] = src } };
@@ -1619,7 +1852,7 @@ clearExpr = { |key, track, slot, name|
         var target = paramTarget.(track, slot, name, if (slot >= 0) { e[\index] });
         e[\sources].keys.do { |i| unwireParamRoute.(key, slot, "~" ++ i ++ "~" ++ name) };
         target !? {
-            if (e[\outKind] == \device) { target[\unmapAudio] !? { |off| off.() } } {
+            if ((e[\outKind] == \device) or: { e[\outKind] == \channelAr }) { target[\unmapAudio] !? { |off| off.() } } {
                 target[\unmap].();
                 (e[\resting] ? ()).at(\value) !? { |v| track[\controllers][slot] !? { |ctl| ctl.set(e[\index], v) } };
             };
@@ -2200,10 +2433,11 @@ server.waitForBoot {
     // samplings differ (both random, only the rate/range contract is shared - see signal.mjs).
     // saw rises 0->1 each period; isaw falls 1->0.
     //
-    // Each shape at both rates: `poptart_lfo_<shape>` writes a control bus, for a plugin's or a
-    // channel's control (read once a block whatever drives it); `poptart_lfo_<shape>_ar` writes
-    // both sides of a stereo audio bus at the sample rate, for a control of one of poptart's own
-    // devices, which reads it per sample (PoptartDevice's /mapa, as poptart_env_ar).
+    // Each shape at both rates: `poptart_lfo_<shape>` writes a control bus, for a plugin's
+    // control (read once a block whatever drives it); `poptart_lfo_<shape>_ar` writes both sides
+    // of a stereo audio bus at the sample rate, for a control of one of poptart's own devices,
+    // which reads it per sample (PoptartDevice's /mapa, as poptart_env_ar), or a channel control
+    // with a per-sample path (see chanIn).
     [\sine, \tri, \saw, \isaw, \square, \rand, \perlin].do { |shape|
         [\kr, \ar].do { |at|
             SynthDef(lfoDefName.(shape, at == \ar), { |out, freq = 1, phase = 0, lo = 0, hi = 1, t_trig = 0|
@@ -2292,7 +2526,10 @@ server.waitForBoot {
     // parameter exactly as a native modulator's is: to the plugin the two are the same thing,
     // and a control can pass between them without the mapping ever being torn down.
     SynthDef(\poptart_ramp, { |out, target = 0, time = 0.03|
-        Out.kr(out, Ramp.kr(target, time));
+        // VarLag (linear), not Ramp: Ramp re-reads its target only once per `time`, so a new value
+        // could wait up to that long before moving; VarLag sets off toward it in the block it
+        // arrives, as the browser's ramp does.
+        Out.kr(out, VarLag.kr(target, time, warp: \lin));
     }).add;
     // Sampler voices, one per (loop?, timestretch?, buffer channels) combination - the
     // combination is fixed per event, so picking a def beats building Select spaghetti with
@@ -2534,15 +2771,24 @@ server.waitForBoot {
         SynthDef(("poptart_sample_grain_" ++ nc).asSymbol, { |out, bufL, bufR, begin = 0, rate = 1, gate = 1, amp = 1,
             atk = 0, dec = 0, sus = 1, rel = 0, bend = 0,
             grainpos = 0, grainsize = 0.08, grainrate = 20, grainpan = 0, posLive = 0, win = -1|
-            var size = grainsize.clip(0.002, 4);
-            var density = grainrate.clip(0.1, 1000);
+            // Each grain control, and the bend, read per sample while an audio-rate driver is on
+            // it: the control `<name>Ar` names the driver's bus (-1 for none - see setChanAr),
+            // otherwise the value mapped off the track's buses. The browser's grain voice reads
+            // size and rate every sample and pos, pan and the bend as each grain starts, on its
+            // own sample; GrainBuf reads an audio-rate argument at the sample its grain starts.
+            var perSample = { |k, name|
+                var bus = NamedControl.kr(name, -1);
+                Select.ar(bus >= 0, [K2A.ar(k), In.ar(bus.max(0), 1)]);
+            };
+            var size = perSample.(grainsize, \grainsizeAr).clip(0.002, 4);
+            var density = perSample.(grainrate, \grainrateAr).clip(0.1, 1000);
             var trig = Impulse.ar(density);
-            var pos = Select.kr(posLive, [begin, grainpos]).clip(0, 1);
+            var pos = Select.ar(posLive, [K2A.ar(begin), perSample.(grainpos, \grainposAr)]).clip(0, 1);
             // GrainBuf already plays a buffer at its own sample rate (rate 1 is the file's pitch
             // on any server), so no BufRateScale here: with it, a 44.1 kHz file on a 48 kHz
             // server played its grains 2.9 semitones flat.
-            var pitch = rate * bend.midiratio;
-            var pan = grainpan.clip(-1, 1);
+            var pitch = rate * perSample.(bend, \bendAr).midiratio;
+            var pan = perSample.(grainpan, \grainpanAr).clip(-1, 1);
             var sig = if (nc == 1) {
                 GrainBuf.ar(2, trig, size, bufL, pitch, pos, 4, pan, win, grainMaxOverlap) * 2.sqrt
             } {
@@ -2875,20 +3121,23 @@ server.waitForBoot {
         DiskOut.ar(buf, In.ar(bus, 2));
     }).add;
     // A term of a track's chain (see routeApply): `in` at the route gain whose level and pan are
-    // on the control bus `gain` (unityGainBus for none), added into `out`. Balance2 is the strip's
-    // law, referenced to the center by the sqrt(2).
-    SynthDef(\poptart_term, { |in, out, gain|
+    // on the audio bus `gain` (-1 for none: unity, center), added into `out`. Balance2 is the
+    // strip's law, referenced to the center by the sqrt(2).
+    SynthDef(\poptart_term, { |in, out, gain = -1|
         var sig = In.ar(in, 2);
-        var g = In.kr(gain, 2);
-        Out.ar(out, Balance2.ar(sig[0], sig[1], g[1], g[0] * 2.sqrt));
+        var g = In.ar(gain.max(0), 2);
+        var on = gain >= 0;
+        var level = Select.ar(on, [DC.ar(1), g[0]]), pos = Select.ar(on, [DC.ar(0), g[1]]);
+        Out.ar(out, Balance2.ar(sig[0], sig[1], pos, 1) * (level * 2.sqrt));
     }).add;
-    // The publishers of a track's route controls (see routeKrNode): a level and pan pair, and a
-    // crossover's frequency as a position on its control.
-    SynthDef(\poptart_gainkr, { |out, level = 1, pan = 0| ReplaceOut.kr(out, [level, pan]) }).add;
+    // The publishers of a track's route controls (see routeKrNode): a level and pan pair, on an
+    // audio bus so a modulator on either is per sample (see chanIn), and a crossover's frequency
+    // as a position on its control.
+    SynthDef(\poptart_gainkr, { |out| Out.ar(out, [chanIn.(\level, 1), chanIn.(\pan, 0)]) }).add;
+    // A strip's pan under an audio-rate driver: the pan law's two gains per sample, off the
+    // driver's bus `in`, for the strip to read (see setChanAr and the strip's panAr).
+    SynthDef(\poptart_panlaw, { |in, out| Out.ar(out, Balance2.ar(DC.ar(1), DC.ar(1), In.ar(in, 1).clip(-1, 1), 1)) }).add;
     SynthDef(\poptart_xokr, { |out, value = 0| ReplaceOut.kr(out, value) }).add;
-    // Unity, center: a term at no gain reads this. Nothing writes it.
-    unityGainBus = Bus.control(server, 2);
-    unityGainBus.setn([1, 0]);
     // Parked buses + route bookkeeping for audio sidechains (see Sig#sidechain). Allocated once,
     // here, so every track synth's sc* args have a valid default (silence in, send to nowhere).
     silentBus = Bus.audio(server, 2);
@@ -3103,12 +3352,14 @@ buildTrack = { |key, birth|
                 ctlBus: ctlBus,                   // what the strip publishes (see buildTrackDef)
                 postGroup: postGroup,             // the DJ stage, taps and sends (see djNode)
                 taps: IdentityDictionary.new,     // name -> tap node (see stripTap)
+                sendIns: Dictionary.new,          // send index -> the chain bus a .bus() written inside the chain taps (see routeApply)
                 nodes: IdentityDictionary.new,    // slot -> its effect node (see ensureFxNode)
                 xovers: IdentityDictionary.new,   // crossover id -> (node:, ctl:) (see routeApply)
                 terms: List.new,                  // the level/sum nodes of the current wiring
                 gains: IdentityDictionary.new,    // k -> (node:, bus:) for rl<k>/rp<k>
                 xos: IdentityDictionary.new,      // k -> (node:, bus:) for xo<k>
                 scBus: IdentityDictionary.new,    // slot -> its sidechain bus (see setScBus)
+                loopSec: IdentityDictionary.new,  // slot -> how late its feedback loop's chain is (see /poptart/setRouting)
                 wet: IdentityDictionary.new,      // slot -> a wetN set before its node was made
                 controllers: IdentityDictionary.new,
                 loaded: IdentityDictionary.new, // slot -> pluginId once open() succeeds
@@ -3211,7 +3462,7 @@ destroyTrack = { |key|
             track[\bendBus] !? { |b| b.free };
             track[\grainBus] !? { |b| b.free };
             // The chain's buses are ours to hand back (its nodes went with the group).
-            [track[\chainIn], track[\ctlBus], track[\post], track[\bassmonoBus]].do { |b| b !? { b.free } };
+            [track[\chainIn], track[\ctlBus], track[\post], track[\bassmonoBus], track[\panLaw] !? { |l| l[\bus] }].do { |b| b !? { b.free } };
             [track[\gains], track[\xos]].do { |all| all.do { |e| e[\bus].free } };
             track[\route] !? { |r| r[\buses].do(_.free) };
             tracks[key] = nil;
@@ -3254,6 +3505,7 @@ routeApply = { |key, track, spec|
         (id: c[0].asString, name: c[1].asString, default: c[2] !? { |d| d.asFloat })
     };
     var order = List.new, terms = List.new, wired = Set.new, crossovers = Set.new, opening = List.new;
+    var sendIns = Dictionary.new;
     (spec !? { spec["buses"] } ? Dictionary.new).keysValuesDo { |id, channels|
         var b = Bus.audio(server, channels.asInteger);
         if (b.isNil) {
@@ -3272,7 +3524,9 @@ routeApply = { |key, track, spec|
                 var slot = st["slot"].asInteger;
                 var node = ensureFxNode.(key, track, slot);
                 wired.add(slot);
-                node.set(\in, busOf.(st["in"]), \out, busOf.(st["out"]));
+                // A looped Delay's repeats go out on `loop`; its return is pointed by the ret step.
+                node.set(\in, busOf.(st["in"]), \out, busOf.(st["out"]), \loop, busOf.(st["loop"]),
+                    \ret, silentBus.index);
                 order.add(node);
             }
             { kind == "xover" } {
@@ -3291,19 +3545,33 @@ routeApply = { |key, track, spec|
             }
             { kind == "term" } {
                 var g = st["g"].asInteger;
-                var gain = if (g == 0) { unityGainBus.index } { routeKrNode.(track, \gain, g)[\bus].index };
+                var gain = if (g == 0) { -1 } { routeKrNode.(track, \gain, g)[\bus].index };
                 var node = Synth(\poptart_term, [\in, busOf.(st["in"]), \out, busOf.(st["out"]), \gain, gain],
                     target: track[\synth], addAction: \addBefore);
                 terms.add(node);
                 order.add(node);
+            }
+            { kind == "send" } {
+                sendIns[st["i"].asInteger] = busOf.(st["in"]);
+            }
+            { kind == "ret" } {
+                // Read the block before (InFeedback in the effect def): it closes the loop.
+                track[\nodes][st["slot"].asInteger] !? { |n| n.set(\ret, busOf.(st["in"])) };
             };
         };
+        // The sends written inside the chain read the bus this layout gives them; the rest, and
+        // any that was tapping a bus of the layout going, the strip's output. Set here so the taps
+        // follow in the same bundle as the buses they read.
+        track[\sendIns] = sendIns;
+        repointSends.(track);
         // In the order the audio runs, each just before the strip (or the bass mono before it).
         order.do { |node| node.moveBefore(track[\bassmono] ? track[\synth]) };
         track[\chainOut] = busOf.((spec !? { spec["out"] }) ? "chain");
         (track[\bassmono] ? track[\synth]).set(\in, track[\chainOut]);
         track[\nodes].keysValuesDo { |slot, node|
-            if (wired.includes(slot).not) { node.set(\in, routeNowhere, \out, routeNowhere) };
+            if (wired.includes(slot).not) {
+                node.set(\in, routeNowhere, \out, routeNowhere, \loop, routeNowhere, \ret, silentBus.index)
+            };
         };
         track[\xovers].keys.copy.do { |id|
             if (crossovers.includes(id).not) { track[\xovers].removeAt(id)[\node].free };
@@ -3320,7 +3588,12 @@ routeApply = { |key, track, spec|
         var ctl = \PoptartDeviceController.asClass.new(x[\node], \nslot, trackDef[\xover]);
         x[\ctl] = ctl;
         ctl.open("Crossover", params, { |self, ok|
-            if (ok) { self.map(0, routeKrNode.(track, \xo, x[\k])[\bus]) } {
+            if (ok) {
+                // On an audio-rate driver of xo<k> when there is one (see setChanAr).
+                var driven = (track[\chanAr] ? ()).at(("xo" ++ x[\k]).asSymbol);
+                x[\open] = true;
+                if (driven.notNil) { self.mapAudio(0, driven, 1, 0) } { self.map(0, routeKrNode.(track, \xo, x[\k])[\bus]) };
+            } {
                 ("poptart: track " ++ key ++ ": the Crossover device would not open, so its bands are silent").warn;
             };
         });
@@ -3331,12 +3604,40 @@ routeFree = { |made|
     made[\buses].do(_.free);
 };
 
+// Where send `i` (its index among the pattern's sends) reads: the bus the chain layout gives it
+// when it is written inside the chain, otherwise nil for the strip's output.
+sendInput = { |track, i|
+    track[\sendIns] !? { |d| d[i] }
+};
+
+// Every routed send's tap pointed at what the current layout says it reads.
+repointSends = { |track|
+    (track[\busSendIdx] ? []).do { |i, k|
+        track[\taps][("bus" ++ k).asSymbol] !? { |tap| tap.set(\in, sendInput.(track, i) ? stripPost.(track).index) };
+    };
+};
+
+// msg = [trackId, layout JSON], or [trackId, "loop", slot, seconds]: how late the chain in a looped
+// device's feedback loop is, from its devices (the UGen adds its block), or below zero for none -
+// kept per slot, and told to the device now and whenever one opens into the slot (loadDevice).
+// One handler for both, as this file's top level has no room for another function.
 OSCdef(\poptartSetRouting, { |msg|
     var key = msg[1].asSymbol, json = msg[2].asString;
-    var spec = if (json == "null") { nil } { json.parseJSON };
+    var spec = if ((json == "null") or: { json == "loop" }) { nil } { json.parseJSON };
     fork {
         var track = awaitTrack.(key);
-        if (track.isKindOf(Event)) { routeApply.(key, track, spec) };
+        if (track.isKindOf(Event)) {
+            if (json == "loop") {
+                var slot = msg[3].asInteger, sec = msg[4].asFloat;
+                var held = track[\loopSec] ?? { var d = IdentityDictionary.new; track[\loopSec] = d; d };
+                if (sec >= 0) { held[slot] = sec } { held.removeAt(slot) };
+                track[\controllers][slot] !? { |ctl|
+                    if (ctl.respondsTo(\loopLatency)) { ctl.loopLatency(held[slot] ? -1) };
+                };
+            } {
+                routeApply.(key, track, spec)
+            };
+        };
     };
 }, '/poptart/setRouting');
 
@@ -3597,6 +3898,10 @@ OSCdef(\poptartLoadDevice, { |msg|
                             self.setTempo(trackTempo[key] ? currentTempo);
                             self.setTransportPos(trackBeats.(key));
                             tellKeyPatched.(track, slot, nil, key);
+                            // And how late a chain in its feedback loop comes back, if it has one.
+                            if (self.respondsTo(\loopLatency)) {
+                                self.loopLatency((track[\loopSec] ? ())[slot] ? -1)
+                            };
                             // And anything patched onto its controls: the device starts with
                             // every control on its own default, and a route outlives the device.
                             paramRoutes.do { |e|
@@ -4214,11 +4519,24 @@ OSCdef(\poptartNoteOffSlot, { |msg|
 // modulator's bus is - see the poptart_ramp SynthDef. The first value creates the ramp, born AT
 // that value so nothing glides in from zero; every later one just moves its target. `target` is
 // a paramTarget.
+// How long a polled value takes to reach an expression's input: the ramp's usual 30 ms, or none
+// for an input the tree marks `step` (read only under a .smooth(), whose time is then the only
+// glide). nil for a control that is not an expression's input.
+leafRampSec = 0.03;
+leafRampTime = { |track, slot, paramName|
+    exprLeaf.(paramName) !? { |leaf|
+        var e = exprsOf.(track)[exprKey.(slot, leaf[1])];
+        if (e.notNil and: { (e[\stepped] ? []).includes(leaf[0]) }) { 0 } { leafRampSec };
+    };
+};
 rampTo = { |track, rampKey, slot, target, value|
     var r = track[\ramps][rampKey];
+    var prefix = "slot" ++ slot ++ "_";
+    var time = leafRampTime.(track, slot, rampKey.asString.copyToEnd(prefix.size));
+    var timeArgs = if (time.isNil) { [] } { [\time, time] };
     if (r.isNil) {
         var bus = Bus.control(server, 1);
-        var syn = Synth(\poptart_ramp, [\out, bus, \target, value], target: track[\group], addAction: \addToHead);
+        var syn = Synth(\poptart_ramp, [\out, bus, \target, value] ++ timeArgs, target: track[\group], addAction: \addToHead);
         nodeOwns.(syn.nodeID, "a polled control (" ++ rampKey ++ ")");
         target[\map].(bus);
         track[\ramps][rampKey] = (synth: syn, bus: bus, index: target[\index], slot: slot, target: value);
@@ -4228,7 +4546,7 @@ rampTo = { |track, rampKey, slot, target, value|
         // The plugin in this slot may have been swapped for one where the name is a different
         // index: follow it. (An open also clears the UGen's mappings - see dropSlotRamps.)
         if (target[\index] != r[\index]) { r[\index] = target[\index]; target[\map].(r[\bus]) };
-        r[\synth].set(\target, value);
+        r[\synth].set(\target, value, *timeArgs);
         tellRamp.(track, rampKey, slot, r[\synth], value);
     };
 };
@@ -4870,9 +5188,9 @@ OSCdef(\poptartSetParamShape, { |msg|
 // running synth's args in place - a mid-note livecoding edit doesn't cut the envelope off.
 //
 // On a control of one of poptart's own devices the envelope runs at the SAMPLE rate, on an audio
-// bus the device reads per sample (poptart_env_ar, PoptartDeviceController's mapAudio): a plugin
-// or a channel control is read once a block whatever drives it, so for those it stays a control
-// bus. An entry whose slot changed kind under it is rebuilt as the other kind.
+// bus the device reads per sample (poptart_env_ar, PoptartDeviceController's mapAudio), and so on
+// a channel control with a per-sample path (see chanIn): a plugin is read once a block whatever
+// drives it, so for one it stays a control bus. An entry whose slot changed kind under it is rebuilt as the other kind.
 OSCdef(\poptartSetParamEnv, { |msg|
     var key = msg[1].asSymbol, slot = msg[2].asInteger, paramName = msg[3].asString;
     var atk = msg[4].asFloat, dec = msg[5].asFloat, sus = msg[6].asFloat, rel = msg[7].asFloat;
@@ -5413,8 +5731,8 @@ OSCdef(\poptartClearAudioInput, { |msg|
     unwireAudio.(msg[1].asSymbol, 0);
 }, '/poptart/clearAudioInput');
 
-// Output-to-bus sends (Sig#bus). msg = [trackId, name1, amount1, name2, amount2, ...]: replace the
-// track's whole set of bus sends. Each name acquires a ref on its bus; the previous set is released
+// Output-to-bus sends (Sig#bus). msg = [trackId, name1, amount1, i1, name2, amount2, i2, ...]:
+// replace the track's whole set of bus sends (`i` is each send's index among the pattern's). Each name acquires a ref on its bus; the previous set is released
 // afterwards (acquire-before-release, so a bus kept across the change never briefly hits zero refs
 // and gets freed). The tree is reordered so the writer executes before any reader of the bus (see
 // reorderTracks). Each send is a tap of its own (see stripTap), as many as the code writes.
@@ -5424,18 +5742,24 @@ OSCdef(\poptartSetBusSends, { |msg|
     fork {
         var track = awaitTrack.(key);
         track !? {
-            // One post-fader tap per named bus (Sig#bus), as many as the code writes.
-            var requested = pairs.size div: 2;
+            // One post-fader tap per named bus (Sig#bus), as many as the code writes - reading
+            // the strip's output, or, for a send the chain layout places inside the chain (`i`,
+            // the send's index among the pattern's; see routeApply), the bus it taps there.
+            var requested = pairs.size div: 3;
             var newNames = [];
-            requested.do { |i|
-                var name = pairs[i * 2].asString;
-                var amt = pairs[(i * 2) + 1].asFloat;
-                stripTap.(track, ("bus" ++ i).asSymbol, acquireBus.(name).index, amt, 1);
+            var newIdx = [];
+            requested.do { |k|
+                var name = pairs[k * 3].asString;
+                var amt = pairs[(k * 3) + 1].asFloat;
+                var i = pairs[(k * 3) + 2].asInteger;
+                stripTap.(track, ("bus" ++ k).asSymbol, acquireBus.(name).index, amt, 1, sendInput.(track, i));
                 newNames = newNames.add(name);
+                newIdx = newIdx.add(i);
             };
-            (track[\busSends] ? []).size.do { |i| if (i >= requested) { stripTap.(track, ("bus" ++ i).asSymbol, nil) } };
+            (track[\busSends] ? []).size.do { |k| if (k >= requested) { stripTap.(track, ("bus" ++ k).asSymbol, nil) } };
             track[\busSends] !? { |prev| prev.do { |bn| releaseBus.(bn) } };
             track[\busSends] = newNames;
+            track[\busSendIdx] = newIdx;
             reorderTracks.();
         };
     };
@@ -5460,6 +5784,7 @@ OSCdef(\poptartClearBusSends, { |msg|
     if (track.isKindOf(Event)) {
         (track[\busSends] ? []).size.do { |i| stripTap.(track, ("bus" ++ i).asSymbol, nil) };
         track[\busSends] !? { |prev| prev.do { |bn| releaseBus.(bn) }; track[\busSends] = nil };
+        track[\busSendIdx] = nil;
         reorderTracks.(); // whatever read those buses may sit shallower now
     };
 }, '/poptart/clearBusSends');
@@ -5774,6 +6099,10 @@ OSCdef(\poptartPlaySample, { |msg|
              // Mapped, like bend, and in the bus's own order (see buildTrackDef's ReplaceOut).
              \grainpos, ("c" ++ bus).asSymbol, \grainsize, ("c" ++ (bus + 1)).asSymbol,
              \grainrate, ("c" ++ (bus + 2)).asSymbol, \grainpan, ("c" ++ (bus + 3)).asSymbol]
+             // ...and per sample, off its driver, a control an audio-rate driver is on (setChanAr).
+             ++ #[\grainpos, \grainsize, \grainrate, \grainpan, \bend].collect { |n|
+                 [(n ++ "Ar").asSymbol, (track[\chanAr] ? ()).at(n) ? -1]
+             }.flatten
         } {
           [\out, track[\inBus].index, \buf, buf, \begin, begin, \end, end,
                 \rate, rate, \dur, dur, \gate, 1, \amp, amp,

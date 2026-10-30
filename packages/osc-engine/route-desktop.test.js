@@ -21,7 +21,7 @@ const core = () => import(path.join(__dirname, '..', 'pattern-core', 'src', 'ind
 function orderProblems(spec) {
   const writes = new Map(); // bus -> index of its last writer
   spec.steps.forEach((st, i) => {
-    for (const b of [st.out, st.rest, st.ap]) if (b && b !== 'none') writes.set(b, i);
+    for (const b of [st.out, st.rest, st.ap, st.loop]) if (b && b !== 'none') writes.set(b, i);
   });
   const problems = [];
   const check = (bus, at, what) => {
@@ -135,6 +135,23 @@ test('any tree the pattern can build is laid out in order, without dropping a te
   assert.ok(laid > 300);
 });
 
+test('a send written inside the chain is a step naming the bus its tap reads', async () => {
+  const { note, routePlan } = await core();
+  const sig = note('c2').synth('X').fx('Delay').bus('feedback').fx('Reverb').bus('room');
+  const spec = desktopRouting(routePlan(sig).plan, { count: 2 });
+  assert.deepEqual(spec.warnings, []);
+  assert.deepEqual(spec.steps.filter((st) => st.k === 'send'), [{ k: 'send', i: 0, in: 'o:1' }], 'the feedback send reads the delay; the room send is the strip\'s');
+  assert.equal(spec.out, 'o:2');
+  assert.deepEqual(orderProblems(spec), []);
+  // At the end of a leveled branch: a term at the branch's gain, and the send reads that.
+  const branched = note('c2').synth('X').split((x) => x, (b) => b.fx('LPG').postgain(0.5).bus('wet')).fx('Reverb');
+  const spec2 = desktopRouting(routePlan(branched).plan);
+  const send = spec2.steps.find((st) => st.k === 'send');
+  const term = spec2.steps.find((st) => st.k === 'term' && st.out === send.in);
+  assert.ok(term && term.g > 0 && term.in === 'o:1', 'the LPG at the branch level');
+  assert.deepEqual(orderProblems(spec2), []);
+});
+
 // -- the engine adapter -------------------------------------------------------------------------
 
 function engine() {
@@ -146,6 +163,14 @@ function engine() {
   e._send = (addr, args) => sent.push({ addr, args });
   return { e, sent };
 }
+
+test('the engine sends each send with its index among the pattern\'s, three values apiece', () => {
+  const { e, sent } = engine();
+  e.setBusSends('delay', [{ name: 'feedback', amount: 0.3, i: 1 }, { name: 'room', amount: 1, i: 2 }]);
+  assert.deepEqual(sent.at(-1), { addr: '/poptart/setBusSends', args: ['delay', 'feedback', 0.3, 1, 'room', 1, 2] });
+  e.setBusSends('delay', [{ name: 'room' }]);
+  assert.deepEqual(sent.at(-1).args, ['delay', 'room', 1, 0], 'no index given: its place in the set');
+});
 
 test('the engine sends the layout as JSON - the plain line too, by the chain\'s length', async () => {
   const { s, routePlan } = await core();
@@ -183,4 +208,33 @@ test('effectSlots says how far a track\'s effects go, however far that is', () =
   assert.equal(e.effectSlots('t'), 30);
   e.unloadEffect('t', 30);
   assert.equal(e.effectSlots('t'), 29);
+});
+
+test('a chain in a Delay\'s loop: the Delay sends on a loop bus, and its return is read last, a block late', async () => {
+  const { s, routePlan } = await core();
+  const { loopLatencies } = require('./route-desktop');
+  const sig = s('x').fx('Delay', (x) => x.fx('Filter').fx('Voice')).fx('Reverb');
+  const plan = routePlan(sig).plan;
+  const spec = desktopRouting(plan, { count: 4 });
+  const fx = (slot) => spec.steps.find((st) => st.k === 'fx' && st.slot === slot);
+  assert.equal(fx(3).loop, 'l:3');
+  assert.equal(fx(1).in, 'l:3', 'the chain reads the Delay\'s repeats');
+  assert.equal(fx(1).loop, undefined);
+  const ret = spec.steps.at(-1);
+  assert.deepEqual(ret, { k: 'ret', slot: 3, in: 'o:2' }, 'the return comes after everything it reads');
+  assert.deepEqual(orderProblems(spec), []);
+  assert.equal(spec.buses['l:3'], 2);
+  const late = loopLatencies(plan, (p) => ({ 1: 0.01, 2: 0.05, 3: 0.5, 4: 0.2 })[p]);
+  assert.deepEqual(Object.keys(late), ['3']);
+  assert.ok(Math.abs(late[3] - 0.06) < 1e-12, 'the loop\'s devices add up; the Delay itself and what follows it do not');
+  assert.deepEqual(loopLatencies(routePlan(s('x').split((a) => a.fx('A'))).plan ?? null, () => 1), {});
+});
+
+test('a loop\'s latency is its longest way round, and a Delay inside it counts for its input only', async () => {
+  const { s, routePlan } = await core();
+  const { loopLatencies } = require('./route-desktop');
+  const sig = s('x').fx('Delay', (x) => x.split((a) => a.fx('A'), (b) => b.fx('B').fx('Delay', (y) => y.fx('C'))));
+  // Slots: A 1, B 2, C 3, inner Delay 4, outer Delay 5.
+  const per = { 1: 0.1, 2: 0.2, 3: 0.4, 4: 0, 5: 0 };
+  assert.deepEqual(loopLatencies(routePlan(sig).plan, (p) => per[p]), { 4: 0.4, 5: 0.2 });
 });

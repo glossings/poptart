@@ -18,6 +18,7 @@ import { TRACK_BEND_PARAM } from './src/descriptor.mjs';
 import { WebAudioEngine } from './src/engine/web-audio-engine.mjs';
 import { renderRange, renderShape } from './src/engine/modulators.mjs';
 import { SPECTRUM_BAND_FREQS, SpectrumTap } from './src/engine/analysis.mjs';
+import { s as sampleSig, routePlan } from '../pattern-core/src/index.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -388,6 +389,33 @@ test('a bus send is built once and its level moved after that', () => {
   assert.equal(track.sends.get('reverb'), send, 'moving a level must not rebuild the send');
 });
 
+test('a send leaves from its place in the chain, and follows the plan as it changes', () => {
+  const { engine } = makeEngine();
+  engine.createTrack('delay');
+  engine.setBusSends('delay', [{ name: 'feedback', amount: 1, i: 0 }]);
+  const track = engine.tracks.get('delay');
+  const send = track.sends.get('feedback');
+  assert.ok(track.sendFader.outputs.includes(send), 'no plan: the post-fader output');
+  // The plan places the send before the second effect: it leaves from its own point, through the
+  // monitor's and the fader's gates, and no longer from the post-fader output.
+  engine.setRouting('delay', routePlan(sampleSig('x').fx('Filter').bus('feedback').fx('Filter')).plan);
+  const point = track.sendPoints.get(0);
+  assert.ok(point && point.fader.outputs.includes(send));
+  assert.ok(!track.sendFader.outputs.includes(send));
+  assert.equal(point.mon.gain.value, 1);
+  engine.setParam('delay', -1, 'fader', 0.5, 0);
+  assert.ok(point.fader.gain.landedOn(0.5), 'the fader gates it as it gates the post-fader send');
+  // A re-eval that sends the same set again leaves it where it is.
+  engine.setBusSends('delay', [{ name: 'feedback', amount: 0.5, i: 0 }]);
+  assert.equal(track.sends.get('feedback'), send);
+  assert.ok(point.fader.outputs.includes(send));
+  // Back to a plain line: the point goes, and the send is the post-fader one again.
+  engine.setRouting('delay', null);
+  assert.equal(track.sendPoints.size, 0);
+  assert.ok(track.sendFader.outputs.includes(send));
+  assert.ok(!point.fader.outputs.includes(send));
+});
+
 test('a send the new pattern dropped is torn down', () => {
   const { engine } = makeEngine();
   engine.createTrack('t1');
@@ -599,6 +627,19 @@ test('a device state round-trips as its parameter map, in real units', async () 
   engine.setParam('t1', 1, 'Cutoff', 0.1, 0);
   assert.equal(await engine.setPluginState('t1', 1, JSON.stringify({ params: { cutoff } }), 0), true);
   assert.equal(engine.tracks.get('t1').slots.get(1).values.cutoff, cutoff);
+});
+
+test('a looper is never saved recording: Record and Clear stay out of its state, both ways', async () => {
+  const { engine } = makeEngine();
+  engine.createTrack('t1');
+  engine.loadEffect('t1', 'Looper', 1);
+  engine.setParam('t1', 1, 'Record', 1, 0);
+  const params = JSON.parse(Buffer.from(await engine.getPluginState('t1', 1), 'base64').toString('utf8')).params;
+  assert.ok(!('record' in params) && !('clear' in params), JSON.stringify(params));
+  engine.setParam('t1', 1, 'Record', 0, 0);
+  assert.equal(await engine.setPluginState('t1', 1, JSON.stringify({ params: { record: 1, wet: 0.5 } }), 0), true);
+  assert.equal(engine.tracks.get('t1').slots.get(1).values.record, 0, 'an old state naming Record does not start a take');
+  assert.equal(engine.tracks.get('t1').slots.get(1).values.wet, 0.5);
 });
 
 test('a state that is not readable warns and leaves the slot as it was', async () => {

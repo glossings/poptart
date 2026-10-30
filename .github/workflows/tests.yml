@@ -14,7 +14,12 @@
 # on a machine without SuperCollider. Here that would let a broken install turn into a green
 # run, so the last step fails the job if any test skipped for want of sclang or scsynth.
 #
-# Nothing here builds, signs or publishes anything, and the job needs no secrets.
+# poptart's own scsynth extensions - its devices (PoptartDevices) and the decks' keylock
+# (PoptartPitchShift) - are committed for macOS only. On Windows the test job builds them first,
+# with the runner's LLVM, so the engine suite tests the build this commit would ship (release.yml
+# builds them the same way for the installer). Linux has no app, but SuperCollider runs there, so
+# the `extensions-linux` job builds them too and proves them through a real scsynth. Neither
+# build is kept: nothing here signs, publishes or commits anything, and no job needs secrets.
 #
 # Actions are pinned to commit SHAs, not tags: a tag can be moved, and these run with access to
 # the checkout. The trailing comment is the human-readable version.
@@ -42,7 +47,7 @@ jobs:
       matrix:
         os: [macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 40
+    timeout-minutes: 60 # the device parity test alone is many minutes on a runner
     defaults:
       run:
         shell: bash
@@ -87,6 +92,18 @@ jobs:
         env:
           ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
 
+      # Into bin/win32-x64/, where extensions.js installs them from. The device build regenerates
+      # the device catalog too, and that has to come out as committed: a difference means the
+      # catalog in the repository is not the one these devices were built from.
+      - name: Build the scsynth extensions
+        if: runner.os == 'Windows'
+        run: |
+          clang++ --version
+          node packages/web-engine/build/devices/native.mjs
+          node packages/osc-engine/native/rubberband/build.mjs
+          sh packages/osc-engine/native/check-plugins.sh
+          git diff --exit-code packages/osc-engine/native/devices/devices.json
+
       # The same code path a first launch takes: fetch the pinned SuperCollider into the private
       # root, then the VSTPlugin extension into its Extensions folder. POPTART_INSTALL_SC=1 is
       # the consent a person would give at the prompt.
@@ -126,6 +143,19 @@ jobs:
           console.log(`sclang_conf.yaml -> ${userDir}\n${fs.readFileSync(conf, 'utf8')}`);
           EOF
 
+      # The engine installs them into the Extensions folder before every boot; some tests read
+      # whether they are installed rather than install them, and test files run in any order.
+      - name: Install poptart's extensions the way the engine does
+        run: |
+          node - <<'EOF'
+          const ext = require('./packages/osc-engine/extensions');
+          const { locateServer } = require('./packages/osc-engine/server/locate');
+          const { extensionsDir } = locateServer();
+          const results = [ext.ensurePoptartExtension({ extensionsDir }), ext.ensureDeviceExtension({ extensionsDir })];
+          console.log(extensionsDir, results);
+          if (results.some((r) => r.skipped)) process.exit(1);
+          EOF
+
       - name: Pattern core and web app
         run: npm test --workspace packages/pattern-core --workspace packages/web-app
 
@@ -150,6 +180,16 @@ jobs:
           fi
           echo "no harness skipped for want of sclang or scsynth"
 
+      # Every platform here has its extensions (committed on macOS, built above on Windows) and a
+      # compiler, so a test that skipped for want of either is a broken build, not a missing tool.
+      - name: Every device test ran
+        run: |
+          if grep -E "# SKIP (no clang\+\+|no PoptartDevices|poptart's own devices are not installed)" engine-tests.log; then
+            echo "::error title=device tests skipped::The lines above skipped for want of the device extension or a compiler, so this platform's devices were not tested."
+            exit 1
+          fi
+          echo "no device test skipped for want of the extension or a compiler"
+
       # When something fails, the report is worth more than the log: it carries every resolved
       # path, the generated config, the Extensions listing and what sclang itself reported.
       - name: Collect diagnostics
@@ -162,3 +202,55 @@ jobs:
           name: doctor-${{ matrix.os }}
           path: doctor-${{ matrix.os }}.txt
           if-no-files-found: warn
+
+  # No desktop app ships for Linux, but SuperCollider runs there and the extensions are built to
+  # load into it: this builds both, checks what they export, holds the devices to the browser's
+  # DSP (the parity test, compiled with the same flags), and renders through a real scsynth - the
+  # distribution's - with them installed, so a green run means Linux's scsynth loads and plays them.
+  extensions-linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60 # the device parity test alone is many minutes on a runner
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: Install scsynth
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends supercollider-server
+          command -v scsynth
+      - name: Build the scsynth extensions
+        run: |
+          clang++ --version
+          node packages/web-engine/build/devices/native.mjs
+          node packages/osc-engine/native/rubberband/build.mjs
+          sh packages/osc-engine/native/check-plugins.sh
+          git diff --exit-code packages/osc-engine/native/devices/devices.json
+      # Where the distribution's scsynth looks without being told (~/.local/share/SuperCollider/
+      # Extensions), the way the engine installs them before every boot.
+      - name: Install them the way the engine does
+        run: |
+          node - <<'EOF'
+          const ext = require('./packages/osc-engine/extensions');
+          const results = [ext.ensurePoptartExtension(), ext.ensureDeviceExtension()];
+          console.log(results);
+          if (results.some((r) => r.skipped)) process.exit(1);
+          EOF
+      - name: Tests
+        working-directory: packages/osc-engine
+        run: |
+          set -o pipefail
+          node --test --test-timeout=120000 extensions.test.js native-device-parity.test.mjs device-nrt.test.js keylock.test.js 2>&1 | tee linux-tests.log
+      # Each of these skips where it cannot run; here everything it needs was just put in place.
+      - name: Nothing skipped
+        working-directory: packages/osc-engine
+        run: |
+          if grep -E '# SKIP' linux-tests.log; then
+            echo "::error title=Linux extension tests skipped::The lines above skipped, so the Linux build was not tested."
+            exit 1
+          fi

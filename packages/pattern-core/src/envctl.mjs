@@ -101,6 +101,10 @@ export function findEnvCallAt(code, idx) {
     const close = matchClose(text, kind, open);
     if (close < 0) continue;
     if (idx < m.index || idx > close + 1) continue;
+    // env("drums") or env(audio("x")) - a source first - is the envelope follower, which has no
+    // ADSR to draw.
+    const first = skipSpace(text, kind, open + 1, close);
+    if (/^(["'`]|[\w$.]+\s*\()/.test(text.slice(first, close))) return null;
     return { start: m.index, open, close, onName: idx >= m.index && idx <= m.index + 3 };
   }
   return null;

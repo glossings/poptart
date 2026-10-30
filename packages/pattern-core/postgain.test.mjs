@@ -128,10 +128,11 @@ test('the track SynthDef takes gain into the chain and postgain at the strip', (
   const strip = scd.match(/buildTrackDef = \{[\s\S]*?\n\};/)?.[0];
   assert.ok(head && strip, 'could not find buildHeadDef and buildTrackDef in sc/poptart.scd');
   // gain is applied by the head, to what goes INTO the chain; the strip is the chain's end.
-  assert.match(head, /Out\.ar\(out, sig \* gain\.lag\(0\.02\)\.clip\(0, 4\)\)/, 'gain is applied to the chain input');
+  // Read per sample under an audio-rate driver, and negative allowed, as the browser's gain node (chanIn).
+  assert.match(head, /Out\.ar\(out, sig \* chanIn\.\(\\gain, 1, 0\.02\)\)/, 'gain is applied to the chain input');
   assert.ok(!/postgain/.test(/\{ \|([^|]*)\|/.exec(head)[1]), 'the head has no postgain control');
-  const at = strip.indexOf('sig = Balance2.ar');
+  const at = strip.indexOf('sig = [(mid + side) * panGains[0]');
   assert.ok(at > 0, 'the strip pans');
-  assert.match(strip.slice(at, at + 200), /postgain\.lag/, 'the strip fader is postgain');
-  assert.ok(!/[^t]gain\.lag/.test(strip.replace(/postgain\.lag/g, '')), 'the plain gain is not the strip fader');
+  assert.match(strip.slice(at, at + 200), /chanIn\.\(\\postgain, 1, 0\.02\)/, 'the strip fader is postgain');
+  assert.ok(!/\\gain\b/.test(strip), 'the plain gain is not the strip fader');
 });

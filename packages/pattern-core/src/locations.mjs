@@ -30,9 +30,10 @@
 // noted rather than special-cased.
 
 import { looksLikeNoteString } from './pianoroll.mjs';
+import { DIVISION_LABEL } from './mini.mjs';
 import { looksLikeShapeData } from './shape.mjs';
 import { grooveNameLike } from './groove.mjs';
-import { widgetCallEdits, RAW_TEXT_WIDGETS } from './widget-calls.mjs';
+import { widgetCallEdits, recordCallEdits, RAW_TEXT_WIDGETS } from './widget-calls.mjs';
 
 // Rewrites `code` so each pattern-position string/template literal is wrapped in mini(str, START),
 // where START = `base` + the literal's first-content-char offset within `code`. Pass the block's
@@ -44,7 +45,14 @@ import { widgetCallEdits, RAW_TEXT_WIDGETS } from './widget-calls.mjs';
 // `miniOff` is the buffer's mini-off ranges (see miniOffRanges), in the same coordinates as `base`:
 // the caller computes them once over the whole buffer, since a range opened in one block runs on
 // through the blocks below it.
-export function injectLocations(code, base = 0, { miniOff = [] } = {}) {
+export function injectLocations(code, base = 0, opts = {}) {
+  return injectLocationsMapped(code, base, opts).code;
+}
+
+// injectLocations, plus the edits it made - `[from, to, replacement]` over `code`, in order - so
+// a position in the rewritten text can be traced back to the one somebody typed (see
+// eval-errors.mjs: an error's line and column are only worth showing in the buffer's terms).
+export function injectLocationsMapped(code, base = 0, { miniOff = [] } = {}) {
   const { lits, masked } = scanLiterals(code);
   // [from, to, replacement] over the ORIGINAL code, applied in one pass below.
   const edits = [];
@@ -63,6 +71,8 @@ export function injectLocations(code, base = 0, { miniOff = [] } = {}) {
   // what keys a widget's live value and display to the control drawn there (see widget-calls.mjs).
   // Their edits replace a call's name and paren, never a literal, so the two lists don't overlap.
   edits.push(...widgetCallEdits(code, base, { masked, lits }));
+  // `.record(` too, so a take a control records can find its call again (see motion.mjs).
+  edits.push(...recordCallEdits(code, base, { masked, lits }));
   edits.sort((x, y) => x[0] - y[0]);
   let out = '';
   let prev = 0;
@@ -71,7 +81,7 @@ export function injectLocations(code, base = 0, { miniOff = [] } = {}) {
     prev = to;
   }
   out += code.slice(prev);
-  return out;
+  return { code: out, edits };
 }
 
 // The stretches of `source` where mini notation is switched off: from each `mini-off` comment to
@@ -105,7 +115,7 @@ const NAME_ARG_CALLS = new Set([
   // say()'s METHOD form: .say("hi there") is one phrase, said on every note. The builder form is
   // speech-mode mini (see isPatternPosition). The voice (the second argument) stays a pattern.
   'say',
-  'synth', 'fx', 'scale', 'setscale', 'setgroove', 'as', 'midi', 'audio', 'input', 'copy', 'pcopy', 'lfo', 'midicc', 'midikeys', 'osc', 'pianoroll',
+  'synth', 'fx', 'scale', 'setscale', 'setgroove', 'as', 'midi', 'audio', 'env', 'input', 'copy', 'pcopy', 'lfo', 'midicc', 'midikeys', 'osc', 'pianoroll',
   // `.bus("<reverb delay>")` / `.bsend(...)` are deliberately NOT here: a send's destination is a
   // pattern of names like `.preset()`'s, so its literal wants wrapping (and highlighting) too.
   // The painter's clips, then its options - drawn data, never mini (see arrange.mjs).
@@ -256,6 +266,9 @@ export function isPatternPosition(before, after, text = '') {
     // argument after it is a name. Wrapped, it reached the engine as a Sig where a parameter
     // name belongs, which poisoned every later evaluation (found 2026-10-03).
     if (enclosing?.[1] === 'param' && /^\s*,/.test(after)) return false;
+    // A tempo division as the value - .param("Sync", "1/8.") - is an option's label: as mini it is
+    // 1 slowed by 8, and "1/16T" does not parse at all. Signal#_paramAt keeps it whole.
+    if (enclosing?.[1] === 'param' && DIVISION_LABEL.test(text)) return false;
     return true;
   }
   if (method) return true;

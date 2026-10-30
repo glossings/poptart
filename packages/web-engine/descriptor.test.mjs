@@ -10,6 +10,7 @@ import {
   findParam,
   formatValue,
   isToggle,
+  migrateState,
   normalize,
   paramGroups,
   signalDestinations,
@@ -139,6 +140,7 @@ test('normalize and denormalize round-trip on every curve', () => {
       { id: 'lin', name: 'Lin', min: -12, max: 12, default: 0 },
       { id: 'freq', name: 'Freq', min: 20, max: 20000, default: 1000, curve: 'exp', unit: 'Hz' },
       { id: 'depth', name: 'Depth', min: 0, max: 1, default: 0.5, curve: 'pow', curveExp: 3 },
+      { id: 'shift', name: 'Shift', min: -5000, max: 5000, default: 0, curve: 'sym', curveExp: 3 },
     ],
   }));
   for (const p of d.params) {
@@ -147,6 +149,45 @@ test('normalize and denormalize round-trip on every curve', () => {
       assert.ok(Math.abs(normalize(p, v) - t) < 1e-9, `${p.id} at ${t} round-tripped to ${normalize(p, v)}`);
     }
   }
+});
+
+test('a sym curve rests at zero in the middle, is fine near it, and reaches both ends', () => {
+  const d = defineDevice(minimal({
+    params: [{ id: 'shift', name: 'Shift', min: -5000, max: 5000, default: 0, curve: 'sym', curveExp: 3, unit: 'Hz' }],
+  }));
+  const p = d.params[0];
+  assert.equal(denormalize(p, 0.5), 0);
+  assert.equal(denormalize(p, 0), -5000);
+  assert.equal(denormalize(p, 1), 5000);
+  assert.ok(Math.abs(denormalize(p, 0.6) - 40) < 1e-9, 'a tenth of the travel is 40 Hz, not 1000');
+  assert.ok(Math.abs(denormalize(p, 0.4) + 40) < 1e-9, 'and the mirror image on the other side');
+  assert.equal(normalize(p, 0), 0.5);
+  assert.throws(() => defineDevice(minimal({ params: [{ id: 'x', name: 'X', min: -1, max: 1, default: 0, curve: 'sym', curveExp: 0 }] })), /positive curveExp/);
+});
+
+test('a device past version 1 can migrate the states its earlier versions saved', () => {
+  const v2 = defineDevice(minimal({
+    version: 2,
+    params: [{ id: 'amount', name: 'Amount', min: -1, max: 1, default: 0 }],
+    migrate(params, from) {
+      if (from < 2) {
+        params.amount = params.down ? -params.amount : params.amount;
+        delete params.down;
+      }
+      return params;
+    },
+  }));
+  const old = { device: 'Test', version: 1, params: { amount: 0.5, down: 1 } };
+  assert.deepEqual(migrateState(v2, old), { device: 'Test', version: 2, params: { amount: -0.5 } });
+  assert.deepEqual(old.params, { amount: 0.5, down: 1 }, 'the saved state is not written over');
+  assert.deepEqual(migrateState(v2, { amount: 0.5, down: 1 }), { amount: -0.5 }, 'a bare parameter map is version 1');
+  const current = { device: 'Test', version: 2, params: { amount: 0.5 } };
+  assert.equal(migrateState(v2, current), current, 'a state at this version passes through untouched');
+  const v1 = defineDevice(minimal());
+  const doc = { device: 'Test', version: 1, params: { mix: 0.5 } };
+  assert.equal(migrateState(v1, doc), doc, 'a device that never changed has nothing to do');
+  assert.throws(() => defineDevice(minimal({ migrate: () => ({}) })), /nothing to migrate from/);
+  assert.throws(() => defineDevice(minimal({ version: 2, migrate: 'yes' })), /function/);
 });
 
 test('an exp curve sweeps by ratio: half travel is the geometric middle', () => {

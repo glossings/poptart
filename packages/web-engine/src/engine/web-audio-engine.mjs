@@ -19,11 +19,11 @@
 import { catalog as defaultCatalog } from '../catalog.mjs';
 import { buildNodeDevice } from '../devices/builtins.mjs';
 import { CROSSOVER } from '../devices/crossover.mjs';
-import { defaultValues, denormalize, findParam, normalize } from '../descriptor.mjs';
+import { defaultValues, denormalize, findParam, migrateState, normalize } from '../descriptor.mjs';
 import { decodeWav, framesOf } from '../dsp/wavfile.mjs';
 import { buildMipmaps, powerOfTwoAtLeast, resampleFrame } from '../dsp/tables.mjs';
 import { outlineOf } from '../dsp/outline.mjs';
-import { compileExpr, exprConsts, exprInputCount, exprInputs, exprShape } from '../dsp/expr.mjs';
+import { compileExpr, exprConsts, exprHasFollower, exprInputCount, exprInputs, exprShape } from '../dsp/expr.mjs';
 import { ViewTaps } from './view-taps.mjs';
 
 // How long a sample name may stay unknown before it is said to be (see _unknownSource).
@@ -102,6 +102,24 @@ function decodeState(text) {
 const SHAPE_POINTS = 256;
 
 /**
+ * The option slot a new list goes into (see _loadListParam): the first past the control's own
+ * entries that is neither the one in force at `now` - the latest pointed at by then - nor one
+ * pointed at for later. `held.at` is when each slot was last pointed at.
+ */
+export function spareListSlot(held, first, now) {
+  let active = -1;
+  let activeAt = -Infinity;
+  for (const [index, at] of held.at) if (at <= now && at > activeAt) { active = index; activeAt = at; }
+  let index = first;
+  for (;; index++) {
+    const at = held.at.get(index);
+    if (at === undefined) break;
+    if (index !== active && at <= now) break;
+  }
+  return index;
+}
+
+/**
  * Reversed copies of sample buffers, so a negative speed plays backwards.
  *
  * A buffer source cannot do this itself. The spec allows a negative playbackRate, but no browser
@@ -154,6 +172,9 @@ function pingPongBuffer(ctx, buffer, lo, hi) {
   byWindow.set(key, made);
   return made;
 }
+
+// How long a polled value takes to reach an expression's input: the desktop's poptart_ramp time.
+const EXPR_LEAF_GLIDE_SEC = 0.03;
 
 export class WebAudioEngine {
   /**
@@ -621,6 +642,19 @@ export class WebAudioEngine {
       this._warnOnce(`routing:${trackId}`, `[web-engine] the branches on this track could not be wired (${err?.message ?? err}), so its effects play one after another.`);
       track.setRouting(null);
     }
+    // A send the new plan places inside the chain (or no longer does) leaves from somewhere else now.
+    for (const node of track.sends.values()) this._feedSend(track, node, node._i ?? 0);
+  }
+
+  // Send `node` fed from where the track says send `i` leaves: moved only when that changed, so a
+  // level in flight is never disturbed.
+  _feedSend(track, node, i) {
+    const from = track.sendFrom(i);
+    if (node._from === from && node._i === i) return;
+    try { node._from?.disconnect(node); } catch { /* already detached */ }
+    from.connect(node);
+    node._from = from;
+    node._i = i;
   }
 
   // -- tempo -------------------------------------------------------------------------------
@@ -1031,7 +1065,10 @@ export class WebAudioEngine {
     // A value for one of an expression's inputs, in whatever units the expression reads it in.
     const leaf = this._leafTarget(trackId, slot, name);
     if (leaf !== undefined) {
-      if (leaf) rampParam(leaf, Number(value) || 0, atTime, now, glide);
+      // The desktop feeds a polled input through a 30 ms linear ramp (its poptart_ramp synth), so
+      // the same here - except an input the tree marks `step` (read only under a .smooth()), which
+      // arrives as a step on both, so the smooth's time is its only glide.
+      if (leaf) rampParam(leaf, Number(value) || 0, atTime, now, this._leafStepped(trackId, slot, name) ? 0 : glide ?? EXPR_LEAF_GLIDE_SEC);
       return;
     }
     if (this._exprOwns(trackId, slot, name)) return;
@@ -1070,6 +1107,10 @@ export class WebAudioEngine {
     }
     if (param.takes === 'shape' && typeof value === 'string') {
       this._loadShapeParam(trackId, slot, filled, param, value, atTime, glide);
+      return;
+    }
+    if ((param.takes === 'list' || param.takes === 'scale') && value && typeof value === 'object' && value.list) {
+      this._loadListParam(trackId, slot, filled, param, value.list, atTime, value.label);
       return;
     }
     this._warnOnce(
@@ -1519,6 +1560,50 @@ export class WebAudioEngine {
     }
   }
 
+  /**
+   * The controls on a slot's device that take a LIST rather than a number (descriptor.mjs's
+   * takes 'list' and 'scale'), which the scheduler reads a whole cycle of a pattern for (or the
+   * track's scale) and sends as `{ list }`. `epoch` changes when a different device fills the
+   * slot, which is when what was handed to the last one has to be handed over again.
+   */
+  listParams(trackId, slot) {
+    const filled = this.tracks.get(trackId)?.slots.get(slot);
+    const wants = filled?.descriptor?.params.filter((p) => p.takes === 'list' || p.takes === 'scale');
+    if (!wants?.length) return null;
+    filled.listEpoch ??= (this._listEpochs = (this._listEpochs ?? 0) + 1);
+    return wants.map((p) => ({ id: p.id, name: p.name, takes: p.takes, epoch: filled.listEpoch }));
+  }
+
+  /**
+   * A list for a control that takes one: handed to the device in an option slot of its own, the
+   * way a drawn curve is (see _postShapeTable), and the control pointed at that slot AT `atTime` -
+   * so a list lands on its beat, where a message to the device could only land when it arrived.
+   *
+   * The same list keeps its slot. A new one takes a slot no select is still due on: the one in
+   * force now and any pointed at for later are kept, every other is free. That is the same rule
+   * as the desktop's (osc-engine's _loadDeviceList), so a slot means the same list on both.
+   */
+  _loadListParam(trackId, slot, filled, param, list, atTime, label = null) {
+    const now = this.getTime();
+    const track = this.tracks.get(trackId);
+    const table = Float32Array.from(list);
+    const ref = Array.prototype.join.call(table, ',');
+    const held = ((filled.lists ??= {})[param.id] ??= { byRef: new Map(), at: new Map() });
+    let index = held.byRef.get(ref);
+    if (index === undefined) {
+      index = spareListSlot(held, param.options?.length ?? 1, now);
+      for (const [other, at] of held.byRef) if (at === index) held.byRef.delete(other);
+      held.byRef.set(ref, index);
+      const built = filled.built;
+      if (typeof built?.loadShape === 'function') built.loadShape(param.id, index, table);
+      else built?.node?.port?.postMessage?.({ kind: 'shape', param: param.id, index, table }, [table.buffer]);
+    }
+    held.at.set(index, Math.max(held.at.get(index) ?? -Infinity, atTime));
+    // The window names the slot by what is in it: a scale's name, or "pattern".
+    ((filled.extras ??= {})[param.id] ??= {})[index] = label ?? 'pattern';
+    track.setParamValue(slot, param.id, index, atTime, now, 0);
+  }
+
   /** The pattern is about to drive a plugin parameter by poll (see Track#holdParam). */
   holdParam(trackId, slot, name) {
     if (leafOf(name)) return;
@@ -1636,8 +1721,10 @@ export class WebAudioEngine {
         numberOfOutputs: 1,
         outputChannelCount: [1],
         // Every input is read as one channel, and a stereo source is folded to it as (L + R) / 2 -
-        // what the desktop's devices make of a pair patched onto a control.
-        channelCount: 1,
+        // what the desktop's devices make of a pair patched onto a control. A tree with an envelope
+        // follower takes both channels instead, for the follower's linked peak, max(|L|, |R|);
+        // the processor folds them to (L + R) / 2 for everything else.
+        channelCount: exprHasFollower(tree) ? 2 : 1,
         channelCountMode: 'explicit',
         channelInterpretation: 'speakers',
         processorOptions: { tree },
@@ -1714,6 +1801,13 @@ export class WebAudioEngine {
     if (!leaf) return undefined;
     if (!this.tracks.has(trackId)) return null;
     return this._exprInput(this._exprRecord(trackId, slot, leaf.name), leaf.i).offset;
+  }
+
+  /** Whether the expression a leaf name belongs to marks that input `step` (see setParam). */
+  _leafStepped(trackId, slot, name) {
+    const leaf = leafOf(name);
+    const tree = leaf && this.exprs.get(trackId)?.get(keyOf(slot, leaf.name))?.tree;
+    return Boolean(tree) && exprInputs(tree).some((n) => (Number(n.i) | 0) === leaf.i && Number(n.step) === 1);
   }
 
   _exprInput(rec, i) {
@@ -1939,20 +2033,24 @@ export class WebAudioEngine {
       }
     }
     const now = this.getTime();
-    for (const send of wanted) {
+    wanted.forEach((send, k) => {
+      // `i` is the send's index among the pattern's: how the routing plan names a send written
+      // inside the chain (see Track#sendFrom).
+      const i = Number.isInteger(send.i) ? send.i : k;
       let node = track.sends.get(send.name);
       if (!node) {
         // Born at its level, not at unity: a send connected first and ramped down after would
         // put the whole track into the bus for the length of the ramp.
         node = this.ctx.createGain();
         node.gain.value = send.amount ?? 1;
-        track.sendFader.connect(node); // post-fader, and a monitored track feeds no bus (see Track's DJ stage)
+        this._feedSend(track, node, i); // post-fader, and a monitored track feeds no bus (see Track's DJ stage)
         node._edge = this.routes.link(node, this._bus(send.name), { src: `t:${trackId}`, dst: `b:${send.name}` });
         track.sends.set(send.name, node);
-        continue;
+        return;
       }
+      this._feedSend(track, node, i);
       rampParam(node.gain, send.amount ?? 1, now, now);
-    }
+    });
     track._sendOrder = wanted.map((s) => s.name);
   }
 
@@ -2258,6 +2356,9 @@ export class WebAudioEngine {
       this._warnOnce(`state:${trackId}:${slot}`, '[web-engine] that preset is not something a browser device can read, so the slot keeps its current settings.');
       return Promise.resolve(false);
     }
+    // A state saved by an earlier version of the device is read as this version would have
+    // saved it, so a control that changed shape since lands rather than being skipped.
+    parsed = migrateState(track.slots.get(slot).descriptor, parsed);
     const values = parsed?.params ?? parsed;
     if (!values || typeof values !== 'object') return Promise.resolve(false);
     const now = this.getTime();
@@ -2272,6 +2373,8 @@ export class WebAudioEngine {
       // A control pointed at a file is restored from the file's NAME below, not from the option
       // slot it happened to sit in when the preset was taken.
       if (id in files) continue;
+      // A control a state never holds (a looper's Record) is not restored from one either.
+      if (findParam(track.slots.get(slot).descriptor, id)?.saved === false) continue;
       if (driven.has(id)) { skipped.push(id); continue; }
       track.setParamValue(slot, id, value, atTime ?? now, now);
     }
@@ -2281,7 +2384,14 @@ export class WebAudioEngine {
         `[web-engine] the preset does not set ${skipped.join(', ')} - ${skipped.length === 1 ? 'it is' : 'they are'} driven by ${[...new Set(skipped.map((id) => driven.get(id)))].join(' and ')}, which stays in charge.`,
       );
     }
-    for (const [id, ref] of Object.entries(files)) this.setParam(trackId, slot, id, ref, atTime ?? now, 0);
+    for (const [id, ref] of Object.entries(files)) {
+      if (findParam(track.slots.get(slot).descriptor, id)?.saved === false) continue;
+      this.setParam(trackId, slot, id, ref, atTime ?? now, 0);
+    }
+    // A state holds no lists (they are the pattern's, `saved: false`), so the scheduler is told to
+    // hand the device its lists again, whatever it thinks it last sent (see listParams).
+    const restored = track.slots.get(slot);
+    if (restored) restored.listEpoch = undefined;
     return Promise.resolve(true);
   }
 
@@ -2294,14 +2404,18 @@ export class WebAudioEngine {
     // this time round, and a preset restored into a fresh one would point at an empty slot.
     const files = {};
     for (const p of filled.descriptor.params) {
-      if (!p.takes) continue;
+      if (!p.takes || p.saved === false) continue;
       const ref = filled.extras?.[p.id]?.[Math.round(filled.values[p.id])];
       if (ref) files[p.id] = ref;
     }
+    // Without the controls that are a gesture rather than part of the sound (`saved: false`): a
+    // looper saved while recording would otherwise start recording as soon as it is opened.
+    const params = { ...filled.values };
+    for (const p of filled.descriptor.params) if (p.saved === false) delete params[p.id];
     return Promise.resolve(encodeState(JSON.stringify({
       device: filled.descriptor.id,
       version: filled.descriptor.version,
-      params: { ...filled.values },
+      params,
       files,
     })));
   }

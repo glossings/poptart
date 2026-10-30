@@ -47,6 +47,30 @@ test('the data widgets keep their text raw, and know where it starts', () => {
   assert.match(out, /_input\(\[18, 25\], 'steps', "x \. x \."\)/);
 });
 
+test('a matrix knows where each row\'s text starts, so its cells carry spans', () => {
+  const code = 'b: matrix({ bd: "x . x .", sd: 4, "hh": "x x" })';
+  const out = injectLocations(code, 100);
+  // 'b: matrix({ bd: "' is 17 characters; sd is a count (no text); "hh" is quoted.
+  assert.match(out, /_input\(\[103, -1, \{"bd":117,"hh":141\}\], 'matrix', /);
+  const { sigs } = evalLines(code, 100);
+  const steps = sigs[0].stepsForCycle(0);
+  assert.deepEqual(steps.find((s) => s.value === 'bd' && s.start === 0.5).loc, [121, 122]);
+  assert.deepEqual(steps.find((s) => s.value === 'hh' && s.start === 0.5).loc, [143, 144]);
+});
+
+test('a set can say where the row\'s text is now, so a count written out lights without an evaluation', () => {
+  const { sigs, widgets } = evalLines('a: steps(4)\nb: matrix({ bd: 4 })', 0);
+  assert.equal(sigs[0].stepsForCycle(0).length, 0);
+  // The editor wrote 'a: steps("x . . .")' - the text now starts at 10.
+  assert.equal(setWidgetValue('a', widgets.inputs[0].at, 'x . . .', 10), true);
+  assert.deepEqual(sigs[0].stepsForCycle(0).map((s) => s.loc), [[10, 11]]);
+  assert.equal(setWidgetValue('a', widgets.inputs[1].at, { row: 'bd', text: '. x . .' }, { bd: 30 }), true);
+  assert.deepEqual(sigs[1].stepsForCycle(0).map((s) => s.loc), [[32, 33]]);
+  // A set without a position keeps the one it had.
+  assert.equal(setWidgetValue('a', widgets.inputs[0].at, '. . x .'), true);
+  assert.deepEqual(sigs[0].stepsForCycle(0).map((s) => s.loc), [[14, 15]]);
+});
+
 test('a slider is its value, live: a moved control is read without an evaluation', () => {
   const { sigs, widgets } = evalLines('a: slider(0.25, 0, 10)', 50);
   const [w] = widgets.inputs;

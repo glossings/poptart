@@ -24,6 +24,11 @@ const BEATS = Object.freeze([
   2, 4 / 3, 3, 4, 8, 16,
 ]);
 
+/** The length of a sync setting in beats, or null when it is free. */
+export function syncBeats(syncIndex) {
+  return BEATS[Math.round(syncIndex)] ?? null;
+}
+
 /** Whether a sync setting is `free`. */
 export function isFree(syncIndex) {
   return BEATS[Math.round(syncIndex)] == null;

@@ -10,12 +10,13 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const synthdef = require('../synthdef');
+const { pluginFile } = require('../extensions');
 
 /** Which of poptart's own extensions scsynth will find in `extensionsDir` (sclang's \Class.asClass check). */
 function extensionFlags(extensionsDir) {
   const has = (f) => !!extensionsDir && fs.existsSync(path.join(extensionsDir, 'poptart', f));
-  const devices = has('PoptartDevices.scx');
-  return { nativeDevices: devices, spectrum: devices, pitchShift: has('PoptartPitchShift.scx') };
+  const devices = has(pluginFile('PoptartDevices'));
+  return { nativeDevices: devices, spectrum: devices, pitchShift: has(pluginFile('PoptartPitchShift')) };
 }
 
 /** Every def an engine with these settings loads at boot: [{name, bytes, meta, def}]. */

@@ -116,10 +116,13 @@
 .iw-cell.on:hover {
   background: var(--accent);
 }
-/* A gap before every fourth step of a row of fours: the beat, as the piano roll's heavier lines. */
-.iw-cell.beat,
+/* A gap before every fourth step of a row of fours: the beat, as the piano roll's heavier lines.
+   Half a step wide, so the fours read as groups at a glance and still at any cell size. */
+.iw-cell.beat {
+  margin-left: calc(var(--iw-cell) / 2);
+}
 .iw-bar.beat {
-  margin-left: 3px;
+  margin-left: calc(var(--iw-bar-w) / 2);
 }
 .iw-cell.on {
   background: color-mix(in srgb, var(--accent) 70%, var(--bg-raised));

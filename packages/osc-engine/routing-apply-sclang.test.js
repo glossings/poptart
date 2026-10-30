@@ -41,6 +41,7 @@ async function layouts() {
     split: of(s('x').split((b) => b.fx('A'), (b) => b.fx('B').postgain(0.5)).fx('C')),
     bands: of(s('x').bands([300], (l) => l.fx('A'), (h) => h.fx('B')).fx('C')),
     line: desktopRouting(null, { count: 3 }),
+    send: of(s('x').fx('A').bus('feedback').fx('B').fx('C')),
   };
 }
 
@@ -54,16 +55,20 @@ var srv = Server(\\poptartRouteProbe, NetAddr("127.0.0.1", 57998));
 var server = srv, routeNowhere = 1000000, silentBus = (index: 7), unityGainBus = (index: 3);
 var nodeOwns = { |id, what| };
 var routeApply, routeFree, slotNode, ensureFxNode, routeKrNode, channelTarget, channelDefault;
+var sendInput, repointSends, stripPost = { |track| (index: 77) };
 var djNode = { |track| track[\\synth] }, bassMonoNode = { |track| track[\\synth] };
-var cueOffset, buildFxDef, buildXoverDef, trackDef, track, sent = List.new, specs, ids;
+var chanIn, cueOffset, buildFxDef, buildXoverDef, trackDef, track, sent = List.new, specs, ids;
 srv.addr = (addr: 1, isLocal: true, hostname: "127.0.0.1", ip: "127.0.0.1", port: 57998,
     sendMsg: { |self ...msg| sent.add(msg) }, sendBundle: { |self, time ...msgs| msgs.do { |m| sent.add(m) } },
     // What Server's makeBundle asks of an address: none open yet, and the bundle sent whole.
     hasBundle: false, sendClumpedBundles: { |self, time ...msgs| msgs.do { |m| sent.add(m) } });
+${lift('chanIn')}
 ${lift('buildFxDef')}
 ${lift('buildXoverDef')}
 ${lift('routeApply')}
 ${lift('routeFree')}
+${lift('sendInput')}
+${lift('repointSends')}
 ${lift('slotNode')}
 ${lift('ensureFxNode')}
 ${lift('routeKrNode')}
@@ -73,7 +78,9 @@ trackDef = (fx: buildFxDef.(), xover: buildXoverDef.());
 track = (synth: Synth.basicNew(\\poptart_track_shared, srv, 5000), head: Synth.basicNew(\\poptart_head, srv, 4999),
     chain: Group.basicNew(srv, 4000), krGroup: Group.basicNew(srv, 4001), chainIn: (index: 90),
     nodes: IdentityDictionary.new, xovers: IdentityDictionary.new, terms: List.new,
-    gains: IdentityDictionary.new, xos: IdentityDictionary.new, scBus: IdentityDictionary.new, wet: IdentityDictionary.new);
+    gains: IdentityDictionary.new, xos: IdentityDictionary.new, scBus: IdentityDictionary.new, wet: IdentityDictionary.new,
+    taps: IdentityDictionary[\\bus0 -> Synth.basicNew(\\poptart_tap, srv, 6000)], busSends: ["feedback"], busSendIdx: [0],
+    sendIns: Dictionary.new);
 specs = [${specs.map(q).join(', ')}].collect(_.parseJSON);
 {
     var dump = { |tag| sent.do { |m| (tag ++ "<" ++ m.collect(_.asString).join(" ") ++ ">").postln }; sent.clear };
@@ -89,6 +96,13 @@ specs = [${specs.map(q).join(', ')}].collect(_.parseJSON);
     dump.("LINE");
     ("NODES-LINE<" ++ ids.() ++ ">").postln;
     ("XOVERS-AFTER<" ++ track[\\xovers].size ++ ">").postln;
+    // A send written inside the chain: its tap reads the bus the layout gives it, then the strip again.
+    routeApply.(\\t, track, specs[3]);
+    dump.("SEND");
+    ("SENDIN<" ++ (sendInput.(track, 0) ? "nil") ++ ">").postln;
+    routeApply.(\\t, track, specs[2]);
+    dump.("UNSEND");
+    ("SENDIN-AFTER<" ++ (sendInput.(track, 0) ? "nil") ++ ">").postln;
     // Where a channel control lives.
     ("AT<" ++ [\\rl2, \\xo1, \\wet2, \\gain, \\postgain].collect { |n|
         var at = channelTarget.(track, n);
@@ -114,8 +128,8 @@ SystemClock.sched(20, { "APPLY-TIMEOUT".postln; 0.exit; nil });
 test('a change of structure moves and rewires a track\'s effects and never recreates one', async (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'poptart-route-apply-'));
   try {
-    const { split, bands, line } = await layouts();
-    const text = run(dir, [split, bands, line]);
+    const { split, bands, line, send } = await layouts();
+    const text = run(dir, [split, bands, line, send]);
     if (!text.includes('Welcome to SuperCollider')) { t.skip(`sclang did not start here: ${text.trim().split('\n').pop()}`); return; }
     assert.match(text, /APPLY-DONE/, `the harness did not finish:\n${text.split('\n').slice(-25).join('\n')}`);
     // sclang sends the server's commands by number: these are the ones in play.
@@ -161,6 +175,15 @@ test('a change of structure moves and rewires a track\'s effects and never recre
     assert.equal(at[3], `${one('HEAD')}:gain`);
     assert.equal(at[4], '5000:postgain');
     assert.deepEqual(one('DEFAULTS').split(','), ['1', '0', '0.049', '1', '0']);
+
+    // The send's tap follows the layout: pointed at the bus the send reads, in the same bundle,
+    // and back at the strip's output once the layout has no place for it.
+    const sendIn = one('SENDIN');
+    assert.match(sendIn, /^\d+$/, 'the layout gave the send a bus');
+    const tapSets = (msgs) => msgs.filter((m) => m[0] === '/n_set' && m[1] === '6000').map((m) => m[m.indexOf('in') + 1]);
+    assert.ok(tapSets(tagged('SEND')).includes(sendIn), 'the tap reads it');
+    assert.equal(one('SENDIN-AFTER'), 'nil');
+    assert.ok(tapSets(tagged('UNSEND')).includes('77'), 'and the strip again');
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

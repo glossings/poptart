@@ -114,6 +114,23 @@ test('a clean branch and a band of the signal add up, sample for sample', () => 
   }
 });
 
+test('a send written inside a band taps that band: the low band alone reaches its bus', () => {
+  const { ctx, engine } = engineRig();
+  const sig = s('x').bands([1000], (low) => low.bus('lows'), (high) => high).bus('all');
+  const track = play(engine, sig);
+  engine.setBusSends('t', [{ name: 'lows', amount: 1, i: 0 }, { name: 'all', amount: 1, i: 1 }]);
+  const frames = 4096;
+  const x = sineWave(700, frames);
+  const [l, r] = renderFake(ctx, engine.buses.get('lows'), { frames, inject: new Map([[track.chainIn, [x, x]]]), devices: DEVICES });
+  const want = lr4(x, 'lowpass', 1000);
+  for (let i = 0; i < frames; i++) {
+    assert.ok(Math.abs(l[i] - want[i]) < 1e-9, `sample ${i}: ${l[i]} vs ${want[i]}`);
+    assert.ok(Math.abs(r[i] - want[i]) < 1e-9);
+  }
+  assert.ok(track.sendFader.outputs.includes(track.sends.get('all')), 'the send after the last device is the post-fader one');
+  assert.ok(track.sendPoints.get(0).fader.outputs.includes(track.sends.get('lows')), 'the tapped one leaves from its point');
+});
+
 test('bands nobody touches sum back to the input - flat, within the crossovers\' all-pass', () => {
   const { ctx, engine } = engineRig();
   const sig = s('x').bands([250, 2500], (low) => low, (mid) => mid, (high) => high);
@@ -254,4 +271,48 @@ test('a plan the build cannot wire leaves the track playing its line', () => {
   engine.setRouting('t', { out: 3 });
   assert.equal(engine.tracks.get('t').routing, null);
   assert.ok(warnings.some((w) => /could not be wired/.test(w)));
+});
+
+// ---- a chain in the Delay's feedback loop -------------------------------------------------------
+
+const loopMessages = (built) => built.node.messages.filter((m) => m.kind === 'loop').map((m) => m.sec);
+
+test('a chain in the Delay\'s loop: its repeats go out, through the chain, and back in through a delay of 0', () => {
+  const { engine } = engineRig();
+  const sig = note('c2').synth('X').fx('Delay', (x) => x.fx('Filter'));
+  const track = play(engine, sig);
+  const filter = track.slots.get(1).built;
+  const delay = track.slots.get(2).built;
+  const out = delay.node.links.find((l) => l.output === 1);
+  assert.ok(out, 'the Delay\'s second output is wired');
+  assert.ok(out.target.reaches(filter.input), 'into the chain');
+  // Back into the Delay's second input, through a DelayNode of 0 (held to a quantum by the browser).
+  const back = track.ctx.created.find((n) => n.kind === 'delay' && n.links?.some((l) => l.target === delay.node && l.input === 1));
+  assert.ok(back, 'the chain comes back into the Delay\'s key through a delay node');
+  assert.equal(back.delayTime.value, 0);
+  assert.ok(filter.output.reaches(back), 'what comes back is the chain\'s end');
+  assert.ok(delay.output.reaches(track.postGain), 'the Delay\'s own output goes on to the strip');
+  assert.deepEqual(loopMessages(delay).at(-1), 128 / SR, 'it is told the way round is one render quantum');
+});
+
+test('the way round counts the delay of each device in the loop, and goes when the chain does', () => {
+  const { engine } = engineRig();
+  const late = catalog.get('Voice').latencySec;
+  assert.ok(late > 0);
+  const sig = note('c2').synth('X').fx('Delay', (x) => x.fx('Voice').fx('Filter'));
+  const track = play(engine, sig);
+  const delay = track.slots.get(3).built;
+  assert.equal(loopMessages(delay).at(-1), 128 / SR + late);
+  // Re-evaluated without the function: no loop, and the Delay is told so.
+  engine.setRouting('t', null);
+  assert.equal(loopMessages(delay).at(-1), -1);
+});
+
+test('a Delay with no function is told it has no loop, and nothing is wired to its second output', () => {
+  const { engine } = engineRig();
+  engine.createTrack('t');
+  engine.loadEffect('t', 'Delay', 1);
+  const delay = engine.tracks.get('t').slots.get(1).built;
+  assert.deepEqual(loopMessages(delay), [-1]);
+  assert.ok(!delay.node.links?.some((l) => l.output === 1), 'the second output goes nowhere');
 });

@@ -69,11 +69,13 @@ function run() {
   const script = `(
 var exprLeaf, busIndexOf, paramTarget, reassertAudioDrivers, awaitTarget;
 var channelTarget = { |track, name| [track[\\synth], name.asSymbol] }; // every channel control on the one synth here - see channelTarget in sc/poptart.scd
+var chanAudio = { |name| false }, setChanAr = { |track, name, index| }; // no per-sample channel controls here - see chanIn in sc/poptart.scd
 var exprDefs, exprKey, exprsOf, exprFeedsOf, exprFeed, exprFeedArgs, exprShape, exprConsts, exprInputs;
 var exprSynthDef, installExpr, clearExpr, exprQueue, reassertExprs, exprRun;
 var exprDefUse = Dictionary.new, exprDefSerial = 0, exprDefDone, freeDefsLater; // see exprDefDone in sc/poptart.scd
 var server, tracks, awaitLoaded, resolveParamIndex, channelDefault, nodeOwns;
 var wireParamRoute, unwireParamRoute, dropRamp, freeModulatorLater;
+var leafRampSec = 0.03; // a polled input's ramp time - see leafRampTime in sc/poptart.scd
 var wired = List.new, unwired = List.new, freed = List.new, native, plugin, t1, t2, say, e, first, order;
 server = Server(\\poptartPETest, NetAddr("127.0.0.1", 57998));
 exprDefs = Dictionary.new;
@@ -137,7 +139,9 @@ Routine {
     "DONE".postln;
     0.exit;
 }.play(AppClock);
-SystemClock.sched(20, { "TIMEOUT".postln; 0.exit });
+// nil at the end: a number returned from a scheduled function reschedules it after that many
+// seconds, and 0.exit answers 0, so without it the timeout re-fired forever instead of exiting.
+SystemClock.sched(20, { "TIMEOUT".postln; 0.exit; nil });
 )
 `;
   const file = path.join(dir, 'harness.scd');

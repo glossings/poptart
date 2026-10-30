@@ -141,6 +141,12 @@ function inlineWidgetsFor(editor) {
         return t.paused ? t.baseCycle : t.baseCycle + Math.max(0, ms / 1000 - t.baseSec) * t.cps;
       },
       isPlaying: () => playing && !deckClock(deck).paused,
+      litSpans: () => {
+        const out = [];
+        for (const r of patternRegions) if (r.cm === editor && r.litSpans) out.push(...r.litSpans);
+        return out;
+      },
+      gridChanged: () => refetchGrid(deck),
       trackColor: (label) => trackColor(deck, label),
     });
     inlineWidgetsByEditor.set(editor, iw);
@@ -361,8 +367,9 @@ const shapeDefs = makeDefRegistry({
   emptyBody: '"0,0 0.5,1 1,0"',
   // A device control that takes a curve names one with .param("Mode", "grit"), which is not a call
   // this registry reads - so a rename carries those settings too, and a delete sees them.
-  otherRefs: (code, id) => shapeUsesOnControl(code, null, id).length,
-  otherRenameEdits: (code, from, to) => shapeRenameEdits(code, null, from, to),
+  // A control's `.record({ take })` names one too (see writeMotionTake).
+  otherRefs: (code, id) => shapeUsesOnControl(code, null, id).length + takeUses(code, id).length,
+  otherRenameEdits: (code, from, to) => [...shapeRenameEdits(code, null, from, to), ...takeRenameEdits(code, from, to)],
   otherRefsNoun: 'device setting',
   isData: (str) => (shapeMod ? shapeMod.looksLikeShapeData(str) : null),
   library: () => [...Object.keys(shapeMod?.SHAPE_PRESETS ?? {}), ...prPrebakeShapes],
@@ -574,7 +581,13 @@ async function api(method, path, body) {
     body: body ? JSON.stringify(body) : undefined,
   });
   const data = await res.json();
-  if (!res.ok) throw new Error(data.error ?? `request failed: ${res.status}`);
+  if (!res.ok) {
+    const err = new Error(data.error ?? `request failed: ${res.status}`);
+    // An evaluation's error says where in the buffer it points (see blockError in server.js).
+    if (data.where) err.where = data.where;
+    if (data.detail) err.detail = data.detail;
+    throw err;
+  }
   return data;
 }
 
@@ -588,14 +601,22 @@ async function api(method, path, body) {
  * about a refusal teaches you to stop reading it. `true` stays the error spelling because most of
  * the calls in this file predate the third level.
  */
-function logLine(text, level = false) {
+function logLine(text, level = false, detail = null, placed = false) {
   // A host's line can be { text, level, fix }: said like any other, with the fix as a button on it.
+  // `where` ({ deck, from, to, text }) is a span of the code the line is about: it is marked in
+  // that deck's editor, and a click on the line puts the cursor there. `detail` (a stack) goes to
+  // the developer console only.
   if (text && typeof text === 'object') {
     const m = text;
-    logLine(m.text, m.level === 'warn' ? 'warn' : m.level === 'error');
+    const level = m.level === 'warn' ? 'warn' : m.level === 'error' || m.level === true;
+    logLine(m.text, level, m.detail, true);
     if (m.fix) attachLogFix(log.firstElementChild, m.fix);
+    const where = m.where ?? locatedParamWarning(m.text);
+    if (where) attachLogPlace(log.firstElementChild, where, level === true ? 'error' : 'warn', m.text);
     return;
   }
+  const located = placed ? null : locatedParamWarning(text);
+  if (located) return logLine({ text, level, where: located });
   const kind = level === 'warn' ? 'warn' : level ? 'error' : '';
   // Embedded there is no console on screen, so what would be red in it goes to the guide's example.
   if (EMBEDDED && kind === 'error') embedPost({ type: 'poptart-embed-error', text });
@@ -608,7 +629,7 @@ function logLine(text, level = false) {
   while (log.childElementCount > LOG_MAX_LINES) log.lastElementChild.remove();
   // Mirror everything to the devtools console too, so the log is still there when the in-app
   // console is minimized (and gets devtools' filtering/timestamps).
-  (kind === 'error' ? console.error : kind === 'warn' ? console.warn : console.log)(`[poptart] ${text}`);
+  (kind === 'error' ? console.error : kind === 'warn' ? console.warn : console.log)(`[poptart] ${text}${detail ? `\n${detail}` : ''}`);
   // With the console collapsed, a refusal is silent - you press a button, nothing happens, and the
   // line saying why is behind a panel you aren't looking at. So pulse the buffer red: not the
   // message, just the fact that there IS one, and somewhere to go for it. Open, the line is already
@@ -618,6 +639,33 @@ function logLine(text, level = false) {
   if (kind === 'error' && document.documentElement.hasAttribute('data-console-collapsed')) {
     pulse(document.getElementById('saveFlash'), 'error-flash');
   }
+}
+
+/** The editor a span of code belongs to: deck B's for 'b', else the main one. */
+function editorOfDeck(deck) {
+  return deck === 'b' && deckBCM ? deckBCM : cm;
+}
+
+/**
+ * A console line about a span of code: the span is marked in its editor, and clicking the line
+ * puts the cursor there. `level` 'error' or 'warn' colors the mark.
+ */
+function attachLogPlace(line, where, level, said) {
+  if (!line) return;
+  const ed = editorOfDeck(where.deck);
+  markEvalProblem(ed, { ...where, text: where.text ?? said }, level);
+  line.classList.add('log-at');
+  line.addEventListener('click', () => jumpToEvalProblem(ed, where));
+}
+
+/** A device-has-no-parameter warning, placed on the one string in the buffer naming it - else null. */
+function locatedParamWarning(text) {
+  if (typeof text !== 'string' || !/has no (?:parameter|control)/.test(text)) return null;
+  for (const [deck, ed] of [['a', cm], ['b', deckBCM]]) {
+    const at = ed ? locateNamedParam(text, ed.getValue()) : null;
+    if (at) return { ...at, deck };
+  }
+  return null;
 }
 
 /** A fix offered on a console line; pressed once, it does its edit and goes. */
@@ -2072,7 +2120,8 @@ function slotOfPluginNow(code, trackLabel, slot, plugin) {
  * Only calls whose argument is a plain setting. A `.param("Cutoff", lfo(2))`, an `audio("x")` or
  * a pattern like `"<a b>"` is not a setting a preset can hold - it is modulation, and it stays.
  */
-function settingParamEdits(code, trackLabel, slot) {
+function settingParamEdits(code, trackLabel, slot, keep = []) {
+  const kept = new Set(keep.map((k) => String(k).toLowerCase()));
   if (!labelsMod) return [];
   const block = blockForTrack(code, trackLabel);
   if (!block) return [];
@@ -2088,6 +2137,7 @@ function settingParamEdits(code, trackLabel, slot) {
     if (close < 0 || close > block.end) continue;
     const args = paramCallArgs(code, open, close);
     if (!args || !isPlainSetting(args.value)) continue;
+    if (kept.has(String(args.name).toLowerCase())) continue; // not in the capture, so not a copy of it
     if (paramSlotAt(code, m.index, args.target) !== slot) continue;
     edits.push([m.index, close + 1, '']);
   }
@@ -2401,7 +2451,7 @@ async function pollPluginEdits({ flush = false } = {}) {
   // motionless on a fader emits no pointermove, and the server would give the control back mid-mix.
   const channelHold = mixerHold?.value == null ? null : { trackId: mixerHold.label, name: mixerHold.name, value: mixerHold.value };
   const committed = [...commitQueue];
-  const { edits, logs, pending, holds } = await api('POST', '/api/pluginEdits', {
+  const { edits, logs, pending, holds, motionTakes } = await api('POST', '/api/pluginEdits', {
     flush,
     hold,
     channelHold,
@@ -2419,7 +2469,7 @@ async function pollPluginEdits({ flush = false } = {}) {
     // capture is one undo step.
     if (e.replacesParams) {
       const { ed, label } = deckTrackParts(e.trackId);
-      const drop = settingParamEdits(ed.getValue(), label, e.slot);
+      const drop = settingParamEdits(ed.getValue(), label, e.slot, e.keepParams ?? []);
       if (drop.length) applyBufferEdits(drop, '+autopin', ed);
     }
     const filed = writePluginState(e.trackId, e.slot, e.state, e.plugin, e.preset);
@@ -2431,6 +2481,7 @@ async function pollPluginEdits({ flush = false } = {}) {
   }
   // .log() event lines from the scheduler, which runs server-side - same drain, same 500ms.
   for (const line of logs ?? []) logLine(line);
+  for (const t of motionTakes ?? []) writeMotionTake(t);
   // Said once when edits start being held, so a plugin tweak that hasn't reached the code yet
   // doesn't look like auto-pin missed it.
   if (pending && !pinsPending) {
@@ -2440,6 +2491,50 @@ async function pollPluginEdits({ flush = false } = {}) {
 }
 
 setInterval(() => pollPluginEdits().catch(() => {}), 500);
+
+/**
+ * A control's `.record()` finished a take (see pattern-core's motion.mjs): `{ deck, at, axes,
+ * shapes }`, one drawn shape per axis. Each goes into the buffer as a `_shape(...)` definition and
+ * the call names it - `knob(0.5).record({ cycles: 2, take: "lead-take" })` - so the take survives a
+ * reload, opens in the shape editor, and the control stays in the code to record the next one. A
+ * call that already names a take has that take's shapes replaced.
+ */
+function writeMotionTake(t) {
+  const ed = deckEditor(t.deck);
+  const iw = ed ? inlineWidgetsFor(ed) : null;
+  if (!iw || t.at == null || !Array.isArray(t.shapes)) return;
+  const call = iw.recordCallAt(t.at);
+  if (!call) return; // the call is gone since it was evaluated: there is nowhere to keep the take
+  const axes = Array.isArray(t.axes) && t.axes.length === t.shapes.length ? t.axes : t.shapes.map(() => '');
+  let name = call.take;
+  if (!name) {
+    const code = ed.getValue();
+    const taken = new Set(shapeDefs.allIds(null, code).map((r) => r.id));
+    const base = `${preferredDefId(prBlockLabelAt(call.index, code), 'motion')}-take`;
+    const free = (n) => axes.every((a) => !taken.has(`${n}${a}`));
+    name = base;
+    for (let i = 2; !free(name); i++) name = `${base}${i}`;
+  }
+  const ids = axes.map((a) => `${name}${a}`);
+  ed.operation(() => {
+    ids.forEach((id, i) => {
+      const code = ed.getValue();
+      const body = JSON.stringify(t.shapes[i]);
+      const def = shapeDefs.findDef(code, id);
+      if (def) {
+        ed.replaceRange(`${def.idLiteral}, ${body}`, ed.posFromIndex(def.open + 1), ed.posFromIndex(def.close));
+      } else {
+        const [from, to, text] = shapeDefs.defsEdit(code, [id], () => body);
+        ed.replaceRange(text, ed.posFromIndex(from), ed.posFromIndex(to));
+      }
+    });
+    iw.writeTake(t.at, name);
+  });
+  refoldAll(ed);
+  logLine(`take recorded: ${ids.join(', ')}`);
+  // The shape editor open on it shows the new take rather than drawing over it with the old one.
+  if (lfoState && lfoCM === ed && ids.includes(lfoState.shapeId)) openShapeById(lfoState.shapeId, lfoCarry(), ed);
+}
 
 // Before writing the buffer out anywhere it has to be true - saving, exporting, sharing - settle
 // any plugin edit the server is still holding (it defers captures while the clock runs, because
@@ -3618,7 +3713,8 @@ function isWidgetHandleAt(editor, code, idx) {
   if (findSpCallAt(code, idx)?.onName) return true;
   if (slicesMod && findSliceCallAt(code, idx)?.onName) return true;
   if (findEnvelopeHandleAt(code, idx)) return true;
-  if (findRecordCallAt(code, idx)?.onName) return true;
+  if (findRecordCallAt(code, idx, editor)?.onName) return true;
+  if (motionTakeAt(code, idx, editor)) return true;
   if (inlineWidgetsMod?.calls.findColorCallAt?.(code, idx)?.onName) return true;
   return !!findChainHandleAt(code, idx);
 }
@@ -3771,7 +3867,12 @@ function openWidgetAt(code, idx, ed = cm) {
   // The envelope and playback controls of a sampler chain - or its s()/se()/sr() source - open the
   // envelope drawn over the sample. Asked after the slice editor, whose `slice` is also a sampler word.
   if (findEnvelopeHandleAt(code, idx) && openEnvelopeAt(code, idx, ed)) return true;
-  const rec = findRecordCallAt(code, idx);
+  const take = motionTakeAt(code, idx, ed);
+  if (take) {
+    openShapeById(take, {}, ed);
+    return true;
+  }
+  const rec = findRecordCallAt(code, idx, ed);
   if (rec?.onName) {
     if (!recordState || recCM !== ed || rec.start !== recordState.callStart) openRecordPanel(rec, ed);
     return true;
@@ -4144,7 +4245,7 @@ function startDeviceLive(trackLabel, slot, panel) {
 const LIVE_FIGURE_KINDS = new Set(['sample', 'meter', 'transfer', 'eq', 'shaper', 'sweep', 'duck']);
 
 /** How tall each kind of figure is drawn, in CSS pixels. */
-const FIGURE_HEIGHT = { wavetable: 176, unison: 64, response: 108, adsr: 108, eq: 128, band: 52, matrix: 176, sample: 96, grain: 64, meter: 22, transfer: 120, shaper: 108, echoes: 84, repeats: 72, decay: 72, sweep: 96, duck: 112 };
+const FIGURE_HEIGHT = { wavetable: 176, unison: 64, response: 108, adsr: 108, eq: 128, band: 52, matrix: 176, sample: 96, grain: 64, meter: 22, transfer: 120, shaper: 108, echoes: 84, repeats: 72, decay: 72, sweep: 96, duck: 112, bands: 96 };
 
 /** How near a press counts as being on an envelope handle - the sampler's panel allows the same. */
 const FIGURE_HIT_PX = 9;
@@ -4205,6 +4306,27 @@ function shapeRenameEdits(code, control, from, to) {
   const word = new RegExp(`(^|[^\\w$])${escaped}(?![\\w$])`, 'g');
   return shapeUsesOnControl(code, control, from)
     .map((u) => [u.from, u.from + u.text.length, `${u.quote}${u.body.replace(word, `$1${to}`)}${u.quote}`]);
+}
+
+/**
+ * The `.record(` calls whose take is the shape `id` - `take: "id"`, or a pad's `take: "name"` for
+ * its `name-x` and `name-y` - as `{ open, take }`.
+ */
+function takeUses(code, id) {
+  const calls = inlineWidgetsMod?.calls;
+  if (!calls?.findRecordCalls) return [];
+  return calls.findRecordCalls(code)
+    .map((c) => ({ open: c.open, take: calls.recordTakeName(code, c.open) }))
+    .filter((c) => c.take && (c.take === id || `${c.take}-x` === id || `${c.take}-y` === id));
+}
+
+/** The edits that carry a shape rename into the `.record()` calls that name it as their take. */
+function takeRenameEdits(code, from, to) {
+  return takeUses(code, from)
+    .filter((u) => u.take === from)
+    .map((u) => inlineWidgetsMod.calls.recordTakeEdit(code, u.open, to))
+    .filter(Boolean)
+    .map((e) => [e.from, e.to, e.text]);
 }
 
 // The curve pickers on the open device panel, by the control they set: each re-reads the curve
@@ -6068,6 +6190,37 @@ const FIGURE_DRAWERS = {
    * and, when a key is patched in, the key's envelope underneath with the threshold it has to
    * cross.
    */
+  /**
+   * A filter bank's bands: a bar per band at its frequency, as tall as the level it is being fed
+   * - what Shape, the mode and Levels have made of it right now, from the device's own report.
+   */
+  bands(ctx, w, h, f, c) {
+    const range = { lowHz: f.lowHz, highHz: f.highHz };
+    const xOf = (hz) => figureLogX(hz, range) * w;
+    ctx.strokeStyle = c.grid;
+    ctx.lineWidth = 1;
+    ctx.font = '8px ui-monospace, monospace';
+    ctx.textBaseline = 'top';
+    for (const hz of [100, 1000, 10000]) {
+      const gx = xOf(hz);
+      ctx.beginPath(); ctx.moveTo(gx, 0); ctx.lineTo(gx, h); ctx.stroke();
+      ctx.fillStyle = c.grid;
+      ctx.fillText(hz >= 1000 ? `${hz / 1000}k` : String(hz), gx + 2, h - 10);
+    }
+    const bars = f.bars ?? [];
+    const top = FIGURE_PAD_Y;
+    const reach = Math.max(1, h - 2 * FIGURE_PAD_Y);
+    const width = Math.max(1, Math.min(6, (0.8 * w) / Math.max(1, bars.length)));
+    ctx.fillStyle = c.accent;
+    for (const bar of bars) {
+      const len = Math.max(1, bar.level * reach);
+      ctx.globalAlpha = 0.35 + 0.65 * bar.level;
+      ctx.fillRect(xOf(bar.hz) - width / 2, top + reach - len, width, len);
+    }
+    ctx.globalAlpha = 1;
+    return `${figurePad(bars.length, 4)} bands`;
+  },
+
   duck(ctx, w, h, f, c) {
     const top = FIGURE_PAD_Y / 2;
     const size = Math.max(1, h - FIGURE_PAD_Y);
@@ -6286,6 +6439,9 @@ function deviceWidget(trackLabel, slot, widget, { bare = false } = {}) {
   const isFile = widget.takes === 'sample' && !widget.modulatedBy;
   // One that takes a drawn curve is a menu of the shapes it ships with, plus a way to draw one.
   const isShape = widget.takes === 'shape' && !widget.modulatedBy;
+  // One that takes a list (a filter bank's Levels, a Resonator's Scale) is the pattern's to set,
+  // not the window's: it only says what is in force - "pattern", "flat", a scale's name.
+  const isList = widget.takes === 'list' || widget.takes === 'scale';
   const readout = document.createElement('div');
   readout.className = 'device-widget-value';
   readout.textContent = widget.modulatedBy ?? widget.text;
@@ -6326,6 +6482,12 @@ function deviceWidget(trackLabel, slot, widget, { bare = false } = {}) {
   // What moves this control when something else changes it. Filled in per widget kind below.
   let setPosition = () => {};
 
+  if (isList) {
+    // On a figure's heading there is no name above it, so the name goes with what it reads.
+    if (bare) readout.textContent = `${widget.name} ${widget.text}`;
+    cell.appendChild(readout);
+    return cell;
+  }
   if (widget.modulatedBy) {
     const knob = deviceKnob(widget, { register: (fn) => { setPosition = fn; } });
     cell.appendChild(knob);
@@ -6445,6 +6607,26 @@ function deviceWidget(trackLabel, slot, widget, { bare = false } = {}) {
     // The box prints its own value, so the answer lands there rather than on a second line.
     showValue = (text) => { if (!box.querySelector('input')) box.textContent = text; };
     cell.appendChild(box);
+  } else if (widget.widget === 'button') {
+    // Momentary: held down is 1, let go is 0, the way a pad on a controller is. Neither end is a
+    // finished edit worth filing, so both go without commit.
+    const button = document.createElement('button');
+    button.className = 'small device-toggle';
+    button.textContent = widget.name.toLowerCase();
+    let down = false;
+    const press = (on) => {
+      if (down === on) return;
+      down = on;
+      button.classList.toggle('on', on);
+      send({ value: on ? 1 : 0 }, false);
+    };
+    button.onpointerdown = () => press(true);
+    button.onpointerup = () => press(false);
+    button.onpointerleave = () => press(false);
+    button.onpointercancel = () => press(false);
+    cell.appendChild(button);
+    showValue = () => { readout.textContent = ''; };
+    readout.textContent = '';
   } else if (widget.widget === 'toggle') {
     const button = document.createElement('button');
     button.className = 'small device-toggle';
@@ -17684,7 +17866,25 @@ function maybePrefetchGrid(cycle, deck = 'a') {
     .catch(() => {})
     .finally(() => {
       win.fetching = false;
+      if (win.stale) {
+        win.stale = false;
+        refetchGrid(deck);
+      }
     });
+}
+
+// The grid in hand no longer says what plays - a loop released, a drawn row's cells changed under
+// its evaluation - so fetch it again from the current cycle; a top-up overwrites the cycles it
+// covers. One already in flight was asked before the change, so another follows it.
+function refetchGrid(deck = 'a') {
+  const win = gridWin[deck];
+  if (!patternRegions.some((r) => r.deck === deck)) return;
+  if (win.fetching) {
+    win.stale = true;
+    return;
+  }
+  win.to = Math.max(win.from, Math.floor(currentCyclePos(deck)));
+  maybePrefetchGrid(win.to, deck);
 }
 
 // The transport mirror as a cycle position "now" - the same rebased formula the server uses.
@@ -18303,8 +18503,27 @@ const RECORD_MAX_NORM = 24;
 // the `record` name itself. Same rule as lfo's and pianoroll's: the options are code you may want
 // to edit by hand, so they are never a handle. (ctrl+b uses the containing call regardless of the
 // handle, to pick up the options of whatever block the cursor is in.)
-function findRecordCallAt(code, idx) {
-  return findNamedCallAt(code, idx, /\.\s*record\s*\(/g, 'record');
+//
+// Given `ed`, a `.record()` the last evaluation found on a control rather than a track is not one:
+// it records the control's movement (see writeMotionTake), and its name opens its take instead.
+function findRecordCallAt(code, idx, ed = null) {
+  const call = findNamedCallAt(code, idx, /\.\s*record\s*\(/g, 'record');
+  if (call && ed && motionRecordOf(code, call, ed)) return null;
+  return call;
+}
+
+function motionRecordOf(code, call, ed) {
+  return inlineWidgetsFor(ed)?.motionRecordAt(call.start + code.slice(call.start, call.open).indexOf('record')) ?? null;
+}
+
+/** The shape a control's `.record()` keeps its take in, when `idx` is on its name - else null. */
+function motionTakeAt(code, idx, ed) {
+  const call = findNamedCallAt(code, idx, /\.\s*record\s*\(/g, 'record');
+  if (!call?.onName) return null;
+  const take = motionRecordOf(code, call, ed)?.take;
+  if (!take) return null;
+  // A pad's take is two shapes, one per axis: the editor opens on its x.
+  return shapeDefs.findDef(code, take) || !shapeDefs.findDef(code, `${take}-x`) ? take : `${take}-x`;
 }
 
 // The options as the panel holds them. Deliberately forgiving: this reads code the user may be
@@ -18864,7 +19083,7 @@ function bounceBlockAtCursor() {
     return;
   }
   if (trackRecState) return cancelTrackRecord(true);
-  const call = findRecordCallAt(code, idx);
+  const call = findRecordCallAt(code, idx, ed);
   const opts = call ? parseRecordCall(code.slice(call.open + 1, call.close)) : { cycles: 4, name: '', wrapTail: false, normalize: true };
   // Open the panel on the way in, so a hotkey bounce still shows its count-in, its meter, and -
   // the point of it - what actually got recorded when it lands.
@@ -20660,6 +20879,7 @@ async function evaluate(start, { byHand = false } = {}) {
   if (newPacks.length) openPackById(newPacks[0], {}, cm); // it has no files - here is where to pick them
   try {
     const result = await pending;
+    clearEvalMarks(cm); // the whole buffer evaluated, so nothing it was marked for stands
     bufferFreshOpened = false; // the fresh eval landed; from here edits are livecoding
     if (byHand) replayRecord('a', code, start, currentSavedName); // a moment of the night (see replays)
     transport = result.transport ?? { cps: result.cps ?? transport.cps, baseSec: 0, baseCycle: 0, paused: !start };
@@ -20704,7 +20924,10 @@ async function evaluate(start, { byHand = false } = {}) {
   } catch (e) {
     inlineWidgetsFor(cm)?.afterEval(widgetSnap, null); // every widget stays as it was
     commitOnEval.push(...filed); // nothing was filed, so nothing is thawed
-    logLine(e.message ?? String(e), true);
+    clearEvalMarks(cm);
+    // Marked only on the code it is about: typed over while the evaluation ran, the offsets are not.
+    const where = e.where && cm.getValue() === code ? { ...e.where, deck: 'a' } : null;
+    logLine({ text: e.message ?? String(e), level: 'error', where, detail: e.detail ?? null });
   }
   updateTransportButtons();
 }
@@ -32701,6 +32924,7 @@ async function evalDeckB(start, how) {
     widgetSnap = inlineWidgetsFor(deckBCM)?.beforeEval(code); // as on the main pane
     if (newPacks.length) openPackById(newPacks[0], {}, deckBCM); // it has no files - here is where to pick them
     const result = await pending;
+    clearEvalMarks(deckBCM);
     if (byHand) replayRecord('b', code, start, deckBFileName);
     takeClocks(result);
     registerTunings(result.tunings);
@@ -32733,7 +32957,9 @@ async function evalDeckB(start, how) {
   } catch (e) {
     inlineWidgetsFor(deckBCM)?.afterEval(widgetSnap, null); // every widget stays as it was
     commitOnEval.push(...filed); // nothing was filed, so nothing is thawed
-    logLine(`deck B: ${e.message ?? String(e)}`, true);
+    clearEvalMarks(deckBCM);
+    const where = e.where && deckBCM.getValue() === code ? { ...e.where, deck: 'b' } : null;
+    logLine({ text: `deck B: ${e.message ?? String(e)}`, level: 'error', where, detail: e.detail ?? null });
   }
 }
 
@@ -43380,12 +43606,8 @@ function arrangeUnlock() {
       logLine(res.released ? `[arrange] loop ${res.released} released` : '[arrange] no loop to release');
       if (arState) drawArrange();
       // The grid window in hand was walked through the clock as it was - looping - so from here on
-      // it lights the loop's bars while playback runs on. Re-fetch from the current cycle; a
-      // top-up overwrites the cycles it covers.
-      if (res.released && patternRegions.length) {
-        gridWin[deck].to = Math.max(gridWin[deck].from, Math.floor(currentCyclePos(deck)));
-        maybePrefetchGrid(gridWin[deck].to, deck);
-      }
+      // it lights the loop's bars while playback runs on.
+      if (res.released) refetchGrid(deck);
     })
     .catch((e) => logLine(`[arrange] ${e.message}`, true));
 }

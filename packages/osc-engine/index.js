@@ -40,7 +40,7 @@ const {
   writeSclangConf,
 } = require('./private-sc');
 const { advertiseOsc } = require('./bonjour');
-const { desktopRouting } = require('./route-desktop');
+const { desktopRouting, loopLatencies } = require('./route-desktop');
 const { preparePluginScan, scanWarnings, joinPathList, noteProbe, noteProbeDone, markProbeCrashed } = require('./plugin-scan');
 const { ScanProgress } = require('./scan-progress');
 const { openEngineLog, engineLogPath } = require('./engine-log');
@@ -526,6 +526,10 @@ class OscEngine {
     // Each track's effect slots that have been filled, so a fresh Scheduler knows how far to empty
     // (effectSlots): a chain is as long as the code makes it.
     this._fxSlots = new Map();
+    // Each track's routing plan while it has a looped Delay in it, and the loop latencies last
+    // sent for it, by slot (see _sendLoops).
+    this._loopPlans = new Map();
+    this._loopSent = new Map();
     // The drawn lfo() shapes the engine holds, "trackId:slot:param" -> their key (_shapeTables).
     this._shapeKeys = new Map();
     this._shapeFileSerial = 0;
@@ -542,6 +546,14 @@ class OscEngine {
     // { byRef, loaded } - the browser's own bookkeeping for the same controls (see
     // _loadDeviceSample), so an index means the same file on both engines.
     this._deviceFiles = new Map();
+    // "track:slot|control" -> the lists handed to a device's list control: which option slot each
+    // is in, and when each slot was last pointed at (see _loadDeviceList). `_listEpochs` counts the
+    // devices a slot has held, so the scheduler knows when a list has to be handed over again.
+    this._deviceLists = new Map();
+    // "track:slot|control" -> the count each open count was last said to be (see _hintRoom).
+    this._roomHints = new Map();
+    this._listEpochs = new Map();
+    this._listEpoch = 0;
     // What reads a drawn curve: pattern-core's shape functions, installed by the host (it is an
     // ES module and this is not) - { looksLikeShapeData, parseShapePoints, sampleShape,
     // lookupShape }. Without one a curve cannot be set, and saying so is all that happens.
@@ -1160,6 +1172,8 @@ class OscEngine {
     }
     this._paramExprs.delete(trackId);
     this._fxSlots.delete(trackId);
+    this._loopPlans.delete(trackId);
+    this._loopSent.delete(trackId);
     this._send('/poptart/destroyTrack', [trackId]);
   }
   loadInstrument(trackId, pluginId) {
@@ -1194,10 +1208,12 @@ class OscEngine {
       // one of those resolves its argument as a plugin's would.
       if (position >= 0) this._rememberDevice(`${trackId}:${position}`, device);
       this._send('/poptart/loadDevice', [trackId, position, device.id, ...deviceParamArgs(device)]);
+      if (this._loopPlans.has(trackId)) this._sendLoops(trackId);
       return;
     }
     if (position >= 0) this._forgetDevice(`${trackId}:${position}`);
     this._send('/poptart/loadEffect', [trackId, pluginId, position]);
+    if (this._loopPlans.has(trackId)) this._sendLoops(trackId);
   }
   // Empties an effect slot: re-bypasses it and closes the plugin (freeing its memory).
   // Engine-side no-op if the slot is already empty.
@@ -1205,6 +1221,7 @@ class OscEngine {
     this._fxSlots.get(trackId)?.delete(slot);
     this._forgetDevice(`${trackId}:${slot}`);
     this._send('/poptart/unloadEffect', [trackId, slot]);
+    if (this._loopPlans.has(trackId)) this._sendLoops(trackId);
   }
 
   /** A slot is filled by one of poptart's own devices: its controls start where it says they do. */
@@ -1215,6 +1232,8 @@ class OscEngine {
     // evaluation reloads every chain, and resetting to the defaults here would undo the
     // `.param()` calls of the very evaluation doing the reloading.
     if (was?.id === device.id) return;
+    this._forgetLists(key);
+    this._listEpochs.set(key, ++this._listEpoch);
     this._devicePositions.set(key, devicePositions(device));
     this._deviceDriven.delete(key);
     // A different device in the slot is a different set of controls, so whatever was loaded onto
@@ -1229,6 +1248,8 @@ class OscEngine {
   /** The slot is empty, or holds a plugin: nothing of the device it held is still true. */
   _forgetDevice(key) {
     this._slotDevices.delete(key);
+    this._forgetLists(key);
+    this._listEpochs.delete(key);
     this._devicePositions.delete(key);
     this._deviceDriven.delete(key);
     for (const held of this._deviceFiles.keys()) {
@@ -1276,6 +1297,32 @@ class OscEngine {
     }
     const { warnings: _w, ...wire } = spec;
     this._send('/poptart/setRouting', [trackId, JSON.stringify(wire)]);
+    if (plan?.returns) this._loopPlans.set(trackId, plan); else this._loopPlans.delete(trackId);
+    this._sendLoops(trackId);
+  }
+
+  /**
+   * Tells the engine how late the chain in each looped Delay's feedback loop is, from the devices
+   * in it (the UGen adds its own block), and that a Delay whose loop has gone has none (-1). Sent
+   * when it changes: on a new plan, and when a device opens into or leaves one of the track's slots.
+   */
+  _sendLoops(trackId) {
+    const plan = this._loopPlans.get(trackId);
+    const want = plan
+      ? loopLatencies(plan, (p) => this._slotDevices.get(`${trackId}:${p}`)?.latencySec ?? 0)
+      : {};
+    const sent = this._loopSent.get(trackId) ?? new Map();
+    for (const [slot, sec] of Object.entries(want)) {
+      if (sent.get(Number(slot)) === sec) continue;
+      sent.set(Number(slot), sec);
+      this._send('/poptart/setRouting', [trackId, 'loop', Number(slot), sec]);
+    }
+    for (const slot of [...sent.keys()]) {
+      if (slot in want) continue;
+      sent.delete(slot);
+      this._send('/poptart/setRouting', [trackId, 'loop', slot, -1]);
+    }
+    if (sent.size) this._loopSent.set(trackId, sent); else this._loopSent.delete(trackId);
   }
 
   /** The highest effect slot the track has filled. */
@@ -1305,6 +1352,13 @@ class OscEngine {
         for (const [name, index] of one.named ?? []) files[control][index] = name;
       }
       if (one.tables) shapes = { ...(shapes ?? {}), ...one.tables };
+    }
+    // The lists a pattern handed over, named as the browser names them.
+    for (const [held, one] of this._deviceLists) {
+      if (!held.startsWith(`${key}|`)) continue;
+      const control = held.slice(key.length + 1);
+      files[control] = { ...(files[control] ?? {}) };
+      for (const [index, label] of one.labels) files[control][index] = label;
     }
     return {
       id: device.id,
@@ -1586,6 +1640,9 @@ class OscEngine {
         // takes, after the program so the control ends on the slot its file landed in.
         const held = this._devicePositions.get(`${trackId}:${slotIndex}`);
         if (held) Object.assign(held, read.positions);
+        // A state holds no lists (they are the pattern's, `saved: false`): the scheduler hands the
+        // device its lists again, whatever it last sent (see listParams).
+        if (this._slotDevices.has(`${trackId}:${slotIndex}`)) this._listEpochs.set(`${trackId}:${slotIndex}`, ++this._listEpoch);
         for (const [id, ref] of Object.entries(read.files)) {
           // A drawn curve is filed the same way as a file, under what `.param()` would say.
           const control = deviceParam(device, id);
@@ -1933,7 +1990,9 @@ class OscEngine {
   /**
    * One sampler event (see Scheduler#_scheduleNoteEdges). `cfg` carries the per-onset values of
    * the pattern's config signals plus `secPerCycle`: { index, begin, end, loop, speed, flip,
-   * stretch, fit ('auto' | measures), slice, slices (a hand-drawn set - start positions, or a map
+   * stretch, fit ('auto' | measures), fitMode (0 repitch | 1 stretch), atLength (the controls that
+   * read the sample's length, as .play() does - called with it once the file is known), slice,
+   * slices (a hand-drawn set - start positions, or a map
    * of them keyed by file - which `slice` then indexes instead of the file's own transients),
    * note, vel, attack, decay, sustain, release (seconds, bar sustain), envScale (multiplies the three times),
    * loopWrap (0 file | 1 window), loopDir (0 forward | 1 pingpong), secPerCycle }.
@@ -1970,6 +2029,31 @@ class OscEngine {
     // breaks, each with its own chops and its own fit.
     const authored = cfg.slices ? sliceEntryFor(cfg.slices, file.path) : null;
 
+    const eventSec = offsetSec - onsetSec;
+    // .splice(): the begin..end window - usually a slice's - is fitted to ITS OWN event, so
+    // "<0 1 2>*8" plays each chop as an 8th note whatever its natural length. Repitch (mode 0)
+    // bends the rate the way .fit() would; stretch (mode 1) warps the length and holds the pitch
+    // (nonunity stretch routes to the granular defs below). Both are the same factor applied to a
+    // different control, so .speed()/.note()/.stretch() keep multiplying on top exactly as they
+    // do unspliced - double speed fills half the event, .stretch(2) spans two of them.
+    const spliced = (cfg.splice ?? 0) > 0.5 && eventSec > 1e-6;
+    // The chain's own .fit() first, then whatever the slice set drew this sample against. The
+    // pattern always wins: a `.fit()` someone wrote is a statement about the part, while the set's
+    // is a property of the file, and the specific instruction beats the general one. A splice
+    // beats both: it and fit each set the rate from a length, and the per-event instruction wins
+    // over the per-file one.
+    const fit = spliced ? null : cfg.fit != null ? cfg.fit : authored?.fit ?? null;
+    // The file's natural length in cycles, and the length a fit makes it (null without one).
+    const measures = file.duration / cfg.secPerCycle;
+    let fitCycles = null;
+    if (fit != null) {
+      const target = fit === 'auto' ? 2 ** Math.round(Math.log2(measures)) : fit;
+      if (target > 0) fitCycles = target;
+    }
+    // .play(): the controls that read the sample's length - the fitted one, or the natural one -
+    // are read now that it is known (see pattern-core's withSampleLength).
+    if (typeof cfg.atLength === 'function') cfg = { ...cfg, ...cfg.atLength(fitCycles ?? measures) };
+
     let begin = clamp01(cfg.begin ?? 0);
     let end = clamp01(cfg.end ?? 1);
     if (cfg.slice != null) {
@@ -2001,9 +2085,6 @@ class OscEngine {
     // sign, their direction), which is what keeps .note(), .fit() and .flip() meaning what they do.
     const grain = (cfg.grain ?? 0) > 0.5;
     let stretch = !grain && cfg.stretch > 0 ? cfg.stretch : 1;
-    const spanSec = file.duration * (end - begin);
-    if (speed === 0 || spanSec <= 0) return { skipped: speed === 0 ? 'speed 0' : 'empty begin..end window' };
-    const eventSec = offsetSec - onsetSec;
     // The enum controls arrive as NUMBERS (.loopwrap()/.loopdir()/.splicemode() are ordinary
     // patternable channels): 0 = file/forward/repitch, 1 = window/pingpong/stretch. Rounded and
     // wrapped here as well as in the scheduler, so a direct engine call - or any raw value that
@@ -2014,31 +2095,25 @@ class OscEngine {
       return Number.isFinite(idx) ? wrap(idx, count) : 0;
     };
 
-    // .splice(): the begin..end window - usually a slice's - is fitted to ITS OWN event, so
-    // "<0 1 2>*8" plays each chop as an 8th note whatever its natural length. Repitch (mode 0)
-    // bends the rate the way .fit() would; stretch (mode 1) warps the length and holds the pitch
-    // (nonunity stretch routes to the granular defs below). Both are the same factor applied to a
-    // different control, so .speed()/.note()/.stretch() keep multiplying on top exactly as they
-    // do unspliced - double speed fills half the event, .stretch(2) spans two of them.
-    const spliced = (cfg.splice ?? 0) > 0.5 && eventSec > 1e-6;
+    const spanSec = file.duration * (end - begin);
+    if (speed === 0 || spanSec <= 0) return { skipped: speed === 0 ? 'speed 0' : 'empty begin..end window' };
     if (spliced) {
       if (mode(cfg.spliceMode ?? 0, 2) === 1) stretch *= eventSec / spanSec;
       else speed *= spanSec / eventSec;
     }
-    // The chain's own .fit() first, then whatever the slice set drew this sample against. The
-    // pattern always wins: a `.fit()` someone wrote is a statement about the part, while the set's
-    // is a property of the file, and the specific instruction beats the general one. A splice
-    // beats both: it and fit each set the rate from a length, and the per-event instruction wins
-    // over the per-file one.
-    const fit = spliced ? null : cfg.fit != null ? cfg.fit : authored?.fit ?? null;
-    if (fit != null) {
+    if (fitCycles != null) {
       // Fit is a property of the whole sample, not the begin..end window: the rate is set so
       // the FULL file lasts the target number of cycles, and begin/end/slice then select a
       // window at that fixed rate. Basing it on the window instead would make a randomized
       // .begin() (s("breaks").fit().vel("1!16").begin(irand(16).div(16))) repitch every hit.
-      const measures = file.duration / cfg.secPerCycle;
-      const target = fit === 'auto' ? 2 ** Math.round(Math.log2(measures)) : fit;
-      if (target > 0) speed *= measures / target;
+      // .fitmode("stretch") reaches the same length by the warp voice instead, pitch held - the
+      // same factor on the other control, as a splice does. A granular voice has no stretch to
+      // apply it to and already sounds for its event, so there it leaves the pitch alone.
+      if (mode(cfg.fitMode ?? 0, 2) === 1) {
+        if (!grain) stretch *= fitCycles / measures;
+      } else {
+        speed *= measures / fitCycles;
+      }
     }
     // Repitch anchor: MIDI 60 plays the file as recorded (the standard sampler root key). Mirrors
     // DEFAULT_SYNTH_NOTE in pattern-core's signal.mjs - the two are deliberately duplicated across
@@ -2146,7 +2221,7 @@ class OscEngine {
       grain && cfg.grainShape ? JSON.stringify(cfg.grainShape) : '',
     ]);
     return {
-      index: idx, begin, end, loop, speed, stretch, durSec, cut, amp, fileSec: file.duration, ...env,
+      index: idx, begin, end, loop, speed, stretch, durSec, cut, amp, fileSec: file.duration, fitCycles, ...env,
       loopWrap: windowed ? 'window' : 'file', loopDir: pingpong ? 'pingpong' : 'forward',
       ...(grain ? { grain: true, grainSize, grainRate } : {}),
     };
@@ -2230,6 +2305,11 @@ class OscEngine {
         this._loadDeviceShape(trackId, slotIndex, device, takesFile, value, targetTime);
         return;
       }
+      // A LIST - a cycle of levels, a scale - for a control that takes one: see _loadDeviceList.
+      if ((takesFile?.takes === 'list' || takesFile?.takes === 'scale') && value && typeof value === 'object' && value.list) {
+        this._loadDeviceList(trackId, slotIndex, device, takesFile, value.list, targetTime, value.label);
+        return;
+      }
       const position = paramPosition(device, paramName, value);
       if (position === null) {
         const control = deviceParam(device, paramName);
@@ -2244,6 +2324,10 @@ class OscEngine {
       if (control) {
         const held = this._devicePositions.get(`${trackId}:${slotIndex}`);
         if (held) held[control.id] = position;
+        // A count with no top (a filter bank's bands) is said to the device NOW, untimed, as well
+        // as at its time: the device makes room for it off the audio thread before the count is
+        // due, so a desktop bank never plays fewer bands than asked while it grows.
+        if (control.open && !control.options) this._hintRoom(trackId, slotIndex, device, control, position);
       }
       this._sendParam(trackId, slotIndex, paramName, position, targetTime);
       return;
@@ -2382,6 +2466,87 @@ class OscEngine {
     }
     this._sendDeviceShape(trackId, slotIndex, device, control, index, points, held, name ?? data);
     this.setParam(trackId, slotIndex, control.id, index, targetTime);
+  }
+
+  /** An open count on its way, said to the device ahead of its time (see setParam). Once per change. */
+  _hintRoom(trackId, slotIndex, device, control, position) {
+    const count = Math.max(control.min, Math.round(control.min + (control.max - control.min) * position));
+    const key = `${trackId}:${slotIndex}|${control.id}`;
+    if (this._roomHints.get(key) === count) return;
+    this._roomHints.set(key, count);
+    const paramIndex = device.params.findIndex((p) => p.id === control.id);
+    this._send('/poptart/deviceShape', [trackId, slotIndex, paramIndex, -1, count]);
+  }
+
+  /** Whatever lists the device in a slot was handed: gone with it. */
+  _forgetLists(key) {
+    for (const held of [...this._roomHints.keys()]) {
+      if (held.startsWith(`${key}|`)) this._roomHints.delete(held);
+    }
+    for (const held of [...this._deviceLists.keys()]) {
+      if (held.startsWith(`${key}|`)) this._deviceLists.delete(held);
+    }
+  }
+
+  /**
+   * The controls on a slot's device that take a LIST rather than a number (the catalog's takes
+   * 'list' and 'scale'), which the scheduler reads a whole cycle of a pattern for - or the track's
+   * scale - and sends as `{ list }`. The browser's listParams, rule for rule.
+   */
+  listParams(trackId, slotIndex) {
+    const key = `${trackId}:${slotIndex}`;
+    const device = this._slotDevices.get(key);
+    const wants = (device?.params ?? []).filter((p) => p.takes === 'list' || p.takes === 'scale');
+    if (!wants.length) return null;
+    const epoch = this._listEpochs.get(key) ?? 0;
+    return wants.map((p) => ({ id: p.id, name: p.name, takes: p.takes, epoch }));
+  }
+
+  /**
+   * A list for a control that takes one, handed to the device as a drawn curve is - its floats
+   * outright, over /poptart/deviceShape, into an option slot of its own - and the control pointed
+   * at that slot at `targetTime`, which is what puts the list on its beat: the table goes now, the
+   * select is timestamped like any control.
+   *
+   * The browser's _loadListParam, rule for rule (and its spareListSlot): the same list keeps its
+   * slot; a new one takes the first slot past the control's own entries that is neither the one in
+   * force now nor one pointed at for later.
+   */
+  _loadDeviceList(trackId, slotIndex, device, control, list, targetTime, label = null) {
+    const key = `${trackId}:${slotIndex}|${control.id}`;
+    let held = this._deviceLists.get(key);
+    if (!held) {
+      held = { byRef: new Map(), at: new Map(), labels: new Map() };
+      this._deviceLists.set(key, held);
+    }
+    const table = Array.from(list, (v) => Math.fround(Number(v) || 0));
+    const ref = table.join(',');
+    const now = this.getTime();
+    let index = held.byRef.get(ref);
+    if (index === undefined) {
+      let active = -1;
+      let activeAt = -Infinity;
+      for (const [slot, at] of held.at) if (at <= now && at > activeAt) { active = slot; activeAt = at; }
+      index = control.options ? control.options.length : 1;
+      for (;; index++) {
+        const at = held.at.get(index);
+        if (at === undefined || (index !== active && at <= now)) break;
+      }
+      for (const [other, at] of held.byRef) if (at === index) held.byRef.delete(other);
+      held.byRef.set(ref, index);
+      const paramIndex = device.params.findIndex((p) => p.id === control.id);
+      // An empty list cannot cross /shape (a curve of no points is no curve): a cycle of rests is
+      // sent as the one triple that covers nothing.
+      this._send('/poptart/deviceShape', [trackId, slotIndex, paramIndex, index, ...(table.length ? table : [0, 0, 0])]);
+    }
+    held.at.set(index, Math.max(held.at.get(index) ?? -Infinity, targetTime));
+    // What the window prints on the control: a scale's name, or "pattern" (see deviceSlot).
+    held.labels.set(index, label ?? 'pattern');
+    const position = paramPosition(device, control.id, index);
+    if (position === null) return;
+    const positions = this._devicePositions.get(`${trackId}:${slotIndex}`);
+    if (positions) positions[control.id] = position;
+    this._sendParam(trackId, slotIndex, control.id, position, targetTime);
   }
 
   /** A control's next free option slot past its own entries. The list grows by what is loaded. */
@@ -2790,13 +2955,15 @@ class OscEngine {
   }
 
   // Route a track's output to one or more named audio buses (Sig#bus). `sends` is an array of
-  // { name, amount }; the whole set replaces the track's current sends. sclang allocates each bus
-  // on first use (any number of tracks on the same name sum into it) and frees it when
+  // { name, amount, i }; the whole set replaces the track's current sends. The engine allocates
+  // each bus on first use (any number of tracks on the same name sum into it) and frees it when
   // unreferenced. The dry path is untouched (see the 'dry' channel param); read a bus's sum with
-  // the audio("name") head source (setInputSource io 'audio').
+  // the audio("name") head source (setInputSource io 'audio'). `i` is the send's index among the
+  // pattern's, which is how the routing plan names a send written inside the chain (see
+  // route-desktop.js): the engine taps that one where the plan says instead of after the strip.
   setBusSends(trackId, sends = []) {
-    const pairs = sends.flatMap(({ name, amount }) => [String(name), amount ?? 1]);
-    this._send('/poptart/setBusSends', [trackId, ...pairs]);
+    const triples = sends.flatMap(({ name, amount, i }, k) => [String(name), amount ?? 1, Number.isInteger(i) ? i : k]);
+    this._send('/poptart/setBusSends', [trackId, ...triples]);
   }
   clearBusSends(trackId) {
     this._send('/poptart/clearBusSends', [trackId]);

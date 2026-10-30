@@ -55,7 +55,20 @@ const LAYOUT = [
 
 // Sources and build scripts of the native helpers; the app needs what they built (native/*/bin)
 // and the SuperCollider class file that sits beside them, not these.
-const NATIVE_SOURCE = /\.(cpp|swift|sh)$/;
+const NATIVE_SOURCE = /\.(cpp|swift|sh|mjs)$/;
+
+// poptart's scsynth extensions for Windows and Linux: built by CI on each platform (release.yml,
+// tests.yml) into bin/<platform>-<arch>/ beside the committed macOS builds, and never committed -
+// so git ignores them and the tracked-file walk never sees them. They are staged from here, when
+// they are there, to the same place in the app the macOS ones go. `requireBuilt` (the
+// POPTART_REQUIRE_EXTENSIONS=1 the release workflow sets) makes a missing one for the platform
+// being built stop the build: an installer without them plays, and quietly has no devices and no
+// keylock, which is the bug this exists to fix.
+const BUILT = [
+  { from: 'packages/osc-engine/native/devices/bin', plugin: 'PoptartDevices' },
+  { from: 'packages/osc-engine/native/rubberband/bin', plugin: 'PoptartPitchShift' },
+];
+const BUILT_FOLDER = /^(win32|linux)-[A-Za-z0-9_]+$/;
 
 // Folders never copied out of a third-party module.
 const MODULE_JUNK = new Set(['node_modules', '.vscode', '.github', '.idea']);
@@ -159,11 +172,46 @@ function clearStage(outDir) {
  * @param {(repoRoot: string, paths: string[]) => string[]} [opts.listTracked] - tests
  * @param {(repoRoot: string, paths: string[]) => string[]} [opts.listUntracked] - tests
  */
+/**
+ * Copy the CI-built extension folders (BUILT) that exist into the stage. Returns the repository
+ * paths staged. With `requireBuilt`, a platform other than macOS must have both of its own.
+ */
+function stageBuilt({ repoRoot, outDir, requireBuilt, platform, arch }) {
+  const staged = [];
+  for (const { from, plugin } of BUILT) {
+    const entry = LAYOUT.find((e) => from.startsWith(`${e.from}/`));
+    const dir = native(repoRoot, from);
+    const folders = fs.existsSync(dir)
+      ? fs.readdirSync(dir, { withFileTypes: true }).filter((d) => d.isDirectory() && BUILT_FOLDER.test(d.name)).map((d) => d.name)
+      : [];
+    for (const folder of folders) {
+      for (const file of fs.readdirSync(path.join(dir, folder))) {
+        const rel = `${from}/${folder}/${file}`;
+        const dest = native(outDir, `${entry.to}/${rel.slice(entry.from.length + 1)}`);
+        fs.mkdirSync(path.dirname(dest), { recursive: true });
+        fs.copyFileSync(native(repoRoot, rel), dest);
+        staged.push(rel);
+      }
+    }
+    if (requireBuilt && platform !== 'darwin') {
+      const want = `${from}/${platform}-${arch}/${plugin}${platform === 'linux' ? '.so' : '.scx'}`;
+      if (!staged.includes(want)) {
+        throw new Error(`${want} is not there - build it first (node packages/web-engine/build/devices/native.mjs, `
+          + 'node packages/osc-engine/native/rubberband/build.mjs), or unset POPTART_REQUIRE_EXTENSIONS');
+      }
+    }
+  }
+  return staged;
+}
+
 function stage({
   repoRoot = REPO_ROOT,
   outDir = STAGE_DIR,
   listTracked = listTrackedWithGit,
   listUntracked = listUntrackedWithGit,
+  requireBuilt = false,
+  platform = process.platform,
+  arch = process.arch,
 } = {}) {
   clearStage(outDir);
   fs.mkdirSync(outDir, { recursive: true });
@@ -181,6 +229,9 @@ function stage({
     fs.copyFileSync(native(repoRoot, tracked), dest);
     files += 1;
   }
+  const built = stageBuilt({ repoRoot, outDir, requireBuilt, platform, arch });
+  files += built.length;
+
   // Every entry is a tracked path, so a miss means the listing is wrong, not the repository. It
   // must not pass quietly: electron-builder looks for a module the stage lacks in the folders
   // above it, finds the repository's own, and packages that instead.
@@ -237,16 +288,17 @@ function stage({
     const entry = LAYOUT.find((e) => file.startsWith(`${e.from}/`));
     return entry && ships(file.slice(entry.from.length + 1), entry);
   });
-  return { files, modules, untracked };
+  return { files, modules, untracked, built };
 }
 
-module.exports = { stage, ships, resolveModule, LAYOUT, MARKER };
+module.exports = { stage, ships, resolveModule, LAYOUT, MARKER, BUILT };
 
 if (require.main === module) {
   /* eslint-disable no-console */
   try {
-    const { files, modules, untracked } = stage();
+    const { files, modules, untracked, built } = stage({ requireBuilt: process.env.POPTART_REQUIRE_EXTENSIONS === '1' });
     console.log(`[poptart] staged ${files} files and ${modules.length} modules in ${path.relative(process.cwd(), STAGE_DIR) || '.'}`);
+    for (const file of built) console.log(`[poptart]   built here, not tracked: ${file}`);
     if (untracked.length) {
       // Not a warning: a new source file is the usual reason for one of these, and an app built
       // without it dies on launch. Files git IGNORES are not in this list - those are left out

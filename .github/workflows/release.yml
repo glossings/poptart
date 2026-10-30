@@ -112,8 +112,44 @@ jobs:
             echo "::warning title=Not notarized::A certificate is configured but no notarization key, so macOS will still refuse this dmg."
           fi
 
+      # poptart's own scsynth extensions - its devices and the decks' keylock - are committed for
+      # macOS only; the Windows app carries builds made here, by the runner's LLVM, into
+      # bin/win32-x64/ (stage.js ships them from there). tests.yml builds and tests the same thing
+      # on every push. POPTART_REQUIRE_EXTENSIONS makes the stage refuse to go on without them.
+      - name: Build the scsynth extensions
+        if: runner.os == 'Windows'
+        run: |
+          clang++ --version
+          node packages/web-engine/build/devices/native.mjs
+          node packages/osc-engine/native/rubberband/build.mjs
+          sh packages/osc-engine/native/check-plugins.sh
+          git diff --exit-code packages/osc-engine/native/devices/devices.json
+          echo "POPTART_REQUIRE_EXTENSIONS=1" >> "$GITHUB_ENV"
+
       - name: Build the installers
         run: npm run dist --prefix packages/desktop -- --publish never
+
+      # What the installer and the zip were made from: the app electron-builder unpacked. Both
+      # extensions have to be in it, as Windows builds, where extensions.js installs them from.
+      - name: The Windows app carries its extensions
+        if: runner.os == 'Windows'
+        working-directory: packages/desktop/dist/win-unpacked/resources/app/node_modules/@poptart/osc-engine
+        run: |
+          node - <<'EOF'
+          const { deviceLayout, pitchShiftLayout, binaryPlatform } = require('./extensions');
+          let ok = true;
+          for (const layout of [deviceLayout('win32', 'x64'), pitchShiftLayout('win32', 'x64')]) {
+            for (const file of Object.values(layout.sources)) {
+              const kind = file.endsWith('.scx') ? binaryPlatform(file) : (require('node:fs').existsSync(file) ? 'class file' : null);
+              console.log(`${file}: ${kind ?? 'MISSING'}`);
+              if (kind !== 'win32' && kind !== 'class file') ok = false;
+            }
+          }
+          if (!ok) {
+            console.log('::error title=Extensions missing from the app::The packaged app does not carry both Windows extensions.');
+            process.exit(1);
+          }
+          EOF
 
       - name: Remove the notarization key
         if: always() && runner.os == 'macOS'

@@ -23,6 +23,7 @@ import { fileURLToPath } from 'node:url';
 
 import { AIRWINDOWS, descriptorFrom, filesFor, upstreamPath } from './airwindows.mjs';
 import { cloudSeedDescriptor } from './cloudseed.mjs';
+import { extractTarGz } from './toolchain.mjs';
 import { stretchDescriptor } from './stretch.mjs';
 import {
   PLAITS_ENGINES, RINGS_MODELS,
@@ -93,7 +94,7 @@ async function repoAt(repo, sha) {
   const res = await fetch(`https://codeload.github.com/${repo}/tar.gz/${sha}`, { headers: { 'user-agent': 'poptart-devices' } });
   if (!res.ok) throw new Error(`could not fetch ${repo}@${sha}: ${res.status} ${res.statusText}`);
   fs.writeFileSync(archive, Buffer.from(await res.arrayBuffer()));
-  execFileSync('tar', ['xzf', archive, '-C', root, '--exclude=.gitmodules', '--exclude=.gitignore', '--exclude=.gitattributes']);
+  extractTarGz(archive, root, { exclude: ['.gitmodules', '.gitignore', '.gitattributes'] });
   fs.rmSync(archive, { force: true });
 
   const unpacked = fs.readdirSync(root).find((e) => fs.statSync(path.join(root, e)).isDirectory());
@@ -581,7 +582,8 @@ async function mutableRecipes({ lock, repin }) {
   const linked = path.join(euro, 'stmlib');
   if (!fs.existsSync(path.join(linked, 'stmlib.h'))) {
     fs.rmSync(linked, { recursive: true, force: true });
-    fs.symlinkSync(stmlib, linked, 'dir');
+    // A junction on Windows: the same thing to the compiler, and no privilege needed to make one.
+    fs.symlinkSync(stmlib, linked, process.platform === 'win32' ? 'junction' : 'dir');
   }
 
   const plaits = plaitsDescriptor(`https://github.com/${EURORACK_REPO} (plaits)`);

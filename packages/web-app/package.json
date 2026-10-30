@@ -10,8 +10,9 @@
     "test": "node --test"
   },
   "dependencies": {
-    "@poptart/pattern-core": "*",
     "@poptart/osc-engine": "*",
+    "@poptart/pattern-core": "*",
+    "acorn": "^8.19.0",
     "codemirror": "^5.65.16"
   }
 }

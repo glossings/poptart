@@ -53,7 +53,7 @@ const PANEL_GLIDE_SEC = 0.03;
  * says when they change: a granulator's grains move on their own, and an auto gain works out
  * its own correction.
  */
-const LIVE_FIGURES = new Set(['sample', 'meter', 'transfer', 'eq', 'shaper', 'sweep', 'duck']);
+const LIVE_FIGURES = new Set(['sample', 'meter', 'transfer', 'eq', 'shaper', 'sweep', 'duck', 'bands']);
 
 class Unsupported extends Error {
   constructor(what, why) {
@@ -443,6 +443,8 @@ export function createHost({
    * that this slot has been edited. Nothing is read out of the device here - see takeCapture.
    */
   function noteDeviceEdit(label, slot, param, arg) {
+    // A control a state never holds (a looper's Record) is played, not edited: nothing to file.
+    if (param.saved === false) return;
     if (conf?.label === label) {
       conf.touched.set(`${slot}:${param.id}`, { slot, name: param.name, id: param.id, value: arg });
       return;
@@ -491,6 +493,9 @@ export function createHost({
       // that set those same controls are now a second, quieter copy of the preset - and the one
       // that wins, since a polled control is re-sent every tick. The editor drops them.
       replacesParams: true,
+      // Gestures rather than settings (a looper's Record): never in the capture, so a `.param()`
+      // setting one is the only thing saying it and stays.
+      keepParams: state.descriptor.params.filter((p) => p.saved === false).flatMap((p) => [p.id, p.name]),
     });
   }
 
@@ -639,9 +644,13 @@ export function createHost({
     // ---- the editor's inline widgets (pattern-core's widget-host.mjs, shared with the desktop) --
 
     // A control moved: its signal reads the new value on its next poll, no evaluation needed.
-    'POST /api/widgets/set': async (body) => ({
-      ok: patternCore.setWidgetValue(body?.deck === 'b' ? 'b' : 'a', Number(body?.at), body?.value),
-    }),
+    'POST /api/widgets/set': async (body) => {
+      const deck = body?.deck === 'b' ? 'b' : 'a';
+      const ok = patternCore.setWidgetValue(deck, Number(body?.at), body?.value, body?.lit);
+      // The hand let go: a .record() on this control ends its take (see pattern-core's motion.mjs).
+      if (body?.release) patternCore.releaseWidget?.(deck, Number(body?.at));
+      return { ok };
+    },
     'GET /api/widgets/window': async (_body, query) => evaluator.widgets?.window(query.get('deck') === 'b' ? 'b' : 'a', query.get('from'), query.get('count'))
       ?? { from: 0, count: 0, views: [] },
     // Polled while a display of sound is on screen, which is also what keeps its tap armed.
@@ -976,7 +985,8 @@ export function createHost({
       });
       // Never anything pending: an edit is taken the moment its window closes, which is now, so
       // there is no held gesture for the editor to warn about the way there is on the desktop.
-      return { edits, logs: drainNotes(), pending: 0, holds };
+      // Takes a control's .record() finished since the last poll (see pattern-core's motion.mjs).
+      return { edits, logs: drainNotes(), pending: 0, holds, motionTakes: patternCore.takeMotionTakes?.() ?? [] };
     },
 
     // A click in the buffer: every open window's slot goes back to its pattern (see holdSlot).

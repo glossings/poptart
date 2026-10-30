@@ -15,7 +15,7 @@ const {
 const {
   Impulse, Sweep, Phasor, LFDNoise0, LFDNoise3, Latch, Gate, Trig1, PulseCount, ToggleFF, Peak,
   RunningMax, RunningSum, OnePole, LPF, HPF, RLPF, RHPF, BPF, Line, K2A, A2K, Convolution2,
-  Delay1, DelayN, Ramp, Select, SampleRate, SampleDur, ControlRate, ControlDur, BlockSize,
+  Delay1, DelayN, VarLag, Select, SampleRate, SampleDur, ControlRate, ControlDur, BlockSize,
   BufFrames, BufRateScale, BufSampleRate, PlayBuf, BufRd, Warp1, GrainBuf, DC, Silent, In,
   InFeedback, LocalIn, Out, ReplaceOut, OffsetOut, LocalOut, BufWr, DiskOut, LocalBuf, EnvGen, Env,
   LinXFade2, Balance2, SendReply, SendPeakRMS, SoundIn, Mix, VSTPlugin, PoptartDevice,
@@ -52,36 +52,59 @@ function djIsolator(input, lo, mid, hi) {
   return LinXFade2.ar(input, wet, lag(sub(mul(on, 2), 1), 0.05));
 }
 
+// poptart.scd's chanIn: a channel control read at the sample rate - its control (lagged) or,
+// while an audio-rate driver is on it, that driver's audio bus `<name>Ar`. A set value is held
+// to setLo..setHi, a driven one to drivenLo..drivenHi (null: not held). With `both`, [audio, control].
+function chanIn(def, name, value, lagTime = 0, setLo = null, setHi = null, drivenLo = null, drivenHi = null, both = false) {
+  const k = def.namedKr(name, value);
+  const bus = def.namedKr(`${name}Ar`, -1);
+  const on = ge(bus, 0);
+  let set = lagTime > 0 ? lag(k, lagTime) : k;
+  let driven = In.ar(max(bus, 0), 1);
+  if (setLo != null) set = clip(set, setLo, setHi);
+  if (drivenLo != null) driven = clip(driven, drivenLo, drivenHi);
+  const ar = Select.ar(on, [K2A.ar(set), driven]);
+  if (!both) return ar;
+  return [ar, Select.kr(on, [set, A2K.kr(driven)])];
+}
+
 function headDef(o) {
   return new SynthDef('poptart_head', {
-    inBus: 0, out: 0, gain: 1, bend: 0, bendrange: 2, bendOut: 0,
+    inBus: 0, out: 0, bendrange: 2, bendOut: 0,
     grainpos: 0, grainsize: 0.08, grainrate: 20, grainpan: 0, grainOut: 0,
-  }, (c) => {
-    const bendV = clip(lag(c.bend, 0.01), -48, 48);
-    ReplaceOut.kr(c.bendOut, bendV);
-    const bendOn = gt(abs(bendV), 1e-4);
+  }, (c, def) => {
+    const [bendV, bendKr] = chanIn(def, 'bend', 0, 0.01, -48, 48, null, null, true);
+    ReplaceOut.kr(c.bendOut, bendKr);
+    const bendOn = gt(abs(bendKr), 1e-4);
     SendReply.kr(
       mul(Impulse.kr(o.bendPollHz), min(add(bendOn, Trig1.kr(sub(1, bendOn), 0.1)), 1)),
-      '/poptart/bendOut', [bendV, c.bendrange]);
+      '/poptart/bendOut', [bendKr, c.bendrange]);
     ReplaceOut.kr(c.grainOut, [c.grainpos, c.grainsize, c.grainrate, c.grainpan]);
     const sig = add(add(VSTPlugin.ar([], 2, { id: 'slot0' }),
       o.nativeDevices ? PoptartDevice.ar([], 2, bendV, null, 'nslot0') : Silent.ar(2)),
     In.ar(c.inBus, 2));
-    Out.ar(c.out, mul(sig, clip(lag(c.gain, 0.02), 0, 4)));
+    Out.ar(c.out, mul(sig, chanIn(def, 'gain', 1, 0.02)));
   });
 }
 
 function fxDef(o) {
-  return new SynthDef('poptart_fx', { in: 0, out: 0, scBus: 0, active: 0, native: 0, wet: 1 }, (c) => {
+  return new SynthDef('poptart_fx', { in: 0, out: 0, scBus: 0, active: 0, native: 0, ret: 0, loop: 0 }, (c, def) => {
     const jin = In.ar(c.in, 2);
     const scIn = In.ar(c.scBus, 2);
     const plugin = VSTPlugin.ar(new Ref([[jin[0], jin[1]], [scIn[0], scIn[1]]]), 2, { id: 'slot' });
-    const device = o.nativeDevices
-      ? PoptartDevice.ar([jin[0], jin[1]], 2, 0, [scIn[0], scIn[1]], 'nslot')
-      : Silent.ar(2);
-    const pick = add(mul(plugin, sub(1, c.native)), mul(device, c.native));
-    const mix = clip(lag(mul(c.active, c.wet), 0.02), 0, 1);
+    // A looped Delay's return rides on the key, the block before (InFeedback); its repeats leave
+    // on the device's second pair (see poptart.scd's buildFxDef).
+    let device;
+    if (o.nativeDevices) {
+      const back = InFeedback.ar(c.ret, 2);
+      device = PoptartDevice.ar([jin[0], jin[1]], 4, 0, [add(scIn[0], back[0]), add(scIn[1], back[1])], 'nslot');
+    } else {
+      device = Silent.ar(4);
+    }
+    const pick = add(mul(plugin, sub(1, c.native)), mul(device.slice(0, 2), c.native));
+    const mix = mul(lag(c.active, 0.02), chanIn(def, 'wet', 1, 0.02, 0, 1));
     Out.ar(c.out, add(mul(jin, sub(1, mix)), mul(pick, mix)));
+    Out.ar(c.loop, device.slice(2, 4));
   });
 }
 
@@ -106,19 +129,23 @@ const directBus = (out, pairs) => mul(mod(sub(round(out), 1), max(pairs, 1)), 2)
 
 function stripDef() {
   return new SynthDef('poptart_track_shared', {
-    in: 0, post: 0, ctl: 0, postgain: 1, pan: 0, width: 1, out: 1, pairs: 1, dry: 1,
+    in: 0, post: 0, ctl: 0, out: 1, pairs: 1,
     fader: 1, deck: 1, mon: 0, direct: 1,
-  }, (c) => {
+  }, (c, def) => {
     const faderAmt = clip(lag(c.fader, 0.08), 0, 1);
     const mainAmt = sub(1, clip(lag(c.mon, 0.05), 0, 1));
     const deckAmt = clip(lag(c.deck, 0.08), 0, 1);
-    const dryAmt = lag(c.dry, 0.02);
     let sig = In.ar(c.in, 2);
     const mid = mul(add(sig[0], sig[1]), 0.5);
-    const side = mul(mul(sub(sig[0], sig[1]), 0.5), clip(lag(c.width, 0.02), 0, 4));
-    sig = mul(Balance2.ar(add(mid, side), sub(mid, side), clip(lag(c.pan, 0.02), -1, 1),
-      clip(lag(c.postgain, 0.02), 0, 4)), SQRT2);
-    ReplaceOut.kr(c.ctl, [faderAmt, mainAmt, deckAmt, dryAmt, c.out, c.pairs]);
+    const side = mul(mul(sub(sig[0], sig[1]), 0.5), chanIn(def, 'width', 1, 0.02, 0, 4, 0, 4));
+    // The pan law's gains once a block off the control, or per sample off panAr (poptart_panlaw).
+    const panBus = def.namedKr('panAr', -1);
+    const panGains = Select.ar(ge(panBus, 0), [K2A.ar(Balance2.kr(1, 1, clip(lag(def.namedKr('pan', 0), 0.02), -1, 1), 1)),
+      In.ar(max(panBus, 0), 2)]);
+    const panned = [mul(add(mid, side), panGains[0]), mul(sub(mid, side), panGains[1])];
+    sig = mul(panned, mul(chanIn(def, 'postgain', 1, 0.02), SQRT2));
+    const [dryAmt, dryKr] = chanIn(def, 'dry', 1, 0.02, null, null, null, null, true);
+    ReplaceOut.kr(c.ctl, [faderAmt, mainAmt, deckAmt, dryKr, c.out, c.pairs]);
     Out.ar(c.post, sig);
     Out.ar(directBus(c.out, c.pairs), mul(sig, mul(mul(mul(mul(faderAmt, deckAmt), mainAmt), dryAmt), c.direct)));
   });
@@ -128,9 +155,11 @@ function djDef() {
   return new SynthDef('poptart_dj', {
     in: 0, ctl: 0, trim: 1, eqlo: 1, eqmid: 1, eqhi: 1, djf: 0, djres: 0,
     cue: 0, cueBus: 0, mdeck: -1, meterBus: 0, fxOut: 0, fxSend: 0,
-  }, (c) => {
+  }, (c, def) => {
     const k = In.kr(c.ctl, 6);
-    const [faderAmt, mainAmt, deckAmt, dryAmt, out, pairs] = k;
+    const [faderAmt, mainAmt, deckAmt, , out, pairs] = k;
+    const dryBus = def.namedKr('dryAr', -1);
+    const dryAmt = Select.ar(ge(dryBus, 0), [K2A.ar(k[3]), In.ar(max(dryBus, 0), 1)]);
     let live = djIsolator(mul(In.ar(c.in, 2), clip(lag(c.trim, 0.08), 0, 4)),
       clip(lag(c.eqlo, 0.08), 0, 2), clip(lag(c.eqmid, 0.08), 0, 2), clip(lag(c.eqhi, 0.08), 0, 2));
     const djv = clip(lag(c.djf, 0.15), -1, 1);
@@ -155,12 +184,16 @@ function tapDef() {
 }
 
 function bassMonoDef() {
-  return new SynthDef('poptart_bassmono', { in: 0, out: 0, bassmono: 0 }, (c) => {
+  return new SynthDef('poptart_bassmono', { in: 0, out: 0 }, (c, def) => {
     const sig = In.ar(c.in, 2);
     const mid = mul(add(sig[0], sig[1]), 0.5);
     let side = mul(sub(sig[0], sig[1]), 0.5);
-    side = LinXFade2.ar(side, HPF.ar(side, clip(lag(c.bassmono, 0.05), 20, 2000)),
-      lag(sub(mul(gt(c.bassmono, 0), 2), 1), 0.05));
+    const k = def.namedKr('bassmono', 0);
+    const bus = def.namedKr('bassmonoAr', -1);
+    const driven = In.ar(max(bus, 0), 1);
+    const freq = clip(Select.ar(ge(bus, 0), [K2A.ar(lag(k, 0.05)), driven]), 20, 2000);
+    const on = Select.ar(ge(bus, 0), [K2A.ar(gt(k, 0)), DC.ar(1)]);
+    side = LinXFade2.ar(side, HPF.ar(side, freq), lag(sub(mul(on, 2), 1), 0.05));
     Out.ar(c.out, [add(mid, side), sub(mid, side)]);
   });
 }
@@ -240,7 +273,9 @@ function envArDef() {
 
 function rampDef() {
   return new SynthDef('poptart_ramp', { out: 0, target: 0, time: 0.03 }, (c) => {
-    Out.kr(c.out, Ramp.kr(c.target, c.time));
+    // VarLag, not Ramp: Ramp re-reads its target only once per `time`, so a new value could wait
+    // up to that long before moving; VarLag sets off toward it in the block it arrives.
+    Out.kr(c.out, VarLag.kr(c.target, c.time));
   });
 }
 
@@ -342,13 +377,19 @@ function samplerDefs(nc, o) {
     out: 0, bufL: 0, bufR: 0, begin: 0, rate: 1, gate: 1, amp: 1,
     atk: 0, dec: 0, sus: 1, rel: 0, bend: 0,
     grainpos: 0, grainsize: 0.08, grainrate: 20, grainpan: 0, posLive: 0, win: -1,
-  }, (c) => {
-    const size = clip(c.grainsize, 0.002, 4);
-    const density = clip(c.grainrate, 0.1, 1000);
+  }, (c, def) => {
+    // Per sample off a driver's bus `<name>Ar` while one is on (see poptart.scd).
+    const perSample = (k, name) => {
+      const bus = def.namedKr(name, -1);
+      return Select.ar(ge(bus, 0), [K2A.ar(k), In.ar(max(bus, 0), 1)]);
+    };
+    const size = clip(perSample(c.grainsize, 'grainsizeAr'), 0.002, 4);
+    const density = clip(perSample(c.grainrate, 'grainrateAr'), 0.1, 1000);
     const trig = Impulse.ar(density);
-    const pos = clip(Select.kr(c.posLive, [c.begin, c.grainpos]), 0, 1);
-    const pitch = mul(c.rate, midiratio(c.bend));
-    const pan = clip(c.grainpan, -1, 1);
+    const begin = K2A.ar(c.begin);
+    const pos = clip(Select.ar(c.posLive, [begin, perSample(c.grainpos, 'grainposAr')]), 0, 1);
+    const pitch = mul(c.rate, midiratio(perSample(c.bend, 'bendAr')));
+    const pan = clip(perSample(c.grainpan, 'grainpanAr'), -1, 1);
     const sig = nc === 1
       ? mul(GrainBuf.ar(2, trig, size, c.bufL, pitch, pos, 4, pan, c.win, o.grainMaxOverlap), SQRT2)
       : add(GrainBuf.ar(2, trig, size, c.bufL, pitch, pos, 4, clip(sub(mul(2, pan), 1), -1, 1), c.win, o.grainMaxOverlap),
@@ -509,13 +550,19 @@ function ioDefs(o) {
   defs.push(new SynthDef('poptart_rec_disk', { bus: 0, buf: 0 }, (c) => {
     DiskOut.ar(c.buf, In.ar(c.bus, 2));
   }));
-  defs.push(new SynthDef('poptart_term', { in: 0, out: 0, gain: 0 }, (c) => {
+  defs.push(new SynthDef('poptart_term', { in: 0, out: 0, gain: -1 }, (c) => {
     const sig = In.ar(c.in, 2);
-    const g = In.kr(c.gain, 2);
-    Out.ar(c.out, Balance2.ar(sig[0], sig[1], g[1], mul(g[0], SQRT2)));
+    const g = In.ar(max(c.gain, 0), 2);
+    const on = ge(c.gain, 0);
+    const level = Select.ar(on, [DC.ar(1), g[0]]);
+    const pos = Select.ar(on, [DC.ar(0), g[1]]);
+    Out.ar(c.out, mul(Balance2.ar(sig[0], sig[1], pos, 1), mul(level, SQRT2)));
   }));
-  defs.push(new SynthDef('poptart_gainkr', { out: 0, level: 1, pan: 0 }, (c) => {
-    ReplaceOut.kr(c.out, [c.level, c.pan]);
+  defs.push(new SynthDef('poptart_gainkr', { out: 0 }, (c, def) => {
+    Out.ar(c.out, [chanIn(def, 'level', 1), chanIn(def, 'pan', 0)]);
+  }));
+  defs.push(new SynthDef('poptart_panlaw', { in: 0, out: 0 }, (c) => {
+    Out.ar(c.out, Balance2.ar(DC.ar(1), DC.ar(1), clip(In.ar(c.in, 1), -1, 1), 1));
   }));
   defs.push(new SynthDef('poptart_xokr', { out: 0, value: 0 }, (c) => {
     ReplaceOut.kr(c.out, c.value);

@@ -42,7 +42,7 @@ test('the strip and the DJ stage build, with and without a cue pair, and the neu
     const dj = defs.get('poptart_dj');
     assert.ok(strip && dj, `missing defs with cueOffset ${cueOffset}`);
     assert.deepStrictEqual(dj.paramNames.map((p) => p.name),
-      ['in', 'ctl', 'trim', 'eqlo', 'eqmid', 'eqhi', 'djf', 'djres', 'cue', 'cueBus', 'mdeck', 'meterBus', 'fxOut', 'fxSend']);
+      ['in', 'ctl', 'trim', 'eqlo', 'eqmid', 'eqhi', 'djf', 'djres', 'cue', 'cueBus', 'mdeck', 'meterBus', 'fxOut', 'fxSend', 'dryAr']);
   }
   const { E } = fakeEngine();
   for (const [name, expected] of DEFAULT_CASES) assert.strictEqual(E.channelDefault(name), expected, `channelDefault("${name}")`);

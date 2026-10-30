@@ -219,7 +219,15 @@ export function findWidgetCalls(code, masking = null) {
     let k = open + 1;
     while (k < src.length && /\s/.test(src[k])) k++;
     const lit = litAt.get(k);
-    out.push({ kind: name, name, at, open, method, input, lit: lit ? lit.contentStart : -1 });
+    const call = { kind: name, name, at, open, method, input, lit: lit ? lit.contentStart : -1 };
+    // A matrix's rows are each their own literal, inside the object: where each one's text starts,
+    // by row name, so a row's cells can carry the spans the highlighter lights, as steps() cells do.
+    if (name === 'matrix' && src[k] === '{') {
+      const rows = {};
+      for (const r of matrixRows(src, k)) if (r.form === 'text' && !(r.key in rows)) rows[r.key] = r.from;
+      if (Object.keys(rows).length) call.rows = rows;
+    }
+    out.push(call);
   }
   return out;
 }
@@ -229,6 +237,7 @@ export function findWidgetCalls(code, masking = null) {
  * to, text]` triples over `code`, with document offsets made absolute by `base`.
  *
  *   slider(0.5, 0, 1)   ->  _input([AT, LIT], 'slider', 0.5, 0, 1)
+ *   matrix({ bd: "x" })  ->  _input([AT, -1, { bd: ROW }], 'matrix', { bd: "x" })
  *   x.scope()           ->  x._display(AT, 'scope', )
  *   scope()             ->  _display(AT, 'scope', )
  *
@@ -239,8 +248,9 @@ export function widgetCallEdits(code, base = 0, masking = null) {
   for (const c of findWidgetCalls(code, masking)) {
     const at = base + c.at;
     const lit = c.lit >= 0 ? base + c.lit : -1;
+    const rows = c.rows ? `, ${JSON.stringify(Object.fromEntries(Object.entries(c.rows).map(([k, v]) => [k, base + v])))}` : '';
     const text = c.input
-      ? `_input([${at}, ${lit}], '${c.kind}', `
+      ? `_input([${at}, ${lit}${rows}], '${c.kind}', `
       : `_display(${at}, '${c.kind}', `;
     edits.push([c.at, c.open + 1, text]);
   }
@@ -625,6 +635,88 @@ export function optionDrop(kind, parsed, key) {
   return { from: arg.from + from, to: arg.from + to, text: '' };
 }
 
+
+// ---------------------------------------------------------------------------- .record()
+
+/**
+ * Every `.record(...)` written on a pattern in `code`, in document order: `{ at, open, close }`,
+ * `at` where the name starts and `open`/`close` the call's parentheses. Only the dotted spelling
+ * counts, and nothing inside a string or a comment. An unclosed call has `close` -1.
+ */
+export function findRecordCalls(code, masking = null) {
+  const src = String(code);
+  const { masked } = masking ?? maskCode(src);
+  const out = [];
+  const re = /record\s*\(/g;
+  let m;
+  while ((m = re.exec(masked))) {
+    const at = m.index;
+    if (at > 0 && /[\w$]/.test(masked[at - 1])) continue;
+    let j = at;
+    while (j > 0 && /\s/.test(masked[j - 1])) j--;
+    if (j === 0 || masked[j - 1] !== '.') continue;
+    const open = at + m[0].length - 1;
+    out.push({ at, open, close: callArgs(src, open, masked)?.close ?? -1 });
+  }
+  return out;
+}
+
+/**
+ * The transpile's tag on each `.record(` call, so a take recorded by a control can find the call
+ * that made it: `x.record({ cycles: 2 })` -> `x._record(AT, { cycles: 2 })`. `[from, to, text]`
+ * triples like widgetCallEdits's.
+ */
+export function recordCallEdits(code, base = 0, masking = null) {
+  return findRecordCalls(code, masking).map((c) => [c.at, c.open + 1, `_record(${base + c.at}, `]);
+}
+
+// The `take: "..."` entry of a `.record()` call's options object, as offsets into `code`.
+function takeEntry(code, open) {
+  const parsed = callArgs(code, open);
+  if (!parsed) return null;
+  const arg = parsed.args[0] ?? null;
+  if (!arg || arg.text[0] !== '{') return { parsed, arg, lit: null };
+  const { masked } = maskCode(arg.text);
+  const m = /(?:^|[{,\s])take\s*:\s*/.exec(masked);
+  if (!m) return { parsed, arg, lit: null };
+  const vs = m.index + m[0].length;
+  const q = arg.text[vs];
+  if (q !== '"' && q !== "'" && q !== '`') return { parsed, arg, lit: null, code: true };
+  const end = arg.text.indexOf(q, vs + 1);
+  if (end < 0) return { parsed, arg, lit: null };
+  return { parsed, arg, lit: { from: arg.from + vs + 1, to: arg.from + end, text: arg.text.slice(vs + 1, end) } };
+}
+
+/** The take a `.record(` call whose `(` is at `open` names - its `take: "..."` - or null. */
+export function recordTakeName(code, open) {
+  return takeEntry(String(code), open)?.lit?.text ?? null;
+}
+
+/**
+ * The one edit that makes the `.record(` call whose `(` is at `open` name the take `name`:
+ * `{ from, to, text }` over `code`, or null when the call is not closed. A `take` already written is
+ * renamed in place; otherwise the entry is added to the options object (made when there is none,
+ * and from a bare length - `.record(2)` - when that is what is written).
+ */
+export function recordTakeEdit(code, open, name) {
+  const src = String(code);
+  const e = takeEntry(src, open);
+  if (!e) return null;
+  const lit = JSON.stringify(String(name));
+  if (e.lit) return { from: e.lit.from, to: e.lit.to, text: String(name) };
+  const { parsed, arg } = e;
+  if (!arg) return { from: open + 1, to: parsed.close, text: `{ take: ${lit} }` };
+  if (arg.text[0] === '{') {
+    const close = arg.text.lastIndexOf('}');
+    const inner = arg.text.slice(1, close);
+    if (!inner.trim()) return { from: arg.from, to: arg.to, text: `{ take: ${lit} }` };
+    let end = close;
+    while (end > 1 && /\s/.test(arg.text[end - 1])) end--;
+    const comma = arg.text[end - 1] === ',' ? ' ' : ', ';
+    return { from: arg.from + end, to: arg.from + end, text: `${comma}take: ${lit}` };
+  }
+  return { from: arg.from, to: arg.to, text: `{ cycles: ${arg.text}, take: ${lit} }` };
+}
 
 // ---------------------------------------------------------------------------- .color()
 

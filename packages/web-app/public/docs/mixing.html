@@ -43,12 +43,28 @@ bell: s("pt_keys:1").note("&lt;g4 bb4 c5 d5&gt;*2").pan("-0.6 0.6").postgain(0.3
           <code>.bsend()</code> does both at once. Both arguments pattern, so
           <code>.bus("&lt;verb delay&gt;")</code> re-routes as it goes.
         </p>
+        <p>
+          The send leaves the chain where it is written. After the last device it is the track's
+          output. Before a device it taps the signal at that point, so what follows stays out of the
+          send: a delay feeding back on itself can keep its reverb out of the loop.
+        </p>
+        <pre data-run><code>delay: audio("delay").fx("Delay").bus("feedback", 0.4).fx("Reverb")
+feedback: audio("feedback").bsend("delay")</code></pre>
         <pre data-run><code>pad: note("c3 e3 g3").synth("Wavetable")
   .width(0.6)
   .pan("&lt;-0.5 0.5&gt;")
   .bus("space", 0.3).postgain(0.5)
 
 verb: audio("space").fx("Reverb").param("Mix", 1).postgain(0.8)</code></pre>
+        <p>
+          A function as the Delay's second argument is a chain inside its feedback loop: every
+          repeat goes through it once more, so a highpass thins each echo further. Its devices are
+          on the track like any other. The way round is taken off the delay time, so the repeats
+          stay on the beat; a time shorter than the way round is held at it.
+        </p>
+        <pre data-run><code>dub: s("~ cp ~ ~").postgain(0.4)
+  .fx("Delay", (x) => x.fx("Filter").param("Mode", "highpass").param("Cutoff", 0.4))
+  .param("Feedback", 0.75)</code></pre>
 
         <h2 id="routing">Sources and sidechains</h2>
         <p>

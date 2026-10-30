@@ -38,7 +38,9 @@ function extractBuildTrackDef() {
   assert.ok(m, 'could not find buildTrackDef in sc/poptart.scd');
   const iso = src.match(/^djIsolator = \{[\s\S]*?^\};$/m);
   assert.ok(iso, 'could not find djIsolator in sc/poptart.scd');
-  return `${iso[0]}\n${m[0]}`;
+  const chan = src.match(/^chanIn = \{[\s\S]*?^\};$/m);
+  assert.ok(chan, 'could not find chanIn in sc/poptart.scd');
+  return `${chan[0]}\n${iso[0]}\n${m[0]}`;
 }
 
 test('the strip is unity at center and constant-power everywhere', (t) => {
@@ -54,7 +56,7 @@ test('the strip is unity at center and constant-power everywhere', (t) => {
     [0.0, ${JSON.stringify(['/s_new', 'poptart_track_t', 2000 + i, 1, 0, ...args])}],`;
     }).join('\n');
     const script = `(
-var playChannels = ${POSITIONS.length * 2}, server, trackDefName, bendPollHz = 100, cueOffset, deckMeterBus, buildTrackDef, djIsolator, routeNowhere = 1000000;
+var playChannels = ${POSITIONS.length * 2}, server, trackDefName, bendPollHz = 100, cueOffset, deckMeterBus, buildTrackDef, djIsolator, chanIn, routeNowhere = 1000000;
 var stripDef, dcDef;
 ${fs.existsSync(scsynth) ? `Score.program = ${JSON.stringify(scsynth)}.quote;` : ''}
 server = (options: (numOutputBusChannels: ${POSITIONS.length * 2}));

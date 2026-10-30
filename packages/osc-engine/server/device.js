@@ -276,6 +276,14 @@ class DeviceController {
     this.sendMsg('/noteRoute', i32(routed ? 1 : 0));
   }
 
+  /**
+   * How late a chain in the device's feedback loop comes back, in seconds (its devices; the UGen
+   * adds its block), or below zero for none.
+   */
+  loopLatency(seconds = -1) {
+    this.sendMsg('/loopLatency', f32(seconds));
+  }
+
   editor() {
     this._post(`poptart: ${this.deviceName ?? 'this device'} has no plugin editor - its panel is poptart's own`);
   }

@@ -388,3 +388,91 @@ test('an engine with no routing plays the chain in series and says so once', () 
   });
   assert.equal(r.lines.filter((l) => /cannot run \.split\(\)/.test(l)).length, 1);
 });
+
+// ---- a chain in a Delay's feedback loop ----------------------------------------------------------
+
+const loop = (p) => ({ k: 'loop', p });
+const dub = () => note('c2').synth('X').fx('Delay', (x) => x.fx('Filter').param('Mode', 'highpass'));
+
+test('a function on .fx("Delay") is a chain in its loop: numbered before the Delay, read off its loop output', () => {
+  const sig = dub().param('Feedback', 0.8).fx('Reverb');
+  assert.deepEqual(sig.fxChain, ['Filter', 'Delay', 'Reverb']);
+  assert.deepEqual(Object.keys(sig.paramSignals), ['1:Mode', '2:Feedback'], 'a .param() after the call reaches the Delay');
+  const { plan } = routePlan(sig);
+  assert.deepEqual(plan.order, [2, 1, 3]);
+  assert.deepEqual(plan.reads[2].s, IN);
+  assert.deepEqual(plan.reads[1].s, loop(2), 'the chain reads the Delay\'s repeats');
+  assert.deepEqual(plan.returns, { 2: { s: slot(1), g: 0 } }, 'and comes back into its return');
+  assert.deepEqual(plan.reads[3].s, slot(2), 'the rest of the chain goes on from the Delay\'s own output');
+  assert.deepEqual(plan.out.s, slot(3));
+});
+
+test('{ loop } is the same as a function, and keeps its label', () => {
+  const a = routePlan(note('c2').synth('X').fx('Delay', { loop: (x) => x.fx('Filter'), label: 'dub' }));
+  const b = routePlan(note('c2').synth('X').fx('Delay', (x) => x.fx('Filter')));
+  assert.deepEqual(a.plan, b.plan);
+  assert.equal(note('c2').synth('X').fx('Delay', { loop: (x) => x.fx('Filter'), label: 'dub' }).slotLabels[2], 'dub');
+});
+
+test('a loop branches like a split branch: a split inside it, and its own .postgain() on the way back', () => {
+  const sig = note('c2').synth('X').fx('Delay', (x) => x.split((a) => a.fx('A'), (b) => b.fx('B')).postgain(0.5));
+  const { plan, controls } = routePlan(sig);
+  assert.deepEqual(plan.reads[1].s, loop(3));
+  assert.deepEqual(plan.reads[2].s, loop(3));
+  const back = plan.returns[3];
+  assert.equal(back.s.k, 'sum');
+  assert.ok(back.g > 0, 'the loop\'s level is a route control on the return');
+  assert.equal(controls[`rl${back.g}`].sample(0, 1, 0), 0.5);
+});
+
+test('a loop inside a .split() branch and a .bus() inside a loop are placed where they are written', () => {
+  const sig = note('c2').synth('X').split((x) => x, (b) => b.fx('Delay', (l) => l.fx('A').bus('fb')));
+  const { plan } = routePlan(sig);
+  assert.deepEqual(plan.returns[2].s, slot(1));
+  assert.deepEqual(plan.sends[0].s, slot(1), 'the send taps the loop\'s end');
+});
+
+test('the loop adds nothing to the chain\'s latency compensation: the Delay takes it off its time', () => {
+  const { plan } = routePlan(dub().fx('Reverb'));
+  assert.deepEqual(routeLatencies(plan, [0, 0.1, 0, 0]), [0, 0.1, 0, 0, 0]);
+});
+
+test('a function that returns no chain, an empty loop, and a device with no loop all play the plain Delay', () => {
+  const plain = routePlan(note('c2').synth('X').fx('Delay'));
+  for (const fn of [() => 42, (x) => x]) {
+    const { value, lines } = capture(() => note('c2').synth('X').fx('Delay', fn));
+    assert.deepEqual(value.fxChain, ['Delay']);
+    assert.equal(routePlan(value), plain);
+    if (fn.length === 0) assert.match(lines.join('\n'), /loop returned number/);
+  }
+  const { value, lines } = capture(() => note('c2').synth('X').fx('Reverb', (x) => x.fx('Filter')));
+  assert.deepEqual(value.fxChain, ['Reverb']);
+  assert.match(lines.join('\n'), /no feedback loop/);
+  const odd = capture(() => note('c2').synth('X').fx('Delay', { loop: 3 }));
+  assert.deepEqual(odd.value.fxChain, ['Delay']);
+  assert.match(odd.lines.join('\n'), /loop is a function/);
+});
+
+test('re-evaluation keeps an unchanged loop; changing or removing the function rewires it', () => {
+  const { engine, callsTo } = mockEngine();
+  const sched = new Scheduler(engine, { trackId: 't' });
+  sched.setPattern(dub());
+  assert.ok(callsTo('setRouting')[0].args[1].returns, 'the loop is sent');
+  sched.setPattern(dub());
+  assert.equal(callsTo('setRouting').length, 1, 'an unchanged loop is not sent again');
+  sched.setPattern(note('c2').synth('X').fx('Delay', (x) => x.fx('Distort')));
+  assert.equal(callsTo('setRouting').length, 1, 'another device in the same place is the same wiring');
+  assert.deepEqual(callsTo('loadEffect').at(-2).args.slice(1), ['Distort', 1], 'with the new device in its slot');
+  sched.setPattern(note('c2').synth('X').fx('Delay', (x) => x.fx('Distort').fx('Filter')));
+  assert.equal(callsTo('setRouting').length, 2, 'a loop of another shape is wired again');
+  sched.setPattern(note('c2').synth('X').fx('Delay'));
+  assert.equal(callsTo('setRouting').at(-1).args[1], null, 'without the function the Delay is back on the plain line');
+  assert.deepEqual(callsTo('loadEffect').at(-1).args.slice(1), ['Delay', 1], 'and the Delay in the first slot');
+});
+
+test('a fresh Scheduler on a track that had a loop sends its own plain wiring', () => {
+  const { engine, callsTo } = mockEngine();
+  new Scheduler(engine, { trackId: 't' }).setPattern(dub());
+  new Scheduler(engine, { trackId: 't' }).setPattern(note('c2').synth('X').fx('Delay'));
+  assert.equal(callsTo('setRouting').at(-1).args[1], null);
+});

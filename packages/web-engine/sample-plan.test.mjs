@@ -5,6 +5,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { detectOnsets, planSample, sliceEntryFor } from './src/engine/sample-plan.mjs';
+import * as core from '../pattern-core/src/index.mjs';
 import { FakeAudioContext, fakeWorkletFor } from './fake-context.mjs';
 import { catalog } from './src/catalog.mjs';
 import { WebAudioEngine } from './src/engine/web-audio-engine.mjs';
@@ -128,4 +129,54 @@ test('a recording cut as a held note loops its sustain section until the note en
   assert.ok(src.stopped.when > 5, 'held to the note\'s end and released after it');
   // Asked to play backwards, or told to loop, it does as it is told instead.
   assert.equal(engine.playSample('t1', 'keys', { note: 60, loop: 0, speed: -1 }, 0, 5).sustainLoop, undefined);
+});
+
+test('fit by stretch holds the rate and reports its length', () => {
+  const p = planSample(file, { fit: 4, fitMode: 1, secPerCycle: 2 }, 0, 1);
+  assert.ok(near(p.speed, 1) && near(p.stretch, 2), 'two cycles of file over four: stretch 2, rate 1');
+  assert.equal(p.fitCycles, 4);
+  assert.equal(planSample(file, { secPerCycle: 2 }, 0, 1).fitCycles, null);
+});
+
+// .play() as the scheduler sends it: begin left to the engine through cfg.atLength (see
+// pattern-core's withSampleLength), worked out here with the event's sample length.
+function beginsOf(sig, from, to, f = { duration: 4.8, rootNote: 60 }) {
+  const seen = [];
+  const sched = new core.Scheduler(new Proxy(
+    { getTime: () => 0, playSample: (trackId, pack, cfg) => { seen.push(cfg); } },
+    { get: (t, k) => (k in t ? t[k] : () => {}) },
+  ), { trackId: 't', cps: 0.5 });
+  sched.setPattern(sig);
+  sched._scheduleNoteEdges(from, to);
+  return seen.map((cfg) => {
+    const p = planSample(f, cfg, 0, 2);
+    assert.equal(p.end, 1, 'each plays on to the end of the file, cut at its event');
+    return p.begin;
+  });
+}
+const close = (a, b, what) => assert.ok(Math.abs(a - b) < 1e-6, `${what}: ${a}, not ${b}`);
+
+test('.play() plays one slice per cycle, over the fitted length', () => {
+  beginsOf(core.s('breaks').fit(4, 'stretch').play(), 0, 4).forEach((b, k) => close(b, k / 4, `cycle ${k}`));
+  // The auto fit: 4.8 s at 2 s a cycle is 2.4 cycles, rounded to 2.
+  beginsOf(core.s('breaks').fit().play(), 0, 3).forEach((b, k) => close(b, (k % 2) / 2, `auto, cycle ${k}`));
+});
+
+test('.play() from cycle 5 reads 5/L; without a fit L is the natural, fractional length', () => {
+  close(beginsOf(core.s('breaks').fit(8).play(), 5, 6)[0], 5 / 8, 'fit(8), cycle 5');
+  close(beginsOf(core.s('breaks').play(), 1, 2)[0], 1 / 2.4, 'natural 2.4 cycles, cycle 1');
+  close(beginsOf(core.s('breaks').play(), 3, 4)[0], 3 / 2.4 - 1, 'natural, wrapped');
+});
+
+test('.play() composes with arithmetic on begin, and .seg(4) plays four slices a cycle', () => {
+  close(beginsOf(core.s('breaks').fit(4).play().mul(core.begin(0.5)), 3, 4)[0], 0.375, 'mul');
+  close(beginsOf(core.s('breaks').fit(4).play().add(core.begin(0.125)), 1, 2)[0], 0.375, 'add');
+  beginsOf(core.s('breaks').fit(8).play().seg(4), 1, 2).forEach((b, k) => close(b, (1 + k / 4) / 8, `seg, step ${k}`));
+});
+
+test('a control mixing the sample length with dur() reads the event\'s own dur() when the engine resolves it', () => {
+  // A one-cycle event at 2 s a cycle lasts 2 s: begin = frac(t / L) + dur() * 0.1 = 1/4 + 0.2.
+  close(beginsOf(core.s('breaks').fit(4).play().add(core.begin(core.dur().mul(0.1))), 1, 2)[0], 0.45, 'play + dur');
+  // .play().add(dur().mul(0)) is .play().
+  close(beginsOf(core.s('breaks').fit(4).play().add(core.begin(core.dur().mul(0))), 1, 2)[0], 0.25, 'play + 0 * dur');
 });

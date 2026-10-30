@@ -15,6 +15,8 @@ import { FMSYNTH } from './devices/fmsynth.mjs';
 import { GRANULAR } from './devices/granular.mjs';
 import { NOISE } from './devices/noise.mjs';
 import { LPG } from './devices/lpg.mjs';
+import { FILTERBANK } from './devices/filterbank.mjs';
+import { RESONATOR } from './devices/resonator.mjs';
 import { DISTORT } from './devices/distort.mjs';
 import { CRUSH } from './devices/crush.mjs';
 import { OVERDRIVE } from './devices/overdrive.mjs';
@@ -33,6 +35,7 @@ import { MULTIBAND } from './devices/multiband.mjs';
 import { LIMITER } from './devices/limiter.mjs';
 import { DUCKER } from './devices/ducker.mjs';
 import { STUTTER } from './devices/stutter.mjs';
+import { LOOPER } from './devices/looper.mjs';
 import { NODE_DEVICES } from './devices/builtins.mjs';
 import { AIRWINDOWS_DEVICES } from './devices/airwindows.mjs';
 import { CLOUDSEED_DEVICES } from './devices/cloudseed.mjs';
@@ -42,8 +45,8 @@ import { MUTABLE_DEVICES } from './devices/mutable.mjs';
 /** Every device, newest version of each. Ordered as the browser lists them. */
 export const DEVICES = Object.freeze([
   WAVETABLE, FMSYNTH, GRANULAR, NOISE,
-  FILTER, EQ, LPG, DISTORT, CRUSH, OVERDRIVE, COMPRESSOR, MULTIBAND, LIMITER, DUCKER,
-  DELAY, GRAINECHO, STUTTER, CHORUS, FLANGER, PHASER, FREQSHIFT, VOICE, REVERB, ...NODE_DEVICES,
+  FILTER, EQ, FILTERBANK, RESONATOR, LPG, DISTORT, CRUSH, OVERDRIVE, COMPRESSOR, MULTIBAND, LIMITER, DUCKER,
+  DELAY, GRAINECHO, STUTTER, LOOPER, CHORUS, FLANGER, PHASER, FREQSHIFT, VOICE, REVERB, ...NODE_DEVICES,
   ...AIRWINDOWS_DEVICES, ...CLOUDSEED_DEVICES, ...STRETCH_DEVICES, ...MUTABLE_DEVICES,
 ]);
 

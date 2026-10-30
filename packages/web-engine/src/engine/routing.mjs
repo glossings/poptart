@@ -19,10 +19,14 @@ const srcKey = (s) => (s.k === 'in' ? 'in' : s.k === 'sum' ? `m${s.id}` : `${s.k
  *   input        the chain input (the `gain` control's node)
  *   output       where the strip starts (the `postgain` node)
  *   slotIO(p)    the slot's ends, built fresh for this wiring: { input: [nodes], output } and, for
- *                a Crossover, `rest` and `ap` (its other two outputs) and `key` ({ node, input })
+ *                a Crossover, `rest` and `ap` (its other two outputs) and `key` ({ node, input });
+ *                for a device with a feedback loop, `loop` (its second output) and `ret` ({ node,
+ *                input }, where the loop's chain comes back in)
  *   gainStage(k) the persistent controls for gain k: { level, panL, panR } nodes to connect from
+ *   sendPoint(i) where .bus() send i, written inside the chain, leaves from: a node the track
+ *                keeps, which this wiring feeds with what the plan says the send taps
  */
-export function buildRouting(ctx, plan, { input, output, slotIO, gainStage }) {
+export function buildRouting(ctx, plan, { input, output, slotIO, gainStage, sendPoint = null }) {
   const made = [];       // nodes this build created, disconnected wholesale by the next one
   const fed = [];        // [persistent node, AudioParam] links into this build's nodes
   const make = (node) => { made.push(node); return node; };
@@ -79,6 +83,8 @@ export function buildRouting(ctx, plan, { input, output, slotIO, gainStage }) {
     // A crossover's other two outputs - silence from a slot that is not one, or not loaded yet.
     else if (s.k === 'rest') node = slotOf(s.p).rest ?? gainNode(0);
     else if (s.k === 'ap') node = slotOf(s.p).ap ?? gainNode(0);
+    // A looped device's repeats, on their way into its loop's chain.
+    else if (s.k === 'loop') node = slotOf(s.p).loop ?? gainNode(0);
     else if (s.k === 'sum') {
       node = gainNode(1);
       memo.set(key, node);
@@ -90,6 +96,27 @@ export function buildRouting(ctx, plan, { input, output, slotIO, gainStage }) {
   };
 
   refNode(plan.out).connect(output);
+  // The sends written inside the chain, each through a node of this build so the next one can
+  // take the feed away without touching the point itself.
+  for (const [i, ref] of Object.entries(plan.sends ?? {})) {
+    const point = sendPoint?.(Number(i));
+    if (!point) continue;
+    const feed = gainNode(1);
+    refNode(ref).connect(feed);
+    feed.connect(point);
+  }
+
+  // Each loop's chain back into its device. The edge closes a cycle, so it goes through a delay of
+  // 0, which every browser holds to one render quantum (see route-graph.mjs) - the block the device
+  // is told about (see loopLatencies).
+  for (const [p, ref] of Object.entries(plan.returns ?? {})) {
+    const io = slotOf(/^\d+$/.test(p) ? Number(p) : p);
+    if (!io.ret) continue;
+    const back = make(ctx.createDelay(0.05));
+    back.delayTime.value = 0;
+    refNode(ref).connect(back);
+    back.connect(io.ret.node, 0, io.ret.input);
+  }
 
   return {
     teardown() {
@@ -97,4 +124,38 @@ export function buildRouting(ctx, plan, { input, output, slotIO, gainStage }) {
       for (const node of made) { try { node.disconnect(); } catch { /* already detached */ } }
     },
   };
+}
+
+/**
+ * How late the chain in each looped device's feedback loop is, from its devices alone, by slot:
+ * the longest way from the device's loop output to what its return reads, each device on the way
+ * adding `latencyOf(slot)` seconds. The track adds the render quantum the return is held to. A
+ * device inside the loop with a loop of its own counts for its input only: its own loop is its
+ * own to take off. The desktop's route-desktop.js works it out the same way.
+ */
+export function loopLatencies(plan, latencyOf) {
+  const out = {};
+  if (!plan?.returns) return out;
+  const slotOf = (p) => (/^\d+$/.test(String(p)) ? Number(p) : p);
+  const own = (p) => { const v = Number(latencyOf(slotOf(p))); return v > 0 ? v : 0; };
+  for (const p of Object.keys(plan.returns)) {
+    const memo = new Map();
+    const from = (s) => {
+      const key = srcKey(s);
+      if (memo.has(key)) return memo.get(key);
+      memo.set(key, -Infinity);
+      let v = -Infinity;
+      if (s.k === 'loop' && String(s.p) === String(p)) v = 0;
+      else if (s.k === 'sum') for (const t of plan.sums?.[s.id] ?? []) v = Math.max(v, from(t.s));
+      else if (s.k !== 'in') {
+        for (const r of [plan.reads?.[s.p], plan.keys?.[s.p]]) if (r) v = Math.max(v, from(r.s));
+        if (v > -Infinity) v += own(s.p);
+      }
+      memo.set(key, v);
+      return v;
+    };
+    const v = from(plan.returns[p].s);
+    out[slotOf(p)] = v > 0 ? v : 0;
+  }
+  return out;
 }

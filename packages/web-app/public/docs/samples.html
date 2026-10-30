@@ -131,6 +131,8 @@ hats: s("oh*8").vel("1 .5")
         <table>
           <tr><th>Write</th><th>Does</th></tr>
           <tr><td><code>.fit(2)</code> · <code>.fit()</code></td><td>repitch so the file lasts two cycles · the nearest power of two</td></tr>
+          <tr><td><code>.fit("stretch")</code></td><td>the same length, pitch held</td></tr>
+          <tr><td><code>.thru()</code></td><td>play the file through, an event's worth per event</td></tr>
           <tr><td><code>.slice("0 1 2 3")</code></td><td>play the nth chop (transients, found automatically)</td></tr>
           <tr><td><code>.splice("&lt;0 1 2&gt;*8")</code></td><td>each chop fitted to its hit; <code>.splicemode("stretch")</code> keeps the pitch</td></tr>
           <tr><td><code>.slices("break")</code></td><td>use the chops you drew (below)</td></tr>
@@ -146,6 +148,13 @@ kick: s("bd*4").postgain(0.4)</code></pre>
         <p>
           If a fitted loop drops out, the region ran out before the step ended: <code>.loop()</code> it,
           or use shorter steps. <code>.log()</code> prints the numbers for every hit.
+        </p>
+        <p>
+          A long file, a vocal or a whole take, plays out with
+          <code>s("files:vocal.wav").fit("stretch").play()</code>: it plays the sample through one
+          slice per cycle, each cycle starting where it points in the file, so play from any cycle
+          lands on the right part. With a whole-number fit every pass starts on the bar.
+          <code>.log()</code> says how many cycles it came to.
         </p>
 
         <details>

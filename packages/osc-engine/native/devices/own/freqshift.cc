@@ -80,17 +80,16 @@ struct Device : pd_own::Device<ids::kCount> {
   }
 
   void pd_process(int frames) {
-    const int direction = jsRoundInt(p[ids::direction]);
-    // +1 keeps the upper sideband, -1 the lower; split sends the two channels opposite ways.
-    const double signL = direction == 1 ? -1 : 1;
-    const double signR = direction == 0 ? 1 : -1;
+    // The sign of the frequency is the direction: the oscillator runs backwards for a shift
+    // down, which keeps the lower sideband. Wide runs the right channel's the other way.
+    const double signR = p[ids::wide] >= 0.5f ? -1 : 1;
     const float* inl = inL();
     const float* inr = inR();
     float* outl = outL();
     float* outr = outR();
     for (int i = 0; i < frames; ++i) {
       phase += ctl(ids::freq, i) / sampleRate;
-      if (phase >= 1) phase -= std::floor(phase);
+      phase -= std::floor(phase);
       const double w = 2 * M_PI * phase;
       const double c = std::cos(w);
       const double s = std::sin(w);
@@ -98,7 +97,7 @@ struct Device : pd_own::Device<ids::kCount> {
       const double mix = ctl(ids::mix, i);
       const double l = inl[i];
       const double r = inr[i];
-      const double wetL = shift(0, l, c, s * signL, feedback);
+      const double wetL = shift(0, l, c, s, feedback);
       const double wetR = shift(1, r, c, s * signR, feedback);
       outl[i] = static_cast<float>(l + (wetL - l) * mix);
       outr[i] = static_cast<float>(r + (wetR - r) * mix);

@@ -60,6 +60,8 @@ export function createWidgetHost({ engine, engineId = (_deck, key) => key, cycle
       from,
       count,
       inputs: taken.inputs.map(({ input: _i, ...w }) => w),
+      // The `.record(` calls that record a control's movement (see motion.mjs).
+      records: taken.records ?? [],
       views: d.views.map((v) => reportOf(v, from, count)),
     };
   }
@@ -209,9 +211,9 @@ export function createWidgetHost({ engine, engineId = (_deck, key) => key, cycle
     }
   }
 
-  /** A control moved: `value` as setWidgetValue takes it. */
-  function set(deck, at, value) {
-    return setWidgetValue(deck, at, value);
+  /** A control moved: `value` and `lit` as setWidgetValue takes them. */
+  function set(deck, at, value, lit) {
+    return setWidgetValue(deck, at, value, lit);
   }
 
   return { afterEval, window, frames, set };

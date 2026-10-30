@@ -8,7 +8,7 @@ import { catalog } from './src/catalog.mjs';
 import { WebAudioEngine } from './src/engine/web-audio-engine.mjs';
 import { EnvConnection, LfoConnection } from './src/engine/modulators.mjs';
 import {
-  compileExpr, exprConsts, exprInputCount, exprMapUnit, exprShape, renderExpr,
+  compileExpr, exprConsts, exprHasFollower, exprInputCount, exprMapUnit, exprShape, renderExpr,
 } from './src/dsp/expr.mjs';
 
 function makeEngine() {
@@ -219,4 +219,122 @@ test('a tree the engine cannot build warns and leaves the parameter as it was', 
   engine.setParamExpr('lead', 0, 'Osc 1 Phase', op('nonesuch', c(1), c(2)));
   assert.ok(warnings.some((w) => w.includes('Osc 1 Phase') && w.includes('nonesuch')));
   assert.equal(phase.connectedFrom.length, 0);
+});
+
+// ---- the lags: env("x"), the envelope follower, and .smooth(t) ------------------------------
+
+const envFollow = (x, atk, rel) => ({ k: 'fn', op: 'env', a: [x, atk, rel] });
+const smooth = (x, t) => ({ k: 'fn', op: 'smooth', a: [x, t] });
+
+test('a follower rises over its attack and falls over its release, each to within 60 dB', () => {
+  const sr = 1000;
+  const run = compileExpr(envFollow(leaf(0, 'ar'), c(0.1), c(0.5)), undefined, { sampleRate: sr });
+  let y = run([0]);
+  for (let n = 0; n < 100; n++) y = run([1]);
+  assert.ok(Math.abs(y - 0.999) < 1e-4, `after the attack time it is within 60 dB of 1 (${y})`);
+  for (let n = 0; n < 500; n++) y = run([0]);
+  assert.ok(Math.abs(y - 0.999 * 0.001) < 1e-5, `after the release time it is within 60 dB of 0 (${y})`);
+});
+
+test('a follower reads the rectified level, clipped at full scale', () => {
+  const run = compileExpr(envFollow(leaf(0, 'ar'), c(0), c(0)), undefined, { sampleRate: 48000 });
+  assert.equal(run([-0.5]), 0.5, 'zero times pass the rectified input straight through');
+  assert.equal(run([3]), 1, 'clipped at 1');
+  assert.equal(run([NaN]), 0, 'a NaN reads 0');
+});
+
+test('a follower keeps its level when its times change, and a time below 0 is 0', () => {
+  const tree = envFollow(leaf(0, 'ar'), c(0.01), c(1));
+  const consts = exprConsts(tree);
+  const run = compileExpr(tree, consts, { sampleRate: 48000 });
+  for (let n = 0; n < 4800; n++) run([1]);
+  consts[1] = -2; // release now instant
+  assert.ok(run([1]) > 0.999, 'the level carried over');
+  assert.equal(run([0.25]), 0.25, 'a negative release falls at once');
+});
+
+test('smooth glides both ways by one time, starts at its input, and 0 passes through', () => {
+  const sr = 1000;
+  const run = compileExpr(smooth(leaf(0), c(0.2)), undefined, { sampleRate: sr });
+  assert.equal(run([0.5]), 0.5, 'no glide in from 0');
+  let y;
+  for (let n = 0; n < 200; n++) y = run([1.5]);
+  assert.ok(Math.abs(y - (1.5 - 0.001)) < 1e-4, `up: within 60 dB of the step after the time (${y})`);
+  for (let n = 0; n < 200; n++) y = run([-1.5]);
+  assert.ok(Math.abs(y - (-1.5 + 3 * 0.001)) < 1e-4, `down the same, unclipped and signed (${y})`);
+  const passed = compileExpr(smooth(leaf(0), c(0)), undefined, { sampleRate: sr });
+  assert.deepEqual([passed([0.2]), passed([-0.7])], [Math.fround(0.2), Math.fround(-0.7)]);
+});
+
+test('an env follower of a source wires the source onto its input, and new times reach the running node', () => {
+  const { engine, rec } = patchRig();
+  const tree = op('add', op('mul', envFollow(src(0, 'a'), c(0.01), c(0.25)), c(0.6)), c(0.2));
+  engine.setParamExpr('lead', 0, 'Osc 1 Phase', tree);
+  const node = rec().node;
+  assert.ok(engine.tracks.get('a').panner.links.some((l) => l.target === node && l.input === 0));
+  const slower = op('add', op('mul', envFollow(src(0, 'a'), c(0.05), c(0.5)), c(0.6)), c(0.2));
+  engine.setParamExpr('lead', 0, 'Osc 1 Phase', slower);
+  assert.equal(rec().node, node, 'same shape: the follower keeps running');
+  assert.deepEqual(node.messages.at(-1), { consts: [0.05, 0.5, 0.6, 0.2] });
+  engine.clearParamExpr('lead', 0, 'Osc 1 Phase');
+  assert.equal(rec(), undefined, 'cleared');
+});
+
+test('an env follower of a source that is not there warns, and its input reads 0', async () => {
+  const { engine, rec, warnings } = patchRig();
+  engine.setParamExpr('lead', 0, 'Osc 1 Phase', envFollow(src(0, 'nobody'), c(0.01), c(0.25)));
+  await new Promise((r) => setTimeout(r, 10));
+  assert.ok(warnings.some((w) => w.includes('nobody')), warnings.join('\n'));
+  assert.equal(rec().sources.size, 0);
+  assert.equal(compileExpr(envFollow(leaf(0, 'ar'), c(0.01), c(0.25)))([]), 0, 'an unconnected input reads 0');
+});
+
+test('a polled value reaches an expression input over the desktop ramp time', () => {
+  const { ctx, engine, rec } = patchRig();
+  engine.setParamExpr('lead', 0, 'Osc 1 Phase', smooth(leaf(0), c(0.2)));
+  engine.setParam('lead', 0, '~0~Osc 1 Phase', 1, ctx.currentTime + 1);
+  const offset = rec().inputs.get(0).offset;
+  const ramp = offset.calls.find((e) => e.kind === 'ramp');
+  assert.ok(ramp, 'a ramp, not a step');
+  assert.ok(Math.abs(ramp.time - (ctx.currentTime + 1.03)) < 1e-9, `ends 30 ms after the step (${ramp.time})`);
+});
+
+test('an input read only under a smooth arrives as a step, so smooth(0) is a step', () => {
+  const { ctx, engine, rec } = patchRig();
+  engine.setParamExpr('lead', 0, 'Osc 1 Phase', op('add', smooth({ ...leaf(0), step: 1 }, c(0)), leaf(1)));
+  engine.setParam('lead', 0, '~0~Osc 1 Phase', 1, ctx.currentTime + 1);
+  engine.setParam('lead', 0, '~1~Osc 1 Phase', 1, ctx.currentTime + 1);
+  const stepped = rec().inputs.get(0).offset.calls;
+  assert.ok(stepped.some((e) => e.kind === 'set' && e.value === 1), 'the smoothed input is set, not ramped');
+  assert.ok(!stepped.some((e) => e.kind === 'ramp'));
+  assert.ok(rec().inputs.get(1).offset.calls.some((e) => e.kind === 'ramp'), 'an input outside the smooth still ramps');
+});
+
+test('a follower reads a stereo pair by its linked peak, so an out-of-phase pair reads its level', () => {
+  const tree = envFollow(src(0, 'a'), c(0), c(0));
+  assert.ok(exprHasFollower(tree));
+  const L = Float32Array.of(0.5, -0.8, 0.25);
+  const R = L.map((v) => -v);
+  const out = new Float32Array(3);
+  const sides = () => [new Float64Array(1), new Float64Array(1), new Float64Array(1)];
+  renderExpr(compileExpr(tree), [[L, R]], out, ...sides());
+  assert.deepEqual([...out], [0.5, 0.800000011920929, 0.25], 'R = -L reads |L|, where (L + R) / 2 would read 0');
+  // Built with arithmetic, the same: each side goes through the arithmetic on its own.
+  const scaled = envFollow(op('add', op('mul', src(0, 'a'), c(0.5)), c(0)), c(0), c(0));
+  renderExpr(compileExpr(scaled), [[L, R]], out, ...sides());
+  assert.deepEqual([...out], [0.25, 0.4000000059604645, 0.125]);
+  // Anything that is not a follower still reads the pair's mid.
+  renderExpr(compileExpr(op('mul', src(0, 'a'), c(1))), [[L, R]], out, ...sides());
+  assert.deepEqual([...out], [0, 0, 0]);
+  // A mono source is unchanged.
+  renderExpr(compileExpr(tree), [[L]], out, ...sides());
+  assert.deepEqual([...out], [0.5, 0.800000011920929, 0.25]);
+});
+
+test('a node with a follower takes both channels of its inputs', () => {
+  const { engine, rec } = patchRig();
+  engine.setParamExpr('lead', 0, 'Osc 1 Phase', envFollow(op('mul', src(0, 'a'), c(2)), c(0.01), c(0.25)));
+  assert.equal(rec().node.options.channelCount, 2);
+  engine.setParamExpr('lead', 0, 'Osc 1 Phase', smooth(src(0, 'a'), c(0.01)));
+  assert.equal(rec().node.options.channelCount, 1);
 });

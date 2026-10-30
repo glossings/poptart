@@ -615,3 +615,76 @@ test('every argument of a granular event encodes as OSC', () => {
   engine.playSample('t1', 'breaks', { grain: 1, grainSize: 1, grainRate: 40.5, secPerCycle: 2 }, 0, 0.5);
   for (const v of sent[0]) assert.ok(typeof v === 'string' || Number.isFinite(v), `argument ${v}`);
 });
+
+// ---------------------------------------------------------------------------------------------
+// fit by stretch (cfg.fitMode 1) and .play() - the whole file reached by the warp voice instead of
+// the rate, and a long file played through across successive events. The pattern-core half is
+// pinned in pattern-core's log.test.mjs.
+// ---------------------------------------------------------------------------------------------
+
+test('fitmode 1 reaches the fitted length by stretch: the rate holds and stretch takes the factor', () => {
+  // 4.8s at 2s/cycle = 2.4 measures, auto -> 2: stretch 2/2.4 and speed 1, so the file lasts 4s.
+  const { engine, sent } = engineWithFile(4.8);
+  engine.playSample('t1', 'breaks', { fit: 'auto', fitMode: 1, secPerCycle: 2 }, 0, 0.125);
+  const args = sent.pop().args;
+  assert.strictEqual(args[ARG.speed], 1, 'pitch untouched');
+  assert.ok(Math.abs(args[ARG.stretch] - 2 / 2.4) < 1e-9, `stretch ${args[ARG.stretch]}`);
+  assert.ok(Math.abs(args[ARG.dur] - 4) < 1e-9, 'the whole file lasts two cycles');
+});
+
+test('playSample reports the length a fit came to, in cycles - what .log() prints for an auto fit', () => {
+  const { engine } = engineWithFile(4.8);
+  assert.strictEqual(engine.playSample('t1', 'breaks', { fit: 'auto', secPerCycle: 2 }, 0, 0.125).fitCycles, 2);
+  assert.strictEqual(engine.playSample('t1', 'breaks', { fit: 3, secPerCycle: 2 }, 0, 0.125).fitCycles, 3);
+  assert.strictEqual(engine.playSample('t1', 'breaks', { secPerCycle: 2 }, 0, 0.125).fitCycles, null);
+});
+
+// .play() as the scheduler sends it: the events of `sig` from cycle `from` up to `to` at 2s a cycle,
+// each { cfg } - begin left to the engine through cfg.atLength (see pattern-core's
+// withSampleLength). pattern-core is an ES module; require() takes one.
+const core = require('../pattern-core/src/index.mjs');
+function playEvents(sig, from, to) {
+  const seen = [];
+  const sched = new core.Scheduler(new Proxy(
+    { getTime: () => 0, playSample: (trackId, pack, cfg) => { seen.push({ cfg }); } },
+    { get: (t, k) => (k in t ? t[k] : () => {}) },
+  ), { trackId: 't', cps: 0.5 });
+  sched.setPattern(sig);
+  sched._scheduleNoteEdges(from, to);
+  return seen;
+}
+function beginsOf(sig, from, to, duration = 4.8) {
+  const { engine, sent } = engineWithFile(duration);
+  return playEvents(sig, from, to).map(({ cfg }) => {
+    engine.playSample('t1', 'breaks', cfg, 0, 2);
+    const args = sent.pop().args;
+    assert.strictEqual(args[ARG.end], 1, 'each plays on to the end of the file, cut at its event');
+    return args[ARG.begin];
+  });
+}
+const close = (a, b, what) => assert.ok(Math.abs(a - b) < 1e-6, `${what}: ${a}, not ${b}`);
+
+test('.play() plays one slice per cycle, over the fitted length', () => {
+  // fit(4): cycle k begins k/4 in.
+  beginsOf(core.s('breaks').fit(4, 'stretch').play(), 0, 4).forEach((b, k) => close(b, k / 4, `cycle ${k}`));
+  // The auto fit: 4.8 s at 2 s a cycle is 2.4 cycles, rounded to 2.
+  beginsOf(core.s('breaks').fit().play(), 0, 3).forEach((b, k) => close(b, (k % 2) / 2, `auto, cycle ${k}`));
+});
+
+test('.play() from cycle 5 reads 5/L; without a fit L is the natural, fractional length', () => {
+  close(beginsOf(core.s('breaks').fit(8).play(), 5, 6)[0], 5 / 8, 'fit(8), cycle 5');
+  close(beginsOf(core.s('breaks').play(), 1, 2)[0], 1 / 2.4, 'natural 2.4 cycles, cycle 1');
+  close(beginsOf(core.s('breaks').play(), 3, 4)[0], 3 / 2.4 - 1, 'natural, wrapped');
+});
+
+test('a control mixing the sample length with dur() reads the event\'s own dur() when the engine resolves it', () => {
+  // A one-cycle event at 2 s a cycle lasts 2 s: begin = frac(t / L) + dur() * 0.1 = 1/4 + 0.2.
+  close(beginsOf(core.s('breaks').fit(4).play().add(core.begin(core.dur().mul(0.1))), 1, 2)[0], 0.45, 'play + dur');
+  close(beginsOf(core.s('breaks').fit(4).play().add(core.begin(core.dur().mul(0))), 1, 2)[0], 0.25, 'play + 0 * dur');
+});
+
+test('.play() composes with arithmetic on begin, and .seg(4) plays four slices a cycle', () => {
+  close(beginsOf(core.s('breaks').fit(4).play().mul(core.begin(0.5)), 3, 4)[0], 0.375, 'mul');
+  close(beginsOf(core.s('breaks').fit(4).play().add(core.begin(0.125)), 1, 2)[0], 0.375, 'add');
+  beginsOf(core.s('breaks').fit(8).play().seg(4), 1, 2).forEach((b, k) => close(b, (1 + k / 4) / 8, `seg, step ${k}`));
+});

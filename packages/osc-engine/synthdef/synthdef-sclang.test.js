@@ -38,6 +38,8 @@ const FN = (op, a) => ({ k: 'fn', op, a: [a] });
 const EXPRS = [
   { tree: OP('add', IN(0), C(1)), outKind: 'channel' },
   { tree: OP('mul', IN(0, 'ar'), IN(1)), outKind: 'device' },
+  // A channel control with audio in its expression (gain under a ring modulator), per sample.
+  { tree: OP('mul', IN(0, 'ar'), IN(1)), outKind: 'channelAr' },
   { tree: OP('div', IN(0), C(2)), outKind: 'plugin' },
   { tree: OP('mod', IN(0, 'ar'), IN(1)), outKind: 'plugin' },
   { tree: OP('sub', OP('min', IN(0), C(3)), OP('max', IN(1), OP('pow', IN(0), C(2)))), outKind: 'channel' },
@@ -56,6 +58,15 @@ const EXPRS = [
   { tree: OP('mul', IN(0), IN(1)), outKind: 'device', rates: ['ar', 'kr'] },
   { tree: OP('add', OP('mul', IN(0), C(2)), C(1)), outKind: 'channel' },
   { tree: OP('add', OP('mul', IN(0, 'ar'), C(0.5)), C(0.5)), outKind: 'device' },
+  // Envelope followers (env("x")): of audio with constant times; of a control input with a
+  // control-rate attack (an audio-rate def all the same); with an attack driven at audio rate.
+  { tree: { k: 'fn', op: 'env', a: [{ k: 'in', i: 0, rate: 'ar', source: 'drums' }, C(0.01), C(0.25)] }, outKind: 'device' },
+  { tree: OP('add', OP('mul', { k: 'fn', op: 'env', a: [IN(0), IN(1), C(0.3)] }, C(-1)), C(1)), outKind: 'plugin' },
+  { tree: { k: 'fn', op: 'env', a: [IN(0, 'ar'), IN(1), C(0.3)] }, outKind: 'channel', rates: ['ar', 'ar'] },
+  // smooth(): of a control input, of audio with a polled time, and of a follower.
+  { tree: { k: 'fn', op: 'smooth', a: [IN(0), C(0.2)] }, outKind: 'plugin' },
+  { tree: { k: 'fn', op: 'smooth', a: [IN(0, 'ar'), IN(1)] }, outKind: 'device' },
+  { tree: { k: 'fn', op: 'smooth', a: [{ k: 'fn', op: 'env', a: [IN(0, 'ar'), C(0.01), C(0.25)] }, IN(1, 'ar')] }, outKind: 'channel' },
 ];
 const MIX = Array.from({ length: 96 }, (_, i) => Math.round(30 * (17000 / 30) ** (i / 95)));
 const CONFIGS = [

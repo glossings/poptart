@@ -178,6 +178,7 @@ function figureData(descriptor, figure, values, opts) {
     case 'decay': return { ...common, ...decayFigure(read) };
     case 'sweep': return { ...common, ...sweepFigure(figure, read, descriptor, bpm, report) };
     case 'duck': return { ...common, ...duckFigure(read, bpm, report) };
+    case 'bands': return { ...common, ...bandsFigure(read, report) };
     default: return common;
   }
 }
@@ -1167,4 +1168,31 @@ function duckFigure(read, bpm, report) {
     period, recovery, span, keyed, trigger, threshold: read('threshold') ?? -24,
     points, history, window,
   };
+}
+
+// --- a filter bank's bands --------------------------------------------------------------------
+
+/**
+ * Every band of a filter bank as a bar at its frequency, as tall as the level it is being fed: the
+ * device's own report while it plays (Shape as the mode has moved it, times Levels, Tilt and a held
+ * note's velocity), since Shape moves every sample and nothing here could say where it has got to.
+ * With no report yet, a bank laid out by its controls (a count over a range) is drawn at Shape's
+ * own level, and one tuned to something only the device knows - a scale, held notes - is empty.
+ */
+function bandsFigure(read, report) {
+  const lowHz = RESPONSE_RANGE.lowHz;
+  const highHz = RESPONSE_RANGE.highHz;
+  const live = report?.bands;
+  if (live && Array.isArray(live.hz) && Array.isArray(live.level)) {
+    const bars = live.hz.map((hz, i) => ({ hz: Number(hz), level: Math.min(1, Math.max(0, Number(live.level[i]) || 0)) }));
+    return { bars, lowHz, highHz, live: true };
+  }
+  const count = read('count');
+  const lo = read('low');
+  const hi = read('high');
+  if (count === null || lo === null || hi === null) return { bars: [], lowHz, highHz, live: false };
+  const n = Math.max(1, Math.round(count));
+  const level = Math.min(1, Math.max(0, read('shape') ?? 1));
+  const bars = Array.from({ length: n }, (_, k) => ({ hz: lo * Math.pow(hi / lo, (k + 0.5) / n), level }));
+  return { bars, lowHz, highHz, live: false };
 }

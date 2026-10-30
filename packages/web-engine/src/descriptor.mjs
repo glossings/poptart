@@ -38,8 +38,12 @@
  */
 export const TRACK_BEND_PARAM = 'track.bend';
 
-/** Parameter value curves: how a 0..1 position maps onto the parameter's real range. */
-const CURVES = new Set(['lin', 'exp', 'pow']);
+/**
+ * Parameter value curves: how a 0..1 position maps onto the parameter's real range. `sym` is
+ * `pow` mirrored about the middle of the range - a signed control that is fine around zero and
+ * still reaches both ends (a frequency shift of a few hertz either way, or thousands).
+ */
+const CURVES = new Set(['lin', 'exp', 'pow', 'sym']);
 // The stages of an instrument's amp envelope a parameter can stand for, which the sampler's own
 // envelope methods (.attack() .decay() .sustain() .release() .envscale()) reach on any instrument.
 const AMP_STAGES = new Set(['attack', 'decay', 'sustain', 'release', 'scale']);
@@ -68,8 +72,15 @@ const KINDS = new Set(['synth', 'fx']);
  *
  * Only an enum can take either, since what the string becomes is a new entry on the option
  * list - which is what makes a loaded file or a drawn curve nameable in the code afterwards.
+ *
+ * 'list' means a LIST of numbers per step of the pattern rather than one: the scheduler reads one
+ * cycle of the pattern on it and hands its steps over as [start, end, value] triples - a level per
+ * band across a filter bank, stepped from cycle to cycle. 'scale' is a list the scheduler fills
+ * with the track's scale, [root, period, interval...], unless the pattern names one. Either is
+ * handed to the device the way a drawn curve is, in an option slot of its own, and the control is
+ * pointed at that slot when the list is due, so a list lands on time on both engines.
  */
-const TAKES = new Set(['sample', 'shape']);
+const TAKES = new Set(['sample', 'shape', 'list', 'scale']);
 
 /**
  * Units we attach meaning to. The string is what a readout prints, so it is the real symbol and
@@ -182,8 +193,8 @@ function defineParam(deviceId, spec, seen) {
     fail(deviceId, `param "${id}": an exp curve needs min above zero (it maps a ratio)`);
   }
   const curveExp = spec.curveExp ?? 2;
-  if (curve === 'pow' && !(isFiniteNumber(curveExp) && curveExp > 0)) {
-    fail(deviceId, `param "${id}": a pow curve needs a positive curveExp`);
+  if ((curve === 'pow' || curve === 'sym') && !(isFiniteNumber(curveExp) && curveExp > 0)) {
+    fail(deviceId, `param "${id}": a ${curve} curve needs a positive curveExp`);
   }
 
   // When this control is live at all.
@@ -220,6 +231,11 @@ function defineParam(deviceId, spec, seen) {
   if (bank !== null && !takes) fail(deviceId, `param "${id}": only a control that takes a file or a curve has a bank`);
   const amp = spec.amp ?? null;
   if (amp !== null && !AMP_STAGES.has(amp)) fail(deviceId, `param "${id}" has unknown amp stage "${amp}"`);
+  // Whether a captured state holds this control. A control that is a performance gesture rather
+  // than part of the sound - a looper's Record - says `saved: false`, so a song saved mid-gesture
+  // does not replay the gesture when it is opened.
+  const saved = spec.saved ?? true;
+  if (typeof saved !== 'boolean') fail(deviceId, `param "${id}": saved is true or false`);
 
   if (seen.has(normalizeKey(id))) fail(deviceId, `duplicate param id "${id}"`);
   if (seen.has(normalizeKey(name))) fail(deviceId, `param name "${name}" collides with another param's id or name`);
@@ -248,6 +264,7 @@ function defineParam(deviceId, spec, seen) {
     sampleAs,
     bank,
     amp,
+    saved,
     group: String(spec.group ?? '').trim() || null,
     description: String(spec.description ?? '').trim() || null,
   });
@@ -302,6 +319,9 @@ const FIGURE_KINDS = new Map([
   ['sweep', ['rate', 'depth']],
   // A ducker's dip: the shape over a beat, and the signal it is pumping.
   ['duck', ['amount', 'length']],
+  // A filter bank's bands: a bar per band at its frequency, as loud as it is being fed - which the
+  // device reports, since Shape moves it every sample.
+  ['bands', ['levels']],
 ]);
 
 /**
@@ -455,9 +475,9 @@ export function defineDevice(spec) {
   // device that wants phase modulation gives its phase a knob. See signalDestinations().
   if (spec.inputs !== undefined) fail(id, 'inputs are not a thing - an a-rate param is a signal destination already');
 
-  // `key` and `outputs` are the Crossover's (see devices/crossover.mjs): a second input that is
-  // not a sidechain anybody routes - the wiring of a .bands() feeds it - and more than one output,
-  // each `out` channels wide. Every other device has neither.
+  // `key` and `outputs` are the Crossover's (see devices/crossover.mjs) and the Delay's loop (see
+  // `loop` below): a second input that is not a sidechain anybody routes - the track's wiring
+  // feeds it - and more than one output, each `out` channels wide. Every other device has neither.
   const channels = {
     in: spec.channels?.in ?? (kind === 'fx' ? 2 : 0),
     out: spec.channels?.out ?? 2,
@@ -493,10 +513,24 @@ export function defineDevice(spec) {
   const latencySec = spec.latencySec ?? 0;
   if (!isFiniteNumber(latencySec) || latencySec < 0 || latencySec > 1) fail(id, 'latencySec is seconds, 0 to 1');
 
+  // A feedback loop a chain can run inside (`.fx("Delay", (x) => x.fx("Filter"))`): the device's
+  // second output is its repeats going out to the chain, and its key is the chain coming back. The
+  // engine tells the processor how late the chain returns (setLoop), and wires the two only when
+  // the code puts a chain there.
+  const loop = spec.loop === true;
+  if (loop && !(channels.key === channels.out && channels.outputs >= 2)) fail(id, 'a loop needs a key as wide as the output and a second output');
+
+  // How a state saved by an earlier version reads on this one (see migrateState). Only a device
+  // past version 1 can have anything to migrate from.
+  const migrate = spec.migrate ?? null;
+  if (migrate !== null && typeof migrate !== 'function') fail(id, 'migrate is a function of (params, fromVersion)');
+  if (migrate && version === 1) fail(id, 'version 1 has nothing to migrate from');
+
   return Object.freeze({
     id,
     kind,
     version,
+    migrate,
     license,
     vendor: String(spec.vendor ?? 'poptart').trim(),
     source: String(spec.source ?? '').trim() || null,
@@ -509,6 +543,7 @@ export function defineDevice(spec) {
     channels: Object.freeze(channels),
     sidechain,
     notes,
+    loop,
     latencySec,
     params: Object.freeze(params),
     figures: Object.freeze(figures),
@@ -562,7 +597,8 @@ export function clampParam(param, value) {
 /**
  * 0..1 position to a real value. `exp` is the ratio sweep a frequency wants (20 Hz to 20 kHz
  * feels linear on a log knob); `pow` bends a linear range so the useful end gets more travel (a
- * 0..1 depth where everything happens below 0.2).
+ * 0..1 depth where everything happens below 0.2); `sym` is `pow` from the middle out, so a signed
+ * control rests at zero and gets most of its travel close to it.
  *
  * This is the one function that gives a `.param()` value its meaning, and every device applies
  * it on the audio thread: a control arrives as a position and leaves this as the number the DSP
@@ -576,6 +612,9 @@ export function denormalize(param, position) {
     v = param.min * Math.pow(param.max / param.min, t);
   } else if (param.curve === 'pow') {
     v = param.min + (param.max - param.min) * Math.pow(t, param.curveExp);
+  } else if (param.curve === 'sym') {
+    const u = 2 * t - 1;
+    v = (param.min + param.max) / 2 + ((param.max - param.min) / 2) * Math.sign(u) * Math.pow(Math.abs(u), param.curveExp);
   } else {
     v = param.min + (param.max - param.min) * t;
   }
@@ -590,10 +629,34 @@ export function normalize(param, value) {
     t = Math.log(v / param.min) / Math.log(param.max / param.min);
   } else if (param.curve === 'pow') {
     t = Math.pow((v - param.min) / (param.max - param.min), 1 / param.curveExp);
+  } else if (param.curve === 'sym') {
+    const u = (v - (param.min + param.max) / 2) / ((param.max - param.min) / 2);
+    t = (1 + Math.sign(u) * Math.pow(Math.abs(u), 1 / param.curveExp)) / 2;
   } else {
     t = (v - param.min) / (param.max - param.min);
   }
   return Math.min(param.open ? Infinity : 1, Math.max(0, t));
+}
+
+/**
+ * A saved state's parameter map brought up to this version of the device, or returned as it is
+ * when nothing has to change.
+ *
+ * A device whose controls change shape between versions declares `migrate(params, fromVersion)`
+ * and returns the map a device of ITS version would have saved: a state carries the version that
+ * wrote it, and a control that was renamed, merged or split would otherwise be silently skipped
+ * on restore and the song would change under the person who saved it. Both engines call this
+ * before reading a state (the desktop mirrors the same mappings in osc-engine's native-devices.js,
+ * which cannot load this module).
+ */
+export function migrateState(descriptor, doc) {
+  if (!doc || typeof doc !== 'object' || !descriptor?.migrate) return doc;
+  const params = doc.params ?? doc;
+  if (!params || typeof params !== 'object') return doc;
+  const from = Number.isInteger(doc.version) && doc.version >= 1 ? doc.version : 1;
+  if (from >= descriptor.version) return doc;
+  const migrated = descriptor.migrate({ ...params }, from);
+  return doc.params ? { ...doc, version: descriptor.version, params: migrated } : migrated;
 }
 
 /** Whether a parameter is a two-state switch, whatever widget it asked for. */

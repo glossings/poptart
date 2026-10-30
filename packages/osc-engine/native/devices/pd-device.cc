@@ -4,7 +4,7 @@
 // This is descriptor.mjs's denormalize()/clampParam() in C++, and it has to stay that way: the
 // panel's readout, the knob and the DSP all read one number through one function in the browser,
 // and a song moved to the desktop has to land on the same number. The curves are the
-// descriptor's own three and there are no others.
+// descriptor's own four and there are no others.
 
 #include "pd-device.h"
 
@@ -25,6 +25,14 @@ float pd_denormalize(const PdParamSpec& spec, float position) {
         case kPdPower:
             v = spec.min + (spec.max - spec.min) * std::pow(t, spec.curveExp);
             break;
+        case kPdSymmetric: {
+            // The power curve from the middle out: a signed control that rests at zero and gets
+            // most of its travel close to it.
+            const float u = 2.f * t - 1.f;
+            const float sign = u < 0.f ? -1.f : (u > 0.f ? 1.f : 0.f);
+            v = (spec.min + spec.max) * 0.5f + (spec.max - spec.min) * 0.5f * sign * std::pow(std::fabs(u), spec.curveExp);
+            break;
+        }
         default:
             v = spec.min + (spec.max - spec.min) * t;
             break;
@@ -40,12 +48,27 @@ float pd_denormalize(const PdParamSpec& spec, float position) {
     return v;
 }
 
+namespace {
+
+/** strcasecmp, which MSVC's runtime spells differently: ASCII only, as device names are. */
+int pd_casecmp(const char* a, const char* b) {
+    for (;; ++a, ++b) {
+        int ca = static_cast<unsigned char>(*a);
+        int cb = static_cast<unsigned char>(*b);
+        if (ca >= 'A' && ca <= 'Z') ca += 'a' - 'A';
+        if (cb >= 'A' && cb <= 'Z') cb += 'a' - 'A';
+        if (ca != cb || ca == 0) return ca - cb;
+    }
+}
+
+}  // namespace
+
 extern "C" const PdDeviceInfo* pd_find_device(const char* name) {
     if (!name) return nullptr;
     const PdDeviceInfo* table = pd_device_table();
     const int count = pd_device_count();
     for (int i = 0; i < count; ++i) {
-        if (strcasecmp(table[i].name, name) == 0) return &table[i];
+        if (pd_casecmp(table[i].name, name) == 0) return &table[i];
     }
     return nullptr;
 }

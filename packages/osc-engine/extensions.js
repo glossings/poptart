@@ -13,26 +13,56 @@
 // would leave sclang failing to compile its class library - which takes the whole engine down,
 // for a reason that would look like a SuperCollider problem. A copy is compared by content and
 // refreshed when the repo's version changes, so a `git pull` that rebuilt the .scx takes effect
-// on the next engine boot. Missing prebuilt (a platform build.sh never ran on) = nothing to
+// on the next engine boot. Missing prebuilt (a platform nobody built one on) = nothing to
 // install; the engine's SynthDefs fall back to the in-graph SOLA keylock (see poptart.scd).
+//
+// WHERE EACH PLATFORM'S BUILD IS. macOS's in bin/ itself, committed, where it has always been.
+// Windows's and Linux's in bin/<platform>-<arch>/ (bin/win32-x64/, bin/linux-x64/), built by CI
+// and shipped in the installer rather than committed; a checkout that never built them has none.
+// A plugin is .scx on macOS and Windows and .so on Linux, because that is the suffix scsynth looks
+// for on each. web-engine's build/devices/toolchain.mjs builds to the same places (binSubdir,
+// pluginSuffix) - extensions.test.js holds the two to each other.
 
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
 const SOURCE_DIR = path.join(__dirname, 'native', 'rubberband');
-const FILES = ['PoptartPitchShift.scx', 'PoptartPitchShift.sc'];
-const SOURCES = {
-  'PoptartPitchShift.scx': path.join(SOURCE_DIR, 'bin', 'PoptartPitchShift.scx'),
-  'PoptartPitchShift.sc': path.join(SOURCE_DIR, 'PoptartPitchShift.sc'),
-};
-
 const DEVICES_DIR = path.join(__dirname, 'native', 'devices');
-const DEVICE_FILES = ['PoptartDevices.scx', 'PoptartDevice.sc'];
-const DEVICE_SOURCES = {
-  'PoptartDevices.scx': path.join(DEVICES_DIR, 'bin', 'PoptartDevices.scx'),
-  'PoptartDevice.sc': path.join(DEVICES_DIR, 'PoptartDevice.sc'),
-};
+
+/** A plugin's file name on a platform: scsynth loads .so on Linux and .scx everywhere else. */
+function pluginFile(base, platform = process.platform) {
+  return `${base}${platform === 'linux' ? '.so' : '.scx'}`;
+}
+
+/** The folder under an extension's bin/ that holds a platform's build ('' = bin/ itself, macOS). */
+function binSubdir(platform = process.platform, arch = process.arch) {
+  return platform === 'darwin' ? '' : `${platform}-${arch}`;
+}
+
+/** One extension on one platform: the names it installs under, and where each comes from. */
+function extensionLayout({ dir, base, classFile }, platform = process.platform, arch = process.arch) {
+  const binary = pluginFile(base, platform);
+  const binDir = path.join(dir, 'bin', binSubdir(platform, arch));
+  return {
+    binary,
+    files: [binary, classFile],
+    sources: { [binary]: path.join(binDir, binary), [classFile]: path.join(dir, classFile) },
+    from: path.relative(__dirname, binDir).split(path.sep).join('/'),
+  };
+}
+
+const PITCH_SHIFT = { dir: SOURCE_DIR, base: 'PoptartPitchShift', classFile: 'PoptartPitchShift.sc' };
+const DEVICES = { dir: DEVICES_DIR, base: 'PoptartDevices', classFile: 'PoptartDevice.sc' };
+
+const pitchShiftLayout = (platform, arch) => extensionLayout(PITCH_SHIFT, platform, arch);
+const deviceLayout = (platform, arch) => extensionLayout(DEVICES, platform, arch);
+
+// This machine's, which is what every caller but the tests wants.
+const { files: FILES, sources: SOURCES } = pitchShiftLayout();
+const { files: DEVICE_FILES, sources: DEVICE_SOURCES } = deviceLayout();
+/** The device plugin this checkout has for this machine (tests hand its folder to scsynth). */
+const DEVICE_BINARY = DEVICE_SOURCES[DEVICE_FILES[0]];
 /** The device catalog, read by the engine's Node half rather than installed anywhere. */
 const DEVICE_CATALOG = path.join(DEVICES_DIR, 'devices.json');
 
@@ -48,12 +78,6 @@ function userExtensionsDir() {
 }
 
 /**
- * Which platform a native binary was built for, read off its magic number: 'darwin' (Mach-O,
- * thin or universal), 'win32' (PE), 'linux' (ELF), or null when it is none of those. The .scx
- * extension says nothing - SuperCollider uses it on macOS and Windows alike - and bin/ holds
- * whichever platform's build.sh ran last, so the file itself is the only thing to ask.
- */
-/**
  * sclang's personal startup file - run before poptart's script on every boot, private copy or
  * not (Platform.userConfigDir +/+ "startup.scd"). Used to tell "a startup.scd is hanging the
  * boot" from "there is no such file, look elsewhere".
@@ -64,6 +88,12 @@ function sclangStartupFile({ platform = process.platform, env = process.env, hom
   return path.join(env.XDG_CONFIG_HOME || path.join(home, '.config'), 'SuperCollider', 'startup.scd');
 }
 
+/**
+ * Which platform a native binary was built for, read off its magic number: 'darwin' (Mach-O,
+ * thin or universal), 'win32' (PE), 'linux' (ELF), or null when it is none of those. The .scx
+ * extension says nothing - SuperCollider uses it on macOS and Windows alike - so the file itself
+ * is the only thing to ask; a build copied into the wrong folder is refused rather than loaded.
+ */
 function binaryPlatform(file) {
   const head = Buffer.alloc(4);
   let fd;
@@ -107,16 +137,18 @@ function sameContent(a, b) {
  * @param {string} [opts.extensionsDir] - override the destination (tests).
  * @param {Record<string,string>} [opts.sources] - override the source files (tests).
  * @param {string} [opts.platform] - override process.platform (tests).
+ * @param {string} [opts.arch] - override process.arch (tests).
  * @param {string[]} [opts.files] - which names to install (defaults to the pitch shifter's).
  * @param {string} [opts.binary] - the name among them whose platform decides the whole group.
  * @param {string} [opts.from] - where they come from, for the message when they are missing.
  */
 function ensurePoptartExtension({
-  extensionsDir = userExtensionsDir(), sources = SOURCES, platform = process.platform,
-  files = FILES, binary = 'PoptartPitchShift.scx', from = 'native/rubberband',
+  extensionsDir = userExtensionsDir(), platform = process.platform, arch = process.arch,
+  layout = pitchShiftLayout(platform, arch),
+  sources = layout.sources, files = layout.files, binary = layout.binary, from = layout.from,
 } = {}) {
   const result = { installed: [], upToDate: [], skipped: null };
-  const missing = files.filter((f) => !fs.existsSync(sources[f]));
+  const missing = files.filter((f) => !sources[f] || !fs.existsSync(sources[f]));
   if (missing.length) {
     result.skipped = `no prebuilt extension for this platform (${missing.join(', ')} not in ${from})`;
     return result;
@@ -169,15 +201,9 @@ function ensurePoptartExtension({
  * check is for: a class file that compiles beside an .scx scsynth cannot load would leave
  * sclang building track slots around a UGen the server does not have.
  */
-function ensureDeviceExtension({ extensionsDir = userExtensionsDir(), sources = DEVICE_SOURCES, platform = process.platform } = {}) {
-  return ensurePoptartExtension({
-    extensionsDir,
-    sources,
-    platform,
-    files: DEVICE_FILES,
-    binary: 'PoptartDevices.scx',
-    from: 'native/devices',
-  });
+function ensureDeviceExtension({ extensionsDir = userExtensionsDir(), platform = process.platform, arch = process.arch, sources } = {}) {
+  const layout = deviceLayout(platform, arch);
+  return ensurePoptartExtension({ extensionsDir, platform, arch, layout, sources: sources ?? layout.sources });
 }
 
 module.exports = {
@@ -185,7 +211,13 @@ module.exports = {
   ensurePoptartExtension,
   ensureDeviceExtension,
   userExtensionsDir,
+  pluginFile,
+  binSubdir,
+  binaryPlatform,
+  pitchShiftLayout,
+  deviceLayout,
   EXTENSION_FILES: FILES,
   DEVICE_EXTENSION_FILES: DEVICE_FILES,
+  DEVICE_BINARY,
   DEVICE_CATALOG,
 };

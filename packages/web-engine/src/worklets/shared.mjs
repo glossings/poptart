@@ -58,6 +58,10 @@ export function bendOf(parameters) {
 function positionOfDefault(p) {
   if (p.curve === 'exp') return Math.log(p.default / p.min) / Math.log(p.max / p.min);
   if (p.curve === 'pow') return Math.pow((p.default - p.min) / (p.max - p.min), 1 / p.curveExp);
+  if (p.curve === 'sym') {
+    const u = (p.default - (p.min + p.max) / 2) / ((p.max - p.min) / 2);
+    return (1 + Math.sign(u) * Math.pow(Math.abs(u), 1 / p.curveExp)) / 2;
+  }
   return (p.default - p.min) / (p.max - p.min);
 }
 

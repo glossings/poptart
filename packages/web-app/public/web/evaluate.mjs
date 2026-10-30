@@ -17,6 +17,20 @@ const DRY_RUN_CYCLES = 8;
 /** Cycles of highlight grid shipped per track, per window. */
 export const HL_WINDOW = 32;
 
+/**
+ * The error an evaluation throws for a block that failed: its message is the console line,
+ * position first, and `where` (when the position is known) is the buffer span the editor marks.
+ * `detail` is the original stack, for the developer console only. The desktop's server builds
+ * the same thing (see its blockError).
+ */
+export function blockError(patternCore, err, ctx) {
+  const { message, where } = patternCore.describeEvalError(err, ctx);
+  const out = new Error(message);
+  if (where) out.where = where;
+  out.detail = err?.stack ?? String(err);
+  return out;
+}
+
 /** How far ahead of now a play-from-stop puts the downbeat. The scheduler's own lookahead. */
 const START_LEAD_SEC = 0.15;
 
@@ -152,7 +166,7 @@ export const deckOfKey = (key) => (String(key).includes(':') ? String(key).slice
  * may move the room's tempo, what a new track is born wearing. Without one there is one deck on
  * the room's clock, exactly as before there was a desk.
  */
-export function createEvaluator({ patternCore, engine, transport, prebakeDefs = new Map(), log = null, remotePacks = null, desk = null }) {
+export function createEvaluator({ patternCore, engine, transport, prebakeDefs = new Map(), log = null, remotePacks = null, desk = null, parse = null, names: apiNames = null }) {
   const schedulers = new Map();        // key -> Scheduler
   const trackIds = new Map();          // key -> engine track id
   // The engine keys its tracks by those ids, and every routing name a pattern carries is the
@@ -334,7 +348,9 @@ export function createEvaluator({ patternCore, engine, transport, prebakeDefs = 
         remotePacks.use(source, prefix);
       },
     };
-    const evalBlock = createBlockEvaluator(patternCore, { defs: new Map(prebakeDefs), hostBuilders, miniOff: patternCore.miniOffRanges(code ?? '') });
+    const evalBlock = createBlockEvaluator(patternCore, { defs: new Map(prebakeDefs), hostBuilders, miniOff: patternCore.miniOffRanges(code ?? ''), parse, deck, doc: code ?? '' });
+    // What a block's failure says, and where in the buffer it points (see blockError).
+    const failed = (err, b) => blockError(patternCore, err, { source: code ?? '', block: b, deck, names: typeof apiNames === 'function' ? apiNames() : apiNames });
 
     // Which row a `clips()` written in this block plays (see pattern-core's clips()). Restores
     // whatever was in force rather than clearing, because these nest: a copy() resolves inside the
@@ -356,7 +372,7 @@ export function createEvaluator({ patternCore, engine, transport, prebakeDefs = 
       if (!b) throw new Error(`there is no block called ${JSON.stringify(label)} to copy`);
       seen.add(label);
       try {
-        return asBlock(b, () => evalBlock(b.code, b.start));
+        return asBlock(b, () => evalBlock(b.code, b.start, b.label));
       } finally {
         seen.delete(label);
       }
@@ -372,7 +388,7 @@ export function createEvaluator({ patternCore, engine, transport, prebakeDefs = 
       for (const b of blocks) {
         if (!patternCore.isBareCallBlock(b.code, 'setscale')) continue;
         try {
-          evalBlock(b.code, b.start);
+          evalBlock(b.code, b.start, b.label);
           hoisted.set(b, SCALE_BLOCK);
         } catch {
           // not evaluable up here - it keeps its place in the pass below, and reports there
@@ -382,7 +398,7 @@ export function createEvaluator({ patternCore, engine, transport, prebakeDefs = 
       for (const b of blocks) {
         if (!patternCore.isBareCallBlock(b.code, 'setgroove')) continue;
         try {
-          evalBlock(b.code, b.start);
+          evalBlock(b.code, b.start, b.label);
           hoisted.set(b, GROOVE_BLOCK);
         } catch {
           // as above
@@ -391,7 +407,7 @@ export function createEvaluator({ patternCore, engine, transport, prebakeDefs = 
 
       evaluated = blocks.map((b) => {
         try {
-          const value = hoisted.has(b) ? hoisted.get(b) : asBlock(b, () => evalBlock(b.code, b.start));
+          const value = hoisted.has(b) ? hoisted.get(b) : asBlock(b, () => evalBlock(b.code, b.start, b.label));
           const isPattern = value instanceof patternCore.Sig;
           const setupValue = value === TEMPO_BLOCK || value === SCALE_BLOCK || value === GROOVE_BLOCK || value?.poptartArrangeBlock;
           // Only a NAMED block promises sound. Anything anonymous that makes none is a setup
@@ -404,7 +420,7 @@ export function createEvaluator({ patternCore, engine, transport, prebakeDefs = 
           }
           return { ...b, sig: value };
         } catch (err) {
-          throw new Error(`${b.label}: ${err.message ?? err}`);
+          throw failed(err, b);
         }
       });
 
@@ -417,9 +433,9 @@ export function createEvaluator({ patternCore, engine, transport, prebakeDefs = 
       for (const b of evaluated) {
         if (!(b.sig instanceof patternCore.Sig)) continue;
         try {
-          asBlock(b, () => dryRun(b.sig, cps));
+          patternCore.withDeepStacks(() => asBlock(b, () => dryRun(b.sig, cps)));
         } catch (err) {
-          throw new Error(`${b.label}: ${err.message ?? err}`);
+          throw failed(err, b);
         }
       }
     } catch (err) {

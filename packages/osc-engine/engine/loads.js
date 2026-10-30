@@ -392,6 +392,8 @@ function install(E) {
           self.setTempo(E.trackTempo.get(key) ?? E.currentTempo);
           if (E.trackBeats) self.setTransportPos(E.trackBeats(key));
           E.tellKeyPatched(track, slot, null, key);
+          // And how late a chain in its feedback loop comes back, if it has one.
+          E.tellLoop?.(track, slot);
           // And anything patched onto its controls: the device starts with every control on its
           // own default, and a route outlives the device.
           for (const e of E.paramRoutes.values()) {

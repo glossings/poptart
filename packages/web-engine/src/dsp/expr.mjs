@@ -13,6 +13,10 @@
 //   { k: 'op', op, a: [x, y] }              add sub mul div mod min max pow gt gte lt lte eq neq
 //   { k: 'fn', op, a: [x] }                 abs neg round floor ceil
 //   { k: 'map', min, max, curve, a: [x] }   real units to a 0..1 position, 'lin' or 'log', clipped
+//   { k: 'fn', op: 'env', a: [x, attack, release] }
+//                                           the level of x: |x| clipped at 1, rising over `attack`
+//                                           seconds and falling over `release` (see exprLag)
+//   { k: 'fn', op: 'smooth', a: [x, time] } x lagged by `time` seconds both ways (see exprLag)
 
 const exprFinite = (v) => (Number.isFinite(v) ? v : 0);
 
@@ -50,6 +54,47 @@ export function exprMapUnit(x, min, max, curve) {
   return t < 0 ? 0 : t > 1 ? 1 : t;
 }
 
+// ln(0.001): a lag's times (the envelope follower's attack and release, smooth()'s time) are the
+// time to get within 60 dB of a new value.
+const LOG001 = Math.log(0.001);
+
+/**
+ * The coefficient one sample of a lag moves by, for a time in seconds - the desktop's Lag/LagUD
+ * formula, which reads its time as a 32-bit float. 0 (no lag) for a time of 0 or less.
+ */
+export function lagCoef(seconds, sampleRate) {
+  const t = Math.fround(seconds);
+  return t > 0 ? Math.exp(LOG001 / (t * sampleRate)) : 0;
+}
+
+/**
+ * One exponential lag's state, as the desktop's LagUD keeps it: `step(x, up, down)` takes one
+ * sample and returns the lagged value, which moves toward x by the `up` time's coefficient while
+ * rising and the `down` time's while falling. It starts at its first input, so a lag put on a
+ * steady value does not glide up to it from 0. Lag is LagUD with both times equal.
+ */
+export function exprLag(sampleRate) {
+  let y = null;
+  let up = NaN;
+  let down = NaN;
+  let cu = 0;
+  let cd = 0;
+  return (x, tUp, tDown) => {
+    if (tUp !== up) { up = tUp; cu = lagCoef(tUp, sampleRate); }
+    if (tDown !== down) { down = tDown; cd = lagCoef(tDown, sampleRate); }
+    const v = Number.isFinite(x) ? Math.fround(x) : 0;
+    if (y === null) y = v;
+    else y = v > y ? v + cu * (y - v) : v + cd * (y - v);
+    return y;
+  };
+}
+
+/** An envelope follower's input: rectified and clipped at full scale (a NaN reads 0). */
+export function followInput(x) {
+  const v = x < 0 ? -x : x;
+  return v <= 1 ? v : v > 1 ? 1 : 0;
+}
+
 /** The constants of a tree, depth first and left to right - the order compileExpr reads them in. */
 export function exprConsts(tree, out = []) {
   if (!tree || typeof tree !== 'object') return out;
@@ -81,12 +126,19 @@ export function exprInputCount(tree) {
 
 /**
  * Compiles a tree into `(x) => value`, where `x[i]` is input i at this sample. `consts` is read
- * live, so writing new numbers into the same array changes the result without recompiling.
+ * live, so writing new numbers into the same array changes the result without recompiling. A
+ * lag keeps state, so the function is called once per sample, in order, at `sampleRate`.
  * Throws on a node it does not know, by name.
  */
-export function compileExpr(tree, consts = exprConsts(tree)) {
+export function compileExpr(tree, consts = exprConsts(tree), { sampleRate = 48000 } = {}) {
   let next = 0;
-  const build = (node) => {
+  // This sample's inputs side by side, where the caller has them (see renderExpr); without them
+  // each side reads as the mid.
+  let left = null;
+  let right = null;
+  // side 0 reads each input as its mid, (L + R) / 2; 1 and 2 read the left and right alone - an
+  // envelope follower's input is built once per side, for its linked peak.
+  const build = (node, side) => {
     switch (node?.k) {
       case 'const': {
         const at = next++;
@@ -94,23 +146,56 @@ export function compileExpr(tree, consts = exprConsts(tree)) {
       }
       case 'in': {
         const i = Number(node.i) | 0;
+        if (side === 1) return (x) => (left ?? x)[i] ?? 0;
+        if (side === 2) return (x) => (right ?? x)[i] ?? 0;
         return (x) => x[i] ?? 0;
       }
       case 'op': {
         const f = EXPR_BINARY[node.op];
         if (!f) throw new Error(`unknown operation "${node.op}"`);
-        const a = build(node.a?.[0]);
-        const b = build(node.a?.[1]);
+        const a = build(node.a?.[0], side);
+        const b = build(node.a?.[1], side);
         return (x) => f(a(x), b(x));
       }
       case 'fn': {
+        if (node.op === 'env') {
+          // The envelope follower: its input's linked peak, max(|L|, |R|) - the input built once
+          // per side, every input in it reading that side alone, so an out-of-phase pair reads its
+          // level and not the 0 of its mid - clipped at full scale, lagged by attack rising and
+          // release falling. Both sides read the same constants.
+          const from = next;
+          const l = build(node.a?.[0], 1);
+          next = from;
+          const r = build(node.a?.[0], 2);
+          const up = build(node.a?.[1], side);
+          const down = build(node.a?.[2], side);
+          const lag = exprLag(sampleRate);
+          return (x) => {
+            const vl = Math.fround(l(x));
+            const vr = Math.fround(r(x));
+            const v = Math.max(vl < 0 ? -vl : vl, vr < 0 ? -vr : vr);
+            const tu = up(x);
+            const td = down(x);
+            return lag(followInput(v), tu > 0 ? tu : 0, td > 0 ? td : 0);
+          };
+        }
+        if (node.op === 'smooth') {
+          // smooth(): its input lagged by one time both ways.
+          const a = build(node.a?.[0], side);
+          const t = build(node.a?.[1], side);
+          const lag = exprLag(sampleRate);
+          return (x) => {
+            const tt = t(x);
+            return lag(a(x), tt > 0 ? tt : 0, tt > 0 ? tt : 0);
+          };
+        }
         const f = EXPR_UNARY[node.op];
         if (!f) throw new Error(`unknown function "${node.op}"`);
-        const a = build(node.a?.[0]);
+        const a = build(node.a?.[0], side);
         return (x) => f(a(x));
       }
       case 'map': {
-        const a = build(node.a?.[0]);
+        const a = build(node.a?.[0], side);
         const { min, max, curve } = node;
         return (x) => exprMapUnit(a(x), min, max, curve);
       }
@@ -118,22 +203,38 @@ export function compileExpr(tree, consts = exprConsts(tree)) {
         throw new Error(`unknown node ${JSON.stringify(node?.k)}`);
     }
   };
-  const fn = build(tree);
-  return (x) => exprFinite(fn(x));
+  const fn = build(tree, 0);
+  return (x, l, r) => {
+    left = l ?? null;
+    right = r ?? null;
+    return exprFinite(fn(x));
+  };
+}
+
+/** Whether a tree has an envelope follower, which reads its inputs side by side. */
+export function exprHasFollower(tree) {
+  if (!tree || typeof tree !== 'object') return false;
+  if (tree.k === 'fn' && tree.op === 'env') return true;
+  return (tree.a ?? []).some(exprHasFollower);
 }
 
 /**
  * Runs a compiled expression over one block. `inputs` is the worklet's inputs (each a list of
- * channels; a mono input is its first channel, an unconnected one has none and reads 0), `x` a
- * scratch array as long as the input count.
+ * channels; an unconnected one has none and reads 0), `x` a scratch array as long as the input
+ * count, where an input with two channels reads as (L + R) / 2. Given `l` and `r`, two more
+ * scratch arrays, each input's left and right go there too, for an envelope follower to read
+ * side by side (a mono input is the same on both).
  */
-export function renderExpr(fn, inputs, out, x) {
+export function renderExpr(fn, inputs, out, x, l = null, r = null) {
   const count = x.length;
   for (let n = 0; n < out.length; n++) {
     for (let i = 0; i < count; i++) {
-      const ch = inputs[i]?.[0];
-      x[i] = ch ? ch[n] : 0;
+      const chans = inputs[i];
+      const a = chans?.[0] ? chans[0][n] : 0;
+      const b = chans?.[1] ? chans[1][n] : a;
+      x[i] = chans?.[1] ? Math.fround((a + b) * 0.5) : a;
+      if (l) { l[i] = a; r[i] = b; }
     }
-    out[n] = fn(x);
+    out[n] = fn(x, l, r);
   }
 }

@@ -46,11 +46,21 @@ function install(E) {
     if (slot === -1) {
       const at = E.channelTarget(track, paramName);
       const wetSlot = String(paramName).match(/^wet([0-9]+)$/);
+      const perSample = E.chanAudio(paramName);
       return {
-        kind: 'channel', index: String(paramName), audio: false,
+        kind: 'channel', index: String(paramName), audio: perSample,
         map: (bus) => { if (at) at[0].map(at[1], bus); },
         // Unmapping leaves a control at whatever the bus last wrote, so it goes back to neutral.
         unmap: () => { if (at) { at[0].map(at[1], -1); at[0].set(at[1], E.channelDefault(paramName)); } },
+        // An audio-rate driver, read per sample where the browser's is (poptart.scd's chanIn).
+        mapAudio: perSample ? (bus) => E.setChanAr(track, paramName, E.busIndexOf(bus)) : null,
+        unmapAudio: perSample ? () => {
+          E.setChanAr(track, paramName, -1);
+          // Back to neutral, as unmap leaves it - and onto whichever audio-rate driver is still
+          // wanted there (the caller has already dropped its own).
+          if (at) at[0].set(at[1], E.channelDefault(paramName));
+          E.reassertAudioDrivers(track, -1, paramName);
+        } : null,
         // A plain value, kept for an effect node made later where it has none yet.
         set: (value) => {
           if (wetSlot) track.wet.set(Number(wetSlot[1]), value);
@@ -83,6 +93,15 @@ function install(E) {
     const k = `slot${slot}_${paramName}`;
     const ctl = track.controllers.get(slot);
     const index = ctl?.info != null ? E.resolveParamIndex(ctl.info, paramName) : null;
+    // A channel control's, likewise (see setChanAr).
+    if (slot === -1) {
+      const env = track.envs.get(k);
+      const lfo = track.lfos.get(k);
+      const expr = track.exprs?.get(k);
+      if (env != null && env.audio === true) E.setChanAr(track, paramName, env.bus.index);
+      else if (lfo != null && lfo.audio === true) E.setChanAr(track, paramName, lfo.bus.index);
+      else if (expr != null && expr.outKind === 'channelAr') E.setChanAr(track, paramName, expr.out.index);
+    }
     if (index != null && hasFn(ctl, 'mapAudio')) {
       const env = track.envs.get(k);
       const expr = track.exprs?.get(k);
@@ -111,11 +130,24 @@ function install(E) {
   // parameter (or the track synth's control input, or an expression's input) as a native
   // modulator's bus is. The first value creates the ramp, born AT that value so nothing glides in
   // from zero; every later one just moves its target. `target` is a paramTarget.
+  // How long a polled value takes to reach an expression's input: the ramp's usual 30 ms, or none
+  // for an input the tree marks `step` (read only under a .smooth(), whose time is then the only
+  // glide). null for a control that is not an expression's input.
+  E.LEAF_RAMP_SEC = 0.03;
+  E.leafRampTime = (track, slot, paramName) => {
+    const leaf = E.exprLeaf(paramName);
+    if (leaf == null) return null;
+    const e = E.exprsOf?.(track)?.get(E.exprKey(slot, leaf[1]));
+    return e?.stepped?.has(leaf[0]) ? 0 : E.LEAF_RAMP_SEC;
+  };
+
   E.rampTo = (track, rampKey, slot, target, value) => {
     const r = track.ramps.get(rampKey);
+    const time = E.leafRampTime(track, slot, String(rampKey).slice(`slot${slot}_`.length));
+    const timeArgs = time == null ? [] : ['time', time];
     if (r == null) {
       const bus = Bus.control(S, 1);
-      const syn = Synth.new(S, 'poptart_ramp', ['out', bus.index, 'target', value], track.group, 'addToHead');
+      const syn = Synth.new(S, 'poptart_ramp', ['out', bus.index, 'target', value, ...timeArgs], track.group, 'addToHead');
       E.nodeOwns?.(syn.nodeID, `a polled control (${rampKey})`);
       target.map(bus);
       track.ramps.set(rampKey, { synth: syn, bus, index: target.index, slot, target: value });
@@ -125,7 +157,7 @@ function install(E) {
       // The plugin in this slot may have been swapped for one where the name is a different index:
       // follow it. (An open also clears the UGen's mappings - see dropSlotRamps.)
       if (target.index !== r.index) { r.index = target.index; target.map(r.bus); }
-      r.synth.set('target', value);
+      r.synth.set('target', value, ...timeArgs);
       E.tellRamp(track, rampKey, slot, r.synth, value);
     }
   };

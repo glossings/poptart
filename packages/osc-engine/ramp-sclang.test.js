@@ -41,10 +41,11 @@ var tracks = IdentityDictionary.new;
 var tellRamp = { }, tellSlot = { }, tellMods = { }, tellTap = { }, shapesHandled = IdentityDictionary.new, nodeAddr = (sendMsg: { }); // the direct path's id handoff (see tellTrack in sc/poptart.scd) - inert here
 var nodeGoneSaid = IdentitySet.new, nodeOwns = { |nodeID, what| }; // the engine's node bookkeeping (see nodeOwns in sc/poptart.scd) - inert here
 var modFreeDelay = 0.05;
-var freeModulatorLater, rampTo, dropRamp, dropSlotRamps;
+var freeModulatorLater, rampTo, dropRamp, dropSlotRamps, leafRampTime; // leafRampTime: nil here, so no ramp is a leaf
 // What a ramp is mapped onto (paramTarget) and what it leans on; the expression half is unused here.
 var exprLeaf, busIndexOf, paramTarget, reassertAudioDrivers, exprFeed, channelDefault, resolveParamIndex;
 var channelTarget = { |track, name| [track[\\synth], name.asSymbol] }; // every channel control on the one synth here - see channelTarget in sc/poptart.scd
+var chanAudio = { |name| false }, setChanAr = { |track, name, index| }; // no per-sample channel controls here - see chanIn in sc/poptart.scd
 var maps = List.new;
 var ctlFor = { |slot| (map: { |self, index, bus| maps.add("slot" ++ slot ++ ":" ++ index ++ "->" ++ bus.index) }) };
 var track = (
