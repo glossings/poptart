@@ -18,22 +18,24 @@
 
 import { defineDevice } from '../descriptor.mjs';
 import { at } from '../dsp/control.mjs';
-import { SYNC_OPTIONS, syncedSeconds } from '../dsp/sync.mjs';
+import { SYNC_OPTIONS, syncedSeconds, migrateSyncLists } from '../dsp/sync.mjs';
 
 const REPEAT_MAX_SEC = 4;
 
 export const STUTTER = defineDevice({
   id: 'Stutter',
   kind: 'fx',
-  version: 1,
+  version: 2,
+  // Version 2 inserted 1/32T and 1/32. into the sync list (see dsp/sync.mjs).
+  migrate: migrateSyncLists(['interval', 'grid']),
   license: 'AGPL-3.0-only',
   processor: 'poptart-stutter',
   description: 'A stutter on the grid: every interval, with the chance set, the last grid division of audio is caught and repeated, falling in level and pitch if asked.',
   channels: { in: 2, out: 2 },
   params: [
-    { id: 'interval', name: 'Interval', default: 12, options: [...SYNC_OPTIONS], rate: 'k',
+    { id: 'interval', name: 'Interval', default: SYNC_OPTIONS.indexOf('1/2T'), options: [...SYNC_OPTIONS], rate: 'k',
       description: 'How often a repeat may start.' },
-    { id: 'grid', name: 'Grid', default: 2, options: [...SYNC_OPTIONS], rate: 'k',
+    { id: 'grid', name: 'Grid', default: SYNC_OPTIONS.indexOf('1/16'), options: [...SYNC_OPTIONS], rate: 'k',
       description: 'How long the caught slice is.' },
     { id: 'chance', name: 'Chance', min: 0, max: 1, default: 1,
       description: 'The odds a given interval repeats. Decided per beat rather than per play, so a song repeats in the same places every time.' },

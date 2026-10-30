@@ -109,3 +109,20 @@ test('without a loop the second output is silent and the return is not heard', (
     assert.ok(send.every((ch) => ch.every((v) => v === 0)));
   }
 });
+
+test('a version 1 state reads its sync where it was, after 1/32T and 1/32. were inserted', async () => {
+  const { migrateState } = await import('./src/descriptor.mjs');
+  const { SYNC_OPTIONS } = await import('./src/dsp/sync.mjs');
+  const { DELAY } = await import('./src/devices/delay.mjs');
+  const { STUTTER } = await import('./src/devices/stutter.mjs');
+  const OLD = ['free', '1/32', '1/16', '1/16T', '1/16.', '1/8', '1/8T', '1/8.', '1/4', '1/4T', '1/4.', '1/2', '1/2T', '1/2.', '1 bar', '2 bars', '4 bars'];
+  for (let i = 0; i < OLD.length; i++) {
+    const doc = migrateState(DELAY, { device: 'Delay', version: 1, params: { sync: i, feedback: 0.5 } });
+    assert.equal(SYNC_OPTIONS[doc.params.sync], OLD[i], `old ${OLD[i]}`);
+    assert.equal(doc.version, 2);
+  }
+  const st = migrateState(STUTTER, { device: 'Stutter', version: 1, params: { interval: 12, grid: 2 } }).params;
+  assert.deepEqual([SYNC_OPTIONS[st.interval], SYNC_OPTIONS[st.grid]], ['1/2T', '1/16']);
+  assert.equal(migrateState(DELAY, { device: 'Delay', version: 2, params: { sync: 3 } }).params.sync, 3, 'a current state is left alone');
+  assert.deepEqual(SYNC_OPTIONS.slice(1, 4), ['1/32', '1/32T', '1/32.']);
+});

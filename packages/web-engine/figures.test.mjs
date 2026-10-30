@@ -560,7 +560,7 @@ const only = (device, kind, over = {}, o = {}) => buildFigures(device, { ...defa
 test('a figure carries the position of every parameter it drags, so a drag starts where the knob is', () => {
   const f = only(DELAY, 'echoes', { feedback: 0.55 });
   assert.deepEqual(Object.keys(f.positions), ['feedback']);
-  assert.ok(Math.abs(f.positions.feedback - 0.55 / 1.1) < 1e-9, 'on the parameter\'s own 0..1 curve');
+  assert.ok(Math.abs(f.positions.feedback - 0.55) < 1e-9, 'on the parameter\'s own 0..1 curve');
   assert.equal(only(WAVETABLE, 'adsr').positions, null, 'a figure with no drag has none');
 });
 

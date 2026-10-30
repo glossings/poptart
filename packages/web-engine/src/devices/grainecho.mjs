@@ -7,7 +7,7 @@
 
 import { defineDevice } from '../descriptor.mjs';
 import { at } from '../dsp/control.mjs';
-import { SYNC_OPTIONS, syncedSeconds } from '../dsp/sync.mjs';
+import { SYNC_OPTIONS, syncedSeconds, migrateSyncLists } from '../dsp/sync.mjs';
 
 const GRAIN_MAX_SEC = 4;
 const MAX_GRAINS = 48;
@@ -15,7 +15,9 @@ const MAX_GRAINS = 48;
 export const GRAINECHO = defineDevice({
   id: 'GrainEcho',
   kind: 'fx',
-  version: 1,
+  version: 2,
+  // Version 2 inserted 1/32T and 1/32. into the sync list (see dsp/sync.mjs).
+  migrate: migrateSyncLists(['sync']),
   license: 'AGPL-3.0-only',
   processor: 'poptart-grainecho',
   description: 'A delay whose repeats are grains: short repitched windows read from around the delay time and scattered, feeding back into themselves.',

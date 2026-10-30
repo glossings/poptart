@@ -25,7 +25,7 @@
 
 import { defineDevice } from '../descriptor.mjs';
 import { at } from '../dsp/control.mjs';
-import { SYNC_OPTIONS, syncBeats } from '../dsp/sync.mjs';
+import { SYNC_OPTIONS, syncBeats, migrateSyncLists } from '../dsp/sync.mjs';
 
 /** Frames per chunk of loop memory, each chunk one array per channel. */
 export const LOOPER_CHUNK = 65536;
@@ -39,7 +39,9 @@ const SNAP = 1e-6;
 export const LOOPER = defineDevice({
   id: 'Looper',
   kind: 'fx',
-  version: 1,
+  version: 2,
+  // Version 2 inserted 1/32T and 1/32. into the sync list (see dsp/sync.mjs).
+  migrate: migrateSyncLists(['quantize']),
   license: 'AGPL-3.0-only',
   processor: 'poptart-looper',
   description: 'A live looper: record a take on the grid, play it back, and overdub onto it, with tape-style speed and reverse.',

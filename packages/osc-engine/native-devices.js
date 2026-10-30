@@ -135,9 +135,25 @@ function deviceStateText(device, positions = {}, files = {}) {
  * native-devices.test.js holds them to the browser's. A state at the current version, or of a
  * device that never changed, passes through untouched.
  */
+// The controls that take the sync list, by device: version 2 inserted 1/32T and 1/32. after 1/32,
+// so an index saved at version 1 from 1/16 on moves two along (web-engine's dsp/sync.mjs).
+const SYNC_LIST_CONTROLS = Object.freeze({
+  Delay: ['sync'], Chorus: ['sync'], Flanger: ['sync'], Phaser: ['sync'], Ducker: ['sync'],
+  GrainEcho: ['sync'], Looper: ['quantize'], Stutter: ['interval', 'grid'],
+});
+
 function migrateDeviceState(device, doc) {
   const from = Number.isInteger(doc.version) && doc.version >= 1 ? doc.version : 1;
   const params = { ...doc.params };
+  if (SYNC_LIST_CONTROLS[device.id] && from < 2) {
+    for (const id of SYNC_LIST_CONTROLS[device.id]) {
+      const name = deviceParam(device, id)?.name;
+      for (const key of [id, name]) {
+        const i = Math.round(Number(params[key]));
+        if (key != null && params[key] != null && Number.isFinite(i) && i >= 2) params[key] = i + 2;
+      }
+    }
+  }
   if (device.id === 'FreqShift' && from < 2) {
     // v1 had an unsigned Freq and an up/down/split Direction; v2 has a signed Freq and a Wide
     // switch (split = the right channel the other way).
@@ -455,6 +471,7 @@ module.exports = {
   deviceRows,
   deviceStateText,
   readDeviceState,
+  migrateDeviceState,
   readDeviceLive,
   readReport,
   paramPosition,

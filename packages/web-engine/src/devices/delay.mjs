@@ -17,14 +17,16 @@ import { defineDevice } from '../descriptor.mjs';
 import { at } from '../dsp/control.mjs';
 import { OnePole } from '../dsp/filters.mjs';
 import { DelayLine } from '../dsp/reverb.mjs';
-import { SYNC_OPTIONS, syncedSeconds } from '../dsp/sync.mjs';
+import { SYNC_OPTIONS, syncedSeconds, migrateSyncLists } from '../dsp/sync.mjs';
 
 const DELAY_MAX_SEC = 4;
 
 export const DELAY = defineDevice({
   id: 'Delay',
   kind: 'fx',
-  version: 1,
+  version: 2,
+  // Version 2 inserted 1/32T and 1/32. into the sync list (see dsp/sync.mjs).
+  migrate: migrateSyncLists(['sync']),
   license: 'AGPL-3.0-only',
   processor: 'poptart-delay',
   description: 'A stereo delay with feedback and a lowpass in the loop, in seconds or synced to the tempo, with a ping-pong mode.',
@@ -37,8 +39,8 @@ export const DELAY = defineDevice({
     { id: 'time', name: 'Time', min: 0.001, max: DELAY_MAX_SEC, default: 0.375, unit: 's', curve: 'exp',
       active: { param: 'sync', is: 'free' },
       description: 'The delay in seconds, when the sync is free.' },
-    { id: 'feedback', name: 'Feedback', min: 0, max: 1.1, default: 0.4,
-      description: 'Above one the loop runs away, and the soft clip in it is all that holds it.' },
+    { id: 'feedback', name: 'Feedback', min: 0, max: 1, default: 0.4,
+      description: 'How much of each repeat goes round again. At one the repeats hold their level, and the soft clip in the loop keeps them from running away.' },
     { id: 'tone', name: 'Tone', min: 200, max: 20000, default: 8000, unit: 'Hz', curve: 'exp',
       description: 'A lowpass inside the feedback loop, so each repeat is darker than the last.' },
     { id: 'pingpong', name: 'Ping Pong', min: 0, max: 1, default: 0, ui: 'toggle', rate: 'k',

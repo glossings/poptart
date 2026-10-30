@@ -21,6 +21,7 @@ const { OscEngine } = require('./index.js');
 const {
   nativeDevice, nativeDevices, deviceParam, deviceParamArgs, deviceParamRows, deviceRows,
   devicePositions, paramPosition, forgetNativeDevices, deviceStateText, readDeviceState, readDeviceLive,
+  migrateDeviceState,
 } = require('./native-devices');
 
 const DESCRIPTOR = path.join(__dirname, '..', 'web-engine', 'src', 'descriptor.mjs');
@@ -815,5 +816,22 @@ test('the two oscillators load into one bank of tables, so their files take diff
   for (const id of ['osc1.table', 'osc2.table']) {
     assert.equal(files[id][slots[0]], 'break:0');
     assert.equal(files[id][slots[1]], 'break:1');
+  }
+});
+
+test('a sync list saved at version 1 reads as the browser reads it, after 1/32T and 1/32. were inserted', async () => {
+  const { DEVICES } = await import('../web-engine/src/catalog.mjs');
+  const { migrateState } = await import('../web-engine/src/descriptor.mjs');
+  for (const [id, ids] of [['Delay', ['sync']], ['Chorus', ['sync']], ['Flanger', ['sync']], ['Phaser', ['sync']],
+    ['Ducker', ['sync']], ['GrainEcho', ['sync']], ['Looper', ['quantize']], ['Stutter', ['interval', 'grid']]]) {
+    const device = nativeDevice(id);
+    const web = DEVICES.find((d) => d.id === id);
+    assert.strictEqual(device.version, 2, `${id} is version 2`);
+    for (let i = 0; i <= 16; i++) {
+      const params = Object.fromEntries(ids.map((k) => [k, i]));
+      const want = migrateState(web, { device: id, version: 1, params }).params;
+      const got = migrateDeviceState(device, { device: id, version: 1, params });
+      for (const k of ids) assert.strictEqual(got[k], want[k], `${id} ${k} at old index ${i}`);
+    }
   }
 });

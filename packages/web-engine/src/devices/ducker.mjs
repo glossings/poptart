@@ -11,13 +11,15 @@
 import { defineDevice } from '../descriptor.mjs';
 import { at } from '../dsp/control.mjs';
 import { curveShape } from '../dsp/adsr.mjs';
-import { SYNC_OPTIONS, syncedSeconds } from '../dsp/sync.mjs';
+import { SYNC_OPTIONS, syncedSeconds, migrateSyncLists } from '../dsp/sync.mjs';
 import { History } from '../dsp/history.mjs';
 
 export const DUCKER = defineDevice({
   id: 'Ducker',
   kind: 'fx',
-  version: 1,
+  version: 2,
+  // Version 2 inserted 1/32T and 1/32. into the sync list (see dsp/sync.mjs).
+  migrate: migrateSyncLists(['sync']),
   license: 'AGPL-3.0-only',
   processor: 'poptart-ducker',
   description: 'A level dip on the beat, on the notes of a track routed in with .midi(), or on the transients of a sidechained track: the pump of a sidechain compressor, with a shape to draw instead of a detector to fight.',
@@ -25,7 +27,7 @@ export const DUCKER = defineDevice({
   sidechain: true,
   notes: true,
   params: [
-    { id: 'sync', name: 'Sync', default: 8, options: [...SYNC_OPTIONS], rate: 'k',
+    { id: 'sync', name: 'Sync', default: SYNC_OPTIONS.indexOf('1/4'), options: [...SYNC_OPTIONS], rate: 'k',
       description: 'How often the dip happens on the clock. Ignored when notes or a sidechain trigger it instead.' },
     { id: 'amount', name: 'Amount', min: 0, max: 1, default: 0.8,
       description: 'How far the level drops at the dip.' },

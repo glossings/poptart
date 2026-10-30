@@ -12,11 +12,11 @@
 namespace pd_own {
 
 /** The length of each sync option in beats (quarter notes); a negative means free. */
-constexpr double kSyncBeats[17] = {
-  -1, 1.0 / 8, 1.0 / 4, 1.0 / 6, 3.0 / 8, 1.0 / 2, 1.0 / 3, 3.0 / 4, 1, 2.0 / 3, 1.5,
+constexpr double kSyncBeats[19] = {
+  -1, 1.0 / 8, 1.0 / 12, 3.0 / 16, 1.0 / 4, 1.0 / 6, 3.0 / 8, 1.0 / 2, 1.0 / 3, 3.0 / 4, 1, 2.0 / 3, 1.5,
   2, 4.0 / 3, 3, 4, 8, 16,
 };
-constexpr int kSyncOptions = 17;
+constexpr int kSyncOptions = 19;
 
 inline double syncBeats(int index) {
   if (index < 0 || index >= kSyncOptions) return -1;

@@ -2694,18 +2694,19 @@ class FilterProcessor {
 // leaves somebody turning whichever of the two is not being read, so the knob declares itself
 // `active: { param: 'sync', is: 'free' }` and the panel draws one or the other, never both.
 //
-// A song stores an enum by its LABEL, so this list can be reordered and added to - which is
-// what lets a division be inserted where it belongs musically rather than appended.
+// A saved state holds an enum by its INDEX, so a division inserted where it belongs musically
+// moves every one after it: each device that takes the list bumps its version, and its `migrate`
+// reads an older state through syncFromVersion1 (the desktop does the same in native-devices.js).
 
 /** The choices on a sync switch, in panel order. The index is what a descriptor's enum stores. */
 const SYNC_OPTIONS = Object.freeze([
-  'free', '1/32', '1/16', '1/16T', '1/16.', '1/8', '1/8T', '1/8.', '1/4', '1/4T', '1/4.',
+  'free', '1/32', '1/32T', '1/32.', '1/16', '1/16T', '1/16.', '1/8', '1/8T', '1/8.', '1/4', '1/4T', '1/4.',
   '1/2', '1/2T', '1/2.', '1 bar', '2 bars', '4 bars',
 ]);
 
 /** The length of each option in beats (quarter notes), or null for free. */
 const BEATS = Object.freeze([
-  null, 1 / 8, 1 / 4, 1 / 6, 3 / 8, 1 / 2, 1 / 3, 3 / 4, 1, 2 / 3, 1.5,
+  null, 1 / 8, 1 / 12, 3 / 16, 1 / 4, 1 / 6, 3 / 8, 1 / 2, 1 / 3, 3 / 4, 1, 2 / 3, 1.5,
   2, 4 / 3, 3, 4, 8, 16,
 ]);
 
@@ -2733,6 +2734,23 @@ function syncedHz(syncIndex, bpm, fallbackHz) {
   return Math.max(1, bpm) / (beats * 60);
 }
 
+/**
+ * A sync index saved before 1/32T and 1/32. were added (device version 1), as it is now: free and
+ * 1/32 stay, everything after them moves two along.
+ */
+function syncFromVersion1(index) {
+  const i = Math.round(Number(index));
+  return Number.isFinite(i) && i >= 2 ? i + 2 : index;
+}
+
+/** A device's `migrate` for the sync-list controls `ids`, from version 1. */
+function migrateSyncLists(ids) {
+  return (params, from) => {
+    if (from < 2) for (const id of ids) if (params[id] != null) params[id] = syncFromVersion1(params[id]);
+    return params;
+  };
+}
+
 // ---- src/devices/delay.mjs ---------------------------------------
 // The Delay effect: a stereo delay line with feedback, a filter in the loop and tempo sync.
 //
@@ -2755,7 +2773,9 @@ const DELAY_MAX_SEC = 4;
 const DELAY = defineDevice({
   id: 'Delay',
   kind: 'fx',
-  version: 1,
+  version: 2,
+  // Version 2 inserted 1/32T and 1/32. into the sync list (see dsp/sync.mjs).
+  migrate: migrateSyncLists(['sync']),
   license: 'AGPL-3.0-only',
   processor: 'poptart-delay',
   description: 'A stereo delay with feedback and a lowpass in the loop, in seconds or synced to the tempo, with a ping-pong mode.',
@@ -2768,8 +2788,8 @@ const DELAY = defineDevice({
     { id: 'time', name: 'Time', min: 0.001, max: DELAY_MAX_SEC, default: 0.375, unit: 's', curve: 'exp',
       active: { param: 'sync', is: 'free' },
       description: 'The delay in seconds, when the sync is free.' },
-    { id: 'feedback', name: 'Feedback', min: 0, max: 1.1, default: 0.4,
-      description: 'Above one the loop runs away, and the soft clip in it is all that holds it.' },
+    { id: 'feedback', name: 'Feedback', min: 0, max: 1, default: 0.4,
+      description: 'How much of each repeat goes round again. At one the repeats hold their level, and the soft clip in the loop keeps them from running away.' },
     { id: 'tone', name: 'Tone', min: 200, max: 20000, default: 8000, unit: 'Hz', curve: 'exp',
       description: 'A lowpass inside the feedback loop, so each repeat is darker than the last.' },
     { id: 'pingpong', name: 'Ping Pong', min: 0, max: 1, default: 0, ui: 'toggle', rate: 'k',
@@ -3649,7 +3669,9 @@ class ModDelay {
 const CHORUS = defineDevice({
   id: 'Chorus',
   kind: 'fx',
-  version: 1,
+  version: 2,
+  // Version 2 inserted 1/32T and 1/32. into the sync list (see dsp/sync.mjs).
+  migrate: migrateSyncLists(['sync']),
   license: 'AGPL-3.0-only',
   processor: 'poptart-chorus',
   description: 'A chorus: one to three delayed copies of the signal, their delays swept by an LFO, spread across the stereo field.',
@@ -3731,7 +3753,9 @@ class ChorusProcessor {
 const FLANGER = defineDevice({
   id: 'Flanger',
   kind: 'fx',
-  version: 1,
+  version: 2,
+  // Version 2 inserted 1/32T and 1/32. into the sync list (see dsp/sync.mjs).
+  migrate: migrateSyncLists(['sync']),
   license: 'AGPL-3.0-only',
   processor: 'poptart-flanger',
   description: 'A flanger: a delay of a few milliseconds swept by an LFO and fed back on itself, for a comb filter that moves.',
@@ -3818,7 +3842,9 @@ const MAX_STAGES = 12;
 const PHASER = defineDevice({
   id: 'Phaser',
   kind: 'fx',
-  version: 1,
+  version: 2,
+  // Version 2 inserted 1/32T and 1/32. into the sync list (see dsp/sync.mjs).
+  migrate: migrateSyncLists(['sync']),
   license: 'AGPL-3.0-only',
   processor: 'poptart-phaser',
   description: 'A phaser: up to twelve allpass stages swept by an LFO, with feedback for sharper notches.',
@@ -4546,7 +4572,9 @@ class Adsr {
 const DUCKER = defineDevice({
   id: 'Ducker',
   kind: 'fx',
-  version: 1,
+  version: 2,
+  // Version 2 inserted 1/32T and 1/32. into the sync list (see dsp/sync.mjs).
+  migrate: migrateSyncLists(['sync']),
   license: 'AGPL-3.0-only',
   processor: 'poptart-ducker',
   description: 'A level dip on the beat, on the notes of a track routed in with .midi(), or on the transients of a sidechained track: the pump of a sidechain compressor, with a shape to draw instead of a detector to fight.',
@@ -4554,7 +4582,7 @@ const DUCKER = defineDevice({
   sidechain: true,
   notes: true,
   params: [
-    { id: 'sync', name: 'Sync', default: 8, options: [...SYNC_OPTIONS], rate: 'k',
+    { id: 'sync', name: 'Sync', default: SYNC_OPTIONS.indexOf('1/4'), options: [...SYNC_OPTIONS], rate: 'k',
       description: 'How often the dip happens on the clock. Ignored when notes or a sidechain trigger it instead.' },
     { id: 'amount', name: 'Amount', min: 0, max: 1, default: 0.8,
       description: 'How far the level drops at the dip.' },
@@ -5049,15 +5077,17 @@ const REPEAT_MAX_SEC = 4;
 const STUTTER = defineDevice({
   id: 'Stutter',
   kind: 'fx',
-  version: 1,
+  version: 2,
+  // Version 2 inserted 1/32T and 1/32. into the sync list (see dsp/sync.mjs).
+  migrate: migrateSyncLists(['interval', 'grid']),
   license: 'AGPL-3.0-only',
   processor: 'poptart-stutter',
   description: 'A stutter on the grid: every interval, with the chance set, the last grid division of audio is caught and repeated, falling in level and pitch if asked.',
   channels: { in: 2, out: 2 },
   params: [
-    { id: 'interval', name: 'Interval', default: 12, options: [...SYNC_OPTIONS], rate: 'k',
+    { id: 'interval', name: 'Interval', default: SYNC_OPTIONS.indexOf('1/2T'), options: [...SYNC_OPTIONS], rate: 'k',
       description: 'How often a repeat may start.' },
-    { id: 'grid', name: 'Grid', default: 2, options: [...SYNC_OPTIONS], rate: 'k',
+    { id: 'grid', name: 'Grid', default: SYNC_OPTIONS.indexOf('1/16'), options: [...SYNC_OPTIONS], rate: 'k',
       description: 'How long the caught slice is.' },
     { id: 'chance', name: 'Chance', min: 0, max: 1, default: 1,
       description: 'The odds a given interval repeats. Decided per beat rather than per play, so a song repeats in the same places every time.' },
@@ -5241,7 +5271,9 @@ const SNAP = 1e-6;
 const LOOPER = defineDevice({
   id: 'Looper',
   kind: 'fx',
-  version: 1,
+  version: 2,
+  // Version 2 inserted 1/32T and 1/32. into the sync list (see dsp/sync.mjs).
+  migrate: migrateSyncLists(['quantize']),
   license: 'AGPL-3.0-only',
   processor: 'poptart-looper',
   description: 'A live looper: record a take on the grid, play it back, and overdub onto it, with tape-style speed and reverse.',
@@ -5483,7 +5515,9 @@ const MAX_GRAINS = 48;
 const GRAINECHO = defineDevice({
   id: 'GrainEcho',
   kind: 'fx',
-  version: 1,
+  version: 2,
+  // Version 2 inserted 1/32T and 1/32. into the sync list (see dsp/sync.mjs).
+  migrate: migrateSyncLists(['sync']),
   license: 'AGPL-3.0-only',
   processor: 'poptart-grainecho',
   description: 'A delay whose repeats are grains: short repitched windows read from around the delay time and scattered, feeding back into themselves.',

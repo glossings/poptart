@@ -3,12 +3,14 @@
 import { defineDevice } from '../descriptor.mjs';
 import { at } from '../dsp/control.mjs';
 import { ModDelay } from '../dsp/moddelay.mjs';
-import { SYNC_OPTIONS, syncedHz } from '../dsp/sync.mjs';
+import { SYNC_OPTIONS, syncedHz, migrateSyncLists } from '../dsp/sync.mjs';
 
 export const CHORUS = defineDevice({
   id: 'Chorus',
   kind: 'fx',
-  version: 1,
+  version: 2,
+  // Version 2 inserted 1/32T and 1/32. into the sync list (see dsp/sync.mjs).
+  migrate: migrateSyncLists(['sync']),
   license: 'AGPL-3.0-only',
   processor: 'poptart-chorus',
   description: 'A chorus: one to three delayed copies of the signal, their delays swept by an LFO, spread across the stereo field.',
