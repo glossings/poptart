@@ -637,9 +637,9 @@ test('a looper is never saved recording: Record and Clear stay out of its state,
   const params = JSON.parse(Buffer.from(await engine.getPluginState('t1', 1), 'base64').toString('utf8')).params;
   assert.ok(!('record' in params) && !('clear' in params), JSON.stringify(params));
   engine.setParam('t1', 1, 'Record', 0, 0);
-  assert.equal(await engine.setPluginState('t1', 1, JSON.stringify({ params: { record: 1, wet: 0.5 } }), 0), true);
+  assert.equal(await engine.setPluginState('t1', 1, JSON.stringify({ params: { record: 1, mix: 0.75 } }), 0), true);
   assert.equal(engine.tracks.get('t1').slots.get(1).values.record, 0, 'an old state naming Record does not start a take');
-  assert.equal(engine.tracks.get('t1').slots.get(1).values.wet, 0.5);
+  assert.equal(engine.tracks.get('t1').slots.get(1).values.mix, 0.75);
 });
 
 test('a state that is not readable warns and leaves the slot as it was', async () => {

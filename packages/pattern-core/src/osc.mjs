@@ -9,6 +9,8 @@
 // signal reads one of them by index - a TouchOSC fader sends one float, an XY pad two.
 
 // address -> latest argument list (numbers only; strings and blobs are dropped on the way in).
+import { notifySourceFed } from './sources.mjs';
+
 const latest = new Map();
 
 // Addresses any osc() call has asked for this session. The host checks this after each eval to
@@ -33,7 +35,9 @@ export function oscInUse() {
 /** Host-side feed: one incoming message, its arguments as sent (non-numbers are ignored). */
 export function feedOsc(address, args) {
   const values = (Array.isArray(args) ? args : [args]).map(Number).filter((v) => Number.isFinite(v));
-  latest.set(normalizeOscAddress(address), values);
+  const at = normalizeOscAddress(address);
+  latest.set(at, values);
+  notifySourceFed({ kind: 'osc', address: at, values });
 }
 
 /**

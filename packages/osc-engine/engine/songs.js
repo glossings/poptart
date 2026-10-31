@@ -105,6 +105,21 @@ function install(E) {
     song.posFunc = E.songPosFunc(key, song.synth.nodeID);
   });
 
+  // Whether a track's pattern is playing: [key, 0/1, latency]. Kept on the track for a device
+  // that opens later (see loads.js), and told to every device on it that takes it - a looper
+  // plays out its pass on a stop. A plugin is not told: it has a transport of its own.
+  E.on('/poptart/trackRunning', (msg) => {
+    const key = String(msg[1]);
+    const on = Math.trunc(Number(msg[2])) > 0;
+    const latency = Number(msg[3]);
+    const track = E.tracks.get(key);
+    if (!E.isTrack(track)) return;
+    track.running = on;
+    E.bundleNow(latency, () => {
+      for (const ctl of track.controllers.values()) if (typeof ctl.trackRunning === 'function') ctl.trackRunning(on);
+    });
+  });
+
   // Set one control on the running player: [key, name, value, latency]. `run` 0/1 is pause and
   // resume; `rate` the tempo-sync and nudge handle.
   E.on('/poptart/songSet', (msg) => {

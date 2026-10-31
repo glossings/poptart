@@ -31,7 +31,7 @@ export const BUILDER_NAMES = Object.freeze(['Signal', 'n', 'note', 'mini', 's', 
   'noteToMidi', 'degreeToMidi', 'parseScaleName']);
 
 /** Builders the editor writes and nobody types: the calls behind a drawn roll, a shape, a pack. */
-export const INTERNAL_BUILDERS = Object.freeze(['_roll', '_shape', '_preset', '_pack', '_slices', '_auto', '_groove', '_arrange', '_input', '_display']);
+export const INTERNAL_BUILDERS = Object.freeze(['_roll', '_shape', '_preset', '_pack', '_slices', '_auto', '_groove', '_arrange', '_input', '_display', '_at']);
 
 /** What a `setbpm(...)` block evaluates to, so a tempo-only block is not mistaken for a pattern. */
 export const TEMPO_BLOCK = Object.freeze({ poptartTempoBlock: true });

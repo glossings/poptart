@@ -536,3 +536,36 @@ test('a matrix with no rows says so, plays nothing, and is left as text', () => 
   }
 });
 
+
+test('a knob or slider turns on a curve: { curve: "exp" } (above zero), pow and sym with their exponent', () => {
+  const said = [];
+  core.setPatternWarn((m) => said.push(m));
+  try {
+    const { widgets } = evalLines('a: knob(880, 20, 20000, { curve: "exp" })\nb: slider(0.2, 0, 1, { curve: "pow", curveExp: 3 })\nc: knob(0.5, 0, 1, { curve: "exp" })\nd: knob(0.5, 0, 1, { curve: "wavy" })\ne: toggle(1, { curve: "exp" })');
+    const [a, b, c, d, e] = widgets.inputs;
+    assert.deepEqual(a.opts, { curve: 'exp' });
+    assert.deepEqual(b.opts, { curve: 'pow', curveExp: 3 });
+    assert.deepEqual(c.opts, {}, 'an exp knob needs a range above zero');
+    assert.deepEqual(d.opts, {});
+    assert.deepEqual(e.opts, {}, 'a toggle has no curve');
+    assert.equal(said.filter((m) => /curve/.test(m)).length, 3, said.join('\n'));
+  } finally {
+    core.setPatternWarn(null);
+  }
+});
+
+test('the curve maths: a position on each curve and back', () => {
+  const { positionOnCurve, valueOnCurve } = core;
+  const exp = { min: 20, max: 20000, curve: 'exp' };
+  assert.ok(Math.abs(positionOnCurve(exp, 632.4555) - 0.5) < 1e-3);
+  assert.ok(Math.abs(valueOnCurve(exp, 0.5) - 632.4555) < 1e-2);
+  const pow = { min: 0, max: 1, curve: 'pow', curveExp: 2 };
+  assert.equal(valueOnCurve(pow, 0.5), 0.25);
+  assert.equal(positionOnCurve(pow, 0.25), 0.5);
+  const sym = { min: -1, max: 1, curve: 'sym', curveExp: 2 };
+  assert.equal(valueOnCurve(sym, 0.5), 0);
+  assert.equal(valueOnCurve(sym, 0.75), 0.25);
+  assert.equal(positionOnCurve(sym, 0.25), 0.75);
+  assert.equal(valueOnCurve({ min: 0, max: 10, curve: 'lin' }, 0.3), 3);
+  assert.equal(positionOnCurve({ min: 0, max: 10 }, 30), 1, 'clamped');
+});

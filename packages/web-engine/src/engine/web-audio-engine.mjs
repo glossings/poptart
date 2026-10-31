@@ -255,6 +255,7 @@ export class WebAudioEngine {
     });
     this.bpm = DEFAULT_BPM;
     this.trackTempo = new Map();    // trackId -> { bpm, anchorSec } for a deck on a clock of its own
+    this.trackRunning = new Map();  // trackId -> whether its pattern is playing (see setTrackRunning)
     // Where a beat falls on the context's clock: the time cycle zero was at. The devices on the
     // grid count from it.
     this.anchorSec = 0;
@@ -553,6 +554,10 @@ export class WebAudioEngine {
     // A device built on a track whose deck runs at its own tempo starts at that tempo.
     const own = this.trackTempo.get(trackId);
     if (own) { try { built.node?.port?.postMessage?.({ kind: 'tempo', ...own }); } catch { /* no port */ } }
+    // And hears whether its track is playing, if that has been said.
+    if (this.trackRunning.has(trackId)) {
+      try { built.node?.port?.postMessage?.({ kind: 'running', running: this.trackRunning.get(trackId), atSec: null }); } catch { /* no port */ }
+    }
     const now = this.getTime();
     for (const [id, value] of Object.entries(defaultValues(descriptor))) {
       track.setParamValue(slot, id, value, now, now);
@@ -685,6 +690,20 @@ export class WebAudioEngine {
       for (const slot of track.slots.values()) {
         try { slot.built.node?.port?.postMessage?.({ kind: 'tempo', bpm, anchorSec: anchor }); } catch { /* no port */ }
       }
+    }
+  }
+
+  /**
+   * Whether a track's pattern is playing, from `atSec` on the audio clock (null for now): what a
+   * looper follows, playing out its pass on a stop and coming back in on the bar. Kept, so a
+   * device built on the track later hears it on its way in.
+   */
+  setTrackRunning(trackId, running, atSec = null) {
+    this.trackRunning.set(trackId, !!running);
+    const track = this.tracks.get(trackId);
+    if (!track) return;
+    for (const slot of track.slots.values()) {
+      try { slot.built.node?.port?.postMessage?.({ kind: 'running', running: !!running, atSec: Number.isFinite(atSec) ? atSec : null }); } catch { /* no port */ }
     }
   }
 

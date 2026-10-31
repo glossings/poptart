@@ -3661,10 +3661,11 @@ watchPluginEdits = { |track, key, slot, ctl|
     var ours = { selfLoading.(key, slot) };
     var notify = { if (ours.value.not) { nodeAddr.sendMsg("/poptart/pluginEdited", key, slot) } };
     ctl.parameterAutomated = { |index, value|
-        // Conf mode is deaf to our own loads for the same reason: a plugin that re-announces every
-        // parameter when its program changes would drop its whole panel into the code as
-        // .param(...) calls, none of which anyone touched.
-        if (track[\confMode] == true and: { ours.value.not }) {
+        // Every gesture goes to Node: conf writes it into the code, and the header's capture
+        // keeps it either way. Deaf to our own loads for the same reason as above - a plugin that
+        // re-announces every parameter when its program changes would drop its whole panel into
+        // the code as .param(...) calls, none of which anyone touched.
+        if (ours.value.not) {
             ctl.info.parameters[index] !? { |p|
                 nodeAddr.sendMsg("/poptart/paramAutomated", key, slot, p.name.asString, index, value.asFloat);
             };
@@ -3897,6 +3898,7 @@ OSCdef(\poptartLoadDevice, { |msg|
                             // this asks rather than waiting to be told.
                             self.setTempo(trackTempo[key] ? currentTempo);
                             self.setTransportPos(trackBeats.(key));
+                            if (self.respondsTo(\trackRunning)) { self.trackRunning(track[\running] ? true) };
                             tellKeyPatched.(track, slot, nil, key);
                             // And how late a chain in its feedback loop comes back, if it has one.
                             if (self.respondsTo(\loopLatency)) {
@@ -6264,6 +6266,21 @@ OSCdef(\poptartSongStart, { |msg|
         }, '/poptart/songPos', server.addr, argTemplate: [song[\synth].nodeID]);
     };
 }, '/poptart/songStart');
+
+// Whether a track's pattern is playing: [key, 0/1, latency]. Kept on the track for a device that
+// opens later (see loadEffect), and told to every device on it that takes it - a looper plays
+// out its pass on a stop. A plugin is not told: it has a transport of its own.
+OSCdef(\poptartTrackRunning, { |msg|
+    var key = msg[1].asSymbol, on = msg[2].asInteger > 0, latency = msg[3].asFloat;
+    tracks[key] !? { |track|
+        if (track.isKindOf(Event)) {
+            track[\running] = on;
+            bundleNow.(latency, {
+                track[\controllers].do { |ctl| if (ctl.respondsTo(\trackRunning)) { ctl.trackRunning(on) } };
+            });
+        };
+    };
+}, '/poptart/trackRunning');
 
 // Set one control on the running player: [key, name, value, latency]. `run` 0/1 is
 // pause/resume; `rate` is the tempo-sync/nudge handle.

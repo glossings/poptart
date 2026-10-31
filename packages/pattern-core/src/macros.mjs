@@ -7,6 +7,8 @@
 // calls setMacro, and any macroN signal in evaluated code picks the value up on its next
 // scheduler poll.
 
+import { notifySourceFed } from './sources.mjs';
+
 export const MACRO_COUNT = 8;
 
 const values = new Array(MACRO_COUNT).fill(0);
@@ -22,6 +24,7 @@ export function setMacro(index, value01) {
   assertMacroIndex(index);
   const v = Number(value01);
   values[index - 1] = Math.min(1, Math.max(0, Number.isNaN(v) ? 0 : v));
+  notifySourceFed({ kind: 'macro', index, value: values[index - 1] });
 }
 
 /** Current 0..1 value of a knob. Knobs always have a position, so this never rests. */

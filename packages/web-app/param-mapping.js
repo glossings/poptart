@@ -333,6 +333,7 @@ class MappedEngine {
   enableOsc(...a) { return this.engine.enableOsc(...a); }
   setMidiNotes(...a) { return this.engine.setMidiNotes(...a); }
   clearMidiNotes(...a) { return this.engine.clearMidiNotes(...a); }
+  setTrackRunning(...a) { return this.engine.setTrackRunning?.(...a); }
   hush(...a) { return this.engine.hush(...a); }
   // Signal routing (midi()/audio() source builders and .midi()/.audio() injectors). No
   // parameter mapping involved, but the scheduler feature-detects each of these (typeof

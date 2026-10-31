@@ -59,7 +59,25 @@ test('the device-named .param() form keeps BOTH names plain and patterns only th
   assert.ok(out.includes('.param("Serum 2", "A Warp 2 Var", mini("0.2 0.8"'), out);
   // ...whatever the value is: a signal argument leaves both names alone too.
   const sig = injectLocations('x.param("Serum 2", "A Warp 2 Var", midicc("x")(12))');
-  assert.ok(sig.includes('.param("Serum 2", "A Warp 2 Var", midicc('), sig);
+  assert.ok(sig.includes('.param("Serum 2", "A Warp 2 Var", _at(35, midicc("x")(12)))'), sig);
+});
+
+test('injectLocations tags every live source with where it is written, for the header\'s capture', () => {
+  assert.equal(injectLocations('x.param("A", osc("/1/fader3"))'), 'x.param("A", _at(13, osc("/1/fader3")))');
+  assert.equal(injectLocations('x.param("A", macro(3).range(1, 2))'), 'x.param("A", _at(13, macro(3)).range(1, 2))');
+  assert.equal(injectLocations('x.param("A", macro1.range(1, 2))'), 'x.param("A", _at(13, macro1).range(1, 2))');
+  assert.equal(injectLocations('x.param("A", macro2)', 100), 'x.param("A", _at(113, macro2))');
+  const bound = injectLocations('const cc = midicc("Twister")\nx.param("A", cc(12, 1)).param("B", cc(13))');
+  assert.equal(bound, 'const cc = midicc("Twister")\nx.param("A", _at(42, cc(12, 1))).param("B", _at(64, cc(13)))');
+  // The method spelling, a string and a function's own name are not sources.
+  assert.equal(injectLocations('x.osc("/a")'), 'x.osc("/a")');
+  assert.ok(!injectLocations('x.param("A", "macro1")').includes('_at('));
+  // A block of a buffer whose binding is above it: the buffer says what `cc` is.
+  const doc = 'const cc = midicc("Twister")\n\nx: n("0").param("A", cc(12))';
+  assert.equal(injectLocations('n("0").param("A", cc(12))', 33, { doc }), 'n(mini("0", 36)).param("A", _at(51, cc(12)))');
+  assert.equal(injectLocations('function osc() {}'), 'function osc() {}');
+  // With a .record() on it, the source is tagged inside the record's own tag.
+  assert.equal(injectLocations('x.param("A", macro1.record({ cycles: 2 }))'), 'x.param("A", _at(13, macro1)._record(20, { cycles: 2 }))');
 });
 
 test('the device-named .wet() form keeps its name plain; a lone .wet value still patterns', () => {

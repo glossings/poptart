@@ -107,11 +107,29 @@ test('a control argument reaches sclang as a position, and an unknown one warns'
 
   const params = sent.filter((m) => m.addr === '/poptart/setParam');
   assert.strictEqual(params.length, 2, 'only the two it can take are sent');
-  assert.strictEqual(params[0].args[2], 'Engine');
+  assert.strictEqual(params[0].args[2], 'engine', 'under the control\'s id, however it was spelled');
   assert.ok(Math.abs(params[0].args[3] - 14 / 23) < 1e-9, `the chord engine sits at 14 of 23, got ${params[0].args[3]}`);
   assert.strictEqual(params[1].args[3], 0.25, 'a plain control takes the position it was given');
   assert.match(warned[0], /no control called "Nonesuch"/);
   assert.match(warned[1], /is not a value Plaits's "Engine" can take/);
+});
+
+test('every spelling of a device control is one control: one ramp, one driver, one release', () => {
+  // The looper's Record touched in its window (`record`) and driven from the code (`Record`) were
+  // two ramps mapping two buses onto one control, and the code's went unheard from then on.
+  const { e, sent } = engine();
+  e.loadEffect('t', 'Looper', 1);
+  e.holdParam('t', 1, 'Record');
+  e.setParam('t', 1, 'Record', 1, 0);
+  e.setParam('t', 1, 'record', 0, 0);
+  e.setParam('t', 1, 'RECORD', 1, 0);
+  e.releaseParam('t', 1, 'Record', 0);
+  const names = sent.filter((m) => ['/poptart/setParam', '/poptart/holdParam', '/poptart/releaseParam'].includes(m.addr)).map((m) => m.args[2]);
+  assert.deepStrictEqual(names, ['record', 'record', 'record', 'record', 'record']);
+  // A plugin's names are its own, and go as written.
+  e.loadInstrument('p', 'Serum 2');
+  e.setParam('p', 0, 'Filter 1 Freq', 0.5, 0);
+  assert.strictEqual(sent.filter((m) => m.addr === '/poptart/setParam').at(-1).args[2], 'Filter 1 Freq');
 });
 
 test('a plugin slot keeps the plugin rule: numbers only, straight through', () => {
@@ -503,9 +521,9 @@ test('a looper is never saved recording: Record and Clear stay out of its state,
   e.setParam('t', 1, 'Record', 1);
   const doc = decodeText(await e.getPluginState('t', 1));
   assert.ok(!('record' in doc.params) && !('clear' in doc.params), JSON.stringify(doc.params));
-  assert.strictEqual(doc.params.feedback, 1);
-  const back = readDeviceState(nativeDevice('Looper'), { device: 'Looper', version: 1, params: { record: 1, clear: 1, wet: 0.5 } });
-  assert.deepStrictEqual(Object.keys(back.positions), ['wet']);
+  assert.strictEqual(doc.params.mix, 0.5);
+  const back = readDeviceState(nativeDevice('Looper'), { device: 'Looper', version: 2, params: { record: 1, clear: 1, mix: 0.75 } });
+  assert.deepStrictEqual(Object.keys(back.positions), ['mix']);
 });
 
 test('a FreqShift state from version 1 reads as version 2: Direction becomes the sign of Freq, and Wide', () => {
@@ -823,7 +841,7 @@ test('a sync list saved at version 1 reads as the browser reads it, after 1/32T 
   const { DEVICES } = await import('../web-engine/src/catalog.mjs');
   const { migrateState } = await import('../web-engine/src/descriptor.mjs');
   for (const [id, ids] of [['Delay', ['sync']], ['Chorus', ['sync']], ['Flanger', ['sync']], ['Phaser', ['sync']],
-    ['Ducker', ['sync']], ['GrainEcho', ['sync']], ['Looper', ['quantize']], ['Stutter', ['interval', 'grid']]]) {
+    ['Ducker', ['sync']], ['GrainEcho', ['sync']], ['Stutter', ['interval', 'grid']]]) {
     const device = nativeDevice(id);
     const web = DEVICES.find((d) => d.id === id);
     assert.strictEqual(device.version, 2, `${id} is version 2`);

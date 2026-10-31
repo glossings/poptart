@@ -188,8 +188,9 @@ function install(E) {
     const ours = () => E.selfLoading(key, slot);
     const notify = () => { if (!ours()) E.tell('/poptart/pluginEdited', key, slot); };
     ctl.parameterAutomated = (index, value) => {
-      // Conf mode is deaf to our own loads for the same reason.
-      if (track.confMode === true && !ours()) {
+      // Every gesture goes to Node - conf writes it into the code, and the header's capture keeps
+      // it either way. Deaf to our own loads for the same reason as above.
+      if (!ours()) {
         const p = ctl.info?.parameters?.[index];
         if (p) E.tell('/poptart/paramAutomated', key, slot, String(p.name), index, Number(value));
       }
@@ -391,6 +392,7 @@ function install(E) {
           // transport is, and whether anything is routed into its key input.
           self.setTempo(E.trackTempo.get(key) ?? E.currentTempo);
           if (E.trackBeats) self.setTransportPos(E.trackBeats(key));
+          if (typeof self.trackRunning === 'function') self.trackRunning(track.running ?? true);
           E.tellKeyPatched(track, slot, null, key);
           // And how late a chain in its feedback loop comes back, if it has one.
           E.tellLoop?.(track, slot);

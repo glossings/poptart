@@ -6222,6 +6222,9 @@ export function steadyValue(x) {
   if (!(x instanceof Sig)) return undefined;
   if (Number.isFinite(x.constVal)) return x.constVal;
   if (x.lfoIR || x.envIR || x.ccIR) return undefined;
+  // A control drawn in the code (a toggle, a knob) holds still only until it is touched: it is
+  // never a setting, and a device window follows it as it would a pattern.
+  if (x.widgetLive) return undefined;
   if (x.stepsForCycle) {
     let first;
     for (let cycle = 0; cycle < STEADY_PROBE_CYCLES; cycle++) {
@@ -7778,7 +7781,7 @@ function defineRoll(id, str, opts, quiet) {
  * Returns the shape as a plain lfo() signal, so a definition is usable on its own if you want it -
  * but it is marked as a definition, so a block of them is never mistaken for a track to play.
  */
-export function _shape(id, str = '') {
+export function _shape(id, str = '', opts = undefined) {
   if (typeof id !== 'number' && typeof id !== 'string') {
     throw new Error('[signal] a shape definition takes a number or a name as its id - draw one in the lfo panel rather than writing it by hand');
   }
@@ -7789,6 +7792,10 @@ export function _shape(id, str = '') {
   // Parsed here rather than at use time so a typo in the breakpoints is reported against the line
   // that has them, not against every lfo() that happens to name it.
   const points = parseShapePoints(String(str).trim() || DEFAULT_LFO_SHAPE);
+  // A control's take knows how many cycles it was recorded over (see motion.mjs): played in a
+  // `.record({ cycles })` of another length it is padded or cut, not stretched.
+  const cycles = opts && typeof opts === 'object' ? Number(opts.cycles) : NaN;
+  if (cycles > 0 && Number.isFinite(cycles)) points.cycles = cycles;
   const replaced = registerShape(key, points);
   if (replaced) warnUser(replaced);
   const sig = lfo(serializeShapePoints(points));
@@ -9013,6 +9020,7 @@ export function macro(index) {
   assertMacroIndex(index);
   const sig = new Sig(() => { noteLiveRead(); return macroValue(index); });
   sig.motionSource = { key: null, range: [0, 1] }; // what .record() records (see motion.mjs)
+  sig.macroIndex = index; // which knob, for the header's capture (see widgets.mjs's _at)
   return sig;
 }
 

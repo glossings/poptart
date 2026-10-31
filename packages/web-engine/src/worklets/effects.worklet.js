@@ -57,6 +57,7 @@ class EffectProcessor extends AudioWorkletProcessor {
     if (isDispose(message)) { this.alive = false; return; }
     if (this.reporter.receive(message)) return;
     if (message.kind === 'tempo' && typeof this.fx.setTempo === 'function') { this.fx.setTempo(message.bpm, message.anchorSec); return; }
+    if (message.kind === 'running') { this.fx.setRunning?.(message.running, message.atSec); return; }
     // Notes, for an effect that is played by them (see the descriptor's `notes`). Timestamped on
     // the context's clock like a synth's, and placed inside the block by the effect itself.
     if (message.kind === 'noteOn') { this.fx.noteOn?.(message.note, message.velocity, message.time); return; }

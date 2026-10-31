@@ -32,6 +32,7 @@
           <tr><th>Call</th><th></th></tr>
           <tr><td><code>slider(value, min, max, step)</code></td><td>a box slider, dragged sideways; min and max are 0 and 1 unless given</td></tr>
           <tr><td><code>knob(value, min, max, step)</code></td><td>a knob, dragged up and down</td></tr>
+          <tr><td><code>knob(880, 20, 20000, { curve: "exp" })</code></td><td>a knob or slider that turns on a curve: <code>exp</code> sweeps a ratio, the way a frequency wants; <code>pow</code> and <code>sym</code> bend the range (with <code>curveExp</code>), from one end or from the middle</td></tr>
           <tr><td><code>toggle(1)</code></td><td>1 or 0, switched by a click</td></tr>
           <tr><td><code>button()</code></td><td>1 while held down, 0 otherwise</td></tr>
           <tr><td><code>xy(x, y)</code></td><td>a pad under the line; <code>.x</code> and <code>.y</code> are its two axes, 0 to 1</td></tr>
@@ -53,13 +54,21 @@ chords: note("&lt;[c3,eb3,g3] [ab2,c3,eb3]&gt;").synth("Wavetable")
   .fx("Filter").param("Cutoff", pad.y)
   .postgain(0.3)</code></pre>
 
+        <p>
+          A number already in the code becomes a control from the right-click menu: <strong>knob from
+          0.5</strong> or <strong>slider from 0.5</strong>. The value of a <code>.param()</code> takes that
+          control's range and curve; any other number gets a range it fits in.
+        </p>
+
         <h2 id="record">Recording a movement</h2>
         <p>
           <code>.record({ cycles })</code> on a control records how you move it while the music plays. Let go, or leave a MIDI or
           OSC controller still for a cycle, and the movement loops, <code>cycles</code> long, on the same
           beats it was played on. The take is kept as a drawn shape: the call gains
-          <code>take: "name"</code>, the shape opens in the shape editor, and moving the control again
-          records a new take in its place. It works the same on <code>slider()</code>, <code>knob()</code>,
+          <code>take: "name"</code>, the shape opens in the shape editor, and touching the control again
+          punches in: the stretch from the grab to the release is overwritten and the rest of the loop
+          kept (a touch longer than the loop replaces it). While the take plays, the control is drawn
+          where the take has it, marked with the accent. It works the same on <code>slider()</code>, <code>knob()</code>,
           <code>toggle()</code>, <code>button()</code>, <code>xy()</code> (both axes),
           <code>midicc()</code>, <code>osc()</code> and <code>macro()</code>.
         </p>
@@ -67,6 +76,23 @@ chords: note("&lt;[c3,eb3,g3] [ab2,c3,eb3]&gt;").synth("Wavetable")
 pad: note("&lt;c3 eb3 g3 bb2&gt;").synth("Wavetable")
   .fx("Filter").param("Cutoff", knob(0.5, 0.2, 0.9).record({ cycles: 2 }))
   .postgain(0.3)</code></pre>
+        <p>
+          A control without <code>.record()</code> keeps its movement for a while too, and so do
+          <code>midicc()</code>, <code>osc()</code> and <code>macro()</code>, and the knobs of a device's
+          window or a plugin's own window. <strong>capture</strong>,
+          in the header, writes in what was just moved as if <code>.record()</code> had been there all along:
+          every control that moved in the last phrase (everything since four cycles of stillness)
+          gains <code>.record({ cycles, take })</code> and its take, and plays it from then on; a hardware
+          knob's take goes on each place in the code that reads it; a device knob moved in its window
+          becomes <code>.param("Cutoff", knob(880, 20, 20000, { curve: "exp" }).record({ cycles, take }))</code>,
+          turning the way the window's knob does. The takes
+          are one length, the whole cycles the phrase covers. A take keeps that length in its
+          definition - <code>_shape("lead-take", "…", { cycles: 3 })</code> - so changing
+          <code>cycles</code> in the call pads it with its last value, or cuts it, rather than stretching
+          it: <code>cycles: 4</code> rounds a three-cycle take out to a bar. The open piano roll
+          captures what was just played on its track as well. In DJ mode each deck's takes land in its
+          own code, and capture can be learned onto a controller pad.
+        </p>
 
         <h2 id="cells">Steps, bars and grids</h2>
         <table>

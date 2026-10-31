@@ -7307,26 +7307,26 @@ html[data-embed] .cm-s-poptart .CodeMirror-gutters {
 
 /* The header never wraps and never pushes the page sideways: as the window narrows it gives up its
    least important pieces first, and play/stop and update stay on screen at every width. The widths
-   are where the full row stops fitting: with every control, it is 1233 px (each later step is that,
+   are where the full row stops fitting: with every control, it is 1313 px (each later step is that,
    less what the steps before it gave up). The clip is the last resort below the last step (see 4),
    and only sideways - the rec options still drop down under their button. */
 .layout > header {
   overflow-x: clip;
 }
 /* 1. The headphone knobs keep their knobs and lose their words (the knobs' tooltips say them). */
-@media (max-width: 1240px) {
+@media (max-width: 1320px) {
   .phones-knob > span {
     display: none;
   }
 }
 /* 2. The phrase circles. */
-@media (max-width: 1145px) {
+@media (max-width: 1225px) {
   #phraseViz {
     display: none;
   }
 }
 /* 3. The theme picker, its edit button and the docs link fold into the ⋯ menu. */
-@media (max-width: 1060px) {
+@media (max-width: 1140px) {
   #themeSelect,
   #themeEditBtn,
   #docsLink {
@@ -7339,7 +7339,7 @@ html[data-embed] .cm-s-poptart .CodeMirror-gutters {
 /* 4. Below the narrowest supported window: the wordmark goes (the logo says it), the spacing
    tightens, and the engine's status pill is the one thing that may shrink, ending in "…" -
    it still colors itself for ready and down. */
-@media (max-width: 830px) {
+@media (max-width: 910px) {
   .layout > header {
     /* With room to spare the spacer takes it all and this changes nothing; with none left, the
        row overflows at its START, so what the clip takes is the logo end, never play and update. */

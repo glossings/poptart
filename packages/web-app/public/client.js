@@ -2514,35 +2514,160 @@ function writeMotionTake(t) {
   if (!iw || t.at == null || !Array.isArray(t.shapes)) return;
   const call = iw.recordCallAt(t.at);
   if (!call) return; // the call is gone since it was evaluated: there is nowhere to keep the take
-  const axes = Array.isArray(t.axes) && t.axes.length === t.shapes.length ? t.axes : t.shapes.map(() => '');
-  let name = call.take;
-  if (!name) {
-    const code = ed.getValue();
-    const taken = new Set(shapeDefs.allIds(null, code).map((r) => r.id));
-    const base = `${preferredDefId(prBlockLabelAt(call.index, code), 'motion')}-take`;
-    const free = (n) => axes.every((a) => !taken.has(`${n}${a}`));
-    name = base;
-    for (let i = 2; !free(name); i++) name = `${base}${i}`;
-  }
+  const axes = takeAxes(t);
+  const name = call.take ?? freeTakeName(ed, call.index, axes);
   const ids = axes.map((a) => `${name}${a}`);
   ed.operation(() => {
-    ids.forEach((id, i) => {
-      const code = ed.getValue();
-      const body = JSON.stringify(t.shapes[i]);
-      const def = shapeDefs.findDef(code, id);
-      if (def) {
-        ed.replaceRange(`${def.idLiteral}, ${body}`, ed.posFromIndex(def.open + 1), ed.posFromIndex(def.close));
-      } else {
-        const [from, to, text] = shapeDefs.defsEdit(code, [id], () => body);
-        ed.replaceRange(text, ed.posFromIndex(from), ed.posFromIndex(to));
-      }
-    });
+    writeTakeShapes(ed, ids, t.shapes, t.cycles);
     iw.writeTake(t.at, name);
   });
   refoldAll(ed);
   logLine(`take recorded: ${ids.join(', ')}`);
-  // The shape editor open on it shows the new take rather than drawing over it with the old one.
+  showWrittenTake(ed, ids);
+}
+
+// A take's shape-name suffixes, one per shape: `['']`, or `['-x', '-y']` for a pad.
+function takeAxes(t) {
+  return Array.isArray(t.axes) && t.axes.length === t.shapes.length ? t.axes : t.shapes.map(() => '');
+}
+
+// A name for a new take of the control at `index`, after its track, that no shape has yet.
+function freeTakeName(ed, index, axes) {
+  const code = ed.getValue();
+  const taken = new Set(shapeDefs.allIds(null, code).map((r) => r.id));
+  const base = `${preferredDefId(prBlockLabelAt(index, code), 'motion')}-take`;
+  const free = (n) => axes.every((a) => !taken.has(`${n}${a}`));
+  let name = base;
+  for (let i = 2; !free(name); i++) name = `${base}${i}`;
+  return name;
+}
+
+// Each take shape into the buffer as a `_shape(...)` definition, replacing one of that name. The
+// take's length rides along - `_shape("x", "…", { cycles: 3 })` - so a `.record({ cycles })` of
+// another length pads or cuts it rather than stretching it (see pattern-core's fitTake).
+function writeTakeShapes(ed, ids, shapes, cycles) {
+  const tail = cycles > 0 ? `, { cycles: ${cycles} }` : '';
+  ids.forEach((id, i) => {
+    const code = ed.getValue();
+    const body = JSON.stringify(shapes[i]);
+    const def = shapeDefs.findDef(code, id);
+    if (def) {
+      ed.replaceRange(`${def.idLiteral}, ${body}${tail}`, ed.posFromIndex(def.open + 1), ed.posFromIndex(def.close));
+    } else {
+      const [from, to, text] = shapeDefs.defsEdit(code, [id], () => `${body}${tail}`);
+      ed.replaceRange(text, ed.posFromIndex(from), ed.posFromIndex(to));
+    }
+  });
+}
+
+/**
+ * A device control moved by hand - in its window, or in a plugin's own window - as a drawn control
+ * in the code with its take: the value of the `.param("Name", …)` that sets it becomes
+ * `knob(value, min, max, { curve }).record({ cycles, take })` (a switch becomes `toggle(…)`), or
+ * the call is added after the device's own when there is none. One already set by code - a
+ * pattern, a knob, a modulator - is left alone and said so. The take's shape name, or null.
+ */
+function writeParamTake(ed, t) {
+  if (!labelsMod) return null;
+  const label = deckTrackParts(t.trackId).label;
+  const code = ed.getValue();
+  const block = blockForTrack(code, label);
+  if (!block) return null;
+  const existing = findParamCall(code, block, t.name, t.slot);
+  if (existing && /[A-Za-z_$][\w$]*\s*\(/.test(code.slice(existing.valueStart, existing.valueEnd))) {
+    logLine(`capture: ${t.name} on "${label}" is already set by code - left as it is`, true);
+    return null;
+  }
+  const anchor = existing ? existing.valueStart : findChainCall(code, block, t.slot)?.closeParen;
+  if (anchor == null) return null;
+  const range = { min: t.min, max: t.max, step: t.step ?? null, curve: t.curve ?? 'lin', curveExp: t.curveExp ?? null };
+  const name = freeTakeName(ed, anchor, ['']);
+  const widget = t.widget === 'toggle' ? `toggle(${t.value >= 0.5 ? 1 : 0})` : controlCallText('knob', formatInRange(t.value, range), range);
+  const text = `${widget}.record({ cycles: ${t.cycles}, take: ${JSON.stringify(name)} })`;
+  if (existing) ed.replaceRange(` ${text}`, ed.posFromIndex(existing.valueStart), ed.posFromIndex(existing.valueEnd));
+  else ed.replaceRange(`.param(${JSON.stringify(t.name)}, ${text})`, ed.posFromIndex(anchor + 1));
+  writeTakeShapes(ed, [name], t.shapes, t.cycles);
+  return name;
+}
+
+/** `knob(value, min, max, step, { curve, curveExp })` - a ranged control's call, as short as it can be. */
+function controlCallText(kind, valueText, { min, max, step = null, curve = 'lin', curveExp = null }) {
+  const args = [valueText, String(min), String(max)];
+  if (step != null && Number.isFinite(step)) args.push(String(step));
+  if (curve && curve !== 'lin') {
+    const opts = [`curve: ${JSON.stringify(curve)}`];
+    if ((curve === 'pow' || curve === 'sym') && curveExp != null && curveExp !== 2) opts.push(`curveExp: ${curveExp}`);
+    args.push(`{ ${opts.join(', ')} }`);
+  }
+  return `${kind}(${args.join(', ')})`;
+}
+
+// A value written with the decimals its range calls for, as the drawn control writes its own.
+function formatInRange(value, { min, max, step = null }) {
+  if (widgetMathMod && inlineWidgetsMod) return inlineWidgetsMod.calls.formatNumber(value, widgetMathMod.decimalsFor(min, max, step));
+  return String(Math.round(value * 1e4) / 1e4);
+}
+
+// The shape editor open on a take just written shows it, rather than drawing over it with the old one.
+function showWrittenTake(ed, ids) {
   if (lfoState && lfoCM === ed && ids.includes(lfoState.shapeId)) openShapeById(lfoState.shapeId, lfoCarry(), ed);
+}
+
+/**
+ * The header's capture: .record() after the fact. Every drawn control, and every `cc(12)`,
+ * `osc("/x")` and `macro1`, that moved in the latest phrase gets the take of it -
+ * `knob(0.5).record({ cycles: 2, take: "lead-take" })`, the shape written in as a definition -
+ * and its deck is evaluated so the take plays from the next poll. The
+ * piano roll on screen captures what was played into its track as well, as its own capture
+ * button does. Each deck's takes land in that deck's code.
+ */
+async function captureAll() {
+  let takes = [];
+  try {
+    ({ takes } = await api('POST', '/api/captureMotion', {}));
+  } catch (e) {
+    logLine(`capture: ${e.message ?? e}`, true);
+  }
+  const written = [];
+  const lengths = new Set();
+  let byHand = false; // a device control moved by hand was written: the slot goes back to its pattern
+  for (const deck of ['a', 'b']) {
+    const ed = deckEditor(deck);
+    const iw = ed ? inlineWidgetsFor(ed) : null;
+    const mine = (takes ?? []).filter((t) => t.deck === deck && Array.isArray(t.shapes));
+    if (!iw || !mine.length) continue;
+    const ids = [];
+    ed.operation(() => {
+      for (const t of mine) {
+        if (t.source === 'param') {
+          // A device control moved in its window: `.param("Name", knob(...).record(...))`.
+          const id = writeParamTake(ed, t);
+          if (id) { ids.push(id); lengths.add(t.cycles); byHand = true; }
+          continue;
+        }
+        const call = iw.controlCallAt(t.at, !!t.source);
+        if (!call || call.recording) continue;
+        const axes = takeAxes(t);
+        const name = freeTakeName(ed, call.index, axes);
+        if (!iw.addRecord(t.at, t.cycles, name, !!t.source)) continue;
+        const named = axes.map((a) => `${name}${a}`);
+        writeTakeShapes(ed, named, t.shapes, t.cycles);
+        ids.push(...named);
+        lengths.add(t.cycles);
+      }
+    });
+    if (!ids.length) continue;
+    refoldAll(ed);
+    showWrittenTake(ed, ids);
+    written.push(...ids);
+    // "I'm back in the code": a slot held by the hand that moved it goes back to its pattern, so
+    // the take it just wrote is what plays.
+    if (byHand) await api('POST', '/api/releaseEditors', {}).catch(() => {});
+    evalEditor(ed);
+  }
+  const notes = prState ? await prCapture({ quiet: true }) : 0;
+  if (written.length) logLine(`capture: ${written.join(', ')} (${[...lengths].map((c) => `${c} cycle${c === 1 ? '' : 's'}`).join(', ')})`);
+  if (!written.length && !notes) logLine('capture: nothing has moved or been played lately', true);
 }
 
 // Before writing the buffer out anywhere it has to be true - saving, exporting, sharing - settle
@@ -3878,7 +4003,7 @@ function openWidgetAt(code, idx, ed = cm) {
   if (findEnvelopeHandleAt(code, idx) && openEnvelopeAt(code, idx, ed)) return true;
   const take = motionTakeAt(code, idx, ed);
   if (take) {
-    openShapeById(take, {}, ed);
+    openShapeById(take, { loopCycles: motionLoopAt(code, idx) }, ed);
     return true;
   }
   const rec = findRecordCallAt(code, idx, ed);
@@ -4251,10 +4376,10 @@ function startDeviceLive(trackLabel, slot, panel) {
 
 /** Figures that draw what a device is doing rather than how it is set, and so always follow. An
  * equalizer's curve is drawn over the signal an analyser reads while its window is open. */
-const LIVE_FIGURE_KINDS = new Set(['sample', 'meter', 'transfer', 'eq', 'shaper', 'sweep', 'duck']);
+const LIVE_FIGURE_KINDS = new Set(['sample', 'meter', 'transfer', 'eq', 'shaper', 'sweep', 'duck', 'bands', 'loop']);
 
 /** How tall each kind of figure is drawn, in CSS pixels. */
-const FIGURE_HEIGHT = { wavetable: 176, unison: 64, response: 108, adsr: 108, eq: 128, band: 52, matrix: 176, sample: 96, grain: 64, meter: 22, transfer: 120, shaper: 108, echoes: 84, repeats: 72, decay: 72, sweep: 96, duck: 112, bands: 96 };
+const FIGURE_HEIGHT = { wavetable: 176, unison: 64, response: 108, adsr: 108, eq: 128, band: 52, matrix: 176, sample: 96, grain: 64, meter: 22, transfer: 120, shaper: 108, echoes: 84, repeats: 72, decay: 72, sweep: 96, duck: 112, bands: 96, loop: 44 };
 
 /** How near a press counts as being on an envelope handle - the sampler's panel allows the same. */
 const FIGURE_HIT_PX = 9;
@@ -6230,6 +6355,69 @@ const FIGURE_DRAWERS = {
     return `${figurePad(bars.length, 4)} bands`;
   },
 
+  /**
+   * A looper's loop: a strip with a mark at every bar and the playhead going round it. While a
+   * first take records, the strip fills as far as the take has got across the Length it runs.
+   */
+  loop(ctx, w, h, f, c) {
+    const top = FIGURE_PAD_Y / 2;
+    const size = Math.max(1, h - FIGURE_PAD_Y);
+    const recording = f.status === 'recording';
+    const has = !recording && f.seconds > 0;
+    // The loop's length in beats, laid out across the width; before there is one, the Length a
+    // take will run.
+    const span = has && f.beats != null ? f.beats : f.fixedBeats > 0 ? f.fixedBeats : 4;
+    const xOf = (beat) => Math.round((beat / Math.max(1e-9, span)) * w);
+    const hot = recording || f.status === 'overdub' || f.status === 'armed';
+    // The fill: the whole loop, faint (fainter stopped); a take as far as it has got.
+    if (recording || has) {
+      ctx.fillStyle = hot ? c.warn : c.accent;
+      ctx.globalAlpha = f.status === 'stopped' ? 0.1 : 0.25;
+      ctx.fillRect(0, top, recording ? xOf(Math.min(span, f.takenBeats)) : w, size);
+      ctx.globalAlpha = 1;
+    }
+    // A mark at every bar, and at every beat while there are few enough to see.
+    if (span <= 32) {
+      for (let b = 1; b < span - 1e-9; b++) {
+        if (b % 4 === 0) continue;
+        const x = xOf(b) + 0.5;
+        figureDashed(ctx, x, top + size * 0.7, x, top + size, c.grid);
+      }
+    }
+    if (span / 4 <= 64) {
+      ctx.strokeStyle = c.grid;
+      ctx.lineWidth = 1;
+      for (let b = 4; b < span - 1e-9; b += 4) {
+        const x = xOf(b) + 0.5;
+        ctx.beginPath();
+        ctx.moveTo(x, top);
+        ctx.lineTo(x, top + size);
+        ctx.stroke();
+      }
+    }
+    ctx.strokeStyle = hot ? c.warn : c.grid;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(0.5, top + 0.5, w - 1, size - 1);
+    // The head: where the take has got to, or where the loop is playing.
+    const head = recording ? xOf(Math.min(span, f.takenBeats)) : has && f.status !== 'stopped' ? Math.round(f.position * w) : null;
+    if (head !== null) {
+      ctx.fillStyle = c.text;
+      ctx.fillRect(Math.min(w - 1, head), top, 1, size);
+    }
+    const length = (beats) => {
+      if (Math.abs(beats - Math.round(beats / 4) * 4) < 1e-6) {
+        const n = Math.round(beats / 4);
+        return `${n} ${n === 1 ? 'bar' : 'bars'}`;
+      }
+      return `${Number.isInteger(Math.round(beats * 100) / 100) ? beats.toFixed(0) : beats.toFixed(2)} beats`;
+    };
+    let says = '';
+    if (recording) says = `of ${length(span)}`;
+    else if (has && f.beats != null) says = length(f.beats);
+    const seconds = recording ? f.takenSec : f.seconds;
+    return `${figurePad(f.status, 9)} ${figurePad(says, 11)} · ${seconds > 0 ? figureSeconds(seconds) : figurePad('', 8)}`;
+  },
+
   duck(ctx, w, h, f, c) {
     const top = FIGURE_PAD_Y / 2;
     const size = Math.max(1, h - FIGURE_PAD_Y);
@@ -6497,7 +6685,22 @@ function deviceWidget(trackLabel, slot, widget, { bare = false } = {}) {
     cell.appendChild(readout);
     return cell;
   }
-  if (widget.modulatedBy) {
+  if (widget.modulatedBy && (widget.widget === 'toggle' || widget.widget === 'button')) {
+    // A switch something else is pressing stays a switch: the same one, lit while it is on, and
+    // not taking clicks - a knob for an on/off thing said nothing it could not say better lit.
+    const button = document.createElement('button');
+    button.className = 'small device-toggle';
+    button.tabIndex = -1;
+    button.style.cursor = 'default';
+    const paint = (on) => {
+      button.textContent = widget.widget === 'button' ? widget.name.toLowerCase() : on ? 'on' : 'off';
+      button.classList.toggle('on', on);
+    };
+    paint(widget.value >= 0.5);
+    cell.appendChild(button);
+    readout.textContent = widget.modulatedBy;
+    deviceLiveEls.set(widget.id, (live) => paint(live.value >= 0.5));
+  } else if (widget.modulatedBy) {
     const knob = deviceKnob(widget, { register: (fn) => { setPosition = fn; } });
     cell.appendChild(knob);
     // Followed from the processor's reports while the window is open: the knob turns and the
@@ -7106,7 +7309,7 @@ function serializeLfoCall(state) {
   const pts = shapeMod.serializeShapePoints(state.points);
   // A definition holds the shape and nothing else: rate and mode are how one lfo() PLAYS a shape,
   // and two calls naming the same shape are free to play it at different rates.
-  if (state.idLiteral) return `_shape(${state.idLiteral}, "${pts}")`;
+  if (state.idLiteral) return `_shape(${state.idLiteral}, "${pts}"${state.takeLength > 0 ? `, { cycles: ${state.takeLength} }` : ''})`;
   if (state.callee === 'grainshape') return `grainshape("${pts}")`;
   return `lfo("${pts}", ${lfoCfgText(state)})`;
 }
@@ -7206,7 +7409,7 @@ function lfoCarry() {
   const parts = lfoCallParts();
   if (!parts) return {};
   const { rate, rateHz, ratePattern, mode, phase, glide } = parseLfoCall(parts.opts);
-  return { callSource: lfoState.callSource, options: { rate, rateHz, ratePattern, mode, phase, glide } };
+  return { callSource: lfoState.callSource, loopCycles: lfoState.loopCycles ?? null, options: { rate, rateHz, ratePattern, mode, phase, glide } };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -7285,6 +7488,10 @@ function openLfoEditor(call, ed = lfoState ? lfoCM : cm) {
     // Which call an INLINE shape is the argument of - lfo(), or .grainshape() (see findLfoCallAt).
     callee: call.callee ?? 'lfo',
     ...parseLfoCall(call.idLiteral ? splitFirstArg(inner)[1] : inner),
+    // A control's take: the cycles it was recorded over (its definition's `{ cycles }`, kept on
+    // every write), and the loop of the `.record({ cycles })` it was opened from, for the playhead.
+    takeLength: call.idLiteral ? Number((/cycles\s*:\s*([\d.]+)/.exec(splitFirstArg(splitFirstArg(inner)[1])[1] ?? '') ?? [])[1]) || null : null,
+    loopCycles: call.loopCycles ?? null,
     // What across and up mean when this is a device's curve rather than a shape in time - a
     // waveshaper's level in and out. Drawn in the corners, with the "unchanged" diagonal.
     axes: null,
@@ -7635,6 +7842,12 @@ function lfoPhaseNow() {
   if (!lfoState || transport.paused) return null;
   if (lfoCallee() !== 'lfo') return null; // a grain window is played per grain - nothing to follow
   const pos = currentCyclePos(deckOfCM(lfoCM)); // the deck the shape plays on, by its own clock
+  if (lfoState.loopCycles > 0) {
+    // A control's take plays in step with the transport, once per `cycles` of its .record() call,
+    // across its own length: past the take's end the loop is padding, and the line parks.
+    const x = (((pos % lfoState.loopCycles) + lfoState.loopCycles) % lfoState.loopCycles) / (lfoState.takeLength ?? lfoState.loopCycles);
+    return x <= 1 ? x : 1;
+  }
   let turns;
   if (lfoState.ratePattern) {
     // A patterned rate counts the integral of the rate on the cycle grid, as the engine's anchors do.
@@ -18042,6 +18255,9 @@ const REC_POLL_MS = 120; // the take is drawn into the open roll from these, so 
 
 recOptsBtn.addEventListener('click', () => recPanel.classList.toggle('hidden'));
 recBtn.addEventListener('click', () => (recState ? cancelMidiRecord(true) : startMidiRecord()));
+// Capture: what you just moved and played, written in as if record had been on (see captureAll).
+const captureBtn = document.getElementById('captureBtn');
+captureBtn.addEventListener('click', () => captureAll());
 
 /** The quantize the rec options ask for: slots per cycle, 0 = off. */
 const recQuantize = () => Number(recGrid.value) || 0;
@@ -18349,23 +18565,25 @@ function rollTargetForTrack(label, ed = cm) {
  * loop for a roll with notes, a fitted power-of-two length for an empty one) and writes it with
  * the same conversion a recording uses. An empty roll takes the captured length as its loop.
  */
-async function prCapture() {
-  if (!prState || !recordMod) return;
+async function prCapture({ quiet = false } = {}) {
+  if (!prState || !recordMod) return 0;
+  // From the header's capture, a roll with nothing played into it is simply not part of it.
+  const miss = (text) => { if (!quiet) logLine(text, true); return 0; };
   const trackId = prPlayingTrack();
-  if (!trackId) { logLine('capture: nothing plays this roll yet - put pianoroll(…) in a track first', true); return; }
+  if (!trackId) return miss('capture: nothing plays this roll yet - put pianoroll(…) in a track first');
   let events;
   try {
     ({ events } = await api('POST', '/api/liveNotes', { trackId }));
   } catch (e) {
     logLine(`capture: ${e.message ?? e}`, true);
-    return;
+    return 0;
   }
-  if (!prState || prPlayingTrack() !== trackId) return; // the panel moved on while we waited
+  if (!prState || prPlayingTrack() !== trackId) return 0; // the panel moved on while we waited
   const hasNotes = prLiveNotes(prState.notes).length > 0;
   const win = recordMod.captureWindow(events ?? [], { loopCycles: hasNotes ? prState.len / prState.grid : null });
-  if (!win) { logLine(`capture: nothing has been played on "${trackId}" lately`, true); return; }
+  if (!win) return miss(`capture: nothing has been played on "${trackId}" lately`);
   const inWindow = events.filter((ev) => ev.start >= win.start && ev.start < win.end);
-  if (!inWindow.length) { logLine(`capture: nothing of "${trackId}" falls in the last pass`, true); return; }
+  if (!inWindow.length) return miss(`capture: nothing of "${trackId}" falls in the last pass`);
   if (!hasNotes) {
     // An empty roll becomes the take's shape: the loop is the captured stretch, from its first cell.
     prState.start = 0;
@@ -18382,6 +18600,7 @@ async function prCapture() {
   drawPianoroll();
   const n = out.added.length;
   logLine(`capture: ${n} note${n === 1 ? '' : 's'} from cycles ${win.start}–${win.end} into ${hasNotes ? 'the roll' : `a ${win.cycles}-cycle loop`} ("${trackId}")${out.regridded ? ` - re-meshed to a ${out.grid} grid for the quantize` : ''}`);
+  return n;
 }
 
 // Finds the live-keys call in the labeled block and swaps the whole call expression for the
@@ -18525,6 +18744,13 @@ function findRecordCallAt(code, idx, ed = null) {
 
 function motionRecordOf(code, call, ed) {
   return inlineWidgetsFor(ed)?.motionRecordAt(call.start + code.slice(call.start, call.open).indexOf('record')) ?? null;
+}
+
+/** The `cycles` of the control's `.record()` call whose name `idx` is on - its loop - or the default. */
+function motionLoopAt(code, idx) {
+  const call = findNamedCallAt(code, idx, /\.\s*record\s*\(/g, 'record');
+  const n = call ? Number((/cycles\s*:\s*([\d.]+)/.exec(code.slice(call.open + 1, call.close)) ?? [])[1]) : NaN;
+  return n > 0 ? n : 4;
 }
 
 /** The shape a control's `.record()` keeps its take in, when `idx` is on its name - else null. */
@@ -33423,6 +33649,10 @@ function mixPushStart() {
     if (!mixModeOn) return;
     try {
       const { deck, action, value } = JSON.parse(e.data);
+      if (action === 'capture') {
+        captureAll();
+        return;
+      }
       // The library browser's own controls belong to no deck: they act on the window, on what it
       // has highlighted, and on whichever deck is active there (see orgMidiAction).
       if (ORG_MIDI_ACTIONS.has(action)) {
@@ -34284,6 +34514,7 @@ function mixLearnAttach(el, target, shiftTarget = null) {
   }, true);
 }
 mixLearnAttach(document.getElementById('crossfader'), 'xf');
+mixLearnAttach(captureBtn, 'capture');
 for (const deck of ['a', 'b']) {
   for (const ctl of MIX_DECK_CONTROLS) mixLearnAttach(mixDeckCtl(deck, ctl), `${deck}:${ctl}`);
 }
@@ -38423,6 +38654,65 @@ function editorOfEvent(e) {
   return editorAt(e.target);
 }
 
+// The number literal under the caret - `{ from, to, text, value }` - or null. Not a digit inside a
+// name, and nothing inside a string or a comment.
+function numberLiteralAt(ed) {
+  if (!inlineWidgetsMod) return null;
+  const code = ed.getValue();
+  const idx = ed.indexFromPos(ed.getCursor());
+  const { masked } = inlineWidgetsMod.calls.maskCode(code);
+  const re = /-?(?:\d+\.?\d*|\.\d+)(?:e-?\d+)?/g;
+  let m;
+  while ((m = re.exec(masked))) {
+    const from = m.index;
+    const to = from + m[0].length;
+    if (from > 0 && /[\w$.]/.test(masked[from - 1])) continue;
+    if (to < masked.length && /[\w$.]/.test(masked[to])) continue;
+    if (idx < from || idx > to) continue;
+    return { from, to, text: m[0], value: Number(m[0]) };
+  }
+  return null;
+}
+
+// The `.param("Name", N)` whose value is exactly the literal `lit`: `{ name, slot, param }`, with
+// `param` the device control's row (range, curve, kind) when the slot's device is known. Null when
+// the number is not a `.param()` value.
+function paramContextOf(ed, lit) {
+  const code = ed.getValue();
+  const key = trackKeyAt(ed, lit.from);
+  if (!key) return null;
+  const block = blockForTrack(code, deckTrackParts(key).label);
+  if (!block) return null;
+  const re = /\.param\s*\(/g;
+  re.lastIndex = block.start;
+  let m;
+  while ((m = re.exec(code)) && m.index < block.end) {
+    const open = m.index + m[0].length - 1;
+    const close = matchParen(code, open);
+    if (close < 0 || close < lit.to) continue;
+    const args = paramCallArgs(code, open, close);
+    if (!args || args.value !== lit.text) continue;
+    const slot = paramSlotAt(code, m.index, args.target);
+    const entry = chainSlots.find((s) => s.track === key && s.slot === slot);
+    const param = entry ? withParamAddrs(entry.params).find((p) => p.addr === args.name || p.name === args.name) ?? null : null;
+    return { name: args.name, slot, param };
+  }
+  return null;
+}
+
+// A range for a bare number to be a knob over: 0..1 when it is in it, else from zero to twice it.
+function rangeAround(v) {
+  if (v >= 0 && v <= 1) return { min: 0, max: 1 };
+  return v < 0 ? { min: 2 * v, max: 0 } : { min: 0, max: 2 * v };
+}
+
+// The literal becomes the control's call, and the buffer is evaluated so the control is drawn.
+function replaceLiteral(ed, lit, text) {
+  ed.replaceRange(text, ed.posFromIndex(lit.from), ed.posFromIndex(lit.to));
+  ed.focus();
+  evalEditor(ed);
+}
+
 function openEditorMenu(ed, e) {
   const selected = ed.somethingSelected();
   const items = [selected
@@ -38445,6 +38735,25 @@ function openEditorMenu(ed, e) {
         matrix: "each row's hits somewhere else",
       }[widgetHit.kind];
       items.unshift(['randomize', () => { fold.randomize(); ed.focus(); }, what]);
+    }
+  }
+  // A number under the caret, drawn as a control: inside a `.param()` it takes the device
+  // control's range and curve, elsewhere a range the number fits in.
+  const lit = selected ? null : numberLiteralAt(ed);
+  if (lit) {
+    const ctx = paramContextOf(ed, lit);
+    const p = ctx?.param ?? null;
+    if (p?.ui === 'toggle') {
+      items.unshift([`toggle from ${lit.text}`, () => replaceLiteral(ed, lit, `toggle(${lit.value >= 0.5 ? 1 : 0})`), 'this number as a switch drawn in the code']);
+    } else if (!p?.options) {
+      const range = p && Number.isFinite(p.min) && Number.isFinite(p.max)
+        ? { min: p.min, max: p.max, step: p.step ?? null, curve: p.curve ?? 'lin', curveExp: p.curveExp ?? null }
+        : rangeAround(lit.value);
+      const over = ctx ? `over ${ctx.name}'s range` : `over ${range.min} to ${range.max}`;
+      items.unshift(
+        [`knob from ${lit.text}`, () => replaceLiteral(ed, lit, controlCallText('knob', lit.text, range)), `this number as a knob drawn in the code, ${over}`],
+        [`slider from ${lit.text}`, () => replaceLiteral(ed, lit, controlCallText('slider', lit.text, range)), `this number as a slider drawn in the code, ${over}`],
+      );
     }
   }
   items.push(['add an effect…', () => insertFxCall(ed), `${hotkeyLabel('fx')} — an .fx("") at the caret, with the plugin list open`]);

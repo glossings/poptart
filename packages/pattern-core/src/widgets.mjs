@@ -18,6 +18,7 @@
 // /api/widgets/set) and every widget signal reads it when it is sampled.
 
 import { Sig, channelAt, soundingEnd, timeShift, warnPattern, noteLiveRead } from './signal.mjs';
+import { CURVES } from './curves.mjs';
 import { songSteps } from './arrange.mjs';
 import {
   INPUT_WIDGETS, DISPLAY_WIDGETS, AUDIO_DISPLAYS, INPUT_SIZES, DISPLAY_SIZES, WIDGET_BOXES,
@@ -41,7 +42,7 @@ const keyOf = (deck, at) => `${deck}:${at}`;
 /** Start collecting the widgets an evaluation of `deck`'s buffer builds. */
 export function beginWidgets(deck = 'a') {
   currentDeck = deck === 'b' ? 'b' : 'a';
-  registry = { inputs: [], views: [], seen: new Set(), records: new Set() };
+  registry = { inputs: [], views: [], seen: new Set(), records: new Set(), recording: new Set(), sources: [] };
   generation++;
 }
 
@@ -53,19 +54,30 @@ export function widgetGeneration() {
   return generation;
 }
 
+const built = { a: 0, b: 0 }; // each deck's last evaluation that went through: its generation
+
+/** The generation of `deck`'s last evaluation that went through (an abandoned one does not count). */
+export function builtGeneration(deck) {
+  return built[deck === 'b' ? 'b' : 'a'];
+}
+
 /**
  * What the evaluation built: `{ inputs, views }`, each in document order. Values of this deck's
  * widgets that the evaluation no longer has are forgotten, so a deleted slider's key can't be set.
  */
 export function takeWidgets() {
-  const r = registry ?? { inputs: [], views: [], seen: new Set(), records: new Set() };
+  const r = registry ?? { inputs: [], views: [], seen: new Set(), records: new Set(), recording: new Set(), sources: [] };
+  if (registry) {
+    built[currentDeck] = generation;
+    lastSources[currentDeck] = r.sources;
+  }
   registry = null;
   const live = new Set(r.inputs.map((w) => keyOf(currentDeck, w.at)));
   for (const k of [...values.keys()]) if (k.startsWith(`${currentDeck}:`) && !live.has(k)) values.delete(k);
   for (const k of [...lits.keys()]) if (k.startsWith(`${currentDeck}:`) && !live.has(k)) lits.delete(k);
   r.inputs.sort((a, b) => a.at - b.at);
   r.views.sort((a, b) => a.at - b.at);
-  return { inputs: r.inputs, views: r.views, records: [...r.records].sort((a, b) => a - b) };
+  return { inputs: r.inputs, views: r.views, records: [...r.records].sort((a, b) => a - b), recording: [...r.recording].sort((a, b) => a - b) };
 }
 
 /** An evaluation that threw built nothing: stop collecting, and keep every control as it was. */
@@ -158,12 +170,55 @@ function textOf(x) {
   return null;
 }
 
+// Told about every read of a drawn control, with where it was read - motion.mjs keeps the recent
+// movement of each control from it, for the header's capture (see captureMotion).
+let controlReadHook = null;
+
+/** `fn(control, pos)` on every read of a drawn control: `control` is `{ key, deck, at, kind, ranges, axes, read }`. */
+export function onControlRead(fn) {
+  controlReadHook = fn;
+}
+
 // A signal whose value is read from the store at every sample - polled by the scheduler like a
-// macro knob, so a moved control is heard within a poll and a lookahead.
-function liveSig(read) {
-  const sig = new Sig(() => { noteLiveRead(); return read(); });
+// macro knob, so a moved control is heard within a poll and a lookahead. `control` says which
+// drawn control it is, for the read hook.
+function liveSig(read, control = null) {
+  const sig = new Sig((t, cps, pos) => {
+    noteLiveRead();
+    if (control && controlReadHook) controlReadHook(control, pos);
+    return read();
+  });
   sig.widgetLive = true;
   return sig;
+}
+
+// What the read hook is told about a drawn control: its key, where its call is, its value now as
+// one number per axis, and the curve each axis turns on (null for linear).
+function controlOf(key, at, kind, ranges, read, curves = ranges.map(() => null)) {
+  return { key, deck: currentDeck, at, kind, ranges, curves, axes: ranges.length > 1 ? ['-x', '-y'] : [''], read };
+}
+
+// Each deck's live sources, as its last evaluation that went through wrote them (see _at).
+const lastSources = { a: [], b: [] };
+
+/**
+ * The transpiled form of every live source written in a buffer: `_at(AT, cc(12, 1))`,
+ * `_at(AT, osc("/x"))`, `_at(AT, macro1)`. The source itself, unchanged - this only notes where it
+ * is and what it reads, so the header's capture can put a `.record()` on the one that moved (see
+ * motion.mjs's captureMotion). Anything else wrapped by mistake passes straight through.
+ */
+export function _at(at, sig) {
+  if (!registry || !Number.isFinite(at) || !(sig instanceof Sig)) return sig;
+  const ir = sig.ccIR;
+  if (ir?.osc) registry.sources.push({ at, kind: 'osc', address: ir.osc, index: ir.index ?? 0 });
+  else if (ir) registry.sources.push({ at, kind: 'cc', device: ir.device, cc: ir.cc, channel: ir.channel ?? null });
+  else if (Number.isFinite(sig.macroIndex)) registry.sources.push({ at, kind: 'macro', index: sig.macroIndex });
+  return sig;
+}
+
+/** `deck`'s live sources as of its last evaluation: `[{ at, kind, ... }]` (see _at). */
+export function sourceCalls(deck) {
+  return lastSources[deck === 'b' ? 'b' : 'a'];
 }
 
 /**
@@ -172,6 +227,11 @@ function liveSig(read) {
  */
 export function registerMotionRecord(at) {
   if (registry && Number.isFinite(at)) registry.records.add(at);
+}
+
+/** A drawn control at `at` with a `.record()` on it: the editor draws it where its take is playing. */
+export function registerRecordingControl(at) {
+  if (registry && Number.isFinite(at)) registry.recording.add(at);
 }
 
 function register(entry) {
@@ -246,15 +306,30 @@ function splitArgs(kind, all) {
 }
 
 // The options an input reads - its `size`, or its `width` and `height` for a kind drawn as a box
-// (see WIDGET_BOXES) - checked like a display's: anything else is said once and ignored, and a
-// size past the range is drawn at the nearest end of it.
+// (see WIDGET_BOXES), and a knob's or slider's `curve` (with `curveExp` for pow and sym) - checked
+// like a display's: anything else is said once and ignored, and a size past the range is drawn at
+// the nearest end of it.
+const CURVED = new Set(['slider', 'knob']);
+
 function inputOpts(kind, opts) {
   const out = {};
   if (opts === undefined) return out;
   const ranges = { ...(INPUT_SIZES[kind] ? { size: INPUT_SIZES[kind] } : {}) };
   if (WIDGET_BOXES[kind]) Object.assign(ranges, { width: WIDGET_BOXES[kind].width, height: WIDGET_BOXES[kind].height });
-  const names = Object.keys(ranges);
+  const names = [...Object.keys(ranges), ...(CURVED.has(kind) ? ['curve', 'curveExp'] : [])];
   for (const [k, raw] of Object.entries(opts)) {
+    if (CURVED.has(kind) && k === 'curve') {
+      const c = textOf(raw);
+      if (c === null || !CURVES.includes(c)) warnPattern(`[widgets] ${kind}({ curve }) is one of ${CURVES.map((x) => `"${x}"`).join(', ')} - got ${JSON.stringify(c ?? raw)}, turning linear`);
+      else out.curve = c;
+      continue;
+    }
+    if (CURVED.has(kind) && k === 'curveExp') {
+      const v = numberOf(raw, NaN);
+      if (!(v > 0)) warnPattern(`[widgets] ${kind}({ curveExp }) is a number above 0 - got ${JSON.stringify(raw)}`);
+      else out.curveExp = v;
+      continue;
+    }
     const range = ranges[k];
     if (!range) {
       warnPattern(`[widgets] ${kind}() has no option ${JSON.stringify(k)}${names.length ? ` (it has ${names.join(', ')})` : ''}`);
@@ -293,10 +368,17 @@ function rangedWidget(kind, where, [value, min, max, step]) {
   const v = numberOf(value, lo);
   const st = step === undefined ? null : numberOf(step, null);
   if (!where) return new Sig(() => v);
+  const opts = { ...(where.opts ?? {}) };
+  // An exp curve maps a ratio: a range that reaches zero or crosses it has none.
+  if (opts.curve === 'exp' && !(lo > 0 && hi > 0)) {
+    warnPattern(`[widgets] ${kind}({ curve: "exp" }) needs a range above zero - got ${lo} to ${hi}, turning linear`);
+    delete opts.curve;
+  }
+  const curve = opts.curve && opts.curve !== 'lin' ? { curve: opts.curve, curveExp: opts.curveExp ?? 2 } : null;
   const key = seed(where.at, v);
-  register({ input: true, kind, at: where.at, value: v, min: lo, max: hi, step: st, opts: where.opts ?? {} });
-  const sig = liveSig(() => values.get(key) ?? v);
-  sig.motionSource = { key, range: [lo, hi] }; // what .record() records (see motion.mjs)
+  register({ input: true, kind, at: where.at, value: v, min: lo, max: hi, step: st, opts });
+  const sig = liveSig(() => values.get(key) ?? v, controlOf(key, where.at, kind, [[lo, hi]], () => [Number(values.get(key) ?? v)], [curve]));
+  sig.motionSource = { key, range: [lo, hi], curve }; // what .record() records (see motion.mjs)
   return sig;
 }
 
@@ -315,7 +397,7 @@ function toggleWidget(where, [on]) {
   if (!where) return new Sig(() => v);
   const key = seed(where.at, v);
   register({ input: true, kind: 'toggle', at: where.at, value: v, opts: where.opts ?? {} });
-  const sig = liveSig(() => (values.get(key) ? 1 : 0));
+  const sig = liveSig(() => (values.get(key) ? 1 : 0), controlOf(key, where.at, 'toggle', [[0, 1]], () => [values.get(key) ? 1 : 0]));
   sig.motionSource = { key, range: [0, 1] };
   return sig;
 }
@@ -329,7 +411,7 @@ function buttonWidget(where) {
   if (!where) return new Sig(() => 0);
   const key = seed(where.at, 0);
   register({ input: true, kind: 'button', at: where.at, value: 0, opts: where.opts ?? {} });
-  const sig = liveSig(() => (values.get(key) ? 1 : 0));
+  const sig = liveSig(() => (values.get(key) ? 1 : 0), controlOf(key, where.at, 'button', [[0, 1]], () => [values.get(key) ? 1 : 0]));
   sig.motionSource = { key, range: [0, 1] };
   return sig;
 }
@@ -351,8 +433,10 @@ function xyWidget(where, [x, y]) {
     readX = () => values.get(key)?.[0] ?? vx;
     readY = () => values.get(key)?.[1] ?? vy;
   }
-  const sx = where ? liveSig(readX) : new Sig(readX);
-  const sy = where ? liveSig(readY) : new Sig(readY);
+  // Both axes report the whole pad, so a read of either one keeps its movement.
+  const control = where ? controlOf(key, where.at, 'xy', [[0, 1], [0, 1]], () => [readX(), readY()].map(Number)) : null;
+  const sx = where ? liveSig(readX, control) : new Sig(readX);
+  const sy = where ? liveSig(readY, control) : new Sig(readY);
   // The pad IS its x axis, so `xy()` goes anywhere a value does; `.x` and `.y` name the two axes.
   sx.x = sx;
   sx.y = sy;

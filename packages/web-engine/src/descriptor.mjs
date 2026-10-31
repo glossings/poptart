@@ -322,6 +322,9 @@ const FIGURE_KINDS = new Map([
   // A filter bank's bands: a bar per band at its frequency, as loud as it is being fed - which the
   // device reports, since Shape moves it every sample.
   ['bands', ['levels']],
+  // A looper's loop: its bars, the playhead going round them, and a first take as it records -
+  // all of it the device's report, with Length to lay it out on.
+  ['loop', ['length']],
 ]);
 
 /**

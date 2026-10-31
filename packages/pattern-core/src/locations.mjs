@@ -33,7 +33,7 @@ import { looksLikeNoteString } from './pianoroll.mjs';
 import { DIVISION_LABEL } from './mini.mjs';
 import { looksLikeShapeData } from './shape.mjs';
 import { grooveNameLike } from './groove.mjs';
-import { widgetCallEdits, recordCallEdits, RAW_TEXT_WIDGETS } from './widget-calls.mjs';
+import { widgetCallEdits, recordCallEdits, sourceCallEdits, RAW_TEXT_WIDGETS } from './widget-calls.mjs';
 
 // Rewrites `code` so each pattern-position string/template literal is wrapped in mini(str, START),
 // where START = `base` + the literal's first-content-char offset within `code`. Pass the block's
@@ -45,14 +45,14 @@ import { widgetCallEdits, recordCallEdits, RAW_TEXT_WIDGETS } from './widget-cal
 // `miniOff` is the buffer's mini-off ranges (see miniOffRanges), in the same coordinates as `base`:
 // the caller computes them once over the whole buffer, since a range opened in one block runs on
 // through the blocks below it.
-export function injectLocations(code, base = 0, opts = {}) {
+export function injectLocations(code, base = 0, opts = {}) { // opts: { miniOff, doc }
   return injectLocationsMapped(code, base, opts).code;
 }
 
 // injectLocations, plus the edits it made - `[from, to, replacement]` over `code`, in order - so
 // a position in the rewritten text can be traced back to the one somebody typed (see
 // eval-errors.mjs: an error's line and column are only worth showing in the buffer's terms).
-export function injectLocationsMapped(code, base = 0, { miniOff = [] } = {}) {
+export function injectLocationsMapped(code, base = 0, { miniOff = [], doc = null } = {}) {
   const { lits, masked } = scanLiterals(code);
   // [from, to, replacement] over the ORIGINAL code, applied in one pass below.
   const edits = [];
@@ -73,6 +73,9 @@ export function injectLocationsMapped(code, base = 0, { miniOff = [] } = {}) {
   edits.push(...widgetCallEdits(code, base, { masked, lits }));
   // `.record(` too, so a take a control records can find its call again (see motion.mjs).
   edits.push(...recordCallEdits(code, base, { masked, lits }));
+  // ...and every live source - `cc(12)`, `osc("/x")`, `macro1` - so the header's capture can find
+  // where one is written (see motion.mjs's captureMotion). Zero-width, at a source's two ends.
+  edits.push(...sourceCallEdits(code, base, { masked, lits }, { doc }));
   edits.sort((x, y) => x[0] - y[0]);
   let out = '';
   let prev = 0;

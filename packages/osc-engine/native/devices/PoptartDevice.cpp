@@ -14,7 +14,7 @@
 //   inputs:  [bend (kr), numMain, main0..., numSidechain, sidechain0...]
 //   outputs: numChannels audio channels
 //   unit commands: /open /close /set /map /mapa /unmap /noteOn /noteOff /allNotesOff
-//                  /sample /shape /report /sidechain /noteRoute /transport /loopLatency
+//                  /sample /shape /report /sidechain /noteRoute /running /transport /loopLatency
 //
 // which is what lets sc/poptart.scd treat a native device and a plugin as the same kind of thing
 // (see PoptartDeviceController in classes/PoptartDevice.sc): one `.set`, one `.map`, one
@@ -544,6 +544,7 @@ struct PoptartDevice : public SCUnit {
 
     void setKeyPatched(bool on) { mKeyPatched = on; }
     void setNoteRoute(bool on) { mNoteRoute = on; }
+    void setRunning(bool on) { mRunning = on; }
     void setLoopLatency(float seconds) { mLoopSec = seconds; }
 
     /**
@@ -746,6 +747,8 @@ private:
             // that arrives while a device is being swapped would otherwise be lost.
             device->keyPatched(mKeyPatched);
             device->noteRoute(mNoteRoute);
+            // And whether the track is playing (cmdRunning), the same way.
+            device->running(mRunning);
             // How late a chain in the device's feedback loop comes back: the chain's own devices,
             // as the engine says, and this server's block, since the return is read a block late
             // (InFeedback in the track's effect def).
@@ -862,6 +865,7 @@ private:
     bool mKeyPatched = false;
     /** Whether a track's notes are routed to this slot (.midi(...)), for the ducker. */
     bool mNoteRoute = false;
+    bool mRunning = true;
     /**
      * The delay of the devices in a chain run inside this device's feedback loop, in seconds, or
      * below zero for none (see PdAny::loop). The node outlives the device in it, so this does too.
@@ -1155,6 +1159,14 @@ void cmdNoteRoute(Unit* unit, sc_msg_iter* args) {
 }
 
 /**
+ * Whether the track's pattern is playing: sent in a bundle timed to the moment it starts or
+ * stops (see setTrackRunning in the engine), so it lands on that block.
+ */
+void cmdRunning(Unit* unit, sc_msg_iter* args) {
+    ((PoptartDevice*)unit)->setRunning(args->geti(0) != 0);
+}
+
+/**
  * The tempo, and where the transport is: the beat position at this moment, in beats.
  *
  * Sent as the tempo changes and as the transport moves, exactly as it is sent to a plugin
@@ -1374,6 +1386,7 @@ PluginLoad(PoptartDeviceUGens) {
     DefineUnitCmd("PoptartDevice", "/allNotesOff", cmdAllNotesOff);
     DefineUnitCmd("PoptartDevice", "/sidechain", cmdSidechain);
     DefineUnitCmd("PoptartDevice", "/noteRoute", cmdNoteRoute);
+    DefineUnitCmd("PoptartDevice", "/running", cmdRunning);
     DefineUnitCmd("PoptartDevice", "/loopLatency", cmdLoopLatency);
     DefineUnitCmd("PoptartDevice", "/transport", cmdTransport);
     DefineUnitCmd("PoptartDevice", "/sample", cmdSample);

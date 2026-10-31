@@ -1929,7 +1929,8 @@ const MIX_MIDI_BROWSE_PRESS = ['browseload', 'browseout', 'browsefilter', 'brows
 // The knob. Relative, and read in either convention hardware sends; see mixMidiBrowseTicks.
 const MIX_MIDI_BROWSE_KNOBS = ['browse'];
 
-const MIX_MIDI_GLOBAL_PRESS = ['fxon', 'fxnext', 'fxprev', 'fxassign', ...MIX_MIDI_BROWSE_PRESS];
+// `capture` is the header's capture button, forwarded to the page (it writes takes into the code).
+const MIX_MIDI_GLOBAL_PRESS = ['fxon', 'fxnext', 'fxprev', 'fxassign', 'capture', ...MIX_MIDI_BROWSE_PRESS];
 const MIX_MIDI_GLOBAL_HOLD = ['fxhold'];
 // `fxassign` above is the one-BUTTON form: a press cycles A -> A+B -> B, which is what a surface
 // with a single assign pad can drive. A surface with a three-position SWITCH cannot: it sends a
@@ -2355,7 +2356,7 @@ function mixMidiApply(target, value) {
     if (target === 'fxhold') mixFxSet({ held: down });
     else if (!down) { /* press pads act on the press edge only */ }
     // The browser's pads: the page owns the window, the selection and the active deck.
-    else if (MIX_MIDI_BROWSE_PRESS.includes(target)) mixActionNotify(null, target);
+    else if (MIX_MIDI_BROWSE_PRESS.includes(target) || target === 'capture') mixActionNotify(null, target);
     else if (target === 'fxon') mixFxSet({ on: !mixState.fx.on });
     else if (target === 'fxassign') mixFxSet({ assign: FX_ASSIGNS[(FX_ASSIGNS.indexOf(mixState.fx.assign) + 1) % FX_ASSIGNS.length] });
     else {
@@ -4553,6 +4554,16 @@ function wireEngine() {
   applyMixFeedbackSetting();
   // Live CC events (forwarded from sclang once MIDI is enabled) feed pattern-core's
   // live-value store - what a Tier-1 midicc() signal samples.
+  // The header's capture keeps each live source's movement as it arrives, in engine time, and
+  // files it on a deck's clock when asked (pattern-core's motion.mjs). A stopped deck has no
+  // position for a move to land on.
+  patternCore.setMotionClock({
+    now: () => engine.getTime(),
+    cycleAt: (deck, sec) => {
+      const c = clockOf(deck);
+      return c.paused ? null : c.cycleAt(sec);
+    },
+  });
   engine.onMidiIn = (device, channel, num, value, kind) => {
     if (handleMixMidi(device, channel, num, value, kind)) return; // a desk control is the desk's alone
     // Notes reach Node for the desk's learned buttons; a midicc() signal samples ccs, and a
@@ -4811,7 +4822,7 @@ const BUILDER_NAMES = ['Signal', 'n', 'note', 'mini', 's', 'se', 'sr', 'sp', 'sa
 // BUILDER_NAMES - which is what drives autocomplete and the docs - so the plain names `roll` and
 // `shape` stay free for whatever they should mean to a person later. See the underscore in
 // pattern-core: these are the editor's own calls, not part of the language.
-const INTERNAL_BUILDERS = ['_roll', '_shape', '_preset', '_pack', '_slices', '_auto', '_groove', '_arrange', '_input', '_display'];
+const INTERNAL_BUILDERS = ['_roll', '_shape', '_preset', '_pack', '_slices', '_auto', '_groove', '_arrange', '_input', '_display', '_at'];
 
 // The Macros panel's knobs, pre-bound as ready-made signals: `macro1`..`macro8` in evaluated
 // code are `macro(1)`..`macro(8)`, so a knob can be dropped straight into a control -
@@ -6346,16 +6357,17 @@ function paramAddr(plugin, name, index) {
 }
 
 function handleParamAutomated(trackId, slot, name, index, normValue) {
-  if (!conf || conf.trackId !== trackId) {
-    // sclang only forwards gestures for a conf-armed track, so landing here means the two ends
-    // disagree about the session - log it, this is the diagnostic for every "conf writes
-    // nothing" report.
-    console.log(`[conf] gesture "${name}" from track "${trackId}" ignored - configuring: ${conf ? `"${conf.trackId}"` : 'none'}`);
-    return;
-  }
   const spec = mappedEngine?.specFor(engineTrack(trackId), slot, name);
   const value = spec ? roundSig(toRealWorld(normValue, spec)) : Math.round(normValue * 1e4) / 1e4;
   const addr = paramAddr(mappedEngine?.chains.get(engineTrack(trackId))?.[slot], name, index);
+  // Every gesture is kept for the header's capture, conf or not (pattern-core's feedParamMove):
+  // in the units `.param()` takes for this parameter, on the curve the mapping gives it.
+  patternCore.feedParamMove({
+    deck: deckOfKey(trackId), trackId, slot, id: addr, name: addr,
+    min: spec ? spec.min : 0, max: spec ? spec.max : 1, curve: spec?.curve === 'log' ? 'exp' : 'lin', curveExp: null, step: null,
+    widget: 'knob', value,
+  });
+  if (!conf || conf.trackId !== trackId) return;
   // One line per param per session (not per gesture - dragging floods otherwise), so the server
   // console shows what conf is capturing.
   if (!conf.seen.has(addr)) {
@@ -6958,7 +6970,7 @@ function deviceFigureOpts(state) {
 }
 
 /** The figures that draw what a device is DOING rather than how it is set, and so always follow. */
-const LIVE_DEVICE_FIGURES = new Set(['sample', 'meter', 'transfer', 'eq', 'shaper', 'sweep', 'duck', 'bands']);
+const LIVE_DEVICE_FIGURES = new Set(['sample', 'meter', 'transfer', 'eq', 'shaper', 'sweep', 'duck', 'bands', 'loop']);
 
 /**
  * A device's live answer as the window reads it: each driven control's value, position and
@@ -7028,6 +7040,17 @@ function widgetsOf(panel) {
  * path unchanged - auto-pin writes them into the call as `{ state }`, in the browser's format
  * (osc-engine's deviceStateText), and `.preset()` restores them.
  */
+// A sweep or a switch moved in a device window, kept for the header's capture (pattern-core's
+// feedParamMove): a choice, a file and a control a state never holds are not movements.
+function notePanelMove(trackLabel, slot, param, value) {
+  if (param.options || param.takes || param.saved === false) return;
+  patternCore.feedParamMove({
+    deck: deckOfKey(trackLabel), trackId: trackLabel, slot, id: param.id, name: param.name,
+    min: param.min, max: param.max, curve: param.curve ?? 'lin', curveExp: param.curveExp ?? null, step: param.step ?? null,
+    widget: param.ui === 'toggle' ? 'toggle' : 'knob', value,
+  });
+}
+
 function noteDeviceEdit(trackLabel, slot, param, arg) {
   // A control a state never holds (a looper's Record) is played, not edited: nothing to file.
   if (param.saved === false) return;
@@ -7112,6 +7135,7 @@ async function setDeviceParam(body) {
   const value = body.position === undefined
     ? kit.descriptor.clampParam(found, Number(body.value))
     : kit.panel.valueFromPosition(descriptor, found.id, body.position);
+  notePanelMove(trackLabel, slot, found, value);
   // The engine takes what `.param()` takes: a position for a sweep, an index for a choice.
   const arg = found.options
     ? Math.round(value)
@@ -8909,6 +8933,10 @@ const routes = {
     const now = clockOf(deckOfKey(trackId)).cycleAt(engine.getTime());
     return { status: 200, body: { events: liveEventsFor(trackId, -Infinity, now), now, transport: transport.snapshot() } };
   },
+
+  // The header's capture: the latest phrase of every drawn control's movement, as takes for the
+  // editor to write in as `.record({ cycles, take })` (pattern-core's captureMotion).
+  'POST /api/captureMotion': async () => ({ status: 200, body: { takes: patternCore.captureMotion() } }),
 
   // A one-off audition note from the piano roll editor. Body: { trackId, note, vel, isOn }. Unlike
   // keyNote it is NOT logged - a note auditioned while drawing is not a note played - but like it

@@ -1124,3 +1124,122 @@ test('a device window on the DJ FX unit leaves its settings in the chain, not in
   rig.transport.rampCps(rig.transport.cps);
   shutdown(rig);
 });
+
+test('capture: a knob moved while playing comes back as a take, from the scheduler\'s own polls', async () => {
+  patternCore.clearCaptureHistory();
+  const rig = makeHost();
+  const code = 'pad: note("c3").synth("Wavetable").param("Osc 1 Position", knob(0.5, 0, 1))';
+  await rig.host.call('POST', '/api/evaluate', { code, start: true });
+  const at = code.indexOf('knob(');
+  const tick = (sec) => {
+    rig.ctx.advance(sec);
+    for (const s of rig.evaluator.schedulers.values()) s._tick();
+  };
+  for (let i = 0; i < 20; i++) tick(0.05); // a second held at 0.5
+  for (let i = 0; i <= 10; i++) {
+    assert.equal((await rig.host.call('POST', '/api/widgets/set', { deck: 'a', at, value: 0.5 + i * 0.04 })).ok, true);
+    tick(0.05);
+  }
+  for (let i = 0; i < 20; i++) tick(0.05);
+  const { takes } = await rig.host.call('POST', '/api/captureMotion', {});
+  assert.equal(takes.length, 1);
+  assert.equal(takes[0].deck, 'a');
+  assert.equal(takes[0].at, at, 'the key of the knob\'s call, which the editor finds it by');
+  assert.equal(takes[0].kind, 'knob');
+  const ys = patternCore.parseShapePoints(takes[0].shapes[0]).map((p) => p.y);
+  assert.ok(Math.min(...ys) < 0.55 && Math.max(...ys) > 0.85, `the sweep is in the take: ${takes[0].shapes[0]}`);
+  shutdown(rig);
+});
+
+test('capture: a hardware knob\'s moves are kept as they arrive and come back as a take on the cc() that reads it', async () => {
+  patternCore.clearCaptureHistory();
+  const rig = makeHost();
+  const code = 'const cc = midicc("Twister")\npad: note("c3").synth("Wavetable").param("Osc 1 Position", cc(12, 1))';
+  await rig.host.call('POST', '/api/evaluate', { code, start: true });
+  const at = code.indexOf('cc(12');
+  const tick = (sec) => {
+    rig.ctx.advance(sec);
+    for (const s of rig.evaluator.schedulers.values()) s._tick();
+  };
+  for (let i = 0; i < 20; i++) tick(0.05);
+  for (let i = 0; i <= 10; i++) {
+    patternCore.feedMidiCC('Midi Fighter Twister', 1, 12, i / 10); // as boot.mjs feeds a cc message
+    tick(0.05);
+  }
+  for (let i = 0; i < 20; i++) tick(0.05);
+  const { takes } = await rig.host.call('POST', '/api/captureMotion', {});
+  assert.equal(takes.length, 1);
+  assert.equal(takes[0].at, at, 'where cc(12, 1) is written, which the editor finds it by');
+  assert.equal(takes[0].source, true);
+  const ys = patternCore.parseShapePoints(takes[0].shapes[0]).map((p) => p.y);
+  assert.ok(Math.min(...ys) < 0.05 && Math.max(...ys) > 0.95, `the sweep is in the take: ${takes[0].shapes[0]}`);
+  // Stopped, a move has nowhere to land, and the clock is set back: nothing to capture.
+  await rig.host.call('POST', '/api/stop', {});
+  patternCore.clearCaptureHistory();
+  patternCore.feedMidiCC('Midi Fighter Twister', 1, 12, 0.3);
+  assert.deepEqual((await rig.host.call('POST', '/api/captureMotion', {})).takes, []);
+  shutdown(rig);
+});
+
+test('capture: a knob dragged in a device window comes back as a param take in that control\'s units and curve', async () => {
+  patternCore.clearCaptureHistory();
+  const rig = makeHost();
+  await rig.host.call('POST', '/api/evaluate', { code: 'pad: note("c3").synth("Wavetable")', start: true });
+  const d = catalog.get('Wavetable');
+  const p = d.params.find((x) => !x.options && x.ui !== 'toggle' && !x.takes && x.saved !== false);
+  const tick = (sec) => {
+    rig.ctx.advance(sec);
+    for (const s of rig.evaluator.schedulers.values()) s._tick();
+  };
+  for (let i = 0; i < 20; i++) tick(0.05);
+  for (let i = 0; i <= 10; i++) {
+    await rig.host.call('POST', '/api/deviceParam', { trackId: 'pad', slot: 0, id: p.id, position: 0.1 + i * 0.08, commit: i === 10 });
+    tick(0.05);
+  }
+  for (let i = 0; i < 20; i++) tick(0.05);
+  const { takes } = await rig.host.call('POST', '/api/captureMotion', {});
+  assert.equal(takes.length, 1);
+  const [t] = takes;
+  assert.equal(t.source, 'param');
+  assert.deepEqual([t.deck, t.trackId, t.slot, t.id, t.name, t.min, t.max, t.curve, t.widget], ['a', 'pad', 0, p.id, p.name, p.min, p.max, p.curve ?? 'lin', 'knob']);
+  const ys = patternCore.parseShapePoints(t.shapes[0]).map((q) => q.y);
+  assert.ok(Math.min(...ys) < 0.15 && Math.max(...ys) > 0.85, `the sweep, as positions on the control's curve: ${t.shapes[0]}`);
+  assert.ok(Math.abs(patternCore.positionOnCurve(p, t.value) - 0.9) < 0.01, 'the value it was left at, in its own units');
+  shutdown(rig);
+});
+
+test('the frames answer carries what a recording control is playing, so the editor draws it there', async () => {
+  patternCore.clearCaptureHistory();
+  const rig = makeHost();
+  const code = 'pad: note("c3").synth("Wavetable").param("Osc 1 Position", knob(0.2).record({ cycles: 1, take: "pt" }))\n\n_shape("pt", "0,0.1 0.5,0.1 0.5,0.9 1,0.9")';
+  const result = await rig.host.call('POST', '/api/evaluate', { code, start: true });
+  const at = code.indexOf('knob(');
+  assert.deepEqual(result.widgets.recording, [at], 'the report names the control with a take on it');
+  const tick = (sec) => {
+    rig.ctx.advance(sec);
+    for (const s of rig.evaluator.schedulers.values()) s._tick();
+  };
+  for (let i = 0; i < 10; i++) tick(0.05);
+  const frames = await rig.host.call('GET', '/api/widgets/frames?deck=a');
+  assert.ok(Array.isArray(frames.now?.[at]), `the played value rides the frames: ${JSON.stringify(frames.now)}`);
+  const v = frames.now[at][0];
+  assert.ok(Math.abs(v - 0.1) < 0.02 || Math.abs(v - 0.9) < 0.02, `one of the take's two values: ${v}`);
+  shutdown(rig);
+});
+
+for (const [label, value] of [['plain', 'knob(0.2).record({ cycles: 1, take: "pt" })'], ['ranged', 'knob(0).record({ cycles: 1, take: "pt" }).range(0.2, 0.9)']]) {
+  test(`a ${label} take named before its shape in the buffer plays, and is reported for the knob to follow`, async () => {
+    patternCore.clearCaptureHistory();
+    const rig = makeHost();
+    const code = `pad: note("c3").synth("Wavetable").param("Osc 1 Position", ${value})\n\n_shape("pt", "0,0.1 0.5,0.1 0.5,0.9 1,0.9")`;
+    await rig.host.call('POST', '/api/evaluate', { code, start: true });
+    const tick = (sec) => { rig.ctx.advance(sec); for (const s of rig.evaluator.schedulers.values()) s._tick(); };
+    const tid = rig.evaluator.trackIds.get('pad') ?? 'pad';
+    const seen = new Set();
+    for (let i = 0; i < 60; i++) { tick(0.05); seen.add(Number(rig.engine.deviceState(tid, 0).values['osc1.position']).toFixed(2)); }
+    assert.ok(seen.size >= 2, `the take moves the control: ${[...seen]}`);
+    const { now } = await rig.host.call('GET', '/api/widgets/frames?deck=a');
+    assert.ok(Array.isArray(now[code.indexOf('knob(')]), `reported for the knob: ${JSON.stringify(now)}`);
+    shutdown(rig);
+  });
+}

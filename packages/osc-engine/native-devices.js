@@ -139,7 +139,7 @@ function deviceStateText(device, positions = {}, files = {}) {
 // so an index saved at version 1 from 1/16 on moves two along (web-engine's dsp/sync.mjs).
 const SYNC_LIST_CONTROLS = Object.freeze({
   Delay: ['sync'], Chorus: ['sync'], Flanger: ['sync'], Phaser: ['sync'], Ducker: ['sync'],
-  GrainEcho: ['sync'], Looper: ['quantize'], Stutter: ['interval', 'grid'],
+  GrainEcho: ['sync'], Stutter: ['interval', 'grid'],
 });
 
 function migrateDeviceState(device, doc) {
@@ -255,6 +255,15 @@ function readReport(id, raw) {
       if (!(n >= 0) || raw.length < 1 + 2 * n) return null;
       return { bands: { hz: raw.slice(1, 1 + n), level: raw.slice(1 + n, 1 + 2 * n) } };
     }
+    case 'Looper': {
+      // The status, the loop's beats (-1 with no loop), seconds and playhead, and a first take's
+      // seconds and beats (own/looper.cc's pd_report).
+      if (raw.length < 6) return null;
+      const status = ['empty', 'armed', 'recording', 'playing', 'overdub', 'stopped'][Math.round(raw[0])] ?? 'empty';
+      return {
+        loop: { status, beats: raw[1] >= 0 ? raw[1] : null, seconds: raw[2], position: raw[3], takenSec: raw[4], takenBeats: raw[5] },
+      };
+    }
     case 'Chorus':
     case 'Flanger':
     case 'Phaser':
@@ -340,6 +349,9 @@ function deviceParamRows(device) {
     ui: p.ui ?? null,
     options: p.options ? [...p.options] : null,
     rate: p.rate ?? null,
+    curve: p.curve ?? 'lin',
+    curveExp: p.curveExp ?? null,
+    step: p.step ?? null,
   }));
 }
 

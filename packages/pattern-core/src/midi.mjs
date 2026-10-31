@@ -10,6 +10,8 @@
 // rule (midiSourceFor) for the native CC/note paths, so both tiers agree on which controller
 // a name means.
 
+import { notifySourceFed } from './sources.mjs';
+
 // actual device name -> Map("cc|channel" -> latest 0..1 value). The "cc|*" key aggregates all
 // channels (last event on any channel wins) - what a channel-less cc(12) reads.
 const deviceStates = new Map();
@@ -37,6 +39,12 @@ export function feedMidiCC(device, channel, cc, value01) {
   }
   state.set(`${cc}|${channel}`, value01);
   state.set(`${cc}|*`, value01);
+  notifySourceFed({ kind: 'cc', device, channel, cc, value: value01 });
+}
+
+/** Whether a real device name is one a `midicc(pattern)` call means: the same match latestCC makes. */
+export function midiDeviceMatches(devicePattern, device) {
+  return String(device).toLowerCase().includes(String(devicePattern).toLowerCase());
 }
 
 /**

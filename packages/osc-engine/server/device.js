@@ -272,6 +272,11 @@ class DeviceController {
   }
 
   /** Whether a track's notes are routed into this slot. */
+  /** Whether the track's pattern is playing: a looper plays out its pass on a stop. */
+  trackRunning(on = true) {
+    this.sendMsg('/running', i32(on ? 1 : 0));
+  }
+
   noteRoute(routed = false) {
     this.sendMsg('/noteRoute', i32(routed ? 1 : 0));
   }

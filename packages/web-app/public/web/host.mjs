@@ -53,7 +53,7 @@ const PANEL_GLIDE_SEC = 0.03;
  * says when they change: a granulator's grains move on their own, and an auto gain works out
  * its own correction.
  */
-const LIVE_FIGURES = new Set(['sample', 'meter', 'transfer', 'eq', 'shaper', 'sweep', 'duck', 'bands']);
+const LIVE_FIGURES = new Set(['sample', 'meter', 'transfer', 'eq', 'shaper', 'sweep', 'duck', 'bands', 'loop']);
 
 class Unsupported extends Error {
   constructor(what, why) {
@@ -378,6 +378,7 @@ export function createHost({
     return descriptor.params.map((p, index) => ({
       name: p.name, label: p.unit, index, id: p.id, min: p.min, max: p.max,
       default: p.default, ui: p.ui, options: p.options ? [...p.options] : null, rate: p.rate,
+      curve: p.curve ?? 'lin', curveExp: p.curveExp ?? null, step: p.step ?? null,
     }));
   }
 
@@ -505,6 +506,15 @@ export function createHost({
   // ---- live notes, and the MIDI that plays them -------------------------------------------------
 
   // Every note played by hand, per track label - what capture and the MIDI recorder read.
+  // The header's capture keeps each live source's movement as it arrives (pattern-core's
+  // motion.mjs), filed on a deck's clock when asked; a stopped deck has no position for it.
+  patternCore.setMotionClock?.({
+    now: () => engine.getTime(),
+    cycleAt: (deck, sec) => {
+      const c = evaluator.clockOf?.(deck) ?? transport;
+      return c.paused ? null : c.cycleAt(sec);
+    },
+  });
   const liveNotes = createLiveNotes({
     nowCycle: () => transport.cycleAt(engine.getTime()),
     recordStartCycle: patternCore.recordStartCycle,
@@ -708,6 +718,9 @@ export function createHost({
       return { ok: true };
     },
     'POST /api/previewNote': async (body) => routes['POST /api/keyNote'](body),
+
+    // The header's capture: the latest phrase of every drawn control's movement, as takes.
+    'POST /api/captureMotion': async () => ({ takes: patternCore.captureMotion() }),
 
     // What a track has had played on it lately, held keys closed at now - the roll's capture.
     'POST /api/liveNotes': async (body) => {
@@ -935,6 +948,15 @@ export function createHost({
       const value = body.position === undefined
         ? panel.clampParam(found, Number(body.value))
         : panel.valueFromPosition(state.descriptor, found.id, body.position);
+      // Kept for the header's capture (pattern-core's feedParamMove): a sweep or a switch, not a
+      // choice, a file or a control a state never holds.
+      if (!found.options && !found.takes && found.saved !== false) {
+        patternCore.feedParamMove?.({
+          deck: label.startsWith('b:') ? 'b' : 'a', trackId: label, slot, id: found.id, name: found.name,
+          min: found.min, max: found.max, curve: found.curve ?? 'lin', curveExp: found.curveExp ?? null, step: found.step ?? null,
+          widget: found.ui === 'toggle' ? 'toggle' : 'knob', value,
+        });
+      }
       // A control being dragged moves for as long as the gesture does, and a device reads each
       // parameter once per block - so the value is glided over a few blocks rather than stepped,
       // or the staircase is heard as a buzz over the sound. A setting that picks between named

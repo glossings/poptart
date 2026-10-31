@@ -4,7 +4,8 @@
 // clearParamEnv/setParamCC/clearParamCC/setParamOSC/clearParamOSC/setMidiNotes/clearMidiNotes/
 // getTime, and - all optional -
 // setInputSource/clearInputSource/injectAudio/clearAudioInject/injectMidi/clearMidiInject for the
-// midi()/audio() source + injector routing).
+// midi()/audio() source + injector routing, and setTrackRunning for the devices that follow
+// whether their track is playing).
 // This class is engine-agnostic by design: anything implementing that interface works
 // unchanged - the OSC engine talking to SuperCollider (see @poptart/osc-engine) is the one in
 // use. Two independent mechanisms run side by side, matching the two ways a Sig can carry
@@ -1761,6 +1762,11 @@ export class Scheduler {
     this._scheduledUntilCycle = fromCycle ?? this.transport.cycleAt(this.engine.getTime());
     if (this._noteGate) this._noteGate.since = this._scheduledUntilCycle; // nothing before this played
     this._timer = setInterval(() => this._tick(), POLL_INTERVAL_MS);
+    // The track's devices hear that it plays from the moment its first cycle does: a looper comes
+    // back in on the bar, not a start lead early.
+    if (typeof this.engine.setTrackRunning === 'function') {
+      this.engine.setTrackRunning(this.trackId, true, this.transport.secAt(this._scheduledUntilCycle));
+    }
   }
 
   /**
@@ -1783,9 +1789,12 @@ export class Scheduler {
   }
 
   stop() {
+    const was = this._running;
     this._running = false;
     if (this._timer) clearInterval(this._timer);
     this._timer = null;
+    // And its devices that it has stopped, now: a looper plays out the pass it is on.
+    if (was && typeof this.engine.setTrackRunning === 'function') this.engine.setTrackRunning(this.trackId, false, null);
     // Nothing here silences what the engine is still sounding for the track: every event already
     // sent carries its own gate-off and plays on to it, and that is a feature - long notes and top
     // loops running on after a stop, a show's last notes ringing out. It is the PLAY that hushes:

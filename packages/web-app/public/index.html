@@ -66,6 +66,7 @@
             </label>
           </div>
         </div>
+        <button id="captureBtn" title="capture what you just moved and played — as if record had been on">capture</button>
         <!-- The headphones: level, and the blend from what is cued (a deck's 🎧, a track's M) to the
              main mix. In the header rather than on the desk because cueing is not only a DJ-mode
              thing. Knobs built by client.js (phonesLevel / phonesMix). -->
@@ -667,7 +668,7 @@
           <div id="mixMenu" class="ctx-menu hidden" role="menu"></div>
           <div class="mix-actions">
             <button id="mixStack" class="small" title="stack the decks: deck B's waveform directly under deck A's, playheads on one vertical line, so the beats of the two can be read against each other (side by side again with another press)">&#8645;</button>
-            <button id="mixLearn" class="small" title="MIDI learn: arm this, then click a control and move the hardware one that should drive it, over and over; click again or press esc to finish. Alt+click a control to unbind it. Learnable: the crossfader, every channel strip and the FX unit (the on pad binds latched, shift+click it for the momentary hold pad; the plugin picker binds the step-forward pad, shift+click for back), and on each deck cue, play, sync, 1×, key, Q, the regions switch, the loop and its two length buttons, the tempo slider and its range, the platter (click the waveform, then spin a jog wheel - shift+click for its coarse search mode, alt-free), the drag buttons (shift+click binds the wheel's pitch-bend instead), the jog steps and their size and the headphone button, and the headphone level and cue/main knobs">midi</button>
+            <button id="mixLearn" class="small" title="MIDI learn: arm this, then click a control and move the hardware one that should drive it, over and over; click again or press esc to finish. Alt+click a control to unbind it. Learnable: the crossfader, every channel strip and the FX unit (the on pad binds latched, shift+click it for the momentary hold pad; the plugin picker binds the step-forward pad, shift+click for back), and on each deck cue, play, sync, 1×, key, Q, the regions switch, the loop and its two length buttons, the tempo slider and its range, the platter (click the waveform, then spin a jog wheel - shift+click for its coarse search mode, alt-free), the drag buttons (shift+click binds the wheel's pitch-bend instead), the jog steps and their size and the headphone button, the headphone level and cue/main knobs, and the header's capture">midi</button>
           </div>
         </div>
         <div class="mix-meter-col" id="mixMeterColB"></div>

@@ -11,6 +11,9 @@
 // plain module, and so locations.mjs can call it from inside its own transpile.
 
 /** Calls that are drawn as a control and return a signal of what the control is set to. */
+// The curve a knob() or slider() turns on, shared with the editor that draws it.
+export { CURVES, positionOnCurve, valueOnCurve } from './curves.mjs';
+
 export const INPUT_WIDGETS = Object.freeze(['slider', 'knob', 'toggle', 'button', 'xy', 'steps', 'sliders', 'matrix']);
 
 /** Calls that draw what a pattern is doing - its sound, or its events and values. */
@@ -659,6 +662,93 @@ export function findRecordCalls(code, masking = null) {
     out.push({ at, open, close: callArgs(src, open, masked)?.close ?? -1 });
   }
   return out;
+}
+
+// A name's occurrences in `masked` as a builder call or a bare reference: not after `.` (a method),
+// not inside another word, and not a function's own name.
+function* nameSites(masked, name) {
+  const re = new RegExp(`${name.replace(/\$/g, '\\$')}\\b`, 'g');
+  let m;
+  while ((m = re.exec(masked))) {
+    const at = m.index;
+    if (at > 0 && /[\w$]/.test(masked[at - 1])) continue;
+    let j = at;
+    while (j > 0 && /\s/.test(masked[j - 1])) j--;
+    if (j > 0 && masked[j - 1] === '.') continue;
+    if (/\bfunction\s*\*?\s*$/.test(masked.slice(Math.max(0, j - 12), j))) continue;
+    yield at;
+  }
+}
+
+// Just past the `)` of the call whose name ends at `after` (skipping spaces to its `(`), or -1
+// when what follows is not a closed call.
+function callEnd(src, masked, after) {
+  let k = after;
+  while (k < masked.length && /\s/.test(masked[k])) k++;
+  if (masked[k] !== '(') return -1;
+  const close = callArgs(src, k, masked)?.close ?? -1;
+  return close < 0 ? -1 : close + 1;
+}
+
+/**
+ * Every live source written in `code`, in document order: `{ at, end, kind }` - where it starts,
+ * just past it, and `cc`, `osc` or `macro`. A source is `osc(...)`, `macro(...)`, a bare
+ * `macro1`..`macro8`, `midicc(...)(...)`, or a call of a name bound to a `midicc(...)` -
+ * `const cc = midicc("Twister")` then `cc(12, 1)`. Nothing inside a string or a comment. The
+ * binding is usually at the top of the buffer and the call in a track's block, so `doc` - the
+ * whole buffer, when `code` is one block of it - is where the bound names are looked for too.
+ */
+export function findSourceCalls(code, masking = null, { doc = null } = {}) {
+  const src = String(code);
+  const { masked } = masking ?? maskCode(src);
+  const out = [];
+  const bound = new Set(doc ? midiccBindings(maskCode(String(doc)).masked) : []);
+  for (const name of ['osc', 'macro']) {
+    for (const at of nameSites(masked, name)) {
+      const end = callEnd(src, masked, at + name.length);
+      if (end > 0) out.push({ at, end, kind: name });
+    }
+  }
+  for (const at of nameSites(masked, 'macro[1-8]')) {
+    const end = at + 6;
+    let k = end;
+    while (k < masked.length && /\s/.test(masked[k])) k++;
+    if (masked[k] === '(' || masked[k] === ':' || masked[k] === '=' && masked[k + 1] !== '=') continue; // a call, a key, an assignment
+    out.push({ at, end, kind: 'macro' });
+  }
+  // The device functions: a `midicc(...)` called at once, or bound to a name and called by it.
+  for (const at of nameSites(masked, 'midicc')) {
+    const inner = callEnd(src, masked, at + 6);
+    if (inner < 0) continue;
+    const end = callEnd(src, masked, inner);
+    if (end > 0) out.push({ at, end, kind: 'cc' });
+  }
+  for (const name of midiccBindings(masked)) bound.add(name);
+  for (const name of bound) {
+    for (const at of nameSites(masked, name)) {
+      const end = callEnd(src, masked, at + name.length);
+      if (end > 0) out.push({ at, end, kind: 'cc' });
+    }
+  }
+  return out.sort((a, b) => a.at - b.at);
+}
+
+// The names `masked` binds to a device function: `const cc = midicc(...)`.
+function midiccBindings(masked) {
+  const names = [];
+  const re = /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*midicc\s*\(/g;
+  let m;
+  while ((m = re.exec(masked))) names.push(m[1]);
+  return names;
+}
+
+/**
+ * The transpile's tag on each live source, so the header's capture can find where it is written:
+ * `cc(12, 1)` -> `_at(AT, cc(12, 1))`, `macro1` -> `_at(AT, macro1)`. `[from, to, text]` triples
+ * like widgetCallEdits's - two per source, one at each end, inserting and replacing nothing.
+ */
+export function sourceCallEdits(code, base = 0, masking = null, opts = {}) {
+  return findSourceCalls(code, masking, opts).flatMap((c) => [[c.at, c.at, `_at(${base + c.at}, `], [c.end, c.end, ')']]);
 }
 
 /**

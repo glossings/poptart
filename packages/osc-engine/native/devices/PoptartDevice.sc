@@ -424,6 +424,12 @@ PoptartDeviceController {
         this.sendMsg('/sidechain', if (patched) { 1 } { 0 });
     }
 
+    // Whether the track's pattern is playing: a looper plays out its pass on a stop. A plugin has
+    // no such message, so the engine asks respondsTo(\trackRunning) before sending it.
+    trackRunning { |on = true|
+        this.sendMsg('/running', if (on) { 1 } { 0 });
+    }
+
     noteRoute { |routed = false|
         this.sendMsg('/noteRoute', if (routed) { 1 } { 0 });
     }

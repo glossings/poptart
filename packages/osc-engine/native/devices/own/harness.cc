@@ -10,7 +10,7 @@
 //
 //   harness <device> <sampleRate> <frames> <blockSize> [bpm] [-k 0|1] [-n frame:note:vel ...]
 //            [-S control:slot:rate:channels:frameLength:file ...] [-H control:slot:file ...]
-//            [-A control:file ...] [-R file]
+//            [-A control:file ...] [-R file] [-r frame:0|1 ...]
 //
 // stdin, little-endian: the parameter values in REAL UNITS (the position-to-value conversion is
 // pd_denormalize's job and is tested separately), then the input as interleaved stereo floats.
@@ -30,6 +30,9 @@
 // device plays it, so these vectors outlive the run.
 //
 // `-H` is a DRAWN curve, raw 32-bit floats, handed over as the host's /shape command does.
+//
+// `-r` says the track stops (0) or plays (1) from `frame` on, told at the start of the block that
+// frame begins, as PoptartDevice tells it every block (PdAny::running). It plays until told.
 //
 // `-A` is a control with a SIGNAL on it: `file` is one value per frame, in real units, raw 32-bit
 // floats. It is handed over as PoptartDevice hands a patched control over - the block's values
@@ -54,6 +57,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <utility>
 #include <vector>
 
 #ifdef _WIN32
@@ -106,6 +110,7 @@ int main(int argc, char** argv) {
   const double bpm = argc > 5 && argv[5][0] != '-' ? std::atof(argv[5]) : 120.0;
 
   std::vector<Note> notes;
+  std::vector<std::pair<int, bool>> runs;  // -r: the track stops or plays from a frame on
   std::vector<Loaded> samples;
   std::vector<Drawn> shapes;
   std::vector<Moving> moving;
@@ -187,6 +192,11 @@ int main(int argc, char** argv) {
     }
     if (std::strcmp(argv[i], "-L") == 0 && i + 1 < argc) {
       loopSec = std::atof(argv[++i]);
+      continue;
+    }
+    if (std::strcmp(argv[i], "-r") == 0 && i + 1 < argc) {
+      int frame = 0, on = 1;
+      if (std::sscanf(argv[++i], "%d:%d", &frame, &on) == 2) runs.push_back({ frame, on != 0 });
       continue;
     }
     if (std::strcmp(argv[i], "-k") == 0 && i + 1 < argc) {
@@ -327,6 +337,9 @@ int main(int argc, char** argv) {
     device->transport(bpm, static_cast<double>(at) / sampleRate);
     device->keyPatched(keyPatched >= 0 ? keyPatched != 0 : inChannels >= 4);
     device->noteRoute(!notes.empty());
+    bool running = true;
+    for (const auto& one : runs) if (one.first <= at) running = one.second;
+    device->running(running);
     device->loop(loopSec);
     for (int ch = 0; ch < inChannels; ++ch) {
       for (int i = 0; i < n; ++i) {

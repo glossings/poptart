@@ -44,7 +44,6 @@ import { DelayProcessor } from '../web-engine/src/devices/delay.mjs';
 import { GrainEchoProcessor } from '../web-engine/src/devices/grainecho.mjs';
 import { StutterProcessor } from '../web-engine/src/devices/stutter.mjs';
 import { LooperProcessor } from '../web-engine/src/devices/looper.mjs';
-import { SYNC_OPTIONS } from '../web-engine/src/dsp/sync.mjs';
 import { DuckerProcessor } from '../web-engine/src/devices/ducker.mjs';
 import { FmSynth } from '../web-engine/src/devices/fmsynth.mjs';
 import { WavetableSynth } from '../web-engine/src/devices/wavetable.mjs';
@@ -759,13 +758,13 @@ for (const { id, param } of PATCHED) {
   });
 }
 
-// ---- the looper, played through takes ----------------------------------------------------------
+// ---- the looper, played through passes ---------------------------------------------------------
 //
 // A looper does nothing worth comparing until somebody records, so it is driven the way a person
-// plays it: Record and Clear moved per sample (as a patched control, `-A` on the harness), through
-// a first take, playback, an overdub, a stretch reversed, a clear and a new take - on the grid and
-// free, at the default tempo and another, with speed and feedback moved. The edges are placed a
-// little after their lines and well after them, so the late-edge rule is played both ways.
+// plays it: Record pressed and Clear moved per sample (as a patched control, `-A` on the harness)
+// - a short press mid-bar, a press 4 ms after a line and one 50 ms after, a hold through a line,
+// releases between lines, a stretch reversed, a clear and a new take - at the default tempo and
+// another, with speed, Mix and Length moved, and the track stopped mid-pass and started again.
 
 /** Noise and two tones, all the way through: a take of silence would compare two silences. */
 function loopInput(frames) {
@@ -781,7 +780,7 @@ function loopInput(frames) {
 }
 
 /** The browser's processor with several controls moving per sample, handed them per block. */
-function runBrowserMoving(descriptor, { values, input, frames, bpm, moving }) {
+function runBrowserMoving(descriptor, { values, input, frames, bpm, moving, runs = [] }) {
   const fx = new PROCESSORS[descriptor.id](SAMPLE_RATE);
   fx.setTempo(bpm, 0);
   const params = {};
@@ -791,6 +790,8 @@ function runBrowserMoving(descriptor, { values, input, frames, bpm, moving }) {
   for (let at = 0; at < frames; at += BLOCK) {
     const n = Math.min(BLOCK, frames - at);
     for (const [id, data] of Object.entries(moving)) params[id] = data.subarray(at, at + n);
+    // The track stopping or playing, told at the block it lands in (the harness's -r).
+    for (const [frame, on] of runs) if (frame >= at && frame < at + n) fx.setRunning(on);
     for (let i = 0; i < n; i++) {
       inputs[0][i] = input[(at + i) * 2];
       inputs[1][i] = input[(at + i) * 2 + 1];
@@ -807,38 +808,41 @@ test('Looper records, plays, overdubs, clears and records again the same on both
   for (const bpm of [120, 137]) {
     const bar = (4 * 60 / bpm) * SAMPLE_RATE;
     const f = (bars, sec = 0) => Math.round(bars * bar + sec * SAMPLE_RATE);
-    const frames = Math.ceil(f(8) / BLOCK) * BLOCK;
+    const frames = Math.ceil(f(10) / BLOCK) * BLOCK;
     const input = loopInput(frames);
     const span = (pairs) => Float32Array.from({ length: frames }, (_, i) => (pairs.some(([a, b]) => i >= a && i < b) ? 1 : 0));
     const moving = {
-      // A take on 4 ms late, off 10 ms late (cut back to the line); an overdub on 50 ms late (to
-      // the next line) and off between lines; after the clear, a take from mid-bar to just past
-      // a line.
-      record: span([[f(0, 0.004), f(1, 0.01)], [f(2, 0.05), f(3.5)], [f(5.5), f(7, 0.002)]]),
-      reverse: span([[f(4.3), f(4.6)]]),
-      clear: span([[f(5.2), f(5.2) + 100]]),
+      // A short press mid-bar (the take); one 4 ms after a line (an overdub on that line) held
+      // through the next and let go between lines; one 50 ms after a line (waits a line); after
+      // the clear, a short press for a new take.
+      record: span([[f(0.4), f(0.4, 0.03)], [f(2, 0.004), f(3.3)], [f(4, 0.05), f(4, 0.08)], [f(6.6), f(6.6, 0.02)]]),
+      reverse: span([[f(5.3), f(5.6)]]),
+      clear: span([[f(5.8), f(5.8) + 100]]),
     };
     const files = Object.fromEntries(Object.entries(moving).map(([id, data]) => [id, writeFile(path.join(WORK, `Looper-${id}-${bpm}.f32`), data)]));
+    const at = (n) => Math.round(f(n) / BLOCK) * BLOCK;
     const settings = [
       ['at the defaults', {}],
-      ['faster, keeping less', { speed: 1.5, feedback: 0.6 }],
-      ['slower, the loop alone', { speed: 0.7, dry: 0, wet: 0.8 }],
+      ['faster, mostly input', { speed: 1.5, mix: 0.2 }],
+      ['slower, mostly loop', { speed: 0.7, mix: 0.8 }],
+      ['two-bar passes', { mix: 0.3, length: 1 }],
+      // Stopped mid-pass after the overdubs, so the pass plays out, and started again a bar on.
+      ['stopped and started', {}, [[at(4.7), false], [at(5.9), true]]],
     ];
-    for (const quantize of ['1 bar', 'free']) {
-      for (const [what, pin] of settings) {
-        const values = device.params.map((p) => (p.id === 'quantize' ? SYNC_OPTIONS.indexOf(quantize) : (p.id in pin ? pin[p.id] : p.default)));
-        const native = runNative(binary, {
-          id: 'Looper', values, input, frames, bpm,
-          moving: Object.keys(moving).map((id) => ({ param: index(id), file: files[id] })),
-        });
-        const browser = runBrowserMoving(device, { values, input, frames, bpm, moving });
-        compare('Looper', `at ${bpm} bpm, quantize ${quantize}, ${what}`, native, browser);
-        if (pin.dry === 0) {
-          // And the loop played: the bar after the first take is not silence.
-          let energy = 0;
-          for (let i = f(1, 0.05) * 2; i < f(2) * 2; i++) energy += browser[i] * browser[i];
-          assert.ok(Math.sqrt(energy / (f(2) - f(1, 0.05)) / 2) > 0.05, `Looper at ${bpm} bpm, quantize ${quantize}: the loop was silent`);
-        }
+    for (const [what, pin, runs = []] of settings) {
+      const values = device.params.map((p) => (p.id in pin ? pin[p.id] : p.default));
+      const native = runNative(binary, {
+        id: 'Looper', values, input, frames, bpm,
+        moving: Object.keys(moving).map((id) => ({ param: index(id), file: files[id] })),
+        extra: runs.flatMap(([frame, on]) => ['-r', `${frame}:${on ? 1 : 0}`]),
+      });
+      const browser = runBrowserMoving(device, { values, input, frames, bpm, moving, runs });
+      compare('Looper', `at ${bpm} bpm, ${what}`, native, browser);
+      if (pin.mix === 0.8) {
+        // And the loop played: the bar after the take is not silence.
+        let energy = 0;
+        for (let i = f(2, 0.05) * 2; i < f(2.9) * 2; i++) energy += browser[i] * browser[i];
+        assert.ok(Math.sqrt(energy / (f(2.9) - f(2, 0.05)) / 2) > 0.02, `Looper at ${bpm} bpm: the loop was silent`);
       }
     }
   }

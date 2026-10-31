@@ -30,6 +30,7 @@ import { SHAPER_MODES, autoGainFor, harmonicsOf, shape } from './dsp/shapers.mjs
 import { dbToGain } from './dsp/control.mjs';
 import { SYNC_OPTIONS, isFree, syncedHz, syncedSeconds } from './dsp/sync.mjs';
 import { lfoValue } from './dsp/moddelay.mjs';
+import { lengthBeats } from './devices/looper.mjs';
 
 /** Points across one cycle of a drawn waveform. Half a frame is past what a panel can show. */
 const WAVE_POINTS = 256;
@@ -179,6 +180,7 @@ function figureData(descriptor, figure, values, opts) {
     case 'sweep': return { ...common, ...sweepFigure(figure, read, descriptor, bpm, report) };
     case 'duck': return { ...common, ...duckFigure(read, bpm, report) };
     case 'bands': return { ...common, ...bandsFigure(read, report) };
+    case 'loop': return { ...common, ...loopFigure(read, report) };
     default: return common;
   }
 }
@@ -1195,4 +1197,25 @@ function bandsFigure(read, report) {
   const level = Math.min(1, Math.max(0, read('shape') ?? 1));
   const bars = Array.from({ length: n }, (_, k) => ({ hz: lo * Math.pow(hi / lo, (k + 0.5) / n), level }));
   return { bars, lowHz, highHz, live: false };
+}
+
+// --- the looper ------------------------------------------------------------------------------
+
+/**
+ * A looper's loop, from what it reports: whether there is one and what it is doing, its length
+ * in beats and seconds, where the playhead is, and how far a first take has got - laid out on
+ * Length, the pass a take runs.
+ */
+function loopFigure(read, report) {
+  const r = report?.loop ?? null;
+  const num = (v, d = 0) => (Number.isFinite(v) ? v : d);
+  return {
+    status: r?.status ?? 'empty',
+    beats: r && Number.isFinite(r.beats) ? r.beats : null,
+    seconds: num(r?.seconds),
+    position: num(r?.position),
+    takenSec: num(r?.takenSec),
+    takenBeats: num(r?.takenBeats),
+    fixedBeats: lengthBeats(read('length') ?? 0),
+  };
 }

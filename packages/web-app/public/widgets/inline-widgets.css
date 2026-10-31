@@ -42,6 +42,12 @@
   cursor: ns-resize;
 }
 
+/* A control drawn where its take is playing (see pattern-core's motion.mjs): the accent on its rim
+   says the take is moving it, and it still takes the hand - a grab records the next take. */
+.CodeMirror-widget .iw-played {
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
 /* A device window's switch, in the code. */
 .CodeMirror-widget .iw-switch {
   font-size: 10px;

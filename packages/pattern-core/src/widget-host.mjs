@@ -16,6 +16,7 @@
 // view-taps.mjs).
 
 import { displayWindow, displayNow, setWidgetValue } from './widgets.mjs';
+import { motionPlaying } from './motion.mjs';
 
 /** Cycles of display data shipped with an evaluation and with each top-up. */
 export const WIDGET_WINDOW = 16;
@@ -62,6 +63,7 @@ export function createWidgetHost({ engine, engineId = (_deck, key) => key, cycle
       inputs: taken.inputs.map(({ input: _i, ...w }) => w),
       // The `.record(` calls that record a control's movement (see motion.mjs).
       records: taken.records ?? [],
+      recording: taken.recording ?? [], // the controls with a take on them, drawn where it plays
       views: d.views.map((v) => reportOf(v, from, count)),
     };
   }
@@ -194,7 +196,8 @@ export function createWidgetHost({ engine, engineId = (_deck, key) => key, cycle
         ...(need.spec && f.spec ? { spec: f.spec } : {}),
       };
     }
-    const live = {};
+    // ...and what each control with a take on it is playing, so the editor draws it there.
+    const live = { ...motionPlaying(which) };
     const pos = cycleNow(which);
     for (const v of d.views) {
       if (v.kind !== 'plot' || !v.sig || !v.sig.widgetLive) continue;

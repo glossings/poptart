@@ -43,7 +43,7 @@ let serial = 0;
  * nor registered). Returns `{ body, id }`: `body` is what to hand to eval.
  */
 export function blockSource(code, locBase, { miniOff = [], label = null, deck = 'a', doc = null } = {}) {
-  const located = typeof locBase === 'number' ? injectLocationsMapped(code, locBase, { miniOff }) : { code, edits: [] };
+  const located = typeof locBase === 'number' ? injectLocationsMapped(code, locBase, { miniOff, doc }) : { code, edits: [] };
   const vars = varRewrite(located.code);
   if (typeof locBase !== 'number') return { body: vars.code, id: null };
   const id = ++serial;
@@ -331,7 +331,7 @@ function editDistance(a, b) {
 }
 
 // Internal spellings the location transpile writes, and what the player wrote instead.
-const INTERNAL_CALLS = { _record: 'record', _input: null, _display: null };
+const INTERNAL_CALLS = { _record: 'record', _input: null, _display: null, _at: null };
 
 /**
  * An error message with the evaluator's own machinery taken out: wrapped strings read as the
@@ -342,6 +342,7 @@ export function plainText(message) {
     .replace(/mini\(("(?:[^"\\\n]|\\.)*"|`[^`]*`|'(?:[^'\\\n]|\\.)*'), \d+(?:, 'speech')?\)/g, '$1')
     .replace(/mini\(\.\.\.\)/g, '"…"')
     .replace(/\b_record\b/g, 'record')
+    .replace(/\b_at\(\d+, /g, '')
     .replace(/__blockCode|__value|__defs/g, 'code');
 }
 

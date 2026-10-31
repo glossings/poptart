@@ -1372,6 +1372,22 @@ class OscEngine {
   }
 
   /** Something other than a `.param()` value is moving this control - or has stopped. */
+  /**
+   * One of poptart's own devices' controls, under its one name: the id. A control answers to its
+   * id and its display name in any case (`.param("Record")`, the panel's `record`), and everything
+   * downstream - the polled control's ramp, its modulators, what a release puts back - is keyed
+   * by the name it is given. Two spellings of one control were two ramps, each mapping its own bus
+   * onto the same control, and only the last one mapped was heard: a looper's Record touched in
+   * its window stopped answering `.param("Record", ...)` for good. Any other name - a plugin's, an
+   * expression's input, a name the device does not have - is left as it is.
+   */
+  _controlName(trackId, slotIndex, paramName) {
+    if (EXPR_LEAF.test(String(paramName))) return paramName;
+    const device = this._slotDevices.get(`${trackId}:${slotIndex}`);
+    if (!device) return paramName;
+    return deviceParam(device, paramName)?.id ?? paramName;
+  }
+
   _noteDriver(trackId, slotIndex, paramName, by) {
     const key = `${trackId}:${slotIndex}`;
     const device = this._slotDevices.get(key);
@@ -2276,6 +2292,7 @@ class OscEngine {
   }
 
   setParam(trackId, slotIndex, paramName, value, targetTime) {
+    paramName = this._controlName(trackId, slotIndex, paramName);
     // An expression's input ("~i~name") takes a plain number: it is a term in the expression, not
     // a position on one of the device's controls.
     if (EXPR_LEAF.test(String(paramName))) {
@@ -2651,10 +2668,12 @@ class OscEngine {
   // Without this, picking a curve on the Distort locked the picker on the very name it had just
   // written (hit live, 2026-10-28).
   holdParam(trackId, slotIndex, paramName, { steady = false } = {}) {
+    paramName = this._controlName(trackId, slotIndex, paramName);
     this._noteDriver(trackId, slotIndex, paramName, steady ? null : 'pattern');
     this._send('/poptart/holdParam', [trackId, slotIndex, paramName]);
   }
   releaseParam(trackId, slotIndex, paramName, targetTime) {
+    paramName = this._controlName(trackId, slotIndex, paramName);
     this._noteDriver(trackId, slotIndex, paramName, null);
     this._direct.rampReleased(trackId, slotIndex, String(paramName));
     this._send('/poptart/releaseParam', [trackId, slotIndex, paramName, this._latency(targetTime)]);
@@ -2668,6 +2687,7 @@ class OscEngine {
   // shape is sampled into a table, written to a file and read into a Buffer that one generic
   // modulator synth plays (see _shapeTables), so no SynthDef is built for one.
   setParamLFO(trackId, slotIndex, paramName, ir) {
+    paramName = this._controlName(trackId, slotIndex, paramName);
     this._noteDriver(trackId, slotIndex, paramName, 'lfo');
     if (ir.shape === 'custom') {
       // Every shape the pattern can reach, read up front: a swap has to be a timestamped switch
@@ -2708,6 +2728,7 @@ class OscEngine {
   // note-gated modes it holds the change until the next note rather than cutting a shape short.
   // A patterned rate passes `rateHz`, the rate the new shape starts at (see anchorParamLFO).
   setParamShape(trackId, slotIndex, paramName, index, targetTime, rateHz = null) {
+    paramName = this._controlName(trackId, slotIndex, paramName);
     const args = [trackId, slotIndex, paramName, index, this._latency(targetTime)];
     this._direct.shapeSent(trackId); // note-ons wait for sclang until it has seen this (a swap may be pending)
     this._send('/poptart/setParamShape', rateHz == null ? args : [...args, rateHz]);
@@ -2740,6 +2761,7 @@ class OscEngine {
     return [key, JSON.stringify(paths)];
   }
   clearParamLFO(trackId, slotIndex, paramName) {
+    paramName = this._controlName(trackId, slotIndex, paramName);
     this._noteDriver(trackId, slotIndex, paramName, null);
     this._shapeKeys.delete(`${trackId}:${slotIndex}:${paramName}`);
     this._send('/poptart/clearParamLFO', [trackId, slotIndex, paramName]);
@@ -2750,6 +2772,7 @@ class OscEngine {
   // rate also passes `rateHz`, the rate it runs at from that moment: its changes travel this way,
   // on the step they belong to, rather than as an immediate setParamLFO re-send.
   anchorParamLFO(trackId, slotIndex, paramName, phase01, targetTime, rateHz = null) {
+    paramName = this._controlName(trackId, slotIndex, paramName);
     if (this._directOn && this._direct.anchorLfo(trackId, slotIndex, String(paramName), phase01, targetTime, rateHz)) return;
     const args = [trackId, slotIndex, paramName, phase01, this._latency(targetTime)];
     this._send('/poptart/anchorParamLFO', rateHz == null ? args : [...args, rateHz]);
@@ -2757,6 +2780,7 @@ class OscEngine {
   // ADSR envelope retriggered by the track's note on/offs - same set-once Tier-2 contract as
   // setParamLFO (see the poptart_env SynthDef + gate wiring in sc/poptart.scd).
   setParamEnv(trackId, slotIndex, paramName, ir) {
+    paramName = this._controlName(trackId, slotIndex, paramName);
     this._noteDriver(trackId, slotIndex, paramName, 'env');
     this._send('/poptart/setParamEnv', [
       trackId,
@@ -2774,6 +2798,7 @@ class OscEngine {
     ]);
   }
   clearParamEnv(trackId, slotIndex, paramName) {
+    paramName = this._controlName(trackId, slotIndex, paramName);
     this._noteDriver(trackId, slotIndex, paramName, null);
     this._send('/poptart/clearParamEnv', [trackId, slotIndex, paramName]);
   }
@@ -2865,6 +2890,15 @@ class OscEngine {
     this._direct.heldReset(trackId);
     this._send('/poptart/hush', [trackId, againSec]);
   }
+  /**
+   * Whether a track's pattern is playing, from `atTime` (null for now): what a looper follows,
+   * playing out its pass on a stop. Told to the devices on the track as they are now and as they
+   * open later; a plugin is not told (it has a transport of its own).
+   */
+  setTrackRunning(trackId, running, atTime = null) {
+    const latency = Number.isFinite(atTime) ? this._latency(atTime) : 0;
+    this._send('/poptart/trackRunning', [trackId, running ? 1 : 0, latency]);
+  }
   clearMidiNotes(trackId) {
     this._dropDeferRoute(trackId);
     this._direct.heldReset(trackId); // clearMidiRoute zeroes the held count sclang-side too
@@ -2883,10 +2917,12 @@ class OscEngine {
   // the scaled value to a control bus mapped onto the parameter - the CC sibling of
   // setParamLFO's mechanism, zero per-event traffic from Node and no poll latency.
   setParamCC(trackId, slotIndex, paramName, ir) {
+    paramName = this._controlName(trackId, slotIndex, paramName);
     this._noteDriver(trackId, slotIndex, paramName, 'cc');
     this._send('/poptart/setParamCC', [trackId, slotIndex, paramName, ir.device, ir.cc, ir.channel ?? 0, ir.min, ir.max]);
   }
   clearParamCC(trackId, slotIndex, paramName) {
+    paramName = this._controlName(trackId, slotIndex, paramName);
     this._noteDriver(trackId, slotIndex, paramName, null);
     this._send('/poptart/clearParamCC', [trackId, slotIndex, paramName]);
   }
@@ -2905,10 +2941,12 @@ class OscEngine {
   // writes the scaled argument to a control bus mapped onto the parameter - setParamCC's
   // mechanism with an OSC address in place of a device/cc/channel binding.
   setParamOSC(trackId, slotIndex, paramName, ir) {
+    paramName = this._controlName(trackId, slotIndex, paramName);
     this._noteDriver(trackId, slotIndex, paramName, 'osc');
     this._send('/poptart/setParamOSC', [trackId, slotIndex, paramName, ir.osc, ir.index ?? 0, ir.min, ir.max]);
   }
   clearParamOSC(trackId, slotIndex, paramName) {
+    paramName = this._controlName(trackId, slotIndex, paramName);
     this._noteDriver(trackId, slotIndex, paramName, null);
     this._send('/poptart/clearParamOSC', [trackId, slotIndex, paramName]);
   }

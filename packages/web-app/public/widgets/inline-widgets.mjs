@@ -560,8 +560,15 @@ export function createInlineWidgets({
     const max = numArg(at, 2, e.max ?? 1);
     const step = at?.pos[3] ? M.literalNumber(at.pos[3].text) : e.step ?? null;
     const value = numArg(at, 0, w.value ?? e.value ?? min);
-    return { min, max, step, value };
+    // The curve the control turns on, from its options (see pattern-core's widgets.mjs).
+    const c = e.opts?.curve;
+    const curve = c && c !== 'lin' ? { curve: c, curveExp: e.opts.curveExp ?? 2 } : null;
+    return { min, max, step, value, curve };
   }
+
+  // A ranged control's value as its 0..1 position, and back, along its curve when it has one.
+  const posOf = (s) => (s.curve && calls.positionOnCurve ? calls.positionOnCurve({ min: s.min, max: s.max, ...s.curve }, s.value) : M.positionOf(s.value, s.min, s.max));
+  const valAt = (s, t) => (s.curve && calls.valueOnCurve ? calls.valueOnCurve({ min: s.min, max: s.max, ...s.curve }, Math.min(1, Math.max(0, t))) : M.valueAt(t, s.min, s.max));
 
   function numArg(at, i, fallback) {
     const a = at?.pos[i];
@@ -591,8 +598,8 @@ export function createInlineWidgets({
       e.preventDefault();
       e.stopPropagation();
       const s = rangedState(w);
-      const t = M.positionOf(s.value, s.min, s.max) + (e.deltaY < 0 ? 1 : -1) * WHEEL_STEP * (e.shiftKey ? 0.1 : 1);
-      setRanged(w, M.valueAt(t, s.min, s.max));
+      const t = posOf(s) + (e.deltaY < 0 ? 1 : -1) * WHEEL_STEP * (e.shiftKey ? 0.1 : 1);
+      setRanged(w, valAt(s, t));
     }, { passive: false });
   }
 
@@ -607,18 +614,20 @@ export function createInlineWidgets({
       onDrag(root, {
         down: (e) => {
           const s = rangedState(w);
-          start = { x: e.clientX, t: M.positionOf(s.value, s.min, s.max) };
+          start = { x: e.clientX, t: posOf(s) };
+          w.dragging = true;
           root.classList.add('dragging');
         },
         move: (e) => {
           if (!start) return;
           const s = rangedState(w);
           const t = start.t + ((e.clientX - start.x) / BOX_SWEEP_PX) * (e.shiftKey ? 0.1 : 1);
-          setRanged(w, M.valueAt(t, s.min, s.max));
+          setRanged(w, valAt(s, t));
           if (t < 0 || t > 1) start = { x: e.clientX, t: Math.min(1, Math.max(0, t)) };
         },
         up: () => {
           start = null;
+          w.dragging = false;
           root.classList.remove('dragging');
           release(w);
         },
@@ -627,12 +636,15 @@ export function createInlineWidgets({
       addGrip(w, root, { box: true, current: () => boxOf(w), preview: (b) => sizeBox(root, b) });
       w.render = () => {
         const s = rangedState(w);
-        const t = M.positionOf(s.value, s.min, s.max);
+        const played = playedOf(w);
+        const shown = played ? { ...s, value: played[0] } : s;
+        const t = posOf(shown);
         const decimals = M.decimalsFor(s.min, s.max, s.step);
         sizeBox(root, boxOf(w));
+        root.classList.toggle('iw-played', !!played);
         fill.style.left = '0';
         fill.style.width = `${t * 100}%`;
-        val.textContent = calls.formatNumber(s.value, decimals);
+        val.textContent = calls.formatNumber(shown.value, decimals);
         root.title = `${s.min} - ${s.max}`;
       };
       return root;
@@ -645,18 +657,20 @@ export function createInlineWidgets({
       onDrag(root, {
         down: (e) => {
           const s = rangedState(w);
-          start = { y: e.clientY, t: M.positionOf(s.value, s.min, s.max) };
+          start = { y: e.clientY, t: posOf(s) };
+          w.dragging = true;
           root.classList.add('dragging');
         },
         move: (e) => {
           if (!start) return;
           const s = rangedState(w);
           const t = start.t + (start.y - e.clientY) / (e.shiftKey ? KNOB_FINE_PX : KNOB_SWEEP_PX);
-          setRanged(w, M.valueAt(t, s.min, s.max));
+          setRanged(w, valAt(s, t));
           if (t < 0 || t > 1) start = { y: e.clientY, t: Math.min(1, Math.max(0, t)) };
         },
         up: () => {
           start = null;
+          w.dragging = false;
           root.classList.remove('dragging');
           release(w);
         },
@@ -670,11 +684,14 @@ export function createInlineWidgets({
       });
       w.render = () => {
         const s = rangedState(w);
-        const t = M.positionOf(s.value, s.min, s.max);
+        const played = playedOf(w);
+        const shown = played ? { ...s, value: played[0] } : s;
+        const t = posOf(shown);
         const n = inputSize(w);
         root.style.width = root.style.height = `${n}px`;
+        root.classList.toggle('iw-played', !!played);
         root.style.setProperty('--ang', `${-135 + t * 270}deg`);
-        root.title = `${calls.formatNumber(s.value, M.decimalsFor(s.min, s.max, s.step))}  (${s.min} - ${s.max})`;
+        root.title = `${calls.formatNumber(shown.value, M.decimalsFor(s.min, s.max, s.step))}  (${s.min} - ${s.max})`;
       };
       return root;
     },
@@ -693,7 +710,9 @@ export function createInlineWidgets({
       });
       addGrip(w, root, { box: true, current: () => boxOf(w), preview: (b) => sizeBox(root, b) });
       w.render = () => {
-        const on = !!numArg(locate(w), 0, w.entry.value ?? 0);
+        const played = playedOf(w);
+        const on = played ? played[0] >= 0.5 : !!numArg(locate(w), 0, w.entry.value ?? 0);
+        root.classList.toggle('iw-played', !!played);
         sizeBox(root, boxOf(w));
         root.classList.toggle('on', on);
         root.firstChild.nodeValue = on ? 'on' : 'off';
@@ -738,14 +757,16 @@ export function createInlineWidgets({
         push(w, [Number(tx), Number(ty)]);
         w.dirty = true;
       };
-      onDrag(pad, { down: place, move: place, up: () => release(w) });
+      onDrag(pad, { down: (e) => { w.dragging = true; place(e); }, move: place, up: () => { w.dragging = false; release(w); } });
       const sizeTo = (n) => { pad.style.width = pad.style.height = `${n}px`; };
       addGrip(w, root, { axis: 'xy', range: calls.INPUT_SIZES.xy, current: () => inputSize(w), preview: sizeTo });
       w.render = () => {
         const at = locate(w);
         const [x0, y0] = Array.isArray(w.entry.value) ? w.entry.value : [0.5, 0.5];
-        const x = numArg(at, 0, x0);
-        const y = numArg(at, 1, y0);
+        const played = playedOf(w);
+        const x = played ? played[0] : numArg(at, 0, x0);
+        const y = played ? played[1] ?? played[0] : numArg(at, 1, y0);
+        pad.classList.toggle('iw-played', !!played);
         sizeTo(inputSize(w));
         dot.style.left = `${x * 100}%`;
         dot.style.top = `${(1 - y) * 100}%`;
@@ -846,7 +867,7 @@ export function createInlineWidgets({
         let i = cellIndex(doc.elementFromPoint?.(e.clientX, r.top + r.height / 2), box);
         if (i < 0) i = e.clientX < r.left ? 0 : cells.length - 1;
         const t = 1 - (e.clientY - r.top) / Math.max(1, r.height);
-        const v = M.valueAt(t, s.min, s.max);
+        const v = valAt(s, t);
         const next = calls.setCellValue(s.text, i, v, M.decimalsFor(s.min, s.max));
         if (next === s.text) return;
         s.write(next);
@@ -1663,13 +1684,28 @@ export function createInlineWidgets({
       .finally(() => { dataWin.fetching = false; });
   }
 
+  let recordingAts = new Set(); // the controls with a `.record()` on them, by key (see afterEval)
+
   function wantsFrames() {
-    return allViews().some((w) => AUDIO_KINDS.has(w.kind) && w.entry.target) || widgets.some((w) => w.kind === 'plot' && w.data?.live);
+    return allViews().some((w) => AUDIO_KINDS.has(w.kind) && w.entry.target)
+      || widgets.some((w) => (w.kind === 'plot' && w.data?.live) || recordingAts.has(w.at));
+  }
+
+  // A control with a take on it is drawn where the take is - `w.played`, one value per axis -
+  // unless the hand is on it, and where the code says once the take stops being reported.
+  function playedOf(w) {
+    return w.dragging ? null : w.played ?? null;
+  }
+  function clearPlayed() {
+    for (const w of widgets) if (w.played !== undefined) { w.played = undefined; w.dirty = true; }
   }
 
   function pollFrames() {
     if (polling) return;
-    if (!wantsFrames() || !isPlaying() || doc?.hidden) return;
+    if (!wantsFrames() || !isPlaying() || doc?.hidden) {
+      clearPlayed();
+      return;
+    }
     polling = true;
     Promise.resolve(api('GET', `/api/widgets/frames?deck=${deck}`))
       .then((res) => {
@@ -1687,6 +1723,14 @@ export function createInlineWidgets({
           }
         }
         const pos = cyclePos();
+        for (const w of widgets) {
+          if (!recordingAts.has(w.at)) continue;
+          const v = liveNow[w.at];
+          const next = Array.isArray(v) && v.every((x) => Number.isFinite(x)) ? v : undefined;
+          if (next === undefined && w.played === undefined) continue;
+          w.played = next;
+          w.dirty = true;
+        }
         for (const w of widgets) {
           if (w.kind !== 'plot' || !w.data?.live || !(w.at in liveNow)) continue;
           const v = liveNow[w.at];
@@ -1995,8 +2039,29 @@ export function createInlineWidgets({
       // Every `.record(` too, so a take a control records can be written into its call however
       // the code has moved since (see recordCallAt).
       records: (calls.findRecordCalls?.(code) ?? []).map((c) => ({ at: c.at, mark: mark(c.at) })),
+      // ...and every live source - `cc(12)`, `osc("/x")`, `macro1` - so the header's capture can
+      // put a `.record()` on one that moved (see sourceCallAt).
+      sources: (calls.findSourceCalls?.(code) ?? []).map((c) => ({ at: c.at, mark: mark(c.at) })),
     };
   }
+
+  let sourceMarks = []; // { at, mark } - each live source of the last evaluation, by its key
+
+  /**
+   * The live source that was at `at` when its buffer was evaluated: `{ index, end, recording }` -
+   * where it is now, just past it, and whether a `.record(` follows. Null once it is gone.
+   */
+  function sourceCallAt(at) {
+    const pos = sourceMarks.find((x) => x.at === at)?.mark.find();
+    if (!pos) return null;
+    const index = cm.indexFromPos(pos);
+    const code = cm.getValue();
+    const c = (calls.findSourceCalls?.(code) ?? []).find((x) => x.at === index);
+    if (!c) return null;
+    return { index, end: c.end, recording: recordFollows(code, c.end) };
+  }
+
+  const recordFollows = (code, end) => /^\s*\.\s*record\s*\(/.test(code.slice(end, end + 200));
 
   let recordMarks = []; // { at, mark } - each `.record(` call of the last evaluation, by its key
 
@@ -2038,6 +2103,31 @@ export function createInlineWidgets({
   }
 
   /**
+   * Where the drawn control whose key is `at` is now: `{ index, end }`, its name and just past its
+   * `)`, with `recording` true when a `.record(` follows it. Null once it is gone.
+   */
+  function controlCallAt(at, source = false) {
+    if (source) return sourceCallAt(at);
+    const w = widgets.find((x) => x.at === at);
+    const loc = w ? locate(w) : null;
+    if (!loc || loc.close < 0) return null;
+    const end = loc.base + loc.close + 1;
+    return { index: loc.base, end, recording: recordFollows(cm.getValue(), end) };
+  }
+
+  /**
+   * Puts `.record({ cycles, take })` right after the drawn control whose key is `at` - or, with
+   * `source`, the live source's - the header's capture, for one that moved. False when it is gone
+   * or already records.
+   */
+  function addRecord(at, cycles, name, source = false) {
+    const call = controlCallAt(at, source);
+    if (!call || call.recording) return false;
+    replaceIdx(call.end, call.end, `.record({ cycles: ${cycles}, take: ${JSON.stringify(name)} })`);
+    return true;
+  }
+
+  /**
    * The evaluation answered. `report` is its `widgets` (null when it failed - then every widget
    * stays as it was). Widgets still at the same call are kept, with their new key; the rest are
    * built or taken down. A folded call keeps only its key: its control is the fold's.
@@ -2047,13 +2137,17 @@ export function createInlineWidgets({
     if (!report) {
       for (const { mark } of snap.marks) mark.clear();
       for (const { mark } of snap.records ?? []) mark.clear();
+      for (const { mark } of snap.sources ?? []) mark.clear();
       return;
     }
     for (const r of recordMarks) r.mark.clear();
+    for (const s of sourceMarks) s.mark.clear();
+    sourceMarks = snap.sources ?? [];
     // Which of them record a control's movement rather than a track's sound: only the evaluation
     // can tell, from what each was called on.
     const motion = new Set(report.records ?? []);
     recordMarks = (snap.records ?? []).map((r) => ({ ...r, motion: motion.has(r.at) }));
+    recordingAts = new Set(report.recording ?? []);
     const entries = [...(report.inputs ?? []), ...(report.views ?? [])];
     const byAt = new Map(entries.map((e) => [e.at, e]));
     const next = [];
@@ -2115,6 +2209,8 @@ export function createInlineWidgets({
     keys = [];
     for (const r of recordMarks) r.mark.clear();
     recordMarks = [];
+    for (const s of sourceMarks) s.mark.clear();
+    sourceMarks = [];
     for (const row of rows.values()) row.lw?.clear();
     rows.clear();
     frames.clear();
@@ -2129,6 +2225,8 @@ export function createInlineWidgets({
     recordCallAt,
     motionRecordAt,
     writeTake,
+    controlCallAt,
+    addRecord,
     get widgets() { return widgets; },
     get folds() { return folds; },
     /** A track's color changed: the displays drawn once while stopped are drawn again in it. */

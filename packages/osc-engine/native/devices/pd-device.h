@@ -158,6 +158,11 @@ struct PdAny {
   virtual void keyPatched(bool on) { (void)on; }
   virtual void noteRoute(bool on) { (void)on; }
   /**
+   * Whether the track's pattern is playing. A looper follows it: stopped, it plays out its pass
+   * and goes quiet. Said every block, true until the engine says otherwise.
+   */
+  virtual void running(bool on) { (void)on; }
+  /**
    * How late a chain in the device's feedback loop comes back to its key input, in seconds, or
    * below zero for no chain. Only the Delay asks: its repeats go out on its second output pair and
    * come back on the key, and it reads that much early so they stay on the grid. The UGen says it
@@ -306,6 +311,13 @@ template <class Device>
 struct PdTakesNoteRoute<Device, decltype(std::declval<Device&>().pd_note_route(false))>
     : std::true_type {};
 
+/** Whether a device asks to be told that its track is playing. */
+template <class Device, class = void>
+struct PdTakesRunning : std::false_type {};
+template <class Device>
+struct PdTakesRunning<Device, decltype(std::declval<Device&>().pd_running(false))>
+    : std::true_type {};
+
 /** Whether a device plays files it is handed. */
 template <class Device, class = void>
 struct PdTakesSample : std::false_type {};
@@ -413,6 +425,10 @@ struct PdAdapter : PdAny {
   }
   void noteRoute(bool on) override {
     if constexpr (PdTakesNoteRoute<Device>::value) d.pd_note_route(on);
+    else { (void)on; }
+  }
+  void running(bool on) override {
+    if constexpr (PdTakesRunning<Device>::value) d.pd_running(on);
     else { (void)on; }
   }
   void loop(double seconds) override {
