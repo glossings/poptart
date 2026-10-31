@@ -146,6 +146,10 @@ PoptartDeviceController {
     var <synth, <id, <synthIndex, <info, <midi;
     var <>parameterAutomated;
     var positions;      // the last position written to each control, by index
+    // The control bus mapped onto each control, by index - kept so a program loaded over the
+    // controls (readProgram) can put them back on what drives them: the UGen takes a control off
+    // its bus on an outright set (PoptartDevice.cpp's setParam), and nothing else would re-map it.
+    var buses;
     var <>deviceName;
     // The tempo and the beat the transport was last at, and when it was there, so either can be
     // sent on its own - a tempo sent alone carries the position run forward to now, not the one
@@ -171,6 +175,7 @@ PoptartDeviceController {
         synthIndex = index;
         // One entry per control of the device opened (see open): none until one is.
         positions = [];
+        buses = IdentityDictionary.new;
         midi = PoptartDeviceMIDIProxy(this);
     }
 
@@ -192,6 +197,7 @@ PoptartDeviceController {
         // `get` - what .hold()/.release() put back - has to say so. Position 0 is the bottom of
         // a control's range, not its rest.
         positions = (params ? []).collect { |p| p[\default] ? 0 };
+        buses = IdentityDictionary.new; // a device opens with nothing mapped
         resp = OSCFunc({ |msg|
             if (answered.not) {
                 answered = true;
@@ -216,6 +222,7 @@ PoptartDeviceController {
     close {
         info = nil;
         deviceName = nil;
+        buses = IdentityDictionary.new;
         this.sendMsg('/close');
     }
 
@@ -225,6 +232,7 @@ PoptartDeviceController {
             (index.isNumber and: { index >= 0 } and: { index < positions.size }).if {
                 positions[index] = value;
             };
+            index.isNumber.if { buses.removeAt(index.asInteger) }; // the UGen drops the mapping too
         };
         // The index as an integer and the value as a float: the UGen reads them as what they
         // are, and a message that says what it means is one less thing to work out from a trace.
@@ -245,7 +253,9 @@ PoptartDeviceController {
 
     /** A control bus onto a control: how every modulator in poptart reaches a parameter. */
     map { |index, bus|
-        this.sendMsg('/map', index.asInteger, bus.asBus.index.asInteger);
+        var at = bus.asBus.index.asInteger;
+        buses[index.asInteger] = at;
+        this.sendMsg('/map', index.asInteger, at);
     }
 
     /**
@@ -268,6 +278,7 @@ PoptartDeviceController {
     }
 
     unmap { |... indices|
+        indices.isEmpty.if { buses = IdentityDictionary.new } { indices.do { |i| buses.removeAt(i.asInteger) } };
         indices.isEmpty.if {
             this.sendMsg('/unmap', *(0..(info !? { |i| i.numParameters - 1 } ? 0)));
         } {
@@ -306,9 +317,16 @@ PoptartDeviceController {
         var doc = text !? { try { text.parseJSON } };
         var values = doc !? { doc["params"] };
         (values.isKindOf(Dictionary) and: { info.notNil }).if {
+            // What was driven stays driven: a preset loaded under a modulator or a knob moves the
+            // controls nothing drives, as a plugin's program does, and the rest go back on their buses.
+            var driven = buses.copy;
             values.keysValuesDo { |key, value|
                 var index = info.findParamIndex(key);
                 index !? { this.set(index, value.asFloat) };
+            };
+            driven.keysValuesDo { |index, at|
+                buses[index] = at;
+                this.sendMsg('/map', index, at);
             };
             ok = true;
         };

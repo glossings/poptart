@@ -72,6 +72,10 @@ class DeviceController {
     this.parameterAutomated = null;
     this.deviceName = null;
     this._positions = [];
+    // The control bus mapped onto each control, by index - kept so a program loaded over the
+    // controls (readProgram) can put them back on what drives them: the UGen takes a control off
+    // its bus on an outright set (PoptartDevice.cpp's setParam), and nothing else would re-map it.
+    this._buses = new Map();
     this._tempo = 120;
     this._beatPos = 0;
     this._reportId = 0;
@@ -110,6 +114,7 @@ class DeviceController {
     this.info = new DeviceDesc(name, params ?? []);
     // The UGen opens every control at its default, so the record starts there.
     this._positions = (params ?? []).map((p) => p.default ?? 0);
+    this._buses.clear(); // a device opens with nothing mapped
     const off = this._reply('/poptart/deviceOpened', (msg) => {
       off();
       if (!answered) {
@@ -131,6 +136,7 @@ class DeviceController {
   close() {
     this.info = null;
     this.deviceName = null;
+    this._buses.clear();
     this.sendMsg('/close');
   }
 
@@ -139,6 +145,7 @@ class DeviceController {
     for (let i = 0; i + 1 < pairs.length; i += 2) {
       const index = pairs[i];
       if (typeof index === 'number' && index >= 0 && index < this._positions.length) this._positions[index] = pairs[i + 1];
+      this._buses.delete(Math.trunc(Number(index))); // the UGen drops the mapping too
     }
     this.sendMsg('/set', ...pairs.map((v, i) => (i % 2 === 0 ? i32(v) : f32(v))));
   }
@@ -153,7 +160,9 @@ class DeviceController {
   }
 
   map(index, bus) {
-    this.sendMsg('/map', i32(index), i32(busIndex(bus)));
+    const at = busIndex(bus);
+    this._buses.set(Math.trunc(Number(index)), at);
+    this.sendMsg('/map', i32(index), i32(at));
   }
 
   /** An audio bus onto a control, read every sample: gain * signal + offset, clamped to 0..1. */
@@ -166,6 +175,8 @@ class DeviceController {
   }
 
   unmap(...indices) {
+    if (indices.length === 0) this._buses.clear();
+    else for (const i of indices) this._buses.delete(Math.trunc(Number(i)));
     if (indices.length === 0) {
       // (0..n-1) - and, as the class's range does, [0] with no device and [0, -1] for one with none.
       const last = this.info ? this.info.numParameters - 1 : 0;
@@ -199,9 +210,16 @@ class DeviceController {
     try { doc = JSON.parse(fs.readFileSync(standardizePath(p), 'utf8')); } catch { doc = null; }
     const values = doc?.params;
     if (values && typeof values === 'object' && !Array.isArray(values) && this.info) {
+      // What was driven stays driven: a preset loaded under a modulator or a knob moves the
+      // controls nothing drives, as a plugin's program does, and the rest go back on their buses.
+      const driven = new Map(this._buses);
       for (const [key, value] of Object.entries(values)) {
         const index = this.info.findParamIndex(key);
         if (index != null) this.set(index, Number(value));
+      }
+      for (const [index, at] of driven) {
+        this._buses.set(index, at);
+        this.sendMsg('/map', i32(index), i32(at));
       }
       ok = true;
     }

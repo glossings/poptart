@@ -286,6 +286,18 @@ test('the host finds what each display shows: its track, the master, or nothing'
   assert.equal(eng.calls.length, 1);
 });
 
+test("a display on a group's member shows that member, not the group", () => {
+  // Two members, one line each; the group's block holds both, and comes first, as the evaluator
+  // lists a group before its members.
+  const code = 'one: s("bd").scope()\ntwo: s("sd").scope()';
+  const two = code.indexOf('two');
+  const blocks = [{ label: 'loopers', start: 0, end: code.length }, { label: 'one', start: 0, end: two }, { label: 'two', start: two, end: code.length }];
+  const { widgets } = evalLines(code);
+  const host = createWidgetHost({ engine: () => fakeEngine(), engineId: (_d, key) => `#${key}`, setTimer: () => 0, clearTimer: () => {} });
+  const report = host.afterEval('a', widgets, blocks);
+  assert.deepEqual(report.views.map((v) => v.target), ['one', 'two']);
+});
+
 test('past the engine\'s budget a display is reported as left out', () => {
   const code = 'a: s("bd").scope()\nb: s("sd").spectrum()';
   const blocks = [{ label: 'a', start: 0, end: 18 }, { label: 'b', start: 19, end: code.length }];

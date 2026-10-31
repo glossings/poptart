@@ -88,6 +88,10 @@ other = PoptartDeviceController(Synth.basicNew(\\pd_ctl, srv, 1001), \\nslot0, d
 other.open("Plaits", params, { |self, ok| ("OTHEROPENED<" ++ ok ++ ">").postln });
 other.readProgram(${JSON.stringify(program)}, { |self, ok| ("READ<" ++ ok ++ ">").postln });
 other.get(1, { |v| ("RESTORED<" ++ v ++ ">").postln });
+// A program loaded under a driven control leaves it on its bus: the load's set takes it off in the
+// UGen, so the controller maps it back.
+other.map(0, 77);
+other.readProgram(${JSON.stringify(program)}, { |self, ok| ("REREAD<" ++ ok ++ ">").postln });
 
 // The answer the server never sends: the open answers itself, once, and says no.
 SystemClock.sched(1.5, { "DONE".postln; 0.exit });
@@ -158,6 +162,10 @@ test('the device controller resolves controls, sends unit commands and round-tri
   assert.strictEqual(mark('WROTE'), 'true');
   assert.strictEqual(mark('READ'), 'true');
   assert.strictEqual(mark('RESTORED'), '0.75');
+  assert.strictEqual(mark('REREAD'), 'true');
+  const lastSet = sent.findLastIndex((m) => m.startsWith(`/u_cmd 1001 ${index} /set`));
+  const remap = sent.findLastIndex((m) => m === `/u_cmd 1001 ${index} /map 0 77`);
+  assert.ok(lastSet >= 0 && remap > lastSet, `the driven control was not mapped back after the load: ${JSON.stringify(sent.slice(-6))}`);
 
   // An open nothing ever answers answers itself, and says no.
   assert.strictEqual(mark('OPENED'), 'false');

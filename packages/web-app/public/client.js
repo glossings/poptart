@@ -7260,6 +7260,15 @@ let lfoClip = null; // { points, width } - a copied span, width in cycles for a 
 // A loop just cut with its seam faded: the drawing before the fade, shown faintly until the next edit.
 let lfoSeam = null; // { original, fade }
 let lfoMenuAlt = false; // alt held as the menu's entry was chosen
+let lfoSmoothSlider = null; // the panel's smooth amount - see initLfoCanvas
+// The breakpoints as the engine plays them: as the code spells them, rounded off by the shape's
+// `smooth` (`amount`, the one on screen unless asked about another) and by the calling lfo()'s own.
+function lfoPlayed(pts, amount = lfoState?.smooth ?? 0) {
+  let out = shapeMod.parseShapePoints(shapeMod.serializeShapePoints(pts));
+  if (amount > 0) out = shapeMod.smoothShape(out, amount);
+  if (lfoState?.idLiteral && lfoState.callSmooth > 0) out = shapeMod.smoothShape(out, lfoState.callSmooth);
+  return out;
+}
 const LFO_END_SNAP_PX = 6; // how near the other end's level a dragged end has to come to catch on it
 const LFO_EVAL_DEBOUNCE_MS = 150; // quiet time after the last shape edit before it re-evaluates
 
@@ -7296,6 +7305,7 @@ function parseLfoCall(inner) {
   const num = (key) => Number((new RegExp(`(?:^|[,{\\s])${key}\\s*:\\s*(-?[\\d.]+)`).exec(inner) ?? [])[1]) || 0;
   const phase = num('phase');
   const glide = num('glide');
+  const smooth = num('smooth');
   let points = null;
   try {
     if (shapeMatch?.[2]?.trim()) points = shapeMod.parseShapePoints(shapeMatch[2]);
@@ -7303,17 +7313,18 @@ function parseLfoCall(inner) {
     // unparseable shape string - fall back to the default below
   }
   if (!points) points = shapeMod.parseShapePoints('0,0 0.5,1 1,0');
-  return { points, rate, rateHz, ratePattern, phase, glide, mode: ['free', 'retrigger', 'envelope'].includes(mode) ? mode : 'free' };
+  return { points, rate, rateHz, ratePattern, phase, glide, smooth, mode: ['free', 'retrigger', 'envelope'].includes(mode) ? mode : 'free' };
 }
 
 // The options an lfo() call carries - the half that belongs to the CALL rather than to the shape.
-function lfoCfgText({ rate, rateHz, ratePattern, mode, phase, glide }) {
+function lfoCfgText({ rate, rateHz, ratePattern, mode, phase, glide, smooth }) {
   const parts = [`rate: ${ratePattern ? JSON.stringify(ratePattern) : rateHz ? `"${rate}hz"` : String(rate)}`];
   if (mode !== 'free') parts.push(`mode: '${mode}'`);
   // Options the panel has no control for are carried through rather than rewritten away: an edit
   // to the rate is an edit to the rate.
   if (phase) parts.push(`phase: ${phase}`);
   if (glide) parts.push(`glide: ${glide}`);
+  if (smooth) parts.push(`smooth: ${smooth}`);
   return `{ ${parts.join(', ')} }`;
 }
 
@@ -7321,7 +7332,10 @@ function serializeLfoCall(state) {
   const pts = shapeMod.serializeShapePoints(state.points);
   // A definition holds the shape and nothing else: rate and mode are how one lfo() PLAYS a shape,
   // and two calls naming the same shape are free to play it at different rates.
-  if (state.idLiteral) return `_shape(${state.idLiteral}, "${pts}"${state.takeLength > 0 ? `, { cycles: ${state.takeLength} }` : ''})`;
+  if (state.idLiteral) {
+    const opts = [state.takeLength > 0 ? `cycles: ${state.takeLength}` : '', state.smooth ? `smooth: ${state.smooth}` : ''].filter(Boolean);
+    return `_shape(${state.idLiteral}, "${pts}"${opts.length ? `, { ${opts.join(', ')} }` : ''})`;
+  }
   if (state.callee === 'grainshape') return `grainshape("${pts}")`;
   return `lfo("${pts}", ${lfoCfgText(state)})`;
 }
@@ -7371,7 +7385,7 @@ function writeLfoSourceCall(range, text) {
 function writeLfoOptions() {
   const parts = lfoCallParts();
   if (!parts || parts.callee !== 'lfo') return; // a grain window has neither (see lfoSyncHead)
-  writeLfoSourceCall(parts.range, `lfo(${parts.shape}, ${lfoCfgText(lfoState)})`);
+  writeLfoSourceCall(parts.range, `lfo(${parts.shape}, ${lfoCfgText({ ...lfoState, smooth: lfoState.callSmooth })})`);
   refoldAll(lfoCM); // rate/mode rewrite the call too, taking the shape's fold with it - see writeLfoCall
   lfoScheduleEval();
 }
@@ -7420,8 +7434,8 @@ function lfoUseInCall(id) {
 function lfoCarry() {
   const parts = lfoCallParts();
   if (!parts) return {};
-  const { rate, rateHz, ratePattern, mode, phase, glide } = parseLfoCall(parts.opts);
-  return { callSource: lfoState.callSource, loopCycles: lfoState.loopCycles ?? null, options: { rate, rateHz, ratePattern, mode, phase, glide } };
+  const { rate, rateHz, ratePattern, mode, phase, glide, smooth } = parseLfoCall(parts.opts);
+  return { callSource: lfoState.callSource, loopCycles: lfoState.loopCycles ?? null, options: { rate, rateHz, ratePattern, mode, phase, glide, callSmooth: smooth } };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -7536,6 +7550,7 @@ function openLfoEditor(call, ed = lfoState ? lfoCM : cm) {
   lfoPreset.value = '';
   lfoClearSelection();
   lfoSeam = null;
+  lfoSmoothSlider?.set(lfoState.smooth ?? 0);
   lfoSyncHead();
   if (!lfoRaf) lfoRaf = requestAnimationFrame(lfoPlayheadLoop); // sweep the playhead while it runs
   lfoPanel.classList.remove('hidden');
@@ -7602,8 +7617,8 @@ function openShapeFromIdCall(call, code, ed = cm) {
   // Marked so the panel's rate/mode controls can write back into this call while a definition of
   // its own is on screen (see writeLfoOptions).
   const callSource = ed.markText(ed.posFromIndex(call.start), ed.posFromIndex(call.close + 1), {});
-  const { rate, rateHz, ratePattern, mode, phase, glide } = parseLfoCall(code.slice(call.open + 1, call.close));
-  if (openShapeById(id, { callSource, options: { rate, rateHz, ratePattern, mode, phase, glide } }, ed)) return true;
+  const { rate, rateHz, ratePattern, mode, phase, glide, smooth } = parseLfoCall(code.slice(call.open + 1, call.close));
+  if (openShapeById(id, { callSource, options: { rate, rateHz, ratePattern, mode, phase, glide, callSmooth: smooth } }, ed)) return true;
   callSource.clear();
   return false;
 }
@@ -7703,6 +7718,8 @@ function syncLfoFromCode() {
     lfoState.phase = parsed.phase;
     lfoState.glide = parsed.glide;
   }
+  lfoState.smooth = parsed.smooth;
+  lfoSmoothSlider?.set(lfoState.smooth);
   lfoRate.value = lfoState.rate;
   lfoMode.value = lfoState.mode;
   lfoSyncHead();
@@ -8051,6 +8068,17 @@ function drawLfoShape() {
     ctx.restore();
   };
 
+  // Smoothed, the shape plays a rounded-off copy of what is drawn: that copy, as a ghost under it.
+  if (lfoState.smooth > 0 && !lfoState.axes) {
+    ctx.save();
+    ctx.strokeStyle = col('--accent');
+    ctx.globalAlpha = 0.35;
+    ctx.lineWidth = 5;
+    ctx.lineJoin = 'round';
+    curve(shapeMod.smoothShape(lfoState.points, lfoState.smooth), 0, 1);
+    ctx.restore();
+  }
+
   ctx.strokeStyle = col('--accent');
   ctx.lineWidth = 2;
   const seam = lfoSeam;
@@ -8263,6 +8291,21 @@ function lfoCopySpan() {
   return true;
 }
 
+/** The menu's simplify: the span's points thinned to the ones its line needs. */
+function lfoSimplifySpan() {
+  const span = lfoSpanNow();
+  if (!span) return false;
+  const before = lfoState.points.length;
+  lfoState.points = shapeMod.simplifyShapeSpan(lfoState.points, span[0], span[1]);
+  lfoSel = new Set();
+  lfoSpan = span;
+  if (lfoState.points.length === before) return false;
+  lfoPreset.value = '';
+  writeLfoCall();
+  drawLfoShape();
+  return true;
+}
+
 /** cmd-V: the copied span over the drawing, from the marked span's start or the last click. */
 function lfoPaste() {
   if (!lfoClip) return false;
@@ -8304,6 +8347,31 @@ function lfoToggleTool() {
 }
 
 function initLfoCanvas() {
+  // smooth: the drawing stays as it is and plays rounded off. Heard as it moves (the running
+  // modulators swap to the new rounding, as a drag's do), written when it lets go.
+  let heard = null;
+  lfoSmoothSlider = prMakeBoxSlider(document.getElementById('lfoSmoothBox'), {
+    min: 0,
+    max: 1,
+    step: 0.01,
+    home: 0,
+    fmt: (v) => String(Number(v.toFixed(2))),
+    onInput: (v) => {
+      if (!lfoState) return;
+      heard ??= lfoPlayed(lfoState.points);
+      lfoState.smooth = v;
+      drawLfoShape();
+      const to = lfoPlayed(lfoState.points);
+      if (JSON.stringify(to) !== JSON.stringify(heard)) {
+        api('POST', '/api/liveShape', { deck: deckOfCM(lfoCM), from: heard, to }).catch(() => {});
+        heard = to;
+      }
+    },
+    onCommit: () => {
+      heard = null;
+      if (lfoState) writeLfoCall();
+    },
+  });
   lfoCanvas.tabIndex = 0; // so B, the selection's keys and undo reach it
   lfoReflectTool();
   lfoToolBtn.addEventListener('click', () => {
@@ -8484,7 +8552,7 @@ function initLfoCanvas() {
   // started from play this one instead, from the phase they are at (see /api/liveShape). The code
   // is written, and evaluated, when the drag ends.
   // Breakpoints as the code spells them, which is what the running modulators were built from.
-  const lfoAsWritten = (pts) => shapeMod.parseShapePoints(shapeMod.serializeShapePoints(pts));
+  const lfoAsWritten = (pts) => lfoPlayed(pts);
   let lfoAuditionFrame = 0;
   const lfoAuditionSoon = () => {
     if (lfoAuditionFrame) return;
@@ -8562,10 +8630,12 @@ function initLfoCanvas() {
 
   lfoCanvas.addEventListener('contextmenu', (e) => {
     e.preventDefault();
-    if (!lfoState || lfoState.axes || !lfoSpanNow()) return;
+    if (!lfoState || !lfoSpanNow()) return;
     lfoMenu.style.zIndex = String(++panelFrontZ); // over the panel, whichever is in front
     openCtxMenu(lfoMenu, e.clientX, e.clientY, {
-      items: [['loop this span', () => lfoLoopSpan(lfoMenuAlt)]],
+      items: lfoState.axes
+        ? [['simplify', () => lfoSimplifySpan()]]
+        : [['loop this span', () => lfoLoopSpan(lfoMenuAlt)], ['simplify', () => lfoSimplifySpan()]],
       after: () => lfoCanvas.focus({ preventScroll: true }),
     });
   });
@@ -12902,6 +12972,9 @@ function lfoSyncHead() {
   const timed = editable && lfoCallee() === 'lfo';
   lfoRateWrap.classList.toggle('hidden', !timed);
   lfoModeWrap.classList.toggle('hidden', !timed);
+  // smooth is the shape's own (a definition's option) or an lfo()'s; a device's curve and an inline
+  // grain window have nowhere to keep it.
+  document.getElementById('lfoSmoothWrap').classList.toggle('hidden', !!lfoState?.axes || (!named && lfoCallee() !== 'lfo'));
   // The → is offered only when it would change something: there is a call behind the panel, and it
   // isn't already playing what you are looking at. A call that names several (`lfo("<a b>")`) is
   // never "already" it - sending collapses the pattern onto this one, which is a real edit.

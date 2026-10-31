@@ -35,6 +35,8 @@ inline double clipTail(double x) {
 struct Device : pd_own::Device<ids::kCount, 4, 4> {
   DelayLine<kLineCapacity> lines[2];
   OnePole tones[2];
+  // AC coupling for what goes round the loop, after the Tone (see the browser's delay.mjs).
+  DcBlocker dcs[2];
   double length[2] = { 0, 0 };   // the delay each channel is actually at, in samples
   double bpm = 120;
   double lastTone = -1;
@@ -45,6 +47,7 @@ struct Device : pd_own::Device<ids::kCount, 4, 4> {
     const int want = static_cast<int>(std::ceil(sr * kMaxSec)) + 4;
     for (auto& l : lines) l.init(want);
     for (auto& t : tones) t.init(sr);
+    for (auto& d : dcs) d.init(sr);
     length[0] = 0;
     length[1] = 0;
     bpm = 120;
@@ -60,6 +63,7 @@ struct Device : pd_own::Device<ids::kCount, 4, 4> {
   void reset() {
     for (auto& l : lines) l.reset();
     for (auto& t : tones) t.reset();
+    for (auto& d : dcs) d.reset();
   }
 
   void pd_process(int frames) {
@@ -101,8 +105,8 @@ struct Device : pd_own::Device<ids::kCount, 4, 4> {
       const double readR = lines[1].readLinear(lenR);
       // Ping-pong feeds each side's repeat into the other line; a plain delay feeds it back into
       // its own. The input enters on the left in ping-pong, so the first repeat is right.
-      const double fedL = clipTail(tones[0].next(pingpong ? readR : readL) * fb);
-      const double fedR = clipTail(tones[1].next(pingpong ? readL : readR) * fb);
+      const double fedL = clipTail(dcs[0].next(tones[0].next(pingpong ? readR : readL)) * fb);
+      const double fedR = clipTail(dcs[1].next(tones[1].next(pingpong ? readL : readR)) * fb);
       if (pingpong) {
         lines[0].write((dryL + dryR) * 0.5 + fedL);
         lines[1].write(fedR);
@@ -162,8 +166,8 @@ struct Device : pd_own::Device<ids::kCount, 4, 4> {
       const double readR = lines[1].readLinear(lenR);
       const double retL = backl[i];
       const double retR = backr[i];
-      const double fedL = clipTail(tones[0].next(pingpong ? retR : retL) * fb);
-      const double fedR = clipTail(tones[1].next(pingpong ? retL : retR) * fb);
+      const double fedL = clipTail(dcs[0].next(tones[0].next(pingpong ? retR : retL)) * fb);
+      const double fedR = clipTail(dcs[1].next(tones[1].next(pingpong ? retL : retR)) * fb);
       if (pingpong) {
         lines[0].write((dryL + dryR) * 0.5 + fedL);
         lines[1].write(fedR);

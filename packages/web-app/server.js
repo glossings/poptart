@@ -6982,7 +6982,12 @@ const LIVE_DEVICE_FIGURES = new Set(['sample', 'meter', 'transfer', 'eq', 'shape
  * see mixTapLabels), so with the mixer closed the curve is drawn alone. And the analyzer hears the
  * track's output, after the whole chain, where the browser's taps the equalizer itself.
  */
-function deviceLiveBody(state, live, trackLabel) {
+// The latest live report of each open window's device, by `track|slot`: what a picture redrawn for
+// a knob being moved is drawn with too. Without it a ducker's lane, which lays itself on the beat
+// grid only with a report, flipped between that and the plain dip on every frame of a drag.
+const lastLiveReports = new Map();
+
+function deviceLiveBody(state, live, trackLabel, slot = null) {
   const { kit, descriptor } = state;
   const values = {};
   const merged = { ...state.values };
@@ -7004,6 +7009,7 @@ function deviceLiveBody(state, live, trackLabel) {
       report = { ...(report ?? {}), spectrum: freqs.map((hz, i) => ({ hz, db: db(Math.max(bands[i][0], bands[i][1])) })) };
     }
   }
+  if (slot != null) lastLiveReports.set(`${trackLabel}|${slot}`, report ?? null);
   const opts = { ...deviceFigureOpts(state), report };
   const figures = (descriptor.figures ?? [])
     .filter((f) => LIVE_DEVICE_FIGURES.has(f.kind) || Object.values(f.params).some((id) => state.driven.has(id)))
@@ -7129,7 +7135,7 @@ async function setDeviceParam(body) {
       arg: kit.panel.paramArgFor(descriptor, found.id, value, after.extras),
       // The option list, which has grown by one: the file's own name is on it now.
       options: widgetsOf(deviceWindow(after)).find((w) => w.id === found.id)?.options ?? null,
-      figures: kit.figures.figuresFor(descriptor, found.id, after.values, deviceFigureOpts(after)),
+      figures: kit.figures.figuresFor(descriptor, found.id, after.values, { ...deviceFigureOpts(after), report: lastLiveReports.get(`${trackLabel}|${slot}`) ?? null }),
     };
   }
   const value = body.position === undefined
@@ -7154,7 +7160,7 @@ async function setDeviceParam(body) {
     // The pictures this control appears in, redrawn - a wavetable's waveform, a filter's
     // response, an envelope's curve. Only the ones that name it: a drag sends a control per
     // frame, and answering with all of them would rebuild a table stack to move a cutoff.
-    figures: kit.figures.figuresFor(descriptor, found.id, { ...state.values, [found.id]: value }, deviceFigureOpts(state)),
+    figures: kit.figures.figuresFor(descriptor, found.id, { ...state.values, [found.id]: value }, { ...deviceFigureOpts(state), report: lastLiveReports.get(`${trackLabel}|${slot}`) ?? null }),
   };
 }
 
@@ -8710,6 +8716,8 @@ const routes = {
       if (String(label).startsWith('b:') !== onB) continue;
       took += sched.liveShape(body.from, body.to);
     }
+    // ...and every definition drawing it, which is what a control's take reads as it plays.
+    took += patternCore.liveShapeDef(onB ? 'b' : 'a', body.from, body.to);
     return { status: 200, body: { ok: true, took } };
   },
 
@@ -9183,7 +9191,7 @@ const routes = {
     if (!state) return { status: 200, body: { values: null, figures: [] } };
     const live = await engine.deviceLive?.(engineTrack(trackLabel), slot);
     if (!live) return { status: 200, body: { values: null, figures: [] } };
-    return { status: 200, body: deviceLiveBody(state, live, trackLabel) };
+    return { status: 200, body: deviceLiveBody(state, live, trackLabel, slot) };
   },
 
   // "I'm back in the code" - the editor sends this on a click in the buffer, and every slot being

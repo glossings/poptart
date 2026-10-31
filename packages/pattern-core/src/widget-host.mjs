@@ -46,7 +46,12 @@ export function createWidgetHost({ engine, engineId = (_deck, key) => key, cycle
    */
   function afterEval(deck, taken, blocks, { keyOf = (l) => l, clockOf = () => null, from = 0, count = WIDGET_WINDOW } = {}) {
     const d = decks[deck === 'b' ? 'b' : 'a'];
-    const owner = (at) => blocks.find((b) => at >= b.start && at < b.end) ?? null;
+    // The innermost block holding it: a display written on a group's member is that member's, not
+    // the group's - the group's block holds its members' too, and taking the first that held it
+    // showed every member the group's sum.
+    const owner = (at) => blocks
+      .filter((b) => at >= b.start && at < b.end)
+      .reduce((best, b) => (!best || b.end - b.start < best.end - best.start ? b : best), null);
     // Every track, in the order written: what a punchcard() or chroma() behind the code draws.
     const tracks = blocks.filter((b) => b.sig && b.label).map((b) => ({ label: b.label, sig: b.sig, clock: clockOf(b) }));
     d.views = taken.views.map((v) => {

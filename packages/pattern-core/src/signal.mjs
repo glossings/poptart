@@ -13,7 +13,7 @@ import {
   parseNoteValue, noteToMidi, degreeToMidi, midiToDegree, parseScaleName, quantizeToScale,
   globalScale, scaleAtOctave, scaleParts, DEFAULT_SCALE, DEFAULT_SCALE_OCTAVE,
 } from './notes.mjs';
-import { parseShapePoints, serializeShapePoints, SHAPE_PRESETS, sampleShape, parseAutoPoints, sampleAutoPoints, parseBendPoints, sampleBendPoints, bendIsFlat } from './shape.mjs';
+import { parseShapePoints, serializeShapePoints, SHAPE_PRESETS, sampleShape, parseAutoPoints, sampleAutoPoints, parseBendPoints, sampleBendPoints, bendIsFlat, smoothShape } from './shape.mjs';
 import { grooveRef, resolveGroove, grooveTimeAt, grooveVelAt, grooveNameLike, looksLikeGrooveData, parseGroove, serializeGroove, setSessionGroove, sessionGroove, GROOVE_NAMES } from './groove.mjs';
 import { parsePianoRoll, normalizePianoRollSteps, noteIndex, noteSlice, noteNudgeChannel, pianoRollNoteGrid, PIANOROLL_DEFAULT_INDEX, PIANOROLL_MAX_NUDGE, PIANOROLL_MODES, looksLikeNoteString } from './pianoroll.mjs';
 import { inSpans, clipShiftNow } from './arrange.mjs';
@@ -7781,6 +7781,17 @@ function defineRoll(id, str, opts, quiet) {
  * Returns the shape as a plain lfo() signal, so a definition is usable on its own if you want it -
  * but it is marked as a definition, so a block of them is never mistaken for a track to play.
  */
+// A shape's `smooth` option: 0..1, how far its drawing is rounded off as it plays.
+function smoothOpt(v, where) {
+  if (v === undefined || v === null) return 0;
+  const n = Number(v);
+  if (!Number.isFinite(n) || n < 0 || n > 1) {
+    warnPattern(`[signal] ${where} smooth is 0 to 1 - got ${JSON.stringify(v)}, playing it ${Number.isFinite(n) ? 'at the nearest end' : 'unsmoothed'}`);
+    return Number.isFinite(n) ? Math.min(1, Math.max(0, n)) : 0;
+  }
+  return n;
+}
+
 export function _shape(id, str = '', opts = undefined) {
   if (typeof id !== 'number' && typeof id !== 'string') {
     throw new Error('[signal] a shape definition takes a number or a name as its id - draw one in the lfo panel rather than writing it by hand');
@@ -7795,10 +7806,14 @@ export function _shape(id, str = '', opts = undefined) {
   // A control's take knows how many cycles it was recorded over (see motion.mjs): played in a
   // `.record({ cycles })` of another length it is padded or cut, not stretched.
   const cycles = opts && typeof opts === 'object' ? Number(opts.cycles) : NaN;
-  if (cycles > 0 && Number.isFinite(cycles)) points.cycles = cycles;
-  const replaced = registerShape(key, points);
+  // `smooth` keeps the drawn points as they are and plays them rounded off (see smoothShape) - the
+  // editor draws both.
+  const smoothed = smoothOpt(opts?.smooth, `_shape(${JSON.stringify(key)})`);
+  const played = smoothed > 0 ? smoothShape(points, smoothed) : points;
+  if (cycles > 0 && Number.isFinite(cycles)) played.cycles = cycles;
+  const replaced = registerShape(key, played);
   if (replaced) warnUser(replaced);
-  const sig = lfo(serializeShapePoints(points));
+  const sig = lfo(serializeShapePoints(played));
   sig.isDef = key; // see _roll(): a definitions block must not become an extra voice
   return sig;
 }
@@ -8506,9 +8521,10 @@ const DEFAULT_LFO_SHAPE = '0,0 0.5,1 1,0'; // triangle - what a bare lfo() start
  * inside an lfo(...) call opens the interactive shape editor, which writes this string.
  * Modes: 'free' (loops on its own clock), 'retrigger' (loops, phase resets on each note),
  * 'envelope' (plays once per note over 1/rate seconds, then holds its final level).
+ * `smooth: 0..1` plays the drawing rounded off, keeping its points as drawn.
  */
 export function lfo(shape, opts = {}) {
-  const { rate = 1, phase = 0, mode = 'free', glide = 0 } = isRateShorthand(opts) ? { rate: opts } : opts;
+  const { rate = 1, phase = 0, mode = 'free', glide = 0, smooth } = isRateShorthand(opts) ? { rate: opts } : opts;
   if (!['free', 'retrigger', 'envelope'].includes(mode)) {
     throw new Error(`[signal] lfo() mode must be 'free', 'retrigger', or 'envelope' (got "${mode}")`);
   }
@@ -8520,6 +8536,7 @@ export function lfo(shape, opts = {}) {
     shapeNames: names,
     shapePattern: pattern, // null unless the argument named more than one
     glide: Math.max(0, Number(glide) || 0),
+    smooth: smoothOpt(smooth, 'lfo()'),
     mode,
     ...parseRate(rate),
     phaseCycles: phase,
@@ -8618,7 +8635,9 @@ export function lfoShapes(ir, scope = undefined) {
     // `{ ...ir, … }` at BUILD time, and a memo riding along in one of those copies would be the
     // early lookup coming back in through the side door. (It is also why this is a function rather
     // than a getter on the IR - an enumerable getter would simply be CALLED by those same spreads.)
-    Object.defineProperty(ir, '_shapes', { value: (ir.shapeNames ?? []).map((name) => shapeNamed(name, scope)), writable: true });
+    // An lfo()'s own `smooth` rounds off whatever it names - on top of a definition's own, if any.
+    const played = (name) => (ir.smooth > 0 ? smoothShape(shapeNamed(name, scope), ir.smooth) : shapeNamed(name, scope));
+    Object.defineProperty(ir, '_shapes', { value: (ir.shapeNames ?? []).map(played), writable: true });
   }
   return ir._shapes;
 }

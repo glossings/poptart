@@ -6,7 +6,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { note, synth, lfo, sine, _shape, setPatternWarn, lfoRateHz, lfoShapes, lfoPoints } from './src/signal.mjs';
-import { clearRolls, setRollLayer, shapeIds } from './src/rolls.mjs';
+import { clearRolls, setRollLayer, shapeIds, lookupShape, liveShapeDef } from './src/rolls.mjs';
 import { injectLocations } from './src/locations.mjs';
 import { mini } from './src/signal.mjs';
 import { Scheduler } from './src/scheduler.mjs';
@@ -120,6 +120,37 @@ test('a defined shape is what a pattern naming it plays', () => {
   const ir = lfo('<swell2 pluck>').lfoIR;
   assert.deepEqual(ir.shapeNames, ['swell2', 'pluck']);
   assert.deepEqual(lfoShapes(ir)[0], [{ x: 0, y: 0, c: 2 }, { x: 0.7, y: 1, c: 0 }, { x: 1, y: 0, c: 0 }]);
+});
+
+test('a smoothed definition plays rounded off, and so does a smoothed lfo()', async () => {
+  const { smoothShape, parseShapePoints, serializeShapePoints } = await import('./src/shape.mjs');
+  clearRolls('buffer');
+  const drawn = '0,1 0.5,1 0.5,0 1,0';
+  _shape('blocky', drawn, { cycles: 2, smooth: 0.4 });
+  const played = lfoShapes(lfo('blocky').lfoIR)[0];
+  assert.equal(serializeShapePoints(played), serializeShapePoints(smoothShape(parseShapePoints(drawn), 0.4)));
+  assert.equal(played.cycles, 2, 'a take keeps its length through the smoothing');
+  const viaCall = lfoShapes(lfo(drawn, { smooth: 0.4 }).lfoIR)[0];
+  assert.equal(serializeShapePoints(viaCall), serializeShapePoints(played));
+  const warned = [];
+  setPatternWarn((m) => warned.push(m));
+  try {
+    _shape('blocky', drawn, { smooth: 3 });
+  } finally {
+    setPatternWarn(null);
+  }
+  assert.match(warned.join(' '), /smooth is 0 to 1/);
+});
+
+test('a shape edited live is what its definition plays until the next evaluation, length and all', () => {
+  clearRolls('buffer');
+  _shape('take1', '0,0 1,1', { cycles: 3 });
+  const from = lookupShape('take1');
+  const to = [{ x: 0, y: 1, c: 0 }, { x: 1, y: 0, c: 0 }];
+  assert.equal(liveShapeDef('a', from, to), 1);
+  assert.deepEqual([...lookupShape('take1')], to);
+  assert.equal(lookupShape('take1').cycles, 3, 'a take keeps its length');
+  assert.equal(liveShapeDef('b', to, from), 0, "the other deck's buffer is its own");
 });
 
 test('a definition shadows the built-in preset of the same name', () => {

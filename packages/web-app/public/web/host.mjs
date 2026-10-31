@@ -805,6 +805,7 @@ export function createHost({
       for (const [label, sched] of evaluator.schedulers ?? []) {
         if (String(label).startsWith('b:') === onB) took += sched.liveShape?.(body.from, body.to) ?? 0;
       }
+      took += patternCore.liveShapeDef(onB ? 'b' : 'a', body.from, body.to); // a control's take
       return { ok: true, took };
     },
     'POST /api/liveGroove': async (body) => ({ ok: liveOnDeck(body, () => patternCore.liveGroove(body.id, String(body.table ?? ''))) !== undefined }),
@@ -942,7 +943,7 @@ export function createHost({
           text: panel.formatValue(found, value, after.extras?.[found.id] ?? null),
           arg: panel.paramArgFor(state.descriptor, found.id, value, after.extras),
           options: widgetsOf(panel.buildPanel(state.descriptor, after.values, after.driven, figureOpts(after))).find((w) => w.id === found.id)?.options ?? null,
-          figures: panel.figuresFor ? panel.figuresFor(state.descriptor, found.id, after.values, figureOpts(after)) : [],
+          figures: panel.figuresFor ? panel.figuresFor(state.descriptor, found.id, after.values, figureOpts(after, engine.liveReport?.(tid, slot) ?? null)) : [],
         };
       }
       const value = body.position === undefined
@@ -981,7 +982,10 @@ export function createHost({
         // response, an envelope's curve. Only the ones that name it: a drag sends a parameter per
         // frame, and answering with all of them would rebuild a table stack to move a cutoff.
         figures: panel.figuresFor
-          ? panel.figuresFor(state.descriptor, found.id, { ...state.values, [found.id]: value }, figureOpts(state))
+          // Drawn with what the device is doing too, as the live poll's are: a ducker's lane lays
+          // itself on the beat grid only with a report, and without one here it flipped between
+          // that and the plain dip on every frame of a drag.
+          ? panel.figuresFor(state.descriptor, found.id, { ...state.values, [found.id]: value }, figureOpts(state, engine.liveReport?.(tid, slot) ?? null))
           : [],
       };
     },

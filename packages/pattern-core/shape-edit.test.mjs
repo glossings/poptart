@@ -97,3 +97,25 @@ test('points moved together keep their shape and stop at the neighbors left behi
   const ends = moveShapePoints(pts, [0, 4], 0.3, 0.5);
   assert.deepEqual(ends.map((p) => p.x), pts.map((p) => p.x), 'ends keep their x');
 });
+
+test('simplify drops the points that barely change the line, and keeps the ones that do', async () => {
+  const { simplifyShapeSpan } = await import('./src/shape.mjs');
+  const wobbly = shape('0,0 0.1,0.101 0.2,0.199 0.3,0.302 0.4,0.4 0.5,1 0.6,0.6 1,0.2');
+  const out = simplifyShapeSpan(wobbly, 0, 1);
+  assert.equal(text(out), '0,0 0.4,0.4 0.5,1 0.6,0.6 1,0.2', 'the near-straight run is one segment; the peak stays');
+  const part = simplifyShapeSpan(wobbly, 0.5, 1);
+  assert.equal(part.length, wobbly.length, 'outside the span nothing is touched, and nothing inside it was spare');
+  const curved = shape('0,0,4 0.5,0.5 1,1');
+  assert.equal(simplifyShapeSpan(curved, 0, 1).length, 3, 'a curve is not a straight line: its point stays');
+});
+
+test('smoothing rounds a shape off around its loop and leaves 0 alone', async () => {
+  const { smoothShape } = await import('./src/shape.mjs');
+  const sq = shape('0,1 0.5,1 0.5,0 1,0');
+  assert.equal(text(smoothShape(sq, 0)), text(sq));
+  const soft = smoothShape(sq, 0.5);
+  assert.ok(Math.abs(sampleShape(soft, 0.5) - 0.5) < 0.02, 'the step is halfway at the step');
+  assert.ok(Math.abs(sampleShape(soft, 0) - 0.5) < 0.02, '...and so is the wrap');
+  assert.ok(sampleShape(soft, 0.25) > 0.95 && sampleShape(soft, 0.75) < 0.05, 'the plateaus survive a moderate smooth');
+  assert.ok(soft.length < 80, `written back as few points - got ${soft.length}`);
+});

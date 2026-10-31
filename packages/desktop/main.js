@@ -141,6 +141,11 @@ if (process.platform !== 'darwin') {
           { role: 'reload' },
           { role: 'forceReload' },
           { role: 'toggleDevTools' },
+          // F12 with the tools focused: their pane's before-input-event (see createWindow) is not
+          // delivered for docked tools, so the second F12 closed nothing. A menu accelerator fires
+          // wherever focus is in the window; with the page focused, that listener takes the key
+          // first and its preventDefault keeps this one from toggling a second time.
+          { label: 'Toggle Developer Tools', accelerator: 'F12', visible: false, acceleratorWorksWhenHidden: true, click: (_item, target) => target?.webContents.toggleDevTools() },
           { type: 'separator' },
           { label: 'Actual Size', accelerator: 'CommandOrControl+0', click: (_item, target) => zoomWindow(target, null) },
           { label: 'Zoom In', accelerator: 'CommandOrControl+Plus', click: (_item, target) => zoomWindow(target, ZOOM_STEP) },

@@ -90,6 +90,20 @@ function makeStore(what) {
       return replaced ? `[signal] ${what} ${JSON.stringify(id)} is defined twice - the later definition wins` : null;
     },
     /**
+     * Every value in `deck`'s buffer for which `same(value)` holds, replaced by `make(value)` until
+     * the next evaluation files the code's own again. How many were.
+     */
+    swapLive(deck, same, make) {
+      const m = bufferOf(scopes[deckOf(deck)]);
+      let n = 0;
+      for (const [id, value] of m ?? []) {
+        if (!same(value)) continue;
+        m.set(id, make(value));
+        n += 1;
+      }
+      return n;
+    },
+    /**
      * What a name means, buffer first, or null if nothing defines it. `layer` asks one layer
      * alone - 'prebake' is how a host reads the LIBRARY's copy of a name some buffer also
      * defines. `scope` is the deck scope a caller captured (see scopesFor for the rest).
@@ -223,6 +237,21 @@ export const rollIds = () => stores.roll.ids();
 
 export const registerShape = (id, points) => stores.shape.register(id, points);
 export const lookupShape = (id, scope) => stores.shape.lookup(id, null, scope);
+
+/**
+ * A drawn shape being edited (see the scheduler's liveShape): every definition in `deck`'s buffer
+ * that plays the breakpoints `from` plays `to` instead, until the next evaluation - which is how a
+ * control's take, read by name on every poll, hears the drawing as it changes. A take keeps its
+ * length. How many definitions took it.
+ */
+export function liveShapeDef(deck, from, to) {
+  const was = JSON.stringify(from);
+  return stores.shape.swapLive(deck, (v) => Array.isArray(v) && JSON.stringify(v) === was, (v) => {
+    const next = to.map((p) => ({ ...p }));
+    if (v.cycles > 0) next.cycles = v.cycles;
+    return next;
+  });
+}
 export const shapeIds = () => stores.shape.ids();
 
 // A preset's value is { plugin, state }, not a Sig: `state` is the plugin's own program (gzip +

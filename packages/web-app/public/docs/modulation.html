@@ -79,7 +79,14 @@
           they drag together, <kbd>⌘D</kbd> plays the span twice (inserting its time), <kbd>⌘C</kbd>,
           <kbd>⌘X</kbd> and <kbd>⌘V</kbd> copy, cut and paste it, and <kbd>⌘L</kbd> (or right-click) keeps
           only the span, as the whole loop. Ends that differ are faded to meet halfway over the loop's first
-          and last sixteenth, drawn dashed until the next edit; <kbd>alt</kbd> keeps the jump.
+          and last sixteenth, drawn dashed until the next edit; <kbd>alt</kbd> keeps the jump. Right-click
+          a span to simplify it: its points thin to the ones the line needs.
+        </p>
+        <p>
+          <code>smooth</code> (0 to 1, the slider under the shape) plays the drawing rounded off and keeps
+          its points as drawn: the editor shows what plays as a ghost under them. It is written into the
+          definition, <code>_shape("wobble", "…", { smooth: 0.3 })</code>, and <code>lfo()</code> takes it
+          too.
         </p>
         <table>
           <tr><th>mode</th><th></th></tr>

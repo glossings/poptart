@@ -258,6 +258,77 @@ function thin(pts, tol) {
 }
 
 /**
+ * The points between `a` and `b` thinned to the fewest that keep the drawn line within `tol` of
+ * where it was - curves included, since the test samples the line rather than the points. The
+ * points kept are points that were there; a stretch they now span alone becomes a straight line.
+ */
+export function simplifyShapeSpan(points, a, b, tol = 0.02) {
+  const out = points.map((p) => ({ ...p }));
+  const ia = out.findIndex((p) => p.x >= a - EPS);
+  let ib = -1;
+  for (let i = out.length - 1; i >= 0; i--) if (out[i].x <= b + EPS) { ib = i; break; }
+  if (ia < 0 || ib - ia < 2) return out;
+  const keep = new Set(out.map((_, i) => i).filter((i) => i <= ia || i >= ib));
+  const lineAt = (i, j, x) => {
+    const t = out[j].x > out[i].x ? (x - out[i].x) / (out[j].x - out[i].x) : 0;
+    return out[i].y + (out[j].y - out[i].y) * t;
+  };
+  // How far the line drawn from point i to point j strays from a straight one between them.
+  const strays = (i, j) => {
+    for (let k = i; k < j; k++) {
+      const p = out[k];
+      const q = out[k + 1];
+      for (let s = 0; s <= 8; s++) {
+        const t = s / 8;
+        const y = q.x > p.x ? curveInterp(p.y, q.y, t, p.c ?? 0) : t < 1 ? p.y : q.y;
+        if (Math.abs(y - lineAt(i, j, p.x + (q.x - p.x) * t)) > tol) return true;
+      }
+    }
+    return false;
+  };
+  const flat = new Set(); // points whose segment out is now a straight line
+  const walk = (i, j) => {
+    if (j - i < 2) return;
+    if (!strays(i, j)) { flat.add(i); return; }
+    let at = i + 1;
+    let worst = -1;
+    for (let k = i + 1; k < j; k++) {
+      const d = Math.abs(out[k].y - lineAt(i, j, out[k].x));
+      if (d > worst) { worst = d; at = k; }
+    }
+    keep.add(at);
+    walk(i, at);
+    walk(at, j);
+  };
+  walk(ia, ib);
+  for (const i of flat) out[i].c = 0;
+  return out.filter((_, i) => keep.has(i));
+}
+
+/**
+ * The shape smoothed by `amount` (0..1): blurred around its loop - the end runs into the start, as
+ * it does when it plays - and written back as breakpoints. 0 is the shape as drawn; 1 rounds it off
+ * over about a fifth of its length.
+ */
+export function smoothShape(points, amount) {
+  const k = Math.min(1, Math.max(0, Number(amount) || 0));
+  if (!(k > 0)) return points.map((p) => ({ ...p }));
+  const N = 512;
+  const ys = Array.from({ length: N }, (_, i) => sampleShape(points, i / N));
+  const sigma = k * 0.08 * N;
+  const reach = Math.ceil(sigma * 3);
+  const weights = Array.from({ length: 2 * reach + 1 }, (_, j) => Math.exp(-((j - reach) ** 2) / (2 * sigma * sigma)));
+  const total = weights.reduce((s, w) => s + w, 0);
+  const blurred = ys.map((_, i) => {
+    let sum = 0;
+    for (let j = -reach; j <= reach; j++) sum += weights[j + reach] * ys[(((i + j) % N) + N) % N];
+    return sum / total;
+  });
+  const line = [...blurred.map((y, i) => ({ x: i / N, y })), { x: 1, y: blurred[0] }];
+  return thin(line, 0.002).map((p) => ({ x: p.x, y: clamp01(p.y), c: 0 }));
+}
+
+/**
  * The points at `indices` moved together by `dx`, `dy`: held inside 0..1 as a group, so the drawing
  * keeps its shape, and never past a neighbor that isn't moving with them. The two ends keep their x.
  */

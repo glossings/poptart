@@ -2526,6 +2526,7 @@ span.color-swatch {
 }
 
 /* The box sliders take the width the number fields beside them would have had. */
+.lfo-controls .pr-box-slider,
 .groove-controls .pr-box-slider {
   width: 62px;
 }
