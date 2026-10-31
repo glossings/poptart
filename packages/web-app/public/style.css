@@ -2311,6 +2311,7 @@ li.CodeMirror-hint-active {
   border-radius: 8px;
   background: var(--bg);
   cursor: crosshair;
+  outline: none;
   touch-action: none;
 }
 

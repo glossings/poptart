@@ -805,6 +805,7 @@
           </div>
         </div>
         <span class="spacer"></span>
+        <button id="lfoTool" class="small" title="select (B)">⬚</button>
         <select id="lfoPreset" title="preset shapes"><option value="">preset…</option></select>
         <button id="lfoRandom" class="small" title="random shape">🎲</button>
         <button id="lfoClose" class="small">✕</button>
@@ -820,8 +821,9 @@
           </select>
         </label>
       </div>
-      <div class="lfo-help">drag points · drag a segment to bend it · double-click adds/removes · esc closes</div>
+      <div class="lfo-help">drag points · drag a segment to bend it · drag around points to select · double-click adds/removes · B draws · esc closes</div>
     </div>
+    <div id="lfoMenu" class="ctx-menu hidden" role="menu"></div>
 
     <!-- The env() editor: the envelope modulator drawn the way a device window draws its own, with
          a number box per setting. Every edit is written back into that env({ ... }) call. -->

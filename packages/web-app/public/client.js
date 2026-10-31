@@ -7248,6 +7248,18 @@ const lfoModeWrap = document.getElementById('lfoModeWrap');
 let lfoState = null; // { marker, callStart, points, rate, mode, shapeId, idLiteral }
 let lfoCM = cm; // the deck the shape on screen is in - see prCM, which is the same idea for the roll
 let lfoSuppressCursor = false;
+const lfoToolBtn = document.getElementById('lfoTool');
+const lfoMenu = document.getElementById('lfoMenu');
+// The pencil draws over the shape; the arrow drags points, bends segments and selects. A way of
+// working, so it stays put across shapes and reloads, like the roll's.
+let lfoTool = localStorage.getItem('poptartShapeTool') === 'draw' ? 'draw' : 'select';
+let lfoSel = new Set(); // indices of the selected breakpoints
+let lfoSpan = null; // [a, b] - the stretch of the period marked by a drag around points, 0..1
+let lfoClickX = null; // where the last click on empty canvas landed - where a paste goes without a span
+let lfoClip = null; // { points, width } - a copied span, width in cycles for a take, else in periods
+// A loop just cut with its seam faded: the drawing before the fade, shown faintly until the next edit.
+let lfoSeam = null; // { original, fade }
+let lfoMenuAlt = false; // alt held as the menu's entry was chosen
 const LFO_END_SNAP_PX = 6; // how near the other end's level a dragged end has to come to catch on it
 const LFO_EVAL_DEBOUNCE_MS = 150; // quiet time after the last shape edit before it re-evaluates
 
@@ -7462,6 +7474,28 @@ function writeLfoRateMode() {
 
 // `ed` is the deck the call is in; opened on the other one, the panel moves across (see
 // openPianorollEditor).
+/** A take's own length: the `{ cycles }` after the points in a `_shape(...)`'s arguments, or null. */
+function takeLengthOf(inner) {
+  return Number((/cycles\s*:\s*([\d.]+)/.exec(splitFirstArg(splitFirstArg(inner)[1])[1] ?? '') ?? [])[1]) || null;
+}
+
+/** The loop of the first `.record({ take })` playing one of `takes`, or null. */
+function recordLoopOf(code, takes) {
+  const re = /\.\s*record\s*\(/g;
+  let m;
+  while ((m = re.exec(code)) !== null) {
+    const open = m.index + m[0].length - 1;
+    const close = matchParen(code, open);
+    if (close < 0) continue;
+    const inner = code.slice(open + 1, close);
+    const take = /take\s*:\s*(["'])((?:\\.|(?!\1).)*)\1/.exec(inner);
+    if (!take || !takes.includes(take[2])) continue;
+    const n = Number((/cycles\s*:\s*([\d.]+)/.exec(inner) ?? [])[1]);
+    return n > 0 ? n : null;
+  }
+  return null;
+}
+
 function openLfoEditor(call, ed = lfoState ? lfoCM : cm) {
   if (lfoState && ed !== lfoCM) closeLfoEditor();
   lfoCM = ed;
@@ -7490,7 +7524,7 @@ function openLfoEditor(call, ed = lfoState ? lfoCM : cm) {
     ...parseLfoCall(call.idLiteral ? splitFirstArg(inner)[1] : inner),
     // A control's take: the cycles it was recorded over (its definition's `{ cycles }`, kept on
     // every write), and the loop of the `.record({ cycles })` it was opened from, for the playhead.
-    takeLength: call.idLiteral ? Number((/cycles\s*:\s*([\d.]+)/.exec(splitFirstArg(splitFirstArg(inner)[1])[1] ?? '') ?? [])[1]) || null : null,
+    takeLength: call.idLiteral ? takeLengthOf(inner) : null,
     loopCycles: call.loopCycles ?? null,
     // What across and up mean when this is a device's curve rather than a shape in time - a
     // waveshaper's level in and out. Drawn in the corners, with the "unchanged" diagonal.
@@ -7500,6 +7534,8 @@ function openLfoEditor(call, ed = lfoState ? lfoCM : cm) {
   lfoRate.value = lfoState.rate;
   lfoMode.value = lfoState.mode;
   lfoPreset.value = '';
+  lfoClearSelection();
+  lfoSeam = null;
   lfoSyncHead();
   if (!lfoRaf) lfoRaf = requestAnimationFrame(lfoPlayheadLoop); // sweep the playhead while it runs
   lfoPanel.classList.remove('hidden');
@@ -7580,10 +7616,11 @@ function closeLfoEditor() {
   lfoPanel.classList.add('hidden');
 }
 
-function writeLfoCall() {
+function writeLfoCall({ keepSeam = false } = {}) {
   if (!lfoState) return;
   const range = lfoState.marker.find();
   if (!range) return;
+  if (!keepSeam) lfoSeam = null; // the faded seam is shown until the next edit
   const text = serializeLfoCall(lfoState);
   lfoSuppressCursor = true;
   try {
@@ -7616,7 +7653,16 @@ function lfoScheduleEval() {
 // by the next drag.
 function syncLfoFromCode() {
   if (!lfoState || lfoSuppressCursor || !shapeMod) return;
-  const range = lfoState.marker.find();
+  let range = lfoState.marker.find();
+  if (!range && lfoState.idLiteral) {
+    // Replaced whole: an undo or redo puts the definition's text back, taking the anchor with it.
+    // The same name still defined is the same shape - anchor on it again.
+    const def = shapeDefs.findDef(lfoCM.getValue(), lfoState.shapeId);
+    if (def) {
+      lfoState.marker = lfoCM.markText(lfoCM.posFromIndex(def.start), lfoCM.posFromIndex(def.close + 1), {});
+      range = lfoState.marker.find();
+    }
+  }
   // The call the panel is anchored to was deleted (or typed into something that is no longer an
   // lfo call) - there is nothing left to edit, so the panel goes with it. This is the only thing
   // that closes it by itself now that opening is an explicit double-click.
@@ -7635,7 +7681,18 @@ function syncLfoFromCode() {
   const body = text.slice(open + 1, close);
   const parsed = parseLfoCall(lfoState.idLiteral ? splitFirstArg(body)[1] : body);
   lfoState.callStart = lfoCM.indexFromPos(range.from);
+  // Edited by hand: a selection's indices, a marked span and the seam's picture are of a drawing
+  // that is no longer there.
+  if (shapeMod.serializeShapePoints(parsed.points) !== shapeMod.serializeShapePoints(lfoState.points)) {
+    lfoClearSelection();
+    lfoSeam = null;
+  }
   lfoState.points = parsed.points;
+  // A take's length, and the loop it plays in, as the code now has them.
+  if (lfoState.idLiteral) {
+    lfoState.takeLength = takeLengthOf(body);
+    if (lfoState.loopCycles != null) lfoState.loopCycles = recordLoopOf(lfoCM.getValue(), lfoTakeNames()) ?? lfoState.loopCycles;
+  }
   // A _shape(...) definition carries no rate or mode - those live on the lfo() that names it, so
   // re-reading the definition must not reset them to the parse's defaults.
   if (!lfoState.idLiteral) {
@@ -7703,6 +7760,7 @@ function initLfoEditor() {
   lfoPreset.addEventListener('change', () => {
     if (!lfoState || !lfoPreset.value) return;
     lfoState.points = shapeMod.parseShapePoints(shapeMod.SHAPE_PRESETS[lfoPreset.value]);
+    lfoClearSelection();
     writeLfoCall();
     drawLfoShape();
   });
@@ -7716,6 +7774,7 @@ function initLfoEditor() {
       c: Math.random() < 0.4 ? Math.round((Math.random() * 8 - 4) * 10) / 10 : 0,
     }));
     lfoPreset.value = '';
+    lfoClearSelection();
     writeLfoCall();
     drawLfoShape();
   });
@@ -7954,26 +8013,81 @@ function drawLfoShape() {
     ctx.fillText(`\u2191 ${lfoState.axes.y}`, W / 2 + 6, LFO_PAD + 4);
   }
 
-  ctx.strokeStyle = col('--accent');
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  for (let i = 0; i <= 200; i++) {
-    const x = i / 200;
-    const { px, py } = lfoToCanvas({ x, y: shapeMod.sampleShape(lfoState.points, x) });
-    if (i === 0) ctx.moveTo(px, py);
-    else ctx.lineTo(px, py);
+  // The marked span, across the whole height: what cmd-D, cmd-C and loop act on.
+  const span = lfoSpanNow();
+  if (span) {
+    const a = lfoToCanvas({ x: span[0], y: 1 }).px;
+    const b = lfoToCanvas({ x: span[1], y: 1 }).px;
+    ctx.save();
+    ctx.fillStyle = col('--accent');
+    ctx.globalAlpha = 0.1;
+    ctx.fillRect(a, LFO_PAD, b - a, H - 2 * LFO_PAD);
+    ctx.restore();
   }
-  ctx.stroke();
 
-  for (const p of lfoState.points) {
+  // The curve, from x0 to x1 of the period.
+  const curve = (points, x0, x1) => {
+    ctx.beginPath();
+    const n = Math.max(2, Math.ceil(200 * (x1 - x0)));
+    for (let i = 0; i <= n; i++) {
+      const x = x0 + ((x1 - x0) * i) / n;
+      const { px, py } = lfoToCanvas({ x, y: shapeMod.sampleShape(points, x) });
+      if (i === 0) ctx.moveTo(px, py);
+      else ctx.lineTo(px, py);
+    }
+    ctx.stroke();
+  };
+  const dot = (p, fill, alpha = 1) => {
     const { px, py } = lfoToCanvas(p);
+    ctx.save();
+    ctx.globalAlpha = alpha;
     ctx.beginPath();
     ctx.arc(px, py, 4.5, 0, 2 * Math.PI);
-    ctx.fillStyle = col('--bg-panel');
+    ctx.fillStyle = fill;
     ctx.fill();
     ctx.strokeStyle = col('--accent');
     ctx.lineWidth = 1.5;
     ctx.stroke();
+    ctx.restore();
+  };
+
+  ctx.strokeStyle = col('--accent');
+  ctx.lineWidth = 2;
+  const seam = lfoSeam;
+  if (seam) {
+    // A loop's faded ends: what was drawn there before, faint, and the fade itself dashed.
+    ctx.save();
+    ctx.globalAlpha = 0.3;
+    ctx.lineWidth = 1.5;
+    curve(seam.original, 0, seam.fade);
+    curve(seam.original, 1 - seam.fade, 1);
+    ctx.setLineDash([4, 3]);
+    ctx.globalAlpha = 1;
+    ctx.lineWidth = 2;
+    curve(lfoState.points, 0, seam.fade);
+    curve(lfoState.points, 1 - seam.fade, 1);
+    ctx.restore();
+    curve(lfoState.points, seam.fade, 1 - seam.fade);
+    for (const p of seam.original) {
+      if (p.x > seam.fade && p.x < 1 - seam.fade) continue;
+      if (Math.abs(shapeMod.sampleShape(lfoState.points, p.x) - p.y) < 1e-3) continue; // the fade left it be
+      dot(p, col('--bg-panel'), 0.35);
+    }
+  } else {
+    curve(lfoState.points, 0, 1);
+  }
+
+  lfoState.points.forEach((p, i) => dot(p, lfoSel.has(i) ? col('--accent') : col('--bg-panel')));
+
+  if (lfoDrag?.kind === 'marquee' && lfoDrag.moved) {
+    const { from, to } = lfoDrag;
+    ctx.save();
+    ctx.strokeStyle = col('--accent');
+    ctx.globalAlpha = 0.7;
+    ctx.lineWidth = 1;
+    ctx.setLineDash([3, 3]);
+    ctx.strokeRect(Math.min(from.px, to.px) + 0.5, Math.min(from.py, to.py) + 0.5, Math.abs(to.px - from.px), Math.abs(to.py - from.py));
+    ctx.restore();
   }
 
   // Where the shape is right now, as a line down the canvas - on the transport's own grid in free
@@ -7994,7 +8108,209 @@ function drawLfoShape() {
   }
 }
 
+function lfoClearSelection() {
+  lfoSel = new Set();
+  lfoSpan = null;
+}
+
+// What the span verbs act on: the stretch marked by a drag around points, else the stretch the
+// selected points cover. Null when neither spans anything.
+function lfoSpanNow() {
+  if (!lfoState) return null;
+  if (lfoSpan && lfoSpan[1] - lfoSpan[0] > 1e-4) return lfoSpan;
+  const xs = [...lfoSel].filter((i) => i < lfoState.points.length).map((i) => lfoState.points[i].x);
+  if (xs.length < 2) return null;
+  const a = Math.min(...xs);
+  const b = Math.max(...xs);
+  return b - a > 1e-4 ? [a, b] : null;
+}
+
+// How long the drawing is in cycles: a take's own length (its definition's `{ cycles }`, or the
+// loop of the `.record()` it was opened from when it has none). Null for an lfo's period.
+function lfoUnit() {
+  return lfoState?.takeLength ?? lfoState?.loopCycles ?? null;
+}
+
+const lfoRoundCycles = (v) => Math.round(v * 10000) / 10000; // sixteenths exactly (0.8125)
+
+// A span's edges land on sixteenths of a cycle (of the period, for an lfo), so a loop or a
+// duplicate keeps in step with the bar. alt places them freely.
+function lfoSnap(x, free = false) {
+  if (free) return x;
+  const grid = 1 / 16 / (lfoUnit() ?? 1);
+  return Math.min(1, Math.max(0, Math.round(x / grid) * grid));
+}
+
+// The names a `.record({ take })` can play this shape by: its own, or - for one axis of a pad's
+// take - the take's, which names both.
+function lfoTakeNames() {
+  const id = lfoState?.shapeId;
+  if (!id) return [];
+  const base = id.replace(/-[xy]$/, '');
+  return base === id ? [id] : [id, base];
+}
+
+// A pad's take is two shapes, one per axis, played together: an edit to the take's TIME (a span
+// duplicated or looped) is made to both, or the axes would stop lining up.
+function lfoPadSibling() {
+  const m = /^(.*)-([xy])$/.exec(lfoState?.shapeId ?? '');
+  if (!m) return null;
+  const id = `${m[1]}-${m[2] === 'x' ? 'y' : 'x'}`;
+  const code = lfoCM.getValue();
+  const def = shapeDefs.findDef(code, id);
+  if (!def) return null;
+  return { id, points: parseLfoCall(splitFirstArg(code.slice(def.open + 1, def.close))[1]).points };
+}
+
+/** Sets the loop of every `.record({ take })` playing one of `takes` to `cycles`. */
+function setRecordCycles(ed, takes, cycles) {
+  const code = ed.getValue();
+  const re = /\.\s*record\s*\(/g;
+  const edits = [];
+  let m;
+  while ((m = re.exec(code)) !== null) {
+    const open = m.index + m[0].length - 1;
+    const close = matchParen(code, open);
+    if (close < 0) continue;
+    const inner = code.slice(open + 1, close);
+    const take = /take\s*:\s*(["'])((?:\\.|(?!\1).)*)\1/.exec(inner);
+    if (!take || !takes.includes(take[2])) continue;
+    const c = /(cycles\s*:\s*)([\d.]+)/.exec(inner);
+    if (c) edits.push([open + 1 + c.index + c[1].length, open + 1 + c.index + c[0].length, String(cycles)]);
+    else if (inner.includes('{')) {
+      const at = open + 1 + inner.indexOf('{') + 1;
+      edits.push([at, at, ` cycles: ${cycles},`]);
+    }
+  }
+  for (const [a, b, text] of edits.reverse()) ed.replaceRange(text, ed.posFromIndex(a), ed.posFromIndex(b));
+}
+
+/**
+ * An edit that changes how long the drawing is: `fn(points)` returns the new points and the factor
+ * the length changed by. A take's length follows - its definition's `{ cycles }`, and the loop of
+ * the `.record()` calls that play it (`grow` keeps a loop that was padding the take, if it still
+ * holds it) - and a pad's other axis gets the same edit. One undo step.
+ */
+function lfoTimeEdit(fn, { grow = false, keepSeam = false } = {}) {
+  const unit = lfoUnit();
+  const loop = lfoState.loopCycles ?? unit;
+  const res = fn(lfoState.points, true);
+  lfoState.points = res.points;
+  lfoPreset.value = '';
+  lfoCM.operation(() => {
+    if (unit > 0 && lfoState.shapeId) {
+      const len = lfoRoundCycles(unit * res.factor);
+      const nextLoop = grow && loop > unit + 1e-9 ? Math.max(loop, len) : len;
+      lfoState.takeLength = len;
+      lfoState.loopCycles = nextLoop;
+      lfoSuppressCursor = true;
+      try {
+        const sib = lfoPadSibling();
+        if (sib) writeTakeShapes(lfoCM, [sib.id], [shapeMod.serializeShapePoints(fn(sib.points, false).points)], len);
+        setRecordCycles(lfoCM, lfoTakeNames(), nextLoop);
+      } finally {
+        lfoSuppressCursor = false;
+      }
+    }
+    writeLfoCall({ keepSeam });
+  });
+  drawLfoShape();
+}
+
+/** cmd-D: the span again, right after itself - time is inserted, and a take grows by the span. */
+function lfoDuplicateSpan() {
+  const span = lfoSpanNow();
+  if (!span || lfoState.axes) return false;
+  const [a, b] = span;
+  let grown = 1;
+  lfoTimeEdit((pts) => {
+    const r = shapeMod.duplicateShapeSpan(pts, a, b);
+    grown = r.grow;
+    return { points: r.points, factor: r.grow };
+  }, { grow: true });
+  // The copy is what's marked now, so the next cmd-D adds another after it.
+  lfoSel = new Set();
+  lfoSpan = [b / grown, (2 * b - a) / grown];
+  drawLfoShape();
+  return true;
+}
+
+/**
+ * cmd-L, or the menu: the span becomes the whole drawing, and a take's length - and its loop - the
+ * span's. Ends that differ are faded to meet halfway over the loop's first and last sixteenth
+ * (`plain` - alt - leaves the jump), and the fade is drawn until the next edit.
+ */
+function lfoLoopSpan(plain = false) {
+  const span = lfoSpanNow();
+  if (!span || lfoState.axes) return false;
+  const [a, b] = span;
+  let original = null;
+  lfoTimeEdit((pts, own) => {
+    const r = shapeMod.loopShapeSpan(pts, a, b, { seam: !plain });
+    if (own) original = r.original;
+    return { points: r.points, factor: b - a };
+  }, { keepSeam: true });
+  lfoSeam = original ? { original, fade: 1 / 16 } : null;
+  lfoClearSelection();
+  drawLfoShape();
+  return true;
+}
+
+function lfoCopySpan() {
+  const span = lfoSpanNow();
+  if (!span) return false;
+  lfoClip = { points: shapeMod.shapeSpan(lfoState.points, span[0], span[1]), width: (span[1] - span[0]) * (lfoUnit() ?? 1) };
+  return true;
+}
+
+/** cmd-V: the copied span over the drawing, from the marked span's start or the last click. */
+function lfoPaste() {
+  if (!lfoClip) return false;
+  const at = lfoSpanNow()?.[0] ?? lfoClickX ?? 0;
+  const width = lfoClip.width / (lfoUnit() ?? 1);
+  const r = shapeMod.pasteShapeSpan(lfoState.points, lfoClip.points, at, width);
+  lfoState.points = r.points;
+  lfoSel = new Set(r.placed);
+  lfoSpan = [at, Math.min(1, at + width)];
+  lfoPreset.value = '';
+  writeLfoCall();
+  drawLfoShape();
+  return true;
+}
+
+/** Delete: the selected points, all but the two ends, which the shape needs to span its period. */
+function lfoDeleteSelected() {
+  const last = lfoState.points.length - 1;
+  const gone = [...lfoSel].filter((i) => i > 0 && i < last);
+  if (!gone.length) return false;
+  lfoState.points = lfoState.points.filter((_, i) => !gone.includes(i));
+  lfoClearSelection();
+  lfoPreset.value = '';
+  writeLfoCall();
+  drawLfoShape();
+  return true;
+}
+
+function lfoReflectTool() {
+  lfoToolBtn.textContent = lfoTool === 'draw' ? '✏️' : '⬚';
+  lfoToolBtn.title = `${lfoTool} (B)`;
+  lfoCanvas.style.cursor = lfoTool === 'draw' ? CUR_PENCIL : '';
+}
+
+function lfoToggleTool() {
+  lfoTool = lfoTool === 'draw' ? 'select' : 'draw';
+  localStorage.setItem('poptartShapeTool', lfoTool);
+  lfoReflectTool();
+}
+
 function initLfoCanvas() {
+  lfoCanvas.tabIndex = 0; // so B, the selection's keys and undo reach it
+  lfoReflectTool();
+  lfoToolBtn.addEventListener('click', () => {
+    lfoToggleTool();
+    lfoCanvas.focus({ preventScroll: true });
+  });
+
   const canvasPos = (e) => {
     const r = lfoCanvas.getBoundingClientRect();
     return { px: e.clientX - r.left, py: e.clientY - r.top };
@@ -8017,28 +8333,125 @@ function initLfoCanvas() {
     return null;
   };
 
+  // On the line itself: a drag there bends the segment. Anywhere else in empty canvas selects.
+  const onCurve = (px, py) => {
+    const { x } = canvasToLfo(px, py);
+    return Math.abs(lfoToCanvas({ x, y: shapeMod.sampleShape(lfoState.points, x) }).py - py) < 10;
+  };
+
   lfoCanvas.addEventListener('pointerdown', (e) => {
-    if (!lfoState) return;
+    if (!lfoState || e.button !== 0) return; // the right button is the menu's
+    lfoCanvas.focus({ preventScroll: true });
     lfoCanvas.setPointerCapture(e.pointerId);
     const { px, py } = canvasPos(e);
-    const pointIdx = hitPoint(px, py);
-    lfoDrag = pointIdx != null ? { kind: 'point', index: pointIdx } : { kind: 'curve', index: segmentAt(px) };
-    // Ends that meet are dragged as a pair (see shape.mjs's moveShapeEnd). Decided once, as the
-    // drag starts, so a pair stays a pair however far it is carried.
-    const last = lfoState.points.length - 1;
-    lfoDrag.end = pointIdx === 0 || pointIdx === last;
-    // A transfer curve's ends are the loudest negative and positive input: nothing joins them.
-    // Only a shape in time wraps round from its end to its start, and only there do they pair.
-    lfoDrag.linked = lfoDrag.end && !lfoState.axes && shapeMod.shapeEndsMeet(lfoState.points);
     // What the engine is playing for this shape right now - the drawing the drag starts from.
-    lfoDrag.heard = lfoAsWritten(lfoState.points);
+    const heard = lfoAsWritten(lfoState.points);
+    if (lfoTool === 'draw') {
+      // The pencil: the stroke replaces whatever it passes over. A click is one point.
+      const p = canvasToLfo(px, py);
+      lfoClearSelection();
+      lfoDrag = { kind: 'pencil', base: lfoState.points.map((q) => ({ ...q })), cols: new Map([[Math.round(px), p]]), from: p, last: { px, y: p.y }, heard };
+      lfoState.points = shapeMod.drawShapeStroke(lfoDrag.base, [p]);
+      lfoPreset.value = '';
+      drawLfoShape();
+      lfoAuditionSoon();
+      return;
+    }
+    const pointIdx = hitPoint(px, py);
+    const last = lfoState.points.length - 1;
+    if (pointIdx != null) {
+      if (e.shiftKey && lfoSel.has(pointIdx)) {
+        // shift-click a selected point: out of the selection, nothing to drag
+        lfoSel.delete(pointIdx);
+        lfoDrag = null;
+        drawLfoShape();
+        return;
+      }
+      if (e.shiftKey) lfoSel.add(pointIdx);
+      else if (!lfoSel.has(pointIdx)) { lfoSel = new Set([pointIdx]); lfoSpan = null; }
+      if (lfoSel.size > 1) {
+        // Several points: they move together. A lone end in the group still carries a partner
+        // that meets it, as a single end does.
+        const ends = [0, last].filter((i) => lfoSel.has(i));
+        const linked = ends.length === 1 && !lfoState.axes && shapeMod.shapeEndsMeet(lfoState.points);
+        lfoDrag = { kind: 'points', base: lfoState.points.map((q) => ({ ...q })), from: { px, py }, end: linked, linkedEnd: linked ? ends[0] : null, heard };
+      } else {
+        lfoDrag = { kind: 'point', index: pointIdx };
+        // Ends that meet are dragged as a pair (see shape.mjs's moveShapeEnd). Decided once, as the
+        // drag starts, so a pair stays a pair however far it is carried.
+        lfoDrag.end = pointIdx === 0 || pointIdx === last;
+        // A transfer curve's ends are the loudest negative and positive input: nothing joins them.
+        // Only a shape in time wraps round from its end to its start, and only there do they pair.
+        lfoDrag.linked = lfoDrag.end && !lfoState.axes && shapeMod.shapeEndsMeet(lfoState.points);
+        lfoDrag.heard = heard;
+      }
+    } else if (onCurve(px, py)) {
+      lfoDrag = { kind: 'curve', index: segmentAt(px), heard };
+    } else {
+      // Empty canvas: a drag marks a span and selects the points inside it; a click clears the
+      // selection and leaves where a paste goes.
+      lfoClickX = lfoSnap(canvasToLfo(px, py).x, e.altKey);
+      if (!e.shiftKey) lfoClearSelection();
+      lfoDrag = { kind: 'marquee', from: { px, py }, to: { px, py }, keep: new Set(lfoSel), keepSpan: lfoSpan, moved: false };
+    }
+    drawLfoShape();
   });
 
   lfoCanvas.addEventListener('pointermove', (e) => {
-    if (!lfoDrag || !lfoState || lfoDrag.index == null) return;
+    if (!lfoDrag || !lfoState) return;
     const { px, py } = canvasPos(e);
     const pts = lfoState.points;
-    if (lfoDrag.kind === 'point' && lfoDrag.end) {
+    if (lfoDrag.kind === 'pencil') {
+      const p = canvasToLfo(px, py);
+      let stroke;
+      if (e.shiftKey) {
+        // shift: a straight line from where the stroke began
+        stroke = [lfoDrag.from, p].sort((u, v) => u.x - v.x);
+      } else {
+        // Every pixel column the pointer crossed since the last event, so a fast stroke has no gaps.
+        // Drawing back over a column redraws it.
+        const { px: lx, y: ly } = lfoDrag.last;
+        const c0 = Math.round(Math.min(lx, px));
+        const c1 = Math.round(Math.max(lx, px));
+        for (let c = c0; c <= c1; c++) {
+          const t = px === lx ? 1 : (c - lx) / (px - lx);
+          lfoDrag.cols.set(c, { x: canvasToLfo(c, 0).x, y: Math.min(1, Math.max(0, ly + (p.y - ly) * t)) });
+        }
+        lfoDrag.last = { px, y: p.y };
+        stroke = [...lfoDrag.cols.values()].sort((u, v) => u.x - v.x);
+      }
+      lfoState.points = shapeMod.drawShapeStroke(lfoDrag.base, stroke, 1.5 / (lfoCanvas.height - 2 * LFO_PAD));
+    } else if (lfoDrag.kind === 'marquee') {
+      lfoDrag.to = { px, py };
+      lfoDrag.moved ||= Math.abs(px - lfoDrag.from.px) > 3 || Math.abs(py - lfoDrag.from.py) > 3;
+      if (!lfoDrag.moved) return;
+      const x0 = Math.min(px, lfoDrag.from.px);
+      const x1 = Math.max(px, lfoDrag.from.px);
+      const y0 = Math.min(py, lfoDrag.from.py);
+      const y1 = Math.max(py, lfoDrag.from.py);
+      const sel = new Set(lfoDrag.keep);
+      pts.forEach((p, i) => {
+        const c = lfoToCanvas(p);
+        if (c.px >= x0 && c.px <= x1 && c.py >= y0 && c.py <= y1) sel.add(i);
+      });
+      lfoSel = sel;
+      const a = lfoSnap(canvasToLfo(x0, 0).x, e.altKey);
+      const b = lfoSnap(canvasToLfo(x1, 0).x, e.altKey);
+      lfoSpan = lfoDrag.keepSpan ? [Math.min(a, lfoDrag.keepSpan[0]), Math.max(b, lfoDrag.keepSpan[1])] : [a, b];
+      drawLfoShape();
+      return;
+    } else if (lfoDrag.kind === 'points') {
+      const dx = (px - lfoDrag.from.px) / (lfoCanvas.width - 2 * LFO_PAD);
+      const dy = -(py - lfoDrag.from.py) / (lfoCanvas.height - 2 * LFO_PAD);
+      const moved = shapeMod.moveShapePoints(lfoDrag.base, [...lfoSel], dx, dy);
+      if (lfoDrag.linkedEnd != null && !e.altKey) {
+        const other = lfoDrag.linkedEnd === 0 ? moved.length - 1 : 0;
+        moved[other].y = moved[lfoDrag.linkedEnd].y;
+      }
+      lfoState.points = moved;
+    } else if (lfoDrag.index == null) {
+      return;
+    } else if (lfoDrag.kind === 'point' && lfoDrag.end) {
       // An end keeps its x (the shape always spans the full period) and minds the other end: a
       // pair moves together, a lone end catches on the other's level within a few pixels. alt is
       // the way out of both, as it is for the slice editor's magnets.
@@ -8089,15 +8502,17 @@ function initLfoCanvas() {
   lfoCanvas.addEventListener('pointerup', (e) => {
     // The drag ends whatever the write does: a point left in hand cannot be put down.
     try {
-      if (lfoDrag && lfoState) writeLfoCall();
+      if (lfoDrag && lfoState && lfoDrag.kind !== 'marquee') writeLfoCall();
     } finally {
+      const was = lfoDrag;
       lfoDrag = null;
-      lfoCanvas.releasePointerCapture(e.pointerId);
+      if (lfoCanvas.hasPointerCapture(e.pointerId)) lfoCanvas.releasePointerCapture(e.pointerId);
+      if (was?.kind === 'marquee') drawLfoShape(); // the rectangle goes; the span it marked stays
     }
   });
 
   lfoCanvas.addEventListener('dblclick', (e) => {
-    if (!lfoState) return;
+    if (!lfoState || lfoTool !== 'select') return; // the pencil's click already adds a point
     const { px, py } = canvasPos(e);
     const pointIdx = hitPoint(px, py);
     const pts = lfoState.points;
@@ -8109,10 +8524,56 @@ function initLfoCanvas() {
       const at = pts.findIndex((p) => p.x > x);
       pts.splice(at === -1 ? pts.length - 1 : at, 0, { x, y, c: 0 });
     }
+    lfoClearSelection();
     lfoPreset.value = '';
     writeLfoCall();
     drawLfoShape();
   });
+
+  lfoCanvas.addEventListener('keydown', (e) => {
+    if (!lfoState) return;
+    const mod = editMod(e);
+    // By physical key: alt changes what e.key reads on a Mac (alt-cmd-L is "¬").
+    const key = e.code.startsWith('Key') ? e.code.slice(3).toLowerCase() : e.key;
+    let done = true;
+    if (key === 'b' && !mod && !e.altKey) lfoToggleTool();
+    else if (mod && key === 'z') { if (e.shiftKey) lfoCM.redo(); else lfoCM.undo(); }
+    else if (mod && key === 'a') {
+      lfoSel = new Set(lfoState.points.map((_, i) => i));
+      lfoSpan = [0, 1];
+      drawLfoShape();
+    } else if (mod && key === 'd') done = lfoDuplicateSpan();
+    else if (mod && key === 'l') done = lfoLoopSpan(e.altKey);
+    else if (mod && key === 'c') done = lfoCopySpan();
+    else if (mod && key === 'x') { done = lfoCopySpan(); if (done) lfoDeleteSelected(); }
+    else if (mod && key === 'v') done = lfoPaste();
+    else if (e.key === 'Delete' || e.key === 'Backspace') done = lfoDeleteSelected();
+    else if (e.key === 'Escape' && (lfoSel.size || lfoSpan)) {
+      // One layer at a time: the selection first, then (the document's handler) the panel.
+      lfoClearSelection();
+      drawLfoShape();
+      e.stopPropagation();
+    } else return;
+    // A verb with nothing to act on still owns its key while the shape has focus: cmd-D is not a
+    // bookmark and cmd-L is not the address bar here.
+    if (done || mod) e.preventDefault();
+    e.stopPropagation();
+  });
+
+  lfoCanvas.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    if (!lfoState || lfoState.axes || !lfoSpanNow()) return;
+    lfoMenu.style.zIndex = String(++panelFrontZ); // over the panel, whichever is in front
+    openCtxMenu(lfoMenu, e.clientX, e.clientY, {
+      items: [['loop this span', () => lfoLoopSpan(lfoMenuAlt)]],
+      after: () => lfoCanvas.focus({ preventScroll: true }),
+    });
+  });
+  lfoMenu.addEventListener('pointerdown', (e) => { lfoMenuAlt = e.altKey; }, true);
+  document.addEventListener('pointerdown', (e) => { if (!lfoMenu.contains(e.target)) lfoMenu.classList.add('hidden'); }, true);
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !lfoMenu.classList.contains('hidden')) { lfoMenu.classList.add('hidden'); e.stopPropagation(); }
+  }, true);
 }
 
 // ---------------------------------------------------------------------------------------------

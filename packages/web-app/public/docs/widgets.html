@@ -89,7 +89,9 @@ pad: note("&lt;c3 eb3 g3 bb2&gt;").synth("Wavetable")
           are one length, the whole cycles the phrase covers. A take keeps that length in its
           definition - <code>_shape("lead-take", "…", { cycles: 3 })</code> - so changing
           <code>cycles</code> in the call pads it with its last value, or cuts it, rather than stretching
-          it: <code>cycles: 4</code> rounds a three-cycle take out to a bar. The open piano roll
+          it: <code>cycles: 4</code> rounds a three-cycle take out to a bar. In the shape editor,
+          <kbd>⌘L</kbd> on a selected span loops just that stretch, and <kbd>⌘D</kbd> plays it twice; both
+          set the take's length and <code>cycles</code> to match. The open piano roll
           captures what was just played on its track as well. In DJ mode each deck's takes land in its
           own code, and capture can be learned onto a controller pad.
         </p>

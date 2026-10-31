@@ -102,6 +102,186 @@ export function moveShapeEnd(points, index, y, { linked = false, snap = 0 } = {}
   return out;
 }
 
+// The shape editor's span verbs: a stretch of the period, `a` to `b` in the shape's own 0..1, cut
+// out exactly - a curved segment split at a span's edge is two curves that draw the same line (a
+// stretch of an exponential is the same exponential, its curvature scaled by the stretch's share).
+// Every function returns new points; the ones passed in are never touched.
+
+const EPS = 1e-9;
+const near = (p, x) => Math.abs(p.x - x) < EPS;
+
+/** The shape with a breakpoint at `x` - unchanged where one already sits there. */
+export function splitShapeAt(points, x) {
+  const out = points.map((p) => ({ ...p }));
+  if (out.some((p) => near(p, x))) return out;
+  for (let i = 0; i < out.length - 1; i++) {
+    const a = out[i];
+    const b = out[i + 1];
+    if (x > a.x && x < b.x) {
+      const u = (x - a.x) / (b.x - a.x);
+      const c = a.c ?? 0;
+      a.c = c * u;
+      out.splice(i + 1, 0, { x, y: curveInterp(a.y, b.y, u, c), c: c * (1 - u) });
+      break;
+    }
+  }
+  return out;
+}
+
+// The shape cut at both edges, with where the span starts (the LAST point at `a`, so a step there
+// starts the span on its far side) and ends (the FIRST point at `b`).
+function cutSpan(points, a, b) {
+  const cut = splitShapeAt(splitShapeAt(points, a), b);
+  let ia = 0;
+  for (let i = 0; i < cut.length; i++) if (near(cut[i], a)) ia = i;
+  const ib = cut.findIndex((p) => near(p, b));
+  return { cut, ia, ib };
+}
+
+/** The breakpoints from `a` to `b`, x laid out over 0..1 of the span. */
+export function shapeSpan(points, a, b) {
+  const { cut, ia, ib } = cutSpan(points, a, b);
+  const span = cut.slice(ia, ib + 1).map((p) => ({ ...p, x: (p.x - a) / (b - a) }));
+  span[0].x = 0;
+  span[span.length - 1].x = 1;
+  return span;
+}
+
+/**
+ * The span `a`..`b` played twice, the copy right after it and everything later moved along: time is
+ * inserted, so the period is `1 + (b - a)` of what it was. `{ points, grow }` - the new shape, back
+ * in 0..1, and that factor, by which a take's length grows.
+ */
+export function duplicateShapeSpan(points, a, b) {
+  const w = b - a;
+  const { cut, ia, ib } = cutSpan(points, a, b);
+  const span = cut.slice(ia, ib + 1);
+  const grow = 1 + w;
+  const out = [
+    ...cut.slice(0, ia),
+    ...span,
+    ...span.map((p) => ({ ...p, x: p.x + w })),
+    ...cut.slice(ib + 1).map((p) => ({ ...p, x: p.x + w })),
+  ].map((p) => ({ ...p, x: p.x / grow }));
+  out[out.length - 1].x = 1;
+  return { points: out, grow };
+}
+
+/**
+ * `clip` (points over 0..1, as shapeSpan gives them) written over the shape from `at`, `width` long
+ * (cut short at the period's end). What was there is replaced; the shape steps into the clip and
+ * back out of it. `{ points, placed }` - the new shape, and the indices the clip landed on.
+ */
+export function pasteShapeSpan(points, clip, at, width) {
+  const b = Math.min(1, at + width);
+  if (!(b - at > EPS)) return { points: points.map((p) => ({ ...p })), placed: [] };
+  const part = b < at + width ? shapeSpan(clip, 0, (b - at) / width) : clip;
+  const span = part.map((p) => ({ ...p, x: at + p.x * (b - at) }));
+  const cut = splitShapeAt(splitShapeAt(points, at), b);
+  const ia = cut.findIndex((p) => near(p, at));
+  let ib = cut.length - 1;
+  for (let i = cut.length - 1; i >= 0; i--) if (near(cut[i], b)) { ib = i; break; }
+  const before = at <= EPS ? [] : cut.slice(0, ia + 1);
+  const after = b >= 1 - EPS ? [] : cut.slice(ib);
+  const out = [...before, ...span, ...after];
+  out[0].x = 0;
+  out[out.length - 1].x = 1;
+  return { points: out, placed: span.map((_, i) => before.length + i) };
+}
+
+/**
+ * The span `a`..`b` alone, as the whole period. With `seam` the two ends are brought to the level
+ * halfway between them, faded in over the first and out over the last `fade` of the loop, so the
+ * wrap is not a jump. `{ points, original }` - the new shape, and (when ends were faded) the shape
+ * as it was before the fade, for drawing what the fade changed.
+ */
+export function loopShapeSpan(points, a, b, { seam = true, fade = 1 / 16 } = {}) {
+  let out = shapeSpan(points, a, b);
+  const y0 = out[0].y;
+  const y1 = out[out.length - 1].y;
+  if (!seam || Math.abs(y0 - y1) < 1e-3) return { points: out, original: null };
+  out = splitShapeAt(splitShapeAt(out, fade), 1 - fade);
+  const original = out.map((p) => ({ ...p }));
+  const mid = (y0 + y1) / 2;
+  for (const p of out) {
+    const w = p.x < fade ? 1 - p.x / fade : p.x > 1 - fade ? 1 - (1 - p.x) / fade : 0;
+    p.y += (mid - p.y) * w;
+  }
+  return { points: out, original };
+}
+
+/**
+ * A pencil stroke drawn over the shape: `stroke` is the `{x, y}` it passed through, in x order. The
+ * points under it are replaced by the stroke, thinned to the ones that change its line by more than
+ * `tolerance`; the shape steps into the stroke and back out of it.
+ */
+export function drawShapeStroke(points, stroke, tolerance = 0.006) {
+  const a = stroke[0].x;
+  const b = stroke[stroke.length - 1].x;
+  if (b - a <= EPS) {
+    // A click: one point where it landed.
+    const out = points.map((p) => ({ ...p }));
+    const p = { x: a, y: clamp01(stroke[0].y), c: 0 };
+    if (a <= EPS || a >= 1 - EPS) out[a <= EPS ? 0 : out.length - 1].y = p.y;
+    else {
+      const at = out.findIndex((q) => q.x > a);
+      out.splice(at, 0, p);
+    }
+    return out;
+  }
+  const line = thin(stroke, tolerance).map((p) => ({ x: p.x, y: clamp01(p.y), c: 0 }));
+  const cut = splitShapeAt(splitShapeAt(points, a), b);
+  const ia = cut.findIndex((p) => near(p, a));
+  let ib = cut.length - 1;
+  for (let i = cut.length - 1; i >= 0; i--) if (near(cut[i], b)) { ib = i; break; }
+  const out = [...(a <= EPS ? [] : cut.slice(0, ia + 1)), ...line, ...(b >= 1 - EPS ? [] : cut.slice(ib))];
+  out[0].x = 0;
+  out[out.length - 1].x = 1;
+  return out;
+}
+
+// Ramer-Douglas-Peucker: the fewest points that stay within `tol` of the line drawn.
+function thin(pts, tol) {
+  if (pts.length <= 2) return pts.slice();
+  const a = pts[0];
+  const b = pts[pts.length - 1];
+  let worst = 0;
+  let at = 0;
+  for (let i = 1; i < pts.length - 1; i++) {
+    const p = pts[i];
+    const t = b.x === a.x ? 0 : (p.x - a.x) / (b.x - a.x);
+    const d = Math.abs(p.y - (a.y + (b.y - a.y) * t));
+    if (d > worst) { worst = d; at = i; }
+  }
+  if (worst <= tol) return [a, b];
+  return [...thin(pts.slice(0, at + 1), tol).slice(0, -1), ...thin(pts.slice(at), tol)];
+}
+
+/**
+ * The points at `indices` moved together by `dx`, `dy`: held inside 0..1 as a group, so the drawing
+ * keeps its shape, and never past a neighbor that isn't moving with them. The two ends keep their x.
+ */
+export function moveShapePoints(points, indices, dx, dy) {
+  const sel = new Set(indices);
+  const last = points.length - 1;
+  const moves = (i) => sel.has(i) && i > 0 && i < last;
+  let lo = -Infinity;
+  let hi = Infinity;
+  let ylo = -Infinity;
+  let yhi = Infinity;
+  for (const i of sel) {
+    const p = points[i];
+    ylo = Math.max(ylo, -p.y);
+    yhi = Math.min(yhi, 1 - p.y);
+    if (!moves(i)) continue;
+    if (!moves(i - 1)) lo = Math.max(lo, points[i - 1].x - p.x);
+    if (!moves(i + 1)) hi = Math.min(hi, points[i + 1].x - p.x);
+  }
+  const mx = Math.min(hi, Math.max(lo, dx));
+  const my = Math.min(yhi, Math.max(ylo, dy));
+  return points.map((p, i) => (sel.has(i) ? { ...p, x: moves(i) ? p.x + mx : p.x, y: p.y + my } : { ...p }));
+}
+
 // Automation breakpoints - the same `x,y[,c]` text as a shape, but x is an ABSOLUTE bar (cycle)
 // rather than a phase: "0,0 16,0 20,1,-2 32,0.3" holds 0 until bar 16, curves up to 1 by bar 20,
 // falls to 0.3 by bar 32. One pass over the arrangement, no period. Neither axis is clamped - x
