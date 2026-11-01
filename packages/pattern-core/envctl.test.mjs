@@ -3,7 +3,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { ENV_DEFAULTS, applyEnvEdits, envCallEdits, findEnvCallAt, readEnvCall } from './src/envctl.mjs';
+import { ENV_DEFAULTS, ENV_FLAGS, applyEnvEdits, envCallEdits, findEnvCallAt, readEnvCall } from './src/envctl.mjs';
 import { env } from './src/signal.mjs';
 
 /** The call around the first `env` in `code`, and `code` with `set` written into it. */
@@ -43,8 +43,8 @@ test('a missing setting reads as env()\'s own default', () => {
   assert.deepEqual(ENV_DEFAULTS, (({ attack, decay, sustain, release, curve }) => ({ attack, decay, sustain, release, curve }))(env().envIR));
   const code = 'gain(env({ attack: 0.05, retrigger: true }))';
   const read = readEnvCall(code, at(code));
-  assert.deepEqual(read.values, { ...ENV_DEFAULTS, attack: 0.05 });
-  assert.deepEqual(Object.keys(read.fields), ['attack']);
+  assert.deepEqual(read.values, { ...ENV_DEFAULTS, ...ENV_FLAGS, attack: 0.05, retrigger: true });
+  assert.deepEqual(Object.keys(read.fields), ['attack', 'retrigger']);
 });
 
 test('an existing literal is rewritten in place, other keys and layout untouched', () => {
@@ -75,7 +75,7 @@ test('env() with no argument gets an object written in', () => {
 test('a setting that is not a plain number is shown and never overwritten', () => {
   const code = 'gain(env({ attack: "<0.01 0.2>", decay: d, sustain: 0.5 * 2, release }))';
   const read = readEnvCall(code, at(code));
-  assert.deepEqual(read.values, ENV_DEFAULTS, 'the picture falls back to the defaults');
+  assert.deepEqual(read.values, { ...ENV_DEFAULTS, ...ENV_FLAGS }, 'the picture falls back to the defaults');
   assert.equal(read.fields.attack.text, '"<0.01 0.2>"');
   assert.equal(read.fields.attack.literal, false);
   assert.equal(read.fields.decay.text, 'd');
@@ -115,4 +115,17 @@ test('quoted keys and comments inside the object are read the way JavaScript rea
   assert.equal(read.values.attack, 0.3);
   assert.equal(read.values.release, 1);
   assert.equal(write(code, { release: 2 }).code, 'env({ /* soft */ "attack": 0.3, \'release\': 2 /* long */ })');
+});
+
+test('retrigger is an on/off setting, on unless the call says false', () => {
+  assert.equal(env().envIR.retrigger, true);
+  assert.equal(env({ retrigger: false }).envIR.retrigger, false);
+  assert.equal(write('env({ attack: 0.8, curve: 3 })', { retrigger: false }).code, 'env({ attack: 0.8, curve: 3, retrigger: false })');
+  assert.equal(write('env({ attack: 0.8, retrigger: false })', { retrigger: true }).code, 'env({ attack: 0.8, retrigger: true })');
+  assert.equal(write('env()', { retrigger: false }).code, 'env({ retrigger: false })');
+  assert.equal(write('env({ attack: 0.8 })', { retrigger: true }).code, 'env({ attack: 0.8 })');
+  const code = 'env({ attack: 0.8 })';
+  assert.equal(readEnvCall(code, at(code)).values.retrigger, true);
+  const named = 'env({ retrigger: r })';
+  assert.deepEqual(write(named, { retrigger: false }).skipped, ['retrigger']);
 });

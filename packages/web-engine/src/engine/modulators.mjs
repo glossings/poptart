@@ -605,7 +605,8 @@ export class LfoConnection {
  * gated by the track's HELD-NOTE COUNT rather than by each note - the engine opens it on the first
  * held note and closes it when the last one ends, so a chord does not release on its first note
  * off. A re-opened gate attacks from wherever the envelope is, never from the floor, which is what
- * keeps a note landing mid-release from clicking. The breakpoints written are remembered, since a
+ * keeps a note landing mid-release from clicking - unless it retriggers, when every note starts
+ * from the floor. The breakpoints written are remembered, since a
  * parameter cannot be asked where a ramp has got to ahead of time.
  */
 export class EnvConnection {
@@ -665,7 +666,13 @@ export class EnvConnection {
     const t = Math.max(this.ctx.currentTime, atTime ?? this.ctx.currentTime);
     const held = min + (max - min) * Math.min(1, Math.max(0, sustain));
     try {
-      const from = this._holdAt(t);
+      // One that retriggers starts every note from the floor, as the desktop's does.
+      let from = this._holdAt(t);
+      if (this.ir.retrigger) {
+        this.target.setValueAtTime(min, t);
+        this.points.push({ time: t, value: min });
+        from = min;
+      }
       const peakAt = writeSegment(this.target, this.points, from, max, t, attack, curve);
       writeSegment(this.target, this.points, max, held, peakAt, decay, curve);
     } catch { /* a parameter already scheduled past this point */ }

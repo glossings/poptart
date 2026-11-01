@@ -19,6 +19,11 @@ export const ENV_DEFAULTS = Object.freeze({ attack: 0.01, decay: 0.1, sustain: 0
 /** The settings the editor draws and writes, in the order it writes new ones. */
 export const ENV_KEYS = Object.freeze(Object.keys(ENV_DEFAULTS));
 
+/** The on/off settings, and what each is when the call leaves it out. */
+export const ENV_FLAGS = Object.freeze({ retrigger: true });
+
+const BOOL_RE = /^(?:true|false)$/;
+
 const NUM_RE = /^[-+]?(?:\d+\.?\d*|\.\d+)(?:e[-+]?\d+)?$/i;
 const KEY_RE = /^(?:([A-Za-z_$][\w$]*)|"([^"\\]*)"|'([^'\\]*)')/;
 
@@ -161,6 +166,13 @@ function field(code, from, to, chained = false) {
   return { text, literal, value: literal ? Number(text) : null, from, to, chained };
 }
 
+/** An on/off setting as written: only a bare `true` or `false` is the editor's to rewrite. */
+function flagField(code, from, to) {
+  const text = code.slice(from, to);
+  const literal = BOOL_RE.test(text);
+  return { text, literal, value: literal ? text === 'true' : null, from, to, chained: false };
+}
+
 /**
  * What an env(...) call sets. `call` is findEnvCallAt's answer.
  *
@@ -172,7 +184,7 @@ function field(code, from, to, chained = false) {
 export function readEnvCall(code, call) {
   const text = String(code);
   const kind = lex(text);
-  const values = { ...ENV_DEFAULTS };
+  const values = { ...ENV_DEFAULTS, ...ENV_FLAGS };
   const fields = {};
   let arg;
   const a = skipSpace(text, kind, call.open + 1, call.close);
@@ -191,8 +203,9 @@ export function readEnvCall(code, call) {
       const lead = last ? text.slice(lineStart, last.from) : '';
       arg = { kind: 'object', open: a, close: braceClose, entries, multiline, indent: /^\s*$/.test(lead) ? lead : '  ' };
       for (const entry of entries) {
-        if (!entry.key || !ENV_KEYS.includes(entry.key)) continue;
-        fields[entry.key] = field(text, entry.valueFrom, entry.valueTo);
+        if (!entry.key) continue;
+        if (ENV_KEYS.includes(entry.key)) fields[entry.key] = field(text, entry.valueFrom, entry.valueTo);
+        else if (entry.key in ENV_FLAGS) fields[entry.key] = flagField(text, entry.valueFrom, entry.valueTo);
       }
     } else {
       arg = { kind: 'opaque', text: text.slice(a, trimEnd(text, kind, a, call.close)) };
@@ -234,11 +247,19 @@ export function envCallEdits(code, call, set) {
   const edits = [];
   const skipped = [];
   const added = [];
-  for (const key of ENV_KEYS) {
+  for (const key of [...ENV_KEYS, ...Object.keys(ENV_FLAGS)]) {
     if (!(key in set)) continue;
-    const num = Number(set[key]);
-    if (!Number.isFinite(num)) continue;
-    const value = formatCtl(num);
+    let value;
+    if (key in ENV_FLAGS) {
+      if (typeof set[key] !== 'boolean') continue;
+      // What a call that leaves it out already says.
+      if (set[key] === ENV_FLAGS[key] && !fields[key]) continue;
+      value = String(set[key]);
+    } else {
+      const num = Number(set[key]);
+      if (!Number.isFinite(num)) continue;
+      value = formatCtl(num);
+    }
     const f = fields[key];
     if (f) {
       if (f.literal) {

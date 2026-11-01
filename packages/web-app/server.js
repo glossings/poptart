@@ -6977,10 +6977,8 @@ const LIVE_DEVICE_FIGURES = new Set(['sample', 'meter', 'transfer', 'eq', 'shape
  * readout, and the pictures redrawn with them - the browser host's deviceLive, from the UGen's
  * report instead of the processor's.
  *
- * An equalizer's curve is drawn over what the mixer's analyzer hears of the track, when the mixer
- * is analyzing it: a window does not start an analyzer of its own (the mixer's are budgeted -
- * see mixTapLabels), so with the mixer closed the curve is drawn alone. And the analyzer hears the
- * track's output, after the whole chain, where the browser's taps the equalizer itself.
+ * An equalizer's curve is drawn over its own output's spectrum, which the device measures and
+ * sends with its report (own/dsp/spectrum.h), as the browser's does.
  */
 // The latest live report of each open window's device, by `track|slot`: what a picture redrawn for
 // a knob being moved is drawn with too. Without it a ducker's lane, which lays itself on the beat
@@ -7000,15 +6998,7 @@ function deviceLiveBody(state, live, trackLabel, slot = null) {
       values[p.id] = { value, position, text: kit.descriptor.formatValue(p, value, state.extras?.[p.id] ?? null) };
     }
   }
-  let report = live.report;
-  if ((descriptor.figures ?? []).some((f) => f.kind === 'eq')) {
-    const bands = mixSpecs.get(trackLabel);
-    const freqs = engine?.mixBandFreqs?.() ?? [];
-    if (bands?.length && freqs.length === bands.length) {
-      const db = (a) => (a > 0 ? Math.max(-120, 20 * Math.log10(a)) : -120);
-      report = { ...(report ?? {}), spectrum: freqs.map((hz, i) => ({ hz, db: db(Math.max(bands[i][0], bands[i][1])) })) };
-    }
-  }
+  const report = live.report;
   if (slot != null) lastLiveReports.set(`${trackLabel}|${slot}`, report ?? null);
   const opts = { ...deviceFigureOpts(state), report };
   const figures = (descriptor.figures ?? [])
@@ -8534,14 +8524,6 @@ const routes = {
     // A shape the evaluation redefined reaches the devices already on it, playing or not.
     engine.refreshNamedShapes?.();
 
-    // Pairs with the event-loop watchdog above: an evaluation that held the process this long
-    // starved the scheduler of the OTHER deck too, and the terminal should name the culprit.
-    const evalMs = performance.now() - evalT0;
-    if (evalMs > 100) {
-      // eslint-disable-next-line no-console
-      console.warn(`[poptart] evaluate (deck ${deck}) took ${Math.round(evalMs)}ms`);
-    }
-
     const tracks = built.map((b) => ({
       label: b.label,
       key: keyOf(b), // what this track is called server-side (deck b keys are "b:<label>", a monitored one's "<label>~M")
@@ -8564,6 +8546,14 @@ const routes = {
       paramNames: paramLabels(b.sig),
       grid: active.includes(b) ? highlightGrid(b.sig, b.start, b.end, gridFrom, HL_WINDOW, b.trackClock ?? arrangeClocks[deck]) : null,
     }));
+    // Pairs with the event-loop watchdog above: an evaluation that held the process this long
+    // starved the scheduler of the OTHER deck too, and the terminal should name the culprit.
+    // Timed after the highlight grid, which reads every track for a window of cycles.
+    const evalMs = performance.now() - evalT0;
+    if (evalMs > 100) {
+      // eslint-disable-next-line no-console
+      console.warn(`[poptart] evaluate (deck ${deck}) took ${Math.round(evalMs)}ms`);
+    }
     // The clock starts now that everything above is in place (see scheduleFrom), and this
     // eval's schedulers with it, their windows opening on its start position.
     if (starting) {

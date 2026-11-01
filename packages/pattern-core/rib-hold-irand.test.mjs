@@ -282,3 +282,16 @@ test('controls chained AFTER .rib() stay outside the loop', () => {
   const sig = n('0').rib(2, 1).gain('<0 1 2 3>');
   assert.equal(Number(sig.channel.gain.sample(5, 1, 5)), 1, 'post-rib gain keeps evolving (cycle 5 mod 4)');
 });
+
+// A band shorter than a cycle loops the same source cycle several times within one output cycle;
+// it is read once, not once per loop.
+test('a short rib band reads its source cycle once', () => {
+  const src = note('c3 e3 g3 b3');
+  let reads = 0;
+  const steps = src.stepsForCycle;
+  src.stepsForCycle = (c) => { reads++; return steps(c); };
+  const looped = src.rib(0, 3 / 16);
+  looped.stepsForCycle(0);
+  assert.equal(reads, 1);
+  assert.equal(looped.stepsForCycle(0).filter((st) => st.value != null && !st.cont).length, 6);
+});

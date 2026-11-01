@@ -22,7 +22,7 @@ import { normalize } from './descriptor.mjs';
 import { curveShape } from './dsp/adsr.mjs';
 import { gainComputer } from './devices/compressor.mjs';
 import { drawnWindow, grainWindow } from './devices/granular.mjs';
-import { BIQUAD_TYPES, biquadCoefficients, biquadMagnitude } from './dsp/biquad.mjs';
+import { BIQUAD_TYPES, biquadMagnitude, biquadSections, sectionCoefficients } from './dsp/biquad.mjs';
 import { FILTER_MODES, MultiFilter } from './dsp/filters.mjs';
 import { fillUnison } from './dsp/oscillator.mjs';
 import { WARP_MODES, crossModOf, warpPhase } from './dsp/warp.mjs';
@@ -545,9 +545,13 @@ function eqFigure(figure, read, sampleRate, descriptor, report = null) {
     const hz = read(`freq${b}`) ?? 1000;
     const gainDb = read(`gain${b}`) ?? 0;
     const q = read(`q${b}`) ?? 1;
+    const slope = Math.round(read(`slope${b}`) ?? 0);
     const typeName = BIQUAD_TYPES[type] ?? BIQUAD_TYPES[0];
     const hasGain = typeName === 'peak' || typeName === 'lowshelf' || typeName === 'highshelf';
-    coeffs.push(Float64Array.from(biquadCoefficients(type, hz, gainDb, q, sampleRate, scratch)));
+    const sections = biquadSections(type, slope);
+    for (let s = 0; s < sections; s++) {
+      coeffs.push(Float64Array.from(sectionCoefficients(type, hz, gainDb, q, sections, s, sampleRate, scratch)));
+    }
     // The Q is the one control of a band that is not a place on the curve, so it has no axis to
     // be dragged along - the panel puts it on the wheel instead, and needs to know where it
     // sits on its own knob to move it from there.

@@ -2067,6 +2067,28 @@
           ]
         },
         {
+          "id": "band1.slope",
+          "name": "Band 1 Slope",
+          "min": 0,
+          "max": 5,
+          "default": 0,
+          "step": 1,
+          "curve": "lin",
+          "curveExp": 2,
+          "unit": "",
+          "ui": "enum",
+          "group": "Band 1",
+          "rate": "k",
+          "options": [
+            "12",
+            "24",
+            "36",
+            "48",
+            "72",
+            "96"
+          ]
+        },
+        {
           "id": "band1.freq",
           "name": "Band 1 Freq",
           "min": 20,
@@ -2130,6 +2152,28 @@
             "bandpass",
             "notch",
             "allpass"
+          ]
+        },
+        {
+          "id": "band2.slope",
+          "name": "Band 2 Slope",
+          "min": 0,
+          "max": 5,
+          "default": 0,
+          "step": 1,
+          "curve": "lin",
+          "curveExp": 2,
+          "unit": "",
+          "ui": "enum",
+          "group": "Band 2",
+          "rate": "k",
+          "options": [
+            "12",
+            "24",
+            "36",
+            "48",
+            "72",
+            "96"
           ]
         },
         {
@@ -2199,6 +2243,28 @@
           ]
         },
         {
+          "id": "band3.slope",
+          "name": "Band 3 Slope",
+          "min": 0,
+          "max": 5,
+          "default": 0,
+          "step": 1,
+          "curve": "lin",
+          "curveExp": 2,
+          "unit": "",
+          "ui": "enum",
+          "group": "Band 3",
+          "rate": "k",
+          "options": [
+            "12",
+            "24",
+            "36",
+            "48",
+            "72",
+            "96"
+          ]
+        },
+        {
           "id": "band3.freq",
           "name": "Band 3 Freq",
           "min": 20,
@@ -2262,6 +2328,28 @@
             "bandpass",
             "notch",
             "allpass"
+          ]
+        },
+        {
+          "id": "band4.slope",
+          "name": "Band 4 Slope",
+          "min": 0,
+          "max": 5,
+          "default": 0,
+          "step": 1,
+          "curve": "lin",
+          "curveExp": 2,
+          "unit": "",
+          "ui": "enum",
+          "group": "Band 4",
+          "rate": "k",
+          "options": [
+            "12",
+            "24",
+            "36",
+            "48",
+            "72",
+            "96"
           ]
         },
         {

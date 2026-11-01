@@ -204,3 +204,38 @@ test('a roll in slice mode chops on its EVENTS, with no channel to read at all',
   some.sampler = {};
   assert.deepEqual(gridOf(some)[0].steps.map((s) => s.chop?.slice), [1, undefined]);
 });
+
+// client.js's side of the grid: a function read out of the page script, as above.
+function clientFn(name) {
+  const src = fs.readFileSync(path.join(__dirname, 'public', 'client.js'), 'utf8');
+  const at = src.indexOf(`function ${name}(`);
+  assert.ok(at > 0, `${name} not found in client.js - this test needs updating`);
+  let depth = 0;
+  let end = src.indexOf('{', at);
+  for (let i = end; i < src.length; i++) {
+    if (src[i] === '{') depth++;
+    else if (src[i] === '}' && --depth === 0) { end = i + 1; break; }
+  }
+  return src.slice(at, end);
+}
+
+test('every atom the grid can light is split off when the grid arrives, not when it sounds', () => {
+  // Lighting an atom gives it a span of its own, and a new span shifts the rest of the line by a
+  // fraction of a pixel - a steps() row after it hopped on every hit. So the split is made once,
+  // up front, and a hit only adds a class to a span that is already there.
+  // eslint-disable-next-line no-new-func
+  const ingestGrid = new Function(`${clientFn('ingestGrid')}; ${clientFn('markAtom')}; return ingestGrid;`)();
+  const made = [];
+  const cm = {
+    operation: (f) => f(),
+    indexFromPos: (p) => p,
+    posFromIndex: (i) => i,
+    markText: (from, to, opts) => { made.push([from, to, opts.className]); return { clear() {} }; },
+  };
+  const region = { cm, anchor: { find: () => ({ from: 100 }) }, grid: new Map(), gates: new Map(), maxEnd: 1, atoms: new Map() };
+  ingestGrid(region, [
+    { cycle: 0, steps: [{ start: 0, end: 0.5, locs: [[3, 6], [20, 21]] }, { start: 0.5, end: 1, locs: [[3, 6]] }] },
+  ]);
+  ingestGrid(region, [{ cycle: 1, steps: [{ start: 0, end: 1, locs: [[3, 6], [24, 25]] }] }]);
+  assert.deepEqual(made, [[103, 106, 'cm-atom'], [120, 121, 'cm-atom'], [124, 125, 'cm-atom']]);
+});

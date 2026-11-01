@@ -198,7 +198,7 @@ const API_DOCS = {
   env: {
     kind: 'builder',
     sig: 'env({ attack, decay, sustain, release, curve, retrigger }) | env(source, { attack, release })',
-    desc: 'With options: an ADSR envelope on each note; double-click the name to draw it. Times in seconds, sustain from 0 to 1, curve negative exponential to positive bowed, retrigger: true restarts it every note. With a source (a track, bus, input or audio signal): that source\'s level from 0 to 1, with attack and release (0.01 and 0.25 by default).',
+    desc: 'With options: an ADSR envelope on each note; double-click the name to draw it. Times in seconds, sustain from 0 to 1, curve negative exponential to positive bowed, it restarts every note unless retrigger: false. With a source (a track, bus, input or audio signal): that source\'s level from 0 to 1, with attack and release (0.01 and 0.25 by default).',
     eg: 'gain(env("kick", { release: 0.3 }).mul(-1).add(1))',
   },
   dur: {
@@ -493,7 +493,7 @@ const API_DOCS = {
   set: {
     kind: 'both',
     sig: 'set(x, ...)',
-    desc: `Replaces each value with x; .set(vel(0.5)) sets the velocity. ${BINOP_FORMS('set')}`,
+    desc: `Replaces each value with x; .set(vel(0.5)) sets the velocity. At the head of a chain, set(a, b) plays its layers together, each with its own sound and settings: set(s("808c").note("F3"), s("bd")).struct("x*4"). ${BINOP_FORMS('set')}`,
     eg: '.set(note(30).clip(2), add(note(12)).vel(0.7))',
   },
   add: { kind: 'both', sig: 'add(x, ...)', desc: `Adds x to each value. On notes, .add(2) is two semitones and .add(n(2)) two scale steps. ${BINOP_FORMS('add')}`, eg: '.add(n("<0 2 -1>"))' },

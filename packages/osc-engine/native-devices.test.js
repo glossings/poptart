@@ -328,6 +328,22 @@ test('a control something else is driving says so, and says what', () => {
   assert.deepStrictEqual(e.deviceSlot('drums', 1).driven, {});
 });
 
+test('a modulator cleared after its slot is emptied goes out under the name it was set under', () => {
+  // Dropping a `.fx()` unloads the slot before the scheduler clears what drove it. sclang files a
+  // driver under the control's id, so a clear spelled as written found nothing and the LFO kept
+  // running - and was still there, writing its bus, when the effect came back.
+  const { e, sent } = engine();
+  e.loadEffect('riff', 'Filter', 1);
+  e.setParamLFO('riff', 1, 'Cutoff', { shape: 'sine', rateHz: 1, phaseCycles: 0, min: 0, max: 1 });
+  e.unloadEffect('riff', 1);
+  e.clearParamLFO('riff', 1, 'Cutoff');
+  e.clearParamEnv('riff', 1, 'Cutoff');
+  const name = (addr) => sent.find((m) => m.addr === addr).args[2];
+  assert.strictEqual(name('/poptart/setParamLFO'), 'cutoff');
+  assert.strictEqual(name('/poptart/clearParamLFO'), 'cutoff');
+  assert.strictEqual(name('/poptart/clearParamEnv'), 'cutoff');
+});
+
 // ---------------------------------------------------------------------------------------------
 // A file on a device's control: `.param("sample", "break:2")`.
 //

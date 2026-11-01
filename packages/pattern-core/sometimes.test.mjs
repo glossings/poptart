@@ -53,3 +53,16 @@ test('the share can be a pattern, read at the events', () => {
 test('a callback is required', () => {
   assert.throws(() => s('bd').sometimes(0.5), /takes a share and a callback/);
 });
+
+// Each side is read once per cycle, however many stretches the coin cuts it into: a costly chain
+// under .sometimes() used to be read once per stretch, which held up the whole engine.
+test('sometimes reads the pattern it wraps once per cycle', () => {
+  const base = s('hh*16');
+  let reads = 0;
+  const steps = base.stepsForCycle;
+  base.stepsForCycle = (c) => { reads++; return steps(c); };
+  const track = base.sometimes(0.5, (x) => x.speed(2));
+  for (let c = 0; c < 8; c++) track.stepsForCycle(c);
+  // Once for the pattern, once inside the callback's result.
+  assert.equal(reads, 16);
+});

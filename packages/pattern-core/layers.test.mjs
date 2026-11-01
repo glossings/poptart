@@ -252,3 +252,49 @@ test('the scheduler fires a layered sampler with each layer\'s own config', () =
   assert.deepEqual(played.map((c) => c.args[2].speed), [2, undefined]);
   assert.deepEqual(played.map((c) => c.args[2].note), [undefined, 67]);
 });
+
+// ---------------------------------------------------------------------------------------------
+// set(a, b) with nothing before it: the layers played together
+// ---------------------------------------------------------------------------------------------
+
+const cfgsAt = (sig, cycle = 0) =>
+  sig.stepsForCycle(cycle).filter((st) => st.value != null).map((st) => [st.start, st.value, st.cfg ?? null]);
+
+test('set(a, b) at the head plays every layer, each with its own sound and channels', () => {
+  const sig = set(s('808c').i(1).note('F3'), s('bd').i(4)).struct('1 ~ 1 ~');
+  assert.deepEqual(cfgsAt(sig), [
+    [0, '808c', { note: 65, index: 1 }], [0, 'bd', { index: 4 }],
+    [0.5, '808c', { note: 65, index: 1 }], [0.5, 'bd', { index: 4 }],
+  ]);
+});
+
+test('set(a, b) keeps each layer on its own rhythm', () => {
+  const sig = set(s('bd*2'), s('hh*4'));
+  assert.deepEqual(cfgsAt(sig).map(([at, v]) => [at, v]), [[0, 'bd'], [0.5, 'bd'], [0, 'hh'], [0.25, 'hh'], [0.5, 'hh'], [0.75, 'hh']]);
+});
+
+test('a control after set(a, b) reaches every layer, replacing what the layers set', () => {
+  const sig = set(s('808c').i(1), s('bd').i(4)).i(9);
+  assert.deepEqual(cfgsAt(sig).map(([, v, cfg]) => [v, cfg]), [['808c', null], ['bd', null]]);
+  assert.equal(sig.sampler.index.sample(0, 1, 0), 9);
+});
+
+test('set(a, b) of synth layers keeps each layer\'s velocity on its own notes', () => {
+  const g = set(note('c3 e3').vel(0.5), note('g2')).stepsForCycle(0);
+  assert.deepEqual(g.map((st) => [st.value, st.vel ?? null]), [[60, 0.5], [64, 0.5], [55, null]]);
+});
+
+test('set(a, b) refuses to mix sample layers and note layers', () => {
+  assert.throws(() => set(note('c3'), s('bd')), /either samples or notes/);
+});
+
+test('add(a, b) at the head says only its first argument is used', () => {
+  const said = [];
+  setPatternWarn((m) => said.push(m));
+  try {
+    add(note(12), note(7));
+  } finally {
+    setPatternWarn(null);
+  }
+  assert.ok(said.some((m) => /only its first argument/.test(m)));
+});

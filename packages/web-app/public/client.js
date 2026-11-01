@@ -4228,6 +4228,12 @@ function deviceNumber(widget, { onDrag, onCommit, register }) {
   if (widget.modulatedBy) return box;
 
   const clamp = (v) => Math.min(widget.max, Math.max(widget.min, Math.round(v / step) * step));
+  // A box with a `sweep` { max, exp } drags along a knob's pow curve instead of in steps - a full
+  // turn from `min` to `max` over the knob's 150 pixels - and keeps going past `max`, so an
+  // open-ended time reaches seconds in one gesture. Steps would take metres of pointer.
+  const sweep = widget.sweep;
+  const sweepPos = (v) => Math.pow(Math.max(0, v - widget.min) / sweep.max, 1 / sweep.exp);
+  const sweepValue = (pos) => clamp(widget.min + sweep.max * Math.pow(Math.max(0, pos), sweep.exp));
   box.addEventListener('pointerdown', (e) => {
     if (box.querySelector('input')) return;
     e.preventDefault();
@@ -4238,9 +4244,11 @@ function deviceNumber(widget, { onDrag, onCommit, register }) {
     const v0 = value;
     let moved = false;
     // Six pixels a step, a quarter of that with shift held, the same way the knobs go fine.
+    const p0 = sweep ? sweepPos(v0) : 0;
     const move = (ev) => {
       const px = ev.shiftKey ? 24 : 6;
-      const next = clamp(v0 + Math.round((y0 - ev.clientY) / px) * step);
+      const next = sweep ? sweepValue(p0 + (y0 - ev.clientY) / (ev.shiftKey ? 1200 : 150))
+        : clamp(v0 + Math.round((y0 - ev.clientY) / px) * step);
       if (next === value) return;
       moved = true;
       value = next;
@@ -4291,7 +4299,10 @@ function deviceNumber(widget, { onDrag, onCommit, register }) {
   });
   box.addEventListener('wheel', (e) => {
     e.preventDefault();
-    value = clamp(value + (e.deltaY < 0 ? 1 : -1) * step);
+    const dir = e.deltaY < 0 ? 1 : -1;
+    // At least a step, so the wheel can leave zero, where the curve is flat.
+    const swept = sweep ? sweepValue(sweepPos(value) + dir * (e.shiftKey ? 0.002 : 0.02)) : value;
+    value = swept !== value ? swept : clamp(value + dir * step);
     onCommit(value, paint);
   }, { passive: false });
   return box;
@@ -18539,7 +18550,7 @@ let playing = false;
 // Each region carries the editor it lives in: deck A's regions mark the main cm, deck B's mark
 // the split pane's (mix mode) - one ticker lights both. `label` is the SERVER key ("b:kick" for
 // deck B), which is how /api/highlight top-ups find their region again.
-let patternRegions = []; // { label, deck, cm, anchor, grid: Map<cycle, steps>, gates: Map<cycle, [pos]>, maxEnd, lastKey, marks: [] }
+let patternRegions = []; // { label, deck, cm, anchor, grid: Map<cycle, steps>, gates: Map<cycle, [pos]>, maxEnd, lastKey, marks: [], atoms: Map<loc key, mark> }
 // The window of cycles each deck's regions hold, counted on that deck's own clock - two decks at
 // different tempos are on different cycles. `from`: the first cycle covered by every region's
 // grid; `to`: one past the last (extended by /api/highlight top-ups); `fetching`: a top-up request
@@ -18559,6 +18570,7 @@ function clearPatternRegions(deck = null) {
     }
     r.anchor.clear();
     for (const mk of r.marks) mk.clear();
+    for (const mk of r.atoms.values()) mk.clear();
   }
   patternRegions = kept;
 }
@@ -18576,7 +18588,7 @@ function setupHighlighting(tracks, from, count, deck = 'a', editor = cm) {
     const anchor = editor.markText(editor.posFromIndex(t.start), editor.posFromIndex(t.end), {});
     const region = {
       label: t.key ?? t.label, deck, cm: editor,
-      anchor, grid: new Map(), gates: new Map(), maxEnd: 1, lastKey: '', marks: [],
+      anchor, grid: new Map(), gates: new Map(), maxEnd: 1, lastKey: '', marks: [], atoms: new Map(),
     };
     ingestGrid(region, t.grid);
     patternRegions.push(region);
@@ -18586,13 +18598,33 @@ function setupHighlighting(tracks, from, count, deck = 'a', editor = cm) {
 // Folds a grid window ([{ cycle, steps }]) into a region, tracking the longest step end so the
 // look-back in highlightTick reaches a note still ringing from an earlier cycle (clip/tie/echo).
 function ingestGrid(region, grid) {
-  for (const g of grid) {
-    region.grid.set(g.cycle, g.steps);
-    // The track's note onsets, kept apart from the lit spans: they are what a note-gated lfo()
-    // shape restarts on, and nothing else on this side needs them (see lfoPhaseNow).
-    region.gates.set(g.cycle, g.gates ?? []);
-    for (const s of g.steps) if (s.end > region.maxEnd) region.maxEnd = s.end;
-  }
+  region.cm.operation(() => {
+    for (const g of grid) {
+      region.grid.set(g.cycle, g.steps);
+      // The track's note onsets, kept apart from the lit spans: they are what a note-gated lfo()
+      // shape restarts on, and nothing else on this side needs them (see lfoPhaseNow).
+      region.gates.set(g.cycle, g.gates ?? []);
+      for (const s of g.steps) {
+        if (s.end > region.maxEnd) region.maxEnd = s.end;
+        for (const l of s.locs) markAtom(region, l);
+      }
+    }
+  });
+}
+
+// Every atom the grid can light is split into a span of its own up front (an unstyled cm-atom
+// mark). A split moves the rest of the line by a fraction of a pixel, so splitting on each hit
+// made a box after the atom (a steps() row) hop a pixel every time it sounded. Split once here
+// and lighting only changes a class.
+function markAtom(region, loc) {
+  const key = loc[0] + '-' + loc[1];
+  if (loc[1] <= loc[0] || region.atoms.has(key)) return;
+  const range = region.anchor.find();
+  if (!range) return;
+  const base = region.cm.indexFromPos(range.from);
+  region.atoms.set(key, region.cm.markText(region.cm.posFromIndex(base + loc[0]), region.cm.posFromIndex(base + loc[1]), {
+    className: 'cm-atom',
+  }));
 }
 
 // Request the next grid window as the clock nears the end of what we hold - patterns that vary per
@@ -27979,12 +28011,12 @@ const ENV_MOD_EVAL_DEBOUNCE_MS = 150; // the shape editor's: a setting is heard 
 
 // The number boxes, in the order env() lists its settings. Unbounded where env() is: a time is
 // never negative and a sustain is a level, but nothing caps how long a stage runs or how hard a
-// curve bends.
+// curve bends. A time drags on the device envelope knobs' own curve (wavetable.mjs's `seconds`).
 const ENV_MOD_FIELDS = [
-  { id: 'attack', min: 0, max: Infinity, step: 0.001, decimals: 3, unit: 's', description: 'Seconds from silence to full level.' },
-  { id: 'decay', min: 0, max: Infinity, step: 0.001, decimals: 3, unit: 's', description: 'Seconds from full level down to the sustain level.' },
+  { id: 'attack', min: 0, max: Infinity, step: 0.001, decimals: 3, unit: 's', sweep: { max: 10, exp: 3 }, description: 'Seconds from silence to full level.' },
+  { id: 'decay', min: 0, max: Infinity, step: 0.001, decimals: 3, unit: 's', sweep: { max: 10, exp: 3 }, description: 'Seconds from full level down to the sustain level.' },
   { id: 'sustain', min: 0, max: 1, step: 0.01, decimals: 2, description: 'The level held while the note is down, from 0 to 1.' },
-  { id: 'release', min: 0, max: Infinity, step: 0.001, decimals: 3, unit: 's', description: 'Seconds from the sustain level to silence once the note ends.' },
+  { id: 'release', min: 0, max: Infinity, step: 0.001, decimals: 3, unit: 's', sweep: { max: 10, exp: 3 }, description: 'Seconds from the sustain level to silence once the note ends.' },
   { id: 'curve', min: -Infinity, max: Infinity, step: 0.1, decimals: 1,
     description: 'Shapes every stage. Zero is a straight line; negative moves fast and levels off, positive holds back and then rushes.' },
 ];
@@ -27992,6 +28024,7 @@ const ENV_MOD_FIELDS = [
 // { at, mods, read, draft, entry, setters } - the call on screen. `at` is a bookmark on its name,
 // which moves with the text; `read` is what the code says (envctl's readEnvCall) and `draft` what a
 // gesture in progress has moved, laid over it. `setters` repaint the number boxes by setting.
+// `span` is the time axis held still while a handle on the picture is dragged, else null.
 let envModState = null;
 let envModCM = cm; // the deck the call is in - see prCM
 let envModWriting = false; // our own write is landing: the code is not changing under the panel
@@ -28070,7 +28103,21 @@ function envModFigureData() {
     const fixed = envModFixedText(id);
     if (fixed != null) modulated.set(id, fixed);
   }
-  return envModState.mods.buildFigures(envModDescriptor(), envModValues(), { modulated })[0];
+  const fig = envModState.mods.buildFigures(envModDescriptor(), envModValues(), { modulated })[0];
+  // Drawn against the held time axis, if a handle drag is holding one: every x is a time over the
+  // span, so another span is one factor. The drag measures against the span it was grabbed on (see
+  // adsrGrab), and an axis that refit under the hand would slide the handle away from the pointer.
+  const span = envModState.span;
+  if (!fig || !span || span === fig.span) return fig;
+  const k = fig.span / span;
+  return {
+    ...fig,
+    span,
+    points: fig.points.map((p) => ({ ...p, x: p.x * k })),
+    handles: fig.handles.map((hd) => ({ ...hd, x: hd.x * k })),
+    plateau: fig.plateau && { ...fig.plateau, x0: fig.plateau.x0 * k, x1: fig.plateau.x1 * k },
+    stages: fig.stages.map((st) => ({ ...st, x0: st.x0 * k, x1: st.x1 * k })),
+  };
 }
 
 // `ed` is the deck the call is in; opened from the other deck, the panel moves across.
@@ -28088,6 +28135,7 @@ async function openEnvModEditor(call, ed = cm) {
     draft: null,
     entry: null,
     setters: {},
+    span: null,
   };
   envModState = state;
   try {
@@ -28120,7 +28168,38 @@ function envModBuild() {
   st.entry = entry;
   envModFigureEl.replaceChildren(cell);
   st.setters = {};
-  envModFieldsEl.replaceChildren(...ENV_MOD_FIELDS.map(envModField));
+  envModFieldsEl.replaceChildren(...ENV_MOD_FIELDS.map(envModField), envModFlag('retrigger'));
+}
+
+/** An on/off setting: the device window's toggle, under the setting's name. */
+function envModFlag(id) {
+  const fixed = envModFixedText(id);
+  const cell = document.createElement('div');
+  cell.className = 'device-widget';
+  const name = document.createElement('div');
+  name.className = 'device-widget-name';
+  name.textContent = id;
+  cell.appendChild(name);
+  const button = document.createElement('button');
+  button.className = 'small device-toggle';
+  let on = false;
+  const paint = (value) => {
+    on = value === true;
+    button.textContent = on ? 'on' : 'off';
+    button.classList.toggle('on', on);
+  };
+  paint(envModState.read.values[id]);
+  if (fixed != null) {
+    cell.classList.add('driven');
+    cell.title = envModState.read.arg.kind === 'opaque' ? `env(${fixed})` : `${id}: ${fixed}`;
+    button.tabIndex = -1;
+    button.style.cursor = 'default';
+  } else {
+    envModState.setters[id] = paint;
+    button.onclick = () => envModCommit({ [id]: !on });
+  }
+  cell.appendChild(button);
+  return cell;
 }
 
 /** One setting's box: the device window's number box, under the setting's name. */
@@ -28158,6 +28237,8 @@ function envModSend(body, commit) {
     if (!param) continue;
     set[one.id] = one.value !== undefined ? one.value : envModState.mods.denormalize(param, one.position);
   }
+  // The axis holds for the whole gesture and refits when it is let go.
+  if (!commit) envModState.span ??= envModState.entry?.figure().span ?? null;
   if (commit) envModCommit(set);
   else envModPreview(set);
 }
@@ -28194,6 +28275,7 @@ function envModCommit(set) {
     envModWriting = false; // never leave it latched: the panel would stop following the code
   }
   envModState.draft = null;
+  envModState.span = null;
   if (!envModRead()) return;
   envModRepaint();
   if (edits.length) deckEvalSoon(envModEvalSoon, envModCM, ENV_MOD_EVAL_DEBOUNCE_MS);

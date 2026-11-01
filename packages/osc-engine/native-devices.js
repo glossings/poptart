@@ -264,6 +264,13 @@ function readReport(id, raw) {
         loop: { status, beats: raw[1] >= 0 ? raw[1] : null, seconds: raw[2], position: raw[3], takenSec: raw[4], takenBeats: raw[5] },
       };
     }
+    case 'EQ': {
+      // The output's spectrum: the band count, each band's frequency, then each one's level in
+      // decibels (own/dsp/spectrum.h's SpectrumTap::report) - the browser's [{ hz, db }].
+      const n = Number(raw[0]) | 0;
+      if (!(n > 0) || raw.length < 1 + 2 * n) return null;
+      return { spectrum: Array.from({ length: n }, (_, i) => ({ hz: raw[1 + i], db: raw[1 + n + i] })) };
+    }
     case 'Chorus':
     case 'Flanger':
     case 'Phaser':

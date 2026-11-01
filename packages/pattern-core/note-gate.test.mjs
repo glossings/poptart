@@ -65,9 +65,9 @@ test('overlapping notes hold one gate; a note starting where the last ends retri
 test('with retrigger, every note restarts the attack even while an earlier one holds the gate', () => {
   const ir = linear({ retrigger: true });
   withNoteGate(gateOf([0, 0.5], [0.3, 0.8]), () => {
-    // The second onset lands at sustain (0.5) and climbs from there, halfway in 0.05 s.
-    near(sampleEnvIR(ir, 0.3, 1), 0.5, 'the attack starts from where the envelope was');
-    near(sampleEnvIR(ir, 0.35, 1), 0.75, 'halfway up the second attack');
+    // The second onset lands at sustain (0.5) and starts again from the floor, halfway in 0.05 s.
+    near(sampleEnvIR(ir, 0.3, 1), 0, 'the attack starts from the floor');
+    near(sampleEnvIR(ir, 0.35, 1), 0.5, 'halfway up the second attack');
     near(sampleEnvIR(ir, 0.4, 1), 1, 'the second peak');
     near(sampleEnvIR(ir, 0.6, 1), 0.5, 'and back to sustain');
     // The gate still closes only when the LAST note ends.
@@ -77,10 +77,10 @@ test('with retrigger, every note restarts the attack even while an earlier one h
   withNoteGate(gateOf([0, 0.5], [0.3, 0.8]), () => near(sampleEnvIR(linear(), 0.4, 1), 0.5, 'held, not retriggered'));
 });
 
-test('env() records retrigger only when asked, and it survives a range', () => {
-  assert.equal(env().envIR.retrigger, false);
-  assert.equal(env({ retrigger: true }).range(200, 4000).envIR.retrigger, true);
-  assert.equal(env({ retrigger: true }).curve(0).envIR.retrigger, true);
+test('env() retriggers unless told not to, and that survives a range', () => {
+  assert.equal(env().envIR.retrigger, true);
+  assert.equal(env({ retrigger: false }).range(200, 4000).envIR.retrigger, false);
+  assert.equal(env({ retrigger: false }).curve(0).envIR.retrigger, false);
 });
 
 test('a note inside the previous release starts from the release level, not zero', () => {

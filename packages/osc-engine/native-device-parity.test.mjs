@@ -56,6 +56,7 @@ import { ResonatorProcessor } from '../web-engine/src/devices/resonator.mjs';
 import { parseScaleName } from '../pattern-core/src/notes.mjs';
 import { IR_NAMES, bufferFromChannels, synthesizeImpulse } from '../web-engine/src/devices/builtins.mjs';
 import { Biquad, BIQUAD_TYPES } from '../web-engine/src/dsp/biquad.mjs';
+import { SPECTRUM_BAND_FREQS } from '../web-engine/src/engine/analysis.mjs';
 import { readReport } from './native-devices.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -346,6 +347,13 @@ const PINNED = {
     { color: 9, character: 1, pitch: -12 },
   ],
   LPG: [{ mode: 1 }, { mode: 2, resonance: 0.8 }, { level: 0.4, decay: 0.05, resonance: 0.5 }],
+  // Every slope on a cut and a shelf: highpass, lowpass, low shelf boosted, high shelf cut.
+  EQ: Array.from({ length: 6 }, (_, slope) => ({
+    'band1.type': 4, 'band1.slope': slope, 'band1.freq': 300, 'band1.q': 1.5,
+    'band2.type': 3, 'band2.slope': slope, 'band2.freq': 4000,
+    'band3.type': 1, 'band3.slope': slope, 'band3.freq': 800, 'band3.gain': 9,
+    'band4.type': 2, 'band4.slope': slope, 'band4.freq': 2000, 'band4.gain': -9,
+  })),
 };
 
 const SAMPLED = {
@@ -1589,3 +1597,29 @@ for (const id of ['Filterbank', 'Resonator']) {
     assert.ok(theirs.bands.level.some((v) => v > 0.05), `${id}: every band reported silent`);
   });
 }
+
+// The equalizer draws its curve over its own output's spectrum. The browser reads that from an
+// AnalyserNode (analysis.mjs's SpectrumTap), which Node has none of, so the native report is held
+// to the node's arithmetic instead: the browser's bands, a tone in the band that holds it, and the
+// level a Blackman window reads of it after one smoothed read (0.3 of the magnitude).
+test('EQ reports its output spectrum in the browser\'s bands', { skip: compiler ? false : 'no clang++' }, () => {
+  const binary = buildHarness(devices);
+  const { device } = devices.find((d) => d.id === 'EQ');
+  const frames = BLOCK * 64;
+  const hz = 1000;
+  const input = new Float32Array(frames * 2);
+  for (let i = 0; i < frames; i++) input[i * 2] = input[i * 2 + 1] = 0.5 * Math.sin((2 * Math.PI * hz * i) / SAMPLE_RATE);
+  const reportFile = path.join(WORK, 'EQ-report.f32');
+  const out = runNative(binary, { id: 'EQ', values: defaultValues(device), input, frames, report: reportFile });
+  const mine = nativeReport('EQ', reportFile)?.spectrum;
+  assert.ok(mine, 'the native EQ reported no spectrum');
+  const bands = SPECTRUM_BAND_FREQS.filter((f) => f < SAMPLE_RATE * 0.5);
+  sameNumbers(mine.map((b) => b.hz), bands.map((f) => Math.fround(f)), 'band centers', 1e-3);
+  const loudest = mine.reduce((a, b) => (b.db > a.db ? b : a));
+  const nearest = bands.reduce((a, b) => (Math.abs(Math.log(b / hz)) < Math.abs(Math.log(a / hz)) ? b : a));
+  assert.ok(Math.abs(loudest.hz - nearest) < 1e-3, `the tone read loudest at ${loudest.hz} Hz`);
+  let peak = 0;
+  for (let i = (frames - 4096) * 2; i < out.length; i++) peak = Math.max(peak, Math.abs(out[i]));
+  const expected = 20 * Math.log10(0.3 * peak * 0.42 * 0.5);
+  assert.ok(Math.abs(loudest.db - expected) < 1, `the tone read ${loudest.db} dB against ${expected}`);
+});

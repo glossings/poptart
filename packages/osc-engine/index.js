@@ -519,6 +519,8 @@ class OscEngine {
     // argument is resolved against (see setParam). Only this half knows: the scheduler sends a
     // name and a value and does not care what is hosting them, exactly as on the web.
     this._slotDevices = new Map();
+    // The id each control name resolved to, as "trackId:slot|name" (see _controlName).
+    this._controlNames = new Map();
     // What expression each track's controls carry, as "slot:name" -> the tree's JSON - which a
     // fresh Scheduler reads back (paramExprs) to leave an unchanged one alone and find one the
     // new pattern dropped. The engine track outlives the Scheduler that installed it.
@@ -1383,9 +1385,15 @@ class OscEngine {
    */
   _controlName(trackId, slotIndex, paramName) {
     if (EXPR_LEAF.test(String(paramName))) return paramName;
+    const key = `${trackId}:${slotIndex}|${paramName}`;
     const device = this._slotDevices.get(`${trackId}:${slotIndex}`);
-    if (!device) return paramName;
-    return deviceParam(device, paramName)?.id ?? paramName;
+    // A clear can arrive after its slot was emptied (the evaluation that drops a `.fx()` unloads
+    // it first): it is addressed by the spelling the driver was set under, or sclang never finds
+    // the driver and it keeps running.
+    if (!device) return this._controlNames.get(key) ?? paramName;
+    const id = deviceParam(device, paramName)?.id ?? paramName;
+    if (id !== paramName) this._controlNames.set(key, id);
+    return id;
   }
 
   _noteDriver(trackId, slotIndex, paramName, by) {

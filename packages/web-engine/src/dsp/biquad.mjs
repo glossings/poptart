@@ -9,6 +9,40 @@ export const BIQUAD_TYPES = Object.freeze([
   'peak', 'lowshelf', 'highshelf', 'lowpass', 'highpass', 'bandpass', 'notch', 'allpass',
 ]);
 
+/** The slopes a band can take, in decibels per octave, in panel order. The index is what the enum stores. */
+export const BIQUAD_SLOPES = Object.freeze(['12', '24', '36', '48', '72', '96']);
+
+/** The most sections a band is built from: 96 dB per octave is eight. */
+export const MAX_SECTIONS = 8;
+
+/** Whether a response is steepened by its slope: the cuts and the shelves. */
+export function takesSlope(type) {
+  const name = BIQUAD_TYPES[type];
+  return name === 'lowpass' || name === 'highpass' || name === 'lowshelf' || name === 'highshelf';
+}
+
+/** How many biquads a band of `type` at slope index `slope` is: one per 12 dB per octave. */
+export function biquadSections(type, slope) {
+  if (!takesSlope(type)) return 1;
+  const i = Math.min(BIQUAD_SLOPES.length - 1, Math.max(0, Math.round(slope) || 0));
+  return Number(BIQUAD_SLOPES[i]) / 12;
+}
+
+/**
+ * Coefficients for section `k` of a band built from `sections` biquads.
+ *
+ * The sections are a Butterworth of order 2 x sections, all at `hz`. A shelf's gain is split
+ * evenly across them. The band's Q scales the last (lowest-Q) section, so the level at the
+ * corner is the Q whatever the slope, and 0.71 is maximally flat. One section is the plain
+ * biquad, untouched.
+ */
+export function sectionCoefficients(type, hz, gainDb, q, sections, k, sampleRate, out) {
+  if (sections <= 1) return biquadCoefficients(type, hz, gainDb, q, sampleRate, out);
+  let sq = 1 / (2 * Math.sin(((2 * k + 1) * Math.PI) / (4 * sections)));
+  if (k === sections - 1) sq *= q / Math.SQRT1_2;
+  return biquadCoefficients(type, hz, gainDb / sections, sq, sampleRate, out);
+}
+
 /**
  * Coefficients for one response at `hz`, with `gainDb` (read by the peak and shelf types) and
  * `q`. Written into `out` (six numbers: b0 b1 b2 a1 a2, normalized by a0, plus a0 for the
@@ -129,6 +163,20 @@ export class Biquad {
    */
   glideTo(type, hz, gainDb, q, sampleRate, steps) {
     biquadCoefficients(type, hz, gainDb, q, sampleRate, this.target);
+    this.steps = Math.max(0, steps | 0);
+    if (this.steps === 0) this.c.set(this.target);
+  }
+
+  /** set, for section `k` of a band built from `sections` biquads (see sectionCoefficients). */
+  setSection(type, hz, gainDb, q, sections, k, sampleRate) {
+    sectionCoefficients(type, hz, gainDb, q, sections, k, sampleRate, this.c);
+    this.target.set(this.c);
+    this.steps = 0;
+  }
+
+  /** glideTo, for section `k` of a band built from `sections` biquads. */
+  glideToSection(type, hz, gainDb, q, sections, k, sampleRate, steps) {
+    sectionCoefficients(type, hz, gainDb, q, sections, k, sampleRate, this.target);
     this.steps = Math.max(0, steps | 0);
     if (this.steps === 0) this.c.set(this.target);
   }

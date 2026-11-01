@@ -2498,14 +2498,18 @@ server.waitForBoot {
     // shapes every segment (negative = scoop, 0 = linear, positive = bulge) and is a plain
     // control input into the Env, so a livecoding re-eval updates it in place.
     //
-    // `retrig` (env({ retrigger: true })) restarts the attack on EVERY note rather than only on
-    // the first of a run that overlaps: each note-on sends t_retrig, and while the gate is
-    // already open that closes it for one block and opens it again - EnvGen then climbs from the
-    // level it had reached. Only while it is already open, so the first note of a run is not held
-    // back the block.
+    // `retrig` (env({ retrigger: true })) restarts the attack on EVERY note, from the floor:
+    // each note-on sends t_retrig, and while the gate is already open that closes it for one
+    // block and opens it again. That envelope leads with a zero-length step to 0, so a restart
+    // drops to the floor before it climbs - otherwise a long attack under back-to-back notes
+    // climbs a little further on every note and ends up held open. Without it, the gate opens on
+    // the first held note only and the attack carries on from wherever the envelope is.
     SynthDef(\poptart_env, { |out, atk = 0.01, dec = 0.1, sus = 0.7, rel = 0.2, curve = -4, gate = 0, lo = 0, hi = 1, retrig = 0, t_retrig = 0|
         var again = t_retrig * retrig * (Delay1.kr(gate) > 0);
-        var envSig = EnvGen.kr(Env.adsr(atk, dec, sus, rel, 1.0, curve), gate - again);
+        var envSig = Select.kr(retrig > 0, [
+            EnvGen.kr(Env.adsr(atk, dec, sus, rel, 1.0, curve), gate),
+            EnvGen.kr(Env([0, 0, 1, sus, 0], [0, atk, dec, rel], curve, 3), gate - again)
+        ]);
         Out.kr(out, lo + (envSig * (hi - lo)));
     }).add;
     // The same envelope at the sample rate, for a control on one of poptart's own devices: the
@@ -2515,7 +2519,10 @@ server.waitForBoot {
     // the shape every audio patch onto a control has (the device sums the pair to mono).
     SynthDef(\poptart_env_ar, { |out, atk = 0.01, dec = 0.1, sus = 0.7, rel = 0.2, curve = -4, gate = 0, lo = 0, hi = 1, retrig = 0, t_retrig = 0|
         var again = Trig1.ar(t_retrig * retrig * (Delay1.kr(gate) > 0), SampleDur.ir);
-        var envSig = EnvGen.ar(Env.adsr(atk, dec, sus, rel, 1.0, curve), gate - again);
+        var envSig = Select.ar(retrig > 0, [
+            EnvGen.ar(Env.adsr(atk, dec, sus, rel, 1.0, curve), gate),
+            EnvGen.ar(Env([0, 0, 1, sus, 0], [0, atk, dec, rel], curve, 3), gate - again)
+        ]);
         var v = lo + (envSig * (hi - lo));
         Out.ar(out, [v, v]);
     }).add;

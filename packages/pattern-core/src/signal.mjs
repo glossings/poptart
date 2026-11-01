@@ -27,7 +27,7 @@ import { Frac } from './frac.mjs';
 import { chordIntervals, chordExtension, invertVoices, spreadVoices, voicingVoices, leadVoices, VOICING_NAMES, justVoices, JI_LIMITS } from './harmony.mjs';
 import { rateLedger } from './lfo-rate.mjs';
 import { parseUnitValue } from './units.mjs';
-import { ENV_DEFAULTS } from './envctl.mjs';
+import { ENV_DEFAULTS, ENV_FLAGS } from './envctl.mjs';
 
 /**
  * @typedef {Object} Step
@@ -1833,7 +1833,7 @@ export class Sig {
       return routed;
     }
     // On a sampler pattern the values are PACK NAMES, so plain arithmetic can only sensibly mean
-    // the repitch note (24 = "c2" = as recorded): `s("rave").add(7)` is seven semitones up, the
+    // the repitch note (60 = "c3" = as recorded): `s("rave").add(7)` is seven semitones up, the
     // same thing `s("rave").add(note(7))` says. Without this the pack name coerces to NaN.
     if (this.sampler) return this._ctlBinop('note', other, fn, op);
     return this._binopValues(op, other, fn, linear);
@@ -2418,8 +2418,7 @@ export class Sig {
     // each onset rides along on the span, so the "<0 1>" currently choosing lights up in the editor
     // alongside the notes it gates.
     const locKey = (locs) => locs.map((l) => (Array.isArray(l) ? l.join(':') : String(l))).join('|');
-    const condStepsAt = (cycle) => {
-      const own = this.stepsForCycle ? this.stepsForCycle(cycle) : null;
+    const condStepsAt = (cycle, own = this.stepsForCycle ? this.stepsForCycle(cycle) : null) => {
       // Real onsets only: a rest is not an event, and a continuation ("_", "@") is the same event
       // still sounding, so neither is an instant at which the condition gets to change its mind.
       const onsets = [
@@ -2456,13 +2455,17 @@ export class Sig {
     const stepsForCycle = this.stepsForCycle
       ? (cycle) => {
           const out = [];
-          for (const c of fillCondGaps(condStepsAt(cycle))) {
+          // Each side is read once for the cycle, however many spans the condition cuts it into.
+          const own = this.stepsForCycle(cycle);
+          let changed = null;
+          const stepsOf = (branch) => (branch === this ? own : (changed ??= branch.stepsForCycle(cycle)));
+          for (const c of fillCondGaps(condStepsAt(cycle, own))) {
             const branch = truthy(c.value) ? transformed : this;
             if (!branch.stepsForCycle) continue;
             // The condition atom currently selecting here (a "<0 1>" pick) lights up alongside the
             // note it gates - its span rode in on the cond step (empty for a synthesized gap fill).
             const condLocs = stepLocs(c);
-            for (const s of branch.stepsForCycle(cycle)) {
+            for (const s of stepsOf(branch)) {
               const start = Math.max(s.start, c.start);
               const end = Math.min(s.end, c.end);
               if (start < end) {
@@ -2846,16 +2849,22 @@ export class Sig {
         // The source event SOUNDING at the trigger, taken WHOLE: its value plus every channel
         // already merged onto it (vel/clip/nudge, and the sampler's step.cfg), so the bundle a roll
         // or an .as() spec drew rides through onto the new rhythm rather than being re-sampled
-        // field by field. Last covering step wins, as everywhere else. A structureless source
-        // (rand(), an LFO) has no steps to take, so it is read as one event at the onset.
-        const src = srcSteps ? coveringSteps(srcSteps, t.start).at(-1) ?? null : null;
-        const ev = src ? { value: src.value, locs: stepLocs(src) } : readEvent(this, cycle + t.start);
-        if (ev.value == null) continue;
-        // A fresh attack every time, never a tie: the trigger is what says "strike now".
-        const step = { ...(src ?? {}), start: t.start, end: t.end, value: ev.value, cont: undefined };
-        const locs = joinLocs(ev, t);
-        if (locs.length) step.locs = locs;
-        out.push(step);
+        // field by field. The last covering step wins, together with every layer that starts with
+        // it - a chord or a `,`-stack is struck whole, an older note still ringing under it is not.
+        // A structureless source (rand(), an LFO) has no steps to take, so it is read as one event
+        // at the onset.
+        const cover = srcSteps ? coveringSteps(srcSteps, t.start) : [];
+        const top = cover.at(-1);
+        const srcs = top ? cover.filter((s) => Math.abs(s.start - top.start) < MIX_EPS) : [null];
+        for (const src of srcs) {
+          const ev = src ? { value: src.value, locs: stepLocs(src) } : readEvent(this, cycle + t.start);
+          if (ev.value == null) continue;
+          // A fresh attack every time, never a tie: the trigger is what says "strike now".
+          const step = { ...(src ?? {}), start: t.start, end: t.end, value: ev.value, cont: undefined };
+          const locs = joinLocs(ev, t);
+          if (locs.length) step.locs = locs;
+          out.push(step);
+        }
       }
       return out;
     };
@@ -3755,7 +3764,7 @@ export class Sig {
    * and synth("X").note("c3 e3") are equivalent (on a synth track this replaces the track's
    * note events, keeping the chain/params/channel metadata).
    *
-   * On a sampler pattern it repitches instead: 24 ("c2") plays the sample as recorded, 36 an
+   * On a sampler pattern it repitches instead: 60 ("c3") plays the sample as recorded, 72 an
    * octave up. Takes note names, numbers, mini strings, or any Sig, sampled per onset. A
    * patterned note also gives structure - each fresh note step retriggers the sample, gated
    * to its step - so s("pluck").note("45 52 _ 57") plays a melodic line from one sample.
@@ -5478,6 +5487,12 @@ function crossMerge(baseStepsForCycle, ctlSig, stamp = null) {
 // sampled per window at its start, so patterned whole-cycle args behave as before.
 function remapGrid(N, srcStepsFor, timeSig, lenSig) {
   const out = [];
+  // A short band loops the same source cycle several times over, so each is read once.
+  const read = new Map();
+  const stepsOf = (cyc) => {
+    if (!read.has(cyc)) read.set(cyc, srcStepsFor(cyc));
+    return read.get(cyc);
+  };
   const end = N + 1;
   // Collect the source steps over [srcStart, srcStart+spanLen), mapped into output phase starting at
   // outBase. `restart` marks the window as beginning at a loop wrap (its leftmost partial is fresh).
@@ -5488,7 +5503,7 @@ function remapGrid(N, srcStepsFor, timeSig, lenSig) {
     const firstCyc = Math.floor(s0 + 1e-9);
     const lastCyc = Math.floor(s1 - 1e-9);
     for (let cyc = firstCyc; cyc <= lastCyc; cyc++) {
-      for (const st of srcStepsFor(cyc)) {
+      for (const st of stepsOf(cyc)) {
         const absStart = cyc + st.start;
         const absEnd = cyc + st.end;
         const cs = Math.max(absStart, s0);
@@ -6791,7 +6806,7 @@ function bareSig(sig) {
  *
  * At the HEAD of a chain a control is that same channel plus a trigger: its steps become the events
  * and its values stay on the channel, so `vel("1!4").s("bd")` is `s("bd").vel("1!4")` - four kicks
- * at velocity 1, at the default note (24, where a sample plays as recorded). See _fromHeadCtl.
+ * at velocity 1, at the default note (60, where a sample plays as recorded). See _fromHeadCtl.
  *
  * The note channels (vel, clip, nudge, swing, swinggrid) work on any pattern; aiming a SAMPLER control
  * at a non-sampler pattern is an error (there's no channel there) - the same message the method
@@ -6902,13 +6917,43 @@ const ARITHMETIC = {
   set: (_a, b) => b,
 };
 function operatorBuilder(op) {
-  return (value) => {
+  return (value, ...more) => {
+    if (more.length) {
+      if (op === 'set') return joinLayers([value, ...more]);
+      warnUser(`[signal] ${op}() names one layer's verb, so only its first argument is used - to play several layers together, write set(a, b)`);
+    }
     const sig = toSignal(value);
     // A copy, not a mark on the caller's own signal - and one that keeps a control's tag, so
     // add(vel(-0.3)) is still the velocity channel.
     return sig._keepCtl(sig._clone({ pending: [{ op, fn: ARITHMETIC[op], raw: null }] }));
   };
 }
+/**
+ * `set(a, b, ...)` with nothing before it: the layers played together, each on its own rhythm with
+ * its own sound and channels - `set(s("808c").i(1).note("F3"), s("bd").i(4)).struct("x*4")` strikes
+ * the 808 and the kick on every trigger. Each layer's channels are written onto its own events (the
+ * .set() layer path, aimed at the layer itself), and the joined pattern keeps no channel of its
+ * own, so a layer never picks up another's .i() or .note(). Anything chained after applies to all.
+ */
+function joinLayers(values) {
+  const layers = values.map(toSignal);
+  if (layers.some((l) => !l.stepsForCycle)) {
+    throw new Error('[signal] set(a, b): every layer needs events of its own, e.g. set(s("808c").note("F3"), s("bd"))');
+  }
+  const kinds = new Set(layers.map((l) => (l.sampler ? 'sampler' : 'notes')));
+  if (kinds.size > 1) {
+    throw new Error('[signal] set(a, b): a track is either samples or notes - put the synth layers and the sample layers on tracks of their own');
+  }
+  const baked = layers.map((l) => l.set(l));
+  const stepsForCycle = (cycle) => baked.flatMap((l) => l.stepsForCycle(cycle));
+  const first = layers[0];
+  const meta = { ...first._meta(), stepsForCycle, noteChannels: {} };
+  if (first.sampler) meta.sampler = {};
+  const kindsOfPitch = new Set(layers.map((l) => l.pitchKind));
+  meta.pitchKind = kindsOfPitch.size === 1 ? first.pitchKind : null;
+  return new Sig((t, cps, pos) => sampleViaSteps(stepsForCycle, t, cps, pos), meta);
+}
+
 /** A layer piece that adds its values to what the event has - `add(note(12))`, `add(vel(-0.3))`. */
 export const add = operatorBuilder('add');
 /** A layer piece that subtracts its values from what the event has - `sub(clip(0.5))`. */
@@ -8912,13 +8957,14 @@ export function sampleEnvIR(ir, pos, cps = 1) {
     for (const [start] of intervals) if (start >= seg[0] && start < seg[1] && start !== starts[starts.length - 1]) starts.push(start);
     return starts.length ? starts : [seg[0]];
   };
-  // Level reached at `at` inside a segment (up to its end), starting from the level `from`.
+  // Level reached at `at` inside a segment (up to its end), starting from the level `from`. A
+  // retriggered note starts from the floor, as the engines' do.
   const holdLevel = (seg, from, at) => {
     const onsets = onsetsOf(seg);
-    let level = from;
+    let level = ir.retrigger ? 0 : from;
     for (let k = 0; k < onsets.length; k++) {
       if (k + 1 < onsets.length && onsets[k + 1] <= at) {
-        level = holdFrom(onsets[k], level, onsets[k + 1]);
+        level = ir.retrigger ? 0 : holdFrom(onsets[k], level, onsets[k + 1]);
         continue;
       }
       return holdFrom(onsets[k], level, at);
@@ -8943,7 +8989,7 @@ export function sampleEnvIR(ir, pos, cps = 1) {
  * `env({ attack: 0.03, decay: 0.3, sustain: 0.2, release: 0.15, curve: -4 }).range(300, 6000)` -
  * times in seconds, sustain 0..1. `curve` shapes every segment (SuperCollider convention:
  * negative = exponential-ish scoop, 0 = linear, positive = bulge); also settable via .curve(c).
- * `retrigger: true` restarts the attack on every note, not only on the first of a run that
+ * Every note restarts the attack; `retrigger: false` restarts it only on the first of a run that
  * overlaps.
  */
 export function env(opts = {}, followOpts) {
@@ -8951,8 +8997,8 @@ export function env(opts = {}, followOpts) {
   if (typeof opts === 'string' || opts instanceof Sig) return envFollower(opts, followOpts);
   if (opts == null || typeof opts !== 'object') opts = {};
   const d = ENV_DEFAULTS; // the env() editor draws a missing setting at the same value (envctl.mjs)
-  const { attack = d.attack, decay = d.decay, sustain = d.sustain, release = d.release, curve = d.curve, retrigger = false } = opts;
-  return withEnvIR({ attack, decay, sustain, release, curve, retrigger: retrigger === true, min: 0, max: 1 });
+  const { attack = d.attack, decay = d.decay, sustain = d.sustain, release = d.release, curve = d.curve, retrigger = ENV_FLAGS.retrigger } = opts;
+  return withEnvIR({ attack, decay, sustain, release, curve, retrigger: retrigger !== false, min: 0, max: 1 });
 }
 
 // ---------------------------------------------------------------------------------------------

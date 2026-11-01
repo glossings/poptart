@@ -178,6 +178,19 @@ test('.struct() reads the value sounding at each trigger', () => {
   assert.deepEqual(g.map((st) => st.value), [0, 0, 7, 7]);
 });
 
+test('.struct() strikes every layer of a stack, not just the top one', () => {
+  const g = grid(s('808c,bd').struct('1 ~ 1 ~'));
+  assert.deepEqual(g.map((st) => [st.start, st.value]), [[0, '808c'], [0, 'bd'], [0.5, '808c'], [0.5, 'bd']]);
+  const chord = grid(note('c3,g3').struct('1 1'));
+  assert.deepEqual(chord.map((st) => st.value), [60, 67, 60, 67]);
+});
+
+test('.struct() takes only the newest onset where an older note still rings under it', () => {
+  // The long note is still sounding at 0.5, but the trigger strikes what starts last.
+  const g = grid(n('[0@4],[~ 7]').struct('~ 1'));
+  assert.deepEqual(g.map((st) => st.value), [7]);
+});
+
 test('.struct() drops a trigger that lands over a rest', () => {
   const g = grid(n('0 ~ 4 ~').struct('1 1 1 1'));
   assert.deepEqual(g.map((st) => st.start), [0, 0.5]);

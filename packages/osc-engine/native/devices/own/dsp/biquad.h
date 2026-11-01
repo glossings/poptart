@@ -78,6 +78,38 @@ inline void biquadCoefficients(int type, double hz, double gainDb, double q, dou
   out[0] = b0 / a0; out[1] = b1 / a0; out[2] = b2 / a0; out[3] = a1 / a0; out[4] = a2 / a0;
 }
 
+/** The slopes a band can take, in decibels per octave, in panel order (BIQUAD_SLOPES). */
+constexpr int kBiquadSlopes[] = { 12, 24, 36, 48, 72, 96 };
+constexpr int kSlopeCount = 6;
+
+/** The most sections a band is built from: 96 dB per octave is eight. */
+constexpr int kMaxSections = 8;
+
+/** Whether a response is steepened by its slope: the cuts and the shelves. */
+inline bool takesSlope(int type) {
+  return type == kLowPass || type == kHighPass || type == kLowShelf || type == kHighShelf;
+}
+
+/** How many biquads a band of `type` at slope index `slope` is: one per 12 dB per octave. */
+inline int biquadSections(int type, int slope) {
+  if (!takesSlope(type)) return 1;
+  const int i = slope < 0 ? 0 : slope >= kSlopeCount ? kSlopeCount - 1 : slope;
+  return kBiquadSlopes[i] / 12;
+}
+
+/**
+ * Coefficients for section `k` of a band built from `sections` biquads: a Butterworth of order
+ * 2 x sections at `hz`, a shelf's gain split evenly, the band's Q scaling the last (lowest-Q)
+ * section. One section is the plain biquad, untouched.
+ */
+inline void sectionCoefficients(int type, double hz, double gainDb, double q, int sections, int k,
+                                double sampleRate, double* out) {
+  if (sections <= 1) { biquadCoefficients(type, hz, gainDb, q, sampleRate, out); return; }
+  double sq = 1.0 / (2.0 * std::sin(((2 * k + 1) * M_PI) / (4.0 * sections)));
+  if (k == sections - 1) sq *= q / M_SQRT1_2;
+  biquadCoefficients(type, hz, gainDb / sections, sq, sampleRate, out);
+}
+
 /** One biquad section, transposed direct form II, for one channel. */
 struct Biquad {
   double c[5] = { 1, 0, 0, 0, 0 };
@@ -105,6 +137,21 @@ struct Biquad {
    */
   void glideTo(int type, double hz, double gainDb, double q, double sampleRate, int inSteps) {
     biquadCoefficients(type, hz, gainDb, q, sampleRate, target);
+    steps = inSteps > 0 ? inSteps : 0;
+    if (steps == 0) for (int i = 0; i < 5; ++i) c[i] = target[i];
+  }
+
+  /** set, for section `k` of a band built from `sections` biquads (see sectionCoefficients). */
+  void setSection(int type, double hz, double gainDb, double q, int sections, int k, double sampleRate) {
+    sectionCoefficients(type, hz, gainDb, q, sections, k, sampleRate, c);
+    for (int i = 0; i < 5; ++i) target[i] = c[i];
+    steps = 0;
+  }
+
+  /** glideTo, for section `k` of a band built from `sections` biquads. */
+  void glideToSection(int type, double hz, double gainDb, double q, int sections, int k,
+                      double sampleRate, int inSteps) {
+    sectionCoefficients(type, hz, gainDb, q, sections, k, sampleRate, target);
     steps = inSteps > 0 ? inSteps : 0;
     if (steps == 0) for (int i = 0; i < 5; ++i) c[i] = target[i];
   }
