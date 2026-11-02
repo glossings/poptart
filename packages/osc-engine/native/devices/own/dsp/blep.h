@@ -39,6 +39,8 @@ inline double besselI0(double x) {
 struct BlepTables {
   double kernelTable[kBlepPoints];
   double step[kBlepPoints];
+  /** The band-limited ramp less the plain one, in samples (blep.mjs's ramp). */
+  double ramp[kBlepPoints];
 
   /** The windowed sinc at table point `i`. */
   static double kernel(int i) {
@@ -57,6 +59,13 @@ struct BlepTables {
     for (int i = 1; i <= n; ++i) step[i] = step[i - 1] + (kernelTable[i - 1] + kernelTable[i]) * 0.5;
     const double total = step[n];
     for (int i = 0; i <= n; ++i) step[i] /= total;
+    ramp[0] = 0;
+    double area = 0;
+    for (int i = 1; i <= n; ++i) {
+      area += (step[i - 1] + step[i]) * (0.5 / kBlepPhases);
+      const double x = static_cast<double>(i) / kBlepPhases - kBlepHalf;
+      ramp[i] = area - (x > 0 ? x : 0);
+    }
   }
 };
 
@@ -69,12 +78,25 @@ inline const BlepTables& blepTables() {
 /** A signal's band-limited output, kBlepHalf samples late (blep.mjs's BlepLine). */
 struct BlepLine {
   const double* table = blepTables().step;
+  const double* rampTable = blepTables().ramp;
   double ring[kBlepRing] = { 0 };
   long long n = 0;
 
   void reset() {
     for (double& v : ring) v = 0;
     n = 0;
+  }
+
+  /** A corner: the slope changes by `change` per sample, `ago` samples before the next push. */
+  void kink(double ago, double change) {
+    if (!(ago < kBlepLast)) ago = kBlepLast;
+    else if (!(ago > 0)) ago = 0;
+    for (int k = -kBlepHalf; k < kBlepHalf; ++k) {
+      const double x = (k + ago + kBlepHalf) * kBlepPhases;
+      const int i = static_cast<int>(std::floor(x));
+      const double a = rampTable[i];
+      ring[(n + k) & kBlepMask] += change * (a + (rampTable[i + 1] - a) * (x - i));
+    }
   }
 
   /** A jump of `height`, `ago` samples before the sample about to be pushed. */

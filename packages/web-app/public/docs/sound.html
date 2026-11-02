@@ -42,6 +42,7 @@
           <tr><td><code>Noise</code></td><td>noise in ten colors, from white to brown and on to velvet, crackle, digital, stepped and chaos</td></tr>
           <tr><td><code>Formant</code></td><td>a spectral peak that stays put while the note moves: VOSIM pulse trains, or a driven impulse fired every cycle</td></tr>
           <tr><td><code>Additive</code></td><td>up to sixty-four sine partials a voice, shaped by a slope, the balance of odd and even, a stretch toward bells, damping that darkens each note as it rings, and a spectrum you draw as a named shape</td></tr>
+          <tr><td><code>Analog</code></td><td>two drifting oscillators, a sub and noise through an analog filter circuit with its own envelope on every voice: acid lines, basses, leads, pads, brass and strings (one voice is a monosynth)</td></tr>
           <tr><td><code>Kick</code></td><td>an analog-style bass drum: a saturated body swept down to the note, with a click (one hit at a time)</td></tr>
           <tr><td><code>Hat</code></td><td>hi-hats, cymbals and a cowbell: clusters of square waves and noise through a bright band and a body band, analog or sampled in character (one hit at a time)</td></tr>
           <tr><td><code>Drum</code></td><td>a struck body and a burst of noise: claves, wood blocks, rims, toms, congas, snares, claps and everything between</td></tr>
@@ -194,6 +195,33 @@ zaps: note("c3 [~ c3] [c3 c3] ~").synth("Drum").preset("&lt;zap knock&gt;")
   .param("Filter Decay", "&lt;30ms 80ms 200ms&gt;").postgain(0.6)
 wood: note("c3*8").synth("Drum").preset("clave")
   .param("Material", "&lt;0 0.25 0.5 0.75&gt;").postgain(0.4)</code></pre>
+
+        <p>
+          <code>Analog</code> is a classic subtractive synth. Each oscillator is a <code>saw</code>,
+          <code>square</code> (with <code>Width</code>), <code>triangle</code> or <code>sine</code>; osc 2 sits
+          <code>Osc 2 Semi</code> and <code>Osc 2 Detune</code> away, <code>Sync</code> restarts it with osc 1 so
+          its tuning moves the tone, and <code>Mix</code> sets the balance of the two. <code>Sub</code> is a square
+          an octave down and <code>Noise</code> is white. <code>Drift</code> lets each oscillator wander slightly
+          out of tune. Every voice has its own filter: <code>Filter Type</code> picks one of the analog circuits the
+          <code>Filter</code> effect has, by the same names, and <code>Morph</code> turns the multimode ones toward
+          bandpass and highpass; <code>Cutoff</code> and
+          <code>Resonance</code> set it, <code>Drive</code> pushes into it, <code>Key Track</code> moves it with
+          the note, and <code>Env Amount</code> is how far the filter envelope sweeps it, up or down, in
+          semitones. <code>Velocity</code> is how much a harder note opens the filter further. Both envelopes are
+          on the device's graphs. With <code>Voices</code> at 1 it is a monosynth: a note played over a held one
+          slides there over <code>Glide</code> without starting the envelopes again, which is how an acid line
+          slides.
+        </p>
+        <p>
+          Presets: <code>acid</code>, <code>bass</code>, <code>sub</code>, <code>lead</code>, <code>sync</code>
+          (one voice each), <code>pad</code>, <code>strings</code>, <code>brass</code>, <code>keys</code>,
+          <code>pluck</code>. A preset sets every control but <code>Level</code>, and these set
+          <code>Voices</code> too.
+        </p>
+        <pre data-run><code>acid: note("c2 c2 [c3 eb2] c2 g1 c2 [bb1 c2] c3").synth("Analog").preset("acid")
+  .clip("0.5 0.5 [1.2 0.5] 0.5 1.2 0.5 [1.2 0.5] 0.5")
+  .param("Cutoff", sine(0.125).range(0.25, 0.5)).postgain(0.5)
+pad: note("&lt;[c3,eb3,g3,bb3] [ab2,c3,eb3,g3]&gt;").synth("Analog").preset("pad").postgain(0.4)</code></pre>
 
         <h2 id="params">Controls</h2>
         <p>

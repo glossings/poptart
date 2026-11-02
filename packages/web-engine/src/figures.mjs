@@ -35,6 +35,7 @@ import { ADDITIVE_PARTIALS, aimPartials, nyquistFade, shapePartials } from './de
 import { KICK_DRAW_SEC, KICK_FIGURE_NOTE, KICK_SWEEP_MAX_ST, KickSweep, kickDrawnAt, kickSweptHz } from './devices/kick.mjs';
 import { midiToHz } from './dsp/voice.mjs';
 import { DRUM_MODES, drumModes } from './devices/drum.mjs';
+import { ANALOG, analogResponse } from './devices/analog.mjs';
 
 /** Points across one cycle of a drawn waveform. Half a frame is past what a panel can show. */
 const WAVE_POINTS = 256;
@@ -168,7 +169,7 @@ function figureData(descriptor, figure, values, opts) {
   switch (figure.kind) {
     case 'wavetable': return { ...common, ...wavetableFigure(descriptor, figure, read, { tables, extras }) };
     case 'unison': return { ...common, ...unisonFigure(read) };
-    case 'response': return { ...common, ...responseFigure(read, sampleRate) };
+    case 'response': return { ...common, ...responseFigure(read, sampleRate, descriptor) };
     case 'adsr': return { ...common, ...adsrFigure(figure, read, descriptor) };
     case 'eq': return { ...common, ...eqFigure(figure, read, sampleRate, descriptor, report) };
     case 'band': return { ...common, ...bandFigure(figure, read) };
@@ -339,8 +340,9 @@ function unisonFigure(read) {
  * entirely for the same reason - it is a nonlinearity, and a magnitude response is not where it
  * can be honestly drawn.
  */
-function responseFigure(read, sampleRate) {
-  const mode = Math.round(read('mode') ?? 0);
+function responseFigure(read, sampleRate, descriptor) {
+  // The Analog's filter types are the Filter device's circuit modes of the same names.
+  const mode = descriptor?.id === ANALOG.id ? analogResponse(read('mode') ?? 0) : Math.round(read('mode') ?? 0);
   const cutoff = read('cutoff') ?? 1000;
   const resonance = Math.min(1, Math.max(0, read('resonance') ?? 0));
   const modeName = FILTER_MODES[mode] ?? FILTER_MODES[0];

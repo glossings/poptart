@@ -13,6 +13,10 @@
 // to about 20 kHz at 48 kHz and what lies past 28 kHz, which is all that could fold back below
 // 20 kHz, is about 80 dB down.
 //
+// A corner - a jump in a signal's SLOPE rather than its value, as a triangle has at its peaks - is
+// drawn the same way one integral further on: the band-limited step's running integral against
+// the plain ramp (`kink`). It shares the step's line, so one signal can have both.
+//
 // The same windowed sinc reads a signal BETWEEN its samples (HistoryLine), which is what a
 // sample-and-hold clocked off the sample grid needs: what it takes has to be the signal at its own
 // tick, not the nearest sample, or the tick's timing error is noise of its own.
@@ -60,7 +64,16 @@ function buildTables() {
   for (let i = 1; i <= n; i++) step[i] = step[i - 1] + (kernel[i - 1] + kernel[i]) * 0.5;
   const total = step[n];
   for (let i = 0; i <= n; i++) step[i] /= total;
-  return { kernel, step };
+  // The band-limited ramp less the plain one, max(0, x), in samples: the step's integral by
+  // trapezoids, with the plain ramp taken off exactly at each point.
+  const ramp = new Float64Array(n + 1);
+  let area = 0;
+  for (let i = 1; i <= n; i++) {
+    area += (step[i - 1] + step[i]) * (0.5 / BLEP_PHASES);
+    const x = i / BLEP_PHASES - BLEP_HALF;
+    ramp[i] = area - (x > 0 ? x : 0);
+  }
+  return { kernel, step, ramp };
 }
 
 let TABLES = null;
@@ -88,6 +101,7 @@ const BLEP_MASK = BLEP_RING - 1;
 export class BlepLine {
   constructor() {
     this.table = tables().step;
+    this.rampTable = tables().ramp;
     this.ring = new Float64Array(BLEP_RING);
     this.n = 0;
   }
@@ -113,6 +127,23 @@ export class BlepLine {
       const a = table[i];
       const step = a + (table[i + 1] - a) * (x - i);
       ring[(this.n + k) & BLEP_MASK] += height * (k >= 0 ? step - 1 : step);
+    }
+  }
+
+  /**
+   * A corner: the slope changes by `change` (in value per sample), `ago` samples before the
+   * sample about to be pushed.
+   */
+  kink(ago, change) {
+    const table = this.rampTable;
+    const ring = this.ring;
+    if (!(ago < BLEP_LAST)) ago = BLEP_LAST;
+    else if (!(ago > 0)) ago = 0;
+    for (let k = -BLEP_HALF; k < BLEP_HALF; k++) {
+      const x = (k + ago + BLEP_HALF) * BLEP_PHASES;
+      const i = Math.floor(x);
+      const a = table[i];
+      ring[(this.n + k) & BLEP_MASK] += change * (a + (table[i + 1] - a) * (x - i));
     }
   }
 

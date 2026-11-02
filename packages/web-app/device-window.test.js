@@ -126,6 +126,15 @@ test('showEditor answers with a panel for a device and opens a window for a plug
   assert.ok(panel > 0, 'a device is answered with the panel to draw');
   assert.ok(plugin > panel, 'and the plugin path is only reached when there was no device');
   assert.match(body, /takeSlotByHand\(trackId, slot\)/, 'either way the slot is held while the window is up');
+  // ...but a redraw of a window already open after an evaluation does not take it back, or a
+  // `.preset()` just added to the code would be held off by the window showing it.
+  assert.match(body, /if \(!body\.refresh\) takeSlotByHand\(trackId, slot\)/);
+});
+
+test('the editor is told how many programs the open window\'s device has taken, so it draws again', () => {
+  const body = route('POST /api/pluginEdits');
+  assert.match(body, /engine\.programCount\?\.\(engineTrack\(String\(body\.panel\.trackId\)\), Number\(body\.panel\.slot \?\? 0\)\)/);
+  assert.match(body, /panelProgram, motionTakes/);
 });
 
 test('showEditor says why a device the code names cannot go in the slot, before looking in it', () => {

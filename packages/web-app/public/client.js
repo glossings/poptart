@@ -2539,6 +2539,11 @@ let commitOnEval = []; // ...once the evaluation carrying them has come back
 // "b:<label>" (see writePluginState), and deck A's eval must not thaw a slot deck B's code holds.
 const isDeckBCommit = (c) => String(c.trackId).startsWith('b:');
 
+// The open device window's slot as of the last poll, and how many whole programs its device had
+// loaded then (see the hosts' pluginEdits).
+let panelProgramFor = null;
+let panelProgramSeen = null;
+
 async function pollPluginEdits({ flush = false } = {}) {
   // The preset panel's hold is renewed here rather than on a timer of its own - the server treats
   // it as a lease, so a tab that closes with the panel open releases the slot instead of leaving it
@@ -2548,12 +2553,20 @@ async function pollPluginEdits({ flush = false } = {}) {
   // motionless on a fader emits no pointermove, and the server would give the control back mid-mix.
   const channelHold = mixerHold?.value == null ? null : { trackId: mixerHold.label, name: mixerHold.name, value: mixerHold.value };
   const committed = [...commitQueue];
-  const { edits, logs, pending, holds, motionTakes, params, ccLearns, ccWaiting } = await api('POST', '/api/pluginEdits', {
+  const shown = devicePanelAt ? { trackId: devicePanelAt.trackLabel, slot: devicePanelAt.slot } : null;
+  const { edits, logs, pending, holds, panelProgram, motionTakes, params, ccLearns, ccWaiting } = await api('POST', '/api/pluginEdits', {
     flush,
     hold,
     channelHold,
     committed,
+    panel: shown,
   });
+  // A whole program landed in the device the open window shows - a `.preset()` coming in, a
+  // `{ state }` - so every control may have moved at once: the window is drawn again.
+  const shownKey = shown ? `${shown.trackId}|${shown.slot}` : null;
+  if (shownKey && shownKey === panelProgramFor && panelProgram != null && panelProgram !== panelProgramSeen) refreshDevicePanel();
+  panelProgramFor = shownKey;
+  panelProgramSeen = panelProgram ?? null;
   // What is held right now, drawn on the code. Every poll, so a hold taken or dropped between two
   // evaluations shows up within half a second instead of waiting for one.
   syncHeldPresets(holds ?? []);
@@ -7397,7 +7410,8 @@ function deviceWidget(trackLabel, slot, widget, { bare = false } = {}) {
 function refreshDevicePanel() {
   if (!devicePanelAt) return;
   const { trackLabel, slot } = devicePanelAt;
-  api('POST', '/api/showEditor', { trackId: trackLabel, slot })
+  // A redraw, not an opening: the slot is not taken by hand again (see the hosts' showEditor).
+  api('POST', '/api/showEditor', { trackId: trackLabel, slot, refresh: true })
     .then((res) => { if (res?.panel) showDevicePanel(trackLabel, slot, res.panel, { raise: false }); })
     // The track may have been renamed or deleted by the edit that triggered this - that is not
     // an error worth a console line, it just means there is nothing to show any more.

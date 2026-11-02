@@ -9139,7 +9139,10 @@ const routes = {
     // pattern-core's midi-learn.mjs).
     const ccLearns = patternCore.takeMidiLearns();
     const ccWaiting = patternCore.midiLearnWaiting();
-    return { status: 200, body: { edits, logs, pending: holding, holds: currentHolds(), motionTakes, params, ccLearns, ccWaiting } };
+    // How many whole programs the open window's device has had loaded, so the window redraws
+    // when a preset lands in it.
+    const panelProgram = body?.panel && engine ? engine.programCount?.(engineTrack(String(body.panel.trackId)), Number(body.panel.slot ?? 0)) ?? null : null;
+    return { status: 200, body: { edits, logs, pending: holding, holds: currentHolds(), panelProgram, motionTakes, params, ccLearns, ccWaiting } };
   },
 
   // A plugin parameter a hand took in the plugin's own window, given back to the code: the code
@@ -9220,8 +9223,10 @@ const routes = {
     // on the editor's next poll, or a swap in between would change the preset out from under the
     // window you just opened - and a knob turned after that would land in the wrong preset. True
     // of a device as well as a plugin: a device's program is its control positions, and a
-    // `.preset()` pattern swaps those just the same.
-    takeSlotByHand(trackId, slot);
+    // `.preset()` pattern swaps those just the same. A redraw of a window already open after an
+    // evaluation is not opening it: the slot stays wherever a click in the code left it, or a
+    // `.preset()` just added would be held off by the window showing it.
+    if (!body.refresh) takeSlotByHand(trackId, slot);
     if (device) return { status: 200, body: { panel: deviceWindow(device), trackId, slot } };
     engine.showPluginEditor(engineTrack(trackId), slot);
     return { status: 200, body: {} };

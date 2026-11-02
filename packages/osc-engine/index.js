@@ -548,6 +548,8 @@ class OscEngine {
     // rather than on the defaults (see deviceSlot, and web-app's device panel).
     this._devicePositions = new Map();
     this._deviceDriven = new Map();
+    // How many whole programs each device slot has had loaded (see programCount).
+    this._programs = new Map();
     // Which file is in which of a device control's option slots, as "trackId:slot|controlId" ->
     // { byRef, loaded } - the browser's own bookkeeping for the same controls (see
     // _loadDeviceSample), so an index means the same file on both engines.
@@ -1611,6 +1613,14 @@ class OscEngine {
     this._send('/poptart/setPluginState', [trackId, slotIndex, stateFile]);
   }
 
+  /**
+   * How many whole programs have been loaded into one of poptart's own devices in a slot - a
+   * preset, a `{ state }` - so a window open on it can tell its controls have all moved at once.
+   */
+  programCount(trackId, slotIndex) {
+    return this._programs.get(`${trackId}:${slotIndex}`) ?? 0;
+  }
+
   /** Captures the current full state of the plugin in a chain slot as an opaque string. */
   async getPluginState(trackId, slotIndex) {
     // One of poptart's own devices is captured here, from the record this half keeps of where
@@ -1712,6 +1722,7 @@ class OscEngine {
         // takes, after the program so the control ends on the slot its file landed in.
         const held = this._devicePositions.get(`${trackId}:${slotIndex}`);
         if (held) Object.assign(held, read.positions);
+        this._programs.set(`${trackId}:${slotIndex}`, (this._programs.get(`${trackId}:${slotIndex}`) ?? 0) + 1);
         // A state holds no lists (they are the pattern's, `saved: false`): the scheduler hands the
         // device its lists again, whatever it last sent (see listParams).
         if (this._slotDevices.has(`${trackId}:${slotIndex}`)) this._listEpochs.set(`${trackId}:${slotIndex}`, ++this._listEpoch);

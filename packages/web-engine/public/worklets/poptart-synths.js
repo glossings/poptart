@@ -5814,462 +5814,211 @@ class AdditiveSynth {
   }
 }
 
-// ---- src/devices/kick.mjs ----------------------------------------
-// The Kick: an analog-style bass drum, one hit per note.
+// ---- src/dsp/blep.mjs --------------------------------------------
+// Band-limited steps, for any signal whose edges are jumps at known times.
 //
-// Fitted to measurements of a classic analog kick circuit; every constant below is from that fit.
+// A square wave, a sample-and-hold, a pulse: all of them are flat stretches joined by jumps, and a
+// jump drawn straight onto the sample grid has energy at every frequency, which folds back below
+// half the sample rate as tones that are not in the sound. The fix is to draw each jump as a
+// band-limited step - the integral of a windowed sinc - at its exact fractional time. Done as a
+// correction: the plain jump goes in as it is, and the difference between it and the band-limited
+// one (the residual) is added either side of it.
 //
-// THE PITCH starts Sweep semitones above the note and falls to the note on ONE FIXED CURVE. The
-// trigger pulse charges it (a short Click Length charges it less), it holds a moment, then falls
-// as an exponential with an offset: (1 + knee) e^(-t/tau) - knee, which reaches the note in a
-// finite time (about 70 ms) with a knee rather than creeping in for ever. The excess is in hertz,
-// as an oscillator driven by a control current has it, so the drop is slow at the top and quick
-// near the note. A drawn curve replaces the fixed one: the pitch over time, in semitones above
-// the note, on a square-root time axis 0 to 400 ms (see KICK_DRAW_SEC) - so a curve transposes
-// with the note it is played on.
+// The kernel is BLEP_HALF samples either side of the jump, so the output runs BLEP_HALF samples
+// late: a jump is only known when the sample after it is reached, and its correction reaches back
+// that far. The kernel cuts at half the sample rate with a Kaiser window, so the passband is flat
+// to about 20 kHz at 48 kHz and what lies past 28 kHz, which is all that could fold back below
+// 20 kHz, is about 80 dB down.
 //
-// THE BODY is a sine through the level envelope and then a saturator (tanh) whose Drive is the
-// circuit's, offset a little so the wave is tipped and has even harmonics: at the measured
-// settings it squares the wave off, and since the saturator comes
-// after the envelope, the level holds near full while the envelope is above it and the wave
-// rounds off as the hit dies. A slow highpass after it sags the flat tops, as a coupling
-// capacitor does. The level envelope is the same offset exponential: Decay is the time it
-// reaches zero, Tail its shape - up holds the belly, down falls away quickly into a thin tail.
+// A corner - a jump in a signal's SLOPE rather than its value, as a triangle has at its peaks - is
+// drawn the same way one integral further on: the band-limited step's running integral against
+// the plain ramp (`kink`). It shares the step's line, so one signal can have both.
 //
-// THE CLICK is the trigger pulse (rising over a fraction of a millisecond, falling on the pulse's
-// end) or a burst of white noise for as long as it lasts (Click Tone between the two), at Click's
-// level, added before the saturator. Both edges of the pulse are band-limited with a polynomial
-// step correction. Tone is a gentle lowpass over the whole hit: up is bright, down is soft.
+// The same windowed sinc reads a signal BETWEEN its samples (HistoryLine), which is what a
+// sample-and-hold clocked off the sample grid needs: what it takes has to be the signal at its own
+// tick, not the nearest sample, or the tick's timing error is noise of its own.
 //
-// One hit sounds at a time: a new note restarts the sweep, and whatever was still ringing is
-// faded out over a few milliseconds rather than cut. Note offs are ignored - a hit plays out.
-//
-// Translated line for line into native/devices/own/kick.cc for the desktop, and held to it by
-// native-device-parity.test.mjs. Everything is computed in double and written to the output once
-// per sample, as the C++ does.
+// Translated line for line in osc-engine/native/devices/own/dsp/blep.h.
 
+/** Samples either side of a jump that its correction reaches. The output is this late. */
+const BLEP_HALF = 16;
+/** Table points per sample, read with linear interpolation. */
+const BLEP_PHASES = 128;
+/** The Kaiser window's shape: about 80 dB of stopband. */
+const BLEP_BETA = 7.86;
 
-/** The most Sweep reaches, and the top of a drawn curve, in semitones above the note. */
-const KICK_SWEEP_MAX_ST = 48;
-/** The fixed curve's time constant and knee (see the header). */
-const KICK_SWEEP_SEC = 0.073;
-const KICK_SWEEP_KNEE = 0.66;
-/** How long the sweep holds after the pulse before it falls. */
-const KICK_SWEEP_HOLD_SEC = 0.003;
-/** How fast the trigger pulse charges the sweep: a pulse this long gets it to 63%. */
-const KICK_CHARGE_SEC = 0.0005;
-/** A drawn curve's time axis: 0 to this many seconds, read on a square root (x = sqrt(t / span)). */
-const KICK_DRAW_SEC = 0.4;
-/** Drive's saturation, from clean to square. */
-const KICK_DRIVE_MIN = 0.1;
-const KICK_DRIVE_MAX = 6;
-/** Tail's knee on the level envelope: an exponential at the bottom, near a straight line at the top. */
-const KICK_TAIL_KNEE_MIN = 0.02;
-const KICK_TAIL_KNEE_MAX = 3;
-/** The saturator's offset, which tips the wave and gives it its even harmonics (about -25 dB second). */
-const KICK_BODY_BIAS = 0.08;
-/** The coupling highpass after the saturator. */
-const KICK_BODY_HP_HZ = 4;
-/** The pulse's rise. */
-const KICK_CLICK_RISE_SEC = 0.0004;
-/** The noise's level against the pulse's. */
-const KICK_NOISE_GAIN = 0.7;
-/** Tone's lowpass, fully soft and fully bright. */
-const KICK_TONE_SOFT_HZ = 150;
-const KICK_TONE_BRIGHT_HZ = 20000;
-/** Below this the hit has finished. */
-const KICK_SILENT = 1e-5;
-/** How long a hit that a new one replaces takes to fade. */
-const KICK_CHOKE_SEC = 0.003;
-/**
- * Drive is full up to the first of these fundamentals (as a share of the sample rate) and gone by
- * the second: the saturator's upper harmonics would otherwise fold back down.
- */
-const KICK_DRIVE_FULL = 1 / 48;
-const KICK_DRIVE_NONE = 1 / 12;
-/** The note a picture of the sweep is labeled for before anything has played: f0. */
-const KICK_FIGURE_NOTE = 29;
-
-const KICK_TWO_PI = 2 * Math.PI;
-
-/** Drive's position to the saturator's gain. */
-const kickDrive = (drive) => KICK_DRIVE_MIN + (KICK_DRIVE_MAX - KICK_DRIVE_MIN) * Math.min(1, Math.max(0, drive));
-/** Tail's position to the level envelope's knee. */
-const kickTailKnee = (tail) => KICK_TAIL_KNEE_MIN * Math.pow(KICK_TAIL_KNEE_MAX / KICK_TAIL_KNEE_MIN, Math.min(1, Math.max(0, tail)));
-
-/**
- * Settings that start from a kind of kick, by name: controls in real units, the rest at their
- * defaults. Each is the middle of a group of measured hits; the defaults are `classic`.
- */
-const KICK_PRESETS = Object.freeze({
-  classic: { sweep: 31, decay: 0.69, drive: 0.32, tail: 0.86, click: 0.51, clicktone: 0.05, clicklength: 2, tone: 0.45 },
-  hard: { sweep: 29, decay: 0.42, drive: 0.72, tail: 0.37, click: 1, clicktone: 0.55, clicklength: 2.15, tone: 0.41 },
-  bright: { sweep: 25, decay: 0.67, drive: 0.29, tail: 0.65, click: 0.55, clicktone: 0.18, clicklength: 1.84, tone: 0.79 },
-  short: { sweep: 27.5, decay: 0.11, drive: 0.36, tail: 0.65, click: 0.4, clicktone: 0.21, clicklength: 1.9, tone: 0.61 },
-  rumble: { sweep: 25, decay: 2, drive: 0.28, tail: 0.5, click: 0.39, clicktone: 0.2, clicklength: 1.5, tone: 0.64 },
-  soft: { sweep: 35, decay: 0.95, drive: 0.55, tail: 0.9, click: 0.44, clicktone: 0, clicklength: 2.2, tone: 0.05 },
-});
-
-const KICK = defineDevice({
-  id: 'Kick',
-  kind: 'synth',
-  version: 1,
-  license: 'AGPL-3.0-only',
-  processor: 'poptart-kick',
-  description: 'An analog-style bass drum: a saturated body swept down to the note on a fixed curve, or one you draw, with a click on top. The note is the pitch the sweep settles on.',
-  channels: { in: 0, out: 2 },
-  params: [
-    { id: 'sweep', name: 'Sweep', min: 0, max: KICK_SWEEP_MAX_ST, default: 31, unit: 'st', group: 'Body',
-      description: 'How far above the note the pitch starts, in semitones. High is a hard, punchy hit; low a round one.' },
-    { id: 'decay', name: 'Decay', min: 0.05, max: 4, default: 0.69, unit: 's', curve: 'exp', group: 'Body', amp: 'decay',
-      description: 'The length of the hit: the time its level takes to reach zero.' },
-    { id: 'drive', name: 'Drive', min: 0, max: 1, default: 0.32, group: 'Body',
-      description: 'Saturates the body, from a clean sine to a squared-off, harder tone that holds its level longer.' },
-    { id: 'pitchenv', name: 'Pitch Env', default: 0, options: ['fixed'], takes: 'shape', rate: 'k', group: 'Body',
-      description: 'The pitch over the hit: the fixed curve, or one you draw, in semitones above the note over the first 400 ms.' },
-    { id: 'click', name: 'Click', min: 0, max: 1, default: 0.51, group: 'Click',
-      description: 'The level of the click on top of the hit.' },
-    { id: 'clicktone', name: 'Click Tone', min: 0, max: 1, default: 0.05, group: 'Click',
-      description: 'From the trigger pulse (0) to a burst of noise (1).' },
-    { id: 'clicklength', name: 'Click Length', min: 0.1, max: 15, default: 2, unit: 'ms', curve: 'exp', rate: 'k', group: 'Click',
-      description: 'The length of the trigger pulse. Shorter is a brighter click and less sweep.' },
-    { id: 'tone', name: 'Tone', min: 0, max: 1, default: 0.45, group: 'Output',
-      description: 'A gentle lowpass over the whole hit: up is bright and punchy, down is soft and round.' },
-    { id: 'tail', name: 'Tail', min: 0, max: 1, default: 0.86, group: 'Output',
-      description: 'The shape of the decay: up holds the belly to the end, down falls away quickly into a thin tail.' },
-    { id: 'level', name: 'Level', min: 0, max: 1, default: 0.7, group: 'Output' },
-  ],
-  figures: [
-    {
-      id: 'sweep',
-      kind: 'hitpitch',
-      group: 'Body',
-      // No title: the curve's name heads the picture, in the control that picks it.
-      description: 'The pitch over the first 400 ms of the hit, labeled for the note last played.',
-      params: { shape: 'pitchenv', sweep: 'sweep', clicklength: 'clicklength' },
-      // The curve control belongs ON the picture of the curve, as a waveshaper's mode heads its own.
-      subsumes: ['shape'],
-    },
-  ],
-  presets: KICK_PRESETS,
-});
-
-/** A drawn curve, read at `t` - linear between the points the engine sampled. */
-function kickDrawnAt(table, t) {
-  const n = table.length;
-  const x = Math.min(1, Math.max(0, t)) * (n - 1);
-  const i = Math.floor(x);
-  const a = table[i];
-  const b = table[Math.min(n - 1, i + 1)];
-  return a + (b - a) * (x - i);
-}
-
-/** Where `seconds` into the hit sits on a drawn curve's time axis, 0..1. */
-const kickDrawX = (seconds) => Math.sqrt(Math.max(0, seconds) / KICK_DRAW_SEC);
-
-/**
- * The trigger pulse at sample `n` of a hit whose pulse ends at `edge` samples: 1 while it is high,
- * with both edges band-limited by a polynomial step correction. The rising edge is on sample 0.
- */
-function kickGateAt(n, edge) {
-  let g = n < edge ? 1 : 0;
-  if (n === 0) g -= 0.5;
-  if (n < edge && edge <= n + 1) {
-    const p = n + 1 - edge;
-    g -= p * p * 0.5;
-  } else if (n - 1 < edge && edge <= n) {
-    const p = n - edge;
-    g += (1 - p) * (1 - p) * 0.5;
+/** The zeroth-order modified Bessel function, by its series. */
+function besselI0(x) {
+  let sum = 1;
+  let term = 1;
+  const q = (x * x) / 4;
+  for (let k = 1; k < 32; k++) {
+    term *= q / (k * k);
+    sum += term;
   }
-  return g;
+  return sum;
 }
 
 /**
- * The fixed sweep, stepped a sample at a time: 0..1 of the way from the note to Sweep above it.
- * The voice plays it, and the panel's picture of it is drawn by stepping the same thing.
+ * The windowed sinc, and the band-limited unit step that is its running integral, from BLEP_HALF
+ * samples before the jump to BLEP_HALF after, at BLEP_PHASES points a sample. Built once. The
+ * plain step is taken off the step as it is read, by which side of the jump a sample is on -
+ * interpolating across the jump itself would smear it.
  */
-class KickSweep {
-  constructor(sampleRate) {
-    this.sampleRate = sampleRate;
-    this.kc = 1 - Math.exp(-1 / (KICK_CHARGE_SEC * sampleRate));
-    this.kFall = Math.exp(-1 / (KICK_SWEEP_SEC * sampleRate));
-    this.hold = KICK_SWEEP_HOLD_SEC * sampleRate;
-    this.start(0);
+function buildTables() {
+  const n = 2 * BLEP_HALF * BLEP_PHASES;
+  const kernel = new Float64Array(n + 1);
+  const i0 = besselI0(BLEP_BETA);
+  for (let i = 0; i <= n; i++) {
+    const x = i / BLEP_PHASES - BLEP_HALF;
+    const r = x / BLEP_HALF;
+    const w = besselI0(BLEP_BETA * Math.sqrt(Math.max(0, 1 - r * r))) / i0;
+    const sinc = x === 0 ? 1 : Math.sin(Math.PI * x) / (Math.PI * x);
+    kernel[i] = sinc * w;
   }
-
-  /** A new hit, whose pulse ends `edge` samples in. */
-  start(edge) {
-    this.edge = edge;
-    this.charge = 0;
-    this.fall = 1;
+  // By trapezoids, scaled to end at exactly one.
+  const step = new Float64Array(n + 1);
+  for (let i = 1; i <= n; i++) step[i] = step[i - 1] + (kernel[i - 1] + kernel[i]) * 0.5;
+  const total = step[n];
+  for (let i = 0; i <= n; i++) step[i] /= total;
+  // The band-limited ramp less the plain one, max(0, x), in samples: the step's integral by
+  // trapezoids, with the plain ramp taken off exactly at each point.
+  const ramp = new Float64Array(n + 1);
+  let area = 0;
+  for (let i = 1; i <= n; i++) {
+    area += (step[i - 1] + step[i]) * (0.5 / BLEP_PHASES);
+    const x = i / BLEP_PHASES - BLEP_HALF;
+    ramp[i] = area - (x > 0 ? x : 0);
   }
-
-  /** Sample `n`'s sweep. */
-  next(n) {
-    if (n < this.edge) {
-      this.charge += (1 - this.charge) * this.kc;
-      return this.charge;
-    }
-    if (n < this.edge + this.hold) return this.charge;
-    const e = (1 + KICK_SWEEP_KNEE) * this.fall - KICK_SWEEP_KNEE;
-    this.fall *= this.kFall;
-    return e > 0 ? this.charge * e : 0;
-  }
+  return { kernel, step, ramp };
 }
 
-/** The pitch at a sweep of `e` (0..1), for a note at `hz` and a Sweep of `st` semitones. */
-const kickSweptHz = (hz, st, e) => hz * (1 + (Math.pow(2, st / 12) - 1) * e);
+let TABLES = null;
 
-class KickVoice {
-  constructor(sampleRate) {
-    this.sampleRate = sampleRate;
-    this.sweep = new KickSweep(sampleRate);
-    this.active = false;
-    this.reset();
+/** The shared tables, built the first time anything asks for them. */
+function tables() {
+  if (TABLES === null) TABLES = buildTables();
+  return TABLES;
+}
+
+/** The latest a jump can be placed before the sample it is pushed with. */
+const BLEP_LAST = 1 - 1e-9;
+
+/** Ring length: a power of two with room for the correction either side of the newest sample. */
+const BLEP_RING = 64;
+const BLEP_MASK = BLEP_RING - 1;
+
+/**
+ * A signal's band-limited output, BLEP_HALF samples late.
+ *
+ * Each sample, `jump(ago, height)` for every jump since the last sample - `ago` is how long
+ * before this sample it happened, in samples, 0 <= ago < 1 - and then `push(value)` with the
+ * plain signal's value at this sample, which returns the output for BLEP_HALF samples ago.
+ */
+class BlepLine {
+  constructor() {
+    this.table = tables().step;
+    this.rampTable = tables().ramp;
+    this.ring = new Float64Array(BLEP_RING);
+    this.n = 0;
   }
 
   reset() {
-    this.active = false;
+    this.ring.fill(0);
     this.n = 0;
-    this.note = 0;
-    this.velocity = 1;
-    this.age = 0;
-    this.phase = 0;
-    this.edge = 0;
-    this.pitchTable = null;
-    this.sweep.start(0);
-    this.env = 1;
-    this.choke = -1;
-    this.state = 1;
-    this.hpIn = 0;
-    this.hpOut = 0;
-    this.lp = 0;
   }
 
-  /** Starts a hit. The pulse's length is read here: it is the trigger, not a control on the sound. */
-  noteOn(note, velocity, seed, clickMs, pitchTable) {
-    this.reset();
-    this.active = true;
-    this.note = note;
-    this.velocity = velocity;
-    this.state = (seed >>> 0) || 1;
-    this.edge = Math.max(0, clickMs) * 0.001 * this.sampleRate;
-    this.sweep.start(this.edge);
-    this.pitchTable = pitchTable;
-  }
-
-  /** Fades the hit out: a new one has replaced it. */
-  chokeOff() {
-    if (this.active && this.choke < 0) this.choke = Math.max(1, Math.round(KICK_CHOKE_SEC * this.sampleRate));
-  }
-
-  /** Uniform in [-1, 1): xorshift32, the same sequence on both engines. */
-  white() {
-    let x = this.state;
-    x ^= x << 13; x >>>= 0;
-    x ^= x >>> 17; x >>>= 0;
-    x ^= x << 5; x >>>= 0;
-    this.state = x;
-    return x / 2147483648 - 1;
-  }
-
-  /** Renders `count` samples of this hit and adds them into the output. */
-  process(outL, outR, count, offset, s) {
-    const sr = this.sampleRate;
-    const p = s.values;
-    const hpA = Math.exp((-KICK_TWO_PI * KICK_BODY_HP_HZ) / sr);
-    const kRise = Math.exp(-1 / (KICK_CLICK_RISE_SEC * sr));
-    let lastTone = -1;
-    let kTone = 1;
-    let lastDecay = -1;
-    let lastTail = -1;
-    let knee = 1;
-    let kEnv = 1;
-    for (let i = 0; i < count; i++) {
-      if (!this.active) break;
-      const j = offset + i;
-      const n = this.n;
-
-      // The pitch: the fixed sweep, or the drawn curve in semitones above the note.
-      const noteHz = midiToHz(this.note + s.bendAt(j));
-      let hz;
-      if (this.pitchTable !== null) {
-        hz = noteHz * Math.pow(2, (KICK_SWEEP_MAX_ST * kickDrawnAt(this.pitchTable, kickDrawX(n / sr))) / 12);
-      } else {
-        const st = Math.min(KICK_SWEEP_MAX_ST, Math.max(0, at(p.sweep, j)));
-        hz = kickSweptHz(noteHz, st, this.sweep.next(n));
-      }
-      hz = Math.min(0.49 * sr, hz);
-
-      // The level envelope: an exponential with a knee, reaching zero at Decay.
-      const decay = Math.max(1e-3, at(p.decay, j));
-      const tail = at(p.tail, j);
-      if (decay !== lastDecay || tail !== lastTail) {
-        knee = kickTailKnee(tail);
-        kEnv = Math.exp(-Math.log((1 + knee) / knee) / (decay * sr));
-        lastDecay = decay;
-        lastTail = tail;
-      }
-      const envNow = (1 + knee) * this.env - knee;
-      const level = envNow > 0 ? envNow : 0;
-      this.env *= kEnv;
-
-      // The click: the pulse, rising, or noise for as long as it is high.
-      const gate = kickGateAt(n, this.edge);
-      let click = 0;
-      if (n <= this.edge + 1) {
-        const tone = Math.min(1, Math.max(0, at(p.clicktone, j)));
-        const pulse = gate * (1 - Math.pow(kRise, n));
-        click = at(p.click, j) * ((1 - tone) * pulse + tone * this.white() * KICK_NOISE_GAIN * gate);
-      }
-
-      // The body, through the saturator with the click, as much Drive as the pitch allows.
-      const ratio = hz / sr;
-      const room = Math.min(1, Math.max(0, (KICK_DRIVE_NONE - ratio) / (KICK_DRIVE_NONE - KICK_DRIVE_FULL)));
-      const drive = KICK_DRIVE_MIN + (kickDrive(at(p.drive, j)) - KICK_DRIVE_MIN) * room;
-      const body = -Math.sin(KICK_TWO_PI * this.phase) * level;
-      this.phase += ratio;
-      if (this.phase >= 1) this.phase -= 1;
-      const lift = Math.tanh(drive * KICK_BODY_BIAS);
-      const shaped = (Math.tanh(drive * (body + click + KICK_BODY_BIAS)) - lift) / (Math.tanh(drive * (1 + KICK_BODY_BIAS)) - lift);
-      this.hpOut = hpA * (this.hpOut + shaped - this.hpIn);
-      this.hpIn = shaped;
-
-      // Tone, then the hit's level, its velocity and a fade when it has been replaced.
-      const tone = Math.min(1, Math.max(0, at(p.tone, j)));
-      if (tone !== lastTone) {
-        kTone = 1 - Math.exp((-KICK_TWO_PI * KICK_TONE_SOFT_HZ * Math.pow(KICK_TONE_BRIGHT_HZ / KICK_TONE_SOFT_HZ, tone)) / sr);
-        lastTone = tone;
-      }
-      this.lp += kTone * (this.hpOut - this.lp);
-      let gain = this.velocity * at(p.level, j);
-      if (this.choke >= 0) {
-        gain *= this.choke / Math.max(1, Math.round(KICK_CHOKE_SEC * sr));
-        this.choke -= 1;
-        if (this.choke < 0) this.active = false;
-      }
-      const v = this.lp * gain;
-      outL[i] += v;
-      outR[i] += v;
-      this.n = n + 1;
-
-      // Finished once the level has gone and the click with it.
-      if (level === 0 && n > this.edge + 1 && Math.abs(this.lp) < KICK_SILENT && Math.abs(this.hpOut) < KICK_SILENT) this.active = false;
+  /** A jump of `height`, `ago` samples before the sample about to be pushed. */
+  jump(ago, height) {
+    const table = this.table;
+    const ring = this.ring;
+    // A phase that lands on an edge to the last bit can put it a whole sample back, which is the
+    // end of the last sample rather than the start of this one: kept just inside.
+    if (!(ago < BLEP_LAST)) ago = BLEP_LAST;
+    else if (!(ago > 0)) ago = 0;
+    // Sample n + k is k + ago after the jump, and the table starts BLEP_HALF before it. From
+    // k = 0 on, the sample is past the jump, so the plain step is there to take off.
+    for (let k = -BLEP_HALF; k < BLEP_HALF; k++) {
+      const x = (k + ago + BLEP_HALF) * BLEP_PHASES;
+      const i = Math.floor(x);
+      const a = table[i];
+      const step = a + (table[i + 1] - a) * (x - i);
+      ring[(this.n + k) & BLEP_MASK] += height * (k >= 0 ? step - 1 : step);
     }
-    if (!Number.isFinite(this.lp + this.hpOut + this.phase)) this.reset();
+  }
+
+  /**
+   * A corner: the slope changes by `change` (in value per sample), `ago` samples before the
+   * sample about to be pushed.
+   */
+  kink(ago, change) {
+    const table = this.rampTable;
+    const ring = this.ring;
+    if (!(ago < BLEP_LAST)) ago = BLEP_LAST;
+    else if (!(ago > 0)) ago = 0;
+    for (let k = -BLEP_HALF; k < BLEP_HALF; k++) {
+      const x = (k + ago + BLEP_HALF) * BLEP_PHASES;
+      const i = Math.floor(x);
+      const a = table[i];
+      ring[(this.n + k) & BLEP_MASK] += change * (a + (table[i + 1] - a) * (x - i));
+    }
+  }
+
+  /** The plain signal at this sample in; the band-limited one, BLEP_HALF samples ago, out. */
+  push(value) {
+    const ring = this.ring;
+    ring[this.n & BLEP_MASK] += value;
+    const at = (this.n - BLEP_HALF) & BLEP_MASK;
+    const out = ring[at];
+    ring[at] = 0;
+    this.n += 1;
+    return out;
   }
 }
 
-class KickSynth {
-  constructor(sampleRate) {
-    this.sampleRate = sampleRate;
-    // Two: the hit playing, and the one it replaced while that fades.
-    this.voices = [new KickVoice(sampleRate), new KickVoice(sampleRate)];
-    this.clock = 0;
-    this.seed = 1;
-    this.events = [];
-    this.bend = 0;
-    this.bendArray = null;
-    this.shapes = [];         // option index -> a drawn pitch curve
-    this.lastNote = null;     // what the picture labels its pitches for
-    this.state = {
-      values: Object.fromEntries(KICK.params.map((p) => [p.id, p.default])),
-      bendAt: (i) => (this.bendArray ? this.bendArray[i] : this.bend),
-    };
+/**
+ * A signal's recent past, read between its samples. `push(x)` each sample; `read(ago)` is the
+ * signal BLEP_HALF + ago samples before the newest one (0 <= ago < 1), band-limited by the same
+ * windowed sinc, and `at(BLEP_HALF)` the sample exactly that far back.
+ */
+class HistoryLine {
+  constructor() {
+    this.kernel = tables().kernel;
+    this.ring = new Float64Array(BLEP_RING);
+    this.n = 0;
   }
 
-  /** The controls in real units: a number, or a block of values for one a signal is moving. */
-  setParams(values) {
-    const s = this.state;
-    for (const p of KICK.params) {
-      const v = values[p.id];
-      if (v === undefined) continue;
-      if (typeof v === 'number' ? Number.isFinite(v) : v.length > 0) s.values[p.id] = v;
+  reset() {
+    this.ring.fill(0);
+    this.n = 0;
+  }
+
+  push(x) {
+    this.ring[this.n & BLEP_MASK] = x;
+    this.n += 1;
+  }
+
+  /** The sample `delay` whole samples before the newest. */
+  at(delay) {
+    return this.ring[(this.n - 1 - delay) & BLEP_MASK];
+  }
+
+  read(ago) {
+    const kernel = this.kernel;
+    const ring = this.ring;
+    const newest = this.n - 1;
+    let sum = 0;
+    let weight = 0;
+    // Sample newest - BLEP_HALF + k is -(ago + k) from the time being read.
+    for (let k = -BLEP_HALF; k < BLEP_HALF; k++) {
+      const x = (BLEP_HALF - ago - k) * BLEP_PHASES;
+      const i = Math.floor(x);
+      const a = kernel[i];
+      const h = a + (kernel[i + 1 <= 2 * BLEP_HALF * BLEP_PHASES ? i + 1 : i] - a) * (x - i);
+      sum += ring[(newest - BLEP_HALF + k) & BLEP_MASK] * h;
+      weight += h;
     }
-  }
-
-  /** The track's bend in semitones, which moves the pitch the sweep settles on. */
-  setBend(bend) {
-    if (typeof bend === 'number') {
-      this.bend = Number.isFinite(bend) ? bend : 0;
-      this.bendArray = null;
-    } else {
-      this.bend = bend[0];
-      this.bendArray = bend;
-    }
-  }
-
-  /** Keeps a drawn pitch curve in a Pitch Env slot. */
-  loadShape(paramId, index, table) {
-    if (paramId !== 'pitchenv' || !table?.length) return false;
-    this.shapes[Math.max(0, Math.round(index))] = table;
-    return true;
-  }
-
-  /** The note last played, for the picture of the sweep to label its pitches with. */
-  report() {
-    return this.lastNote === null ? null : { note: this.lastNote };
-  }
-
-  queueNoteOn(note, velocity, offset = 0) {
-    this.events.push({ at: Math.max(0, offset | 0), kind: 1, note, velocity });
-  }
-
-  /** A hit plays out whatever the note's length: there is nothing for an off to do. */
-  queueNoteOff() {}
-
-  allNotesOff() {
-    this.events.length = 0;
-    for (const v of this.voices) v.chokeOff();
-  }
-
-  get activeVoices() {
-    let n = 0;
-    for (const v of this.voices) if (v.active) n++;
-    return n;
-  }
-
-  /** The drawn curve Pitch Env is on, or null for the fixed one. */
-  _drawn() {
-    const index = Math.round(at(this.state.values.pitchenv, 0));
-    if (!(index >= 1)) return null;
-    return this.shapes[index] ?? null;
-  }
-
-  startNote(note, velocity) {
-    // A free voice, or the older one; whatever else is sounding fades out under the new hit.
-    let voice = null;
-    for (const v of this.voices) if (!v.active) { voice = v; break; }
-    if (!voice) voice = this.voices[0].age <= this.voices[1].age ? this.voices[0] : this.voices[1];
-    for (const v of this.voices) if (v !== voice) v.chokeOff();
-    this.seed = (this.seed * 1664525 + 1013904223) >>> 0;
-    voice.noteOn(note, velocity, this.seed, at(this.state.values.clicklength, 0), this._drawn());
-    voice.age = this.clock++;
-    this.lastNote = note;
-  }
-
-  /** Renders one block, split wherever a queued hit falls. */
-  process(outL, outR, count) {
-    const events = this.events;
-    if (events.length > 1) events.sort((a, b) => a.at - b.at);
-    let at0 = 0;
-    let next = 0;
-    while (at0 < count) {
-      while (next < events.length && events[next].at <= at0) {
-        const e = events[next++];
-        this.startNote(e.note, e.velocity);
-      }
-      const until = next < events.length ? Math.min(count, events[next].at) : count;
-      const n = until - at0;
-      if (n > 0) {
-        const l = at0 === 0 && n === outL.length ? outL : outL.subarray(at0, at0 + n);
-        const r = at0 === 0 && n === outR.length ? outR : outR.subarray(at0, at0 + n);
-        for (const v of this.voices) if (v.active) v.process(l, r, n, at0, this.state);
-      }
-      at0 = until;
-    }
-    if (next >= events.length) events.length = 0;
-    else this.events = events.slice(next).map((e) => ({ ...e, at: Math.max(0, e.at - count) }));
+    return sum / weight;
   }
 }
 
@@ -7452,180 +7201,1160 @@ class MultiFilter {
   }
 }
 
-// ---- src/dsp/blep.mjs --------------------------------------------
-// Band-limited steps, for any signal whose edges are jumps at known times.
+// ---- src/devices/analog.mjs --------------------------------------
+// The Analog synth: two oscillators, a sub and noise into an analog filter circuit with its own
+// envelope, on every voice.
 //
-// A square wave, a sample-and-hold, a pulse: all of them are flat stretches joined by jumps, and a
-// jump drawn straight onto the sample grid has energy at every frequency, which folds back below
-// half the sample rate as tones that are not in the sound. The fix is to draw each jump as a
-// band-limited step - the integral of a windowed sinc - at its exact fractional time. Done as a
-// correction: the plain jump goes in as it is, and the difference between it and the band-limited
-// one (the residual) is added either side of it.
+// THE OSCILLATORS are a saw, a square with a width, a triangle or a sine each, drawn
+// band-limited: every jump in a saw or a square and every corner of a triangle is placed at its
+// exact fraction of a sample and corrected with a windowed sinc (dsp/blep.mjs), so a high note
+// does not fold back. Osc 2 sits Semi and Detune away from osc 1, and Sync restarts it at every
+// cycle of osc 1 - each restart a jump of its own, drawn the same way. Mix crossfades the two.
+// The sub is a square an octave below osc 1, flipped at osc 1's own cycle, and noise is white.
+// Everything is summed into one line and comes out BLEP_HALF samples late.
 //
-// The kernel is BLEP_HALF samples either side of the jump, so the output runs BLEP_HALF samples
-// late: a jump is only known when the sample after it is reached, and its correction reaches back
-// that far. The kernel cuts at half the sample rate with a Kaiser window, so the passband is flat
-// to about 20 kHz at 48 kHz and what lies past 28 kHz, which is all that could fold back below
-// 20 kHz, is about 80 dB down.
+// DRIFT. Each oscillator wanders a few cents on its own, as a pair of analog oscillators never
+// quite agree: a smoothed random walk a voice keeps from note to note, seeded, so a render plays
+// the same twice and on both engines.
 //
-// The same windowed sinc reads a signal BETWEEN its samples (HistoryLine), which is what a
-// sample-and-hold clocked off the sample grid needs: what it takes has to be the signal at its own
-// tick, not the nearest sample, or the tick's timing error is noise of its own.
+// ONE FILTER PER VOICE, which is the exception to the synths being filterless (see
+// dsp/voice.mjs): a chain filter is shared by every voice and follows one envelope, and an
+// envelope per note is the sound of this instrument. Cutoff moves with the note (Key Track, from
+// middle C) and with the filter envelope (Env Amount, in semitones, either way); Velocity sets how
+// much a note's velocity scales that envelope, so a harder note opens it further.
 //
-// Translated line for line in osc-engine/native/devices/own/dsp/blep.h.
+// THE FILTER is a circuit model from dsp/analog.mjs, the same ones the Filter device's analog
+// modes run: Filter Type picks the model (ANALOG_MODELS, in Filter's order), Drive is the level
+// into it, Morph the response of the multimode ones. A voice talks to it only through
+// setModel, setCutoff, setResonance, setDrive, setMorph, process and reset; the model has its own
+// saturation and its own oversampling.
+//
+// MONO. With Voices at one the synth is a monosynth: a note played while another is held slides
+// to it over Glide without starting either envelope again, and letting go of it slides back to the
+// note still held. A note on its own starts both envelopes. With more voices each note takes a
+// voice, and Glide slides a voice from whatever it was last playing.
+//
+// Translated line for line into native/devices/own/analog.cc for the desktop, and held to it by
+// native-device-parity.test.mjs. Everything is computed in double and written to the output once
+// per voice per sample, as the C++ does.
 
-/** Samples either side of a jump that its correction reaches. The output is this late. */
-const BLEP_HALF = 16;
-/** Table points per sample, read with linear interpolation. */
-const BLEP_PHASES = 128;
-/** The Kaiser window's shape: about 80 dB of stopband. */
-const BLEP_BETA = 7.86;
 
-/** The zeroth-order modified Bessel function, by its series. */
-function besselI0(x) {
-  let sum = 1;
-  let term = 1;
-  const q = (x * x) / 4;
-  for (let k = 1; k < 32; k++) {
-    term *= q / (k * k);
-    sum += term;
+/** The oscillator shapes, in the order the controls list them. */
+const ANALOG_SHAPES = Object.freeze(['saw', 'square', 'triangle', 'sine']);
+const ANALOG_SAW = 0;
+const ANALOG_SQUARE = 1;
+const ANALOG_TRIANGLE = 2;
+
+/** How far the Voices knob reaches, which is no most (see the Wavetable's VOICES_KNOB). */
+const ANALOG_VOICES_KNOB = 128;
+/** The note Key Track turns on: at middle C the cutoff is the knob's. */
+const ANALOG_TRACK_NOTE = 60;
+/** Drift at one: how far, in cents, an oscillator wanders either way. */
+const ANALOG_DRIFT_CENTS = 12;
+/** How often the wander picks somewhere new to go, and how slowly it gets there. */
+const ANALOG_DRIFT_STEP_SEC = 0.4;
+const ANALOG_DRIFT_SMOOTH_SEC = 0.2;
+/** The narrowest a pulse gets, as a share of the cycle, at either end of Width. */
+const ANALOG_MIN_WIDTH = 0.02;
+/** The highest an oscillator plays, as a share of the sample rate: past it, it is held there. */
+const ANALOG_TOP = 0.45;
+/** A voice's level against the controls, as the other synths'. */
+const ANALOG_VOICE_GAIN = 0.5;
+/** How close a glide gets, in semitones, before it lands. */
+const ANALOG_GLIDE_LAND = 1e-6;
+/** The most notes a monosynth remembers being held. */
+const ANALOG_HELD = 64;
+const ANALOG_TWO_PI = 2 * Math.PI;
+
+const analogClamp01 = (x) => Math.min(1, Math.max(0, x));
+
+/** The Filter Type options: the circuit models, in the Filter device's order. */
+const ANALOG_FILTER_TYPES = ANALOG_MODELS;
+
+/** A filter type as the Filter device's mode of the same circuit, for the panel's picture. */
+function analogResponse(type) {
+  const t = Math.min(ANALOG_MODELS.length - 1, Math.max(0, Math.round(type)));
+  return FILTER_MODES.indexOf(ANALOG_MODELS[t]);
+}
+
+/** A filter type's index by name, for the presets. */
+const ANALOG_TYPE = Object.freeze(Object.fromEntries(ANALOG_MODELS.map((name, i) => [name, i])));
+
+// --- the descriptor ---------------------------------------------------------------------------
+
+const ANALOG_OSC = 'Oscillators';
+const ANALOG_MIXER = 'Mixer';
+const ANALOG_FILTER_GROUP = 'Filter';
+const ANALOG_FILTER_ENV = 'Filter Env';
+const ANALOG_AMP_ENV = 'Amp Env';
+const ANALOG_VOICE = 'Voice';
+
+const analogSeconds = (id, name, def, group) => ({
+  id, name, min: 0, max: 10, default: def, unit: 's', curve: 'pow', curveExp: 3, group,
+});
+const analogCurve = (id, name, group, description) => ({
+  id, name, min: -8, max: 8, default: -4, step: 0.5, rate: 'k', ui: 'number', group, description,
+});
+
+const analogOscParams = (n) => [
+  { id: `osc${n}.shape`, name: `Osc ${n} Shape`, default: 0, options: [...ANALOG_SHAPES], rate: 'k', group: ANALOG_OSC },
+  { id: `osc${n}.width`, name: `Osc ${n} Width`, min: 0, max: 1, default: 0.5, group: ANALOG_OSC,
+    active: { param: `osc${n}.shape`, is: 'square' },
+    description: 'How much of each cycle the square is high: a half is square, toward either end a thinner pulse.' },
+];
+
+const ANALOG = defineDevice({
+  id: 'Analog',
+  kind: 'synth',
+  version: 1,
+  license: 'AGPL-3.0-only',
+  processor: 'poptart-analog',
+  description: 'Two drifting analog-style oscillators, a sub and noise into an analog filter circuit with its own envelope on every voice. One voice and a glide is an acid bass; more are pads, brass and strings.',
+  channels: { in: 0, out: 2 },
+  params: [
+    ...analogOscParams(1),
+    ...analogOscParams(2),
+    { id: 'osc2.semi', name: 'Osc 2 Semi', min: -24, max: 24, default: 0, step: 1, unit: 'st', ui: 'number', group: ANALOG_OSC,
+      description: 'Osc 2 against osc 1, in semitones.' },
+    { id: 'osc2.detune', name: 'Osc 2 Detune', min: -100, max: 100, default: 7, unit: 'ct', group: ANALOG_OSC,
+      description: 'Osc 2 against osc 1, in cents. A few is the beating of two oscillators side by side.' },
+    { id: 'sync', name: 'Sync', min: 0, max: 1, default: 0, ui: 'toggle', rate: 'k', group: ANALOG_OSC,
+      description: 'Restarts osc 2 at every cycle of osc 1, so its Semi moves the tone rather than the pitch.' },
+    { id: 'drift', name: 'Drift', min: 0, max: 1, default: 0.2, group: ANALOG_OSC,
+      description: 'How far each oscillator wanders out of tune on its own, slowly. At one, twelve cents either way.' },
+
+    { id: 'mix', name: 'Mix', min: 0, max: 1, default: 0.5, group: ANALOG_MIXER,
+      description: 'Osc 1 against osc 2: all osc 1 at zero, all osc 2 at one.' },
+    { id: 'sub', name: 'Sub', min: 0, max: 1, default: 0, group: ANALOG_MIXER,
+      description: 'A square an octave below osc 1.' },
+    { id: 'noise', name: 'Noise', min: 0, max: 1, default: 0, group: ANALOG_MIXER },
+
+    { id: 'filter.type', name: 'Filter Type', default: 0, options: [...ANALOG_FILTER_TYPES], rate: 'k', group: ANALOG_FILTER_GROUP,
+      description: 'The circuit each voice plays through, as the Filter device\'s modes of the same names.' },
+    { id: 'cutoff', name: 'Cutoff', min: 20, max: 20000, default: 1500, unit: 'Hz', curve: 'exp', group: ANALOG_FILTER_GROUP,
+      description: 'Where the filter sits for middle C with the envelope closed.' },
+    { id: 'resonance', name: 'Resonance', min: 0, max: 1, default: 0.2, group: ANALOG_FILTER_GROUP },
+    { id: 'drive', name: 'Drive', min: 1, max: 8, default: 1, unit: 'x', group: ANALOG_FILTER_GROUP,
+      description: 'Level into the circuit. Higher saturates its stages, and the resonance with them.' },
+    { id: 'morph', name: 'Morph', min: 0, max: 1, default: 0, group: ANALOG_FILTER_GROUP,
+      active: { param: 'filter.type', is: [...ANALOG_MORPHING] },
+      description: 'The response of the two-pole circuits: lowpass, bandpass, highpass from left to right. On statevar the middle is a notch.' },
+    { id: 'keytrack', name: 'Key Track', min: 0, max: 1, default: 0.5, group: ANALOG_FILTER_GROUP,
+      description: 'How far the cutoff follows the note: at one it moves as far as the note does, from middle C.' },
+    { id: 'envamount', name: 'Env Amount', min: -96, max: 96, default: 24, unit: 'st', group: ANALOG_FILTER_GROUP,
+      description: 'How far the filter envelope moves the cutoff at its peak, up or down.' },
+    { id: 'velocity', name: 'Velocity', min: 0, max: 1, default: 0.5, group: ANALOG_FILTER_GROUP,
+      description: 'How much a note\'s velocity scales the filter envelope: at one a soft note barely opens it and a hard one opens it all the way.' },
+
+    analogSeconds('fenv.attack', 'Filter Attack', 0.002, ANALOG_FILTER_ENV),
+    analogSeconds('fenv.decay', 'Filter Decay', 0.3, ANALOG_FILTER_ENV),
+    { id: 'fenv.sustain', name: 'Filter Sustain', min: 0, max: 1, default: 0.3, group: ANALOG_FILTER_ENV },
+    analogSeconds('fenv.release', 'Filter Release', 0.2, ANALOG_FILTER_ENV),
+    analogCurve('fenv.acurve', 'Filter Attack Curve', ANALOG_FILTER_ENV, 'Zero is a straight line; negative rises fast and levels off, positive holds back and then rushes.'),
+    analogCurve('fenv.dcurve', 'Filter Decay Curve', ANALOG_FILTER_ENV, 'Zero is a straight line; negative falls fast and trails off.'),
+    analogCurve('fenv.rcurve', 'Filter Release Curve', ANALOG_FILTER_ENV, 'Zero is a straight line; negative drops away quickly and then hangs.'),
+
+    { ...analogSeconds('ampenv.attack', 'Amp Attack', 0.005, ANALOG_AMP_ENV), amp: 'attack' },
+    { ...analogSeconds('ampenv.decay', 'Amp Decay', 0.1, ANALOG_AMP_ENV), amp: 'decay' },
+    { id: 'ampenv.sustain', name: 'Amp Sustain', min: 0, max: 1, default: 0.8, group: ANALOG_AMP_ENV, amp: 'sustain' },
+    { ...analogSeconds('ampenv.release', 'Amp Release', 0.15, ANALOG_AMP_ENV), amp: 'release' },
+    analogCurve('env.acurve', 'Attack Curve', ANALOG_AMP_ENV, 'Zero is a straight line; negative rises fast and levels off, positive holds back and then rushes.'),
+    analogCurve('env.dcurve', 'Decay Curve', ANALOG_AMP_ENV, 'Zero is a straight line; negative falls fast and trails off.'),
+    analogCurve('env.rcurve', 'Release Curve', ANALOG_AMP_ENV, 'Zero is a straight line; negative drops away quickly and then hangs, positive holds the level and then cuts.'),
+
+    { id: 'glide', name: 'Glide', min: 0, max: 5, default: 0, unit: 's', curve: 'pow', curveExp: 3, group: ANALOG_VOICE,
+      description: 'How long a slide between notes takes. With one voice it slides between notes played over each other; with more, each voice slides from what it last played.' },
+    { id: 'level', name: 'Level', min: 0, max: 1, default: 0.7, group: ANALOG_VOICE },
+    { id: 'voices', name: 'Voices', min: 1, open: true, uiMax: ANALOG_VOICES_KNOB, default: 8, step: 1, rate: 'k', ui: 'number', group: ANALOG_VOICE,
+      description: 'How many notes sound at once. At one it is a monosynth.' },
+  ],
+  figures: [
+    {
+      id: 'response',
+      kind: 'response',
+      group: ANALOG_FILTER_GROUP,
+      title: 'response',
+      description: 'The filter at Cutoff, Resonance and Morph, before the note and the envelope move it. Drag across for the cutoff, up for the resonance.',
+      params: { mode: 'filter.type', cutoff: 'cutoff', resonance: 'resonance', drive: 'drive', morph: 'morph' },
+      drag: { x: 'cutoff', y: 'resonance' },
+    },
+    {
+      id: 'filterenv',
+      kind: 'adsr',
+      group: ANALOG_FILTER_ENV,
+      title: 'envelope',
+      description: 'The filter envelope, which Env Amount scales. Drag a point for its stage, the plateau for the sustain level.',
+      params: {
+        attack: 'fenv.attack', decay: 'fenv.decay', sustain: 'fenv.sustain', release: 'fenv.release',
+        acurve: 'fenv.acurve', dcurve: 'fenv.dcurve', rcurve: 'fenv.rcurve',
+      },
+      subsumes: ['acurve', 'dcurve', 'rcurve'],
+    },
+    {
+      id: 'ampenv',
+      kind: 'adsr',
+      group: ANALOG_AMP_ENV,
+      title: 'envelope',
+      description: 'The amplitude envelope. Drag a point for its stage, the plateau for the sustain level.',
+      params: {
+        attack: 'ampenv.attack', decay: 'ampenv.decay', sustain: 'ampenv.sustain', release: 'ampenv.release',
+        acurve: 'env.acurve', dcurve: 'env.dcurve', rcurve: 'env.rcurve',
+      },
+      subsumes: ['acurve', 'dcurve', 'rcurve'],
+    },
+  ],
+  panel: { rows: [[ANALOG_OSC, ANALOG_MIXER], [ANALOG_FILTER_GROUP], [ANALOG_FILTER_ENV, ANALOG_AMP_ENV], [ANALOG_VOICE]] },
+  // Every one names Voices: a mono patch is one voice, and the next preset puts the voices back.
+  presets: {
+    acid: {
+      'osc1.shape': 0, mix: 0, drift: 0.05, 'filter.type': ANALOG_TYPE.diode, cutoff: 220, resonance: 0.88, drive: 3.45,
+      keytrack: 0.3, envamount: 52, velocity: 0.8,
+      'fenv.attack': 0.001, 'fenv.decay': 0.16, 'fenv.sustain': 0, 'fenv.release': 0.08,
+      'ampenv.attack': 0.002, 'ampenv.decay': 0.4, 'ampenv.sustain': 0.6, 'ampenv.release': 0.03,
+      glide: 0.05, voices: 1,
+    },
+    bass: {
+      'osc1.shape': 0, 'osc2.shape': 1, 'osc2.semi': -12, 'osc2.detune': 4, mix: 0.4, sub: 0.6, drift: 0.1,
+      cutoff: 320, resonance: 0.3, drive: 3.8, keytrack: 0.4, envamount: 30, velocity: 0.4,
+      'fenv.attack': 0.001, 'fenv.decay': 0.25, 'fenv.sustain': 0.15, 'fenv.release': 0.1,
+      'ampenv.attack': 0.002, 'ampenv.decay': 0.3, 'ampenv.sustain': 0.85, 'ampenv.release': 0.06,
+      voices: 1,
+    },
+    lead: {
+      'osc1.shape': 0, 'osc2.shape': 1, 'osc2.width': 0.3, 'osc2.detune': 9, mix: 0.5, drift: 0.25,
+      cutoff: 1800, resonance: 0.35, drive: 2.75, keytrack: 0.8, envamount: 18, velocity: 0.5,
+      'fenv.attack': 0.01, 'fenv.decay': 0.5, 'fenv.sustain': 0.4, 'fenv.release': 0.3,
+      'ampenv.attack': 0.005, 'ampenv.decay': 0.2, 'ampenv.sustain': 0.9, 'ampenv.release': 0.2,
+      glide: 0.04, voices: 1,
+    },
+    pad: {
+      'osc1.shape': 0, 'osc2.shape': 0, 'osc2.detune': 14, mix: 0.5, noise: 0.03, drift: 0.4, 'filter.type': ANALOG_TYPE.statevar,
+      cutoff: 900, resonance: 0.15, keytrack: 0.5, envamount: 14, velocity: 0.2,
+      'fenv.attack': 1.2, 'fenv.decay': 2, 'fenv.sustain': 0.5, 'fenv.release': 2,
+      'ampenv.attack': 0.8, 'ampenv.decay': 1, 'ampenv.sustain': 0.9, 'ampenv.release': 2.5,
+      voices: 8,
+    },
+    brass: {
+      'osc1.shape': 0, 'osc2.shape': 0, 'osc2.detune': 6, mix: 0.5, drift: 0.2, 'filter.type': ANALOG_TYPE.ota,
+      cutoff: 600, resonance: 0.1, drive: 1.6, keytrack: 0.7, envamount: 36, velocity: 0.6,
+      'fenv.attack': 0.06, 'fenv.decay': 0.4, 'fenv.sustain': 0.45, 'fenv.release': 0.2,
+      'ampenv.attack': 0.03, 'ampenv.decay': 0.2, 'ampenv.sustain': 0.85, 'ampenv.release': 0.2,
+      voices: 8,
+    },
+    pluck: {
+      'osc1.shape': 1, 'osc1.width': 0.35, 'osc2.shape': 0, 'osc2.semi': 12, 'osc2.detune': 3, mix: 0.3, drift: 0.1,
+      cutoff: 400, resonance: 0.4, keytrack: 0.6, envamount: 40, velocity: 0.7,
+      'fenv.attack': 0.001, 'fenv.decay': 0.18, 'fenv.sustain': 0, 'fenv.release': 0.18,
+      'ampenv.attack': 0.001, 'ampenv.decay': 0.5, 'ampenv.sustain': 0, 'ampenv.release': 0.3,
+      voices: 8,
+    },
+    sync: {
+      'osc1.shape': 0, 'osc2.shape': 0, 'osc2.semi': 9, 'osc2.detune': 0, sync: 1, mix: 0.8, drift: 0.15,
+      cutoff: 3000, resonance: 0.2, drive: 3.1, keytrack: 0.8, envamount: 12, velocity: 0.4,
+      'fenv.attack': 0.005, 'fenv.decay': 0.6, 'fenv.sustain': 0.5, 'fenv.release': 0.3,
+      'ampenv.attack': 0.003, 'ampenv.decay': 0.3, 'ampenv.sustain': 0.85, 'ampenv.release': 0.2,
+      glide: 0.03, voices: 1,
+    },
+    strings: {
+      'osc1.shape': 0, 'osc2.shape': 0, 'osc2.detune': 18, mix: 0.5, drift: 0.5, 'filter.type': ANALOG_TYPE.sallen,
+      cutoff: 2400, resonance: 0.05, keytrack: 0.6, envamount: 6, velocity: 0.3,
+      'fenv.attack': 0.4, 'fenv.decay': 1, 'fenv.sustain': 0.7, 'fenv.release': 1,
+      'ampenv.attack': 0.35, 'ampenv.decay': 0.5, 'ampenv.sustain': 0.9, 'ampenv.release': 1.2,
+      voices: 8,
+    },
+    keys: {
+      'osc1.shape': 1, 'osc1.width': 0.5, 'osc2.shape': 2, 'osc2.semi': 12, mix: 0.35, drift: 0.15, 'filter.type': ANALOG_TYPE.statevar,
+      cutoff: 1200, resonance: 0.1, keytrack: 0.8, envamount: 20, velocity: 0.6,
+      'fenv.attack': 0.001, 'fenv.decay': 0.7, 'fenv.sustain': 0.2, 'fenv.release': 0.4,
+      'ampenv.attack': 0.002, 'ampenv.decay': 1.2, 'ampenv.sustain': 0.4, 'ampenv.release': 0.4,
+      voices: 8,
+    },
+    sub: {
+      'osc1.shape': 2, 'osc2.shape': 3, 'osc2.semi': -12, 'osc2.detune': 0, mix: 0.5, sub: 0.3, drift: 0.05, 'filter.type': ANALOG_TYPE.statevar,
+      cutoff: 400, resonance: 0, keytrack: 1, envamount: 6, velocity: 0.2,
+      'fenv.attack': 0.001, 'fenv.decay': 0.2, 'fenv.sustain': 0.5, 'fenv.release': 0.1,
+      'ampenv.attack': 0.004, 'ampenv.decay': 0.2, 'ampenv.sustain': 1, 'ampenv.release': 0.08,
+      glide: 0.02, voices: 1,
+    },
+  },
+});
+
+// --- the voice --------------------------------------------------------------------------------
+
+/**
+ * One stream of xorshift32 with unsigned shifts throughout, the same sequence here and in C++
+ * (on an unsigned int).
+ */
+class AnalogRandom {
+  constructor() { this.state = 1; }
+  seed(s) { this.state = (s >>> 0) || 1; }
+  white() {
+    let x = this.state;
+    x ^= x << 13; x >>>= 0;
+    x ^= x >>> 17; x >>>= 0;
+    x ^= x << 5; x >>>= 0;
+    this.state = x;
+    return x / 2147483648 - 1;
   }
-  return sum;
+}
+
+/** A shape's value at a phase, 0..1, centered on zero. */
+function analogWave(shape, p, w) {
+  switch (shape) {
+    case ANALOG_SAW: return 2 * p - 1;
+    case ANALOG_SQUARE: return p < w ? 2 - 2 * w : -2 * w;
+    case ANALOG_TRIANGLE: return p < 0.5 ? 4 * p - 1 : 3 - 4 * p;
+    default: return Math.sin(ANALOG_TWO_PI * p);
+  }
+}
+
+/** A shape's analogSlope at a phase, per cycle. */
+function analogSlope(shape, p) {
+  switch (shape) {
+    case ANALOG_SAW: return 2;
+    case ANALOG_SQUARE: return 0;
+    case ANALOG_TRIANGLE: return p < 0.5 ? 4 : -4;
+    default: return ANALOG_TWO_PI * Math.cos(ANALOG_TWO_PI * p);
+  }
 }
 
 /**
- * The windowed sinc, and the band-limited unit step that is its running integral, from BLEP_HALF
- * samples before the jump to BLEP_HALF after, at BLEP_PHASES points a sample. Built once. The
- * plain step is taken off the step as it is read, by which side of the jump a sample is on -
- * interpolating across the jump itself would smear it.
+ * Moves an oscillator's phase from `from` to `to` (less than a cycle on), drawing every jump and
+ * corner it passes into the line at `gain`, and returns where it ends, within the cycle. `agoEnd`
+ * is how long before the coming sample the move ends; `dt` is the phase step a sample.
  */
-function buildTables() {
-  const n = 2 * BLEP_HALF * BLEP_PHASES;
-  const kernel = new Float64Array(n + 1);
-  const i0 = besselI0(BLEP_BETA);
-  for (let i = 0; i <= n; i++) {
-    const x = i / BLEP_PHASES - BLEP_HALF;
-    const r = x / BLEP_HALF;
-    const w = besselI0(BLEP_BETA * Math.sqrt(Math.max(0, 1 - r * r))) / i0;
-    const sinc = x === 0 ? 1 : Math.sin(Math.PI * x) / (Math.PI * x);
-    kernel[i] = sinc * w;
+function analogTravel(line, shape, w, gain, from, to, dt, agoEnd) {
+  switch (shape) {
+    case ANALOG_SAW:
+      if (to >= 1) {
+        to -= 1;
+        line.jump(agoEnd + to / dt, -2 * gain);
+      }
+      return to;
+    case ANALOG_SQUARE:
+      if (from < w && to >= w) line.jump(agoEnd + (to - w) / dt, -2 * gain);
+      if (to >= 1) {
+        to -= 1;
+        line.jump(agoEnd + to / dt, 2 * gain);
+        if (to >= w) line.jump(agoEnd + (to - w) / dt, -2 * gain);
+      }
+      return to;
+    case ANALOG_TRIANGLE:
+      if (from < 0.5 && to >= 0.5) line.kink(agoEnd + (to - 0.5) / dt, -8 * dt * gain);
+      if (to >= 1) {
+        to -= 1;
+        line.kink(agoEnd + to / dt, 8 * dt * gain);
+        if (to >= 0.5) line.kink(agoEnd + (to - 0.5) / dt, -8 * dt * gain);
+      }
+      return to;
+    default:
+      return to >= 1 ? to - 1 : to;
   }
-  // By trapezoids, scaled to end at exactly one.
-  const step = new Float64Array(n + 1);
-  for (let i = 1; i <= n; i++) step[i] = step[i - 1] + (kernel[i - 1] + kernel[i]) * 0.5;
-  const total = step[n];
-  for (let i = 0; i <= n; i++) step[i] /= total;
-  return { kernel, step };
 }
 
-let TABLES = null;
+class AnalogVoice {
+  constructor(sampleRate) {
+    this.sampleRate = sampleRate;
+    this.line = new BlepLine();
+    this.filter = new AnalogFilter(sampleRate);
+    this.ampEnv = new Adsr(sampleRate);
+    this.filterEnv = new Adsr(sampleRate);
+    this.random = new AnalogRandom();
+    this.noise = new AnalogRandom();
+    this.note = -1;
+    this.velocity = 1;
+    this.age = 0;
+    this.releasing = false;
+    this.holds = 0;
+    this.target = 60;    // the note the pitch is going to, and where it is (both in semitones)
+    this.pitch = 60;
+    this.phase1 = 0;
+    this.phase2 = 0;
+    this.sub = 1;
+    this.drift1 = 0;
+    this.drift2 = 0;
+    this.drift1To = 0;
+    this.drift2To = 0;
+    this.driftLeft = 0;
+  }
 
-/** The shared tables, built the first time anything asks for them. */
-function tables() {
-  if (TABLES === null) TABLES = buildTables();
-  return TABLES;
+  get active() { return this.ampEnv.active; }
+
+  /**
+   * Starts a note, sliding from `glideFrom` (a note) when there is one. A voice that had finished
+   * starts clean - its oscillators at phases the seed picks - and one still sounding carries on
+   * from where it is, so a steal does not click.
+   */
+  noteOn(note, velocity, seed, glideFrom) {
+    if (!this.ampEnv.active) {
+      this.line.reset();
+      this.filter.reset();
+      this.random.seed(seed);
+      this.noise.seed(seed ^ 0x9e3779b9);
+      this.phase1 = (this.random.white() + 1) * 0.5;
+      this.phase2 = (this.random.white() + 1) * 0.5;
+      this.sub = 1;
+      this.drift1 = this.random.white();
+      this.drift2 = this.random.white();
+      this.drift1To = this.drift1;
+      this.drift2To = this.drift2;
+      this.driftLeft = 0;
+    }
+    this.note = note;
+    this.velocity = velocity;
+    this.releasing = false;
+    this.target = note;
+    this.pitch = glideFrom !== null ? glideFrom : note;
+    this.ampEnv.gateOn(true);
+    this.filterEnv.gateOn(true);
+  }
+
+  /** A monosynth's legato: the pitch goes to `note` and the envelopes carry on. */
+  slide(note) {
+    this.note = note;
+    this.target = note;
+  }
+
+  noteOff() {
+    this.releasing = true;
+    this.ampEnv.gateOff();
+    this.filterEnv.gateOff();
+  }
+
+  /** Renders `count` samples of this voice, `offset` into the block, adding into the output. */
+  process(outL, outR, count, offset, s) {
+    const p = s.values;
+    const sr = this.sampleRate;
+    const filter = this.filter;
+    filter.setModel(s.type);
+    const line = this.line;
+    const shape1 = s.shape1;
+    const shape2 = s.shape2;
+    const sync = s.sync;
+    const glideK = s.glideK;
+    const driftK = s.driftK;
+    const velocity = this.velocity;
+    this.ampEnv.setStages(s.attack, s.decay, s.sustain, s.release, s.acurve, s.dcurve, s.rcurve);
+    this.filterEnv.setStages(s.fattack, s.fdecay, s.fsustain, s.frelease, s.facurve, s.fdcurve, s.frcurve);
+    let y = 0;
+
+    for (let i = 0; i < count; i++) {
+      const j = offset + i;
+      if (this.pitch !== this.target) {
+        this.pitch += (this.target - this.pitch) * glideK;
+        if (Math.abs(this.target - this.pitch) < ANALOG_GLIDE_LAND) this.pitch = this.target;
+      }
+      const note = this.pitch + s.bendAt(j);
+
+      // The wander: somewhere new every so often, reached slowly.
+      if (--this.driftLeft <= 0) {
+        this.driftLeft = s.driftStep;
+        this.drift1To = this.random.white();
+        this.drift2To = this.random.white();
+      }
+      this.drift1 += (this.drift1To - this.drift1) * driftK;
+      this.drift2 += (this.drift2To - this.drift2) * driftK;
+      const wander = (at(p.drift, j) * ANALOG_DRIFT_CENTS) / 100;
+      const dt1 = Math.min(ANALOG_TOP, midiToHz(note + wander * this.drift1) / sr);
+      const tune2 = at(p['osc2.semi'], j) + at(p['osc2.detune'], j) / 100;
+      const dt2 = Math.min(ANALOG_TOP, midiToHz(note + tune2 + wander * this.drift2) / sr);
+      const w1 = Math.min(1 - ANALOG_MIN_WIDTH, Math.max(ANALOG_MIN_WIDTH, at(p['osc1.width'], j)));
+      const w2 = Math.min(1 - ANALOG_MIN_WIDTH, Math.max(ANALOG_MIN_WIDTH, at(p['osc2.width'], j)));
+      const mix = analogClamp01(at(p.mix, j));
+      const g1 = 1 - mix;
+      const g2 = mix;
+      const gs = at(p.sub, j);
+
+      // Osc 1, then the sub it flips, then osc 2 - restarted where osc 1 came round, if synced.
+      const to1 = this.phase1 + dt1;
+      const wrapped = to1 >= 1;
+      const ago1 = wrapped ? (to1 - 1) / dt1 : 0;
+      this.phase1 = analogTravel(line, shape1, w1, g1, this.phase1, to1, dt1, 0);
+      if (wrapped) {
+        line.jump(ago1, -2 * this.sub * gs);
+        this.sub = -this.sub;
+      }
+      if (sync && wrapped) {
+        const end = analogTravel(line, shape2, w2, g2, this.phase2, this.phase2 + dt2 * (1 - ago1), dt2, ago1);
+        line.jump(ago1, g2 * (analogWave(shape2, 0, w2) - analogWave(shape2, end, w2)));
+        const bend = analogSlope(shape2, 0) - analogSlope(shape2, end);
+        if (bend !== 0) line.kink(ago1, g2 * bend * dt2);
+        this.phase2 = analogTravel(line, shape2, w2, g2, 0, dt2 * ago1, dt2, 0);
+      } else {
+        this.phase2 = analogTravel(line, shape2, w2, g2, this.phase2, this.phase2 + dt2, dt2, 0);
+      }
+      const plain = g1 * analogWave(shape1, this.phase1, w1) + g2 * analogWave(shape2, this.phase2, w2)
+        + gs * this.sub + at(p.noise, j) * this.noise.white();
+      const x = line.push(plain);
+
+      // The filter: the knob, moved by the note and by the envelope as hard as the note was played.
+      const fenv = this.filterEnv.next();
+      const v = at(p.velocity, j);
+      const amount = at(p.envamount, j) * (1 - v + v * velocity);
+      const semis = at(p.keytrack, j) * (note - ANALOG_TRACK_NOTE) + amount * fenv;
+      filter.setResonance(at(p.resonance, j));
+      filter.setDrive(at(p.drive, j));
+      filter.setMorph(at(p.morph, j));
+      filter.setCutoff(at(p.cutoff, j) * Math.pow(2, semis / 12));
+      y = filter.process(x);
+
+      const out = y * this.ampEnv.next() * velocity * at(p.level, j) * ANALOG_VOICE_GAIN;
+      outL[i] += out;
+      outR[i] += out;
+    }
+
+    if (!Number.isFinite(y)) {
+      this.line.reset();
+      filter.reset();
+    }
+  }
 }
 
-/** The latest a jump can be placed before the sample it is pushed with. */
-const BLEP_LAST = 1 - 1e-9;
+// --- the synth --------------------------------------------------------------------------------
 
-/** Ring length: a power of two with room for the correction either side of the newest sample. */
-const BLEP_RING = 64;
-const BLEP_MASK = BLEP_RING - 1;
+/** A control's value at the end of the block: a number, or the last of a block of values. */
+const analogEndOf = (v) => (typeof v === 'number' ? v : v[v.length - 1]);
 
-/**
- * A signal's band-limited output, BLEP_HALF samples late.
- *
- * Each sample, `jump(ago, height)` for every jump since the last sample - `ago` is how long
- * before this sample it happened, in samples, 0 <= ago < 1 - and then `push(value)` with the
- * plain signal's value at this sample, which returns the output for BLEP_HALF samples ago.
- */
-class BlepLine {
-  constructor() {
-    this.table = tables().step;
-    this.ring = new Float64Array(BLEP_RING);
-    this.n = 0;
+class AnalogSynth {
+  constructor(sampleRate) {
+    this.sampleRate = sampleRate;
+    this.voices = Array.from({ length: 16 }, () => new AnalogVoice(sampleRate)); // as the Wavetable's
+    this.voiceCount = 8;
+    this.clock = 0;
+    this.seed = 1;
+    this.events = [];
+    this.held = [];   // a monosynth's held notes, oldest first
+    this.bend = 0;
+    this.bendArray = null;
+    this.state = {
+      values: Object.fromEntries(ANALOG.params.map((p) => [p.id, p.default])),
+      bendAt: (i) => (this.bendArray ? this.bendArray[i] : this.bend),
+      shape1: 0, shape2: 0, sync: false, type: 0,
+      glideK: 1,
+      driftK: 1 - Math.exp(-1 / (ANALOG_DRIFT_SMOOTH_SEC * sampleRate)),
+      driftStep: Math.round(ANALOG_DRIFT_STEP_SEC * sampleRate),
+      attack: 0.005, decay: 0.1, sustain: 0.8, release: 0.15, acurve: -4, dcurve: -4, rcurve: -4,
+      fattack: 0.002, fdecay: 0.3, fsustain: 0.3, frelease: 0.2, facurve: -4, fdcurve: -4, frcurve: -4,
+    };
   }
 
-  reset() {
-    this.ring.fill(0);
-    this.n = 0;
+  /** The controls in real units: a number, or a block of values for one a signal is moving. */
+  setParams(values) {
+    const s = this.state.values;
+    for (const p of ANALOG.params) {
+      const v = values[p.id];
+      if (v === undefined) continue;
+      if (typeof v === 'number' ? Number.isFinite(v) : v.length > 0) s[p.id] = v;
+    }
+    const count = analogEndOf(s.voices);
+    if (Number.isFinite(count)) {
+      const next = Math.max(1, Math.round(count));
+      // Into or out of mono: what a monosynth remembers being held is its own.
+      if ((next === 1) !== (this.voiceCount === 1)) this.held.length = 0;
+      this.voiceCount = next;
+    }
+    while (this.voices.length < this.voiceCount) this.voices.push(new AnalogVoice(this.sampleRate));
   }
 
-  /** A jump of `height`, `ago` samples before the sample about to be pushed. */
-  jump(ago, height) {
-    const table = this.table;
-    const ring = this.ring;
-    // A phase that lands on an edge to the last bit can put it a whole sample back, which is the
-    // end of the last sample rather than the start of this one: kept just inside.
-    if (!(ago < BLEP_LAST)) ago = BLEP_LAST;
-    else if (!(ago > 0)) ago = 0;
-    // Sample n + k is k + ago after the jump, and the table starts BLEP_HALF before it. From
-    // k = 0 on, the sample is past the jump, so the plain step is there to take off.
-    for (let k = -BLEP_HALF; k < BLEP_HALF; k++) {
-      const x = (k + ago + BLEP_HALF) * BLEP_PHASES;
-      const i = Math.floor(x);
-      const a = table[i];
-      const step = a + (table[i + 1] - a) * (x - i);
-      ring[(this.n + k) & BLEP_MASK] += height * (k >= 0 ? step - 1 : step);
+  /** The track's bend in semitones: a number while it is still, a block of values while it moves. */
+  setBend(bend) {
+    if (typeof bend === 'number') {
+      this.bend = Number.isFinite(bend) ? bend : 0;
+      this.bendArray = null;
+    } else {
+      this.bend = bend[0];
+      this.bendArray = bend;
     }
   }
 
-  /** The plain signal at this sample in; the band-limited one, BLEP_HALF samples ago, out. */
-  push(value) {
-    const ring = this.ring;
-    ring[this.n & BLEP_MASK] += value;
-    const at = (this.n - BLEP_HALF) & BLEP_MASK;
-    const out = ring[at];
-    ring[at] = 0;
-    this.n += 1;
-    return out;
+  queueNoteOn(note, velocity, offset = 0) { this.events.push({ at: Math.max(0, offset | 0), kind: 1, note, velocity }); }
+  queueNoteOff(note, offset = 0) { this.events.push({ at: Math.max(0, offset | 0), kind: 0, note, velocity: 0 }); }
+
+  allNotesOff() {
+    this.events.length = 0;
+    this.held.length = 0;
+    for (const v of this.voices) {
+      v.holds = 0;
+      if (v.active) v.noteOff();
+    }
+  }
+
+  get activeVoices() {
+    let n = 0;
+    for (const v of this.voices) if (v.active) n++;
+    return n;
+  }
+
+  /** The voice already on this note, a free one, the oldest releasing one, or the oldest. */
+  allocate(note) {
+    let free = null;
+    let oldestReleasing = null;
+    let oldest = null;
+    for (let i = 0; i < this.voiceCount; i++) {
+      const v = this.voices[i];
+      if (v.active && v.note === note && !v.releasing) return v;
+      if (!v.active) { if (!free) free = v; continue; }
+      if (v.releasing && (!oldestReleasing || v.age < oldestReleasing.age)) oldestReleasing = v;
+      if (!oldest || v.age < oldest.age) oldest = v;
+    }
+    return free ?? oldestReleasing ?? oldest ?? this.voices[0];
+  }
+
+  startNote(note, velocity) {
+    this.seed = (this.seed * 1664525 + 1013904223) >>> 0;
+    if (this.voiceCount === 1) {
+      const voice = this.voices[0];
+      const legato = this.held.length > 0 && voice.active && !voice.releasing;
+      if (this.held.length >= ANALOG_HELD) this.held.shift();
+      this.held.push(note);
+      if (legato) {
+        voice.slide(note);
+        return;
+      }
+      voice.age = this.clock++;
+      voice.noteOn(note, velocity, this.seed, null);
+      return;
+    }
+    const voice = this.allocate(note);
+    // Glide slides from whatever this voice was last playing.
+    const from = this.state.glideK < 1 && voice.active ? voice.pitch : null;
+    const holds = voice.active && voice.note === note && !voice.releasing ? voice.holds + 1 : 1;
+    voice.age = this.clock++;
+    voice.noteOn(note, velocity, this.seed, from);
+    voice.holds = holds;
+  }
+
+  stopNote(note) {
+    if (this.voiceCount === 1) {
+      const held = this.held;
+      const k = held.lastIndexOf(note);
+      if (k < 0) return;
+      held.splice(k, 1);
+      const voice = this.voices[0];
+      if (!voice.active || voice.releasing) return;
+      if (held.length === 0) { voice.noteOff(); return; }
+      // Back to the note still held, as a monosynth does.
+      const top = held[held.length - 1];
+      if (top !== voice.note) voice.slide(top);
+      return;
+    }
+    for (const v of this.voices) {
+      if (!(v.active && v.note === note && !v.releasing)) continue;
+      if (--v.holds > 0) continue; // an earlier note on this pitch ending: a later one still holds it
+      v.holds = 0;
+      v.noteOff();
+    }
+  }
+
+  /** What every voice reads once a block: the switches and the envelopes, where the block ends. */
+  _prepare() {
+    const s = this.state;
+    const v = s.values;
+    const last = ANALOG_SHAPES.length - 1;
+    s.shape1 = Math.min(last, Math.max(0, Math.round(analogEndOf(v['osc1.shape']))));
+    s.shape2 = Math.min(last, Math.max(0, Math.round(analogEndOf(v['osc2.shape']))));
+    s.sync = analogEndOf(v.sync) >= 0.5;
+    s.type = Math.min(ANALOG_MODELS.length - 1, Math.max(0, Math.round(analogEndOf(v['filter.type']))));
+    const glide = analogEndOf(v.glide);
+    s.glideK = glide > 0 ? 1 - Math.exp(-1 / (glide * this.sampleRate)) : 1;
+    s.attack = analogEndOf(v['ampenv.attack']);
+    s.decay = analogEndOf(v['ampenv.decay']);
+    s.sustain = analogEndOf(v['ampenv.sustain']);
+    s.release = analogEndOf(v['ampenv.release']);
+    s.acurve = analogEndOf(v['env.acurve']);
+    s.dcurve = analogEndOf(v['env.dcurve']);
+    s.rcurve = analogEndOf(v['env.rcurve']);
+    s.fattack = analogEndOf(v['fenv.attack']);
+    s.fdecay = analogEndOf(v['fenv.decay']);
+    s.fsustain = analogEndOf(v['fenv.sustain']);
+    s.frelease = analogEndOf(v['fenv.release']);
+    s.facurve = analogEndOf(v['fenv.acurve']);
+    s.fdcurve = analogEndOf(v['fenv.dcurve']);
+    s.frcurve = analogEndOf(v['fenv.rcurve']);
+  }
+
+  /** Renders one block, split wherever a queued note edge falls. */
+  process(outL, outR, count) {
+    this._prepare();
+    const events = this.events;
+    if (events.length > 1) events.sort((a, b) => a.at - b.at);
+    let at0 = 0;
+    let next = 0;
+    while (at0 < count) {
+      while (next < events.length && events[next].at <= at0) {
+        const e = events[next++];
+        if (e.kind === 1) this.startNote(e.note, e.velocity); else this.stopNote(e.note);
+      }
+      const until = next < events.length ? Math.min(count, events[next].at) : count;
+      const n = until - at0;
+      if (n > 0) {
+        const l = at0 === 0 && n === outL.length ? outL : outL.subarray(at0, at0 + n);
+        const r = at0 === 0 && n === outR.length ? outR : outR.subarray(at0, at0 + n);
+        for (const v of this.voices) if (v.active) v.process(l, r, n, at0, this.state);
+      }
+      at0 = until;
+    }
+    if (next >= events.length) events.length = 0;
+    else this.events = events.slice(next).map((e) => ({ ...e, at: Math.max(0, e.at - count) }));
   }
 }
 
+// ---- src/devices/kick.mjs ----------------------------------------
+// The Kick: an analog-style bass drum, one hit per note.
+//
+// Fitted to measurements of a classic analog kick circuit; every constant below is from that fit.
+//
+// THE PITCH starts Sweep semitones above the note and falls to the note on ONE FIXED CURVE. The
+// trigger pulse charges it (a short Click Length charges it less), it holds a moment, then falls
+// as an exponential with an offset: (1 + knee) e^(-t/tau) - knee, which reaches the note in a
+// finite time (about 70 ms) with a knee rather than creeping in for ever. The excess is in hertz,
+// as an oscillator driven by a control current has it, so the drop is slow at the top and quick
+// near the note. A drawn curve replaces the fixed one: the pitch over time, in semitones above
+// the note, on a square-root time axis 0 to 400 ms (see KICK_DRAW_SEC) - so a curve transposes
+// with the note it is played on.
+//
+// THE BODY is a sine through the level envelope and then a saturator (tanh) whose Drive is the
+// circuit's, offset a little so the wave is tipped and has even harmonics: at the measured
+// settings it squares the wave off, and since the saturator comes
+// after the envelope, the level holds near full while the envelope is above it and the wave
+// rounds off as the hit dies. A slow highpass after it sags the flat tops, as a coupling
+// capacitor does. The level envelope is the same offset exponential: Decay is the time it
+// reaches zero, Tail its shape - up holds the belly, down falls away quickly into a thin tail.
+//
+// THE CLICK is the trigger pulse (rising over a fraction of a millisecond, falling on the pulse's
+// end) or a burst of white noise for as long as it lasts (Click Tone between the two), at Click's
+// level, added before the saturator. Both edges of the pulse are band-limited with a polynomial
+// step correction. Tone is a gentle lowpass over the whole hit: up is bright, down is soft.
+//
+// One hit sounds at a time: a new note restarts the sweep, and whatever was still ringing is
+// faded out over a few milliseconds rather than cut. Note offs are ignored - a hit plays out.
+//
+// Translated line for line into native/devices/own/kick.cc for the desktop, and held to it by
+// native-device-parity.test.mjs. Everything is computed in double and written to the output once
+// per sample, as the C++ does.
+
+
+/** The most Sweep reaches, and the top of a drawn curve, in semitones above the note. */
+const KICK_SWEEP_MAX_ST = 48;
+/** The fixed curve's time constant and knee (see the header). */
+const KICK_SWEEP_SEC = 0.073;
+const KICK_SWEEP_KNEE = 0.66;
+/** How long the sweep holds after the pulse before it falls. */
+const KICK_SWEEP_HOLD_SEC = 0.003;
+/** How fast the trigger pulse charges the sweep: a pulse this long gets it to 63%. */
+const KICK_CHARGE_SEC = 0.0005;
+/** A drawn curve's time axis: 0 to this many seconds, read on a square root (x = sqrt(t / span)). */
+const KICK_DRAW_SEC = 0.4;
+/** Drive's saturation, from clean to square. */
+const KICK_DRIVE_MIN = 0.1;
+const KICK_DRIVE_MAX = 6;
+/** Tail's knee on the level envelope: an exponential at the bottom, near a straight line at the top. */
+const KICK_TAIL_KNEE_MIN = 0.02;
+const KICK_TAIL_KNEE_MAX = 3;
+/** The saturator's offset, which tips the wave and gives it its even harmonics (about -25 dB second). */
+const KICK_BODY_BIAS = 0.08;
+/** The coupling highpass after the saturator. */
+const KICK_BODY_HP_HZ = 4;
+/** The pulse's rise. */
+const KICK_CLICK_RISE_SEC = 0.0004;
+/** The noise's level against the pulse's. */
+const KICK_NOISE_GAIN = 0.7;
+/** Tone's lowpass, fully soft and fully bright. */
+const KICK_TONE_SOFT_HZ = 150;
+const KICK_TONE_BRIGHT_HZ = 20000;
+/** Below this the hit has finished. */
+const KICK_SILENT = 1e-5;
+/** How long a hit that a new one replaces takes to fade. */
+const KICK_CHOKE_SEC = 0.003;
 /**
- * A signal's recent past, read between its samples. `push(x)` each sample; `read(ago)` is the
- * signal BLEP_HALF + ago samples before the newest one (0 <= ago < 1), band-limited by the same
- * windowed sinc, and `at(BLEP_HALF)` the sample exactly that far back.
+ * Drive is full up to the first of these fundamentals (as a share of the sample rate) and gone by
+ * the second: the saturator's upper harmonics would otherwise fold back down.
  */
-class HistoryLine {
-  constructor() {
-    this.kernel = tables().kernel;
-    this.ring = new Float64Array(BLEP_RING);
-    this.n = 0;
+const KICK_DRIVE_FULL = 1 / 48;
+const KICK_DRIVE_NONE = 1 / 12;
+/** The note a picture of the sweep is labeled for before anything has played: f0. */
+const KICK_FIGURE_NOTE = 29;
+
+const KICK_TWO_PI = 2 * Math.PI;
+
+/** Drive's position to the saturator's gain. */
+const kickDrive = (drive) => KICK_DRIVE_MIN + (KICK_DRIVE_MAX - KICK_DRIVE_MIN) * Math.min(1, Math.max(0, drive));
+/** Tail's position to the level envelope's knee. */
+const kickTailKnee = (tail) => KICK_TAIL_KNEE_MIN * Math.pow(KICK_TAIL_KNEE_MAX / KICK_TAIL_KNEE_MIN, Math.min(1, Math.max(0, tail)));
+
+/**
+ * Settings that start from a kind of kick, by name: controls in real units, the rest at their
+ * defaults. Each is the middle of a group of measured hits; the defaults are `classic`.
+ */
+const KICK_PRESETS = Object.freeze({
+  classic: { sweep: 31, decay: 0.69, drive: 0.32, tail: 0.86, click: 0.51, clicktone: 0.05, clicklength: 2, tone: 0.45 },
+  hard: { sweep: 29, decay: 0.42, drive: 0.72, tail: 0.37, click: 1, clicktone: 0.55, clicklength: 2.15, tone: 0.41 },
+  bright: { sweep: 25, decay: 0.67, drive: 0.29, tail: 0.65, click: 0.55, clicktone: 0.18, clicklength: 1.84, tone: 0.79 },
+  short: { sweep: 27.5, decay: 0.11, drive: 0.36, tail: 0.65, click: 0.4, clicktone: 0.21, clicklength: 1.9, tone: 0.61 },
+  rumble: { sweep: 25, decay: 2, drive: 0.28, tail: 0.5, click: 0.39, clicktone: 0.2, clicklength: 1.5, tone: 0.64 },
+  soft: { sweep: 35, decay: 0.95, drive: 0.55, tail: 0.9, click: 0.44, clicktone: 0, clicklength: 2.2, tone: 0.05 },
+});
+
+const KICK = defineDevice({
+  id: 'Kick',
+  kind: 'synth',
+  version: 1,
+  license: 'AGPL-3.0-only',
+  processor: 'poptart-kick',
+  description: 'An analog-style bass drum: a saturated body swept down to the note on a fixed curve, or one you draw, with a click on top. The note is the pitch the sweep settles on.',
+  channels: { in: 0, out: 2 },
+  params: [
+    { id: 'sweep', name: 'Sweep', min: 0, max: KICK_SWEEP_MAX_ST, default: 31, unit: 'st', group: 'Body',
+      description: 'How far above the note the pitch starts, in semitones. High is a hard, punchy hit; low a round one.' },
+    { id: 'decay', name: 'Decay', min: 0.05, max: 4, default: 0.69, unit: 's', curve: 'exp', group: 'Body', amp: 'decay',
+      description: 'The length of the hit: the time its level takes to reach zero.' },
+    { id: 'drive', name: 'Drive', min: 0, max: 1, default: 0.32, group: 'Body',
+      description: 'Saturates the body, from a clean sine to a squared-off, harder tone that holds its level longer.' },
+    { id: 'pitchenv', name: 'Pitch Env', default: 0, options: ['fixed'], takes: 'shape', rate: 'k', group: 'Body',
+      description: 'The pitch over the hit: the fixed curve, or one you draw, in semitones above the note over the first 400 ms.' },
+    { id: 'click', name: 'Click', min: 0, max: 1, default: 0.51, group: 'Click',
+      description: 'The level of the click on top of the hit.' },
+    { id: 'clicktone', name: 'Click Tone', min: 0, max: 1, default: 0.05, group: 'Click',
+      description: 'From the trigger pulse (0) to a burst of noise (1).' },
+    { id: 'clicklength', name: 'Click Length', min: 0.1, max: 15, default: 2, unit: 'ms', curve: 'exp', rate: 'k', group: 'Click',
+      description: 'The length of the trigger pulse. Shorter is a brighter click and less sweep.' },
+    { id: 'tone', name: 'Tone', min: 0, max: 1, default: 0.45, group: 'Output',
+      description: 'A gentle lowpass over the whole hit: up is bright and punchy, down is soft and round.' },
+    { id: 'tail', name: 'Tail', min: 0, max: 1, default: 0.86, group: 'Output',
+      description: 'The shape of the decay: up holds the belly to the end, down falls away quickly into a thin tail.' },
+    { id: 'level', name: 'Level', min: 0, max: 1, default: 0.7, group: 'Output' },
+  ],
+  figures: [
+    {
+      id: 'sweep',
+      kind: 'hitpitch',
+      group: 'Body',
+      // No title: the curve's name heads the picture, in the control that picks it.
+      description: 'The pitch over the first 400 ms of the hit, labeled for the note last played.',
+      params: { shape: 'pitchenv', sweep: 'sweep', clicklength: 'clicklength' },
+      // The curve control belongs ON the picture of the curve, as a waveshaper's mode heads its own.
+      subsumes: ['shape'],
+    },
+  ],
+  presets: KICK_PRESETS,
+});
+
+/** A drawn curve, read at `t` - linear between the points the engine sampled. */
+function kickDrawnAt(table, t) {
+  const n = table.length;
+  const x = Math.min(1, Math.max(0, t)) * (n - 1);
+  const i = Math.floor(x);
+  const a = table[i];
+  const b = table[Math.min(n - 1, i + 1)];
+  return a + (b - a) * (x - i);
+}
+
+/** Where `seconds` into the hit sits on a drawn curve's time axis, 0..1. */
+const kickDrawX = (seconds) => Math.sqrt(Math.max(0, seconds) / KICK_DRAW_SEC);
+
+/**
+ * The trigger pulse at sample `n` of a hit whose pulse ends at `edge` samples: 1 while it is high,
+ * with both edges band-limited by a polynomial step correction. The rising edge is on sample 0.
+ */
+function kickGateAt(n, edge) {
+  let g = n < edge ? 1 : 0;
+  if (n === 0) g -= 0.5;
+  if (n < edge && edge <= n + 1) {
+    const p = n + 1 - edge;
+    g -= p * p * 0.5;
+  } else if (n - 1 < edge && edge <= n) {
+    const p = n - edge;
+    g += (1 - p) * (1 - p) * 0.5;
+  }
+  return g;
+}
+
+/**
+ * The fixed sweep, stepped a sample at a time: 0..1 of the way from the note to Sweep above it.
+ * The voice plays it, and the panel's picture of it is drawn by stepping the same thing.
+ */
+class KickSweep {
+  constructor(sampleRate) {
+    this.sampleRate = sampleRate;
+    this.kc = 1 - Math.exp(-1 / (KICK_CHARGE_SEC * sampleRate));
+    this.kFall = Math.exp(-1 / (KICK_SWEEP_SEC * sampleRate));
+    this.hold = KICK_SWEEP_HOLD_SEC * sampleRate;
+    this.start(0);
+  }
+
+  /** A new hit, whose pulse ends `edge` samples in. */
+  start(edge) {
+    this.edge = edge;
+    this.charge = 0;
+    this.fall = 1;
+  }
+
+  /** Sample `n`'s sweep. */
+  next(n) {
+    if (n < this.edge) {
+      this.charge += (1 - this.charge) * this.kc;
+      return this.charge;
+    }
+    if (n < this.edge + this.hold) return this.charge;
+    const e = (1 + KICK_SWEEP_KNEE) * this.fall - KICK_SWEEP_KNEE;
+    this.fall *= this.kFall;
+    return e > 0 ? this.charge * e : 0;
+  }
+}
+
+/** The pitch at a sweep of `e` (0..1), for a note at `hz` and a Sweep of `st` semitones. */
+const kickSweptHz = (hz, st, e) => hz * (1 + (Math.pow(2, st / 12) - 1) * e);
+
+class KickVoice {
+  constructor(sampleRate) {
+    this.sampleRate = sampleRate;
+    this.sweep = new KickSweep(sampleRate);
+    this.active = false;
+    this.reset();
   }
 
   reset() {
-    this.ring.fill(0);
+    this.active = false;
     this.n = 0;
+    this.note = 0;
+    this.velocity = 1;
+    this.age = 0;
+    this.phase = 0;
+    this.edge = 0;
+    this.pitchTable = null;
+    this.sweep.start(0);
+    this.env = 1;
+    this.choke = -1;
+    this.state = 1;
+    this.hpIn = 0;
+    this.hpOut = 0;
+    this.lp = 0;
   }
 
-  push(x) {
-    this.ring[this.n & BLEP_MASK] = x;
-    this.n += 1;
+  /** Starts a hit. The pulse's length is read here: it is the trigger, not a control on the sound. */
+  noteOn(note, velocity, seed, clickMs, pitchTable) {
+    this.reset();
+    this.active = true;
+    this.note = note;
+    this.velocity = velocity;
+    this.state = (seed >>> 0) || 1;
+    this.edge = Math.max(0, clickMs) * 0.001 * this.sampleRate;
+    this.sweep.start(this.edge);
+    this.pitchTable = pitchTable;
   }
 
-  /** The sample `delay` whole samples before the newest. */
-  at(delay) {
-    return this.ring[(this.n - 1 - delay) & BLEP_MASK];
+  /** Fades the hit out: a new one has replaced it. */
+  chokeOff() {
+    if (this.active && this.choke < 0) this.choke = Math.max(1, Math.round(KICK_CHOKE_SEC * this.sampleRate));
   }
 
-  read(ago) {
-    const kernel = this.kernel;
-    const ring = this.ring;
-    const newest = this.n - 1;
-    let sum = 0;
-    let weight = 0;
-    // Sample newest - BLEP_HALF + k is -(ago + k) from the time being read.
-    for (let k = -BLEP_HALF; k < BLEP_HALF; k++) {
-      const x = (BLEP_HALF - ago - k) * BLEP_PHASES;
-      const i = Math.floor(x);
-      const a = kernel[i];
-      const h = a + (kernel[i + 1 <= 2 * BLEP_HALF * BLEP_PHASES ? i + 1 : i] - a) * (x - i);
-      sum += ring[(newest - BLEP_HALF + k) & BLEP_MASK] * h;
-      weight += h;
+  /** Uniform in [-1, 1): xorshift32, the same sequence on both engines. */
+  white() {
+    let x = this.state;
+    x ^= x << 13; x >>>= 0;
+    x ^= x >>> 17; x >>>= 0;
+    x ^= x << 5; x >>>= 0;
+    this.state = x;
+    return x / 2147483648 - 1;
+  }
+
+  /** Renders `count` samples of this hit and adds them into the output. */
+  process(outL, outR, count, offset, s) {
+    const sr = this.sampleRate;
+    const p = s.values;
+    const hpA = Math.exp((-KICK_TWO_PI * KICK_BODY_HP_HZ) / sr);
+    const kRise = Math.exp(-1 / (KICK_CLICK_RISE_SEC * sr));
+    let lastTone = -1;
+    let kTone = 1;
+    let lastDecay = -1;
+    let lastTail = -1;
+    let knee = 1;
+    let kEnv = 1;
+    for (let i = 0; i < count; i++) {
+      if (!this.active) break;
+      const j = offset + i;
+      const n = this.n;
+
+      // The pitch: the fixed sweep, or the drawn curve in semitones above the note.
+      const noteHz = midiToHz(this.note + s.bendAt(j));
+      let hz;
+      if (this.pitchTable !== null) {
+        hz = noteHz * Math.pow(2, (KICK_SWEEP_MAX_ST * kickDrawnAt(this.pitchTable, kickDrawX(n / sr))) / 12);
+      } else {
+        const st = Math.min(KICK_SWEEP_MAX_ST, Math.max(0, at(p.sweep, j)));
+        hz = kickSweptHz(noteHz, st, this.sweep.next(n));
+      }
+      hz = Math.min(0.49 * sr, hz);
+
+      // The level envelope: an exponential with a knee, reaching zero at Decay.
+      const decay = Math.max(1e-3, at(p.decay, j));
+      const tail = at(p.tail, j);
+      if (decay !== lastDecay || tail !== lastTail) {
+        knee = kickTailKnee(tail);
+        kEnv = Math.exp(-Math.log((1 + knee) / knee) / (decay * sr));
+        lastDecay = decay;
+        lastTail = tail;
+      }
+      const envNow = (1 + knee) * this.env - knee;
+      const level = envNow > 0 ? envNow : 0;
+      this.env *= kEnv;
+
+      // The click: the pulse, rising, or noise for as long as it is high.
+      const gate = kickGateAt(n, this.edge);
+      let click = 0;
+      if (n <= this.edge + 1) {
+        const tone = Math.min(1, Math.max(0, at(p.clicktone, j)));
+        const pulse = gate * (1 - Math.pow(kRise, n));
+        click = at(p.click, j) * ((1 - tone) * pulse + tone * this.white() * KICK_NOISE_GAIN * gate);
+      }
+
+      // The body, through the saturator with the click, as much Drive as the pitch allows.
+      const ratio = hz / sr;
+      const room = Math.min(1, Math.max(0, (KICK_DRIVE_NONE - ratio) / (KICK_DRIVE_NONE - KICK_DRIVE_FULL)));
+      const drive = KICK_DRIVE_MIN + (kickDrive(at(p.drive, j)) - KICK_DRIVE_MIN) * room;
+      const body = -Math.sin(KICK_TWO_PI * this.phase) * level;
+      this.phase += ratio;
+      if (this.phase >= 1) this.phase -= 1;
+      const lift = Math.tanh(drive * KICK_BODY_BIAS);
+      const shaped = (Math.tanh(drive * (body + click + KICK_BODY_BIAS)) - lift) / (Math.tanh(drive * (1 + KICK_BODY_BIAS)) - lift);
+      this.hpOut = hpA * (this.hpOut + shaped - this.hpIn);
+      this.hpIn = shaped;
+
+      // Tone, then the hit's level, its velocity and a fade when it has been replaced.
+      const tone = Math.min(1, Math.max(0, at(p.tone, j)));
+      if (tone !== lastTone) {
+        kTone = 1 - Math.exp((-KICK_TWO_PI * KICK_TONE_SOFT_HZ * Math.pow(KICK_TONE_BRIGHT_HZ / KICK_TONE_SOFT_HZ, tone)) / sr);
+        lastTone = tone;
+      }
+      this.lp += kTone * (this.hpOut - this.lp);
+      let gain = this.velocity * at(p.level, j);
+      if (this.choke >= 0) {
+        gain *= this.choke / Math.max(1, Math.round(KICK_CHOKE_SEC * sr));
+        this.choke -= 1;
+        if (this.choke < 0) this.active = false;
+      }
+      const v = this.lp * gain;
+      outL[i] += v;
+      outR[i] += v;
+      this.n = n + 1;
+
+      // Finished once the level has gone and the click with it.
+      if (level === 0 && n > this.edge + 1 && Math.abs(this.lp) < KICK_SILENT && Math.abs(this.hpOut) < KICK_SILENT) this.active = false;
     }
-    return sum / weight;
+    if (!Number.isFinite(this.lp + this.hpOut + this.phase)) this.reset();
+  }
+}
+
+class KickSynth {
+  constructor(sampleRate) {
+    this.sampleRate = sampleRate;
+    // Two: the hit playing, and the one it replaced while that fades.
+    this.voices = [new KickVoice(sampleRate), new KickVoice(sampleRate)];
+    this.clock = 0;
+    this.seed = 1;
+    this.events = [];
+    this.bend = 0;
+    this.bendArray = null;
+    this.shapes = [];         // option index -> a drawn pitch curve
+    this.lastNote = null;     // what the picture labels its pitches for
+    this.state = {
+      values: Object.fromEntries(KICK.params.map((p) => [p.id, p.default])),
+      bendAt: (i) => (this.bendArray ? this.bendArray[i] : this.bend),
+    };
+  }
+
+  /** The controls in real units: a number, or a block of values for one a signal is moving. */
+  setParams(values) {
+    const s = this.state;
+    for (const p of KICK.params) {
+      const v = values[p.id];
+      if (v === undefined) continue;
+      if (typeof v === 'number' ? Number.isFinite(v) : v.length > 0) s.values[p.id] = v;
+    }
+  }
+
+  /** The track's bend in semitones, which moves the pitch the sweep settles on. */
+  setBend(bend) {
+    if (typeof bend === 'number') {
+      this.bend = Number.isFinite(bend) ? bend : 0;
+      this.bendArray = null;
+    } else {
+      this.bend = bend[0];
+      this.bendArray = bend;
+    }
+  }
+
+  /** Keeps a drawn pitch curve in a Pitch Env slot. */
+  loadShape(paramId, index, table) {
+    if (paramId !== 'pitchenv' || !table?.length) return false;
+    this.shapes[Math.max(0, Math.round(index))] = table;
+    return true;
+  }
+
+  /** The note last played, for the picture of the sweep to label its pitches with. */
+  report() {
+    return this.lastNote === null ? null : { note: this.lastNote };
+  }
+
+  queueNoteOn(note, velocity, offset = 0) {
+    this.events.push({ at: Math.max(0, offset | 0), kind: 1, note, velocity });
+  }
+
+  /** A hit plays out whatever the note's length: there is nothing for an off to do. */
+  queueNoteOff() {}
+
+  allNotesOff() {
+    this.events.length = 0;
+    for (const v of this.voices) v.chokeOff();
+  }
+
+  get activeVoices() {
+    let n = 0;
+    for (const v of this.voices) if (v.active) n++;
+    return n;
+  }
+
+  /** The drawn curve Pitch Env is on, or null for the fixed one. */
+  _drawn() {
+    const index = Math.round(at(this.state.values.pitchenv, 0));
+    if (!(index >= 1)) return null;
+    return this.shapes[index] ?? null;
+  }
+
+  startNote(note, velocity) {
+    // A free voice, or the older one; whatever else is sounding fades out under the new hit.
+    let voice = null;
+    for (const v of this.voices) if (!v.active) { voice = v; break; }
+    if (!voice) voice = this.voices[0].age <= this.voices[1].age ? this.voices[0] : this.voices[1];
+    for (const v of this.voices) if (v !== voice) v.chokeOff();
+    this.seed = (this.seed * 1664525 + 1013904223) >>> 0;
+    voice.noteOn(note, velocity, this.seed, at(this.state.values.clicklength, 0), this._drawn());
+    voice.age = this.clock++;
+    this.lastNote = note;
+  }
+
+  /** Renders one block, split wherever a queued hit falls. */
+  process(outL, outR, count) {
+    const events = this.events;
+    if (events.length > 1) events.sort((a, b) => a.at - b.at);
+    let at0 = 0;
+    let next = 0;
+    while (at0 < count) {
+      while (next < events.length && events[next].at <= at0) {
+        const e = events[next++];
+        this.startNote(e.note, e.velocity);
+      }
+      const until = next < events.length ? Math.min(count, events[next].at) : count;
+      const n = until - at0;
+      if (n > 0) {
+        const l = at0 === 0 && n === outL.length ? outL : outL.subarray(at0, at0 + n);
+        const r = at0 === 0 && n === outR.length ? outR : outR.subarray(at0, at0 + n);
+        for (const v of this.voices) if (v.active) v.process(l, r, n, at0, this.state);
+      }
+      at0 = until;
+    }
+    if (next >= events.length) events.length = 0;
+    else this.events = events.slice(next).map((e) => ({ ...e, at: Math.max(0, e.at - count) }));
   }
 }
 
@@ -9248,6 +9977,7 @@ const SYNTHS = [
   [NOISE, () => new NoiseSynth(sampleRate)],
   [FORMANT, () => new FormantSynth(sampleRate)],
   [ADDITIVE, () => new AdditiveSynth(sampleRate)],
+  [ANALOG, () => new AnalogSynth(sampleRate)],
   [KICK, () => new KickSynth(sampleRate)],
   [HAT, () => new HatSynth(sampleRate)],
   [DRUM, () => new DrumSynth(sampleRate)],

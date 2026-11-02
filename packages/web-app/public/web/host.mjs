@@ -856,8 +856,10 @@ export function createHost({
       // The processor starts reporting where its controls are, so a control something else is
       // driving is drawn where it is rather than where it was set. Stopped when the window closes.
       engine.watchDevice?.(tid, slot, true);
-      // The window is up, so the slot is yours until it closes (see holdSlot).
-      holdSlot(label, slot, true);
+      // The window is up, so the slot is yours until it closes (see holdSlot). A redraw of a window
+      // already open after an evaluation is not opening it: the slot stays wherever a click in the
+      // code left it, or a `.preset()` just added would be held off by the window showing it.
+      if (!body?.refresh) holdSlot(label, slot, true);
       return {
         panel: withLoadable(panel.buildPanel(state.descriptor, state.values, state.driven, figureOpts(state))),
         trackId: label,
@@ -1045,8 +1047,12 @@ export function createHost({
       // there is no held gesture for the editor to warn about the way there is on the desktop.
       // Takes a control's .record() finished since the last poll (see pattern-core's motion.mjs).
       // ...and bare cc() calls a knob has filled in (see pattern-core's midi-learn.mjs).
+      // How many whole programs the open window's device has had loaded, so the window redraws
+      // when a preset lands in it.
+      const shown = body?.panel ? evaluator.trackIds.get(String(body.panel.trackId)) ?? String(body.panel.trackId) : null;
+      const panelProgram = shown != null ? engine.programCount?.(shown, Number(body.panel.slot ?? 0)) ?? null : null;
       return {
-        edits, logs: drainNotes(), pending: 0, holds, motionTakes: patternCore.takeMotionTakes?.() ?? [],
+        edits, logs: drainNotes(), pending: 0, holds, panelProgram, motionTakes: patternCore.takeMotionTakes?.() ?? [],
         ccLearns: patternCore.takeMidiLearns(), ccWaiting: patternCore.midiLearnWaiting(),
         // `params`: moves made in a plugin's own window, which this build has no plugins to make.
         params: [],

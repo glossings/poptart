@@ -16,6 +16,7 @@ import { GRANULAR } from './devices/granular.mjs';
 import { NOISE } from './devices/noise.mjs';
 import { FORMANT } from './devices/formant.mjs';
 import { ADDITIVE } from './devices/additive.mjs';
+import { ANALOG } from './devices/analog.mjs';
 import { KICK } from './devices/kick.mjs';
 import { HAT } from './devices/hat.mjs';
 import { DRUM } from './devices/drum.mjs';
@@ -49,7 +50,7 @@ import { MUTABLE_DEVICES } from './devices/mutable.mjs';
 
 /** Every device, newest version of each. Ordered as the browser lists them. */
 export const DEVICES = Object.freeze([
-  WAVETABLE, FMSYNTH, GRANULAR, NOISE, FORMANT, ADDITIVE, KICK, HAT, DRUM,
+  WAVETABLE, FMSYNTH, GRANULAR, NOISE, FORMANT, ADDITIVE, ANALOG, KICK, HAT, DRUM,
   FILTER, EQ, FILTERBANK, RESONATOR, LPG, DISTORT, CRUSH, OVERDRIVE, COMPRESSOR, MULTIBAND, LIMITER, DUCKER,
   DELAY, GRAINECHO, STUTTER, LOOPER, CHORUS, FLANGER, PHASER, FREQSHIFT, VOCALSHIFT, REVERB, ...NODE_DEVICES,
   ...AIRWINDOWS_DEVICES, ...CLOUDSEED_DEVICES, ...STRETCH_DEVICES, ...MUTABLE_DEVICES,
@@ -78,13 +79,13 @@ export function buildCatalog(devices = DEVICES) {
   return registry;
 }
 
-/** The controls a shipped preset leaves where they are: how loud the track is, and how many hits ring. */
+/** The controls a shipped preset leaves where they are, unless it names them: how loud the track is, and how many hits ring. */
 export const PRESET_KEEPS = Object.freeze(['level', 'voices']);
 
 /**
  * The presets the devices ship, as `_preset()` definitions would hold them: { id, plugin, state },
  * the state in the format a captured one has (web-audio-engine.mjs's getPluginState) - every
- * control but PRESET_KEEPS, at the preset's value or its default. osc-engine's native-devices.js
+ * control but the PRESET_KEEPS it does not name, at the preset's value or its default. osc-engine's native-devices.js
  * makes the same strings from the desktop's catalog, for the same names to play the same there.
  */
 export function shippedPresets(devices = DEVICES) {
@@ -92,7 +93,7 @@ export function shippedPresets(devices = DEVICES) {
   for (const d of devices) {
     for (const [id, values] of Object.entries(d.presets ?? {})) {
       const params = {};
-      for (const p of d.params) if (!PRESET_KEEPS.includes(p.id)) params[p.id] = values[p.id] ?? p.default;
+      for (const p of d.params) if (!PRESET_KEEPS.includes(p.id) || p.id in values) params[p.id] = values[p.id] ?? p.default;
       out.push({ id, plugin: d.id, state: btoa(JSON.stringify({ device: d.id, version: d.version, params, files: {} })) });
     }
   }

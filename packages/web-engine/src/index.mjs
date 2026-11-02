@@ -42,6 +42,7 @@ export { WAVETABLE, WavetableSynth, VOICES_KNOB, TABLE_NAMES, tableFromSample } 
 export { FMSYNTH, FmSynth } from './devices/fmsynth.mjs';
 export { GRANULAR, GranularSynth } from './devices/granular.mjs';
 export { ADDITIVE, AdditiveSynth } from './devices/additive.mjs';
+export { ANALOG, AnalogSynth } from './devices/analog.mjs';
 export { sharedBuiltInTables, buildMipmaps } from './dsp/tables.mjs';
 export { DISTORT, DistortProcessor } from './devices/distort.mjs';
 export { REVERB, ReverbProcessor } from './devices/reverb.mjs';

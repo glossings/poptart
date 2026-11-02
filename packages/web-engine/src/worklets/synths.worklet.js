@@ -17,6 +17,7 @@ import { GRANULAR, GranularSynth } from '../devices/granular.mjs';
 import { NOISE, NoiseSynth } from '../devices/noise.mjs';
 import { FORMANT, FormantSynth } from '../devices/formant.mjs';
 import { ADDITIVE, AdditiveSynth } from '../devices/additive.mjs';
+import { ANALOG, AnalogSynth } from '../devices/analog.mjs';
 import { KICK, KickSynth } from '../devices/kick.mjs';
 import { HAT, HatSynth } from '../devices/hat.mjs';
 import { DRUM, DrumSynth } from '../devices/drum.mjs';
@@ -117,6 +118,7 @@ const SYNTHS = [
   [NOISE, () => new NoiseSynth(sampleRate)],
   [FORMANT, () => new FormantSynth(sampleRate)],
   [ADDITIVE, () => new AdditiveSynth(sampleRate)],
+  [ANALOG, () => new AnalogSynth(sampleRate)],
   [KICK, () => new KickSynth(sampleRate)],
   [HAT, () => new HatSynth(sampleRate)],
   [DRUM, () => new DrumSynth(sampleRate)],

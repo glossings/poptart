@@ -52,6 +52,7 @@ import { GranularSynth } from '../web-engine/src/devices/granular.mjs';
 import { NoiseSynth } from '../web-engine/src/devices/noise.mjs';
 import { FormantSynth } from '../web-engine/src/devices/formant.mjs';
 import { AdditiveSynth } from '../web-engine/src/devices/additive.mjs';
+import { ANALOG, ANALOG_FILTER_TYPES, AnalogSynth } from '../web-engine/src/devices/analog.mjs';
 import { KickSynth } from '../web-engine/src/devices/kick.mjs';
 import { HatSynth } from '../web-engine/src/devices/hat.mjs';
 import { DRUM, DrumSynth } from '../web-engine/src/devices/drum.mjs';
@@ -99,6 +100,7 @@ const PROCESSORS = {
   Noise: NoiseSynth,
   Formant: FormantSynth,
   Additive: AdditiveSynth,
+  Analog: AnalogSynth,
   Kick: KickSynth,
   Hat: HatSynth,
   Drum: DrumSynth,
@@ -406,6 +408,20 @@ const PINNED = {
     { partials: 48, stretch: -0.3, damp: 1, odd: 0.6, tilt: -3 },
     { partials: 40, odd: -1, tilt: -9 },
     { glide: 0.05 },
+  ],
+  // Every preset it ships; every shape on both oscillators with sync, sub and noise; each filter
+  // type at the top of Resonance and Drive; the ends of Key Track and Env Amount; and one voice
+  // gliding, which slides between the overlapping chords' notes without starting the envelopes.
+  Analog: [
+    ...Object.values(ANALOG.presets),
+    ...[0, 1, 2, 3].map((shape) => ({ 'osc1.shape': shape, 'osc2.shape': 3 - shape, 'osc1.width': 0.2, 'osc2.width': 0.9, sync: 1, 'osc2.semi': 7, sub: 0.5, noise: 0.2 })),
+    ...ANALOG_FILTER_TYPES.map((_, type) => ({ 'filter.type': type, resonance: 1, drive: 8, cutoff: 300, envamount: 60, morph: 0.7 })),
+    ...ANALOG_FILTER_TYPES.map((_, type) => ({ 'filter.type': type, resonance: 0.5, morph: 0.4, cutoff: 2000 })),
+    { keytrack: 1, envamount: -96, velocity: 1, cutoff: 20000 },
+    { keytrack: 0, envamount: 96, velocity: 0, cutoff: 20, 'fenv.attack': 0.01, 'fenv.decay': 0.02 },
+    { voices: 1, glide: 0.03, drift: 1 },
+    { voices: 1, glide: 0 },
+    { voices: 2, glide: 0.05 },
   ],
   // The ends of every part: the most sweep on the longest pulse, all-noise click, the most drive,
   // the softest tone with the thinnest tail, and the shortest hit with a click only.
@@ -803,6 +819,8 @@ const PATCHED = [
   { id: 'Hat', param: 'tone' },
   { id: 'Hat', param: 'warp' },
   { id: 'Drum', param: 'level' },
+  { id: 'Analog', param: 'cutoff' },
+  { id: 'Analog', param: 'mix' },
 ];
 
 for (const { id, param } of PATCHED) {

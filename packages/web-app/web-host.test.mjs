@@ -900,6 +900,37 @@ test('an open window holds its slot, so a preset coming round cannot undo what y
   shutdown(rig);
 });
 
+test('an open window redrawn after an evaluation leaves its slot to the code, and is told when a preset lands', async () => {
+  const rig = makeHost();
+  await rig.host.call('POST', '/api/evaluate', { code: 'd: n("0").synth("Drum")' });
+  const scheduler = rig.evaluator.schedulers.get('d');
+  const tid = rig.evaluator.trackIds.get('d');
+  await rig.host.call('POST', '/api/showEditor', { trackId: 'd', slot: 0 });
+  await rig.host.call('POST', '/api/releaseEditors', {});
+
+  // `.preset()` added in the code: the editor redraws the open window after the evaluation, and
+  // that redraw must not take the slot back, or the preset would be held off by the window.
+  const snare = catalog.get('Drum').presets.snare;
+  const state = Buffer.from(JSON.stringify({ device: 'Drum', version: 1, params: snare })).toString('base64');
+  await rig.host.call('POST', '/api/evaluate', { code: `_preset("crack", "Drum", "${state}")\nd: n("0").synth("Drum").preset("crack")` });
+  await rig.host.call('POST', '/api/showEditor', { trackId: 'd', slot: 0, refresh: true });
+  assert.equal(scheduler._stateHold.has(0), false, 'a redraw is not an opening');
+
+  // Each whole program loaded into the device it shows is counted, so the window draws again.
+  const panel = { trackId: 'd', slot: 0 };
+  const before = (await rig.host.call('POST', '/api/pluginEdits', { panel })).panelProgram;
+  await rig.engine.setPluginState(tid, 0, state);
+  const after = (await rig.host.call('POST', '/api/pluginEdits', { panel })).panelProgram;
+  assert.equal(after, before + 1);
+  const { panel: drawn } = await rig.host.call('POST', '/api/showEditor', { trackId: 'd', slot: 0, refresh: true });
+  const pitch = drawn.sections.flatMap((s) => s.widgets ?? s.params ?? []).find((w) => w.id === 'pitch');
+  assert.equal(pitch.text, '-7.3 st', 'and the redraw shows what the preset set');
+  // Opening it for real still takes the slot.
+  await rig.host.call('POST', '/api/showEditor', { trackId: 'd', slot: 0 });
+  assert.equal(scheduler._stateHold.has(0), true);
+  shutdown(rig);
+});
+
 test('with conf on for a track, the same gesture writes a .param() call instead', async () => {
   const rig = makeHost();
   await rig.host.call('POST', '/api/evaluate', { code: 'lead: n("0 2").synth("Wavetable")' });

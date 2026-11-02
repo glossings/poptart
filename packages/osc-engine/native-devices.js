@@ -492,13 +492,13 @@ function paramPosition(device, name, arg) {
   return normalize(param, denormalize(param, n));
 }
 
-/** The controls a shipped preset leaves where they are (web-engine's catalog.mjs, PRESET_KEEPS). */
+/** The controls a shipped preset leaves where they are unless it names them (web-engine's catalog.mjs, PRESET_KEEPS). */
 const PRESET_KEEPS = ['level', 'voices'];
 
 /**
  * The presets the devices ship, as `_preset()` definitions would hold them: { id, plugin, state },
  * the state in the browser's format, the same string web-engine's shippedPresets makes - every
- * control but PRESET_KEEPS, at the preset's value or its default. A host files them in the
+ * control but the PRESET_KEEPS it does not name, at the preset's value or its default. A host files them in the
  * library layer, so `.preset("snare")` on a Drum plays one on either engine.
  */
 function shippedPresets(opts) {
@@ -506,7 +506,7 @@ function shippedPresets(opts) {
   for (const d of nativeDevices(opts)) {
     for (const [id, values] of Object.entries(d.presets ?? {})) {
       const params = {};
-      for (const p of d.params) if (!PRESET_KEEPS.includes(p.id)) params[p.id] = values[p.id] ?? p.default;
+      for (const p of d.params) if (!PRESET_KEEPS.includes(p.id) || p.id in values) params[p.id] = values[p.id] ?? p.default;
       const json = JSON.stringify({ device: d.id, version: d.version, params, files: {} });
       out.push({ id, plugin: d.id, state: Buffer.from(json, 'utf8').toString('base64') });
     }

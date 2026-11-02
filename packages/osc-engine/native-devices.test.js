@@ -685,6 +685,18 @@ test('a preset made in the browser restores onto the desktop device as positions
   assert.deepStrictEqual(decodeText(await e.getPluginState('t', 1)).params, { pitch: 12, formant: -6, tonality: 0 });
 });
 
+test('each whole program a device takes is counted, so a window open on it draws again', async () => {
+  const { e } = engine();
+  e.loadEffect('t', 'Shift', 1);
+  assert.strictEqual(e.programCount('t', 1), 0);
+  e.setPluginState('t', 1, Buffer.from(JSON.stringify({ device: 'Shift', params: { pitch: 12 } })).toString('base64'));
+  await e._stateIdle();
+  assert.strictEqual(e.programCount('t', 1), 1);
+  e.setPluginState('t', 1, Buffer.from(JSON.stringify({ device: 'Shift', params: { pitch: -12 } })).toString('base64'));
+  await e._stateIdle();
+  assert.strictEqual(e.programCount('t', 1), 2);
+});
+
 test('a gzipped state and JSON typed out by hand are read too', async () => {
   const zlib = require('node:zlib');
   const { e, sent } = engine();
@@ -977,6 +989,11 @@ test('the presets a device ships are the same strings on the desktop as in the b
   assert.strictEqual(doc.device, 'Drum');
   assert.ok(!('level' in doc.params) && !('voices' in doc.params));
   assert.strictEqual(doc.params.stutter, 0, 'a control the preset does not name is at its default');
+  // One that names the voices sets them: a mono patch is one voice.
+  const acid = desktop.find((p) => p.plugin === 'Analog' && p.id === 'acid');
+  const mono = JSON.parse(Buffer.from(acid.state, 'base64').toString('utf8'));
+  assert.strictEqual(mono.params.voices, 1);
+  assert.ok(!('level' in mono.params));
 });
 
 test('a control a device reads when a hit starts is set outright, not glided', () => {

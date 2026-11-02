@@ -68,6 +68,7 @@ import { GRANULAR } from '../../src/devices/granular.mjs';
 import { NOISE } from '../../src/devices/noise.mjs';
 import { FORMANT } from '../../src/devices/formant.mjs';
 import { ADDITIVE } from '../../src/devices/additive.mjs';
+import { ANALOG } from '../../src/devices/analog.mjs';
 import { KICK } from '../../src/devices/kick.mjs';
 import { HAT } from '../../src/devices/hat.mjs';
 import { DRUM } from '../../src/devices/drum.mjs';
@@ -159,6 +160,7 @@ const OWN = [
   { descriptor: NOISE, source: 'noise.cc' },
   { descriptor: FORMANT, source: 'formant.cc' },
   { descriptor: ADDITIVE, source: 'additive.cc' },
+  { descriptor: ANALOG, source: 'analog.cc' },
   { descriptor: KICK, source: 'kick.cc' },
   { descriptor: HAT, source: 'hat.cc' },
   { descriptor: DRUM, source: 'drum.cc' },

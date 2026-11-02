@@ -2464,8 +2464,19 @@ export class WebAudioEngine {
     // A state holds no lists (they are the pattern's, `saved: false`), so the scheduler is told to
     // hand the device its lists again, whatever it thinks it last sent (see listParams).
     const restored = track.slots.get(slot);
-    if (restored) restored.listEpoch = undefined;
+    if (restored) {
+      restored.listEpoch = undefined;
+      restored.programs = (restored.programs ?? 0) + 1;
+    }
     return Promise.resolve(true);
+  }
+
+  /**
+   * How many whole programs have been loaded into a slot's device - a preset, a `{ state }` - so
+   * a window open on it can tell its controls have all moved at once and draw them again.
+   */
+  programCount(trackId, slot) {
+    return this.tracks.get(trackId)?.slots.get(slot)?.programs ?? 0;
   }
 
   getPluginState(trackId, slot) {
