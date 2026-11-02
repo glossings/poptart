@@ -445,7 +445,8 @@ built tree.
   a UGen in the native case and by a ramp synth (linear glide between polls) in the polled case,
   so a polled sweep is a line rather than a staircase and a control can pass between the two
   without its mapping being torn down. The note-gated modulators (`env()`, `lfo()` in
-  retrigger/envelope mode) sample in JS off the track's own note grid — the scheduler emits those
+  retrigger/envelope mode, and the bare `vel`, which latches each note-on's velocity) sample in JS
+  off the track's own note grid — the scheduler emits those
   notes, so the gate is a pure function of (pattern, position) and both paths hear the same notes.
   The one source that isn't on the grid is live `midikeys()` input, which only the engine sees.
 - **Pitch bend is one control with two destinations.** `.bend(sig)` — and the curve drawn on a

@@ -32,7 +32,7 @@ import { MIX_BAND_FREQS, MixAnalysis, SpectrumTap } from './analysis.mjs';
 import { MidiRoutes } from './midi-routes.mjs';
 import { detectOnsets, monoOf, planSample, sliceEntryFor } from './sample-plan.mjs';
 import { isSliceGrid, assumedFitNote } from '../../../osc-engine/slice-grid-core.mjs';
-import { EnvConnection, FeedConnection, LfoConnection } from './modulators.mjs';
+import { EnvConnection, FeedConnection, LatchConnection, LfoConnection } from './modulators.mjs';
 import { GRAIN_CHANNEL_FIELDS, SUPPORTED_CHANNELS, Track, rampParam } from './track.mjs';
 import { DeskAudio } from './desk-audio.mjs';
 import { SONG_LATENCY_SEC, SongPlayer } from './song-player.mjs';
@@ -231,7 +231,7 @@ export class WebAudioEngine {
     this.modulators = new Map();    // trackId -> Map("slot:name" -> connection)
     this.exprs = new Map();         // trackId -> Map("slot:name" -> parameter expression, see setParamExpr)
     this.patterned = new Map();     // trackId -> Set("slot:name") a pattern drives by poll (see holdParam)
-    this.envelopes = new Map();     // trackId -> Map("slot:name" -> EnvConnection), gated per note
+    this.envelopes = new Map();     // trackId -> Map("slot:name" -> EnvConnection | LatchConnection), gated per note
     this.feeds = new Map();         // "device|cc" or "osc:address" -> Set(FeedConnection)
     // Every controller's and OSC address's latest 0..1 this session, which a feed made afresh starts
     // from (see setParamCC): "device name|cc|channel" (channel 0 = the last on any) and
@@ -754,22 +754,36 @@ export class WebAudioEngine {
     const source = this.tracks.get(trackId)?.source;
     if (source?.node?.port) source.node.port.postMessage({ kind: 'noteOn', note, velocity, time: atTime });
     this._markSounding(trackId, 0, note, Infinity);
-    const held = this.held.get(trackId) ?? 0;
-    this.held.set(trackId, held + 1);
-    // One that retriggers starts its attack again on every note, from the floor.
-    for (const env of this.envelopes.get(trackId)?.values() ?? []) if (held === 0 || env.ir?.retrigger) env.gateOn(atTime);
-    for (const conn of this.modulators.get(trackId)?.values() ?? []) {
-      if (conn instanceof LfoConnection) conn.gate(atTime);
-    }
+    this._gateOn(trackId, velocity, atTime);
   }
 
   _stopNote(trackId, note, atTime) {
     const source = this.tracks.get(trackId)?.source;
     if (source?.node?.port) source.node.port.postMessage({ kind: 'noteOff', note, time: atTime });
     this._markSounding(trackId, 0, note, atTime);
+    this._gateOff(trackId, atTime);
+  }
+
+  // A note or a sample starting, as the track's modulators hear it: the held count goes up, the
+  // env()s open (one that retriggers starts its attack again on every note, from the floor), a
+  // `vel` takes the velocity, and the note-gated lfo() shapes restart.
+  _gateOn(trackId, velocity, atTime) {
+    const held = this.held.get(trackId) ?? 0;
+    this.held.set(trackId, held + 1);
+    for (const env of this.envelopes.get(trackId)?.values() ?? []) {
+      if (env instanceof LatchConnection) env.latch(velocity, atTime);
+      else if (held === 0 || env.ir?.retrigger) env.gateOn(atTime);
+    }
+    for (const conn of this.modulators.get(trackId)?.values() ?? []) {
+      if (conn instanceof LfoConnection) conn.gate(atTime);
+    }
+  }
+
+  // ...and ending: the env()s close when the last held one does. A `vel` holds.
+  _gateOff(trackId, atTime) {
     const held = Math.max(0, (this.held.get(trackId) ?? 0) - 1);
     this.held.set(trackId, held);
-    if (held === 0) for (const env of this.envelopes.get(trackId)?.values() ?? []) env.gateOff(atTime);
+    if (held === 0) for (const env of this.envelopes.get(trackId)?.values() ?? []) if (env instanceof EnvConnection) env.gateOff(atTime);
   }
 
   /**
@@ -1045,7 +1059,7 @@ export class WebAudioEngine {
     try { track.source?.node?.port?.postMessage({ kind: 'allNotesOff', time: now }); } catch { /* no port */ }
     release(now);
     if (againSec > 0) release(now + againSec);
-    for (const env of this.envelopes.get(trackId)?.values() ?? []) env.gateOff(now);
+    for (const env of this.envelopes.get(trackId)?.values() ?? []) if (env instanceof EnvConnection) env.gateOff(now);
     this.held.set(trackId, 0);
     for (const voice of [...(this.voices.get(trackId) ?? [])]) voice.release(now);
     this.midiRoutes.releaseFrom(trackId, now);
@@ -1465,7 +1479,8 @@ export class WebAudioEngine {
     const held = this.modulators.get(trackId);
     if (!held) return;
     const existing = held.get(key);
-    if (existing && existing.method !== method) this._clearModulator(trackId, slot, name);
+    // An env() and a `vel` are both programmed by setParamEnv, and are not one another.
+    if (existing && (existing.method !== method || Boolean(existing.ir?.latch) !== Boolean(ir?.latch))) this._clearModulator(trackId, slot, name);
     else if (existing) {
       // A re-send goes to the connection, which decides what changed: the scheduler re-sends every
       // modulator after each evaluation, and one whose range or rate is a signal every tick, and
@@ -1489,6 +1504,7 @@ export class WebAudioEngine {
       // Born open when notes are already held, as the desktop's env synth is.
       if ((this.held.get(trackId) ?? 0) > 0) connection.gateOn(this.getTime());
     }
+    if (connection instanceof LatchConnection) this.envelopes.get(trackId)?.set(key, connection);
   }
 
   /**
@@ -1528,7 +1544,9 @@ export class WebAudioEngine {
   }
 
   setParamEnv(trackId, slot, name, ir) {
-    this._setModulator(trackId, slot, name, ir, (target) => new EnvConnection(this.ctx, target, ir), 'an envelope', 'setParamEnv');
+    // `ir.latch` is the bare `vel`: the note's velocity, held, rather than an ADSR.
+    if (ir?.latch) this._setModulator(trackId, slot, name, ir, (target) => new LatchConnection(this.ctx, target, ir), 'velocity', 'setParamEnv');
+    else this._setModulator(trackId, slot, name, ir, (target) => new EnvConnection(this.ctx, target, ir), 'an envelope', 'setParamEnv');
   }
 
   setParamCC(trackId, slot, name, ir) {
@@ -2711,6 +2729,10 @@ export class WebAudioEngine {
     const slices = cfg.slice != null && !grid ? authored?.marks ?? this._transientsOf(buffer) : null;
     const plan = planSample({ duration: buffer.duration, rootNote }, { ...cfg }, onsetSec, offsetSec, { slices, grid, authoredFit: authored?.fit ?? null, anchor: SAMPLER_ANCHOR });
     if (plan.skipped) return { skipped: plan.skipped };
+    // The track's modulators hear a sample as a note, from its onset to where its voice is let go
+    // (the gate for a loop or a cut one, its own end otherwise) - as the desktop's sampler does.
+    this._gateOn(trackId, plan.amp, onsetSec);
+    this._gateOff(trackId, plan.loop || plan.cut ? offsetSec : onsetSec + plan.durSec);
     if (plan.gridAssumed != null) this._warnOnce(`slicegrid:${key ?? packId}`, `[web-engine] ${assumedFitNote(grid, (key ?? String(packId)).split('/').pop(), plan.gridAssumed)}`);
     if (plan.noSlices) this._warnOnce(`slices:${key}`, `[web-engine] .slice(): no transients were found in ${key ?? packId} - playing the whole sample.`);
 

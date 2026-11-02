@@ -17,7 +17,7 @@
 // Like macros.mjs this keeps its own store, apart from signal.mjs: the host writes it (POST
 // /api/widgets/set) and every widget signal reads it when it is sampled.
 
-import { Sig, mini, channelAt, soundingEnd, timeShift, warnPattern, noteLiveRead } from './signal.mjs';
+import { Sig, mini, channelAt, soundingEnd, timeShift, warnPattern, noteLiveRead, clipsOwnerNow, withTrackGate } from './signal.mjs';
 import { CURVES } from './curves.mjs';
 import { songSteps } from './arrange.mjs';
 import { notePress, forgetPresses } from './triggers.mjs';
@@ -34,8 +34,8 @@ const values = new Map(); // `${deck}:${at}` -> the live value (a number, a row'
 // moved by a set that says where the text is now (the editor writing a count out as cells), so a
 // row's cells carry the spans the highlighter lights without waiting for the next evaluation.
 const lits = new Map();
-// `${deck}:${at}` -> { [option]: Sig } - a row option written as a signal or a pattern, which the
-// editor asks the host for at each pass of the row (see widgetOption).
+// `${deck}:${at}` -> { [option]: Sig, block } - a row option written as a signal or a pattern, which
+// the editor asks the host for at each pass of the row (see widgetOption), and the block it is in.
 const optionSigs = new Map();
 // The keys that are button()s: a change of their value is a press or a release (see triggers.mjs).
 const buttonKeys = new Set();
@@ -422,7 +422,8 @@ function rowOption(kind, key, raw, out, at = null) {
     const first = numberOf(sig, 0);
     out[key] = Math.min(hi, Math.max(lo, Number.isFinite(first) ? first : 0));
     out[`${key}Live`] = true;
-    if (at !== null) optionSigs.set(keyOf(currentDeck, at), { ...optionSigs.get(keyOf(currentDeck, at)), [key]: sig });
+    // Filed with the block it is in, so a signal that reads its track's notes (`vel`) reads them.
+    if (at !== null) optionSigs.set(keyOf(currentDeck, at), { ...optionSigs.get(keyOf(currentDeck, at)), [key]: sig, block: clipsOwnerNow().label });
     return;
   }
   const v = numberOf(sig ?? raw, NaN);
@@ -441,12 +442,14 @@ function rowOption(kind, key, raw, out, at = null) {
  * when that row has no such option, or it reads nothing there.
  */
 export function widgetOption(deck, at, key, pos, cps = 0.5) {
-  const sig = optionSigs.get(keyOf(deck === 'b' ? 'b' : 'a', Number(at)))?.[key];
+  const which = deck === 'b' ? 'b' : 'a';
+  const entry = optionSigs.get(keyOf(which, Number(at)));
+  const sig = entry?.[key];
   if (!sig) return null;
   const p = Number(pos);
   let v;
   try {
-    v = Number(sig.sample(p / cps, cps, p));
+    v = Number(withTrackGate(which, entry.block, p, () => sig.sample(p / cps, cps, p)));
   } catch {
     return null;
   }

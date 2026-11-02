@@ -254,10 +254,14 @@ function shapeLfoDef(at) {
 
 const envParams = () => ({ out: 0, atk: 0.01, dec: 0.1, sus: 0.7, rel: 0.2, curve: -4, gate: 0, lo: 0, hi: 1, retrig: 0, t_retrig: 0 });
 
+// With retrig, a restart drops to the floor before it climbs (see poptart.scd).
 function envDef() {
   return new SynthDef('poptart_env', envParams(), (c) => {
     const again = mul(mul(c.t_retrig, c.retrig), gt(Delay1.kr(c.gate), 0));
-    const envSig = EnvGen.kr(Env.adsr(c.atk, c.dec, c.sus, c.rel, 1.0, c.curve), sub(c.gate, again));
+    const envSig = Select.kr(gt(c.retrig, 0), [
+      EnvGen.kr(Env.adsr(c.atk, c.dec, c.sus, c.rel, 1.0, c.curve), c.gate),
+      EnvGen.kr(new Env([0, 0, 1, c.sus, 0], [0, c.atk, c.dec, c.rel], c.curve, 3), sub(c.gate, again)),
+    ]);
     Out.kr(c.out, add(c.lo, mul(envSig, sub(c.hi, c.lo))));
   });
 }
@@ -265,9 +269,19 @@ function envDef() {
 function envArDef() {
   return new SynthDef('poptart_env_ar', envParams(), (c) => {
     const again = Trig1.ar(mul(mul(c.t_retrig, c.retrig), gt(Delay1.kr(c.gate), 0)), SampleDur.ir());
-    const envSig = EnvGen.ar(Env.adsr(c.atk, c.dec, c.sus, c.rel, 1.0, c.curve), sub(c.gate, again));
+    const envSig = Select.ar(gt(c.retrig, 0), [
+      EnvGen.ar(Env.adsr(c.atk, c.dec, c.sus, c.rel, 1.0, c.curve), c.gate),
+      EnvGen.ar(new Env([0, 0, 1, c.sus, 0], [0, c.atk, c.dec, c.rel], c.curve, 3), sub(c.gate, again)),
+    ]);
     const v = add(c.lo, mul(envSig, sub(c.hi, c.lo)));
     Out.ar(c.out, [v, v]);
+  });
+}
+
+// The bare `vel`, held from each note-on to the next (see poptart.scd).
+function velDef() {
+  return new SynthDef('poptart_vel', { out: 0, vel: 0, lo: 0, hi: 1 }, (c) => {
+    Out.kr(c.out, add(c.lo, mul(c.vel, sub(c.hi, c.lo))));
   });
 }
 
@@ -576,7 +590,7 @@ function bootDefs(options) {
   const defs = [];
   for (const shape of LFO_SHAPES) for (const at of ['kr', 'ar']) defs.push(lfoDef(shape, at));
   for (const at of ['kr', 'ar']) defs.push(shapeLfoDef(at));
-  defs.push(envDef(), envArDef(), rampDef());
+  defs.push(envDef(), envArDef(), velDef(), rampDef());
   for (const nc of [1, 2]) defs.push(...samplerDefs(nc, o));
   defs.push(...ioDefs(o));
   return defs;

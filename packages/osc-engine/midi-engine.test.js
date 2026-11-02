@@ -155,7 +155,7 @@ test('a live route plays from the worker, keeps the books here, and its teardown
     assert.deepEqual(notes, [[0x90, 62, 100], [0x93, 65, 90]]);
     assert.deepEqual(server.got[0].slice(1, 3), [3000, 18], 'addressed to the slot\'s UGen');
     assert.ok(told.some((m) => m.address === '/poptart/midiNoteIn' && m.args[0] === key && m.args[1] === 62));
-    assert.deepEqual(gates.at(-1), ['gate', 1, 't_retrig', 1], 'a key opens the env gate');
+    assert.deepEqual(gates.at(-1), ['gate', 1, 't_retrig', 1, 'vel', 90 / 127], 'a key opens the env gate, and hands a velocity latch its velocity');
     // Teardown: the held notes released at the pitches played, VST2 also gets CC 123 everywhere.
     E.dispatch('/poptart/clearMidiRoute', [key]);
     const offs = ctl.calls.filter((c) => c[0] === 'noteOff').map((c) => c.slice(1));

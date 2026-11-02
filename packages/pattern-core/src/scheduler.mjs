@@ -26,7 +26,7 @@
 //    own note grid (withNoteGate), which is what the engine gates the native one from too.
 
 import { defScopeOf, withDefDeck } from './rolls.mjs';
-import { steadyValue, sampleBound, CHANNEL_DEFAULTS, channelDefault, GRAIN_CHANNELS, DEFAULT_BEND_RANGE, bendRangeWarning, LOOP_MODES, loopModeAt, channelAt, soundingEnd, timeShift, grooveVelScale, endEdgeStep, warnPattern, lfoRateHz, lfoPhaseCount, lfoShapes, resolvePreset, paramExpr, lfoRateChanges, withNoteGate, withEventSpan, noteGateFromGrid, withSampleLength, currentEventSpan } from './signal.mjs';
+import { steadyValue, sampleBound, CHANNEL_DEFAULTS, channelDefault, GRAIN_CHANNELS, DEFAULT_BEND_RANGE, bendRangeWarning, LOOP_MODES, loopModeAt, channelAt, soundingEnd, timeShift, grooveVelScale, endEdgeStep, warnPattern, lfoRateHz, lfoPhaseCount, lfoShapes, resolvePreset, paramExpr, lfoRateChanges, withNoteGate, withEventSpan, noteGateFromGrid, withSampleLength, currentEventSpan, setTrackGate } from './signal.mjs';
 import { scalePitchClasses, parseScaleName, degreeToMidi, quantizeToScale, globalScale } from './notes.mjs';
 import { songSteps, stepsUnderShift, withClipShift } from './arrange.mjs';
 import { sliceSetIsEmpty } from './slices.mjs';
@@ -34,7 +34,7 @@ import { resolveInputChannels } from './audio-inputs.mjs';
 import { withLiveReads } from './motion.mjs';
 import { withPressWindow } from './triggers.mjs';
 import { routePlan, routeLatencies, routeControlDefault, routeItems } from './route.mjs';
-import { deviceParamSpec, unitConversion, unitPosition, unitTree, noteHz } from './units.mjs';
+import { deviceParamSpec, unitConversion, unitPosition, unitTree, noteHz, midiHz, midiHzTree, takesHz } from './units.mjs';
 import { plainText } from './eval-errors.mjs';
 
 // Resolves an input()'s channel request against the booted device's live layout (see
@@ -1111,9 +1111,8 @@ export class Scheduler {
     const spec = deviceParamSpec(typeof device === 'string' ? device : null, c.name);
     if (!spec) return null; // a plugin: a mapping file is what gives its numbers units
     if (!unit) {
-      // A note name on a control in hertz is that note's frequency.
-      const own = String(spec.unit ?? '').toLowerCase();
-      return own === 'hz' && !spec.options ? { spec, divide: 1, notes: true } : null;
+      // A note on a control in hertz is that note's frequency.
+      return takesHz(spec) ? { spec, divide: 1, notes: true } : null;
     }
     const conv = unitConversion(spec, unit);
     if (typeof conv === 'object') return conv;
@@ -1158,18 +1157,25 @@ export class Scheduler {
       const conv = this._unitConversion(sig, raw);
       if (conv === false) continue;
       const engineSide = Boolean(paramExpr(raw.sig) || raw.sig.lfoIR || raw.sig.envIR || raw.sig.ccIR);
+      // A note pattern's numbers are MIDI notes (note("<c4 c5>")), each one its frequency here.
+      // Anything else holds a note only as a name; its numbers stay positions.
+      const midi = Boolean(conv?.notes) && raw.sig.pitchKind === 'note';
       let c = raw;
       if (conv?.notes) {
-        // Only a pattern can hold a note name, and its numbers stay positions.
-        if (!engineSide && raw.sig.stepsForCycle) {
-          c = { ...raw, sig: raw.sig.mapValue((v) => { const hz = noteHz(v); return hz == null ? v : unitPosition(conv, hz); }) };
+        if (!engineSide && (raw.sig.stepsForCycle || midi)) {
+          c = { ...raw, sig: raw.sig.mapValue((v) => {
+            if (typeof v === 'number') return midi ? unitPosition(conv, midiHz(v)) : v;
+            const hz = noteHz(v);
+            return hz == null ? v : unitPosition(conv, hz);
+          }) };
         }
       } else if (conv) {
         c = { ...raw, sig: raw.sig.mapValue((v) => unitPosition(conv, v)) };
       }
+      const converts = conv && (!conv.notes || midi);
       let node = paramExpr(raw.sig);
-      if (conv && !conv.notes && !node && canEval && engineSide) node = { k: 'leaf', sig: raw.sig };
-      if (conv && !conv.notes && node) node = unitTree(conv, node);
+      if (converts && !node && canEval && engineSide) node = { k: 'leaf', sig: raw.sig };
+      if (converts && node) node = unitTree(conv, midi ? midiHzTree(node) : node);
       if (!node) { entries.push(c); continue; }
       if (!canEval) {
         // Without the engine's help an expression is still its JavaScript - except audio, which
@@ -1196,7 +1202,8 @@ export class Scheduler {
               inputs.set(n.sig, i);
               entries.push({ slot: c.slot, name: leafName(i, c.name), sig: n.sig });
             }
-            return { k: 'in', i: inputs.get(n.sig), rate: n.sig.envIR ? 'ar' : 'kr' };
+            // An envelope is fed per sample; a `vel` steps once a note, so a block's value is all of it.
+            return { k: 'in', i: inputs.get(n.sig), rate: n.sig.envIR && !n.sig.envIR.latch ? 'ar' : 'kr' };
           }
           // A node's own fields (a map's range and curve) travel with it.
           default: return { ...n, a: n.a.map(wire) };
@@ -1366,6 +1373,8 @@ export class Scheduler {
       ? noteGateFromGrid((cycle) => this._songSteps(sig.stepsForCycle, cycle, cycle + 1), (e) => this._soundingSpan(e))
       : null;
     if (this._noteGate) this._noteGate.since = since;
+    // ...and filed by block, for a read the editor makes outside the poll (see setTrackGate).
+    if (this.label != null) setTrackGate(this.deck, this._blockLabel(), (fn, atCycle) => this._withNoteGate(fn, atCycle));
     this.engine.createTrack(this.trackId);
 
     if (sig.instrument) {
@@ -1661,6 +1670,14 @@ export class Scheduler {
     }, nowCycle);
   }
 
+  // The block this track was evaluated from: its label, without the deck prefix a second deck's
+  // tracks carry ("b:bass").
+  _blockLabel() {
+    const label = String(this.label);
+    const prefix = `${this.deck}:`;
+    return this.deck !== 'a' && label.startsWith(prefix) ? label.slice(prefix.length) : label;
+  }
+
   /**
    * Runs `fn` with this track's note grid bound as the gate its modulators sample against, for
    * reads made around transport cycle `atCycle`.
@@ -1676,24 +1693,24 @@ export class Scheduler {
     const delta = gate && this._songClock && atCycle != null ? this._songAt(atCycle) - atCycle : 0;
     if (!delta) return withNoteGate(gate, fn);
     return withNoteGate({
-      intervalsUpTo: (pos) => gate.intervalsUpTo(pos - delta).map(([a, b]) => [a + delta, b + delta]),
+      intervalsUpTo: (pos) => gate.intervalsUpTo(pos - delta).map(([a, b, vel]) => [a + delta, b + delta, vel]),
     }, fn);
   }
 
-  // One event's sounding span in absolute transport cycles, or null where nothing sounds (a rest, a
-  // tie's continuation, a note at zero velocity - what _scheduleNoteEdges skips). Takes a songSteps
-  // entry and reads it at its grid position like the emitter does; the nudge/swing shift is a
-  // matter of milliseconds against a modulator whose times are set in tens of them.
+  // One event's sounding span in absolute transport cycles, with the velocity the engine is sent
+  // for it - [onset, end, vel] - or null where nothing sounds (a rest, a tie's continuation, a note
+  // at zero velocity - what _scheduleNoteEdges and the engines skip). Takes a songSteps entry and
+  // reads it at its grid position like the emitter does; the nudge/swing shift is a matter of
+  // milliseconds against a modulator whose times are set in tens of them.
   _soundingSpan({ step, cycle, delta }) {
     if (step.value == null || step.cont) return null;
     const songOnset = cycle + step.start;
     const onset = songOnset - delta;
     const onsetSec = this.transport.secAt(onset);
-    if (!this.pattern.sampler) {
-      const vel = this._velAt(step, onsetSec, songOnset) ?? 1.0;
-      if (vel <= 0) return null;
-    }
-    return [onset, cycle - delta + this._soundingEnd(step, onsetSec, songOnset)];
+    // A note's velocity is capped at full as it is sent; a sample's gain is sent as it is.
+    const vel = this._velAt(step, onsetSec, songOnset) ?? 1.0;
+    if (vel <= 0) return null;
+    return [onset, cycle - delta + this._soundingEnd(step, onsetSec, songOnset), this.pattern.sampler ? vel : Math.min(1, vel)];
   }
 
   /**

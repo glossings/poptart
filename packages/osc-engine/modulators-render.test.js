@@ -324,10 +324,50 @@ test('audio patched onto a native control is read every sample, and an audio-rat
   assert.ok(worstStep < 0.002, `the attack moved ${worstStep.toFixed(4)} in one sample - a block step, not a ramp`);
   assert.ok(Math.abs(sample(4, at(0.125)) - 0.5) < 0.03, `25 ms into a 50 ms attack: ${sample(4, at(0.125))}`);
   assert.ok(Math.abs(sample(4, at(0.45)) - 0.5) < 1e-3, `at sustain before the retrigger: ${sample(4, at(0.45))}`);
-  assert.ok(sample(4, at(0.53)) > 0.7, `the retrigger did not restart the attack: ${sample(4, at(0.53))}`);
+  // A retrigger drops to the floor and climbs again: 30 ms into a fresh 50 ms attack.
+  assert.ok(Math.abs(sample(4, at(0.53)) - 0.6) < 0.03, `the retrigger did not restart the attack from the floor: ${sample(4, at(0.53))}`);
   assert.ok(Math.abs(sample(6, at(0.53)) - 0.5) < 1e-3, `without retrigger the envelope should hold at sustain: ${sample(6, at(0.53))}`);
   assert.ok(Math.abs(sample(8, at(0.45)) - 0.5) < 1e-3, `the control-rate envelope's sustain: ${sample(8, at(0.45))}`);
-  assert.ok(sample(8, at(0.53)) > 0.7, `the control-rate retrigger did not restart the attack: ${sample(8, at(0.53))}`);
+  // At the control rate the drop and the climb each start on a block, a few milliseconds later.
+  assert.ok(sample(8, at(0.504)) < 0.2, `the control-rate retrigger did not drop to the floor: ${sample(8, at(0.504))}`);
+  assert.ok(Math.abs(sample(8, at(0.53)) - 0.6) < 0.08, `the control-rate retrigger did not restart the attack from the floor: ${sample(8, at(0.53))}`);
   // Both sides of the pair carry it - a patch is read as the mean of the two.
   assert.strictEqual(sample(5, at(0.3)), sample(4, at(0.3)));
+});
+
+test('the bare vel latches each note-on in the block its note starts in, as an envelope opens, and holds to the next', (t) => {
+  const f = (v) => ({ type: 'f', value: v });
+  // A note-on mid-block (sample 4815 of a 64-sample grid), handed to every envelope-filed synth in
+  // one message as the engine sends it: an envelope ignores `vel`, the latch ignores the gate.
+  const ON = 4815 / SR;
+  const NEXT = 0.3;
+  const onset = (node, vel) => ['/n_set', node, 'gate', 1, 't_retrig', 1, 'vel', f(vel)];
+  const r = renderNRT([
+    ...[bootDef('poptart_vel'), bootDef('poptart_env'), bootDef('poptart_env_ar'), readKr, readAr].map((d) => [0, ['/d_recv', d]]),
+    // 0: vel over 0.2..0.6. 1: a control-rate envelope with no attack. 2: the audio-rate one.
+    [0, ['/s_new', 'poptart_vel', 1000, 0, 0, 'out', 3, 'lo', f(0.2), 'hi', f(0.6)]],
+    [0, ['/s_new', 'poptart_env', 1001, 0, 0, 'out', 4, 'atk', f(0), 'dec', f(0), 'sus', f(1), 'rel', f(0)]],
+    [0, ['/s_new', 'poptart_env_ar', 1002, 0, 0, 'out', 20, 'atk', f(0), 'dec', f(0), 'sus', f(1), 'rel', f(0)]],
+    [0, ['/s_new', 't_read', 1100, 1, 0, 'out', 0, 'bus', 3]],
+    [0, ['/s_new', 't_read', 1101, 1, 0, 'out', 1, 'bus', 4]],
+    [0, ['/s_new', 't_read_ar', 1102, 1, 0, 'out', 2, 'bus', 20]],
+    [ON, onset(1000, 0.5)], [ON, onset(1001, 0.5)], [ON, onset(1002, 0.5)],
+    [NEXT, onset(1000, 0.25)],
+  ], { duration: 0.5, outChannels: 3 });
+  if (!r.data) { t.skip(r.why); return; }
+  assert.ok(!/FAILURE/.test(r.text ?? ''), `the server failed a command:\n${r.text}`);
+  const firstMoved = (ch, from) => { for (let i = from; i < r.frames; i++) if (r.at(ch, i) !== r.at(ch, from)) return i; return -1; };
+  const near = (a, b, what) => assert.ok(Math.abs(a - b) < 1e-6, `${what}: ${a} vs ${b}`);
+  near(r.at(0, 100), 0.2, 'rests at its floor before the first note');
+  const vel = firstMoved(0, 100);
+  const env = firstMoved(1, 100);
+  const envAr = firstMoved(2, 100);
+  // Measured: vel and the audio-rate envelope move in the block the note-on falls in (4800-4863:
+  // a timestamp takes effect at the start of its block on the desktop), at 4801 and 4802; the
+  // control-rate envelope a block later, at 4865. So vel is never later than an envelope.
+  assert.ok(vel <= env, `vel moved at sample ${vel}, the control-rate envelope at ${env}`);
+  assert.ok(Math.abs(vel - envAr) < BLOCK, `vel moved at sample ${vel}, the audio-rate envelope at ${envAr}`);
+  assert.ok(vel <= 4815 && 4815 - vel < BLOCK, `vel moved at sample ${vel} for a note-on at 4815`);
+  near(r.at(0, Math.floor(0.2 * SR)), 0.2 + 0.5 * 0.4, 'holds the note\'s velocity, in its range');
+  near(r.at(0, Math.floor(0.45 * SR)), 0.2 + 0.25 * 0.4, 'the next note-on replaces it');
 });

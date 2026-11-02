@@ -347,9 +347,9 @@ const API_DOCS = {
   bsend: { kind: 'method', sig: 'bsend(name, amount)', desc: 'Sends the track\'s output to a named bus and silences its own output. Both arguments can be patterns.', eg: '.bsend("reverb")' },
   vel: {
     kind: 'both',
-    sig: 'vel(value)',
-    desc: 'Note velocity: MIDI velocity for a plugin, volume for a sample. A patterned vel plays a note on every step.',
-    eg: '.vel("1 0.6 ~ 0.8")',
+    sig: 'vel(value) | vel',
+    desc: 'Note velocity: MIDI velocity for a plugin, volume for a sample. A patterned vel plays a note on every step. Bare, without a call, vel reads it: the velocity of the note playing, from 0 to 1, held until the next note.',
+    eg: '.vel("1 0.6 ~ 0.8").fx("Filter").param("Cutoff", vel.range(0.3, 0.9))',
   },
   clip: {
     kind: 'both',

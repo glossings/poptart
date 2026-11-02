@@ -167,12 +167,12 @@ test('the scheduler gates on what it plays: rests, ties and silent notes open no
 
 test('a zero-velocity note is no gate, and nothing before the start played', () => {
   withScheduler(n('60 60').vel('1 0').synth('X'), (sched) => {
-    assert.deepEqual(sched._noteGate.intervalsUpTo(0.9), [[0, 0.5]]);
+    assert.deepEqual(sched._noteGate.intervalsUpTo(0.9), [[0, 0.5, 1]]);
   });
 });
 
-test('a sampler pattern gates on its hits', () => {
+test('a sampler pattern gates on its hits, each with the gain it is sent', () => {
   withScheduler(s('bd ~ bd ~'), (sched) => {
-    assert.deepEqual(sched._noteGate.intervalsUpTo(1.9), [[0, 0.25], [0.5, 0.75], [1, 1.25], [1.5, 1.75]]);
+    assert.deepEqual(sched._noteGate.intervalsUpTo(1.9), [[0, 0.25, 1], [0.5, 0.75, 1], [1, 1.25, 1], [1.5, 1.75, 1]]);
   });
 });

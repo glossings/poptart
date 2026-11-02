@@ -243,7 +243,8 @@ pad: note("&lt;[c3,eb3,g3,bb3] [ab2,c3,eb3,g3]&gt;").synth("Analog").preset("pad
         <p>
           A value written with a unit is in the control's own units: <code>"3x"</code>, <code>"800hz"</code>,
           <code>"2khz"</code>, <code>"-6db"</code>, <code>"250ms"</code>, <code>"7st"</code>, <code>"50ct"</code>.
-          A note name on a control in hertz is its frequency. A bare number is a position.
+          A note on a control in hertz is its frequency, as a name (<code>"c5"</code>) or as a
+          <code>note()</code> pattern. A bare number is a position.
         </p>
         <pre data-run><code>bell: n("0 2 4 &lt;5 7&gt;").scale("D dorian").synth("FM")
   .param("Op 2 Level", 0.6).param("Mod 2 to 1", 0.5)

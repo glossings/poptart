@@ -129,6 +129,18 @@ kick: s("bd*4").postgain(0.45)</code></pre>
           <code>note("c3").synth("Wavetable").adsr(0.005, 0.3, 0, 0.2)</code> is a pluck.
         </p>
 
+        <h2 id="velocity">Velocity</h2>
+        <p>
+          Bare, without a call, <code>vel</code> is the velocity of the note the track is playing, from
+          0 to 1, held until the next note. Accents open the filter:
+        </p>
+        <pre data-run><code>bass: note("c2 c2 c3 c2 eb2 c2 g2 bb1").vel("1 0.4 0.7 0.4").synth("Wavetable")
+  .fx("Filter").param("Mode", "ladder")
+  .param("Cutoff", vel.range(0.25, 0.7)).postgain(0.45)</code></pre>
+        <p>
+          A sample's velocity is its gain. <code>vel(0.5)</code> and <code>.vel(0.5)</code> still set it.
+        </p>
+
         <h2 id="combining">Combining</h2>
         <p>
           Signals combine with ordinary arithmetic, and the engine works it out every sample, so a

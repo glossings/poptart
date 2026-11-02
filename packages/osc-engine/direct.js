@@ -351,10 +351,11 @@ class DirectPath {
     };
   }
 
-  // A note or sample onset retriggers the track's envelopes and its note-synced shapes.
-  _onsetMods(tr) {
+  // A note or sample onset retriggers the track's envelopes and its note-synced shapes, and hands
+  // a velocity latch (poptart_vel, filed with the envelopes) the onset's velocity.
+  _onsetMods(tr, vel) {
     const out = [];
-    for (const e of tr.envs.values()) out.push({ address: '/n_set', args: [i32(e.node), str('gate'), i32(1), str('t_retrig'), i32(1)] });
+    for (const e of tr.envs.values()) out.push({ address: '/n_set', args: [i32(e.node), str('gate'), i32(1), str('t_retrig'), i32(1), str('vel'), f32(vel)] });
     for (const l of tr.lfos.values()) {
       if (l.kind === MOD_SHAPE_RETRIG || l.kind === MOD_SHAPE_ENV) out.push({ address: '/n_set', args: [i32(l.node), str('t_trig'), i32(1)] });
     }
@@ -380,7 +381,7 @@ class DirectPath {
     if (slot !== 0) vel127 = Math.min(127, Math.max(1, vel127));
     const msgs = [DirectPath.noteMessage(s, note, vel127, true)];
     if (slot === 0) {
-      msgs.push(...this._onsetMods(tr));
+      msgs.push(...this._onsetMods(tr, velocity));
       tr.held += 1;
     }
     this._sendAt(targetTime, msgs);
@@ -426,7 +427,7 @@ class DirectPath {
     ];
     if (loop) args.push(str('loopLo'), f32(v.loopLo), str('loopHi'), f32(v.loopHi), str('entry'), f32(v.entry), str('pingpong'), i32(v.pingpong));
     const spawn = { address: '/s_new', args: [str(defName), i32(node), i32(0), i32(tr.voices), ...args] };
-    this._sendAt(v.onsetSec, [spawn, ...this._onsetMods(tr)]);
+    this._sendAt(v.onsetSec, [spawn, ...this._onsetMods(tr, v.amp)]);
     if (gated) this._sendAt(v.offsetSec, [{ address: '/n_set', args: [i32(node), str('gate'), i32(0)] }]);
     tr.held += 1;
     const doneAt = gated ? v.offsetSec : v.onsetSec + v.dur;

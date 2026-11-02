@@ -104,6 +104,11 @@ function position(spec, v) {
   return Math.min(spec.open ? Infinity : 1, Math.max(0, t));
 }
 
+/** Whether a control's own unit is hertz, so a note on it is that note's frequency. */
+export function takesHz(spec) {
+  return String(spec?.unit ?? '').trim().toLowerCase() === 'hz' && !spec.options;
+}
+
 /**
  * One value as the control's position. A number is in the signal's unit; a note name on a
  * control in hertz is that note's frequency (c3 = MIDI 60). Anything else is passed as it is.
@@ -113,19 +118,31 @@ export function unitPosition(conv, value) {
   if (typeof value === 'string') {
     const u = parseUnitValue(value);
     if (u) return position(conv.spec, u.value / conv.divide);
+    const hz = takesHz(conv.spec) ? noteHz(value) : null;
+    if (hz != null) return position(conv.spec, hz);
   }
   return value;
+}
+
+/** A MIDI note number's frequency (69 = 440 Hz). */
+export function midiHz(midi) {
+  return 440 * Math.pow(2, (midi - 69) / 12);
 }
 
 /** A note name's frequency, for a control in hertz, or null. */
 export function noteHz(value) {
   if (typeof value !== 'string' || !/^[a-g]/i.test(value.trim())) return null;
   const midi = noteToMidi(value.trim());
-  return Number.isFinite(midi) ? 440 * Math.pow(2, (midi - 69) / 12) : null;
+  return Number.isFinite(midi) ? midiHz(midi) : null;
 }
 
 const C = (v) => ({ k: 'const', v });
 const OP = (op, a, b) => ({ k: 'op', op, a: [a, b] });
+
+/** An expression tree of MIDI note numbers as one of their frequencies, as midiHz computes them. */
+export function midiHzTree(node) {
+  return OP('mul', C(440), OP('pow', C(2), OP('div', OP('sub', node, C(69)), C(12))));
+}
 
 /**
  * An expression tree whose value is in the signal's unit, as one whose value is the control's

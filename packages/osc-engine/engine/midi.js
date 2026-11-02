@@ -349,7 +349,7 @@ function install(E) {
         if (r.on) {
           E.heldBy(track, 1);
           sounding.set(rawKey, r.note);
-          for (const e of track.envs.values()) e.synth.set('gate', 1, 't_retrig', 1);
+          for (const e of track.envs.values()) e.synth.set('gate', 1, 't_retrig', 1, 'vel', veloc / 127.0);
           for (const e of track.lfos.values()) {
             if (e.mode === 'retrigger' || e.mode === 'envelope') e.synth.set('t_trig', 1);
           }

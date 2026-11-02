@@ -7088,8 +7088,22 @@ export const envscale = controlBuilder('envscale');
 /** Granular playback (over 0.5 = on) - the top-level form of `.grain()`. */
 export const grain = controlBuilder('grain');
 
-/** Per-note velocity as an operand - the top-level form of `.vel()`. */
-export const vel = controlBuilder('vel');
+/**
+ * Per-note velocity. Called, `vel(x)` is an operand - the top-level form of `.vel()`. Bare, `vel`
+ * READS it: a signal of the velocity (0..1) of the note the track is playing, held from each
+ * note's start until the next one's - `.fx("Filter").param("Cutoff", vel.range(0.3, 0.9))`.
+ * Assigned whole to a control (or as an input of an expression) the engines latch it natively at
+ * each note-on, in the same bundle as the note; anywhere else it is read off the track's note grid.
+ */
+export const vel = callableSig(controlBuilder('vel'), withEnvIR({ latch: 'vel', min: 0, max: 1 }));
+
+// A builder that is also a signal when it is not called: `fn(...)` builds as before, and
+// everything a Sig has - its methods, its IR - is there on the function itself.
+function callableSig(fn, sig) {
+  const out = (...args) => fn(...args);
+  Object.setPrototypeOf(out, Sig.prototype);
+  return Object.assign(out, sig);
+}
 /** Duration multiplier as an operand - the top-level form of `.clip()`. */
 export const clip = controlBuilder('clip');
 /** Per-event time offset as an operand - the top-level form of `.nudge()`. */
@@ -9002,7 +9016,8 @@ function withEnvIR(ir) {
   return new Sig((t, cps, pos) => {
     const lo = sampleBound(ir.min, t, cps, pos) ?? 0;
     const hi = sampleBound(ir.max, t, cps, pos) ?? 1;
-    return lo + sampleEnvIR(ir, pos ?? t * cps, cps) * (hi - lo);
+    const at = pos ?? t * cps;
+    return lo + (ir.latch === 'vel' ? latchedVel(at) : sampleEnvIR(ir, at, cps)) * (hi - lo);
   }, { envIR: ir });
 }
 
@@ -9025,7 +9040,7 @@ function withEnvIR(ir) {
  * a note held, or a release ringing, longer than this reads as finished. */
 export const NOTE_GATE_LOOKBACK_CYCLES = 8;
 
-let noteGate = null; // { intervalsUpTo(pos) -> [[onsetCycle, endCycle], ...] sorted by onset }
+let noteGate = null; // { intervalsUpTo(pos) -> [[onsetCycle, endCycle, vel?], ...] sorted by onset }
 
 /** Runs `fn` with `gate` as the note gate every gated modulator samples against (see above). */
 export function withNoteGate(gate, fn) {
@@ -9036,6 +9051,24 @@ export function withNoteGate(gate, fn) {
   } finally {
     noteGate = prev;
   }
+}
+
+// Each playing track's way of binding its gate, by deck and block label, for a read made outside
+// the track's own poll - a row option such as steps()'s `{ mutate: vel }`, which the editor asks
+// for as the row's pass begins (see widgets.mjs's widgetOption). The scheduler files itself here.
+const trackGates = new Map();
+
+/** Files (or, with null, drops) how the track `label` on `deck` binds its note gate: `run(fn, atCycle)`. */
+export function setTrackGate(deck, label, run) {
+  const key = `${deck ?? 'a'}:${label}`;
+  if (run) trackGates.set(key, run);
+  else trackGates.delete(key);
+}
+
+/** Runs `fn` under the note gate of the track `label` on `deck` around `atCycle`, or bare without one. */
+export function withTrackGate(deck, label, atCycle, fn) {
+  const run = label == null ? null : trackGates.get(`${deck ?? 'a'}:${label}`);
+  return run ? run(fn, atCycle) : fn();
 }
 
 /**
@@ -9144,6 +9177,17 @@ export function dur() {
     for (const span of noteGate.intervalsUpTo(pos ?? t * cps)) if (!latest || span[0] >= latest[0]) latest = span;
     return latest ? (latest[1] - latest[0]) / cps : null;
   });
+}
+
+// The velocity of the most recent note to start at or before `pos` (absolute cycles), held until
+// the next one starts - what the bare `vel` reads, as the engines latch it at each note-on. Of
+// notes starting together, the last one sent wins, as it does on the engines. 0 with no gate in
+// scope or nothing played yet, where the engines' latch rests too.
+function latchedVel(pos) {
+  if (!noteGate) return 0;
+  let latest = null;
+  for (const span of noteGate.intervalsUpTo(pos)) if (!latest || span[0] >= latest[0]) latest = span;
+  return latest ? latest[2] ?? 1 : 0;
 }
 
 // The most recent note onset at or before `pos` (absolute cycles), or null with no gate in scope

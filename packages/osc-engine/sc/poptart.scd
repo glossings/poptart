@@ -2560,6 +2560,13 @@ server.waitForBoot {
         var v = lo + (envSig * (hi - lo));
         Out.ar(out, [v, v]);
     }).add;
+    // The bare `vel`: the velocity of the track's notes, held from each note-on to the next. Every
+    // note-on sets `vel` in the same bundle that opens the envelopes (see the noteOn OSCdefs), so it
+    // moves in the block its note starts in, as an envelope does. Filed with the envelopes, since it
+    // is programmed and torn down the way they are; it rests at `lo` until the first note.
+    SynthDef(\poptart_vel, { |out, vel = 0, lo = 0, hi = 1|
+        Out.kr(out, lo + (vel * (hi - lo)));
+    }).add;
     // The writer behind every POLLED control (see rampTo / poptartSetParam). Node re-sends a
     // polled value every poll interval, and this glides the bus linearly from one value to the
     // next over that interval, so a parameter driven from JS moves as a line rather than a
@@ -4469,7 +4476,8 @@ OSCdef(\poptartNoteOn, { |msg|
         fire = { |lat|
             bundleNow.(lat, {
                 if (slotLive.(track, 0)) { ctl.midi.noteOn(0, noteKey.(ctl, note), (veloc * 127).round.asInteger) };
-                track[\envs].do { |e| e[\synth].set(\gate, 1, \t_retrig, 1) };
+                // `vel` is for a velocity latch (poptart_vel); an envelope has no such control.
+                track[\envs].do { |e| e[\synth].set(\gate, 1, \t_retrig, 1, \vel, veloc) };
                 // note-synced lfo() shapes: reset/replay on every note onset - and this is where a
                 // patterned shape's swap actually happens in those modes, just before the trigger, so
                 // the note gets the new shape from its beginning rather than halfway through the old.
@@ -5327,6 +5335,8 @@ OSCdef(\poptartSetParamEnv, { |msg|
     var atk = msg[4].asFloat, dec = msg[5].asFloat, sus = msg[6].asFloat, rel = msg[7].asFloat;
     var curve = msg[8].asFloat, lo = msg[9].asFloat, hi = msg[10].asFloat;
     var retrig = (msg[11] ? 0).asInteger;
+    // 1: the bare `vel`, a velocity latch (poptart_vel) rather than an ADSR.
+    var latch = (msg[12] ? 0).asInteger;
     fork {
         var track = awaitTrack.(key);
         var target, isChannel, ctl, index, envKey, existing, atAudio;
@@ -5340,10 +5350,12 @@ OSCdef(\poptartSetParamEnv, { |msg|
 
                     envKey = ("slot" ++ slot ++ "_" ++ paramName).asSymbol;
                     existing = track[\envs][envKey];
-                    atAudio = target[\mapAudio].notNil;
-                    if (existing.notNil and: { (existing[\audio] ? false) != atAudio }) {
+                    // A latch steps once a note, so a control bus is all it needs, on any control.
+                    atAudio = target[\mapAudio].notNil and: { latch == 0 };
+                    if (existing.notNil and: { ((existing[\audio] ? false) != atAudio) or: { (existing[\latch] ? 0) != latch } }) {
                         // A plugin swapped for a native device or back: the bus is the wrong kind
-                        // for what reads it now, so this envelope starts over on the right one.
+                        // for what reads it now, so this envelope starts over on the right one. An
+                        // envelope turned into a latch or back is another synth altogether.
                         existing[\synth].free;
                         existing[\bus].free;
                         track[\envs].removeAt(envKey);
@@ -5365,13 +5377,13 @@ OSCdef(\poptartSetParamEnv, { |msg|
                         existing[\synth].set(\atk, atk, \dec, dec, \sus, sus, \rel, rel, \curve, curve, \lo, lo, \hi, hi, \retrig, retrig);
                     } {
                         var bus = if (atAudio) { Bus.audio(server, 2) } { Bus.control(server, 1) };
-                        var envSynth = Synth(if (atAudio) { \poptart_env_ar } { \poptart_env },
+                        var envSynth = Synth(if (latch == 1) { \poptart_vel } { if (atAudio) { \poptart_env_ar } { \poptart_env } },
                             [\out, bus, \atk, atk, \dec, dec, \sus, sus, \rel, rel, \curve, curve, \lo, lo, \hi, hi,
                              \retrig, retrig, \gate, if (track[\held] > 0) { 1 } { 0 }],
                             target: track[\group], addAction: \addToHead);
                         dropRamp.(key, track, envKey);
                         if (atAudio) { target[\mapAudio].(bus, 1, 0) } { target[\map].(bus) };
-                        track[\envs][envKey] = (synth: envSynth, bus: bus, index: index, audio: atAudio);
+                        track[\envs][envKey] = (synth: envSynth, bus: bus, index: index, audio: atAudio, latch: latch);
                     };
                 };
         };
@@ -5747,7 +5759,7 @@ OSCdef(\poptartMidiRoute, { |msg|
                                 heldBy.(track, 1);
                                 sounding[rawKey] = note;
                                 ctl.midi.noteOn(chan, note, veloc);
-                                track[\envs].do { |e| e[\synth].set(\gate, 1, \t_retrig, 1) };
+                                track[\envs].do { |e| e[\synth].set(\gate, 1, \t_retrig, 1, \vel, veloc / 127.0) };
                                 track[\lfos].do { |e|
                                     if ((e[\mode] == \retrigger) or: { e[\mode] == \envelope }) { e[\synth].set(\t_trig, 1) };
                                 };
@@ -6275,7 +6287,7 @@ OSCdef(\poptartPlaySample, { |msg|
             };
             synth = Synth(defName, args, target: track[\voices] ? track[\group], addAction: \addToHead);
             voiceBorn.(synth); // ...and the oldest one goes if the engine is already full
-            track[\envs].do { |e| e[\synth].set(\gate, 1, \t_retrig, 1) };
+            track[\envs].do { |e| e[\synth].set(\gate, 1, \t_retrig, 1, \vel, amp) };
             track[\lfos].do { |e|
                 if ((e[\mode] == \retrigger) or: { e[\mode] == \envelope }) { e[\synth].set(\t_trig, 1) };
             };

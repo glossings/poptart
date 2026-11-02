@@ -235,7 +235,7 @@ function install(E) {
         }
         synth = Synth.new(S, defName, args, track.voices ?? track.group, 'addToHead');
         E.voiceBorn(synth); // ...and the oldest one goes if the engine is already full
-        for (const e of track.envs.values()) e.synth?.set('gate', 1, 't_retrig', 1);
+        for (const e of track.envs.values()) e.synth?.set('gate', 1, 't_retrig', 1, 'vel', amp);
         for (const e of track.lfos.values()) {
           if (e.mode === 'retrigger' || e.mode === 'envelope') e.synth?.set('t_trig', 1);
         }

@@ -99,7 +99,8 @@ test('a plugin note is the MIDI sclang would send, bundled with its modulators a
   assert.deepStrictEqual(note.args.slice(0, 3), [1003, 2, '/midi_msg']);
   // noteKey rounds a plugin's note; velocity is (v * 127).round, as poptartNoteOn sends it.
   assert.deepStrictEqual([...note.args[3]], [0x90, 62, 64]);
-  assert.deepStrictEqual(env, { address: '/n_set', args: [2001, 'gate', 1, 't_retrig', 1] });
+  // ...and a velocity latch filed with the envelopes gets the note's velocity (an envelope ignores it).
+  assert.deepStrictEqual(env, { address: '/n_set', args: [2001, 'gate', 1, 't_retrig', 1, 'vel', 0.5] });
   assert.deepStrictEqual(trig, { address: '/n_set', args: [2002, 't_trig', 1] });
   assert.strictEqual(flat(b).length, 3, 'a free-running shape must not be retriggered');
   assert.deepStrictEqual(told[0], ['/poptart/direct/note', 'kick', 0, 61.6, -1]);
@@ -178,7 +179,9 @@ test('a sample voice is the same synth, in the voices group, with its gate-off a
   assert.strictEqual(named.buf, 7);
   assert.strictEqual(named.bend, 'c40');
   assert.ok(Math.abs(named.entry - 0.1) < 1e-6);
-  assert.deepStrictEqual(env.args, [2001, 'gate', 1, 't_retrig', 1]);
+  assert.deepStrictEqual(env.args.slice(0, 5), [2001, 'gate', 1, 't_retrig', 1]);
+  assert.strictEqual(env.args[5], 'vel');
+  assert.ok(Math.abs(env.args[6] - 0.8) < 1e-6, 'a sample\'s gain is its velocity');
   assert.ok(Math.abs(secondsOf(sent[1].timeTag) - 1000.4) < 1e-9);
   assert.deepStrictEqual(flat(sent[1])[0], { address: '/n_set', args: [node, 'gate', 0] });
   assert.deepStrictEqual(told.at(-1), ['/poptart/direct/voice', 'kick', node, 'poptart_sample_loop_2', told.at(-1)[4]]);

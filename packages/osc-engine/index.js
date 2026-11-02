@@ -2899,23 +2899,26 @@ class OscEngine {
     this._send('/poptart/anchorParamLFO', rateHz == null ? args : [...args, rateHz]);
   }
   // ADSR envelope retriggered by the track's note on/offs - same set-once Tier-2 contract as
-  // setParamLFO (see the poptart_env SynthDef + gate wiring in sc/poptart.scd).
+  // setParamLFO (see the poptart_env SynthDef + gate wiring in sc/poptart.scd). With `ir.latch`
+  // it is the bare `vel` instead: the velocity of each note-on, held (poptart_vel), which has no
+  // times of its own.
   setParamEnv(trackId, slotIndex, paramName, ir) {
     paramName = this._controlName(trackId, slotIndex, paramName);
-    this._noteDriver(trackId, slotIndex, paramName, 'env');
+    this._noteDriver(trackId, slotIndex, paramName, ir.latch ? 'vel' : 'env');
     this._send('/poptart/setParamEnv', [
       trackId,
       slotIndex,
       paramName,
-      ir.attack,
-      ir.decay,
-      ir.sustain,
-      ir.release,
+      ir.attack ?? 0,
+      ir.decay ?? 0,
+      ir.sustain ?? 1,
+      ir.release ?? 0,
       ir.curve ?? -4,
       ir.min,
       ir.max,
       // Every note restarts the attack, not only the first of an overlapping run.
       ir.retrigger ? 1 : 0,
+      ir.latch === 'vel' ? 1 : 0,
     ]);
   }
   clearParamEnv(trackId, slotIndex, paramName) {

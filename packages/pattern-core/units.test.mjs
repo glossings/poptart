@@ -6,7 +6,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { mini, setPatternWarn, sine, synth } from './src/signal.mjs';
+import { mini, note, setPatternWarn, sine, synth } from './src/signal.mjs';
 import { Scheduler } from './src/scheduler.mjs';
 import { parseUnitValue, registerDeviceParams, unitConversion, unitPosition, unitTree, deviceParamSpec } from './src/units.mjs';
 import { compileExpr } from '../web-engine/src/dsp/expr.mjs';
@@ -144,6 +144,44 @@ test('a note name on a control in hertz is its frequency', () => {
   const pos = sends(synth('X').fx('Filter').param('Cutoff', 'a3'), 'Cutoff').values.at(-1);
   assert.ok(near(pos, Math.log(22) / Math.log(1000)));
   assert.equal(sends(synth('X').fx('Filter').param('Cutoff', 0.3), 'Cutoff').values.at(-1), 0.3);
+});
+
+test('a note name is its frequency wherever a value in hertz is converted', () => {
+  const cutoff = deviceParamSpec('Filter', 'Cutoff');
+  const a3 = Math.log(22) / Math.log(1000); // 440 Hz on 20..20000
+  assert.ok(near(unitPosition({ spec: cutoff, divide: 1 }, 'a3'), a3));
+  assert.ok(near(unitPosition(unitConversion(cutoff, 'hz'), 'a3'), a3), 'beside values in hertz');
+  // A control in another unit has no frequency for a note: the name is left for the engine to say so.
+  assert.equal(unitPosition(unitConversion(deviceParamSpec('Filter', 'Time'), 's'), 'a3'), 'a3');
+  // A pattern that mixes the two: each step converted, on every cycle.
+  const mixed = mini('<200hz a3>', 0);
+  const { engine, callsTo } = mockEngine();
+  const sched = new Scheduler(engine, { trackId: 't' });
+  sched.setPattern(synth('X').fx('Filter').param('Cutoff', mixed));
+  const at = (cycle) => {
+    const sec = sched.transport.secAt(cycle) - 0.15;
+    sched._pollGenericParams(sec);
+    return callsTo('setParam').filter((c) => c.args[2] === 'Cutoff').at(-1).args[3];
+  };
+  assert.ok(near(at(0.5), Math.log(10) / Math.log(1000)), '200hz');
+  assert.ok(near(at(1.5), a3), 'a3, the next cycle');
+});
+
+test('a note pattern on a control in hertz is its frequency, numbers included', () => {
+  const a3 = Math.log(22) / Math.log(1000);
+  assert.ok(near(sends(synth('X').fx('Filter').param('Cutoff', note('a3')), 'Cutoff').values.at(-1), a3));
+  assert.ok(near(sends(synth('X').fx('Filter').param('Cutoff', note(69)), 'Cutoff').values.at(-1), a3), 'MIDI 69');
+  assert.ok(near(sends(synth('X').fx('Filter').param('Cutoff', note('<a3 a4>')), 'Cutoff').values.at(-1), a3));
+  // A note pattern on a control with no unit is a number like any other.
+  assert.equal(sends(synth('FM').param('Mix', note(0.5)), 'Mix').values.at(-1), 0.5);
+});
+
+test('a note pattern moved by a modulator is its frequency in the expression the engine runs', () => {
+  const { tree } = sends(synth('X').fx('Filter').param('Cutoff', note('a3').add(sine(1).range(0, 12))), 'Cutoff');
+  assert.ok(tree, 'sent as an expression');
+  // The note (69) and the lfo's 0..12 semitones above it, as positions on the cutoff.
+  assert.ok(near(evalTree(tree, 69, 0), Math.log(22) / Math.log(1000)));
+  assert.ok(near(evalTree(tree, 69, 12), Math.log(44) / Math.log(1000)), 'an octave up');
 });
 
 test('a modulator in units runs natively under a conversion the engine evaluates', () => {

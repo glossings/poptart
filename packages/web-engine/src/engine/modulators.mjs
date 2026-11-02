@@ -697,6 +697,72 @@ export class EnvConnection {
 }
 
 /**
+ * A parameter driven by the velocity of the track's notes - the bare `vel`. Each note-on sets it
+ * to min + velocity * (max - min) at the note's own time, and it holds there until the next one:
+ * the desktop's poptart_vel, in automation. It rests at its floor until the first note, as the
+ * desktop's does. The note-ons still ahead of the clock are remembered, so a new range rewrites
+ * them rather than leaving them at the old one.
+ */
+export class LatchConnection {
+  constructor(ctx, target, ir) {
+    this.ctx = ctx;
+    this.target = target;
+    this.ir = ir;
+    this.latches = []; // [{ time, vel }], in time order: the last one at or before the clock and every one after
+    try {
+      target.cancelScheduledValues(ctx.currentTime);
+      target.setValueAtTime(this._level(0), ctx.currentTime);
+    } catch {
+      try { target.value = this._level(0); } catch { /* a param that refuses a direct set */ }
+    }
+  }
+
+  _level(vel) {
+    const { min = 0, max = 1 } = this.ir ?? {};
+    return min + vel * (max - min);
+  }
+
+  // The velocity in force at `time`: the last note-on at or before it, or 0 before the first.
+  _velAt(time) {
+    let vel = 0;
+    for (const l of this.latches) if (l.time <= time) vel = l.vel;
+    return vel;
+  }
+
+  /** A note-on at `atTime` with velocity `vel` (0..1). */
+  latch(vel, atTime) {
+    const now = this.ctx.currentTime;
+    const t = Math.max(now, atTime ?? now);
+    const behind = this.latches.filter((l) => l.time <= now);
+    this.latches = [...behind.slice(-1), ...this.latches.filter((l) => l.time > now), { time: t, vel }];
+    this.latches.sort((a, b) => a.time - b.time);
+    try { this.target.setValueAtTime(this._level(vel), t); } catch { /* a parameter already scheduled past this point */ }
+  }
+
+  /** A new range: the value now and every note-on still to come are written again in it. */
+  update(ir) {
+    this.ir = { ...this.ir, ...ir };
+    const now = this.ctx.currentTime;
+    try {
+      this.target.cancelScheduledValues(now);
+      this.target.setValueAtTime(this._level(this._velAt(now)), now);
+      for (const l of this.latches) if (l.time > now) this.target.setValueAtTime(this._level(l.vel), l.time);
+    } catch { /* as above */ }
+  }
+
+  /** Stops where it is: the parameter keeps the value it holds, as on the desktop. */
+  stop() {
+    const now = this.ctx.currentTime;
+    const value = this._level(this._velAt(now));
+    try {
+      this.target.cancelScheduledValues(now);
+      this.target.setValueAtTime(value, now);
+    } catch { /* nothing scheduled */ }
+    return value;
+  }
+}
+
+/**
  * A parameter driven by a live control value - a MIDI continuous controller or an incoming OSC
  * message. A constant source rather than a scheduled value so the host can push a new value at
  * any time without knowing anything about the graph it lands in.

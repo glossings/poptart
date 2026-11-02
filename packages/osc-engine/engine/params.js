@@ -580,6 +580,8 @@ function install(E) {
     const lo = Number(msg[9]);
     const hi = Number(msg[10]);
     const retrig = isInt(msg[11] ?? 0);
+    // 1: the bare `vel`, a velocity latch (poptart_vel) rather than an ADSR.
+    const latch = isInt(msg[12] ?? 0);
     E.fork(async () => {
       const track = E.builtTrack(key) ?? await E.awaitTrack(key);
       if (track == null) {
@@ -591,9 +593,11 @@ function install(E) {
           const index = target.index;
           const envKey = `slot${slot}_${paramName}`;
           let existing = track.envs.get(envKey);
-          const atAudio = target.mapAudio != null;
-          if (existing != null && (existing.audio ?? false) !== atAudio) {
+          // A latch steps once a note, so a control bus is all it needs, on any control.
+          const atAudio = target.mapAudio != null && latch === 0;
+          if (existing != null && ((existing.audio ?? false) !== atAudio || (existing.latch ?? 0) !== latch)) {
             // A plugin swapped for a native device or back: this envelope starts over on the right bus.
+            // An envelope turned into a latch or back is another synth altogether.
             existing.synth.free();
             existing.bus.free();
             track.envs.delete(envKey);
@@ -612,13 +616,13 @@ function install(E) {
             existing.synth.set('atk', atk, 'dec', dec, 'sus', sus, 'rel', rel, 'curve', curve, 'lo', lo, 'hi', hi, 'retrig', retrig);
           } else {
             const bus = atAudio ? Bus.audio(S, 2) : Bus.control(S, 1);
-            const envSynth = Synth.new(S, atAudio ? 'poptart_env_ar' : 'poptart_env',
+            const envSynth = Synth.new(S, latch === 1 ? 'poptart_vel' : atAudio ? 'poptart_env_ar' : 'poptart_env',
               ['out', bus.index, 'atk', atk, 'dec', dec, 'sus', sus, 'rel', rel, 'curve', curve, 'lo', lo, 'hi', hi,
                 'retrig', retrig, 'gate', track.held > 0 ? 1 : 0],
               track.group, 'addToHead');
             E.dropRamp(key, track, envKey);
             if (atAudio) target.mapAudio(bus, 1, 0); else target.map(bus);
-            track.envs.set(envKey, { synth: envSynth, bus, index, audio: atAudio });
+            track.envs.set(envKey, { synth: envSynth, bus, index, audio: atAudio, latch });
           }
         }
       }

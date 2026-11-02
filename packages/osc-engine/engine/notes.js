@@ -119,7 +119,8 @@ function install(E) {
     const fire = (lat) => {
       E.bundleNow(lat, () => {
         if (E.slotLive(track, 0)) ctl.midi.noteOn(0, E.noteKey(ctl, note), Math.round(veloc * 127));
-        for (const e of track.envs.values()) e.synth?.set('gate', 1, 't_retrig', 1);
+        // `vel` is for a velocity latch (poptart_vel); an envelope has no such control.
+        for (const e of track.envs.values()) e.synth?.set('gate', 1, 't_retrig', 1, 'vel', veloc);
         // Note-synced lfo() shapes reset on every onset - and a patterned shape's swap happens
         // here in those modes, just before the trigger, so the note gets the new shape whole.
         for (const e of track.lfos.values()) {
