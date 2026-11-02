@@ -169,3 +169,10 @@ test('a later .clip() replaces the earlier one instead of compounding it', () =>
     assert.deepEqual(grid(sig).map((x) => [x.start, x.end]), [[0, 0.5], [0.5, 1]]);
   }
 });
+
+test('arithmetic that changes at the cycle line cuts a held note there, with nothing past the line', () => {
+  const held = note('c3').slow(2).add('<0 12>');
+  const at = (c) => held.stepsForCycle(c).map((st) => [st.start, st.end, st.value, Boolean(st.cont)]);
+  assert.deepEqual(at(0), [[0, 1, 60, false]]);
+  assert.deepEqual(at(1), [[0, 1, 72, false]]);
+});

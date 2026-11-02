@@ -458,6 +458,12 @@ const API_DOCS = {
     desc: 'Plays this pattern\'s values in turn, the next one on each trigger: the rhythm comes from trigger, anything struct takes. The values are the events of the cycle the trigger lands in; a chord is one value.',
     eg: 'n(sliders("0 4 7", 0, 12).advance(button())).scale("A1:minor")',
   },
+  elongate: {
+    kind: 'method',
+    sig: 'elongate(lengths)',
+    desc: 'Holds each step for a number of steps, pushing the steps after it later. A rest is a step; a chord is one step. Lengths are taken in turn, one per step, from the cycle the step comes from. A change to a length is heard from the next step on.',
+    eg: 'n("0 2 4 7").elongate("1 4 1 2")',
+  },
   ply: { kind: 'method', sig: 'ply(reps, fn)', desc: 'Repeats each event reps times within its own step. The optional (x, n) => pattern changes the nth repeat.', eg: '.ply(3, (x, n) => x.add(n * 12))' },
   echo: { kind: 'method', sig: 'echo(reps, time, fn)', desc: 'Repeats each event reps times, time cycles apart. The optional (x, n) => pattern changes the nth repeat.', eg: '.echo(4, 1/8, (x, n) => x.gain(0.6 ** n))' },
   arp: { kind: 'method', sig: 'arp(indices)', desc: 'Plays each chord one note at a time, in the order of the index pattern. Indices past the top note continue an octave up. On scale degrees, apply .scale() first.', eg: 'note("[c3,e3,g3]").arp("0 1 2 1")' },

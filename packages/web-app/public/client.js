@@ -1854,7 +1854,33 @@ onEveryDeck((ed) => ed.on('changes', (_, changes) => {
   // A steps(), sliders(), matrix() or shiftreg() pasted or dropped in is drawn at once, as it was where it was
   // copied from, rather than sitting as text until the next evaluation.
   else if (changes.some((c) => (c.origin === 'paste' || c.origin === 'drop') && /\b(?:steps|sliders|matrix|shiftreg)\s*\(/.test(c.text.join('\n')))) refoldAll(ed);
+  // A gesture that writes an option into a folded control - mutate from the menu, a size from a
+  // drag - lands inside the fold; the fold then has to shrink to the cells so the option shows as
+  // code, and grow back over the call when the option is taken out.
+  else if (changes.some((c) => c.origin === '+widget') && widgetFoldsStale(ed)) refoldAll(ed);
 }));
+
+// Whether any folded steps()/sliders()/matrix()/shiftreg() covers other text than foldRange gives
+// for its call now (see foldWidgetCalls).
+function widgetFoldsStale(ed) {
+  if (!inlineWidgetsMod || !foldsHere(ed)) return false;
+  const { calls } = inlineWidgetsMod;
+  const marks = new Map();
+  for (const mk of ed.getAllMarks()) if (mk.poptartFold && mk.poptartKey?.startsWith('widget:')) marks.set(mk.poptartKey, mk);
+  if (!marks.size) return false;
+  const code = ed.getValue();
+  const nth = {};
+  for (const c of calls.findWidgetCalls(code)) {
+    if (!calls.FOLDED_WIDGETS.includes(c.kind)) continue;
+    const key = `widget:${c.kind}:${(nth[c.kind] = (nth[c.kind] ?? -1) + 1)}`;
+    const range = marks.get(key)?.find();
+    const parsed = range && calls.callArgs(code, c.open);
+    if (!parsed) continue;
+    const span = calls.foldRange(c.kind, c, parsed);
+    if (ed.indexFromPos(range.from) !== span.from || ed.indexFromPos(range.to) !== span.to) return true;
+  }
+  return false;
+}
 
 // String/bracket-aware scan from an opening paren to its matching close; -1 if unbalanced. The one
 // call-span scanner in this file - conf's param upsert, the lfo/pianoroll editors, and the MIDI
@@ -2771,7 +2797,8 @@ async function captureAll() {
   for (const deck of ['a', 'b']) {
     const ed = deckEditor(deck);
     const iw = ed ? inlineWidgetsFor(ed) : null;
-    const mine = (takes ?? []).filter((t) => t.deck === deck && Array.isArray(t.shapes));
+    // A button's take is a row of cells rather than shapes.
+    const mine = (takes ?? []).filter((t) => t.deck === deck && (Array.isArray(t.shapes) || typeof t.row === 'string'));
     if (!iw || !mine.length) continue;
     const ids = [];
     ed.operation(() => {
@@ -31757,6 +31784,9 @@ addBuiltinHotkey('sidebar', () => {
 
 // app+r - arm/stop MIDI recording (mirrors the ● rec button).
 addBuiltinHotkey('record', () => (recState ? cancelMidiRecord(true) : startMidiRecord()));
+
+// The header's capture button. No chord by default (settings → hotkeys… gives it one).
+addBuiltinHotkey('captureTakes', () => captureAll());
 
 // ctrl+b - bounce the block the cursor is in to audio (mirrors the record panel's button).
 addBuiltinHotkey('bounce', () => bounceBlockAtCursor());

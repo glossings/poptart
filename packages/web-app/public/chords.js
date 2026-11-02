@@ -140,6 +140,8 @@ const HOTKEY_ACTIONS = [
     tip: 'stops playback. In DJ mode, stops only the active deck' },
   { id: 'record', section: 'transport', label: 'record', combos: ['app+r'],
     tip: 'arms and stops MIDI recording, like the ● rec button' },
+  { id: 'captureTakes', section: 'transport', label: 'capture', combos: [],
+    tip: 'writes what you just moved and played into the code, as if record had been on, like the capture button' },
   { id: 'save', section: 'files', label: 'save', combos: ['mod+s', 'ctrl+s'],
     tip: 'saves over the open pattern\'s file, or asks for a name when it has none' },
   { id: 'saveAs', section: 'files', label: 'save as', combos: ['mod+shift+s', 'ctrl+shift+s'],

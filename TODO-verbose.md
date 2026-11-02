@@ -704,3 +704,10 @@ entry here when its TODO.md line goes.
     should do that read for every method: the argument at each event's onset, a rest silencing
     the event, the spans joined with withLocs. Move methods onto it a few at a time, each group
     with a test that its output is unchanged, until no method reads an argument any other way.
+
+[ ] Per-voice fx chains and modulators. A track's fx and its env()/vel/lfo() act once per track
+    (most recent note), so per-note filtering and amplitude only exist inside a device - which is
+    why every synth carries its own amp ADSR and Analog carries a filter. A chain such as
+    `.synth("Osc").voice(fx("Filter").param("Cutoff", env(...)))` would be copied into every voice
+    on both engines, each copy gated by its own note and reading its own velocity and pitch. With
+    that, Analog becomes a preset of a patch, and per-synth amp envelopes could go.

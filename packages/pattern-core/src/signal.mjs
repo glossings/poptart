@@ -27,7 +27,7 @@ import { Frac } from './frac.mjs';
 import { chordIntervals, chordExtension, invertVoices, spreadVoices, voicingVoices, leadVoices, VOICING_NAMES, justVoices, JI_LIMITS } from './harmony.mjs';
 import { rateLedger } from './lfo-rate.mjs';
 import { parseUnitValue } from './units.mjs';
-import { triggerGrid, sampledEdges, edgeSteps, pressSteps, placedPresses, createTriggerCounter, miniSameEveryCycle, noteButtonGrid } from './triggers.mjs';
+import { triggerGrid, sampledEdges, edgeSteps, pressSteps, placedPresses, createTriggerCounter, miniSameEveryCycle, noteButtonGrid, schedulingWindow } from './triggers.mjs';
 import { ENV_DEFAULTS, ENV_FLAGS } from './envctl.mjs';
 
 /**
@@ -547,7 +547,7 @@ export class Sig {
         : base;
       out = this._clone({ sampler: { ...this.sampler, note: mapped }, stepsForCycle });
     } else {
-      out = apply(this, this.pitchKind);
+      out = this.pitchKind === 'degree' ? placeDegreeChords(this, apply, names, scaleName) : apply(this, this.pitchKind);
     }
     // On a live note source the scale is one link of the route's pitch-op chain, in chain order -
     // `.scale("c minor").add(1)` quantizes then shifts, `.add(1).scale("c minor")` the reverse -
@@ -1930,6 +1930,10 @@ export class Sig {
             for (let e = 0; e + 1 < edges.length; e++) {
               const start = edges[e];
               const end = edges[e + 1];
+              // A note ringing past the cycle line is cut there by an operand that changes at it;
+              // the part after the line belongs to the next cycle, which has the note's tail as a
+              // step of its own and reads the operand there.
+              if (start >= 1 - MIX_EPS) continue;
               const at = (start + end) / 2; // read INSIDE the segment - never on a boundary
               // A `,`-stack on the right is several values sounding AT ONCE, so it fans each event
               // out into one event per layer instead of collapsing to whichever layer sample() picks:
@@ -2967,6 +2971,26 @@ export class Sig {
   }
 
   /**
+   * Holds each step for a number of steps, pushing the ones after it later, so the line grows past
+   * the cycle rather than squeezing into it:
+   *
+   *   n("0 2 4 7").elongate("1 4 1 2")      // 0 for one step, 2 for four, 4 for one, 7 for two
+   *   note(sliders(16).range("C1", "F4").round()).elongate(sliders(8).range(1, 5).round())
+   *
+   * A step lasts until the next one starts, so a rest is held like a note, and a chord is one step.
+   * The lengths are taken in turn, one per step, from the events of the cycle the step comes from:
+   * five lengths over sixteen notes drift against them. A length that is not a positive number is
+   * 1. The line is counted from cycle 0; when a length changes as it plays, the step sounding keeps
+   * its place and the change is heard from the next step on.
+   */
+  elongate(lengths) {
+    const base = this.stepsForCycle;
+    if (!base) throw new Error('[signal] .elongate() holds the steps of a pattern, e.g. n("0 2 4 7").elongate("1 4 1 2")');
+    const stepsForCycle = elongateSteps(base, toSignal(lengths));
+    return new Sig((t, cps, pos) => sampleViaSteps(stepsForCycle, t, cps, pos), { stepsForCycle, ...this._meta() });
+  }
+
+  /**
    * The arrangement painter's gate (see arrange.mjs): keeps only the events whose onset falls
    * inside one of `spans` ([start, end) in cycles, sorted and merged). Everything else becomes a
    * rest, so the step grid keeps its shape and the highlighter simply has nothing to light - and
@@ -3182,7 +3206,7 @@ export class Sig {
           // one ringing in from an earlier cycle. Only a tie the INDEX pattern itself carries stays a
           // continuation.
           const cont = idx.cont && start > seg.start + CHORD_EPS ? true : undefined;
-          const step = { ...tone.step, start, end, value: tone.midi + 12 * Math.floor(i / len), cont };
+          const step = { ...withoutChord(tone.step), start, end, value: tone.midi + 12 * Math.floor(i / len), cont };
           // Light the chord tone that sounded and the index that chose it, as crossMerge does.
           const locs = joinLocs(tone.step, idx);
           if (locs.length) step.locs = locs;
@@ -3228,42 +3252,53 @@ export class Sig {
    * Patternable, read at each note's onset: `.chord("<m9 maj7>")`; a rest plays the root alone. The
    * chord's notes are ordinary notes, so .inv(), .voicing(), .spread(), .lead() and .arp() shape
    * them afterwards.
+   *
+   * Each note keeps the chord it belongs to (`step.chord`: the quality, which note of the chord it
+   * is, its distance from the root, and the key), so the chord is rebuilt wherever its root
+   * changes: `chord("m7").note("c3")` is Cm7, a second `.chord()` replaces the quality on the same
+   * root, and a quality name on scale degrees - `n("0 4").chord("m7")` - is built in the key by the
+   * .scale() after it. .arp(), .inv(), .voicing(), .spread(), .lead() and .ji() fix the notes:
+   * after them the chord is plain notes.
    */
   chord(quality = 5) {
     const refusal = this._chordRefusal('chord', 'note("c3 f3").chord("m7")', { notes: false });
     if (refusal) return refusal;
     const qSig = toSignal(quality);
     const degrees = this.pitchKind === 'degree';
-    let stepIn = null;
-    const keyStep = () => (stepIn ??= this._degreeStep((d, offset) => d + offset, NO_SCALE_FOR_CHORD));
+    let warnedKey = false;
+    const sayMissingKey = () => {
+      if (warnedKey) return;
+      warnedKey = true;
+      this._degreeStep((d, offset) => d + offset, NO_SCALE_FOR_CHORD);
+    };
     for (const v of chordArgValues(qSig)) {
       if (isExtension(v) ? !chordExtension(v) : !chordIntervals(v)) {
         warnUser(`[signal] .chord(${JSON.stringify(v)}) is not a chord - give a quality (m, m7, maj7, dom7, m9, sus4, dim) or how high to stack the key (5, 7, 9). Playing the triad in key instead.`);
-      } else if (degrees && !isExtension(v)) {
-        warnUser(`[signal] .chord(${JSON.stringify(v)}) on scale degrees has no key to build in - put .sc() before it. Playing the triad in key instead.`);
       }
-      if (!degrees && (isExtension(v) || !chordIntervals(v))) keyStep(); // say a missing key now, not mid-play
+      if (!degrees && (isExtension(v) || !chordIntervals(v))) sayMissingKey(); // say a missing key now, not mid-play
     }
-    const tones = (root, q, pos) => {
-      const intervals = !degrees && q != null && !isExtension(q) ? chordIntervals(q) : null;
-      if (intervals) return intervals.map((iv) => root + iv);
-      if (q == null) return [root];
-      const stack = (isExtension(q) ? chordExtension(q) : null) ?? chordExtension(5);
-      return degrees ? stack.map((s) => root + s) : stack.map((s) => fnAtPos(keyStep(), pos)(root, s));
-    };
+    const names = this.scaleNames;
+    const fixedKey = this.scaleName ?? globalScale() ?? DEFAULT_SCALE;
+    const keyAt = (pos) => (names ? scaleNameAt(names, pos) ?? fixedKey : fixedKey);
     const base = this.stepsForCycle;
     const stepsForCycle = (cycle) => {
       const out = [];
       for (const st of base(cycle)) {
-        const root = st.value == null ? NaN : degrees ? Number(st.value) : stepMidi(st.value);
+        // A note of an earlier chord: the chord is rebuilt once, from its root, with this quality.
+        if (st.chord && st.chord.i !== 0) continue;
+        const kind = st.chord ? st.chord.kind : degrees ? 'degree' : 'note';
+        const value = st.value == null ? NaN : kind === 'degree' ? Number(st.value) : stepMidi(st.value);
+        const root = st.chord ? value - st.chord.off : value;
         if (!Number.isFinite(root)) {
           out.push(st);
           continue;
         }
-        const q = chordArgAt(qSig, cycle + st.start);
-        for (const tone of tones(root, q.value, cycle + st.start)) {
-          out.push(withLocs({ ...st, value: tone }, q));
-        }
+        const pos = cycle + st.start;
+        const q = chordArgAt(qSig, pos);
+        const shape = { q: q.value ?? null, kind, key: keyAt(pos) };
+        chordTones(root, shape).forEach((tone, i) => {
+          out.push(withLocs({ ...st, value: tone, chord: { ...shape, i, off: tone - root } }, q));
+        });
       }
       return out;
     };
@@ -3856,8 +3891,12 @@ export class Sig {
 
   /**
    * Note pattern for this track - works before or after .synth(): note("c3 e3").synth("X")
-   * and synth("X").note("c3 e3") are equivalent (on a synth track this replaces the track's
-   * note events, keeping the chain/params/channel metadata).
+   * and synth("X").note("c3 e3") are equivalent. On a synth track the note merges onto the
+   * events already there, like any other control: a patterned note cuts the events it falls
+   * across (synth("X").note("c3 e3") plays c3 then e3), and a note that holds across the cycle
+   * ("F0", 60, "<c3 e3>") sets the pitch of each event without adding or cutting any, so
+   * struct("1 ~ 1 1").note("F0") plays F0 on each hit. The chain, params, channel strip and
+   * note channels are kept.
    *
    * On a sampler pattern it repitches instead: 60 ("c3") plays the sample as recorded, 72 an
    * octave up. Takes note names, numbers, mini strings, or any Sig, sampled per onset. A
@@ -3884,8 +3923,8 @@ export class Sig {
    * names, options - and a bare `.pianoroll()` gets a roll named after its track, same as a bare
    * `pianoroll()` does.
    *
-   * This is the ONE note method that layers instead of replacing (.note()/.n() swap the pattern
-   * out; see _noteLike), because it is the one whose data you go on to edit by hand: the point of
+   * This is the ONE note method that layers instead of merging (.note()/.n() set the pitch of the
+   * events already there; see _noteLike), because it is the one whose data you go on to edit by hand: the point of
    * writing it after a source is to keep hearing the source while you draw. Both sides keep their
    * own timing and their own note channels, exactly as a `,`-stack does.
    *
@@ -3900,7 +3939,7 @@ export class Sig {
     // A bare control in head position (`vel("1!4").pianoroll(…)`) has no note layer of its own, so
     // there is nothing to mix WITH: the roll is simply the pattern those velocities play, which is
     // what .note()/.n() already do with a head control. See _fromHeadCtl.
-    return this.ctl ? this._noteLike(roll) : this._mixNotes(roll);
+    return this.ctl ? this._swapNotes(roll) : this._mixNotes(roll);
   }
 
   /**
@@ -3909,8 +3948,8 @@ export class Sig {
    *   kick2: pianoroll("kickB").copy("kick")   // kick's chain and feel, playing the kickB roll
    *
    * Everything the copied block chained - instrument, fx, params, channel strip - carries over,
-   * and this signal becomes its note source: exactly the swap .note()/.n() perform, so the copy's
-   * own note channels (drawn velocities, clips) re-merge onto the new grid (see _noteLike). Use
+   * and this signal becomes its note source: its notes swapped in whole (see _swapNotes), so the copy's
+   * own note channels (drawn velocities, clips) re-merge onto the new grid. Use
    * the bare builder - copy("kick") - when the copy should play the original's notes too.
    */
   copy(name) {
@@ -3923,21 +3962,21 @@ export class Sig {
     }
     // A sampler can't take the swap through _noteLike - that is .note()'s repitch semantics,
     // which keeps the copied grid - so it re-grids instead (see _samplerRegrid).
-    return sig.sampler ? sig._samplerRegrid(this) : sig._noteLike(this);
+    return sig.sampler ? sig._samplerRegrid(this) : sig._swapNotes(this);
   }
 
   /**
    * The named track's NOTES swapped in as THIS chain's pattern - the method form of pcopy(), and
    * the mirror image of .copy(): `synth("X").fx("Y").pcopy("a")` keeps this chain and plays a's
-   * notes through it, exactly the swap .note()/.n() perform (this chain's own note channels
-   * re-merge onto the copied grid - see _noteLike). Use the bare builder - pcopy("a") - when
+   * notes through it, swapped in whole (this chain's own note channels re-merge onto the
+   * copied grid - see _swapNotes). Use the bare builder - pcopy("a") - when
    * there is no chain yet to keep.
    */
   pcopy(name) {
     // `pcopy` here is the builder, same trick as .copy() above. A sampler chain re-grids for the
     // reason .copy() does: the incoming notes must BE the events, not a repitch channel.
     const notes = pcopy(name);
-    return this.sampler ? this._samplerRegrid(notes) : this._noteLike(notes);
+    return this.sampler ? this._samplerRegrid(notes) : this._swapNotes(notes);
   }
 
   /**
@@ -4282,17 +4321,32 @@ export class Sig {
       const stepsForCycle = crossMerge(this.stepsForCycle, sig, stampCfg('note'));
       return this._clone({ sampler: { ...this.sampler, note: sig }, stepsForCycle });
     }
-    // Synth track: the note signal becomes the pattern itself; everything chained so far
-    // (instrument, fx, params, channel strip...) carries over. A live source keeps its own
-    // midiNotes (synth("X").note(kb(1)) - the chain's meta would otherwise null it out).
-    // pitchKind follows the note signal, not the track: whether these are notes or degrees is a
-    // property of the values just supplied, so a later .scale() reads them the right way even on
-    // a synth("X") track (which is note-kind by default from its C2 placeholder).
-    //
-    // The note pattern's grid becomes the track's trigger, but any note channels attached earlier
-    // (`.as("vel").note(...)`, `.clip(2).n(...)`) must re-merge onto it - the whole point of holding
-    // them separately from the grid (see Sig#noteChannels). In the ordinary pitch-first order
-    // noteChannels is empty here and this is a plain grid swap.
+    // A live source (synth("X").note(kb(1))) has no grid to merge - its notes arrive as played.
+    if (sig.midiNotes || sig.inputSource || !this.stepsForCycle) return this._swapNotes(sig);
+    // Synth track: the note is a control like any other, merged onto the events the way crossMerge
+    // merges every control - a patterned note mixes (synth("X").note("c3 e3") cuts the whole-cycle
+    // default note in two), a note that only holds across the cycle (note("F0"), "<c3 e3>")
+    // neither cuts nor re-strikes anything, so struct("1 ~ 1 1").note("F0") plays F0 on each hit.
+    // The note channels are already on the events and stay there. pitchKind follows the note
+    // signal: whether these are notes or degrees is a property of the values just supplied, so a
+    // later .scale() reads them the right way even on a synth("X") track.
+    const stepsForCycle = mergeNotes(this.stepsForCycle, sig);
+    return new Sig((t, cps, pos) => sampleViaSteps(stepsForCycle, t, cps, pos), {
+      stepsForCycle, ...this._meta(), pitchKind: sig.pitchKind,
+    });
+  }
+
+  /**
+   * The note-REPLACING swap .copy()/.pcopy() mean on a synth track (and what a live source does
+   * to one): `sig`'s events become the pattern, and everything chained so far (instrument, fx,
+   * params, channel strip...) carries over. A live source keeps its own midiNotes (the chain's meta
+   * would otherwise null it out), and pitchKind follows the incoming notes. Any note channels
+   * attached earlier (`.as("vel").pcopy(...)`) re-merge onto the new grid - the whole point of
+   * holding them separately from the grid (see Sig#noteChannels).
+   */
+  _swapNotes(sig) {
+    if (this.ctl) return this._fromHeadCtl((trigger) => trigger._swapNotes(sig));
+    if (this.sampler) return this._noteLike(sig);
     const stepsForCycle = applyNoteChannels(sig.stepsForCycle, this.noteChannels);
     return sig._clone({ ...this._meta(), stepsForCycle, midiNotes: sig.midiNotes ?? this.midiNotes, pitchKind: sig.pitchKind });
   }
@@ -4830,6 +4884,135 @@ function countedSource(steps, period) {
   };
 }
 
+// How many cycles .elongate() looks ahead for the next onset before calling the pattern silent.
+const ELONGATE_LOOKAHEAD = 16;
+
+// .elongate()'s steps. Its line is a run of stages - an onset of `base` with everything starting
+// with it, rests included, lasting until the next onset - each held for its length and played one
+// after another from cycle 0. The line is worked out stage by stage as far as it has been asked
+// for and remembered. A scheduler's read (see triggers.mjs's schedulingWindow) first forgets every
+// stage that starts at or after where it reads from: what has been sent stays where it was, and
+// what changed since - a length, a note, the rhythm - plays from the next stage on.
+function elongateSteps(base, lens) {
+  const line = []; // { T, n, i, k, adv, len, group, locs }, in order of T
+  let maxDur = 0; // the longest note on the line, how far back a query looks for one still ringing
+  let lastWindow = null;
+
+  // The stages of source cycle `n` in time order: each onset with everything starting with it, and
+  // each stretch where nothing sounds (a rest has no step of its own, so it is found as a gap).
+  const stagesOf = (n, cache) => {
+    let stages = cache.get(n);
+    if (stages) return stages;
+    const steps = base(n);
+    const groups = [];
+    const onsets = steps.filter((s) => !s.cont && s.start >= 0 && s.start < 1).sort((a, b) => a.start - b.start);
+    for (const s of onsets) {
+      const last = groups[groups.length - 1];
+      if (last && Math.abs(last[0].start - s.start) < MIX_EPS) last.push(s);
+      else groups.push([s]);
+    }
+    stages = [];
+    const rest = (from, to) => {
+      if (from < to - MIX_EPS) stages.push([{ start: from, end: to, value: null }]);
+    };
+    // Whatever rings in from the cycle before is its stage's; a rest starts where it stops.
+    const ringing = steps.filter((s) => s.cont && s.value != null && s.start <= MIX_EPS).reduce((m, s) => Math.max(m, s.end), 0);
+    rest(ringing, groups.length ? groups[0][0].start : 1);
+    groups.forEach((group, j) => {
+      stages.push(group);
+      const end = group.reduce((m, s) => (s.value == null ? m : Math.max(m, s.end)), group[0].start);
+      rest(end, j + 1 < groups.length ? groups[j + 1][0].start : 1);
+    });
+    cache.set(n, stages);
+    return stages;
+  };
+  // The first stage at or after stage `i` of cycle `n`, as [n, i] - null when nothing starts for
+  // ELONGATE_LOOKAHEAD cycles.
+  const stageFrom = (n, i, cache) => {
+    if (i < stagesOf(n, cache).length) return [n, i];
+    for (let m = n + 1; m <= n + ELONGATE_LOOKAHEAD; m++) if (stagesOf(m, cache).length) return [m, 0];
+    return null;
+  };
+  // The `k`th length, from the lengths of source cycle `n` - or, for a signal with no steps of
+  // its own (a number, an LFO, irand()), its value where the stage starts. Anything that is not a
+  // positive number is 1.
+  const lengthOf = (n, at, k) => {
+    let ev;
+    if (lens.stepsForCycle && !lens.eventAt) {
+      const groups = [];
+      const onsets = lens.stepsForCycle(n).filter((s) => s.value != null && !s.cont).sort((a, b) => a.start - b.start);
+      for (const s of onsets) if (!groups.length || Math.abs(groups[groups.length - 1].start - s.start) >= MIX_EPS) groups.push(s);
+      if (!groups.length) return { len: 1, locs: [] };
+      const s = groups[k % groups.length];
+      ev = { value: s.value, locs: stepLocs(s) };
+    } else {
+      ev = readEvent(lens, at);
+    }
+    const len = Number(ev.value);
+    return { len: Number.isFinite(len) && len > 0 ? len : 1, locs: ev.locs };
+  };
+  const push = (n, i, k, T, cache) => {
+    const group = stagesOf(n, cache)[i];
+    const at = n + group[0].start;
+    const next = stageFrom(n, i + 1, cache);
+    const nextAt = next ? next[0] + stagesOf(next[0], cache)[next[1]][0].start : n + 1;
+    const { len, locs } = lengthOf(n, at, k);
+    for (const s of group) maxDur = Math.max(maxDur, (s.end - s.start) * len);
+    line.push({ T, n, i, k, adv: (nextAt - at) * len, len, group, locs });
+  };
+  // Lays stages onto the line until one starts at or after `to`.
+  const extend = (to) => {
+    const cache = new Map();
+    if (!line.length) {
+      const first = stageFrom(0, 0, cache);
+      if (!first) return;
+      push(first[0], first[1], 0, first[0] + stagesOf(first[0], cache)[first[1]][0].start, cache);
+    }
+    while (line[line.length - 1].T < to) {
+      const last = line[line.length - 1];
+      const next = stageFrom(last.n, last.i + 1, cache);
+      if (!next) return;
+      push(next[0], next[1], last.k + 1, last.T + last.adv, cache);
+    }
+  };
+  // The index of the first stage starting at or after `x`.
+  const firstFrom = (x) => {
+    let lo = 0;
+    let hi = line.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (line[mid].T < x) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo;
+  };
+
+  return (cycle) => {
+    const w = schedulingWindow();
+    if (w && w !== lastWindow) {
+      lastWindow = w;
+      line.length = firstFrom(w.posAt(w.from) - MIX_EPS);
+    }
+    extend(cycle + 1);
+    const out = [];
+    for (let j = firstFrom(cycle - maxDur - MIX_EPS); j < line.length && line[j].T < cycle + 1 - MIX_EPS; j++) {
+      const e = line[j];
+      for (const src of e.group) {
+        if (src.value == null) continue; // a rest: it takes its time and sounds nothing
+        const start = e.T - cycle;
+        const end = start + (src.end - src.start) * e.len;
+        if (end <= MIX_EPS) continue;
+        const step = start >= -MIX_EPS ? { ...src, start: Math.max(0, start), end, cont: undefined } : { ...src, start: 0, end, cont: true };
+        const locs = joinLocs({ value: src.value, locs: stepLocs(src) }, e.locs);
+        if (locs.length) step.locs = locs;
+        else delete step.locs;
+        out.push(step);
+      }
+    }
+    return out.sort((a, b) => a.start - b.start);
+  };
+}
+
 // Every step of `steps` sounding at cycle-phase `phase` (fraction of a cycle) - one for an ordinary
 // sequence, several for a `,`-stack, none over a rest. _binop reads the right operand this way so a
 // stacked operand fans the event out per layer (and so both operands' highlight spans survive the
@@ -4979,7 +5162,7 @@ function revoiceSteps(steps, fn) {
     const voiced = fn(g, midis) ?? midis;
     g.voices.forEach((v, i) => {
       if (voiced[i] == null) return;
-      out.push(withLocs({ ...v.step, value: voiced[i] }, g.locs));
+      out.push(withLocs({ ...withoutChord(v.step), value: voiced[i] }, g.locs));
     });
   }
   return out.sort((a, b) => a.start - b.start);
@@ -5005,6 +5188,72 @@ function chordArgValues(sig) {
 
 // Whether a .chord() argument means "stack the key this high" rather than a quality name.
 const isExtension = (v) => typeof v === 'number' || (typeof v === 'string' && v.trim() !== '' && Number.isFinite(Number(v)));
+
+// A chord's notes on `root`, root first - what .chord() builds and what a chord note carries
+// (`step.chord`, plain data so the note can be copied anywhere) to be built again on a new root.
+// `kind` is what the root is: a MIDI note, or a scale degree. A quality name on a degree has no
+// semitones to add yet, so the key's own stack of the same size stands in for it until .scale()
+// builds the named chord (see placeDegreeChords). A number stacks the key's thirds: on a note in
+// `key`, on a degree in whatever key places it later.
+function chordTones(root, { q, kind, key }) {
+  if (q == null) return [root];
+  const named = isExtension(q) ? null : chordIntervals(q);
+  if (named && kind !== 'degree') return named.map((iv) => root + iv);
+  const stack = (named ? chordExtension(named.length * 2 - 1) : isExtension(q) ? chordExtension(q) : null) ?? chordExtension(5);
+  if (kind === 'degree') return stack.map((s) => root + s);
+  return stack.map((s) => stepInKey(root, s, key));
+}
+
+// `a` moved `b` steps through `key`, keeping its distance from the key (an F# in C major stays a
+// semitone above the degree it steps from).
+function stepInKey(a, b, key) {
+  const degree = midiToDegree(a, key);
+  const offKey = a - degreeToMidi(degree, key);
+  return degreeToMidi(Math.round(degree + b), key) + offKey;
+}
+
+// A chord note with its root swapped for `root` (of `kind`): the same note of the same chord,
+// built again there. Null when the chord has no such note.
+function rerootChordStep(step, root, kind) {
+  const shape = { ...step.chord, kind };
+  const tone = chordTones(root, shape)[step.chord.i];
+  if (tone === undefined) return null;
+  return { ...step, value: tone, chord: { ...shape, off: tone - root } };
+}
+
+// .scale() on degrees, with its chords built in the key: each chord note's root degree is noted
+// before the values are mapped, then the chord is built again on the root's MIDI note - so a quality
+// name, which degrees could only stand in for (see chordTones), becomes the named chord here, and a
+// number stacks the thirds of the key that placed it.
+function placeDegreeChords(sig, apply, names, scaleName) {
+  const base = sig.stepsForCycle;
+  if (!base) return apply(sig, 'degree');
+  const marked = sig._clone({
+    stepsForCycle: (cycle) => base(cycle).map((st) => (
+      st.chord?.kind === 'degree' && st.value != null ? { ...st, chord: { ...st.chord, rootDegree: Number(st.value) - st.chord.off } } : st
+    )),
+  });
+  const mapped = apply(marked, 'degree');
+  const toMidi = (degree, pos) => {
+    const name = names ? validScaleName(readEvent(names, pos).value) : scaleName;
+    return name == null ? null : { midi: degreeToMidi(degree, name), name };
+  };
+  const stepsForCycle = (cycle) => mapped.stepsForCycle(cycle).map((st) => {
+    if (st.chord?.rootDegree === undefined) return st;
+    const { rootDegree, ...shape } = st.chord;
+    const root = st.value == null ? null : toMidi(rootDegree, cycle + st.start);
+    if (root == null) return { ...st, value: null, chord: shape };
+    return rerootChordStep({ ...st, chord: { ...shape, key: root.name } }, root.midi, 'note') ?? { ...st, value: null, chord: shape };
+  });
+  return new Sig((t, cps, pos) => sampleViaSteps(stepsForCycle, t, cps, pos), { stepsForCycle, ...mapped._meta() });
+}
+
+// A step with no chord on it - what the chord-shaping methods leave once they have fixed the notes.
+function withoutChord(step) {
+  if (!step.chord) return step;
+  const { chord: _shape, ...rest } = step;
+  return rest;
+}
 
 // ---------------------------------------------------------------------------------------------
 // bite helpers (Sig#bite): the index pattern is resolved into absolute-time playhead events, and
@@ -5611,6 +5860,39 @@ function collapseRestamped(steps, keys, baseKeys) {
     dropped = true;
   }
   return dropped ? steps.filter((_, i) => keep[i]) : steps;
+}
+
+// .note()/.n() on a synth track: the incoming notes merged onto the events as a control is (see
+// crossMerge), the note being the event's own value. A note with no grid at all (a continuous
+// signal) is read at each onset, as any gridless control is.
+//
+// A note of a chord takes the new note as its ROOT: the chord is built again there, so
+// chord("m7").note("c3") is Cm7 (see chordTones).
+function mergeNotes(baseStepsForCycle, noteSig) {
+  const stamp = noteStamp(noteSig.pitchKind === 'degree' ? 'degree' : 'note');
+  if (noteSig.stepsForCycle) return crossMerge(baseStepsForCycle, noteSig, stamp);
+  return (cycle) => baseStepsForCycle(cycle).flatMap((s) => {
+    if (s.value == null) return [s];
+    const step = { ...s };
+    stamp(step, readEvent(noteSig, cycle + s.start).value);
+    return step.value == null ? [] : [step];
+  });
+}
+
+function noteStamp(kind) {
+  const stamp = (step, value) => {
+    const root = Number(value);
+    if (!step.chord || value == null || !Number.isFinite(root)) {
+      step.value = value;
+      if (step.chord) delete step.chord;
+      return;
+    }
+    const rebuilt = rerootChordStep(step, root, kind);
+    step.value = rebuilt ? rebuilt.value : null;
+    if (rebuilt) step.chord = rebuilt.chord;
+  };
+  stamp.clear = (step) => step;
+  return stamp;
 }
 
 function crossMerge(baseStepsForCycle, ctlSig, stamp = null) {
@@ -9580,7 +9862,7 @@ function resolveCopy(name) {
  *
  * To keep a track's dressing but play different notes into it, put the notes first and use the
  * method form - `kick2: pianoroll("kickB").copy("kick")` is kick's chain, channels and feel with
- * the new roll swapped in as its notes (the same swap .note()/.n() do; see Sig#copy).
+ * the new roll swapped in as its notes (see Sig#copy).
  *
  * A group can't be copied (it is a mixdown of other tracks, not a pattern - copy a member), and
  * copies that form a loop are refused by name.

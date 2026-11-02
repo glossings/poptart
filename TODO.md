@@ -37,7 +37,7 @@ Delete an entry when it's done. Details: TODO-verbose.md.
 ## Native devices (desktop)
 [ ] Live figures: decide the EQ analyzer budget; reports for Chorus, Flanger, Phaser, Compressor, Limiter, Multiband, Ducker
 [ ] Audio-rate lfo/cc/polled controls
-[ ] Play-test devices in a live engine
+[ ] Per-voice fx chains and modulators (`.voice(...)`), so a poly synth is a patch
 
 ## Desktop engine
 [ ] Cut sclang out: Node talks to scsynth directly (notes/params, then bookkeeping, SynthDef writer, VST control)

@@ -212,6 +212,11 @@ export function withPressWindow(ctx, fn) {
   }
 }
 
+/** The window the scheduler is reading right now (see withPressWindow), or null for any other read. */
+export function schedulingWindow() {
+  return scheduling;
+}
+
 /**
  * The triggers a live button gives cycle `cycle` on `grid`: `[{ start, end, value: 1, n }]`, `n`
  * counting the triggers it has given out on that grid. A press not yet placed is placed by the

@@ -7,7 +7,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { n, note, mini, s, setPatternWarn } from './src/signal.mjs';
+import { n, note, mini, s, chord, setPatternWarn } from './src/signal.mjs';
 import { setGlobalScale } from './src/notes.mjs';
 import { invertVoices } from './src/harmony.mjs';
 
@@ -90,11 +90,32 @@ test('chord: an unknown name warns and plays the triad in key', () => {
   assert.deepEqual(firstChord(result), [60, 64, 67]);
 });
 
-test('chord: a quality on scale degrees warns and stacks the key instead', () => {
-  const { result, lines } = warnings(() => n('0').chord(mini('m7', 0)));
-  assert.equal(lines.length, 1);
-  assert.match(lines[0], /scale degrees/);
-  assert.deepEqual(firstChord(result), [0, 2, 4]);
+test('chord: a quality on scale degrees is built by the .scale() after it', () => {
+  const { result, lines } = warnings(() => n('0 4').chord(mini('m7', 0)));
+  assert.equal(lines.length, 0);
+  // Until a key places them, the key's own stack of the same size stands in.
+  assert.deepEqual(firstChord(result), [0, 2, 4, 6]);
+  const placed = result.scale('C:major').stepsForCycle(0).filter((st) => st.value != null);
+  assert.deepEqual(placed.filter((st) => st.start === 0).map((st) => st.value), [60, 63, 67, 70]);
+  assert.deepEqual(placed.filter((st) => st.start === 0.5).map((st) => st.value), [67, 70, 74, 77]);
+});
+
+test('chord: a new root rebuilds the chord on it', () => {
+  const tones = (sig) => sig.stepsForCycle(0).filter((st) => st.value != null).map((st) => [st.start, st.value]).sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  assert.deepEqual(tones(chord('m7').note('c3')), [[0, 60], [0, 63], [0, 67], [0, 70]]);
+  // .add() moves the root and .note() replaces it.
+  assert.deepEqual(tones(chord('m7').add(12).note('c3')), [[0, 60], [0, 63], [0, 67], [0, 70]]);
+  // A second .chord() replaces the quality on the root as it stands.
+  assert.deepEqual(tones(chord('m7').add(12).chord('maj7')), [[0, 72], [0, 76], [0, 79], [0, 83]]);
+  // A patterned note mixes, one chord per root.
+  assert.deepEqual(tones(note('c3').chord('m7').note('c3 g3')),
+    [[0, 60], [0, 63], [0, 67], [0, 70], [0.5, 67], [0.5, 70], [0.5, 74], [0.5, 77]]);
+});
+
+test('chord: once .arp() or a voicing fixes the notes, a new note replaces them', () => {
+  const tones = (sig) => sig.stepsForCycle(0).filter((st) => st.value != null).map((st) => [st.start, st.value]).sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  assert.deepEqual(tones(chord('m7').arp('0 1 2 3').note('c3')), [[0, 60], [0.25, 60], [0.5, 60], [0.75, 60]]);
+  assert.deepEqual(tones(chord('m7').inv(1).note('c3')), [[0, 60]]);
 });
 
 test('chord methods on a sampler pattern warn and keep playing', () => {
