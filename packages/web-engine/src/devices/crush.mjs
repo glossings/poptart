@@ -20,6 +20,17 @@ import { OnePole } from '../dsp/filters.mjs';
  */
 const RATE_TOP = 24000;
 
+/** Starting points for the preset menu: each the defaults with these controls changed. */
+export const CRUSH_PRESETS = Object.freeze({
+  lofisampler: { bits: 12, rate: 12000, tone: 8000 },
+  eightbit: { rate: 11025 },
+  fourbit: { bits: 4, rate: 8000 },
+  alias: { bits: 16, rate: 2500 },
+  smear: { bits: 6, rate: 4000, jitter: 0.6, tone: 6000 },
+  radio: { bits: 6, rate: 6000, tone: 3000 },
+  subtle: { bits: 10, mix: 0.5 },
+});
+
 export const CRUSH = defineDevice({
   id: 'Crush',
   kind: 'fx',
@@ -40,6 +51,7 @@ export const CRUSH = defineDevice({
     { id: 'mix', name: 'Mix', min: 0, max: 1, default: 1, group: 'Out' },
     { id: 'output', name: 'Output', min: -24, max: 24, default: 0, unit: 'dB', group: 'Out' },
   ],
+  presets: CRUSH_PRESETS,
 });
 
 /** One channel: what it is holding, how far through the hold it is, and the tone filter after. */

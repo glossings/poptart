@@ -11,6 +11,17 @@ import { defineDevice } from '../descriptor.mjs';
 import { at, dbToGain } from '../dsp/control.mjs';
 import { DYNAMICS_BLOCKS_PER_ENTRY, History } from '../dsp/history.mjs';
 
+/** Starting points for the preset menu: each the defaults with these controls changed. */
+export const COMPRESSOR_PRESETS = Object.freeze({
+  glue: { threshold: -28, ratio: 2, attack: 30, release: 300, makeup: 2 },
+  pump: { threshold: -32, ratio: 8, knee: 2, attack: 5, release: 250, makeup: 8 },
+  smash: { threshold: -40, ratio: 20, knee: 0, attack: 0.5, release: 60, makeup: 18, mix: 0.4 },
+  vocal: { threshold: -26, ratio: 3, knee: 10, attack: 4, release: 90, makeup: 4 },
+  punch: { threshold: -24, ratio: 5, knee: 3, attack: 30, release: 70, makeup: 4 },
+  leveler: { threshold: -30, ratio: 1.5, knee: 18, attack: 60, release: 600, makeup: 3 },
+  peakcatch: { threshold: -14, ratio: 12, knee: 2, attack: 0.3, release: 40 },
+});
+
 export const COMPRESSOR = defineDevice({
   id: 'Compressor',
   kind: 'fx',
@@ -40,6 +51,7 @@ export const COMPRESSOR = defineDevice({
       drag: { x: 'threshold', y: 'ratio' },
     },
   ],
+  presets: COMPRESSOR_PRESETS,
 });
 
 /** A linear level in decibels, floored so silence is a number. */

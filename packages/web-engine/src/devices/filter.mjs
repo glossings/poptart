@@ -10,6 +10,19 @@ import { defineDevice } from '../descriptor.mjs';
 import { at, dbToGain, isMoving } from '../dsp/control.mjs';
 import { DRIVEN_MODES, FILTER_MODES, MORPHING_MODES, MultiFilter } from '../dsp/filters.mjs';
 
+/** Starting points for the preset menu: each the defaults with these controls changed. */
+export const FILTER_PRESETS = Object.freeze({
+  acidsquelch: { mode: 10, cutoff: 500, resonance: 0.85, drive: 3 },
+  warmladder: { mode: 10, cutoff: 1500, resonance: 0.25, drive: 2 },
+  sweep: { cutoff: 400, resonance: 0.7 },
+  mellow: { mode: 2, cutoff: 600, resonance: 0.1 },
+  telephone: { mode: 7, cutoff: 1200, resonance: 0.4, output: 9 },
+  thinhigh: { mode: 5, cutoff: 500, resonance: 0.15, output: 8 },
+  combring: { mode: 11, cutoff: 220, resonance: 0.85, mix: 0.6 },
+  vowel: { mode: 13, cutoff: 485, resonance: 0.8 },
+  phasey: { mode: 12, cutoff: 800, resonance: 0.6, mix: 0.5 },
+});
+
 export const FILTER = defineDevice({
   id: 'Filter',
   kind: 'fx',
@@ -45,6 +58,7 @@ export const FILTER = defineDevice({
   // Wide enough for every control in one row, so a mode that shows Drive and Morph does not
   // push Output onto a second one.
   panel: { width: 640 },
+  presets: FILTER_PRESETS,
 });
 
 export class FilterProcessor {

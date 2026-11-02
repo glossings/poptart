@@ -40,6 +40,16 @@ function compressorBandParams(name) {
   ];
 }
 
+/** Starting points for the preset menu: each the defaults with these controls changed. */
+export const MULTIBAND_PRESETS = Object.freeze({
+  masterglue: { 'low.threshold': -32, 'low.ratio': 2, 'low.upward': 0, 'low.attack': 30, 'low.release': 250, 'mid.threshold': -34, 'mid.ratio': 2, 'mid.upward': 0, 'mid.attack': 20, 'mid.release': 200, 'high.threshold': -36, 'high.ratio': 2, 'high.upward': 0, 'high.attack': 10, 'high.release': 150, output: 2 },
+  deess: { highsplit: 5000, 'low.ratio': 1, 'low.upward': 0, 'mid.ratio': 1, 'mid.upward': 0, 'high.threshold': -40, 'high.ratio': 8, 'high.upward': 0, 'high.attack': 0.5, 'high.release': 40 },
+  tightbass: { lowsplit: 120, 'low.threshold': -30, 'low.ratio': 5, 'low.upward': 0, 'low.attack': 20, 'low.release': 100, 'mid.ratio': 1, 'mid.upward': 0, 'high.ratio': 1, 'high.upward': 0 },
+  loud: { 'low.threshold': -32, 'low.ratio': 4, 'low.upward': 0.5, 'mid.threshold': -32, 'mid.ratio': 4, 'mid.upward': 0.5, 'high.threshold': -32, 'high.ratio': 4, 'high.upward': 0.5, output: 4 },
+  light: { amount: 0.35 },
+  airlift: { 'low.ratio': 1, 'low.upward': 0, 'mid.ratio': 1, 'mid.upward': 0, 'high.threshold': -18, 'high.ratio': 2, 'high.upward': 1, 'high.gain': 2 },
+});
+
 export const MULTIBAND = defineDevice({
   id: 'Multiband',
   kind: 'fx',
@@ -75,6 +85,7 @@ export const MULTIBAND = defineDevice({
     drag: { x: 'threshold', y: 'ratio' },
   })),
   panel: { width: 760, rows: [['Global'], ['Low', 'Mid', 'High']] },
+  presets: MULTIBAND_PRESETS,
 });
 
 /** How far below its threshold a band is still lifted: quieter than this is left alone. */

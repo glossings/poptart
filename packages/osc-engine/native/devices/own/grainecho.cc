@@ -2,7 +2,8 @@
 //
 // Translated from web-engine/src/devices/grainecho.mjs. Each grain reads from around the delay
 // time, windowed, transposed and panned, with what comes out fed back into the buffer - so the
-// repeats smear and scatter instead of arriving whole.
+// repeats smear and scatter instead of arriving whole. The grains are divided by how many
+// overlap and DC-blocked before they are heard or fed back.
 
 #include "own/pd-own.h"
 #include "own/dsp/sync.h"
@@ -15,6 +16,8 @@ using namespace pd_own;
 
 constexpr double kGrainMaxSec = 4.0;
 constexpr int kMaxGrains = 48;
+/** Where the DC blocker on the grains starts to let through, in Hz. */
+constexpr double kDcHz = 20.0;
 /** Four seconds at 96 kHz. Above that rate the buffer stops growing and the delay is shorter. */
 constexpr int kCapacity = 384000;
 
@@ -38,6 +41,8 @@ struct Device : pd_own::Device<ids::kCount> {
   int until = 0;              // samples until the next grain starts
   unsigned int seed = 0x2545f491u;
   double bpm = 120;
+  double dcK = 1;
+  double dcInL = 0, dcInR = 0, dcOutL = 0, dcOutR = 0;
 
   void pd_init(double sr) {
     sampleRate = sr;
@@ -49,6 +54,8 @@ struct Device : pd_own::Device<ids::kCount> {
     until = 0;
     seed = 0x2545f491u;
     bpm = 120;
+    dcK = 1 - (2 * M_PI * kDcHz) / sr;
+    dcInL = 0; dcInR = 0; dcOutL = 0; dcOutR = 0;
   }
 
   void pd_transport(double tempo, double seconds) { (void)seconds; bpm = tempo; }
@@ -129,6 +136,15 @@ struct Device : pd_own::Device<ids::kCount> {
         if (g.pos >= size) g.pos -= size;
         if (++g.at >= g.len) g.on = false;
       }
+      // Two Hann windows overlapping half way sum to one; more than that is brought back to it.
+      const double overlap = std::fmin(kMaxGrains, ctl(ids::size, i) * 0.001 * ctl(ids::density, i));
+      const double norm = 1 / std::fmax(1.0, overlap * 0.5);
+      const double rawL = wetL * norm;
+      const double rawR = wetR * norm;
+      wetL = rawL - dcInL + dcK * dcOutL;
+      wetR = rawR - dcInR + dcK * dcOutR;
+      dcInL = rawL; dcInR = rawR;
+      dcOutL = wetL; dcOutR = wetR;
       const double fb = ctl(ids::feedback, i);
       // A number that cannot be played is stored as silence: kept, it would come back round the
       // feedback for as long as the device lives.

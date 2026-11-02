@@ -10,6 +10,18 @@ import { at, dbToGain } from '../dsp/control.mjs';
 import { OnePole } from '../dsp/filters.mjs';
 import { Reverb } from '../dsp/reverb.mjs';
 
+/** Starting points for the preset menu: each the defaults with these controls changed. */
+export const REVERB_PRESETS = Object.freeze({
+  room: { decay: 0.6, size: 0.3, predelay: 0.005, damping: 8000, mix: 0.25 },
+  chamber: { decay: 1.2, size: 0.5, predelay: 0.015, damping: 7000, mix: 0.28 },
+  plate: { decay: 1.8, size: 0.45, predelay: 0.02, modulation: 0.4, damping: 12000, lowcut: 200 },
+  hall: { decay: 3.5, size: 0.9, predelay: 0.03, damping: 5000 },
+  ambience: { decay: 0.9, size: 0.12, predelay: 0, modulation: 0.1, damping: 10000, mix: 0.2 },
+  burst: { decay: 0.3, size: 1, predelay: 0, damping: 9000, lowcut: 200, mix: 0.4 },
+  cavern: { decay: 9, size: 1, predelay: 0.08, modulation: 0.5, damping: 2500, lowcut: 60, mix: 0.35 },
+  endless: { decay: 25, size: 1, predelay: 0.04, modulation: 0.7, damping: 4000, mix: 0.45, output: -5 },
+});
+
 export const REVERB = defineDevice({
   id: 'Reverb',
   kind: 'fx',
@@ -43,6 +55,7 @@ export const REVERB = defineDevice({
       drag: { x: 'decay' },
     },
   ],
+  presets: REVERB_PRESETS,
 });
 
 export class ReverbProcessor {

@@ -14,6 +14,17 @@ import { curveShape } from '../dsp/adsr.mjs';
 import { SYNC_OPTIONS, syncedSeconds, migrateSyncLists } from '../dsp/sync.mjs';
 import { History } from '../dsp/history.mjs';
 
+/** Starting points for the preset menu: each the defaults with these controls changed. */
+export const DUCKER_PRESETS = Object.freeze({
+  pump: { amount: 0.9, length: 0.8, curve: 4 },
+  eighths: { sync: 7, amount: 0.7, length: 0.7, curve: 2 },
+  gentle: { amount: 0.4, length: 0.6, curve: 2 },
+  chop: { sync: 7, amount: 1, length: 0.6, attack: 0.5, curve: 8 },
+  flutter: { sync: 4, amount: 0.6, length: 0.9, curve: 1 },
+  swell: { sync: 16, amount: 0.85, length: 0.9, curve: 5, attack: 10 },
+  keyed: { amount: 0.85, length: 0.15, threshold: -18, curve: 2 },
+});
+
 export const DUCKER = defineDevice({
   id: 'Ducker',
   kind: 'fx',
@@ -50,6 +61,7 @@ export const DUCKER = defineDevice({
       drag: { x: 'length', y: 'amount' },
     },
   ],
+  presets: DUCKER_PRESETS,
 });
 
 export class DuckerProcessor {

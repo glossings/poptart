@@ -12,6 +12,18 @@ import { SYNC_OPTIONS, syncedHz, migrateSyncLists } from '../dsp/sync.mjs';
 
 const MAX_STAGES = 12;
 
+/** Starting points for the preset menu: each the defaults with these controls changed. */
+export const PHASER_PRESETS = Object.freeze({
+  subtle: { stages: 4, rate: 0.3, depth: 0.4, feedback: 0.1, mix: 0.4 },
+  swirl: { stages: 8, rate: 0.1, center: 800, depth: 0.8, feedback: 0.6 },
+  wobble: { stages: 4, rate: 5, center: 1200, depth: 0.4, feedback: 0.3 },
+  resonant: { stages: 12, rate: 0.2, depth: 0.9, feedback: 0.85 },
+  hollow: { rate: 0.3, center: 600, feedback: -0.7 },
+  pulse: { stages: 8, sync: 10, feedback: 0.5 },
+  airy: { stages: 10, rate: 0.7, center: 4000, depth: 0.5, feedback: 0.3, spread: 1 },
+  deep: { rate: 0.25, center: 250, depth: 0.6, feedback: 0.5 },
+});
+
 export const PHASER = defineDevice({
   id: 'Phaser',
   kind: 'fx',
@@ -48,6 +60,7 @@ export const PHASER = defineDevice({
       drag: { y: 'depth' },
     },
   ],
+  presets: PHASER_PRESETS,
 });
 
 /** One channel's chain of first-order allpasses and its feedback sample. */

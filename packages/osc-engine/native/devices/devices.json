@@ -242,7 +242,79 @@
           "rate": "k",
           "open": true
         }
-      ]
+      ],
+      "presets": {
+        "organ": {
+          "partials": 6,
+          "tilt": -3,
+          "ampenv.attack": 0.004,
+          "ampenv.decay": 0.3,
+          "ampenv.sustain": 0.75,
+          "ampenv.release": 0.06
+        },
+        "glassbell": {
+          "partials": 12,
+          "tilt": -4,
+          "stretch": 0.3,
+          "damp": 0.35,
+          "ampenv.decay": 3.5,
+          "ampenv.sustain": 0,
+          "ampenv.release": 2
+        },
+        "bowed": {
+          "partials": 32,
+          "stretch": 0.004,
+          "odd": -0.15,
+          "ampenv.attack": 0.7,
+          "ampenv.sustain": 1,
+          "ampenv.release": 1.2
+        },
+        "hollow": {
+          "partials": 24,
+          "odd": 1,
+          "tilt": -7,
+          "ampenv.attack": 0.01,
+          "ampenv.sustain": 1,
+          "glide": 0.05
+        },
+        "pluck": {
+          "partials": 40,
+          "tilt": -3,
+          "stretch": 0.012,
+          "damp": 0.5,
+          "ampenv.decay": 1.6,
+          "ampenv.sustain": 0,
+          "ampenv.release": 0.4,
+          "env.dcurve": -6
+        },
+        "chime": {
+          "partials": 6,
+          "tilt": -2,
+          "odd": 1,
+          "stretch": 0.45,
+          "damp": 0.15,
+          "ampenv.decay": 2.5,
+          "ampenv.sustain": 0,
+          "ampenv.release": 1.5
+        },
+        "flute": {
+          "partials": 4,
+          "tilt": -14,
+          "odd": 0.4,
+          "ampenv.attack": 0.08,
+          "ampenv.sustain": 1,
+          "ampenv.release": 0.2
+        },
+        "buzz": {
+          "partials": 64,
+          "tilt": -4,
+          "stretch": 0.003,
+          "ampenv.attack": 0.003,
+          "ampenv.decay": 0.4,
+          "ampenv.sustain": 0.6,
+          "ampenv.release": 0.1
+        }
+      }
     },
     {
       "id": "Analog",
@@ -1293,7 +1365,60 @@
           "group": "",
           "rate": "a"
         }
-      ]
+      ],
+      "presets": {
+        "subtle": {
+          "rate": 0.4,
+          "depth": 1.5,
+          "delay": 8,
+          "mix": 0.3
+        },
+        "lush": {
+          "rate": 0.8,
+          "depth": 6,
+          "delay": 15,
+          "spread": 1
+        },
+        "wide": {
+          "rate": 0.15,
+          "depth": 2,
+          "delay": 30,
+          "spread": 1
+        },
+        "wobble": {
+          "rate": 6,
+          "depth": 2.5,
+          "delay": 8,
+          "shape": 1
+        },
+        "swirl": {
+          "rate": 0.1,
+          "depth": 10,
+          "delay": 20,
+          "shape": 1,
+          "mix": 0.6
+        },
+        "shimmer": {
+          "rate": 2.5,
+          "depth": 0.8,
+          "delay": 3,
+          "spread": 0.9
+        },
+        "seasick": {
+          "sync": 16,
+          "depth": 14,
+          "delay": 25,
+          "spread": 0.3,
+          "mix": 0.55
+        },
+        "detuned": {
+          "rate": 5,
+          "depth": 2.5,
+          "delay": 5,
+          "spread": 0,
+          "mix": 1
+        }
+      }
     },
     {
       "id": "Clouds",
@@ -2208,7 +2333,64 @@
           "group": "",
           "rate": "a"
         }
-      ]
+      ],
+      "presets": {
+        "glue": {
+          "threshold": -28,
+          "ratio": 2,
+          "attack": 30,
+          "release": 300,
+          "makeup": 2
+        },
+        "pump": {
+          "threshold": -32,
+          "ratio": 8,
+          "knee": 2,
+          "attack": 5,
+          "release": 250,
+          "makeup": 8
+        },
+        "smash": {
+          "threshold": -40,
+          "ratio": 20,
+          "knee": 0,
+          "attack": 0.5,
+          "release": 60,
+          "makeup": 18,
+          "mix": 0.4
+        },
+        "vocal": {
+          "threshold": -26,
+          "ratio": 3,
+          "knee": 10,
+          "attack": 4,
+          "release": 90,
+          "makeup": 4
+        },
+        "punch": {
+          "threshold": -24,
+          "ratio": 5,
+          "knee": 3,
+          "attack": 30,
+          "release": 70,
+          "makeup": 4
+        },
+        "leveler": {
+          "threshold": -30,
+          "ratio": 1.5,
+          "knee": 18,
+          "attack": 60,
+          "release": 600,
+          "makeup": 3
+        },
+        "peakcatch": {
+          "threshold": -14,
+          "ratio": 12,
+          "knee": 2,
+          "attack": 0.3,
+          "release": 40
+        }
+      }
     },
     {
       "id": "Convolver",
@@ -2325,7 +2507,60 @@
           "group": "Tone",
           "rate": "a"
         }
-      ]
+      ],
+      "presets": {
+        "room": {
+          "ir": 0,
+          "size": 1,
+          "mix": 0.25
+        },
+        "booth": {
+          "ir": 0,
+          "size": 0.4,
+          "damping": 9000,
+          "mix": 0.2
+        },
+        "hall": {
+          "size": 1.8,
+          "predelay": 0.025,
+          "damping": 5000
+        },
+        "plate": {
+          "ir": 2,
+          "size": 1.8,
+          "predelay": 0,
+          "damping": 12000,
+          "lowcut": 200
+        },
+        "tightplate": {
+          "ir": 2,
+          "size": 0.8,
+          "predelay": 0,
+          "damping": 10000,
+          "lowcut": 250,
+          "mix": 0.25
+        },
+        "chamber": {
+          "ir": 3,
+          "size": 1.5,
+          "predelay": 0.015
+        },
+        "cathedral": {
+          "ir": 4,
+          "size": 2.5,
+          "predelay": 0.04,
+          "damping": 4500,
+          "mix": 0.35
+        },
+        "vast": {
+          "ir": 4,
+          "size": 6,
+          "predelay": 0.08,
+          "damping": 3500,
+          "lowcut": 150,
+          "mix": 0.4
+        }
+      }
     },
     {
       "id": "Crush",
@@ -2418,7 +2653,40 @@
           "group": "Out",
           "rate": "a"
         }
-      ]
+      ],
+      "presets": {
+        "lofisampler": {
+          "bits": 12,
+          "rate": 12000,
+          "tone": 8000
+        },
+        "eightbit": {
+          "rate": 11025
+        },
+        "fourbit": {
+          "bits": 4,
+          "rate": 8000
+        },
+        "alias": {
+          "bits": 16,
+          "rate": 2500
+        },
+        "smear": {
+          "bits": 6,
+          "rate": 4000,
+          "jitter": 0.6,
+          "tone": 6000
+        },
+        "radio": {
+          "bits": 6,
+          "rate": 6000,
+          "tone": 3000
+        },
+        "subtle": {
+          "bits": 10,
+          "mix": 0.5
+        }
+      }
     },
     {
       "id": "Delay",
@@ -2546,7 +2814,62 @@
           "group": "",
           "rate": "a"
         }
-      ]
+      ],
+      "presets": {
+        "dub": {
+          "sync": 10,
+          "feedback": 0.72,
+          "tone": 1600,
+          "mix": 0.4
+        },
+        "slapback": {
+          "time": 0.09,
+          "feedback": 0.08,
+          "tone": 5000,
+          "mix": 0.3
+        },
+        "pingpong": {
+          "sync": 7,
+          "feedback": 0.5,
+          "pingpong": 1,
+          "tone": 6000
+        },
+        "dotted": {
+          "sync": 9,
+          "feedback": 0.55,
+          "tone": 10000,
+          "spread": 0.25,
+          "mix": 0.3
+        },
+        "tapeecho": {
+          "time": 0.31,
+          "feedback": 0.58,
+          "tone": 2400,
+          "spread": 0.08,
+          "mix": 0.38
+        },
+        "wash": {
+          "sync": 13,
+          "feedback": 0.7,
+          "tone": 3000,
+          "spread": 0.4,
+          "mix": 0.4
+        },
+        "doubler": {
+          "time": 0.022,
+          "feedback": 0,
+          "tone": 12000,
+          "spread": 0.7,
+          "mix": 0.4
+        },
+        "triplets": {
+          "sync": 8,
+          "feedback": 0.35,
+          "tone": 5000,
+          "pingpong": 1,
+          "mix": 0.3
+        }
+      }
     },
     {
       "id": "Distort",
@@ -2705,7 +3028,56 @@
           "group": "Out",
           "rate": "k"
         }
-      ]
+      ],
+      "presets": {
+        "warmtape": {
+          "drive": 9,
+          "bias": 0.15,
+          "tone": 9000
+        },
+        "fuzz": {
+          "mode": 1,
+          "drive": 30,
+          "bias": 0.25,
+          "tone": 5000,
+          "output": -3
+        },
+        "fold": {
+          "mode": 2,
+          "drive": 18,
+          "output": -1
+        },
+        "tube": {
+          "mode": 5,
+          "drive": 12,
+          "character": 0.65,
+          "tone": 12000,
+          "oversample": 2
+        },
+        "octaveup": {
+          "mode": 9,
+          "drive": 4,
+          "mix": 0.6
+        },
+        "bitty": {
+          "mode": 10,
+          "drive": 10,
+          "character": 0.3
+        },
+        "shimmer": {
+          "mode": 11,
+          "drive": 9,
+          "character": 0.75,
+          "mix": 0.5,
+          "output": -2
+        },
+        "wavefold": {
+          "mode": 7,
+          "drive": 15,
+          "tone": 10000,
+          "output": -2
+        }
+      }
     },
     {
       "id": "Drum",
@@ -3567,7 +3939,51 @@
           "group": "",
           "rate": "a"
         }
-      ]
+      ],
+      "presets": {
+        "pump": {
+          "amount": 0.9,
+          "length": 0.8,
+          "curve": 4
+        },
+        "eighths": {
+          "sync": 7,
+          "amount": 0.7,
+          "length": 0.7,
+          "curve": 2
+        },
+        "gentle": {
+          "amount": 0.4,
+          "length": 0.6,
+          "curve": 2
+        },
+        "chop": {
+          "sync": 7,
+          "amount": 1,
+          "length": 0.6,
+          "attack": 0.5,
+          "curve": 8
+        },
+        "flutter": {
+          "sync": 4,
+          "amount": 0.6,
+          "length": 0.9,
+          "curve": 1
+        },
+        "swell": {
+          "sync": 16,
+          "amount": 0.85,
+          "length": 0.9,
+          "curve": 5,
+          "attack": 10
+        },
+        "keyed": {
+          "amount": 0.85,
+          "length": 0.15,
+          "threshold": -18,
+          "curve": 2
+        }
+      }
     },
     {
       "id": "Elements",
@@ -4175,7 +4591,76 @@
           "group": "Output",
           "rate": "a"
         }
-      ]
+      ],
+      "presets": {
+        "bassboost": {
+          "band1.freq": 90,
+          "band1.gain": 6,
+          "output": -3
+        },
+        "air": {
+          "band4.freq": 10000,
+          "band4.gain": 8
+        },
+        "midscoop": {
+          "band2.freq": 700,
+          "band2.gain": -8,
+          "band2.q": 0.7,
+          "band3.freq": 1500,
+          "band3.gain": -3,
+          "band3.q": 0.8,
+          "output": 1
+        },
+        "telephone": {
+          "band1.type": 4,
+          "band1.slope": 1,
+          "band1.freq": 400,
+          "band3.freq": 1500,
+          "band3.gain": 5,
+          "band3.q": 0.7,
+          "band4.type": 3,
+          "band4.slope": 1,
+          "band4.freq": 3000,
+          "output": 8
+        },
+        "kicktight": {
+          "band1.freq": 60,
+          "band1.gain": 3,
+          "band2.freq": 350,
+          "band2.gain": -6,
+          "band2.q": 1.4,
+          "band3.freq": 4000,
+          "band3.gain": 5,
+          "band3.q": 1.2
+        },
+        "presence": {
+          "band1.type": 4,
+          "band1.freq": 100,
+          "band2.freq": 300,
+          "band2.gain": -2,
+          "band3.freq": 3000,
+          "band3.gain": 4,
+          "band3.q": 0.8,
+          "band4.freq": 10000,
+          "band4.gain": 3
+        },
+        "darktape": {
+          "band1.freq": 100,
+          "band1.gain": 2,
+          "band2.freq": 200,
+          "band2.gain": 1.5,
+          "band2.q": 0.7,
+          "band4.freq": 5000,
+          "band4.gain": -8,
+          "band4.q": 0.5
+        },
+        "lowcut": {
+          "band1.type": 4,
+          "band1.slope": 2,
+          "band1.freq": 150,
+          "output": 4
+        }
+      }
     },
     {
       "id": "Filter",
@@ -4305,7 +4790,59 @@
           "group": "",
           "rate": "a"
         }
-      ]
+      ],
+      "presets": {
+        "acidsquelch": {
+          "mode": 10,
+          "cutoff": 500,
+          "resonance": 0.85,
+          "drive": 3
+        },
+        "warmladder": {
+          "mode": 10,
+          "cutoff": 1500,
+          "resonance": 0.25,
+          "drive": 2
+        },
+        "sweep": {
+          "cutoff": 400,
+          "resonance": 0.7
+        },
+        "mellow": {
+          "mode": 2,
+          "cutoff": 600,
+          "resonance": 0.1
+        },
+        "telephone": {
+          "mode": 7,
+          "cutoff": 1200,
+          "resonance": 0.4,
+          "output": 9
+        },
+        "thinhigh": {
+          "mode": 5,
+          "cutoff": 500,
+          "resonance": 0.15,
+          "output": 8
+        },
+        "combring": {
+          "mode": 11,
+          "cutoff": 220,
+          "resonance": 0.85,
+          "mix": 0.6
+        },
+        "vowel": {
+          "mode": 13,
+          "cutoff": 485,
+          "resonance": 0.8
+        },
+        "phasey": {
+          "mode": 12,
+          "cutoff": 800,
+          "resonance": 0.6,
+          "mix": 0.5
+        }
+      }
     },
     {
       "id": "Filterbank",
@@ -4507,7 +5044,64 @@
           "group": "Bands",
           "rate": "a"
         }
-      ]
+      ],
+      "presets": {
+        "vowelbank": {
+          "bands": 6,
+          "low": 250,
+          "high": 3200,
+          "width": 0.35
+        },
+        "chime": {
+          "bands": 20,
+          "low": 40,
+          "high": 6000,
+          "width": 0.12
+        },
+        "smooth": {
+          "bands": 8,
+          "low": 60,
+          "high": 12000,
+          "width": 2.5
+        },
+        "radio": {
+          "bands": 10,
+          "low": 400,
+          "high": 3000,
+          "width": 1.2
+        },
+        "glass": {
+          "bands": 48,
+          "low": 100,
+          "high": 12000,
+          "width": 0.25
+        },
+        "darkbank": {
+          "bands": 10,
+          "low": 30,
+          "high": 700,
+          "width": 1.5
+        },
+        "ripple": {
+          "mode": 1,
+          "where": 0.2,
+          "wavespeed": 40,
+          "damping": 0.05,
+          "stereo": 0.6,
+          "bands": 24,
+          "low": 120,
+          "high": 10000,
+          "width": 0.5
+        },
+        "drift": {
+          "scroll": 2,
+          "stereo": 1,
+          "bands": 32,
+          "low": 60,
+          "high": 5000,
+          "width": 0.7
+        }
+      }
     },
     {
       "id": "Flanger",
@@ -4653,7 +5247,61 @@
           "group": "",
           "rate": "a"
         }
-      ]
+      ],
+      "presets": {
+        "subtle": {
+          "rate": 0.15,
+          "depth": 1.5,
+          "delay": 1,
+          "feedback": 0.2,
+          "mix": 0.3
+        },
+        "jet": {
+          "rate": 0.08,
+          "depth": 6,
+          "delay": 0.3,
+          "feedback": 0.85,
+          "shape": 1
+        },
+        "throughzero": {
+          "rate": 0.2,
+          "depth": 4,
+          "delay": 0.1,
+          "feedback": -0.6
+        },
+        "swirl": {
+          "rate": 0.05,
+          "depth": 8,
+          "delay": 2,
+          "feedback": 0.6,
+          "spread": 1
+        },
+        "wobble": {
+          "rate": 4,
+          "depth": 1,
+          "delay": 2,
+          "feedback": 0.3
+        },
+        "comb": {
+          "rate": 0.3,
+          "depth": 1,
+          "delay": 5,
+          "feedback": 0.9
+        },
+        "hollow": {
+          "rate": 0.2,
+          "depth": 2,
+          "delay": 3,
+          "feedback": -0.8
+        },
+        "barsweep": {
+          "sync": 16,
+          "depth": 5,
+          "delay": 0.5,
+          "feedback": 0.7,
+          "shape": 1
+        }
+      }
     },
     {
       "id": "FM",
@@ -6784,7 +7432,127 @@
           "open": true,
           "legacyMax": 12
         }
-      ]
+      ],
+      "presets": {
+        "epiano": {
+          "op1.decay": 2.5,
+          "op1.sustain": 0.15,
+          "op1.release": 0.5,
+          "op2.decay": 1.2,
+          "op2.sustain": 0.1,
+          "mod.2.1": 0.12,
+          "op3.level": 0.25,
+          "op3.decay": 0.8,
+          "op3.sustain": 0,
+          "op4.ratio": 14,
+          "op4.decay": 0.12,
+          "op4.sustain": 0,
+          "mod.4.3": 0.15,
+          "op1.velocity": 0.7,
+          "op2.velocity": 0.9
+        },
+        "bell": {
+          "op1.decay": 4,
+          "op1.sustain": 0,
+          "op1.release": 2,
+          "op2.ratio": 3.5,
+          "op2.decay": 3,
+          "op2.sustain": 0,
+          "op2.release": 2,
+          "mod.2.1": 0.3,
+          "op3.level": 0.3,
+          "op3.ratio": 2,
+          "op3.decay": 2.5,
+          "op3.sustain": 0,
+          "op3.release": 1.5,
+          "op4.ratio": 5.19,
+          "op4.decay": 1.5,
+          "op4.sustain": 0,
+          "mod.4.3": 0.25
+        },
+        "bass": {
+          "op1.sustain": 1,
+          "op1.release": 0.08,
+          "op1.velocity": 0.2,
+          "op2.decay": 0.25,
+          "op2.sustain": 0.3,
+          "op2.release": 0.08,
+          "mod.2.1": 0.3,
+          "mod.2.2": 0.06
+        },
+        "brass": {
+          "op1.attack": 0.03,
+          "op1.sustain": 0.9,
+          "op1.release": 0.15,
+          "op2.attack": 0.09,
+          "op2.decay": 0.4,
+          "op2.release": 0.15,
+          "mod.2.1": 0.4,
+          "mod.2.2": 0.05
+        },
+        "pluck": {
+          "op1.decay": 0.6,
+          "op1.sustain": 0,
+          "op2.ratio": 3,
+          "op2.decay": 0.15,
+          "op2.sustain": 0,
+          "mod.2.1": 0.5,
+          "mod.2.2": 0.05
+        },
+        "metal": {
+          "op1.decay": 0.9,
+          "op1.sustain": 0,
+          "op1.release": 0.6,
+          "op2.ratio": 1.41,
+          "op2.decay": 0.6,
+          "op2.sustain": 0,
+          "op2.release": 0.4,
+          "mod.2.1": 0.55,
+          "op3.ratio": 2.73,
+          "op3.decay": 0.4,
+          "op3.sustain": 0,
+          "mod.3.2": 0.5
+        },
+        "organ": {
+          "op1.level": 0.45,
+          "op1.sustain": 1,
+          "op1.release": 0.06,
+          "op1.velocity": 0,
+          "op2.level": 0.35,
+          "op2.ratio": 2,
+          "op2.sustain": 1,
+          "op2.release": 0.06,
+          "op2.velocity": 0,
+          "op3.level": 0.25,
+          "op3.ratio": 3,
+          "op3.sustain": 1,
+          "op3.release": 0.06,
+          "op3.velocity": 0,
+          "op4.level": 0.3,
+          "op4.ratio": 0.5,
+          "op4.sustain": 1,
+          "op4.release": 0.06,
+          "op4.velocity": 0,
+          "op5.level": 0.2,
+          "op5.ratio": 4,
+          "op5.decay": 0.15,
+          "op5.sustain": 0,
+          "op5.velocity": 0
+        },
+        "mallet": {
+          "op1.decay": 0.45,
+          "op1.sustain": 0,
+          "op2.ratio": 4,
+          "op2.decay": 0.03,
+          "op2.sustain": 0,
+          "mod.2.1": 0.12,
+          "op3.level": 0.35,
+          "op3.ratio": 4,
+          "op3.decay": 0.12,
+          "op3.sustain": 0,
+          "op3.release": 0.1
+        }
+      }
     },
     {
       "id": "Formant",
@@ -7041,7 +7809,80 @@
           "open": true,
           "legacyMax": 16
         }
-      ]
+      ],
+      "presets": {
+        "vowelpad": {
+          "formant": 900,
+          "count": 6,
+          "decay": 0.85,
+          "ampenv.attack": 0.7,
+          "ampenv.sustain": 1,
+          "ampenv.release": 1.5
+        },
+        "talker": {
+          "formant": 1400,
+          "count": 3,
+          "decay": 0.7,
+          "track": 0.3,
+          "ampenv.attack": 0.01,
+          "ampenv.sustain": 1,
+          "ampenv.release": 0.12,
+          "glide": 0.08
+        },
+        "buzzbass": {
+          "mode": 1,
+          "formant": 320,
+          "shape": 0.15,
+          "air": 0.7,
+          "track": 0.5,
+          "ampenv.attack": 0.003,
+          "ampenv.decay": 0.3,
+          "ampenv.sustain": 0.7,
+          "ampenv.release": 0.08
+        },
+        "choir": {
+          "formant": 420,
+          "count": 10,
+          "decay": 0.92,
+          "ampenv.attack": 0.45,
+          "ampenv.sustain": 1,
+          "ampenv.release": 1.2
+        },
+        "whistle": {
+          "formant": 270,
+          "track": 1,
+          "count": 1,
+          "ampenv.attack": 0.06,
+          "ampenv.sustain": 1,
+          "ampenv.release": 0.2,
+          "glide": 0.05
+        },
+        "growl": {
+          "mode": 1,
+          "formant": 140,
+          "shape": 0.85,
+          "air": 1,
+          "ampenv.attack": 0.01,
+          "ampenv.sustain": 1
+        },
+        "reed": {
+          "mode": 1,
+          "formant": 2400,
+          "air": 0.15,
+          "track": 0.2,
+          "ampenv.attack": 0.03,
+          "ampenv.sustain": 1
+        },
+        "ping": {
+          "formant": 3200,
+          "count": 14,
+          "decay": 0.95,
+          "track": 0.5,
+          "ampenv.decay": 0.35,
+          "ampenv.sustain": 0,
+          "ampenv.release": 0.3
+        }
+      }
     },
     {
       "id": "FreqShift",
@@ -7106,7 +7947,44 @@
           "group": "",
           "rate": "a"
         }
-      ]
+      ],
+      "presets": {
+        "phasing": {
+          "freq": 1.5,
+          "mix": 0.5
+        },
+        "shimmer": {
+          "freq": 7,
+          "wide": 1,
+          "mix": 0.5
+        },
+        "barberup": {
+          "freq": 3,
+          "feedback": 0.7,
+          "mix": 0.6
+        },
+        "barberdown": {
+          "freq": -3,
+          "feedback": 0.7,
+          "mix": 0.6
+        },
+        "metallic": {
+          "freq": 120
+        },
+        "clang": {
+          "freq": 700,
+          "mix": 0.5
+        },
+        "sink": {
+          "freq": -40
+        },
+        "spiral": {
+          "freq": 30,
+          "feedback": 0.85,
+          "wide": 1,
+          "mix": 0.6
+        }
+      }
     },
     {
       "id": "Galactic",
@@ -7355,7 +8233,71 @@
           "group": "",
           "rate": "a"
         }
-      ]
+      ],
+      "presets": {
+        "smear": {
+          "time": 0.4,
+          "size": 250,
+          "density": 8,
+          "spray": 0.6,
+          "feedback": 0.45
+        },
+        "glitch": {
+          "sync": 4,
+          "size": 15,
+          "density": 80,
+          "spray": 0.05,
+          "feedback": 0.6
+        },
+        "shimmer": {
+          "pitch": 12,
+          "size": 120,
+          "density": 15,
+          "spray": 0.3,
+          "feedback": 0.5,
+          "mix": 0.4
+        },
+        "descend": {
+          "pitch": -12,
+          "size": 150,
+          "density": 25,
+          "feedback": 0.5,
+          "mix": 0.45
+        },
+        "sinking": {
+          "sync": 7,
+          "pitch": -3,
+          "size": 150,
+          "density": 15,
+          "spray": 0.05,
+          "feedback": 0.7
+        },
+        "cloud": {
+          "size": 60,
+          "density": 30,
+          "random": 12,
+          "spray": 1,
+          "feedback": 0.35,
+          "spread": 1,
+          "mix": 0.45
+        },
+        "rhythmic": {
+          "sync": 9,
+          "size": 200,
+          "density": 8,
+          "spray": 0,
+          "feedback": 0.5
+        },
+        "wash": {
+          "time": 1,
+          "size": 500,
+          "density": 4,
+          "spray": 1,
+          "feedback": 0.7,
+          "spread": 1,
+          "mix": 0.6
+        }
+      }
     },
     {
       "id": "Granular",
@@ -7624,7 +8566,81 @@
           "open": true,
           "legacyMax": 8
         }
-      ]
+      ],
+      "presets": {
+        "frozen": {
+          "spray": 0.01,
+          "size": 200,
+          "density": 40,
+          "attack": 0.8,
+          "release": 2
+        },
+        "shimmer": {
+          "pitch": 12,
+          "spray": 0.1,
+          "size": 180,
+          "density": 40,
+          "spread": 1,
+          "random": 0.15,
+          "attack": 0.4,
+          "release": 2.5
+        },
+        "stutter": {
+          "spray": 0,
+          "size": 45,
+          "density": 12,
+          "window": 2,
+          "spread": 0.2,
+          "attack": 0.002,
+          "release": 0.1
+        },
+        "smear": {
+          "spray": 0.3,
+          "size": 500,
+          "density": 16,
+          "random": 0.5,
+          "reverse": 0.5,
+          "spread": 0.9,
+          "attack": 0.3,
+          "release": 1.5
+        },
+        "scrub": {
+          "spray": 0.01,
+          "size": 80,
+          "density": 40,
+          "scan": 1,
+          "attack": 0.01,
+          "release": 0.2
+        },
+        "sparse": {
+          "spray": 0.6,
+          "size": 160,
+          "density": 8,
+          "window": 1,
+          "random": 7,
+          "spread": 1,
+          "attack": 0.005,
+          "release": 1
+        },
+        "backward": {
+          "reverse": 1,
+          "window": 4,
+          "size": 300,
+          "density": 16,
+          "spray": 0.03,
+          "attack": 0.05,
+          "release": 0.6
+        },
+        "deep": {
+          "pitch": -12,
+          "size": 300,
+          "density": 25,
+          "spray": 0.04,
+          "window": 5,
+          "attack": 0.2,
+          "release": 1.2
+        }
+      }
     },
     {
       "id": "Hat",
@@ -8319,7 +9335,36 @@
           "group": "",
           "rate": "a"
         }
-      ]
+      ],
+      "presets": {
+        "safety": {
+          "ceiling": -1,
+          "release": 200
+        },
+        "loud": {
+          "gain": 6,
+          "release": 60
+        },
+        "brickwall": {
+          "gain": 3,
+          "ceiling": -0.1,
+          "release": 20
+        },
+        "slam": {
+          "gain": 12,
+          "ceiling": -9.5,
+          "release": 30
+        },
+        "gentle": {
+          "gain": 4,
+          "release": 400
+        },
+        "pumping": {
+          "gain": 8,
+          "ceiling": -3,
+          "release": 250
+        }
+      }
     },
     {
       "id": "Looper",
@@ -8506,7 +9551,41 @@
           "group": "",
           "rate": "a"
         }
-      ]
+      ],
+      "presets": {
+        "pluck": {
+          "decay": 0.25,
+          "resonance": 0.2
+        },
+        "bongo": {
+          "decay": 0.12,
+          "resonance": 0.7,
+          "output": 3
+        },
+        "wood": {
+          "decay": 0.5,
+          "resonance": 0.5
+        },
+        "bloom": {
+          "decay": 1.5,
+          "resonance": 0.1
+        },
+        "click": {
+          "decay": 0.08,
+          "mode": 1,
+          "output": 4
+        },
+        "wah": {
+          "decay": 0.6,
+          "mode": 2,
+          "resonance": 0.6,
+          "output": -5
+        },
+        "ringing": {
+          "decay": 0.8,
+          "resonance": 0.95
+        }
+      }
     },
     {
       "id": "Multiband",
@@ -8837,7 +9916,76 @@
           "group": "High",
           "rate": "a"
         }
-      ]
+      ],
+      "presets": {
+        "masterglue": {
+          "low.threshold": -32,
+          "low.ratio": 2,
+          "low.upward": 0,
+          "low.attack": 30,
+          "low.release": 250,
+          "mid.threshold": -34,
+          "mid.ratio": 2,
+          "mid.upward": 0,
+          "mid.attack": 20,
+          "mid.release": 200,
+          "high.threshold": -36,
+          "high.ratio": 2,
+          "high.upward": 0,
+          "high.attack": 10,
+          "high.release": 150,
+          "output": 2
+        },
+        "deess": {
+          "highsplit": 5000,
+          "low.ratio": 1,
+          "low.upward": 0,
+          "mid.ratio": 1,
+          "mid.upward": 0,
+          "high.threshold": -40,
+          "high.ratio": 8,
+          "high.upward": 0,
+          "high.attack": 0.5,
+          "high.release": 40
+        },
+        "tightbass": {
+          "lowsplit": 120,
+          "low.threshold": -30,
+          "low.ratio": 5,
+          "low.upward": 0,
+          "low.attack": 20,
+          "low.release": 100,
+          "mid.ratio": 1,
+          "mid.upward": 0,
+          "high.ratio": 1,
+          "high.upward": 0
+        },
+        "loud": {
+          "low.threshold": -32,
+          "low.ratio": 4,
+          "low.upward": 0.5,
+          "mid.threshold": -32,
+          "mid.ratio": 4,
+          "mid.upward": 0.5,
+          "high.threshold": -32,
+          "high.ratio": 4,
+          "high.upward": 0.5,
+          "output": 4
+        },
+        "light": {
+          "amount": 0.35
+        },
+        "airlift": {
+          "low.ratio": 1,
+          "low.upward": 0,
+          "mid.ratio": 1,
+          "mid.upward": 0,
+          "high.threshold": -18,
+          "high.ratio": 2,
+          "high.upward": 1,
+          "high.gain": 2
+        }
+      }
     },
     {
       "id": "Noise",
@@ -9060,7 +10208,68 @@
           "open": true,
           "legacyMax": 16
         }
-      ]
+      ],
+      "presets": {
+        "wind": {
+          "color": 1,
+          "tone": 700,
+          "ampenv.attack": 1.2,
+          "ampenv.sustain": 1,
+          "ampenv.release": 2.5,
+          "env.acurve": 0
+        },
+        "surf": {
+          "color": 2,
+          "tone": 4000,
+          "ampenv.attack": 1,
+          "ampenv.decay": 2.5,
+          "ampenv.sustain": 0.25,
+          "ampenv.release": 3,
+          "env.acurve": 2
+        },
+        "rain": {
+          "color": 5,
+          "character": 0.95,
+          "tone": 9000,
+          "ampenv.attack": 0.3,
+          "ampenv.sustain": 1,
+          "ampenv.release": 1
+        },
+        "hiss": {
+          "color": 3,
+          "ampenv.attack": 0,
+          "ampenv.decay": 0.13,
+          "ampenv.sustain": 0,
+          "ampenv.release": 0.05
+        },
+        "crackle": {
+          "color": 6,
+          "character": 0.75,
+          "ampenv.attack": 0.05,
+          "ampenv.sustain": 1,
+          "ampenv.release": 0.5
+        },
+        "riser": {
+          "ampenv.attack": 3,
+          "ampenv.sustain": 1,
+          "ampenv.release": 0.3,
+          "env.acurve": 3
+        },
+        "chip": {
+          "color": 7,
+          "character": 0.8,
+          "ampenv.decay": 0.25,
+          "ampenv.sustain": 0.3,
+          "ampenv.release": 0.08
+        },
+        "steps": {
+          "color": 8,
+          "character": 0.1,
+          "pitch": -24,
+          "tone": 6000,
+          "ampenv.sustain": 1
+        }
+      }
     },
     {
       "id": "Overdrive",
@@ -9153,7 +10362,43 @@
           "group": "Drive",
           "rate": "a"
         }
-      ]
+      ],
+      "presets": {
+        "edge": {
+          "drive": 6,
+          "dynamics": 0.1,
+          "tone": 8000
+        },
+        "crunch": {
+          "drive": 16,
+          "tone": 5000,
+          "dynamics": 0.2
+        },
+        "heavy": {
+          "low": 200,
+          "high": 5000,
+          "drive": 30,
+          "tone": 3500,
+          "dynamics": 0,
+          "mix": 0.7
+        },
+        "cleanlow": {
+          "low": 250,
+          "high": 6000,
+          "drive": 18
+        },
+        "midbite": {
+          "low": 500,
+          "high": 2500,
+          "drive": 24,
+          "tone": 3500,
+          "dynamics": 0
+        },
+        "parallel": {
+          "drive": 30,
+          "mix": 0.4
+        }
+      }
     },
     {
       "id": "Phaser",
@@ -9295,7 +10540,60 @@
           "group": "",
           "rate": "a"
         }
-      ]
+      ],
+      "presets": {
+        "subtle": {
+          "stages": 4,
+          "rate": 0.3,
+          "depth": 0.4,
+          "feedback": 0.1,
+          "mix": 0.4
+        },
+        "swirl": {
+          "stages": 8,
+          "rate": 0.1,
+          "center": 800,
+          "depth": 0.8,
+          "feedback": 0.6
+        },
+        "wobble": {
+          "stages": 4,
+          "rate": 5,
+          "center": 1200,
+          "depth": 0.4,
+          "feedback": 0.3
+        },
+        "resonant": {
+          "stages": 12,
+          "rate": 0.2,
+          "depth": 0.9,
+          "feedback": 0.85
+        },
+        "hollow": {
+          "rate": 0.3,
+          "center": 600,
+          "feedback": -0.7
+        },
+        "pulse": {
+          "stages": 8,
+          "sync": 10,
+          "feedback": 0.5
+        },
+        "airy": {
+          "stages": 10,
+          "rate": 0.7,
+          "center": 4000,
+          "depth": 0.5,
+          "feedback": 0.3,
+          "spread": 1
+        },
+        "deep": {
+          "rate": 0.25,
+          "center": 250,
+          "depth": 0.6,
+          "feedback": 0.5
+        }
+      }
     },
     {
       "id": "Plaits",
@@ -9691,7 +10989,42 @@
           "group": "Tuning",
           "rate": "a"
         }
-      ]
+      ],
+      "presets": {
+        "bell": {
+          "decay": 3,
+          "tilt": 6,
+          "mix": 0.4
+        },
+        "body": {
+          "decay": 0.15,
+          "mix": 0.6
+        },
+        "drone": {
+          "decay": 6,
+          "tilt": -6,
+          "mix": 0.6
+        },
+        "shimmer": {
+          "decay": 2,
+          "shift": 12,
+          "tilt": 12,
+          "spread": 0.5,
+          "mix": 0.4
+        },
+        "wide": {
+          "decay": 1.5,
+          "spread": 1
+        },
+        "subtle": {
+          "decay": 0.5,
+          "mix": 0.25
+        },
+        "dark": {
+          "decay": 2,
+          "tilt": -18
+        }
+      }
     },
     {
       "id": "Reverb",
@@ -9812,7 +11145,71 @@
           "group": "Tone",
           "rate": "a"
         }
-      ]
+      ],
+      "presets": {
+        "room": {
+          "decay": 0.6,
+          "size": 0.3,
+          "predelay": 0.005,
+          "damping": 8000,
+          "mix": 0.25
+        },
+        "chamber": {
+          "decay": 1.2,
+          "size": 0.5,
+          "predelay": 0.015,
+          "damping": 7000,
+          "mix": 0.28
+        },
+        "plate": {
+          "decay": 1.8,
+          "size": 0.45,
+          "predelay": 0.02,
+          "modulation": 0.4,
+          "damping": 12000,
+          "lowcut": 200
+        },
+        "hall": {
+          "decay": 3.5,
+          "size": 0.9,
+          "predelay": 0.03,
+          "damping": 5000
+        },
+        "ambience": {
+          "decay": 0.9,
+          "size": 0.12,
+          "predelay": 0,
+          "modulation": 0.1,
+          "damping": 10000,
+          "mix": 0.2
+        },
+        "burst": {
+          "decay": 0.3,
+          "size": 1,
+          "predelay": 0,
+          "damping": 9000,
+          "lowcut": 200,
+          "mix": 0.4
+        },
+        "cavern": {
+          "decay": 9,
+          "size": 1,
+          "predelay": 0.08,
+          "modulation": 0.5,
+          "damping": 2500,
+          "lowcut": 60,
+          "mix": 0.35
+        },
+        "endless": {
+          "decay": 25,
+          "size": 1,
+          "predelay": 0.04,
+          "modulation": 0.7,
+          "damping": 4000,
+          "mix": 0.45,
+          "output": -5
+        }
+      }
     },
     {
       "id": "Rings",
@@ -10156,7 +11553,59 @@
           "group": "",
           "rate": "k"
         }
-      ]
+      ],
+      "presets": {
+        "roll": {
+          "interval": 16,
+          "grid": 1,
+          "repeats": 16
+        },
+        "glitch": {
+          "interval": 10,
+          "grid": 2,
+          "chance": 0.5,
+          "repeats": 6,
+          "seed": 3
+        },
+        "tapestop": {
+          "interval": 17,
+          "grid": 7,
+          "repeats": 10,
+          "pitch": -1,
+          "decay": 0.1
+        },
+        "echoes": {
+          "interval": 16,
+          "grid": 7,
+          "repeats": 6,
+          "decay": 0.3,
+          "dry": 1,
+          "wet": 0.7
+        },
+        "chop": {
+          "interval": 13,
+          "grid": 7,
+          "repeats": 2,
+          "chance": 0.5,
+          "seed": 7
+        },
+        "freeze": {
+          "interval": 17,
+          "repeats": 16
+        },
+        "sparse": {
+          "interval": 10,
+          "repeats": 3,
+          "chance": 0.25,
+          "seed": 11
+        },
+        "dive": {
+          "interval": 16,
+          "repeats": 12,
+          "pitch": -2,
+          "decay": 0.15
+        }
+      }
     },
     {
       "id": "VocalShift",
@@ -10194,7 +11643,35 @@
           "group": "",
           "rate": "a"
         }
-      ]
+      ],
+      "presets": {
+        "octaveup": {
+          "pitch": 12
+        },
+        "octavedown": {
+          "pitch": -12
+        },
+        "fifthup": {
+          "pitch": 7
+        },
+        "fourthdown": {
+          "pitch": -5
+        },
+        "chipmunk": {
+          "pitch": 9,
+          "formant": 9
+        },
+        "monster": {
+          "pitch": -7,
+          "formant": -8
+        },
+        "giant": {
+          "formant": -6
+        },
+        "tiny": {
+          "formant": 5
+        }
+      }
     },
     {
       "id": "Wavetable",
@@ -10890,7 +12367,122 @@
           "open": true,
           "legacyMax": 16
         }
-      ]
+      ],
+      "presets": {
+        "pad": {
+          "osc1.position": 0.333,
+          "osc1.unison": 5,
+          "osc1.detune": 18,
+          "osc1.spread": 0.9,
+          "osc1.level": 0.35,
+          "osc2.table": 1,
+          "osc2.position": 0.55,
+          "osc2.level": 0.25,
+          "osc2.octave": 1,
+          "osc2.unison": 3,
+          "osc2.detune": 10,
+          "osc2.spread": 1,
+          "ampenv.attack": 0.6,
+          "ampenv.decay": 0.5,
+          "ampenv.sustain": 1,
+          "ampenv.release": 1.6
+        },
+        "widelead": {
+          "osc1.position": 0.333,
+          "osc1.unison": 7,
+          "osc1.detune": 28,
+          "osc1.spread": 1,
+          "osc1.level": 0.3,
+          "osc2.position": 0.5,
+          "osc2.level": 0.15,
+          "osc2.semi": 7,
+          "osc2.cents": 4,
+          "ampenv.attack": 0.008,
+          "ampenv.sustain": 1,
+          "ampenv.release": 0.25,
+          "glide": 0.06
+        },
+        "subbass": {
+          "osc1.octave": -1,
+          "osc1.level": 0.38,
+          "osc1.position": 0.08,
+          "sub.level": 0.15,
+          "ampenv.attack": 0.004,
+          "ampenv.sustain": 1,
+          "ampenv.release": 0.08,
+          "osc1.phaserand": 0
+        },
+        "pluck": {
+          "osc1.position": 0.333,
+          "osc1.unison": 2,
+          "osc1.detune": 8,
+          "osc1.level": 0.75,
+          "osc2.table": 4,
+          "osc2.position": 0.35,
+          "osc2.level": 0.3,
+          "osc2.octave": 1,
+          "ampenv.decay": 0.28,
+          "ampenv.sustain": 0,
+          "ampenv.release": 0.25,
+          "env.dcurve": -6
+        },
+        "synclead": {
+          "osc1.table": 4,
+          "osc1.position": 0.7,
+          "osc1.level": 0.4,
+          "osc2.position": 0.5,
+          "osc2.level": 0.15,
+          "osc2.octave": -1,
+          "ampenv.attack": 0.003,
+          "ampenv.sustain": 0.9,
+          "ampenv.release": 0.12,
+          "glide": 0.04
+        },
+        "stab": {
+          "osc1.position": 0.333,
+          "osc1.unison": 3,
+          "osc1.detune": 14,
+          "osc1.level": 0.65,
+          "osc2.position": 0.5,
+          "osc2.level": 0.35,
+          "osc2.octave": 1,
+          "ampenv.attack": 0.002,
+          "ampenv.decay": 0.22,
+          "ampenv.sustain": 0.25,
+          "ampenv.release": 0.12
+        },
+        "keys": {
+          "osc1.table": 6,
+          "osc1.position": 0.3,
+          "osc1.level": 0.45,
+          "osc2.table": 1,
+          "osc2.position": 0.15,
+          "osc2.level": 0.2,
+          "osc2.octave": 1,
+          "ampenv.attack": 0.003,
+          "ampenv.decay": 1.4,
+          "ampenv.sustain": 0.25,
+          "ampenv.release": 0.45
+        },
+        "drone": {
+          "osc1.table": 3,
+          "osc1.position": 0.5,
+          "osc1.unison": 4,
+          "osc1.detune": 9,
+          "osc1.spread": 1,
+          "osc1.level": 0.3,
+          "osc2.table": 2,
+          "osc2.position": 0.5,
+          "osc2.level": 0.3,
+          "osc2.octave": -1,
+          "osc2.cents": 7,
+          "sub.level": 0.2,
+          "noise.level": 0.03,
+          "ampenv.attack": 1.5,
+          "ampenv.sustain": 1,
+          "ampenv.release": 3
+        }
+      }
     }
   ],
   "internal": [

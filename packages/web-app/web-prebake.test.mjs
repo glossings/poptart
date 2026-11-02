@@ -79,7 +79,7 @@ test('a prebake run leaves the sample packs registered, and a prebake pack of th
 });
 
 test('the presets the devices ship are library presets after every run, and the prebake\'s own win', async () => {
-  const webEngine = await import('@poptart/web-engine');
+  const webEngine = await import('../web-engine/src/index.mjs');
   const storage = createStorage(memoryStore(), { meta });
   const prebake = createPrebake({
     patternCore, storage, prebakeDefs: new Map(), createBlockEvaluator, pinnedDefs,

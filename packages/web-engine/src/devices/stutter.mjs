@@ -22,6 +22,18 @@ import { SYNC_OPTIONS, syncedSeconds, migrateSyncLists } from '../dsp/sync.mjs';
 
 const REPEAT_MAX_SEC = 4;
 
+/** Starting points for the preset menu: each the defaults with these controls changed. */
+export const STUTTER_PRESETS = Object.freeze({
+  roll: { interval: 16, grid: 1, repeats: 16 },
+  glitch: { interval: 10, grid: 2, chance: 0.5, repeats: 6, seed: 3 },
+  tapestop: { interval: 17, grid: 7, repeats: 10, pitch: -1, decay: 0.1 },
+  echoes: { interval: 16, grid: 7, repeats: 6, decay: 0.3, dry: 1, wet: 0.7 },
+  chop: { interval: 13, grid: 7, repeats: 2, chance: 0.5, seed: 7 },
+  freeze: { interval: 17, repeats: 16 },
+  sparse: { interval: 10, repeats: 3, chance: 0.25, seed: 11 },
+  dive: { interval: 16, repeats: 12, pitch: -2, decay: 0.15 },
+});
+
 export const STUTTER = defineDevice({
   id: 'Stutter',
   kind: 'fx',
@@ -60,6 +72,7 @@ export const STUTTER = defineDevice({
       params: { grid: 'grid', repeats: 'repeats', decay: 'decay', pitch: 'pitch', interval: 'interval' },
     },
   ],
+  presets: STUTTER_PRESETS,
 });
 
 /** A deterministic 0..1 for a beat and a seed - the same chance the same beat, every play. */
@@ -68,7 +81,7 @@ function hashChance(beat, seed) {
   h ^= h >>> 15;
   h = Math.imul(h, 2246822519) >>> 0;
   h ^= h >>> 13;
-  return h / 4294967296;
+  return (h >>> 0) / 4294967296;
 }
 
 export class StutterProcessor {

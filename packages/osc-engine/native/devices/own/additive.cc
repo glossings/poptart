@@ -34,7 +34,7 @@ constexpr int kSineSize = 4096;
 constexpr double kNyquistFade = 0.05;
 /** Damp at 1, in nepers a second per unit of ratio above the fundamental. */
 constexpr double kDampRate = 10;
-constexpr double kVoiceGain = 0.5;
+constexpr double kVoiceGain = 0.32;
 constexpr double kSilentPower = 1e-12;
 
 /** The shared sine table; one more entry repeats the first, so a read never wraps. */

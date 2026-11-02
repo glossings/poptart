@@ -53,6 +53,18 @@ export function grainWindow(mode, t) {
   return 0.5 - 0.5 * Math.cos(2 * Math.PI * t);
 }
 
+/** Starting points for the preset menu: each the defaults with these controls changed. */
+export const GRANULAR_PRESETS = Object.freeze({
+  frozen: { spray: 0.01, size: 200, density: 40, attack: 0.8, release: 2 },
+  shimmer: { pitch: 12, spray: 0.1, size: 180, density: 40, spread: 1, random: 0.15, attack: 0.4, release: 2.5 },
+  stutter: { spray: 0, size: 45, density: 12, window: 2, spread: 0.2, attack: 0.002, release: 0.1 },
+  smear: { spray: 0.3, size: 500, density: 16, random: 0.5, reverse: 0.5, spread: 0.9, attack: 0.3, release: 1.5 },
+  scrub: { spray: 0.01, size: 80, density: 40, scan: 1, attack: 0.01, release: 0.2 },
+  sparse: { spray: 0.6, size: 160, density: 8, window: 1, random: 7, spread: 1, attack: 0.005, release: 1 },
+  backward: { reverse: 1, window: 4, size: 300, density: 16, spray: 0.03, attack: 0.05, release: 0.6 },
+  deep: { pitch: -12, size: 300, density: 25, spray: 0.04, window: 5, attack: 0.2, release: 1.2 },
+});
+
 export const GRANULAR = defineDevice({
   id: 'Granular',
   kind: 'synth',
@@ -122,6 +134,7 @@ export const GRANULAR = defineDevice({
     },
   ],
   panel: { width: 760, rows: [['Source', 'Grains'], ['Amp']] },
+  presets: GRANULAR_PRESETS,
 });
 
 class VoiceGrain {

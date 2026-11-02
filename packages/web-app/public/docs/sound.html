@@ -337,6 +337,11 @@ _preset("buzz", "Wavetable", "eyJkZXZpY2UiOiJXYXZldGFibGUiLCJ2ZXJzaW9uIjoxLCJwYX
           <span data-build="web">A share link carries the presets with the code.</span>
           A device's preset opens the same in the browser build and the desktop app.
         </p>
+        <p>
+          Most devices come with presets of their own, listed in the preset picker in their panel:
+          <code>.synth("Wavetable").preset("pad")</code> plays one, and a preset of yours with the same
+          name wins. Each sets every control but <code>Level</code> and <code>Voices</code>.
+        </p>
 
         <section data-build="desktop">
           <h2 id="plugins">Your plugins</h2>

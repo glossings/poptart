@@ -4,6 +4,11 @@
 // each one a short windowed piece, repitched, scattered in time by the spray, and fed back into
 // the buffer so the next generation of grains reads the last. At a low density and no pitch it
 // is a delay with a texture; pushed, it is a cloud.
+//
+// The grains are summed and divided by how many overlap (Size times Density, past two), so a
+// denser cloud is not a louder one and the feedback can never gain on itself. The sum then goes
+// through a DC blocker before it is heard or fed back: windowed, repitched grains leave an
+// offset, and round the loop it would build up.
 
 import { defineDevice } from '../descriptor.mjs';
 import { at } from '../dsp/control.mjs';
@@ -11,6 +16,20 @@ import { SYNC_OPTIONS, syncedSeconds, migrateSyncLists } from '../dsp/sync.mjs';
 
 const GRAIN_MAX_SEC = 4;
 const MAX_GRAINS = 48;
+/** Where the DC blocker on the grains starts to let through, in Hz. */
+const GRAINECHO_DC_HZ = 20;
+
+/** Starting points for the preset menu: each the defaults with these controls changed. */
+export const GRAINECHO_PRESETS = Object.freeze({
+  smear: { time: 0.4, size: 250, density: 8, spray: 0.6, feedback: 0.45 },
+  glitch: { sync: 4, size: 15, density: 80, spray: 0.05, feedback: 0.6 },
+  shimmer: { pitch: 12, size: 120, density: 15, spray: 0.3, feedback: 0.5, mix: 0.4 },
+  descend: { pitch: -12, size: 150, density: 25, feedback: 0.5, mix: 0.45 },
+  sinking: { sync: 7, pitch: -3, size: 150, density: 15, spray: 0.05, feedback: 0.7 },
+  cloud: { size: 60, density: 30, random: 12, spray: 1, feedback: 0.35, spread: 1, mix: 0.45 },
+  rhythmic: { sync: 9, size: 200, density: 8, spray: 0, feedback: 0.5 },
+  wash: { time: 1, size: 500, density: 4, spray: 1, feedback: 0.7, spread: 1, mix: 0.6 },
+});
 
 export const GRAINECHO = defineDevice({
   id: 'GrainEcho',
@@ -42,6 +61,7 @@ export const GRAINECHO = defineDevice({
       description: 'How far grains are panned either way.' },
     { id: 'mix', name: 'Mix', min: 0, max: 1, default: 0.5 },
   ],
+  presets: GRAINECHO_PRESETS,
 });
 
 /** One grain: where it reads, how far through it is, its rate and pan. */
@@ -60,6 +80,8 @@ export class GrainEchoProcessor {
     this.until = 0;        // samples until the next grain starts
     this.seed = 0x2545f491;
     this.bpm = 120;
+    this.dcK = 1 - (2 * Math.PI * GRAINECHO_DC_HZ) / sampleRate;
+    this.dcInL = 0; this.dcInR = 0; this.dcOutL = 0; this.dcOutR = 0;
   }
 
   setTempo(bpm) { this.bpm = bpm; }
@@ -131,6 +153,15 @@ export class GrainEchoProcessor {
         if (g.pos >= this.size) g.pos -= this.size;
         if (++g.at >= g.len) g.on = false;
       }
+      // Two Hann windows overlapping half way sum to one; more than that is brought back to it.
+      const overlap = Math.min(MAX_GRAINS, at(params.size, i) * 0.001 * at(params.density, i));
+      const norm = 1 / Math.max(1, overlap * 0.5);
+      const rawL = wetL * norm;
+      const rawR = wetR * norm;
+      wetL = rawL - this.dcInL + this.dcK * this.dcOutL;
+      wetR = rawR - this.dcInR + this.dcK * this.dcOutR;
+      this.dcInL = rawL; this.dcInR = rawR;
+      this.dcOutL = wetL; this.dcOutR = wetR;
       const fb = at(params.feedback, i);
       // A number that cannot be played is stored as silence: kept, it would come back round
       // the feedback for as long as the device lives.

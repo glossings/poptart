@@ -2461,16 +2461,23 @@ function shape(x, mode, drive, bias, character = 0.5, table = null) {
 }
 
 /**
- * How much a curve at this setting changes the level, measured rather than derived: the curve is
- * probed with a sine and the ratio of what went in to what came out is the correction, clamped
- * because a fold can land on a zero crossing for a whole probe and ask for hundreds. Measured on the part
- * you hear: the probe's average is taken off first, since the device blocks it.
+ * The peak of the sine the auto gain probes with: -18 dBFS RMS, a track's usual level. The
+ * correction depends on the curve and the drive only, never on the signal, so a transient is never
+ * touched; a hotter input comes out hotter.
  */
-function autoGainFor(mode, drive, bias, character, table = null) {
+const AUTO_GAIN_LEVEL = 0.17825;
+
+/**
+ * How much a curve at this setting changes the level, measured rather than derived: the curve is
+ * probed with a sine at a track's usual level (AUTO_GAIN_LEVEL) and the ratio of what went in to
+ * what came out is the correction, clamped because a fold can land on a zero crossing for a whole
+ * probe and ask for hundreds. Measured on the part you hear: the
+ * probe's average is taken off first, since the device blocks it.
+ */
+function autoGainFor(mode, drive, bias, character, table = null, amplitude = AUTO_GAIN_LEVEL) {
   // 256 points a cycle, not version 1's 64: a curve that throws a few sharp spikes a cycle (chaos,
   // wrap) is measured by where the probe lands, and too coarse a probe missed most of them.
   const PROBES = 256;
-  const amplitude = 0.5;
   const ys = [];
   for (let i = 0; i < PROBES; i++) ys.push(shape(Math.sin((i / PROBES) * Math.PI * 2) * amplitude, mode, drive, bias, character, table));
   const mean = ys.reduce((a, b) => a + b, 0) / ys.length;
@@ -2529,6 +2536,7 @@ function harmonicsOf(mode, drive, bias, character, table = null) {
 const CURVE_FADE_SEC = 0.01;
 
 
+
 /**
  * The one extra control, shared by every curve that has something to vary - so whatever drives it
  * goes on driving it when the curve changes. Hidden on the curves that ignore it.
@@ -2536,6 +2544,18 @@ const CURVE_FADE_SEC = 0.01;
 const CHARACTER = { id: 'character', name: 'Character', min: 0, max: 1, default: 0.5, group: 'Shape',
   active: { param: 'mode', is: [...TAKES_CHARACTER] },
   description: 'What varies in this curve: a knee, an asymmetry, a harmonic, the shape of a stair, the hardness of a wrap. The middle is the classic setting.' };
+
+/** Starting points for the preset menu: each the defaults with these controls changed. */
+const DISTORT_PRESETS = Object.freeze({
+  warmtape: { drive: 9, bias: 0.15, tone: 9000 },
+  fuzz: { mode: 1, drive: 30, bias: 0.25, tone: 5000, output: -3 },
+  fold: { mode: 2, drive: 18, output: -1 },
+  tube: { mode: 5, drive: 12, character: 0.65, tone: 12000, oversample: 2 },
+  octaveup: { mode: 9, drive: 4, mix: 0.6 },
+  bitty: { mode: 10, drive: 10, character: 0.3 },
+  shimmer: { mode: 11, drive: 9, character: 0.75, mix: 0.5, output: -2 },
+  wavefold: { mode: 7, drive: 15, tone: 10000, output: -2 },
+});
 
 const DISTORT = defineDevice({
   id: 'Distort',
@@ -2578,6 +2598,7 @@ const DISTORT = defineDevice({
     },
   ],
   panel: { width: 640, rows: [['Shape', 'Out']] },
+  presets: DISTORT_PRESETS,
 });
 
 /** One channel's state. A stereo device holds two of these, so the channels never share history. */
@@ -2820,6 +2841,17 @@ class DistortProcessor {
  */
 const RATE_TOP = 24000;
 
+/** Starting points for the preset menu: each the defaults with these controls changed. */
+const CRUSH_PRESETS = Object.freeze({
+  lofisampler: { bits: 12, rate: 12000, tone: 8000 },
+  eightbit: { rate: 11025 },
+  fourbit: { bits: 4, rate: 8000 },
+  alias: { bits: 16, rate: 2500 },
+  smear: { bits: 6, rate: 4000, jitter: 0.6, tone: 6000 },
+  radio: { bits: 6, rate: 6000, tone: 3000 },
+  subtle: { bits: 10, mix: 0.5 },
+});
+
 const CRUSH = defineDevice({
   id: 'Crush',
   kind: 'fx',
@@ -2840,6 +2872,7 @@ const CRUSH = defineDevice({
     { id: 'mix', name: 'Mix', min: 0, max: 1, default: 1, group: 'Out' },
     { id: 'output', name: 'Output', min: -24, max: 24, default: 0, unit: 'dB', group: 'Out' },
   ],
+  presets: CRUSH_PRESETS,
 });
 
 /** One channel: what it is holding, how far through the hold it is, and the tone filter after. */
@@ -3180,6 +3213,18 @@ class Reverb {
 // every other time in poptart.
 
 
+/** Starting points for the preset menu: each the defaults with these controls changed. */
+const REVERB_PRESETS = Object.freeze({
+  room: { decay: 0.6, size: 0.3, predelay: 0.005, damping: 8000, mix: 0.25 },
+  chamber: { decay: 1.2, size: 0.5, predelay: 0.015, damping: 7000, mix: 0.28 },
+  plate: { decay: 1.8, size: 0.45, predelay: 0.02, modulation: 0.4, damping: 12000, lowcut: 200 },
+  hall: { decay: 3.5, size: 0.9, predelay: 0.03, damping: 5000 },
+  ambience: { decay: 0.9, size: 0.12, predelay: 0, modulation: 0.1, damping: 10000, mix: 0.2 },
+  burst: { decay: 0.3, size: 1, predelay: 0, damping: 9000, lowcut: 200, mix: 0.4 },
+  cavern: { decay: 9, size: 1, predelay: 0.08, modulation: 0.5, damping: 2500, lowcut: 60, mix: 0.35 },
+  endless: { decay: 25, size: 1, predelay: 0.04, modulation: 0.7, damping: 4000, mix: 0.45, output: -5 },
+});
+
 const REVERB = defineDevice({
   id: 'Reverb',
   kind: 'fx',
@@ -3213,6 +3258,7 @@ const REVERB = defineDevice({
       drag: { x: 'decay' },
     },
   ],
+  presets: REVERB_PRESETS,
 });
 
 class ReverbProcessor {
@@ -3284,6 +3330,19 @@ class ReverbProcessor {
 // cannot do, since it retunes at the block rate and was the reason to write this.
 
 
+/** Starting points for the preset menu: each the defaults with these controls changed. */
+const FILTER_PRESETS = Object.freeze({
+  acidsquelch: { mode: 10, cutoff: 500, resonance: 0.85, drive: 3 },
+  warmladder: { mode: 10, cutoff: 1500, resonance: 0.25, drive: 2 },
+  sweep: { cutoff: 400, resonance: 0.7 },
+  mellow: { mode: 2, cutoff: 600, resonance: 0.1 },
+  telephone: { mode: 7, cutoff: 1200, resonance: 0.4, output: 9 },
+  thinhigh: { mode: 5, cutoff: 500, resonance: 0.15, output: 8 },
+  combring: { mode: 11, cutoff: 220, resonance: 0.85, mix: 0.6 },
+  vowel: { mode: 13, cutoff: 485, resonance: 0.8 },
+  phasey: { mode: 12, cutoff: 800, resonance: 0.6, mix: 0.5 },
+});
+
 const FILTER = defineDevice({
   id: 'Filter',
   kind: 'fx',
@@ -3319,6 +3378,7 @@ const FILTER = defineDevice({
   // Wide enough for every control in one row, so a mode that shows Drive and Morph does not
   // push Output onto a second one.
   panel: { width: 640 },
+  presets: FILTER_PRESETS,
 });
 
 class FilterProcessor {
@@ -3489,6 +3549,18 @@ function migrateSyncLists(ids) {
 
 const DELAY_MAX_SEC = 4;
 
+/** Starting points for the preset menu: each the defaults with these controls changed. */
+const DELAY_PRESETS = Object.freeze({
+  dub: { sync: 10, feedback: 0.72, tone: 1600, mix: 0.4 },
+  slapback: { time: 0.09, feedback: 0.08, tone: 5000, mix: 0.3 },
+  pingpong: { sync: 7, feedback: 0.5, pingpong: 1, tone: 6000 },
+  dotted: { sync: 9, feedback: 0.55, tone: 10000, spread: 0.25, mix: 0.3 },
+  tapeecho: { time: 0.31, feedback: 0.58, tone: 2400, spread: 0.08, mix: 0.38 },
+  wash: { sync: 13, feedback: 0.7, tone: 3000, spread: 0.4, mix: 0.4 },
+  doubler: { time: 0.022, feedback: 0, tone: 12000, spread: 0.7, mix: 0.4 },
+  triplets: { sync: 8, feedback: 0.35, tone: 5000, pingpong: 1, mix: 0.3 },
+});
+
 const DELAY = defineDevice({
   id: 'Delay',
   kind: 'fx',
@@ -3527,6 +3599,7 @@ const DELAY = defineDevice({
       drag: { y: 'feedback' },
     },
   ],
+  presets: DELAY_PRESETS,
 });
 
 /**
@@ -3757,6 +3830,17 @@ class History {
 // signal can move the threshold.
 
 
+/** Starting points for the preset menu: each the defaults with these controls changed. */
+const COMPRESSOR_PRESETS = Object.freeze({
+  glue: { threshold: -28, ratio: 2, attack: 30, release: 300, makeup: 2 },
+  pump: { threshold: -32, ratio: 8, knee: 2, attack: 5, release: 250, makeup: 8 },
+  smash: { threshold: -40, ratio: 20, knee: 0, attack: 0.5, release: 60, makeup: 18, mix: 0.4 },
+  vocal: { threshold: -26, ratio: 3, knee: 10, attack: 4, release: 90, makeup: 4 },
+  punch: { threshold: -24, ratio: 5, knee: 3, attack: 30, release: 70, makeup: 4 },
+  leveler: { threshold: -30, ratio: 1.5, knee: 18, attack: 60, release: 600, makeup: 3 },
+  peakcatch: { threshold: -14, ratio: 12, knee: 2, attack: 0.3, release: 40 },
+});
+
 const COMPRESSOR = defineDevice({
   id: 'Compressor',
   kind: 'fx',
@@ -3786,6 +3870,7 @@ const COMPRESSOR = defineDevice({
       drag: { x: 'threshold', y: 'ratio' },
     },
   ],
+  presets: COMPRESSOR_PRESETS,
 });
 
 /** A linear level in decibels, floored so silence is a number. */
@@ -3909,6 +3994,16 @@ class CompressorProcessor {
 /** The lookahead, in seconds. Two milliseconds is under a hundred samples: inaudible as latency. */
 const LOOKAHEAD_SEC = 0.002;
 
+/** Starting points for the preset menu: each the defaults with these controls changed. */
+const LIMITER_PRESETS = Object.freeze({
+  safety: { ceiling: -1, release: 200 },
+  loud: { gain: 6, release: 60 },
+  brickwall: { gain: 3, ceiling: -0.1, release: 20 },
+  slam: { gain: 12, ceiling: -9.5, release: 30 },
+  gentle: { gain: 4, release: 400 },
+  pumping: { gain: 8, ceiling: -3, release: 250 },
+});
+
 const LIMITER = defineDevice({
   id: 'Limiter',
   kind: 'fx',
@@ -3935,6 +4030,7 @@ const LIMITER = defineDevice({
       params: { threshold: 'ceiling', pregain: 'gain' },
     },
   ],
+  presets: LIMITER_PRESETS,
 });
 
 class LimiterProcessor {
@@ -3944,7 +4040,7 @@ class LimiterProcessor {
     const size = this.look + 1;
     this.bufL = new Float32Array(size);
     this.bufR = new Float32Array(size);
-    this.need = new Float32Array(size);     // the gain each delayed sample needs
+    this.need = new Float32Array(size).fill(1);   // the gain each delayed sample needs, 1 until a sample needs less
     this.pos = 0;
     this.gain = 1;
     this.reduction = 0;
@@ -4298,6 +4394,18 @@ for (let n = 1; n <= EQ_BANDS; n++) {
   figureParams[`q${n}`] = `band${n}.q`;
 }
 
+/** Starting points for the preset menu: each the defaults with these controls changed. */
+const EQ_PRESETS = Object.freeze({
+  bassboost: { 'band1.freq': 90, 'band1.gain': 6, output: -3 },
+  air: { 'band4.freq': 10000, 'band4.gain': 8 },
+  midscoop: { 'band2.freq': 700, 'band2.gain': -8, 'band2.q': 0.7, 'band3.freq': 1500, 'band3.gain': -3, 'band3.q': 0.8, output: 1 },
+  telephone: { 'band1.type': 4, 'band1.slope': 1, 'band1.freq': 400, 'band3.freq': 1500, 'band3.gain': 5, 'band3.q': 0.7, 'band4.type': 3, 'band4.slope': 1, 'band4.freq': 3000, output: 8 },
+  kicktight: { 'band1.freq': 60, 'band1.gain': 3, 'band2.freq': 350, 'band2.gain': -6, 'band2.q': 1.4, 'band3.freq': 4000, 'band3.gain': 5, 'band3.q': 1.2 },
+  presence: { 'band1.type': 4, 'band1.freq': 100, 'band2.freq': 300, 'band2.gain': -2, 'band3.freq': 3000, 'band3.gain': 4, 'band3.q': 0.8, 'band4.freq': 10000, 'band4.gain': 3 },
+  darktape: { 'band1.freq': 100, 'band1.gain': 2, 'band2.freq': 200, 'band2.gain': 1.5, 'band2.q': 0.7, 'band4.freq': 5000, 'band4.gain': -8, 'band4.q': 0.5 },
+  lowcut: { 'band1.type': 4, 'band1.slope': 2, 'band1.freq': 150, output: 4 },
+});
+
 const EQ = defineDevice({
   id: 'EQ',
   kind: 'fx',
@@ -4321,6 +4429,7 @@ const EQ = defineDevice({
     },
   ],
   panel: { width: 760, rows: [['Band 1', 'Band 2', 'Band 3', 'Band 4', 'Output']] },
+  presets: EQ_PRESETS,
 });
 
 class EqProcessor {
@@ -4457,6 +4566,18 @@ class ModDelay {
 // The Chorus effect: up to three modulated copies, each a few milliseconds behind and drifting.
 
 
+/** Starting points for the preset menu: each the defaults with these controls changed. */
+const CHORUS_PRESETS = Object.freeze({
+  subtle: { rate: 0.4, depth: 1.5, delay: 8, mix: 0.3 },
+  lush: { rate: 0.8, depth: 6, delay: 15, spread: 1 },
+  wide: { rate: 0.15, depth: 2, delay: 30, spread: 1 },
+  wobble: { rate: 6, depth: 2.5, delay: 8, shape: 1 },
+  swirl: { rate: 0.1, depth: 10, delay: 20, shape: 1, mix: 0.6 },
+  shimmer: { rate: 2.5, depth: 0.8, delay: 3, spread: 0.9 },
+  seasick: { sync: 16, depth: 14, delay: 25, spread: 0.3, mix: 0.55 },
+  detuned: { rate: 5, depth: 2.5, delay: 5, spread: 0, mix: 1 },
+});
+
 const CHORUS = defineDevice({
   id: 'Chorus',
   kind: 'fx',
@@ -4492,6 +4613,7 @@ const CHORUS = defineDevice({
       drag: { y: 'depth' },
     },
   ],
+  presets: CHORUS_PRESETS,
 });
 
 class ChorusProcessor {
@@ -4541,6 +4663,18 @@ class ChorusProcessor {
 // The Flanger effect: a very short modulated delay with feedback, for the comb that sweeps.
 
 
+/** Starting points for the preset menu: each the defaults with these controls changed. */
+const FLANGER_PRESETS = Object.freeze({
+  subtle: { rate: 0.15, depth: 1.5, delay: 1, feedback: 0.2, mix: 0.3 },
+  jet: { rate: 0.08, depth: 6, delay: 0.3, feedback: 0.85, shape: 1 },
+  throughzero: { rate: 0.2, depth: 4, delay: 0.1, feedback: -0.6 },
+  swirl: { rate: 0.05, depth: 8, delay: 2, feedback: 0.6, spread: 1 },
+  wobble: { rate: 4, depth: 1, delay: 2, feedback: 0.3 },
+  comb: { rate: 0.3, depth: 1, delay: 5, feedback: 0.9 },
+  hollow: { rate: 0.2, depth: 2, delay: 3, feedback: -0.8 },
+  barsweep: { sync: 16, depth: 5, delay: 0.5, feedback: 0.7, shape: 1 },
+});
+
 const FLANGER = defineDevice({
   id: 'Flanger',
   kind: 'fx',
@@ -4576,6 +4710,7 @@ const FLANGER = defineDevice({
       drag: { y: 'depth' },
     },
   ],
+  presets: FLANGER_PRESETS,
 });
 
 class FlangerProcessor {
@@ -4630,6 +4765,18 @@ class FlangerProcessor {
 
 const MAX_STAGES = 12;
 
+/** Starting points for the preset menu: each the defaults with these controls changed. */
+const PHASER_PRESETS = Object.freeze({
+  subtle: { stages: 4, rate: 0.3, depth: 0.4, feedback: 0.1, mix: 0.4 },
+  swirl: { stages: 8, rate: 0.1, center: 800, depth: 0.8, feedback: 0.6 },
+  wobble: { stages: 4, rate: 5, center: 1200, depth: 0.4, feedback: 0.3 },
+  resonant: { stages: 12, rate: 0.2, depth: 0.9, feedback: 0.85 },
+  hollow: { rate: 0.3, center: 600, feedback: -0.7 },
+  pulse: { stages: 8, sync: 10, feedback: 0.5 },
+  airy: { stages: 10, rate: 0.7, center: 4000, depth: 0.5, feedback: 0.3, spread: 1 },
+  deep: { rate: 0.25, center: 250, depth: 0.6, feedback: 0.5 },
+});
+
 const PHASER = defineDevice({
   id: 'Phaser',
   kind: 'fx',
@@ -4666,6 +4813,7 @@ const PHASER = defineDevice({
       drag: { y: 'depth' },
     },
   ],
+  presets: PHASER_PRESETS,
 });
 
 /** One channel's chain of first-order allpasses and its feedback sample. */
@@ -4766,6 +4914,18 @@ function coefficient(hz, sampleRate) {
 // the sign lived in an up/down/split Direction menu; `migrate` reads those states.
 
 
+/** Starting points for the preset menu: each the defaults with these controls changed. */
+const FREQSHIFT_PRESETS = Object.freeze({
+  phasing: { freq: 1.5, mix: 0.5 },
+  shimmer: { freq: 7, wide: 1, mix: 0.5 },
+  barberup: { freq: 3, feedback: 0.7, mix: 0.6 },
+  barberdown: { freq: -3, feedback: 0.7, mix: 0.6 },
+  metallic: { freq: 120 },
+  clang: { freq: 700, mix: 0.5 },
+  sink: { freq: -40 },
+  spiral: { freq: 30, feedback: 0.85, wide: 1, mix: 0.6 },
+});
+
 const FREQSHIFT = defineDevice({
   id: 'FreqShift',
   kind: 'fx',
@@ -4795,6 +4955,7 @@ const FREQSHIFT = defineDevice({
     }
     return params;
   },
+  presets: FREQSHIFT_PRESETS,
 });
 
 // Two chains of second-order allpasses whose outputs stay 90 degrees apart from about 20 Hz to
@@ -4927,6 +5088,18 @@ class FreqShiftProcessor {
 /** How late the output is, in seconds, and so what the scheduler plays notes early by. */
 const VOCALSHIFT_LATENCY_SEC = 0.05;
 
+/** Starting points for the preset menu: each the defaults with these controls changed. */
+const VOCALSHIFT_PRESETS = Object.freeze({
+  octaveup: { pitch: 12 },
+  octavedown: { pitch: -12 },
+  fifthup: { pitch: 7 },
+  fourthdown: { pitch: -5 },
+  chipmunk: { pitch: 9, formant: 9 },
+  monster: { pitch: -7, formant: -8 },
+  giant: { formant: -6 },
+  tiny: { formant: 5 },
+});
+
 const VOCALSHIFT = defineDevice({
   id: 'VocalShift',
   kind: 'fx',
@@ -4944,6 +5117,7 @@ const VOCALSHIFT = defineDevice({
     { id: 'formant', name: 'Formant', min: -12, max: 12, default: 0, unit: 'st',
       description: 'Moves the resonances without moving the pitch: up for a smaller throat, down for a bigger one.' },
   ],
+  presets: VOCALSHIFT_PRESETS,
 });
 
 /** Samples averaged into one for the pitch tracker. */
@@ -5360,6 +5534,17 @@ class Adsr {
 // length set, which is what a sidechain compressor's release does with far less to set.
 
 
+/** Starting points for the preset menu: each the defaults with these controls changed. */
+const DUCKER_PRESETS = Object.freeze({
+  pump: { amount: 0.9, length: 0.8, curve: 4 },
+  eighths: { sync: 7, amount: 0.7, length: 0.7, curve: 2 },
+  gentle: { amount: 0.4, length: 0.6, curve: 2 },
+  chop: { sync: 7, amount: 1, length: 0.6, attack: 0.5, curve: 8 },
+  flutter: { sync: 4, amount: 0.6, length: 0.9, curve: 1 },
+  swell: { sync: 16, amount: 0.85, length: 0.9, curve: 5, attack: 10 },
+  keyed: { amount: 0.85, length: 0.15, threshold: -18, curve: 2 },
+});
+
 const DUCKER = defineDevice({
   id: 'Ducker',
   kind: 'fx',
@@ -5396,6 +5581,7 @@ const DUCKER = defineDevice({
       drag: { x: 'length', y: 'amount' },
     },
   ],
+  presets: DUCKER_PRESETS,
 });
 
 class DuckerProcessor {
@@ -5549,8 +5735,21 @@ class DuckerProcessor {
 // what lies between is driven; what lies outside passes clean and is added back. That is what
 // keeps a driven bass from turning to mud below and fizz above, and it is what the region
 // controls are for. A dynamics control compresses the region before the drive, so the grit is
-// steady across a part rather than only on its loudest notes.
+// steady across a part rather than only on its loudest notes. The driven region is brought back
+// to the level it went in at by a makeup that follows the drive and the dynamics: a sine at a
+// track's usual level (-18 dBFS RMS) is put through the lift and the curve, and what that took or
+// added is given back. It never depends on the signal, so transients pass as they are.
 
+
+/** Starting points for the preset menu: each the defaults with these controls changed. */
+const OVERDRIVE_PRESETS = Object.freeze({
+  edge: { drive: 6, dynamics: 0.1, tone: 8000 },
+  crunch: { drive: 16, tone: 5000, dynamics: 0.2 },
+  heavy: { low: 200, high: 5000, drive: 30, tone: 3500, dynamics: 0, mix: 0.7 },
+  cleanlow: { low: 250, high: 6000, drive: 18 },
+  midbite: { low: 500, high: 2500, drive: 24, tone: 3500, dynamics: 0 },
+  parallel: { drive: 30, mix: 0.4 },
+});
 
 const OVERDRIVE = defineDevice({
   id: 'Overdrive',
@@ -5584,7 +5783,26 @@ const OVERDRIVE = defineDevice({
     },
   ],
   panel: { width: 640, rows: [['Region', 'Drive']] },
+  presets: OVERDRIVE_PRESETS,
 });
+
+const OVERDRIVE_PROBES = 64;
+
+/**
+ * The makeup for a drive (linear) and a dynamics setting: the probe's level over its level once
+ * lifted and driven. The detector sits near a sine's peak, so the probe is lifted as its peak.
+ */
+function overdriveMakeup(drive, dyn, probe = AUTO_GAIN_LEVEL) {
+  const lift = Math.min(dyn > 0 ? Math.pow(Math.max(1e-4, probe) / 0.25, -0.7 * dyn) : 1, 16);
+  let energy = 0;
+  for (let i = 0; i < OVERDRIVE_PROBES; i++) {
+    const y = Math.tanh(Math.sin((i / OVERDRIVE_PROBES) * Math.PI * 2) * probe * lift * drive);
+    energy += y * y;
+  }
+  const out = Math.sqrt(energy / OVERDRIVE_PROBES);
+  if (!(out > 1e-9)) return 1;
+  return Math.min(8, Math.max(0.05, probe / Math.SQRT2 / out));
+}
 
 const LOWPASS = BIQUAD_TYPES.indexOf('lowpass');
 const HIGHPASS = BIQUAD_TYPES.indexOf('highpass');
@@ -5607,6 +5825,7 @@ class OverdriveProcessor {
     this.sampleRate = sampleRate;
     this.channels = [new DriveChannel(sampleRate), new DriveChannel(sampleRate)];
     this.last = { low: -1, high: -1, tone: -1 };
+    this.makeup = -1;   // where the makeup stands, ramped across each block to where it is going
   }
 
   process(inputs, outputs, count, params) {
@@ -5623,6 +5842,12 @@ class OverdriveProcessor {
       }
       this.last = { low, high, tone };
     }
+    // Measured where the drive and dynamics end the block and reached along a ramp from where the
+    // last block left it, so a drive being turned is not corrected in steps.
+    const makeupTo = overdriveMakeup(dbToGain(at(params.drive, count - 1)), at(params.dynamics, count - 1));
+    if (this.makeup < 0) this.makeup = makeupTo;
+    const makeupFrom = this.makeup;
+    const makeupStep = (makeupTo - makeupFrom) / Math.max(1, count);
     for (let ch = 0; ch < outputs.length; ch++) {
       const out = outputs[ch];
       const input = inputs[Math.min(ch, inputs.length - 1)];
@@ -5637,13 +5862,14 @@ class OverdriveProcessor {
         const env = c.detector.next(Math.abs(region));
         const lift = dyn > 0 ? Math.pow(Math.max(1e-4, env) / 0.25, -0.7 * dyn) : 1;
         const drive = dbToGain(at(params.drive, i));
-        const driven = Math.tanh(region * Math.min(lift, 16) * drive) / Math.tanh(Math.min(drive, 4) * 0.5 + 0.5);
-        const wet = c.tone.next(driven) * 0.7 + rest;
+        const driven = Math.tanh(region * Math.min(lift, 16) * drive) * (makeupFrom + makeupStep * i);
+        const wet = c.tone.next(driven) + rest;
         const mix = at(params.mix, i);
         out[i] = x + (wet - x) * mix;
       }
       if (!Number.isFinite(out[count - 1]) || !Number.isFinite(c.detector.env)) c.reset();
     }
+    this.makeup = Number.isFinite(makeupTo) ? makeupTo : 1;
   }
 }
 
@@ -5685,6 +5911,16 @@ function compressorBandParams(name) {
   ];
 }
 
+/** Starting points for the preset menu: each the defaults with these controls changed. */
+const MULTIBAND_PRESETS = Object.freeze({
+  masterglue: { 'low.threshold': -32, 'low.ratio': 2, 'low.upward': 0, 'low.attack': 30, 'low.release': 250, 'mid.threshold': -34, 'mid.ratio': 2, 'mid.upward': 0, 'mid.attack': 20, 'mid.release': 200, 'high.threshold': -36, 'high.ratio': 2, 'high.upward': 0, 'high.attack': 10, 'high.release': 150, output: 2 },
+  deess: { highsplit: 5000, 'low.ratio': 1, 'low.upward': 0, 'mid.ratio': 1, 'mid.upward': 0, 'high.threshold': -40, 'high.ratio': 8, 'high.upward': 0, 'high.attack': 0.5, 'high.release': 40 },
+  tightbass: { lowsplit: 120, 'low.threshold': -30, 'low.ratio': 5, 'low.upward': 0, 'low.attack': 20, 'low.release': 100, 'mid.ratio': 1, 'mid.upward': 0, 'high.ratio': 1, 'high.upward': 0 },
+  loud: { 'low.threshold': -32, 'low.ratio': 4, 'low.upward': 0.5, 'mid.threshold': -32, 'mid.ratio': 4, 'mid.upward': 0.5, 'high.threshold': -32, 'high.ratio': 4, 'high.upward': 0.5, output: 4 },
+  light: { amount: 0.35 },
+  airlift: { 'low.ratio': 1, 'low.upward': 0, 'mid.ratio': 1, 'mid.upward': 0, 'high.threshold': -18, 'high.ratio': 2, 'high.upward': 1, 'high.gain': 2 },
+});
+
 const MULTIBAND = defineDevice({
   id: 'Multiband',
   kind: 'fx',
@@ -5720,6 +5956,7 @@ const MULTIBAND = defineDevice({
     drag: { x: 'threshold', y: 'ratio' },
   })),
   panel: { width: 760, rows: [['Global'], ['Low', 'Mid', 'High']] },
+  presets: MULTIBAND_PRESETS,
 });
 
 /** How far below its threshold a band is still lifted: quieter than this is left alone. */
@@ -5865,6 +6102,18 @@ class MultibandProcessor {
 
 const REPEAT_MAX_SEC = 4;
 
+/** Starting points for the preset menu: each the defaults with these controls changed. */
+const STUTTER_PRESETS = Object.freeze({
+  roll: { interval: 16, grid: 1, repeats: 16 },
+  glitch: { interval: 10, grid: 2, chance: 0.5, repeats: 6, seed: 3 },
+  tapestop: { interval: 17, grid: 7, repeats: 10, pitch: -1, decay: 0.1 },
+  echoes: { interval: 16, grid: 7, repeats: 6, decay: 0.3, dry: 1, wet: 0.7 },
+  chop: { interval: 13, grid: 7, repeats: 2, chance: 0.5, seed: 7 },
+  freeze: { interval: 17, repeats: 16 },
+  sparse: { interval: 10, repeats: 3, chance: 0.25, seed: 11 },
+  dive: { interval: 16, repeats: 12, pitch: -2, decay: 0.15 },
+});
+
 const STUTTER = defineDevice({
   id: 'Stutter',
   kind: 'fx',
@@ -5903,6 +6152,7 @@ const STUTTER = defineDevice({
       params: { grid: 'grid', repeats: 'repeats', decay: 'decay', pitch: 'pitch', interval: 'interval' },
     },
   ],
+  presets: STUTTER_PRESETS,
 });
 
 /** A deterministic 0..1 for a beat and a seed - the same chance the same beat, every play. */
@@ -5911,7 +6161,7 @@ function hashChance(beat, seed) {
   h ^= h >>> 15;
   h = Math.imul(h, 2246822519) >>> 0;
   h ^= h >>> 13;
-  return h / 4294967296;
+  return (h >>> 0) / 4294967296;
 }
 
 class StutterProcessor {
@@ -6436,10 +6686,29 @@ class LooperProcessor {
 // each one a short windowed piece, repitched, scattered in time by the spray, and fed back into
 // the buffer so the next generation of grains reads the last. At a low density and no pitch it
 // is a delay with a texture; pushed, it is a cloud.
+//
+// The grains are summed and divided by how many overlap (Size times Density, past two), so a
+// denser cloud is not a louder one and the feedback can never gain on itself. The sum then goes
+// through a DC blocker before it is heard or fed back: windowed, repitched grains leave an
+// offset, and round the loop it would build up.
 
 
 const GRAIN_MAX_SEC = 4;
 const MAX_GRAINS = 48;
+/** Where the DC blocker on the grains starts to let through, in Hz. */
+const GRAINECHO_DC_HZ = 20;
+
+/** Starting points for the preset menu: each the defaults with these controls changed. */
+const GRAINECHO_PRESETS = Object.freeze({
+  smear: { time: 0.4, size: 250, density: 8, spray: 0.6, feedback: 0.45 },
+  glitch: { sync: 4, size: 15, density: 80, spray: 0.05, feedback: 0.6 },
+  shimmer: { pitch: 12, size: 120, density: 15, spray: 0.3, feedback: 0.5, mix: 0.4 },
+  descend: { pitch: -12, size: 150, density: 25, feedback: 0.5, mix: 0.45 },
+  sinking: { sync: 7, pitch: -3, size: 150, density: 15, spray: 0.05, feedback: 0.7 },
+  cloud: { size: 60, density: 30, random: 12, spray: 1, feedback: 0.35, spread: 1, mix: 0.45 },
+  rhythmic: { sync: 9, size: 200, density: 8, spray: 0, feedback: 0.5 },
+  wash: { time: 1, size: 500, density: 4, spray: 1, feedback: 0.7, spread: 1, mix: 0.6 },
+});
 
 const GRAINECHO = defineDevice({
   id: 'GrainEcho',
@@ -6471,6 +6740,7 @@ const GRAINECHO = defineDevice({
       description: 'How far grains are panned either way.' },
     { id: 'mix', name: 'Mix', min: 0, max: 1, default: 0.5 },
   ],
+  presets: GRAINECHO_PRESETS,
 });
 
 /** One grain: where it reads, how far through it is, its rate and pan. */
@@ -6489,6 +6759,8 @@ class GrainEchoProcessor {
     this.until = 0;        // samples until the next grain starts
     this.seed = 0x2545f491;
     this.bpm = 120;
+    this.dcK = 1 - (2 * Math.PI * GRAINECHO_DC_HZ) / sampleRate;
+    this.dcInL = 0; this.dcInR = 0; this.dcOutL = 0; this.dcOutR = 0;
   }
 
   setTempo(bpm) { this.bpm = bpm; }
@@ -6560,6 +6832,15 @@ class GrainEchoProcessor {
         if (g.pos >= this.size) g.pos -= this.size;
         if (++g.at >= g.len) g.on = false;
       }
+      // Two Hann windows overlapping half way sum to one; more than that is brought back to it.
+      const overlap = Math.min(MAX_GRAINS, at(params.size, i) * 0.001 * at(params.density, i));
+      const norm = 1 / Math.max(1, overlap * 0.5);
+      const rawL = wetL * norm;
+      const rawR = wetR * norm;
+      wetL = rawL - this.dcInL + this.dcK * this.dcOutL;
+      wetR = rawR - this.dcInR + this.dcK * this.dcOutR;
+      this.dcInL = rawL; this.dcInR = rawR;
+      this.dcOutL = wetL; this.dcOutR = wetR;
       const fb = at(params.feedback, i);
       // A number that cannot be played is stored as silence: kept, it would come back round
       // the feedback for as long as the device lives.
@@ -6609,6 +6890,17 @@ const CUTOFF_SPAN = 1000;
 /** Where the element counts as dark, so its tail does not run on in denormals. */
 const DARK = 1e-9;
 
+/** Starting points for the preset menu: each the defaults with these controls changed. */
+const LPG_PRESETS = Object.freeze({
+  pluck: { decay: 0.25, resonance: 0.2 },
+  bongo: { decay: 0.12, resonance: 0.7, output: 3 },
+  wood: { decay: 0.5, resonance: 0.5 },
+  bloom: { decay: 1.5, resonance: 0.1 },
+  click: { decay: 0.08, mode: 1, output: 4 },
+  wah: { decay: 0.6, mode: 2, resonance: 0.6, output: -5 },
+  ringing: { decay: 0.8, resonance: 0.95 },
+});
+
 const LPG = defineDevice({
   id: 'LPG',
   kind: 'fx',
@@ -6629,6 +6921,7 @@ const LPG = defineDevice({
       description: 'A peak at the cutoff, which rings as the gate closes.' },
     { id: 'output', name: 'Output', min: -24, max: 24, default: 0, unit: 'dB' },
   ],
+  presets: LPG_PRESETS,
 });
 
 class LpgProcessor {
@@ -7154,6 +7447,18 @@ function fieldSettings(params) {
   };
 }
 
+/** Starting points for the preset menu: each the defaults with these controls changed. */
+const FILTERBANK_PRESETS = Object.freeze({
+  vowelbank: { bands: 6, low: 250, high: 3200, width: 0.35 },
+  chime: { bands: 20, low: 40, high: 6000, width: 0.12 },
+  smooth: { bands: 8, low: 60, high: 12000, width: 2.5 },
+  radio: { bands: 10, low: 400, high: 3000, width: 1.2 },
+  glass: { bands: 48, low: 100, high: 12000, width: 0.25 },
+  darkbank: { bands: 10, low: 30, high: 700, width: 1.5 },
+  ripple: { mode: 1, where: 0.2, wavespeed: 40, damping: 0.05, stereo: 0.6, bands: 24, low: 120, high: 10000, width: 0.5 },
+  drift: { scroll: 2, stereo: 1, bands: 32, low: 60, high: 5000, width: 0.7 },
+});
+
 const FILTERBANK = defineDevice({
   id: 'Filterbank',
   kind: 'fx',
@@ -7185,6 +7490,7 @@ const FILTERBANK = defineDevice({
       subsumes: ['levels'],
     },
   ],
+  presets: FILTERBANK_PRESETS,
 });
 
 class FilterbankProcessor {
@@ -7294,6 +7600,17 @@ const spreadSign = (x) => {
   return 2 * (v - Math.floor(v)) - 1;
 };
 
+/** Starting points for the preset menu: each the defaults with these controls changed. */
+const RESONATOR_PRESETS = Object.freeze({
+  bell: { decay: 3, tilt: 6, mix: 0.4 },
+  body: { decay: 0.15, mix: 0.6 },
+  drone: { decay: 6, tilt: -6, mix: 0.6 },
+  shimmer: { decay: 2, shift: 12, tilt: 12, spread: 0.5, mix: 0.4 },
+  wide: { decay: 1.5, spread: 1 },
+  subtle: { decay: 0.5, mix: 0.25 },
+  dark: { decay: 2, tilt: -18 },
+});
+
 const RESONATOR = defineDevice({
   id: 'Resonator',
   kind: 'fx',
@@ -7328,6 +7645,7 @@ const RESONATOR = defineDevice({
       subsumes: ['levels', 'scale'],
     },
   ],
+  presets: RESONATOR_PRESETS,
 });
 
 class ResonatorProcessor {

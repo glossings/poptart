@@ -57,6 +57,18 @@ export function fieldSettings(params) {
   };
 }
 
+/** Starting points for the preset menu: each the defaults with these controls changed. */
+export const FILTERBANK_PRESETS = Object.freeze({
+  vowelbank: { bands: 6, low: 250, high: 3200, width: 0.35 },
+  chime: { bands: 20, low: 40, high: 6000, width: 0.12 },
+  smooth: { bands: 8, low: 60, high: 12000, width: 2.5 },
+  radio: { bands: 10, low: 400, high: 3000, width: 1.2 },
+  glass: { bands: 48, low: 100, high: 12000, width: 0.25 },
+  darkbank: { bands: 10, low: 30, high: 700, width: 1.5 },
+  ripple: { mode: 1, where: 0.2, wavespeed: 40, damping: 0.05, stereo: 0.6, bands: 24, low: 120, high: 10000, width: 0.5 },
+  drift: { scroll: 2, stereo: 1, bands: 32, low: 60, high: 5000, width: 0.7 },
+});
+
 export const FILTERBANK = defineDevice({
   id: 'Filterbank',
   kind: 'fx',
@@ -88,6 +100,7 @@ export const FILTERBANK = defineDevice({
       subsumes: ['levels'],
     },
   ],
+  presets: FILTERBANK_PRESETS,
 });
 
 export class FilterbankProcessor {

@@ -19,6 +19,18 @@ import { outlineOf } from '../dsp/outline.mjs';
 export const IR_NAMES = Object.freeze(['room', 'hall', 'plate', 'chamber', 'cathedral']);
 
 
+/** Starting points for the preset menu: each the defaults with these controls changed. */
+export const CONVOLVER_PRESETS = Object.freeze({
+  room: { ir: 0, size: 1, mix: 0.25 },
+  booth: { ir: 0, size: 0.4, damping: 9000, mix: 0.2 },
+  hall: { size: 1.8, predelay: 0.025, damping: 5000 },
+  plate: { ir: 2, size: 1.8, predelay: 0, damping: 12000, lowcut: 200 },
+  tightplate: { ir: 2, size: 0.8, predelay: 0, damping: 10000, lowcut: 250, mix: 0.25 },
+  chamber: { ir: 3, size: 1.5, predelay: 0.015 },
+  cathedral: { ir: 4, size: 2.5, predelay: 0.04, damping: 4500, mix: 0.35 },
+  vast: { ir: 4, size: 6, predelay: 0.08, damping: 3500, lowcut: 150, mix: 0.4 },
+});
+
 export const CONVOLVER = defineDevice({
   id: 'Convolver',
   kind: 'fx',
@@ -49,6 +61,7 @@ export const CONVOLVER = defineDevice({
       subsumes: ['sample'],
     },
   ],
+  presets: CONVOLVER_PRESETS,
 });
 
 export const NODE_DEVICES = Object.freeze([CONVOLVER]);

@@ -5,6 +5,18 @@ import { at } from '../dsp/control.mjs';
 import { ModDelay } from '../dsp/moddelay.mjs';
 import { SYNC_OPTIONS, syncedHz, migrateSyncLists } from '../dsp/sync.mjs';
 
+/** Starting points for the preset menu: each the defaults with these controls changed. */
+export const CHORUS_PRESETS = Object.freeze({
+  subtle: { rate: 0.4, depth: 1.5, delay: 8, mix: 0.3 },
+  lush: { rate: 0.8, depth: 6, delay: 15, spread: 1 },
+  wide: { rate: 0.15, depth: 2, delay: 30, spread: 1 },
+  wobble: { rate: 6, depth: 2.5, delay: 8, shape: 1 },
+  swirl: { rate: 0.1, depth: 10, delay: 20, shape: 1, mix: 0.6 },
+  shimmer: { rate: 2.5, depth: 0.8, delay: 3, spread: 0.9 },
+  seasick: { sync: 16, depth: 14, delay: 25, spread: 0.3, mix: 0.55 },
+  detuned: { rate: 5, depth: 2.5, delay: 5, spread: 0, mix: 1 },
+});
+
 export const CHORUS = defineDevice({
   id: 'Chorus',
   kind: 'fx',
@@ -40,6 +52,7 @@ export const CHORUS = defineDevice({
       drag: { y: 'depth' },
     },
   ],
+  presets: CHORUS_PRESETS,
 });
 
 export class ChorusProcessor {

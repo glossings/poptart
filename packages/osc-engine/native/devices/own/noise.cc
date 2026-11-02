@@ -31,6 +31,8 @@ constexpr int kPinkPoles = 6;
 constexpr double kPinkHz[kPinkPoles] = { 15, 60, 240, 960, 3840, 15360 };
 constexpr double kCrackleRing = 0.0003;
 constexpr double kChaosGain = 0.8;
+/** The voice's level against the controls: a chord of white noise at the default stays under full scale. */
+constexpr double kVoiceGain = 0.55;
 constexpr double kDigitalGain = 0.5773502691896258;
 constexpr double kPi = 3.141592653589793;
 constexpr double kSqrtHalf = 0.7071067811865476;
@@ -290,7 +292,7 @@ struct Voice {
         l1 += toneK * (l - l1); l2 += toneK * (l1 - l2); l = l2;
         r1 += toneK * (r - r1); r2 += toneK * (r1 - r2); r = r2;
       }
-      const double gain = env.next() * velocity * c.ctl(ids::level, i);
+      const double gain = env.next() * velocity * c.ctl(ids::level, i) * kVoiceGain;
       outL[i] = static_cast<float>(outL[i] + l * gain);
       outR[i] = static_cast<float>(outR[i] + r * gain);
     }

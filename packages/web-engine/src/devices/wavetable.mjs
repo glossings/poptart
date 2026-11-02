@@ -72,6 +72,18 @@ function oscParams(n, group, levelDefault) {
   ];
 }
 
+/** Starting points for the preset menu: each the defaults with these controls changed. */
+export const WAVETABLE_PRESETS = Object.freeze({
+  pad: { 'osc1.position': 0.333, 'osc1.unison': 5, 'osc1.detune': 18, 'osc1.spread': 0.9, 'osc1.level': 0.35, 'osc2.table': 1, 'osc2.position': 0.55, 'osc2.level': 0.25, 'osc2.octave': 1, 'osc2.unison': 3, 'osc2.detune': 10, 'osc2.spread': 1, 'ampenv.attack': 0.6, 'ampenv.decay': 0.5, 'ampenv.sustain': 1, 'ampenv.release': 1.6 },
+  widelead: { 'osc1.position': 0.333, 'osc1.unison': 7, 'osc1.detune': 28, 'osc1.spread': 1, 'osc1.level': 0.3, 'osc2.position': 0.5, 'osc2.level': 0.15, 'osc2.semi': 7, 'osc2.cents': 4, 'ampenv.attack': 0.008, 'ampenv.sustain': 1, 'ampenv.release': 0.25, glide: 0.06 },
+  subbass: { 'osc1.octave': -1, 'osc1.level': 0.38, 'osc1.position': 0.08, 'sub.level': 0.15, 'ampenv.attack': 0.004, 'ampenv.sustain': 1, 'ampenv.release': 0.08, 'osc1.phaserand': 0 },
+  pluck: { 'osc1.position': 0.333, 'osc1.unison': 2, 'osc1.detune': 8, 'osc1.level': 0.75, 'osc2.table': 4, 'osc2.position': 0.35, 'osc2.level': 0.3, 'osc2.octave': 1, 'ampenv.decay': 0.28, 'ampenv.sustain': 0, 'ampenv.release': 0.25, 'env.dcurve': -6 },
+  synclead: { 'osc1.table': 4, 'osc1.position': 0.7, 'osc1.level': 0.4, 'osc2.position': 0.5, 'osc2.level': 0.15, 'osc2.octave': -1, 'ampenv.attack': 0.003, 'ampenv.sustain': 0.9, 'ampenv.release': 0.12, glide: 0.04 },
+  stab: { 'osc1.position': 0.333, 'osc1.unison': 3, 'osc1.detune': 14, 'osc1.level': 0.65, 'osc2.position': 0.5, 'osc2.level': 0.35, 'osc2.octave': 1, 'ampenv.attack': 0.002, 'ampenv.decay': 0.22, 'ampenv.sustain': 0.25, 'ampenv.release': 0.12 },
+  keys: { 'osc1.table': 6, 'osc1.position': 0.3, 'osc1.level': 0.45, 'osc2.table': 1, 'osc2.position': 0.15, 'osc2.level': 0.2, 'osc2.octave': 1, 'ampenv.attack': 0.003, 'ampenv.decay': 1.4, 'ampenv.sustain': 0.25, 'ampenv.release': 0.45 },
+  drone: { 'osc1.table': 3, 'osc1.position': 0.5, 'osc1.unison': 4, 'osc1.detune': 9, 'osc1.spread': 1, 'osc1.level': 0.3, 'osc2.table': 2, 'osc2.position': 0.5, 'osc2.level': 0.3, 'osc2.octave': -1, 'osc2.cents': 7, 'sub.level': 0.2, 'noise.level': 0.03, 'ampenv.attack': 1.5, 'ampenv.sustain': 1, 'ampenv.release': 3 },
+});
+
 export const WAVETABLE = defineDevice({
   id: 'Wavetable',
   kind: 'synth',
@@ -149,6 +161,7 @@ export const WAVETABLE = defineDevice({
   // The two oscillators side by side, because they are twins, each one's unison under it; the
   // rest in a row beneath.
   panel: { width: 920, rows: [['Osc 1', 'Osc 2'], ['Osc 1 Unison', 'Osc 2 Unison'], ['Sub', 'Amp Env', 'Voice']] },
+  presets: WAVETABLE_PRESETS,
 });
 
 /** The two pictures an oscillator gets: the waveform it is reading, and its unison spread. */

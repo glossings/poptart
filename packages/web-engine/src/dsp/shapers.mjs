@@ -255,16 +255,23 @@ export function shape(x, mode, drive, bias, character = 0.5, table = null) {
 }
 
 /**
- * How much a curve at this setting changes the level, measured rather than derived: the curve is
- * probed with a sine and the ratio of what went in to what came out is the correction, clamped
- * because a fold can land on a zero crossing for a whole probe and ask for hundreds. Measured on the part
- * you hear: the probe's average is taken off first, since the device blocks it.
+ * The peak of the sine the auto gain probes with: -18 dBFS RMS, a track's usual level. The
+ * correction depends on the curve and the drive only, never on the signal, so a transient is never
+ * touched; a hotter input comes out hotter.
  */
-export function autoGainFor(mode, drive, bias, character, table = null) {
+export const AUTO_GAIN_LEVEL = 0.17825;
+
+/**
+ * How much a curve at this setting changes the level, measured rather than derived: the curve is
+ * probed with a sine at a track's usual level (AUTO_GAIN_LEVEL) and the ratio of what went in to
+ * what came out is the correction, clamped because a fold can land on a zero crossing for a whole
+ * probe and ask for hundreds. Measured on the part you hear: the
+ * probe's average is taken off first, since the device blocks it.
+ */
+export function autoGainFor(mode, drive, bias, character, table = null, amplitude = AUTO_GAIN_LEVEL) {
   // 256 points a cycle, not version 1's 64: a curve that throws a few sharp spikes a cycle (chaos,
   // wrap) is measured by where the probe lands, and too coarse a probe missed most of them.
   const PROBES = 256;
-  const amplitude = 0.5;
   const ys = [];
   for (let i = 0; i < PROBES; i++) ys.push(shape(Math.sin((i / PROBES) * Math.PI * 2) * amplitude, mode, drive, bias, character, table));
   const mean = ys.reduce((a, b) => a + b, 0) / ys.length;

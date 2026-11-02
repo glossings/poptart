@@ -24,6 +24,7 @@ import { ASYMMETRIC, SHAPER_INDEX, SHAPER_MODES, TAKES_CHARACTER, autoGainFor, c
 const CURVE_FADE_SEC = 0.01;
 
 
+
 /**
  * The one extra control, shared by every curve that has something to vary - so whatever drives it
  * goes on driving it when the curve changes. Hidden on the curves that ignore it.
@@ -31,6 +32,18 @@ const CURVE_FADE_SEC = 0.01;
 const CHARACTER = { id: 'character', name: 'Character', min: 0, max: 1, default: 0.5, group: 'Shape',
   active: { param: 'mode', is: [...TAKES_CHARACTER] },
   description: 'What varies in this curve: a knee, an asymmetry, a harmonic, the shape of a stair, the hardness of a wrap. The middle is the classic setting.' };
+
+/** Starting points for the preset menu: each the defaults with these controls changed. */
+export const DISTORT_PRESETS = Object.freeze({
+  warmtape: { drive: 9, bias: 0.15, tone: 9000 },
+  fuzz: { mode: 1, drive: 30, bias: 0.25, tone: 5000, output: -3 },
+  fold: { mode: 2, drive: 18, output: -1 },
+  tube: { mode: 5, drive: 12, character: 0.65, tone: 12000, oversample: 2 },
+  octaveup: { mode: 9, drive: 4, mix: 0.6 },
+  bitty: { mode: 10, drive: 10, character: 0.3 },
+  shimmer: { mode: 11, drive: 9, character: 0.75, mix: 0.5, output: -2 },
+  wavefold: { mode: 7, drive: 15, tone: 10000, output: -2 },
+});
 
 export const DISTORT = defineDevice({
   id: 'Distort',
@@ -73,6 +86,7 @@ export const DISTORT = defineDevice({
     },
   ],
   panel: { width: 640, rows: [['Shape', 'Out']] },
+  presets: DISTORT_PRESETS,
 });
 
 /** One channel's state. A stereo device holds two of these, so the channels never share history. */

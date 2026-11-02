@@ -5,6 +5,18 @@ import { at } from '../dsp/control.mjs';
 import { ModDelay } from '../dsp/moddelay.mjs';
 import { SYNC_OPTIONS, syncedHz, migrateSyncLists } from '../dsp/sync.mjs';
 
+/** Starting points for the preset menu: each the defaults with these controls changed. */
+export const FLANGER_PRESETS = Object.freeze({
+  subtle: { rate: 0.15, depth: 1.5, delay: 1, feedback: 0.2, mix: 0.3 },
+  jet: { rate: 0.08, depth: 6, delay: 0.3, feedback: 0.85, shape: 1 },
+  throughzero: { rate: 0.2, depth: 4, delay: 0.1, feedback: -0.6 },
+  swirl: { rate: 0.05, depth: 8, delay: 2, feedback: 0.6, spread: 1 },
+  wobble: { rate: 4, depth: 1, delay: 2, feedback: 0.3 },
+  comb: { rate: 0.3, depth: 1, delay: 5, feedback: 0.9 },
+  hollow: { rate: 0.2, depth: 2, delay: 3, feedback: -0.8 },
+  barsweep: { sync: 16, depth: 5, delay: 0.5, feedback: 0.7, shape: 1 },
+});
+
 export const FLANGER = defineDevice({
   id: 'Flanger',
   kind: 'fx',
@@ -40,6 +52,7 @@ export const FLANGER = defineDevice({
       drag: { y: 'depth' },
     },
   ],
+  presets: FLANGER_PRESETS,
 });
 
 export class FlangerProcessor {

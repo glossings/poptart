@@ -12,6 +12,16 @@ import { DYNAMICS_BLOCKS_PER_ENTRY, History } from '../dsp/history.mjs';
 /** The lookahead, in seconds. Two milliseconds is under a hundred samples: inaudible as latency. */
 const LOOKAHEAD_SEC = 0.002;
 
+/** Starting points for the preset menu: each the defaults with these controls changed. */
+export const LIMITER_PRESETS = Object.freeze({
+  safety: { ceiling: -1, release: 200 },
+  loud: { gain: 6, release: 60 },
+  brickwall: { gain: 3, ceiling: -0.1, release: 20 },
+  slam: { gain: 12, ceiling: -9.5, release: 30 },
+  gentle: { gain: 4, release: 400 },
+  pumping: { gain: 8, ceiling: -3, release: 250 },
+});
+
 export const LIMITER = defineDevice({
   id: 'Limiter',
   kind: 'fx',
@@ -38,6 +48,7 @@ export const LIMITER = defineDevice({
       params: { threshold: 'ceiling', pregain: 'gain' },
     },
   ],
+  presets: LIMITER_PRESETS,
 });
 
 export class LimiterProcessor {
@@ -47,7 +58,7 @@ export class LimiterProcessor {
     const size = this.look + 1;
     this.bufL = new Float32Array(size);
     this.bufR = new Float32Array(size);
-    this.need = new Float32Array(size);     // the gain each delayed sample needs
+    this.need = new Float32Array(size).fill(1);   // the gain each delayed sample needs, 1 until a sample needs less
     this.pos = 0;
     this.gain = 1;
     this.reduction = 0;

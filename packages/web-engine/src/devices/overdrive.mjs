@@ -4,13 +4,27 @@
 // what lies between is driven; what lies outside passes clean and is added back. That is what
 // keeps a driven bass from turning to mud below and fizz above, and it is what the region
 // controls are for. A dynamics control compresses the region before the drive, so the grit is
-// steady across a part rather than only on its loudest notes.
+// steady across a part rather than only on its loudest notes. The driven region is brought back
+// to the level it went in at by a makeup that follows the drive and the dynamics: a sine at a
+// track's usual level (-18 dBFS RMS) is put through the lift and the curve, and what that took or
+// added is given back. It never depends on the signal, so transients pass as they are.
 
 import { defineDevice } from '../descriptor.mjs';
 import { at, dbToGain } from '../dsp/control.mjs';
 import { BIQUAD_TYPES, Biquad } from '../dsp/biquad.mjs';
 import { OnePole } from '../dsp/filters.mjs';
+import { AUTO_GAIN_LEVEL } from '../dsp/shapers.mjs';
 import { Detector } from './compressor.mjs';
+
+/** Starting points for the preset menu: each the defaults with these controls changed. */
+export const OVERDRIVE_PRESETS = Object.freeze({
+  edge: { drive: 6, dynamics: 0.1, tone: 8000 },
+  crunch: { drive: 16, tone: 5000, dynamics: 0.2 },
+  heavy: { low: 200, high: 5000, drive: 30, tone: 3500, dynamics: 0, mix: 0.7 },
+  cleanlow: { low: 250, high: 6000, drive: 18 },
+  midbite: { low: 500, high: 2500, drive: 24, tone: 3500, dynamics: 0 },
+  parallel: { drive: 30, mix: 0.4 },
+});
 
 export const OVERDRIVE = defineDevice({
   id: 'Overdrive',
@@ -44,7 +58,26 @@ export const OVERDRIVE = defineDevice({
     },
   ],
   panel: { width: 640, rows: [['Region', 'Drive']] },
+  presets: OVERDRIVE_PRESETS,
 });
+
+const OVERDRIVE_PROBES = 64;
+
+/**
+ * The makeup for a drive (linear) and a dynamics setting: the probe's level over its level once
+ * lifted and driven. The detector sits near a sine's peak, so the probe is lifted as its peak.
+ */
+export function overdriveMakeup(drive, dyn, probe = AUTO_GAIN_LEVEL) {
+  const lift = Math.min(dyn > 0 ? Math.pow(Math.max(1e-4, probe) / 0.25, -0.7 * dyn) : 1, 16);
+  let energy = 0;
+  for (let i = 0; i < OVERDRIVE_PROBES; i++) {
+    const y = Math.tanh(Math.sin((i / OVERDRIVE_PROBES) * Math.PI * 2) * probe * lift * drive);
+    energy += y * y;
+  }
+  const out = Math.sqrt(energy / OVERDRIVE_PROBES);
+  if (!(out > 1e-9)) return 1;
+  return Math.min(8, Math.max(0.05, probe / Math.SQRT2 / out));
+}
 
 const LOWPASS = BIQUAD_TYPES.indexOf('lowpass');
 const HIGHPASS = BIQUAD_TYPES.indexOf('highpass');
@@ -67,6 +100,7 @@ export class OverdriveProcessor {
     this.sampleRate = sampleRate;
     this.channels = [new DriveChannel(sampleRate), new DriveChannel(sampleRate)];
     this.last = { low: -1, high: -1, tone: -1 };
+    this.makeup = -1;   // where the makeup stands, ramped across each block to where it is going
   }
 
   process(inputs, outputs, count, params) {
@@ -83,6 +117,12 @@ export class OverdriveProcessor {
       }
       this.last = { low, high, tone };
     }
+    // Measured where the drive and dynamics end the block and reached along a ramp from where the
+    // last block left it, so a drive being turned is not corrected in steps.
+    const makeupTo = overdriveMakeup(dbToGain(at(params.drive, count - 1)), at(params.dynamics, count - 1));
+    if (this.makeup < 0) this.makeup = makeupTo;
+    const makeupFrom = this.makeup;
+    const makeupStep = (makeupTo - makeupFrom) / Math.max(1, count);
     for (let ch = 0; ch < outputs.length; ch++) {
       const out = outputs[ch];
       const input = inputs[Math.min(ch, inputs.length - 1)];
@@ -97,12 +137,13 @@ export class OverdriveProcessor {
         const env = c.detector.next(Math.abs(region));
         const lift = dyn > 0 ? Math.pow(Math.max(1e-4, env) / 0.25, -0.7 * dyn) : 1;
         const drive = dbToGain(at(params.drive, i));
-        const driven = Math.tanh(region * Math.min(lift, 16) * drive) / Math.tanh(Math.min(drive, 4) * 0.5 + 0.5);
-        const wet = c.tone.next(driven) * 0.7 + rest;
+        const driven = Math.tanh(region * Math.min(lift, 16) * drive) * (makeupFrom + makeupStep * i);
+        const wet = c.tone.next(driven) + rest;
         const mix = at(params.mix, i);
         out[i] = x + (wet - x) * mix;
       }
       if (!Number.isFinite(out[count - 1]) || !Number.isFinite(c.detector.env)) c.reset();
     }
+    this.makeup = Number.isFinite(makeupTo) ? makeupTo : 1;
   }
 }

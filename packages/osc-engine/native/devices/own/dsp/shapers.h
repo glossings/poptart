@@ -218,13 +218,16 @@ inline double shape(double x, int mode, double drive, double bias, double charac
 
 /**
  * How much a curve at this setting changes the level, measured rather than derived: the curve is
- * probed with a sine and the ratio of what went in to what came out is the correction. Measured
+ * probed with a sine at a track's usual level and the ratio of what went in to what came out is the correction. Measured
  * on the part you hear, so the probe's average comes off first.
  */
+/** The peak of the sine probed with: -18 dBFS RMS, a track's usual level. */
+constexpr double kAutoGainLevel = 0.17825;
+
 inline double autoGainFor(int mode, double drive, double bias, double character,
-                          const float* table = nullptr, int tableLength = 0) {
+                          const float* table = nullptr, int tableLength = 0,
+                          double amplitude = kAutoGainLevel) {
   constexpr int kProbes = 256;
-  const double amplitude = 0.5;
   double ys[kProbes];
   double sum = 0;
   for (int i = 0; i < kProbes; ++i) {

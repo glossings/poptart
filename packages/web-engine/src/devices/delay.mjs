@@ -21,6 +21,18 @@ import { SYNC_OPTIONS, syncedSeconds, migrateSyncLists } from '../dsp/sync.mjs';
 
 const DELAY_MAX_SEC = 4;
 
+/** Starting points for the preset menu: each the defaults with these controls changed. */
+export const DELAY_PRESETS = Object.freeze({
+  dub: { sync: 10, feedback: 0.72, tone: 1600, mix: 0.4 },
+  slapback: { time: 0.09, feedback: 0.08, tone: 5000, mix: 0.3 },
+  pingpong: { sync: 7, feedback: 0.5, pingpong: 1, tone: 6000 },
+  dotted: { sync: 9, feedback: 0.55, tone: 10000, spread: 0.25, mix: 0.3 },
+  tapeecho: { time: 0.31, feedback: 0.58, tone: 2400, spread: 0.08, mix: 0.38 },
+  wash: { sync: 13, feedback: 0.7, tone: 3000, spread: 0.4, mix: 0.4 },
+  doubler: { time: 0.022, feedback: 0, tone: 12000, spread: 0.7, mix: 0.4 },
+  triplets: { sync: 8, feedback: 0.35, tone: 5000, pingpong: 1, mix: 0.3 },
+});
+
 export const DELAY = defineDevice({
   id: 'Delay',
   kind: 'fx',
@@ -59,6 +71,7 @@ export const DELAY = defineDevice({
       drag: { y: 'feedback' },
     },
   ],
+  presets: DELAY_PRESETS,
 });
 
 /**

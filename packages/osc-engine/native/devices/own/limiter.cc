@@ -23,7 +23,7 @@ struct Device : pd_own::Device<ids::kCount> {
   int look = 1;
   float bufL[kMaxLook] = { 0 };
   float bufR[kMaxLook] = { 0 };
-  float need[kMaxLook] = { 0 };   // the gain each delayed sample needs
+  float need[kMaxLook];   // the gain each delayed sample needs, 1 until a sample needs less
   int pos = 0;
   double gain = 1;
   // The last block's loudest input (after the gain) and deepest reduction, in decibels, and
@@ -48,11 +48,9 @@ struct Device : pd_own::Device<ids::kCount> {
     blockSec = 128.0 / sr;
     levels.init(-120.0f, kDynamicsBlocksPerEntry, History::kMax);
     reductions.init(0.0f, kDynamicsBlocksPerEntry, History::kMin);
-    // The window starts at zero rather than at unity, as the browser's buffers do: for the
-    // first two milliseconds the limiter believes it has to be silent, and comes up out of it
-    // at the release. That is audible exactly once, when a limiter is first put on a chain, and
-    // it is the behavior a song was written against.
-    for (int i = 0; i < kMaxLook; ++i) { bufL[i] = 0; bufR[i] = 0; need[i] = 0; }
+    // The window starts at unity: nothing in it needs any gain taken off yet, so a limiter
+    // put on a chain passes its first samples at full level rather than fading in.
+    for (int i = 0; i < kMaxLook; ++i) { bufL[i] = 0; bufR[i] = 0; need[i] = 1; }
   }
 
   void pd_process(int frames) {

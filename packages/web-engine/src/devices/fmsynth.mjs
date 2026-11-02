@@ -82,6 +82,18 @@ for (let n = 1; n <= OPS; n++) {
   });
 }
 
+/** Starting points for the preset menu: each the defaults with these controls changed. */
+export const FMSYNTH_PRESETS = Object.freeze({
+  epiano: { 'op1.decay': 2.5, 'op1.sustain': 0.15, 'op1.release': 0.5, 'op2.decay': 1.2, 'op2.sustain': 0.1, 'mod.2.1': 0.12, 'op3.level': 0.25, 'op3.decay': 0.8, 'op3.sustain': 0, 'op4.ratio': 14, 'op4.decay': 0.12, 'op4.sustain': 0, 'mod.4.3': 0.15, 'op1.velocity': 0.7, 'op2.velocity': 0.9 },
+  bell: { 'op1.decay': 4, 'op1.sustain': 0, 'op1.release': 2, 'op2.ratio': 3.5, 'op2.decay': 3, 'op2.sustain': 0, 'op2.release': 2, 'mod.2.1': 0.3, 'op3.level': 0.3, 'op3.ratio': 2, 'op3.decay': 2.5, 'op3.sustain': 0, 'op3.release': 1.5, 'op4.ratio': 5.19, 'op4.decay': 1.5, 'op4.sustain': 0, 'mod.4.3': 0.25 },
+  bass: { 'op1.sustain': 1, 'op1.release': 0.08, 'op1.velocity': 0.2, 'op2.decay': 0.25, 'op2.sustain': 0.3, 'op2.release': 0.08, 'mod.2.1': 0.3, 'mod.2.2': 0.06 },
+  brass: { 'op1.attack': 0.03, 'op1.sustain': 0.9, 'op1.release': 0.15, 'op2.attack': 0.09, 'op2.decay': 0.4, 'op2.release': 0.15, 'mod.2.1': 0.4, 'mod.2.2': 0.05 },
+  pluck: { 'op1.decay': 0.6, 'op1.sustain': 0, 'op2.ratio': 3, 'op2.decay': 0.15, 'op2.sustain': 0, 'mod.2.1': 0.5, 'mod.2.2': 0.05 },
+  metal: { 'op1.decay': 0.9, 'op1.sustain': 0, 'op1.release': 0.6, 'op2.ratio': 1.41, 'op2.decay': 0.6, 'op2.sustain': 0, 'op2.release': 0.4, 'mod.2.1': 0.55, 'op3.ratio': 2.73, 'op3.decay': 0.4, 'op3.sustain': 0, 'mod.3.2': 0.5 },
+  organ: { 'op1.level': 0.45, 'op1.sustain': 1, 'op1.release': 0.06, 'op1.velocity': 0, 'op2.level': 0.35, 'op2.ratio': 2, 'op2.sustain': 1, 'op2.release': 0.06, 'op2.velocity': 0, 'op3.level': 0.25, 'op3.ratio': 3, 'op3.sustain': 1, 'op3.release': 0.06, 'op3.velocity': 0, 'op4.level': 0.3, 'op4.ratio': 0.5, 'op4.sustain': 1, 'op4.release': 0.06, 'op4.velocity': 0, 'op5.level': 0.2, 'op5.ratio': 4, 'op5.decay': 0.15, 'op5.sustain': 0, 'op5.velocity': 0 },
+  mallet: { 'op1.decay': 0.45, 'op1.sustain': 0, 'op2.ratio': 4, 'op2.decay': 0.03, 'op2.sustain': 0, 'mod.2.1': 0.12, 'op3.level': 0.35, 'op3.ratio': 4, 'op3.decay': 0.12, 'op3.sustain': 0, 'op3.release': 0.1 },
+});
+
 export const FMSYNTH = defineDevice({
   id: 'FM',
   kind: 'synth',
@@ -118,6 +130,7 @@ export const FMSYNTH = defineDevice({
   // controls, and which of them is modulating which is the thing somebody needs to see before any
   // of those controls mean anything. Underneath it, the operators in two rows of four.
   panel: { width: 980, rows: [['Matrix', 'Voice'], ['Op 1', 'Op 2', 'Op 3', 'Op 4'], ['Op 5', 'Op 6', 'Op 7', 'Op 8']] },
+  presets: FMSYNTH_PRESETS,
 });
 
 /** A wave at a phase in cycles, in -1..1, cheap enough for eight of them per sample per voice. */

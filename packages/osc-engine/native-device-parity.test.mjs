@@ -59,7 +59,7 @@ import { AdditiveSynth } from '../web-engine/src/devices/additive.mjs';
 import { ANALOG, ANALOG_FILTER_TYPES, AnalogSynth } from '../web-engine/src/devices/analog.mjs';
 import { KickSynth } from '../web-engine/src/devices/kick.mjs';
 import { HatSynth } from '../web-engine/src/devices/hat.mjs';
-import { DRUM, DrumSynth } from '../web-engine/src/devices/drum.mjs';
+import { DrumSynth } from '../web-engine/src/devices/drum.mjs';
 import { LpgProcessor } from '../web-engine/src/devices/lpg.mjs';
 import { CrossoverProcessor } from '../web-engine/src/devices/crossover.mjs';
 import { FilterbankProcessor } from '../web-engine/src/devices/filterbank.mjs';
@@ -381,7 +381,7 @@ function testSignal(frames, channels = 2, seed = 7, keyed = true) {
  * nothing for its first 50 ms, and has to have tracked a pitch and laid down grains before the two
  * engines can be said to agree about it.
  */
-const LONG_RUN = { VocalShift: BLOCK * 240 };
+const LONG_RUN = { VocalShift: BLOCK * 240, Stutter: BLOCK * 240 };
 
 // Settings a device is always ALSO played at, on top of its defaults and the seeded draws: a
 // mode the draws may never land on, with whatever it depends on turned up. Each is the defaults
@@ -405,8 +405,16 @@ const PINNED = {
     { color: 8, character: 0 },
     { color: 9, character: 1, pitch: -12 },
   ],
-  // Every preset it ships, and a body high enough that its upper modes are band-limited away.
-  Drum: [...Object.values(DRUM.presets), { pitch: 48, material: 0.5, drop: 12 }],
+  // A body high enough that its upper modes are band-limited away.
+  Drum: [{ pitch: 48, material: 0.5, drop: 12 }],
+  // A catch on every 1/32 that happens half the time, or never: which beats fire is the hash's
+  // say, and both engines have to draw the same ones.
+  Stutter: [
+    { interval: 1, grid: 1, repeats: 2, chance: 0.5 },
+    { interval: 1, grid: 1, repeats: 2, chance: 0.5, seed: 7 },
+    { interval: 1, grid: 1, repeats: 2, chance: 0.2, seed: 42 },
+    { interval: 1, grid: 1, repeats: 2, chance: 0 },
+  ],
   LPG: [{ mode: 1 }, { mode: 2, resonance: 0.8 }, { level: 0.4, decay: 0.05, resonance: 0.5 }],
   // Every source, at the ends of every part: the dense twelve held coarse with noise and the full
   // body, the bell, the thin six long and bright, and pure noise at the shortest and darkest.
@@ -724,7 +732,8 @@ for (const one of devices.filter((d) => !STOCK_NODES.has(d.id))) {
       const runs = [['at its defaults', defaultValues(device)]];
       // And across the range: four settings from the same seeds every run.
       for (const seed of [11, 29, 97, 1234]) runs.push([`at setting ${seed}`, randomValues(device, seed)]);
-      for (const pin of PINNED[one.id] ?? []) {
+      // Every preset the device ships, and the settings pinned for it.
+      for (const pin of [...Object.values(device.presets ?? {}), ...(PINNED[one.id] ?? [])]) {
         runs.push([`at ${JSON.stringify(pin)}`, device.params.map((p) => (p.id in pin ? pin[p.id] : p.default))]);
       }
 

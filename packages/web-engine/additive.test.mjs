@@ -187,7 +187,7 @@ test('one partial alone is a sine at the level the voice is set to', () => {
   const out = render(synth, values, 40);
   let peak = 0;
   for (let i = BLOCK * 4; i < out.length; i++) peak = Math.max(peak, Math.abs(out[i]));
-  assert.ok(Math.abs(peak - 0.8 * 0.5) < 1e-3, `peak ${peak}`);
+  assert.ok(Math.abs(peak - 0.8 * 0.32) < 1e-3, `peak ${peak}`);
 });
 
 test('a note-off releases, and a pitch held twice lets go only at its last off', () => {

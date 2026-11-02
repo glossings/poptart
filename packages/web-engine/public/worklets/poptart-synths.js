@@ -2799,6 +2799,18 @@ function oscParams(n, group, levelDefault) {
   ];
 }
 
+/** Starting points for the preset menu: each the defaults with these controls changed. */
+const WAVETABLE_PRESETS = Object.freeze({
+  pad: { 'osc1.position': 0.333, 'osc1.unison': 5, 'osc1.detune': 18, 'osc1.spread': 0.9, 'osc1.level': 0.35, 'osc2.table': 1, 'osc2.position': 0.55, 'osc2.level': 0.25, 'osc2.octave': 1, 'osc2.unison': 3, 'osc2.detune': 10, 'osc2.spread': 1, 'ampenv.attack': 0.6, 'ampenv.decay': 0.5, 'ampenv.sustain': 1, 'ampenv.release': 1.6 },
+  widelead: { 'osc1.position': 0.333, 'osc1.unison': 7, 'osc1.detune': 28, 'osc1.spread': 1, 'osc1.level': 0.3, 'osc2.position': 0.5, 'osc2.level': 0.15, 'osc2.semi': 7, 'osc2.cents': 4, 'ampenv.attack': 0.008, 'ampenv.sustain': 1, 'ampenv.release': 0.25, glide: 0.06 },
+  subbass: { 'osc1.octave': -1, 'osc1.level': 0.38, 'osc1.position': 0.08, 'sub.level': 0.15, 'ampenv.attack': 0.004, 'ampenv.sustain': 1, 'ampenv.release': 0.08, 'osc1.phaserand': 0 },
+  pluck: { 'osc1.position': 0.333, 'osc1.unison': 2, 'osc1.detune': 8, 'osc1.level': 0.75, 'osc2.table': 4, 'osc2.position': 0.35, 'osc2.level': 0.3, 'osc2.octave': 1, 'ampenv.decay': 0.28, 'ampenv.sustain': 0, 'ampenv.release': 0.25, 'env.dcurve': -6 },
+  synclead: { 'osc1.table': 4, 'osc1.position': 0.7, 'osc1.level': 0.4, 'osc2.position': 0.5, 'osc2.level': 0.15, 'osc2.octave': -1, 'ampenv.attack': 0.003, 'ampenv.sustain': 0.9, 'ampenv.release': 0.12, glide: 0.04 },
+  stab: { 'osc1.position': 0.333, 'osc1.unison': 3, 'osc1.detune': 14, 'osc1.level': 0.65, 'osc2.position': 0.5, 'osc2.level': 0.35, 'osc2.octave': 1, 'ampenv.attack': 0.002, 'ampenv.decay': 0.22, 'ampenv.sustain': 0.25, 'ampenv.release': 0.12 },
+  keys: { 'osc1.table': 6, 'osc1.position': 0.3, 'osc1.level': 0.45, 'osc2.table': 1, 'osc2.position': 0.15, 'osc2.level': 0.2, 'osc2.octave': 1, 'ampenv.attack': 0.003, 'ampenv.decay': 1.4, 'ampenv.sustain': 0.25, 'ampenv.release': 0.45 },
+  drone: { 'osc1.table': 3, 'osc1.position': 0.5, 'osc1.unison': 4, 'osc1.detune': 9, 'osc1.spread': 1, 'osc1.level': 0.3, 'osc2.table': 2, 'osc2.position': 0.5, 'osc2.level': 0.3, 'osc2.octave': -1, 'osc2.cents': 7, 'sub.level': 0.2, 'noise.level': 0.03, 'ampenv.attack': 1.5, 'ampenv.sustain': 1, 'ampenv.release': 3 },
+});
+
 const WAVETABLE = defineDevice({
   id: 'Wavetable',
   kind: 'synth',
@@ -2876,6 +2888,7 @@ const WAVETABLE = defineDevice({
   // The two oscillators side by side, because they are twins, each one's unison under it; the
   // rest in a row beneath.
   panel: { width: 920, rows: [['Osc 1', 'Osc 2'], ['Osc 1 Unison', 'Osc 2 Unison'], ['Sub', 'Amp Env', 'Voice']] },
+  presets: WAVETABLE_PRESETS,
 });
 
 /** The two pictures an oscillator gets: the waveform it is reading, and its unison spread. */
@@ -3341,6 +3354,18 @@ for (let n = 1; n <= OPS; n++) {
   });
 }
 
+/** Starting points for the preset menu: each the defaults with these controls changed. */
+const FMSYNTH_PRESETS = Object.freeze({
+  epiano: { 'op1.decay': 2.5, 'op1.sustain': 0.15, 'op1.release': 0.5, 'op2.decay': 1.2, 'op2.sustain': 0.1, 'mod.2.1': 0.12, 'op3.level': 0.25, 'op3.decay': 0.8, 'op3.sustain': 0, 'op4.ratio': 14, 'op4.decay': 0.12, 'op4.sustain': 0, 'mod.4.3': 0.15, 'op1.velocity': 0.7, 'op2.velocity': 0.9 },
+  bell: { 'op1.decay': 4, 'op1.sustain': 0, 'op1.release': 2, 'op2.ratio': 3.5, 'op2.decay': 3, 'op2.sustain': 0, 'op2.release': 2, 'mod.2.1': 0.3, 'op3.level': 0.3, 'op3.ratio': 2, 'op3.decay': 2.5, 'op3.sustain': 0, 'op3.release': 1.5, 'op4.ratio': 5.19, 'op4.decay': 1.5, 'op4.sustain': 0, 'mod.4.3': 0.25 },
+  bass: { 'op1.sustain': 1, 'op1.release': 0.08, 'op1.velocity': 0.2, 'op2.decay': 0.25, 'op2.sustain': 0.3, 'op2.release': 0.08, 'mod.2.1': 0.3, 'mod.2.2': 0.06 },
+  brass: { 'op1.attack': 0.03, 'op1.sustain': 0.9, 'op1.release': 0.15, 'op2.attack': 0.09, 'op2.decay': 0.4, 'op2.release': 0.15, 'mod.2.1': 0.4, 'mod.2.2': 0.05 },
+  pluck: { 'op1.decay': 0.6, 'op1.sustain': 0, 'op2.ratio': 3, 'op2.decay': 0.15, 'op2.sustain': 0, 'mod.2.1': 0.5, 'mod.2.2': 0.05 },
+  metal: { 'op1.decay': 0.9, 'op1.sustain': 0, 'op1.release': 0.6, 'op2.ratio': 1.41, 'op2.decay': 0.6, 'op2.sustain': 0, 'op2.release': 0.4, 'mod.2.1': 0.55, 'op3.ratio': 2.73, 'op3.decay': 0.4, 'op3.sustain': 0, 'mod.3.2': 0.5 },
+  organ: { 'op1.level': 0.45, 'op1.sustain': 1, 'op1.release': 0.06, 'op1.velocity': 0, 'op2.level': 0.35, 'op2.ratio': 2, 'op2.sustain': 1, 'op2.release': 0.06, 'op2.velocity': 0, 'op3.level': 0.25, 'op3.ratio': 3, 'op3.sustain': 1, 'op3.release': 0.06, 'op3.velocity': 0, 'op4.level': 0.3, 'op4.ratio': 0.5, 'op4.sustain': 1, 'op4.release': 0.06, 'op4.velocity': 0, 'op5.level': 0.2, 'op5.ratio': 4, 'op5.decay': 0.15, 'op5.sustain': 0, 'op5.velocity': 0 },
+  mallet: { 'op1.decay': 0.45, 'op1.sustain': 0, 'op2.ratio': 4, 'op2.decay': 0.03, 'op2.sustain': 0, 'mod.2.1': 0.12, 'op3.level': 0.35, 'op3.ratio': 4, 'op3.decay': 0.12, 'op3.sustain': 0, 'op3.release': 0.1 },
+});
+
 const FMSYNTH = defineDevice({
   id: 'FM',
   kind: 'synth',
@@ -3377,6 +3402,7 @@ const FMSYNTH = defineDevice({
   // controls, and which of them is modulating which is the thing somebody needs to see before any
   // of those controls mean anything. Underneath it, the operators in two rows of four.
   panel: { width: 980, rows: [['Matrix', 'Voice'], ['Op 1', 'Op 2', 'Op 3', 'Op 4'], ['Op 5', 'Op 6', 'Op 7', 'Op 8']] },
+  presets: FMSYNTH_PRESETS,
 });
 
 /** A wave at a phase in cycles, in -1..1, cheap enough for eight of them per sample per voice. */
@@ -3756,6 +3782,18 @@ function grainWindow(mode, t) {
   return 0.5 - 0.5 * Math.cos(2 * Math.PI * t);
 }
 
+/** Starting points for the preset menu: each the defaults with these controls changed. */
+const GRANULAR_PRESETS = Object.freeze({
+  frozen: { spray: 0.01, size: 200, density: 40, attack: 0.8, release: 2 },
+  shimmer: { pitch: 12, spray: 0.1, size: 180, density: 40, spread: 1, random: 0.15, attack: 0.4, release: 2.5 },
+  stutter: { spray: 0, size: 45, density: 12, window: 2, spread: 0.2, attack: 0.002, release: 0.1 },
+  smear: { spray: 0.3, size: 500, density: 16, random: 0.5, reverse: 0.5, spread: 0.9, attack: 0.3, release: 1.5 },
+  scrub: { spray: 0.01, size: 80, density: 40, scan: 1, attack: 0.01, release: 0.2 },
+  sparse: { spray: 0.6, size: 160, density: 8, window: 1, random: 7, spread: 1, attack: 0.005, release: 1 },
+  backward: { reverse: 1, window: 4, size: 300, density: 16, spray: 0.03, attack: 0.05, release: 0.6 },
+  deep: { pitch: -12, size: 300, density: 25, spray: 0.04, window: 5, attack: 0.2, release: 1.2 },
+});
+
 const GRANULAR = defineDevice({
   id: 'Granular',
   kind: 'synth',
@@ -3825,6 +3863,7 @@ const GRANULAR = defineDevice({
     },
   ],
   panel: { width: 760, rows: [['Source', 'Grains'], ['Amp']] },
+  presets: GRANULAR_PRESETS,
 });
 
 class VoiceGrain {
@@ -4161,11 +4200,26 @@ const CRACKLE_RING = 0.0003;
 /** How loud the chaotic map plays, against white. Its values bunch at the ends of the range. */
 const CHAOS_GAIN = 0.8;
 
+/** The voice's level against the controls: a chord of white noise at the default stays under full scale. */
+const NOISE_VOICE_GAIN = 0.55;
+
 /** The digital color's level: a sequence of +1 and -1 is a square wave's loudness, not noise's. */
 const DIGITAL_GAIN = 0.5773502691896258;
 
 const envSeconds = (id, name, def) => ({
   id, name, min: 0, max: 10, default: def, unit: 's', curve: 'pow', curveExp: 3, group: 'Amp Env',
+});
+
+/** Starting points for the preset menu: each the defaults with these controls changed. */
+const NOISE_PRESETS = Object.freeze({
+  wind: { color: 1, tone: 700, 'ampenv.attack': 1.2, 'ampenv.sustain': 1, 'ampenv.release': 2.5, 'env.acurve': 0 },
+  surf: { color: 2, tone: 4000, 'ampenv.attack': 1, 'ampenv.decay': 2.5, 'ampenv.sustain': 0.25, 'ampenv.release': 3, 'env.acurve': 2 },
+  rain: { color: 5, character: 0.95, tone: 9000, 'ampenv.attack': 0.3, 'ampenv.sustain': 1, 'ampenv.release': 1 },
+  hiss: { color: 3, 'ampenv.attack': 0, 'ampenv.decay': 0.13, 'ampenv.sustain': 0, 'ampenv.release': 0.05 },
+  crackle: { color: 6, character: 0.75, 'ampenv.attack': 0.05, 'ampenv.sustain': 1, 'ampenv.release': 0.5 },
+  riser: { 'ampenv.attack': 3, 'ampenv.sustain': 1, 'ampenv.release': 0.3, 'env.acurve': 3 },
+  chip: { color: 7, character: 0.8, 'ampenv.decay': 0.25, 'ampenv.sustain': 0.3, 'ampenv.release': 0.08 },
+  steps: { color: 8, character: 0.1, pitch: -24, tone: 6000, 'ampenv.sustain': 1 },
 });
 
 const NOISE = defineDevice({
@@ -4202,6 +4256,7 @@ const NOISE = defineDevice({
     { id: 'level', name: 'Level', min: 0, max: 1, default: 0.5, group: 'Voice' },
     { id: 'voices', name: 'Voices', min: 1, open: true, uiMax: NOISE_VOICES_KNOB, legacyMax: 16, default: 8, step: 1, rate: 'k', ui: 'number', group: 'Voice' },
   ],
+  presets: NOISE_PRESETS,
 });
 
 /** A one-pole lowpass coefficient for a corner in Hz. */
@@ -4466,7 +4521,7 @@ class NoiseVoice {
         this.l1 += toneK * (l - this.l1); this.l2 += toneK * (this.l1 - this.l2); l = this.l2;
         this.r1 += toneK * (r - this.r1); this.r2 += toneK * (this.r1 - this.r2); r = this.r2;
       }
-      const gain = this.env.next() * this.velocity * at(p.level, j);
+      const gain = this.env.next() * this.velocity * at(p.level, j) * NOISE_VOICE_GAIN;
       outL[i] += l * gain;
       outR[i] += r * gain;
     }
@@ -4860,6 +4915,18 @@ const formantSeconds = (id, name, def) => ({
 const VOSIM_ONLY = { param: 'mode', is: 'vosim' };
 const SQUARE_ONLY = { param: 'mode', is: 'square' };
 
+/** Starting points for the preset menu: each the defaults with these controls changed. */
+const FORMANT_PRESETS = Object.freeze({
+  vowelpad: { formant: 900, count: 6, decay: 0.85, 'ampenv.attack': 0.7, 'ampenv.sustain': 1, 'ampenv.release': 1.5 },
+  talker: { formant: 1400, count: 3, decay: 0.7, track: 0.3, 'ampenv.attack': 0.01, 'ampenv.sustain': 1, 'ampenv.release': 0.12, glide: 0.08 },
+  buzzbass: { mode: 1, formant: 320, shape: 0.15, air: 0.7, track: 0.5, 'ampenv.attack': 0.003, 'ampenv.decay': 0.3, 'ampenv.sustain': 0.7, 'ampenv.release': 0.08 },
+  choir: { formant: 420, count: 10, decay: 0.92, 'ampenv.attack': 0.45, 'ampenv.sustain': 1, 'ampenv.release': 1.2 },
+  whistle: { formant: 270, track: 1, count: 1, 'ampenv.attack': 0.06, 'ampenv.sustain': 1, 'ampenv.release': 0.2, glide: 0.05 },
+  growl: { mode: 1, formant: 140, shape: 0.85, air: 1, 'ampenv.attack': 0.01, 'ampenv.sustain': 1 },
+  reed: { mode: 1, formant: 2400, air: 0.15, track: 0.2, 'ampenv.attack': 0.03, 'ampenv.sustain': 1 },
+  ping: { formant: 3200, count: 14, decay: 0.95, track: 0.5, 'ampenv.decay': 0.35, 'ampenv.sustain': 0, 'ampenv.release': 0.3 },
+});
+
 const FORMANT = defineDevice({
   id: 'Formant',
   kind: 'synth',
@@ -4913,6 +4980,7 @@ const FORMANT = defineDevice({
       subsumes: ['acurve', 'dcurve', 'rcurve'],
     },
   ],
+  presets: FORMANT_PRESETS,
 });
 
 /** The formant in Hz for a pitch: the knob, moved with the note as far as `track` says, kept under the top. */
@@ -5382,12 +5450,24 @@ const ADD_NYQUIST_FADE = 0.05;
 /** Damp at 1, in nepers a second per unit of ratio above the fundamental. */
 const ADD_DAMP_RATE = 10;
 /** The voice's level against the controls, as the FM synth's. */
-const ADD_VOICE_GAIN = 0.5;
+const ADD_VOICE_GAIN = 0.32;
 /** Below this, the partials' summed power is silence and is not brought up to level. */
 const ADD_SILENT_POWER = 1e-12;
 
 const additiveSeconds = (id, name, def) => ({
   id, name, min: 0, max: 10, default: def, unit: 's', curve: 'pow', curveExp: 3, group: 'Amp Env',
+});
+
+/** Starting points for the preset menu: each the defaults with these controls changed. */
+const ADDITIVE_PRESETS = Object.freeze({
+  organ: { partials: 6, tilt: -3, 'ampenv.attack': 0.004, 'ampenv.decay': 0.3, 'ampenv.sustain': 0.75, 'ampenv.release': 0.06 },
+  glassbell: { partials: 12, tilt: -4, stretch: 0.3, damp: 0.35, 'ampenv.decay': 3.5, 'ampenv.sustain': 0, 'ampenv.release': 2 },
+  bowed: { partials: 32, stretch: 0.004, odd: -0.15, 'ampenv.attack': 0.7, 'ampenv.sustain': 1, 'ampenv.release': 1.2 },
+  hollow: { partials: 24, odd: 1, tilt: -7, 'ampenv.attack': 0.01, 'ampenv.sustain': 1, glide: 0.05 },
+  pluck: { partials: 40, tilt: -3, stretch: 0.012, damp: 0.5, 'ampenv.decay': 1.6, 'ampenv.sustain': 0, 'ampenv.release': 0.4, 'env.dcurve': -6 },
+  chime: { partials: 6, tilt: -2, odd: 1, stretch: 0.45, damp: 0.15, 'ampenv.decay': 2.5, 'ampenv.sustain': 0, 'ampenv.release': 1.5 },
+  flute: { partials: 4, tilt: -14, odd: 0.4, 'ampenv.attack': 0.08, 'ampenv.sustain': 1, 'ampenv.release': 0.2 },
+  buzz: { partials: 64, tilt: -4, stretch: 0.003, 'ampenv.attack': 0.003, 'ampenv.decay': 0.4, 'ampenv.sustain': 0.6, 'ampenv.release': 0.1 },
 });
 
 const ADDITIVE = defineDevice({
@@ -5451,6 +5531,7 @@ const ADDITIVE = defineDevice({
     },
   ],
   panel: { rows: [['Partials'], ['Amp Env', 'Voice']] },
+  presets: ADDITIVE_PRESETS,
 });
 
 /** One partial's level from a drawn spectrum: the table read at `x` (0..1), linearly. */

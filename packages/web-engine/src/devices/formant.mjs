@@ -74,6 +74,18 @@ const formantSeconds = (id, name, def) => ({
 const VOSIM_ONLY = { param: 'mode', is: 'vosim' };
 const SQUARE_ONLY = { param: 'mode', is: 'square' };
 
+/** Starting points for the preset menu: each the defaults with these controls changed. */
+export const FORMANT_PRESETS = Object.freeze({
+  vowelpad: { formant: 900, count: 6, decay: 0.85, 'ampenv.attack': 0.7, 'ampenv.sustain': 1, 'ampenv.release': 1.5 },
+  talker: { formant: 1400, count: 3, decay: 0.7, track: 0.3, 'ampenv.attack': 0.01, 'ampenv.sustain': 1, 'ampenv.release': 0.12, glide: 0.08 },
+  buzzbass: { mode: 1, formant: 320, shape: 0.15, air: 0.7, track: 0.5, 'ampenv.attack': 0.003, 'ampenv.decay': 0.3, 'ampenv.sustain': 0.7, 'ampenv.release': 0.08 },
+  choir: { formant: 420, count: 10, decay: 0.92, 'ampenv.attack': 0.45, 'ampenv.sustain': 1, 'ampenv.release': 1.2 },
+  whistle: { formant: 270, track: 1, count: 1, 'ampenv.attack': 0.06, 'ampenv.sustain': 1, 'ampenv.release': 0.2, glide: 0.05 },
+  growl: { mode: 1, formant: 140, shape: 0.85, air: 1, 'ampenv.attack': 0.01, 'ampenv.sustain': 1 },
+  reed: { mode: 1, formant: 2400, air: 0.15, track: 0.2, 'ampenv.attack': 0.03, 'ampenv.sustain': 1 },
+  ping: { formant: 3200, count: 14, decay: 0.95, track: 0.5, 'ampenv.decay': 0.35, 'ampenv.sustain': 0, 'ampenv.release': 0.3 },
+});
+
 export const FORMANT = defineDevice({
   id: 'Formant',
   kind: 'synth',
@@ -127,6 +139,7 @@ export const FORMANT = defineDevice({
       subsumes: ['acurve', 'dcurve', 'rcurve'],
     },
   ],
+  presets: FORMANT_PRESETS,
 });
 
 /** The formant in Hz for a pitch: the knob, moved with the note as far as `track` says, kept under the top. */

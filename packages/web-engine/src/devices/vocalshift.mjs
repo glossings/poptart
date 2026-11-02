@@ -33,6 +33,18 @@ import { at } from '../dsp/control.mjs';
 /** How late the output is, in seconds, and so what the scheduler plays notes early by. */
 export const VOCALSHIFT_LATENCY_SEC = 0.05;
 
+/** Starting points for the preset menu: each the defaults with these controls changed. */
+export const VOCALSHIFT_PRESETS = Object.freeze({
+  octaveup: { pitch: 12 },
+  octavedown: { pitch: -12 },
+  fifthup: { pitch: 7 },
+  fourthdown: { pitch: -5 },
+  chipmunk: { pitch: 9, formant: 9 },
+  monster: { pitch: -7, formant: -8 },
+  giant: { formant: -6 },
+  tiny: { formant: 5 },
+});
+
 export const VOCALSHIFT = defineDevice({
   id: 'VocalShift',
   kind: 'fx',
@@ -50,6 +62,7 @@ export const VOCALSHIFT = defineDevice({
     { id: 'formant', name: 'Formant', min: -12, max: 12, default: 0, unit: 'st',
       description: 'Moves the resonances without moving the pitch: up for a smaller throat, down for a bigger one.' },
   ],
+  presets: VOCALSHIFT_PRESETS,
 });
 
 /** Samples averaged into one for the pitch tracker. */

@@ -53,3 +53,42 @@ test('a number nobody can play does not stay in the feedback', () => {
   const out = run(input, { feedback: 0.9, mix: 0.5 });
   for (let i = SR; i < input.length; i++) assert.ok(Number.isFinite(out[i]), `sample ${i} was ${out[i]}`);
 });
+
+/** Two seconds of a pulsed tone, then four of silence. */
+function pulses() {
+  const input = new Float32Array(6 * SR);
+  for (let i = 0; i < 2 * SR; i++) {
+    const t = i / SR;
+    input[i] = 0.5 * Math.sin(2 * Math.PI * 220 * t) * (Math.sin(2 * Math.PI * 2 * t) > 0 ? 1 : 0);
+  }
+  return input;
+}
+
+const stats = (x, from, to) => {
+  let sum = 0;
+  let energy = 0;
+  for (let i = from; i < to; i++) { sum += x[i]; energy += x[i] * x[i]; }
+  return { dc: sum / (to - from), rms: Math.sqrt(energy / (to - from)) };
+};
+
+test('a dense cloud fed back hard stays bounded, carries no offset and dies away', () => {
+  const input = pulses();
+  for (const params of [
+    { size: 500, density: 200, feedback: 0.95 },
+    { size: 300, density: 100, feedback: 0.8, mix: 1 },
+    { size: 200, density: 50, feedback: 0.95, pitch: -12 },
+  ]) {
+    const out = run(input, params);
+    const what = JSON.stringify(params);
+    assert.ok(peakIn(out, 0, out.length) < 0.98, `${what} peaked at ${peakIn(out, 0, out.length)}`);
+    assert.ok(Math.abs(stats(out, 0, out.length).dc) < 0.005, `${what} left an offset`);
+    assert.ok(peakIn(out, 5 * SR, 6 * SR) < 1e-3, `${what} is still sounding seconds after its input stopped`);
+  }
+});
+
+test('more grains overlapping is not a louder echo', () => {
+  const input = pulses();
+  const wet = (density) => stats(run(input, { size: 200, density, spray: 0, feedback: 0, mix: 1 }), 0, 2 * SR).rms;
+  const sparse = wet(10);
+  for (const density of [40, 100, 200]) assert.ok(wet(density) <= sparse * 1.1, `at ${density} Hz the wet is ${wet(density)} against ${sparse}`);
+});

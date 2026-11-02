@@ -20,6 +20,18 @@
 import { defineDevice } from '../descriptor.mjs';
 import { at } from '../dsp/control.mjs';
 
+/** Starting points for the preset menu: each the defaults with these controls changed. */
+export const FREQSHIFT_PRESETS = Object.freeze({
+  phasing: { freq: 1.5, mix: 0.5 },
+  shimmer: { freq: 7, wide: 1, mix: 0.5 },
+  barberup: { freq: 3, feedback: 0.7, mix: 0.6 },
+  barberdown: { freq: -3, feedback: 0.7, mix: 0.6 },
+  metallic: { freq: 120 },
+  clang: { freq: 700, mix: 0.5 },
+  sink: { freq: -40 },
+  spiral: { freq: 30, feedback: 0.85, wide: 1, mix: 0.6 },
+});
+
 export const FREQSHIFT = defineDevice({
   id: 'FreqShift',
   kind: 'fx',
@@ -49,6 +61,7 @@ export const FREQSHIFT = defineDevice({
     }
     return params;
   },
+  presets: FREQSHIFT_PRESETS,
 });
 
 // Two chains of second-order allpasses whose outputs stay 90 degrees apart from about 20 Hz to

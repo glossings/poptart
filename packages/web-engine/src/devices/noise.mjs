@@ -66,11 +66,26 @@ const CRACKLE_RING = 0.0003;
 /** How loud the chaotic map plays, against white. Its values bunch at the ends of the range. */
 const CHAOS_GAIN = 0.8;
 
+/** The voice's level against the controls: a chord of white noise at the default stays under full scale. */
+const NOISE_VOICE_GAIN = 0.55;
+
 /** The digital color's level: a sequence of +1 and -1 is a square wave's loudness, not noise's. */
 const DIGITAL_GAIN = 0.5773502691896258;
 
 const envSeconds = (id, name, def) => ({
   id, name, min: 0, max: 10, default: def, unit: 's', curve: 'pow', curveExp: 3, group: 'Amp Env',
+});
+
+/** Starting points for the preset menu: each the defaults with these controls changed. */
+export const NOISE_PRESETS = Object.freeze({
+  wind: { color: 1, tone: 700, 'ampenv.attack': 1.2, 'ampenv.sustain': 1, 'ampenv.release': 2.5, 'env.acurve': 0 },
+  surf: { color: 2, tone: 4000, 'ampenv.attack': 1, 'ampenv.decay': 2.5, 'ampenv.sustain': 0.25, 'ampenv.release': 3, 'env.acurve': 2 },
+  rain: { color: 5, character: 0.95, tone: 9000, 'ampenv.attack': 0.3, 'ampenv.sustain': 1, 'ampenv.release': 1 },
+  hiss: { color: 3, 'ampenv.attack': 0, 'ampenv.decay': 0.13, 'ampenv.sustain': 0, 'ampenv.release': 0.05 },
+  crackle: { color: 6, character: 0.75, 'ampenv.attack': 0.05, 'ampenv.sustain': 1, 'ampenv.release': 0.5 },
+  riser: { 'ampenv.attack': 3, 'ampenv.sustain': 1, 'ampenv.release': 0.3, 'env.acurve': 3 },
+  chip: { color: 7, character: 0.8, 'ampenv.decay': 0.25, 'ampenv.sustain': 0.3, 'ampenv.release': 0.08 },
+  steps: { color: 8, character: 0.1, pitch: -24, tone: 6000, 'ampenv.sustain': 1 },
 });
 
 export const NOISE = defineDevice({
@@ -107,6 +122,7 @@ export const NOISE = defineDevice({
     { id: 'level', name: 'Level', min: 0, max: 1, default: 0.5, group: 'Voice' },
     { id: 'voices', name: 'Voices', min: 1, open: true, uiMax: NOISE_VOICES_KNOB, legacyMax: 16, default: 8, step: 1, rate: 'k', ui: 'number', group: 'Voice' },
   ],
+  presets: NOISE_PRESETS,
 });
 
 /** A one-pole lowpass coefficient for a corner in Hz. */
@@ -371,7 +387,7 @@ class NoiseVoice {
         this.l1 += toneK * (l - this.l1); this.l2 += toneK * (this.l1 - this.l2); l = this.l2;
         this.r1 += toneK * (r - this.r1); this.r2 += toneK * (this.r1 - this.r2); r = this.r2;
       }
-      const gain = this.env.next() * this.velocity * at(p.level, j);
+      const gain = this.env.next() * this.velocity * at(p.level, j) * NOISE_VOICE_GAIN;
       outL[i] += l * gain;
       outR[i] += r * gain;
     }

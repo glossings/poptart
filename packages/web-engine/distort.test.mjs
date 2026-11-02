@@ -161,8 +161,11 @@ test('a stage brought down by two passes the band under the new Nyquist and stop
   for (const hz of [34000, 40000, 46000]) assert.ok(levelAfter(hz) < -60, `${hz} Hz came out at ${levelAfter(hz).toFixed(1)} dB`);
 });
 
+// The level the auto gain holds is a track's usual one, -18 dBFS RMS: a sine peaking at this.
+const TRACK_LEVEL = 0.17825;
+
 test('auto gain holds the level as the drive goes up, and off it does not', () => {
-  const input = sine(101, 0.5);
+  const input = sine(101, TRACK_LEVEL);
   const quiet = rms(run({ mode: SHAPER_INDEX.soft, drive: 0, autogain: 1 }, input));
   const loud = rms(run({ mode: SHAPER_INDEX.soft, drive: 36, autogain: 1 }, input));
   assert.ok(Math.abs(loud / quiet - 1) < 0.5, `auto gain should hold the level: ${(loud / quiet).toFixed(2)}x`);
@@ -492,13 +495,36 @@ test('harmonics is as loud as what goes in at every drive, not 12 dB under it', 
   }
 });
 
-test('with the auto gain on, every curve comes out within 6 dB of what goes in', () => {
+test('with the auto gain on, every curve comes out within 6 dB of what goes in at a track\'s level', () => {
+  // The harmonic blend is left out: on a quiet signal its odd terms all but cancel the
+  // fundamental, and there is too little left to bring up (its own test is above).
   for (const [mode, name] of SHAPER_MODES.entries()) {
-    for (const drive of [0, 12, 24]) {
-      const db = levelDb(tail({ mode, drive }));
+    if (mode === SHAPER_INDEX.harmonics) continue;
+    for (const drive of [0, 12, 24, 40]) {
+      const db = levelDb(tail({ mode, drive }, { amplitude: TRACK_LEVEL }));
       assert.ok(Math.abs(db) < 6, `${name} at ${drive} dB of drive came out ${db.toFixed(1)} dB from the input`);
     }
   }
+});
+
+test('the auto gain depends on the drive and not on the signal: a hit after silence comes through whole', () => {
+  // A second of silence, then a sine held for half a second: the first 10 ms of it are as loud as
+  // 10 ms of it once it has settled, and a hotter input comes out hotter.
+  const block = 128;
+  const hit = (amplitude) => {
+    const count = Math.round(1.5 * SR / block) * block;
+    const input = new Float32Array(count).map((_, i) => (i < SR ? 0 : amplitude * Math.sin((2 * Math.PI * 220 * (i - SR)) / SR)));
+    const fx = new DistortProcessor(SR, block);
+    const out = new Float32Array(count);
+    const params = { ...defaultValues(DISTORT), mode: SHAPER_INDEX.hard, drive: 30 };
+    for (let at = 0; at < count; at += block) fx.process([input.subarray(at, at + block)], [out.subarray(at, at + block)], block, params);
+    const window = (from) => rms(out.subarray(from, from + SR / 100));
+    return { first: window(SR), settled: window(SR + SR / 4), out };
+  };
+  const { first, settled } = hit(0.5);
+  const db = 20 * Math.log10(first / settled);
+  assert.ok(Math.abs(db) < 0.5, `the first 10 ms came out ${db.toFixed(2)} dB from the settled hit`);
+  assert.ok(hit(0.5).settled > hit(0.1).settled * 1.05, 'a hotter input should come out hotter');
 });
 
 test('Character replaces the old Harmonic knob, and shows only on the curves it changes', async () => {

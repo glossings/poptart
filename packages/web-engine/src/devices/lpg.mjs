@@ -33,6 +33,17 @@ const CUTOFF_SPAN = 1000;
 /** Where the element counts as dark, so its tail does not run on in denormals. */
 const DARK = 1e-9;
 
+/** Starting points for the preset menu: each the defaults with these controls changed. */
+export const LPG_PRESETS = Object.freeze({
+  pluck: { decay: 0.25, resonance: 0.2 },
+  bongo: { decay: 0.12, resonance: 0.7, output: 3 },
+  wood: { decay: 0.5, resonance: 0.5 },
+  bloom: { decay: 1.5, resonance: 0.1 },
+  click: { decay: 0.08, mode: 1, output: 4 },
+  wah: { decay: 0.6, mode: 2, resonance: 0.6, output: -5 },
+  ringing: { decay: 0.8, resonance: 0.95 },
+});
+
 export const LPG = defineDevice({
   id: 'LPG',
   kind: 'fx',
@@ -53,6 +64,7 @@ export const LPG = defineDevice({
       description: 'A peak at the cutoff, which rings as the gate closes.' },
     { id: 'output', name: 'Output', min: -24, max: 24, default: 0, unit: 'dB' },
   ],
+  presets: LPG_PRESETS,
 });
 
 export class LpgProcessor {

@@ -45,12 +45,24 @@ const ADD_NYQUIST_FADE = 0.05;
 /** Damp at 1, in nepers a second per unit of ratio above the fundamental. */
 const ADD_DAMP_RATE = 10;
 /** The voice's level against the controls, as the FM synth's. */
-const ADD_VOICE_GAIN = 0.5;
+const ADD_VOICE_GAIN = 0.32;
 /** Below this, the partials' summed power is silence and is not brought up to level. */
 const ADD_SILENT_POWER = 1e-12;
 
 const additiveSeconds = (id, name, def) => ({
   id, name, min: 0, max: 10, default: def, unit: 's', curve: 'pow', curveExp: 3, group: 'Amp Env',
+});
+
+/** Starting points for the preset menu: each the defaults with these controls changed. */
+export const ADDITIVE_PRESETS = Object.freeze({
+  organ: { partials: 6, tilt: -3, 'ampenv.attack': 0.004, 'ampenv.decay': 0.3, 'ampenv.sustain': 0.75, 'ampenv.release': 0.06 },
+  glassbell: { partials: 12, tilt: -4, stretch: 0.3, damp: 0.35, 'ampenv.decay': 3.5, 'ampenv.sustain': 0, 'ampenv.release': 2 },
+  bowed: { partials: 32, stretch: 0.004, odd: -0.15, 'ampenv.attack': 0.7, 'ampenv.sustain': 1, 'ampenv.release': 1.2 },
+  hollow: { partials: 24, odd: 1, tilt: -7, 'ampenv.attack': 0.01, 'ampenv.sustain': 1, glide: 0.05 },
+  pluck: { partials: 40, tilt: -3, stretch: 0.012, damp: 0.5, 'ampenv.decay': 1.6, 'ampenv.sustain': 0, 'ampenv.release': 0.4, 'env.dcurve': -6 },
+  chime: { partials: 6, tilt: -2, odd: 1, stretch: 0.45, damp: 0.15, 'ampenv.decay': 2.5, 'ampenv.sustain': 0, 'ampenv.release': 1.5 },
+  flute: { partials: 4, tilt: -14, odd: 0.4, 'ampenv.attack': 0.08, 'ampenv.sustain': 1, 'ampenv.release': 0.2 },
+  buzz: { partials: 64, tilt: -4, stretch: 0.003, 'ampenv.attack': 0.003, 'ampenv.decay': 0.4, 'ampenv.sustain': 0.6, 'ampenv.release': 0.1 },
 });
 
 export const ADDITIVE = defineDevice({
@@ -114,6 +126,7 @@ export const ADDITIVE = defineDevice({
     },
   ],
   panel: { rows: [['Partials'], ['Amp Env', 'Voice']] },
+  presets: ADDITIVE_PRESETS,
 });
 
 /** One partial's level from a drawn spectrum: the table read at `x` (0..1), linearly. */

@@ -38,6 +38,17 @@ const spreadSign = (x) => {
   return 2 * (v - Math.floor(v)) - 1;
 };
 
+/** Starting points for the preset menu: each the defaults with these controls changed. */
+export const RESONATOR_PRESETS = Object.freeze({
+  bell: { decay: 3, tilt: 6, mix: 0.4 },
+  body: { decay: 0.15, mix: 0.6 },
+  drone: { decay: 6, tilt: -6, mix: 0.6 },
+  shimmer: { decay: 2, shift: 12, tilt: 12, spread: 0.5, mix: 0.4 },
+  wide: { decay: 1.5, spread: 1 },
+  subtle: { decay: 0.5, mix: 0.25 },
+  dark: { decay: 2, tilt: -18 },
+});
+
 export const RESONATOR = defineDevice({
   id: 'Resonator',
   kind: 'fx',
@@ -72,6 +83,7 @@ export const RESONATOR = defineDevice({
       subsumes: ['levels', 'scale'],
     },
   ],
+  presets: RESONATOR_PRESETS,
 });
 
 export class ResonatorProcessor {

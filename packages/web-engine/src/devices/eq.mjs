@@ -41,6 +41,18 @@ for (let n = 1; n <= EQ_BANDS; n++) {
   figureParams[`q${n}`] = `band${n}.q`;
 }
 
+/** Starting points for the preset menu: each the defaults with these controls changed. */
+export const EQ_PRESETS = Object.freeze({
+  bassboost: { 'band1.freq': 90, 'band1.gain': 6, output: -3 },
+  air: { 'band4.freq': 10000, 'band4.gain': 8 },
+  midscoop: { 'band2.freq': 700, 'band2.gain': -8, 'band2.q': 0.7, 'band3.freq': 1500, 'band3.gain': -3, 'band3.q': 0.8, output: 1 },
+  telephone: { 'band1.type': 4, 'band1.slope': 1, 'band1.freq': 400, 'band3.freq': 1500, 'band3.gain': 5, 'band3.q': 0.7, 'band4.type': 3, 'band4.slope': 1, 'band4.freq': 3000, output: 8 },
+  kicktight: { 'band1.freq': 60, 'band1.gain': 3, 'band2.freq': 350, 'band2.gain': -6, 'band2.q': 1.4, 'band3.freq': 4000, 'band3.gain': 5, 'band3.q': 1.2 },
+  presence: { 'band1.type': 4, 'band1.freq': 100, 'band2.freq': 300, 'band2.gain': -2, 'band3.freq': 3000, 'band3.gain': 4, 'band3.q': 0.8, 'band4.freq': 10000, 'band4.gain': 3 },
+  darktape: { 'band1.freq': 100, 'band1.gain': 2, 'band2.freq': 200, 'band2.gain': 1.5, 'band2.q': 0.7, 'band4.freq': 5000, 'band4.gain': -8, 'band4.q': 0.5 },
+  lowcut: { 'band1.type': 4, 'band1.slope': 2, 'band1.freq': 150, output: 4 },
+});
+
 export const EQ = defineDevice({
   id: 'EQ',
   kind: 'fx',
@@ -64,6 +76,7 @@ export const EQ = defineDevice({
     },
   ],
   panel: { width: 760, rows: [['Band 1', 'Band 2', 'Band 3', 'Band 4', 'Output']] },
+  presets: EQ_PRESETS,
 });
 
 export class EqProcessor {
