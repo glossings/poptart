@@ -548,6 +548,9 @@ class OscEngine {
     // { byRef, loaded } - the browser's own bookkeeping for the same controls (see
     // _loadDeviceSample), so an index means the same file on both engines.
     this._deviceFiles = new Map();
+    // "trackId:slot" -> the loads onto that slot's device still waiting on their pack (see
+    // _loadDeviceSample and sampleSettled).
+    this._deviceLoading = new Map();
     // "track:slot|control" -> the lists handed to a device's list control: which option slot each
     // is in, and when each slot was last pointed at (see _loadDeviceList). `_listEpochs` counts the
     // devices a slot has held, so the scheduler knows when a list has to be handed over again.
@@ -1332,6 +1335,17 @@ class OscEngine {
     return Math.max(0, ...(this._fxSlots.get(trackId) ?? []));
   }
 
+  /**
+   * Resolves once every file named for one slot's device has been handed to it, or at once when
+   * none is waiting - a file in a pack the server is still reading is loaded when the pack is in.
+   * The browser engine's sampleSettled: a window drawing what it just pointed a control at waits
+   * on this, or it draws the empty slot. Never rejects.
+   */
+  sampleSettled(trackId, slot) {
+    const loading = this._deviceLoading.get(`${trackId}:${slot}`);
+    return loading ? Promise.all([...loading]).then(() => null) : Promise.resolve(null);
+  }
+
   deviceSlot(trackId, slot) {
     const key = `${trackId}:${slot}`;
     const device = this._slotDevices.get(key);
@@ -1341,6 +1355,10 @@ class OscEngine {
     const files = {};
     // And the drawn curves, by option slot, as the browser's engine keeps them for its figures.
     let shapes = null;
+    // And where each loaded file is on disk, by option slot - { name, path, table } - for the
+    // window's picture of it: the outline of a file played as audio, the frames of a table (the
+    // browser's engine keeps those itself, as `waves` and `tables`).
+    let sources = null;
     for (const [held, one] of this._deviceFiles) {
       if (!held.startsWith(`${key}|`)) continue;
       // Filed by control, or by the bank several controls share - in which case every one of them
@@ -1354,6 +1372,10 @@ class OscEngine {
         for (const [name, index] of one.named ?? []) files[control][index] = name;
       }
       if (one.tables) shapes = { ...(shapes ?? {}), ...one.tables };
+      for (const [ref, index] of one.byRef) {
+        const at = one.paths?.get(index);
+        if (at?.path) (sources ??= {})[index] = { name: ref, path: at.path, table: at.table };
+      }
     }
     // The lists a pattern handed over, named as the browser names them.
     for (const [held, one] of this._deviceLists) {
@@ -1370,6 +1392,7 @@ class OscEngine {
       driven: Object.fromEntries(this._deviceDriven.get(key) ?? []),
       files,
       shapes,
+      sources,
     };
   }
 
@@ -1932,6 +1955,7 @@ class OscEngine {
           // would be a fresh spawn every couple of seconds for as long as the pattern plays.
           entry.status = 'error';
           entry.stable = true;
+          this._dropWaiting(entry);
           this._warnOnce(`source:${ref}`, `[poptart] ${what} could not be rendered: ${err.message}`);
         });
       return entry;
@@ -1972,6 +1996,7 @@ class OscEngine {
         // the device silent until something touched that line again.
         const waiting = entry.waiting ?? [];
         entry.waiting = null;
+        entry.failed = null;
         // eslint-disable-next-line no-console
         console.log(`[poptart] ${what}: ${entry.files.length} file(s) loaded`);
         for (const fn of waiting) {
@@ -1984,8 +2009,17 @@ class OscEngine {
       })
       .catch((err) => {
         entry.status = 'error';
+        this._dropWaiting(entry);
         this._warnOnce(`source:${ref}`, `[poptart] ${what} failed to load: ${err.message}`);
       });
+  }
+
+  /** A pack that will not load: whoever was waiting on it stops waiting. */
+  _dropWaiting(entry) {
+    const failed = entry.failed ?? [];
+    entry.waiting = null;
+    entry.failed = null;
+    for (const done of failed) done();
   }
 
   /**
@@ -2403,8 +2437,22 @@ class OscEngine {
     }
     const entry = this._ensurePack(pack);
     if (entry.status === 'loading') {
-      // Applied when the pack is in, rather than dropped: see _ensurePack.
-      (entry.waiting ??= []).push(() => this._loadDeviceSample(trackId, slotIndex, device, control, ref, targetTime));
+      // Applied when the pack is in, rather than dropped: see _ensurePack. Until then the slot is
+      // loading, which a window drawing it waits on (see sampleSettled).
+      let done;
+      const settled = new Promise((resolve) => { done = resolve; });
+      (entry.waiting ??= []).push(() => {
+        try { this._loadDeviceSample(trackId, slotIndex, device, control, ref, targetTime); } finally { done(); }
+      });
+      (entry.failed ??= []).push(done);
+      const slotKey = `${trackId}:${slotIndex}`;
+      const loading = this._deviceLoading.get(slotKey) ?? new Set();
+      this._deviceLoading.set(slotKey, loading);
+      loading.add(settled);
+      settled.then(() => {
+        loading.delete(settled);
+        if (!loading.size && this._deviceLoading.get(slotKey) === loading) this._deviceLoading.delete(slotKey);
+      });
       return;
     }
     if (entry.status !== 'ready') return;    // _ensurePack has already said what went wrong
@@ -2426,6 +2474,8 @@ class OscEngine {
     const paramIndex = device.params.findIndex((p) => p.id === control.id);
     // A table is cut at the frame length its file declares, which only the file's header says.
     const frameLength = control.sampleAs === 'wavetable' ? wavFrameLength(entry.files[file]?.path) : 0;
+    // Where the file is, for the window's picture of it (see deviceSlot's `sources`).
+    (held.paths ??= new Map()).set(index, { path: entry.files[file]?.path ?? null, table: control.sampleAs === 'wavetable' });
     this._send('/poptart/deviceSample', [trackId, slotIndex, paramIndex, index, pack, file, frameLength]);
     this.setParam(trackId, slotIndex, control.id, index, targetTime);
   }

@@ -16,6 +16,7 @@ const { preferVst3 } = require('./plugin-filter');
 const { deviceRows, deviceParamRows, nativeDevice, nativeDevices } = require('@poptart/osc-engine/native-devices');
 const { SNAPSHOT_DIR, putSnapshot, getSnapshot, pruneSnapshots } = require('./snapshots');
 const blobs = require('./blobs');
+const { deviceSources, withLoadedTables } = require('./device-sources');
 const filePreview = require('./file-preview');
 const { StateCarry } = require('./state-carry');
 const pinnedDefs = require('./pinned-defs');
@@ -6914,8 +6915,9 @@ function deviceKit() {
     const load = (file) => import(pathToFileURL(path.join(WEB_ENGINE_SRC, file)).href);
     devicePanelKit = Promise.all([
       load('panel.mjs'), load('figures.mjs'), load('descriptor.mjs'), load('catalog.mjs'), load('dsp/tables.mjs'), load('dsp/wavfile.mjs'),
+      load('dsp/outline.mjs'), load('devices/builtins.mjs'),
     ])
-      .then(([panel, figures, descriptor, catalog, tables, wavfile]) => ({ panel, figures, descriptor, catalog, tables, wavfile }))
+      .then(([panel, figures, descriptor, catalog, tables, wavfile, outline, builtins]) => ({ panel, figures, descriptor, catalog, tables, wavfile, outline, builtins }))
       .catch((err) => {
         devicePanelKit = null;
         throw new Error(`poptart's own device windows are drawn by web-engine, which could not be loaded - ${err?.message ?? err}`);
@@ -6951,6 +6953,9 @@ async function deviceInSlot(trackLabel, slot) {
     extras: at.files ?? {},
     // The curves drawn onto a control that takes one, as the device reads them.
     shapes: at.shapes ?? null,
+    // The outline of each file it plays (and of a space it synthesizes) as `waves`, and the frames
+    // of each table loaded onto it as `tables`, for the pictures of them.
+    ...(await deviceSources(kit, descriptor, values, at, { sampleRate: DEVICE_FIGURE_RATE })),
   };
 }
 
@@ -6959,9 +6964,11 @@ function deviceFigureOpts(state) {
   return {
     // The shipped set, built by the same code the C++ tables were translated from - a picture of
     // a different copy would be a picture of a different sound.
-    tables: state.kit.tables.sharedBuiltInTables(),
+    // Then whatever this slot loaded into the spare slots, as the browser host does.
+    tables: withLoadedTables(state.kit.tables.sharedBuiltInTables(), state.tables ?? null),
     extras: state.extras,
     shapes: state.shapes ?? null,
+    waves: state.waves ?? null,
     sampleRate: DEVICE_FIGURE_RATE,
     // The tempo the track runs at, for a picture on the beat grid: a ducker's dip was drawn at
     // the nominal 120 while the device dipped at the song's 138 (seen live, 2026-10-28).
@@ -7113,6 +7120,10 @@ async function setDeviceParam(body) {
   // the engine, because WHICH slot that was is the engine's answer and not this one's.
   if (typeof body.sample === 'string' && found.takes === 'sample') {
     mappedEngine?.setParam(engineTrack(trackLabel), slot, found.id, body.sample, engine.getTime());
+    // A file in a pack the server is still reading lands when the pack is in, so the answer waits
+    // for it, as the browser host's does: drawn straight away, the picture would be of the empty
+    // slot, and would sit there until something else redrew it.
+    await engine.sampleSettled?.(engineTrack(trackLabel), slot);
     const after = (await deviceInSlot(trackLabel, slot)) ?? state;
     const value = after.values[found.id] ?? 0;
     if (body?.commit) noteDeviceEdit(trackLabel, slot, found, kit.panel.paramArgFor(descriptor, found.id, value, after.extras));

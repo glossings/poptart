@@ -20,8 +20,8 @@ import { catalog as defaultCatalog } from '../catalog.mjs';
 import { buildNodeDevice } from '../devices/builtins.mjs';
 import { CROSSOVER } from '../devices/crossover.mjs';
 import { defaultValues, denormalize, findParam, migrateState, normalize } from '../descriptor.mjs';
-import { decodeWav, framesOf } from '../dsp/wavfile.mjs';
-import { buildMipmaps, powerOfTwoAtLeast, resampleFrame } from '../dsp/tables.mjs';
+import { decodeWav, tableFramesOf } from '../dsp/wavfile.mjs';
+import { buildMipmaps } from '../dsp/tables.mjs';
 import { outlineOf } from '../dsp/outline.mjs';
 import { compileExpr, exprConsts, exprHasFollower, exprInputCount, exprInputs, exprShape } from '../dsp/expr.mjs';
 import { ViewTaps } from './view-taps.mjs';
@@ -1354,18 +1354,11 @@ export class WebAudioEngine {
    * in pieces, yielding between them, so a file of hundreds of frames costs the page a moment
    * of work rather than the audio thread a dropout.
    */
-  async _wavetableOf({ channels, frameLength }) {
-    let mono = channels[0];
-    if (channels.length > 1) {
-      mono = new Float32Array(channels[0].length);
-      for (const c of channels) for (let i = 0; i < mono.length; i++) mono[i] += c[i] / channels.length;
-    }
-    const raw = framesOf(mono, frameLength ?? 2048);
-    const length = powerOfTwoAtLeast(raw[0].length);
+  async _wavetableOf(payload) {
+    const frames = tableFramesOf(payload);
     const mips = [];
-    for (let i = 0; i < raw.length; i++) {
-      const frame = raw[i].length === length ? raw[i] : resampleFrame(raw[i], length);
-      mips.push(buildMipmaps(frame));
+    for (let i = 0; i < frames.length; i++) {
+      mips.push(buildMipmaps(frames[i]));
       if (i % 8 === 7) await new Promise((resolve) => setTimeout(resolve, 0));
     }
     return { mips };

@@ -386,6 +386,57 @@ test('a named file is loaded onto the control and the control is pointed at it',
   assert.deepStrictEqual(e.deviceSlot('cloud', 0).files, { sample: { [slot]: 'break:1' } });
 });
 
+test('a loaded file says where it is, and whether it is a table, for the window\'s picture of it', () => {
+  const { e } = withPack();
+  e.loadInstrument('cloud', 'Granular');
+  e.setParam('cloud', 0, 'sample', 'break:1');
+  const slot = deviceParam(nativeDevice('Granular'), 'sample').options.length;
+  assert.deepStrictEqual(e.deviceSlot('cloud', 0).sources, { [slot]: { name: 'break:1', path: '/samples/break/two.wav', table: false } });
+  e.loadInstrument('table', 'Wavetable');
+  e.setParam('table', 0, 'Osc 1 Table', 'break:0');
+  const tables = e.deviceSlot('table', 0).sources;
+  assert.deepStrictEqual(Object.values(tables), [{ name: 'break:0', path: '/samples/break/one.wav', table: true }]);
+});
+
+test('a file in a pack still loading keeps its slot loading until the pack is in', async () => {
+  const { e, sent } = engine();
+  const loaded = [];
+  e._loadPackFiles = (ref, entry) => loaded.push(entry);
+  e._resolveSource = () => ({ paths: ['/samples/wt/one.wav'], what: 'wt', where: '', stable: true });
+  e.loadInstrument('table', 'Wavetable');
+  let settled = false;
+  await e.sampleSettled('table', 0);
+  e.setParam('table', 0, 'Osc 1 Table', 'wt:0');
+  e.sampleSettled('table', 0).then(() => { settled = true; });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.strictEqual(settled, false, 'nothing has been handed over yet');
+  assert.strictEqual(e.deviceSlot('table', 0).sources, null);
+  // The pack lands, as _loadPackFiles's answer from sclang does.
+  const [entry] = loaded;
+  entry.files = [{ path: '/samples/wt/one.wav', duration: 1, channels: 1 }];
+  entry.status = 'ready';
+  const waiting = entry.waiting;
+  entry.waiting = null;
+  for (const fn of waiting) fn();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.strictEqual(settled, true);
+  assert.deepStrictEqual(Object.values(e.deviceSlot('table', 0).sources), [{ name: 'wt:0', path: '/samples/wt/one.wav', table: true }]);
+  assert.strictEqual(sent.filter((m) => m.addr === '/poptart/deviceSample').length, 1);
+});
+
+test('a pack that fails to load stops its slot waiting', async () => {
+  const { e } = engine();
+  const loaded = [];
+  e._loadPackFiles = (ref, entry) => loaded.push(entry);
+  e._resolveSource = () => ({ paths: ['/samples/wt/one.wav'], what: 'wt', where: '', stable: true });
+  e.loadInstrument('table', 'Wavetable');
+  e.setParam('table', 0, 'Osc 1 Table', 'wt:0');
+  const settled = e.sampleSettled('table', 0);
+  loaded[0].status = 'error';
+  e._dropWaiting(loaded[0]);
+  assert.strictEqual(await settled, null);
+});
+
 test('the same file named again is a lookup, not a second load', () => {
   const { e, sent } = withPack();
   e.loadInstrument('cloud', 'Granular');

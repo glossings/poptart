@@ -10,6 +10,8 @@
 // PCM in 8, 16, 24 and 32 bits and IEEE float in 32 and 64 are read, which covers what an editor
 // exports. Anything else - compressed, or a format tag this has never seen - is refused by name.
 
+import { powerOfTwoAtLeast, resampleFrame } from './tables.mjs';
+
 const FORMAT_PCM = 1;
 const FORMAT_FLOAT = 3;
 const FORMAT_EXTENSIBLE = 0xfffe;
@@ -130,4 +132,20 @@ export function framesOf(samples, frameLength = DEFAULT_FRAME_LENGTH) {
     for (const f of frames) for (let i = 0; i < f.length; i++) f[i] *= g;
   }
   return frames;
+}
+
+/**
+ * A file's channels as wavetable frames: summed, cut at the frame length it declares (2048 when
+ * it declares none), and each frame brought to a power of two. What the engine builds a loaded
+ * table's pyramid from, and what a picture of the table draws.
+ */
+export function tableFramesOf({ channels, frameLength }) {
+  let mono = channels[0];
+  if (channels.length > 1) {
+    mono = new Float32Array(channels[0].length);
+    for (const c of channels) for (let i = 0; i < mono.length; i++) mono[i] += c[i] / channels.length;
+  }
+  const raw = framesOf(mono, frameLength ?? 2048);
+  const length = powerOfTwoAtLeast(raw[0].length);
+  return raw.map((frame) => (frame.length === length ? frame : resampleFrame(frame, length)));
 }
