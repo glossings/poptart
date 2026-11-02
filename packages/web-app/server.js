@@ -13,7 +13,7 @@ const os = require('node:os');
 const { MappedEngine, toRealWorld } = require('./param-mapping');
 const { blockReason, isLoopbackHostname, embedRefusal } = require('./request-guard');
 const { preferVst3 } = require('./plugin-filter');
-const { deviceRows, deviceParamRows, nativeDevice, nativeDevices } = require('@poptart/osc-engine/native-devices');
+const { deviceRows, deviceParamRows, nativeDevice, nativeDevices, shippedPresets } = require('@poptart/osc-engine/native-devices');
 const { SNAPSHOT_DIR, putSnapshot, getSnapshot, pruneSnapshots } = require('./snapshots');
 const blobs = require('./blobs');
 const { deviceSources, withLoadedTables } = require('./device-sources');
@@ -5264,6 +5264,9 @@ function runPrebake() {
   // prebake (the browser saved the file) replaces the layer wholesale, the same as prebakeDefs.
   patternCore.setRollLayer('prebake');
   patternCore.clearRolls('prebake');
+  // The presets poptart's own devices ship (a Drum's snare), filed first so one the prebake
+  // defines under the same name for the same device wins.
+  for (const p of shippedPresets()) patternCore._preset(p.id, p.plugin, p.state);
   // A prebake can name .scl tunings too (a setscale there, or a helper's .scale) - read them before
   // it runs, as a buffer's are before an evaluation.
   for (const src of sources) registerBufferTunings(src.code);
@@ -9153,6 +9156,23 @@ const routes = {
     if (name != null && presetHolds.get(`${trackId}|${slot}`)?.preset !== name) await flushPluginCaptures();
     const why = setPresetHold(trackId, slot, name, { force: true });
     return { status: 200, body: { held: name, why } };
+  },
+
+  // A preset picked in a device window: loaded into the slot now, even over a window holding it by
+  // hand - it is a deliberate "play this one" - once what the hands did is captured into the preset
+  // it was done on. The window writes the `.preset(...)` into the code as well; this is what makes
+  // it heard before the pattern next comes round. Body: { trackId, slot, preset }.
+  'POST /api/devicePreset': async (body) => {
+    const trackId = String(body?.trackId ?? '');
+    const slot = Number(body?.slot ?? 0);
+    const name = body?.preset == null ? null : String(body.preset);
+    if (name == null) return { status: 200, body: { loaded: false } };
+    await flushPluginCaptures();
+    const scheduler = schedulers.get(trackId);
+    const why = scheduler?.holdPreset(slot, name, { force: true }) ?? null;
+    // Loaded, not held: the pattern has it from here, unless the preset panel is holding the slot.
+    if (!presetHolds.has(`${trackId}|${slot}`)) scheduler?.holdPreset(slot, null);
+    return { status: 200, body: { loaded: !!scheduler, why } };
   },
 
   // Hold one channel-strip control at the value under a mixer fader/knob while it is dragged, so

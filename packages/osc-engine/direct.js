@@ -445,7 +445,7 @@ class DirectPath {
    * moves; the first value, a channel control coming back to rest, and the stepped selectors go
    * the old way, since those are where sclang builds, drops or sets outright.
    */
-  setParam(trackId, slot, name, value, targetTime) {
+  setParam(trackId, slot, name, value, targetTime, step = false) {
     if (!this.ready) return this._ok(false);
     const tr = this.tracks.get(trackId);
     if (!tr?.known) return this._ok(false);
@@ -458,7 +458,10 @@ class DirectPath {
     }
     const leaf = /^~\d+~/.test(name);
     const v = slot >= 0 && !leaf ? Math.min(1, Math.max(0, value)) : value;
-    this._sendAt(targetTime, [{ address: '/n_set', args: [i32(r.node), str('target'), f32(v)] }]);
+    // A stepped control's ramp takes no time, so the value is in place at its own time.
+    const args = [i32(r.node), str('target'), f32(v)];
+    if (step) args.push(str('time'), f32(0));
+    this._sendAt(targetTime, [{ address: '/n_set', args }]);
     return this._ok(true);
   }
 

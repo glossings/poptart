@@ -27,7 +27,7 @@ const { speechRoot, cachedSpeech, renderSpeech, parseSpeech, voiceInstalled } = 
 const { analyzeSlices } = require('./analysis');
 const { ensurePoptartExtension, ensureDeviceExtension, userExtensionsDir, sclangStartupFile } = require('./extensions');
 const {
-  nativeDevice, internalDevice, deviceParam, deviceParamArgs, devicePositions, paramPosition, deviceStateText, readDeviceState,
+  nativeDevice, internalDevice, isStepped, deviceParam, deviceParamArgs, devicePositions, paramPosition, deviceStateText, readDeviceState,
   readDeviceLive,
 } = require('./native-devices');
 const { wavFrameLength, writeWav } = require('./wav');
@@ -2353,13 +2353,18 @@ class OscEngine {
   }
 
   // A value for a control, direct when sclang has already built its ramp (see DirectPath#setParam).
-  _sendParam(trackId, slotIndex, paramName, value, targetTime) {
+  // `step` sets it outright at its time rather than gliding there (native-devices.js's isStepped):
+  // a mode list glided through plays every mode on the way, and a control a device reads when a
+  // hit starts (a Drum's Material) has to be in place for a hit on the same sample.
+  _sendParam(trackId, slotIndex, paramName, value, targetTime, step = false) {
     if (this._directOn) {
       const grainCtl = slotIndex === -1 && /^grain(pos|size|rate|pan)$/.test(String(paramName));
       if (grainCtl ? this._direct.setHeadControl(trackId, String(paramName), value, targetTime)
-        : this._direct.setParam(trackId, slotIndex, String(paramName), value, targetTime)) return;
+        : this._direct.setParam(trackId, slotIndex, String(paramName), value, targetTime, step)) return;
     }
-    this._send('/poptart/setParam', [trackId, slotIndex, paramName, value, this._latency(targetTime)]);
+    const args = [trackId, slotIndex, paramName, value, this._latency(targetTime)];
+    if (step) args.push(1);
+    this._send('/poptart/setParam', args);
   }
 
   setParam(trackId, slotIndex, paramName, value, targetTime) {
@@ -2417,7 +2422,7 @@ class OscEngine {
         // due, so a desktop bank never plays fewer bands than asked while it grows.
         if (control.open && !control.options) this._hintRoom(trackId, slotIndex, device, control, position);
       }
-      this._sendParam(trackId, slotIndex, paramName, position, targetTime);
+      this._sendParam(trackId, slotIndex, paramName, position, targetTime, !!control && isStepped(control));
       return;
     }
     // A plugin parameter is a number. A word - an enum label the browser build's devices take -

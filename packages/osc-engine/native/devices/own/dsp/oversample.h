@@ -95,7 +95,9 @@ struct Stage2x {
       downEven[0] = input[i * 2];
       downOdd[0] = input[i * 2 + 1];
       double acc = 0;
-      for (int k = 0; k < kHalfTaps; ++k) acc += even[k] * downEven[k] + odd[k] * downOdd[k];
+      // The output is taken at the odd sample: the even taps fall on the odd samples and the odd
+      // taps on the even ones. Paired the other way round the filter is not a lowpass at all.
+      for (int k = 0; k < kHalfTaps; ++k) acc += even[k] * downOdd[k] + odd[k] * downEven[k];
       // The gain of two belongs to the upsampler only; undo it here.
       out[i] = acc * 0.5;
     }

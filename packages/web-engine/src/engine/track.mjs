@@ -1126,8 +1126,9 @@ export class Track {
     // A choice, a stepped control or a switch STEPS, whoever sets it. The pattern's poll and a
     // named curve being loaded pass no glide, and the default one ramped a mode control from slot
     // 19 to slot 1 through every setting between - each played for a block, empty drawn slots as a
-    // hard clip, which was the crack heard on every curve change.
-    const stepped = !!(param.options || param.step || param.ui === 'toggle');
+    // hard clip, which was the crack heard on every curve change. A control read when a hit starts
+    // (`latch`) steps too: a hit on the change's sample is struck with the new value.
+    const stepped = !!(param.options || param.step || param.ui === 'toggle' || param.latch);
     if (audioParam) rampParam(audioParam, normalize(param, value), atTime, now, stepped ? 0 : glide);
     else slot.built.set?.(param.id, value);
   }

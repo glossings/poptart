@@ -98,7 +98,9 @@ export class Stage2x {
       lineE[0] = input[i * 2];
       lineO[0] = input[i * 2 + 1];
       let acc = 0;
-      for (let k = 0; k < half; k++) acc += even[k] * lineE[k] + odd[k] * lineO[k];
+      // The output is taken at the odd sample: the even taps fall on the odd samples and the odd
+      // taps on the even ones. Paired the other way round the filter is not a lowpass at all.
+      for (let k = 0; k < half; k++) acc += even[k] * lineO[k] + odd[k] * lineE[k];
       // The gain of two belongs to the upsampler only; undo it here.
       out[i] = acc * 0.5;
     }

@@ -2081,6 +2081,72 @@ function presetCallForSlot(code, trackLabel, slot) {
   return null;
 }
 
+/**
+ * The `.preset(...)` calls on `block`'s own chain aimed at `slot`, in order: each the last device
+ * before it, as Sig#preset reads the chain (a second synth() takes slot 0 over). Each is
+ * { dot, close, from, to, str } - where the call starts at its dot and ends, and the range of its
+ * string's contents. Commented-out calls are not calls.
+ */
+function slotPresetCalls(code, block, slot) {
+  const isCode = blockOwnCode(code, block);
+  const chain = slotCalls(code, block.start, block.end, isCode);
+  const out = [];
+  const re = /\.\s*preset\s*\(/g;
+  re.lastIndex = block.start;
+  let m;
+  while ((m = re.exec(code)) && m.index < block.end) {
+    if (!isCode(m.index)) continue;
+    const open = m.index + m[0].length - 1;
+    const close = matchParen(code, open);
+    if (close < 0 || close > block.end) continue;
+    // The device it aims at: the last one whose call has closed before it.
+    let aimed = null;
+    for (const c of chain) if (c.index < m.index && c.close >= 0 && c.close < m.index) aimed = c.slot;
+    if (aimed !== slot) continue;
+    const lit = /^\s*(["'`])((?:\\.|(?!\1)[\s\S])*?)\1\s*$/.exec(code.slice(open + 1, close));
+    if (!lit) continue;
+    const from = open + 1 + lit[0].indexOf(lit[1]) + 1;
+    out.push({ dot: m.index, close, from, to: from + lit[2].length, str: lit[2] });
+  }
+  return out;
+}
+
+/**
+ * What a device window's preset picker reads: the preset the code puts `slot` on - the LAST call
+ * aimed at it, as the last call wins - or `driven` with the pattern when that call names more than
+ * one, which the window shows and leaves alone, as it does a driven knob.
+ */
+function devicePresetNow(code, trackLabel, slot) {
+  const block = blockForTrack(code, trackLabel);
+  const last = block ? slotPresetCalls(code, block, slot).at(-1) : null;
+  if (!last) return { name: null, driven: null };
+  const word = last.str.trim();
+  return /^[A-Za-z_$][\w$]*$/.test(word) ? { name: word, driven: null } : { name: null, driven: word };
+}
+
+/**
+ * The edit that puts `slot` on preset `id` - its last `.preset(...)` renamed, or one chained on
+ * right after the device's call - or, with `id` null, takes that call out (with the line it stood
+ * on, when it had one to itself). [from, to, text], or null when there is nothing to do.
+ */
+function devicePresetEdit(code, trackLabel, slot, id) {
+  const block = blockForTrack(code, trackLabel);
+  if (!block) return null;
+  const last = slotPresetCalls(code, block, slot).at(-1);
+  if (id == null) {
+    if (!last) return null;
+    let from = last.dot;
+    while (from > 0 && (code[from - 1] === ' ' || code[from - 1] === '\t')) from--;
+    if (code[from - 1] !== '\n') from = last.dot;
+    else from -= 1;
+    return [from, last.close + 1, ''];
+  }
+  if (last) return last.str === id ? null : [last.from, last.to, id];
+  const call = findChainCall(code, block, slot);
+  if (!call) return null;
+  return [call.closeParen + 1, call.closeParen + 1, `.preset(${JSON.stringify(id)})`];
+}
+
 // Applies [from, to, text] edits to the buffer as ONE undo step, last-first so every offset still
 // holds against the `code` they were computed from.
 //
@@ -3997,7 +4063,9 @@ function openWidgetAt(code, idx, ed = cm) {
     return true;
   }
   const preset = findPresetCallAt(code, idx);
-  if (preset?.onName) {
+  // On the call's name, or on a preset's name inside it - which is where the eye is.
+  const presetName = preset && idStringRange(preset, code);
+  if (preset?.onName || (presetName && idx >= presetName[0] && idx <= presetName[1])) {
     // An empty .preset() has no name yet. Give it one, then open whatever it became - a bookmark
     // carries the handle's position across the rewrite, since a definitions block inserted above
     // moves every offset below it along. Same dance as the roll's and the shape's.
@@ -4136,6 +4204,7 @@ function showPluginEditor(trackId, slot, name = null) {
 const devicePanelEl = document.getElementById('devicePanel');
 const deviceTitleEl = document.getElementById('deviceTitle');
 const deviceTargetEl = document.getElementById('deviceTarget');
+const devicePresetEl = document.getElementById('devicePreset');
 const deviceSectionsEl = document.getElementById('deviceSections');
 const deviceCreditEl = document.getElementById('deviceCredit');
 
@@ -4427,10 +4496,10 @@ function startDeviceLive(trackLabel, slot, panel) {
 
 /** Figures that draw what a device is doing rather than how it is set, and so always follow. An
  * equalizer's curve is drawn over the signal an analyser reads while its window is open. */
-const LIVE_FIGURE_KINDS = new Set(['sample', 'meter', 'transfer', 'eq', 'shaper', 'sweep', 'duck', 'bands', 'loop']);
+const LIVE_FIGURE_KINDS = new Set(['sample', 'meter', 'transfer', 'eq', 'shaper', 'sweep', 'duck', 'bands', 'loop', 'hitpitch']);
 
 /** How tall each kind of figure is drawn, in CSS pixels. */
-const FIGURE_HEIGHT = { wavetable: 176, unison: 64, response: 108, adsr: 108, eq: 128, band: 52, matrix: 176, sample: 96, grain: 64, meter: 22, transfer: 120, shaper: 108, echoes: 84, repeats: 72, decay: 72, sweep: 96, duck: 112, bands: 96, loop: 44 };
+const FIGURE_HEIGHT = { wavetable: 176, unison: 64, response: 108, adsr: 108, eq: 128, band: 52, matrix: 176, sample: 96, grain: 64, meter: 22, transfer: 120, shaper: 108, echoes: 84, repeats: 72, decay: 72, sweep: 96, duck: 112, bands: 96, loop: 44, partials: 96, hitpitch: 108, modes: 96 };
 
 /** How near a press counts as being on an envelope handle - the sampler's panel allows the same. */
 const FIGURE_HIT_PX = 9;
@@ -4565,6 +4634,135 @@ document.addEventListener('scroll', () => {
  * knows lfo() and .grainshape()), so a rename carries those calls here, and a delete is refused
  * while one still plays it.
  */
+/**
+ * The preset picker on a device window's heading: the presets this device can be put on - the ones
+ * it comes with, the buffer's own `_preset(...)` definitions for it and the library's - with the
+ * one the code has it on shown. Choosing one writes it into the code as the slot's `.preset(...)`
+ * (one undo step) and evaluates, so what the window shows is what the code says; "none" takes the
+ * call out. A slot whose `.preset(...)` is a pattern is shown as such and not rewritten, as a
+ * driven knob is not turned. The list is the preset panel's own, hung off the page like a curve
+ * picker's (see deviceShapePicker).
+ */
+function devicePresetPicker(trackLabel, slot, panel) {
+  const { ed: host, label } = deckTrackParts(trackLabel);
+  const shipped = new Set(panel.presets ?? []);
+  const NONE = '(none)';
+  const make = (tag, cls, text) => {
+    const el = document.createElement(tag);
+    if (cls) el.className = cls;
+    if (text != null) el.textContent = text;
+    return el;
+  };
+  const wrap = make('div', 'def-pick-wrap', 'preset');
+  const title = make('span', 'hidden');
+  const name = make('input', 'def-name');
+  name.type = 'text';
+  name.spellcheck = false;
+  name.readOnly = true;
+  const btn = make('button', 'small', '▾');
+  btn.title = 'pick a preset';
+  const box = make('div', 'def-picker hidden');
+  const search = make('input');
+  search.type = 'text';
+  search.spellcheck = false;
+  search.placeholder = 'search, or type a new name';
+  const list = make('div', 'def-pick-list');
+  box.append(search, list);
+  wrap.append(title, name, btn, box);
+
+  const now = () => devicePresetNow(host.getValue(), label, slot);
+  // The plugin name the code calls this device by, which is what its presets are filed under.
+  const scope = () => {
+    const code = host.getValue();
+    const block = blockForTrack(code, label);
+    return (block && findChainCall(code, block, slot)?.plugin) || panel.id;
+  };
+  const presets = (fn) => presetDefs.withEditor(host, fn);
+  const reg = {
+    label: 'preset',
+    libraryNote: presetDefs.libraryNote,
+    allIds: () => [
+      { id: NONE, scope: scope(), note: '', own: false, none: true },
+      ...presets(() => presetDefs.allIds(scope(), host.getValue()))
+        .map((r) => (!r.own && shipped.has(r.id) ? { ...r, note: 'built-in' } : r)),
+    ],
+    pinState: (id, sc) => (id === NONE || shipped.has(id) ? 'none' : presets(() => presetDefs.pinState(id, sc))),
+    pin: (id, sc) => presets(() => presetDefs.pin(id, sc)),
+    unpin: (id, sc) => presets(() => presetDefs.unpin(id, sc)),
+    duplicate: (id, sc) => (id === NONE ? null : presets(() => presetDefs.duplicate(id, sc))),
+    remove: (id, sc) => presets(() => presetDefs.remove(id, sc)),
+    rename: () => {},
+  };
+  /**
+   * Puts the slot on `id` in the code (null for none), and evaluates. An open window holds its
+   * slot against the pattern (see showPluginEditor), so the preset is loaded into it first, by the
+   * host - which captures any edit made by hand into the preset it was made on before it does.
+   */
+  const choose = (id) => {
+    if (now().driven) return;
+    queueHandOp(() => api('POST', '/api/devicePreset', { trackId: trackLabel, slot, preset: id }).catch(() => {}).then(() => {
+      const edit = devicePresetEdit(host.getValue(), label, slot, id);
+      if (!edit) return;
+      const [from, to, text] = edit;
+      host.replaceRange(text, host.posFromIndex(from), host.posFromIndex(to), 'devicePreset');
+      logLine(id == null ? `${trackLabel} slot ${slot}: no preset` : `${trackLabel} slot ${slot}: preset "${id}"`);
+      evalEditor(host);
+    }));
+  };
+  const head = makeNamePicker({
+    els: { wrap, title, name, btn, picker: box, search, list },
+    reg,
+    current: () => now().name ?? NONE,
+    alwaysShow: true,
+    scope,
+    open: (id) => choose(id === NONE ? null : id),
+    create: (id) => {
+      if (DEF_ID_BAD.test(id)) return logLine(`a preset's name has to be one plain word - "${id}" isn't`, true);
+      choose(id);
+    },
+    refocus: () => {},
+  });
+
+  btn.addEventListener('click', () => {
+    if (head.isOpen()) { closeDeviceShapeList(); return; }
+    closeDeviceShapeList();
+    deviceShapeOpen = { head, wrap, box };
+    document.body.appendChild(box);
+    head.openPicker();
+    const at = wrap.getBoundingClientRect();
+    deviceShapeOpen.at = at;
+    const height = box.getBoundingClientRect().height;
+    const below = window.innerHeight - at.bottom;
+    box.style.position = 'fixed';
+    box.style.left = `${Math.max(8, Math.min(at.left, window.innerWidth - box.offsetWidth - 8))}px`;
+    box.style.top = `${below >= height + 12 || below >= at.top ? at.bottom + 4 : Math.max(8, at.top - height - 4)}px`;
+    box.style.zIndex = String(panelFrontZ + 1);
+  });
+  search.addEventListener('input', () => head.renderList(true));
+  search.addEventListener('keydown', (e) => {
+    if (packTransportKey(e)) return;
+    if (e.key === 'ArrowDown') { e.preventDefault(); head.move(1); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); head.move(-1); }
+    else if (e.key === 'Enter') { e.preventDefault(); head.choose(); }
+    else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); head.closePicker(); return; }
+    e.stopPropagation();
+  });
+
+  const { name: on, driven } = now();
+  head.syncHead();
+  if (driven) {
+    // A pattern of presets: said as written, and the list is not offered.
+    name.value = driven;
+    name.title = `driven by .preset("${driven}")`;
+    wrap.classList.add('driven');
+    btn.disabled = true;
+  } else {
+    name.value = on ?? NONE;
+    name.title = on ? `${on}${shipped.has(on) ? ' - built in' : ''}` : 'no preset';
+  }
+  return { el: wrap };
+}
+
 function deviceShapePicker(trackLabel, slot, widget, showValue) {
   // The deck whose code plays this device: its curves are that buffer's shapes, and a pick is
   // written there and evaluated there.
@@ -6413,6 +6611,45 @@ const FIGURE_DRAWERS = {
   },
 
   /**
+   * A struck body: a bar per mode at its frequency, as loud as it starts, and under them the band
+   * the noise sits in, as tall as Noise mixes it in.
+   */
+  modes(ctx, w, h, f, c) {
+    const range = { lowHz: f.lowHz, highHz: f.highHz };
+    const xOf = (hz) => figureLogX(hz, range) * w;
+    ctx.strokeStyle = c.grid;
+    ctx.lineWidth = 1;
+    ctx.font = '8px ui-monospace, monospace';
+    ctx.textBaseline = 'top';
+    for (const hz of [100, 1000, 10000]) {
+      const gx = xOf(hz);
+      ctx.beginPath(); ctx.moveTo(gx, 0); ctx.lineTo(gx, h); ctx.stroke();
+      ctx.fillStyle = c.grid;
+      ctx.fillText(hz >= 1000 ? `${hz / 1000}k` : String(hz), gx + 2, h - 10);
+    }
+    const top = FIGURE_PAD_Y;
+    const reach = Math.max(1, h - 2 * FIGURE_PAD_Y);
+    const base = top + reach;
+    // The noise: a hump an octave and a half either side of Tone, on the same log axis.
+    if (f.noise?.level > 0) {
+      const pts = [];
+      for (let i = 0; i <= 48; i++) {
+        const oct = (i / 48) * 3 - 1.5;
+        const y = base - f.noise.level * reach * Math.exp(-2 * oct * oct);
+        pts.push([xOf(f.noise.hz * Math.pow(2, oct)), y]);
+      }
+      figureFill(ctx, pts, c.accent, base);
+      figureStroke(ctx, pts, c.accent, 1);
+    }
+    ctx.fillStyle = c.accent;
+    for (const bar of f.bars ?? []) {
+      const len = Math.max(1, bar.level * reach);
+      ctx.fillRect(xOf(bar.hz) - 1.5, base - len, 3, len);
+    }
+    return figureHz(f.hz);
+  },
+
+  /**
    * A looper's loop: a strip with a mark at every bar and the playhead going round it. While a
    * first take records, the strip fills as far as the take has got across the Length it runs.
    */
@@ -6553,12 +6790,70 @@ const FIGURE_DRAWERS = {
     return `${figurePad(Math.round(f.amount * 100), 3)}% · ${figureSeconds(f.recovery)} ${on}`;
   },
 
+  /**
+   * An additive synth's partials: a bar each at its ratio above the note on a log axis, as tall as
+   * its level on a 60 dB scale. The pale top of a bar is what Damp takes away in a quarter second;
+   * a partial fading out below Nyquist is drawn faint.
+   */
+  partials(ctx, w, h, f, c) {
+    const bars = f.bars ?? [];
+    const pad = 4;
+    const span = Math.log(Math.max(1.0001, f.top ?? 64));
+    const xOf = (ratio) => pad + (Math.log(Math.max(1, ratio)) / span) * Math.max(1, w - 2 * pad);
+    const heightOf = (level) => Math.min(1, Math.max(0, 1 + (20 * Math.log10(Math.max(1e-9, level))) / 60));
+    ctx.strokeStyle = c.grid;
+    ctx.lineWidth = 1;
+    for (const db of [-20, -40]) {
+      const gy = figureLevelY(1 + db / 60, h);
+      ctx.beginPath(); ctx.moveTo(0, gy); ctx.lineTo(w, gy); ctx.stroke();
+    }
+    const width = Math.max(1, Math.min(4, (0.5 * w) / Math.max(1, bars.length)));
+    const floor = figureLevelY(0, h);
+    ctx.fillStyle = c.accent;
+    for (const bar of bars) {
+      const x = xOf(bar.ratio) - width / 2;
+      const full = figureLevelY(heightOf(bar.level), h);
+      const kept = figureLevelY(heightOf(bar.damped), h);
+      ctx.globalAlpha = 0.3 * bar.pass;
+      ctx.fillRect(x, full, width, kept - full);
+      ctx.globalAlpha = bar.pass;
+      ctx.fillRect(x, kept, width, Math.max(1, floor - kept));
+    }
+    ctx.globalAlpha = 1;
+    return `${figurePad(bars.length, 2)} partials`;
+  },
+
   /** One grain's amplitude across its own length, the window the synth is applying. */
   grain(ctx, w, h, f, c) {
     const pts = f.points.map((pt) => [pt.x * w, figureLevelY(pt.y, h)]);
     figureFill(ctx, pts, c.accent, figureLevelY(0, h));
     figureStroke(ctx, pts, c.accent);
     return ''; // the grain's length is a knob beside it
+  },
+
+  /**
+   * A drum hit's pitch over time, as a graph: milliseconds across (on the square-root axis the
+   * curve is drawn on, so the first few are wide) and hertz up, labeled for the note last played.
+   */
+  hitpitch(ctx, w, h, f, c) {
+    const grid = f.shapeAxes?.grid ?? { x: [], y: [] };
+    ctx.strokeStyle = c.grid;
+    ctx.lineWidth = 1;
+    for (const tick of grid.x) {
+      const x = Math.round(tick.at * w) + 0.5;
+      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke();
+      figureLabel(ctx, tick.label, x - 2, h - 10, c.dim, 'end');
+    }
+    for (const tick of grid.y) {
+      const y = Math.round(figureLevelY(tick.at, h)) + 0.5;
+      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
+      figureLabel(ctx, tick.label, 3, y - 9, c.dim);
+    }
+    const pts = f.points.map((pt) => [pt.x * w, figureLevelY(pt.y, h)]);
+    figureFill(ctx, pts, c.accent, figureLevelY(0, h));
+    figureStroke(ctx, pts, c.accent);
+    // Where the hit starts and the note it settles on.
+    return `${figureHz(f.startHz)} → ${figureHz(f.noteHz)}`;
   },
 };
 
@@ -6585,6 +6880,7 @@ function showDevicePanel(trackLabel, slot, panel, { raise = true } = {}) {
   devicePanelRelayout = new Set(panel.relayoutOn ?? []);
   deviceTitleEl.textContent = panel.title;
   deviceTargetEl.textContent = `${trackLabel} · slot ${slot}`;
+  devicePresetEl.replaceChildren(devicePresetPicker(trackLabel, slot, panel).el);
   // What the device is, and whose DSP it is, on the heading's ctrl+hover: the credit is part
   // of what a ported device has to say about itself, and this is where it says it.
   deviceTitleEl.title = panel.description ?? '';
@@ -8167,7 +8463,36 @@ function drawLfoShape() {
     ctx.restore();
   }
 
-  if (lfoState.axes) {
+  if (lfoState.axes?.grid) {
+    // A graph in real units (a drum hit's pitch over time): its grid, labeled along the bottom and
+    // up the left, in the units the device plays the curve in.
+    ctx.save();
+    ctx.strokeStyle = col('--text-dim');
+    ctx.globalAlpha = 0.35;
+    ctx.fillStyle = col('--text-dim');
+    ctx.font = '10px sans-serif';
+    for (const tick of lfoState.axes.grid.x) {
+      const { px } = lfoToCanvas({ x: tick.at, y: 0 });
+      ctx.beginPath(); ctx.moveTo(px, LFO_PAD); ctx.lineTo(px, H - LFO_PAD); ctx.stroke();
+    }
+    for (const tick of lfoState.axes.grid.y) {
+      const { py } = lfoToCanvas({ x: 0, y: tick.at });
+      ctx.beginPath(); ctx.moveTo(LFO_PAD, py); ctx.lineTo(W - LFO_PAD, py); ctx.stroke();
+    }
+    ctx.globalAlpha = 0.9;
+    // Times along the top, levels up the left, each just inside its line: the bottom corner is
+    // where a curve ends on the note, and labels there were drawn over its last point.
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'top';
+    for (const tick of lfoState.axes.grid.x) ctx.fillText(tick.label, lfoToCanvas({ x: tick.at, y: 0 }).px - 3, LFO_PAD + 3);
+    ctx.textAlign = 'left';
+    for (const tick of lfoState.axes.grid.y) {
+      const { py } = lfoToCanvas({ x: 0, y: tick.at });
+      ctx.textBaseline = tick.at >= 1 ? 'top' : 'bottom';
+      ctx.fillText(tick.label, LFO_PAD + 4, tick.at >= 1 ? py + 3 : py - 2);
+    }
+    ctx.restore();
+  } else if (lfoState.axes) {
     // A transfer curve: the diagonal is "out equals in", and the cross is silence in and out.
     ctx.save();
     ctx.strokeStyle = col('--text-dim');
@@ -8692,7 +9017,7 @@ function initLfoCanvas() {
       let { x, y } = canvasToLfo(px, py);
       // On a transfer curve the center is silence in and silence out: a point near it catches on
       // it, so "quiet stays quiet" is the easy thing to draw. alt is the way out, as for the ends.
-      if (lfoState.axes && !e.altKey) {
+      if (lfoState.axes && !lfoState.axes.grid && !e.altKey) {
         const snapX = LFO_END_SNAP_PX / (lfoCanvas.width - 2 * LFO_PAD);
         const snapY = LFO_END_SNAP_PX / (lfoCanvas.height - 2 * LFO_PAD);
         if (Math.abs(x - 0.5) < snapX && Math.abs(y - 0.5) < snapY) { x = 0.5; y = 0.5; }
@@ -9007,7 +9332,17 @@ function openPresetFromCall(call, code, ed = cm) {
   const source = ed.markText(ed.posFromIndex(from), ed.posFromIndex(to), {});
   // Read from the call rather than from presetTarget(), which follows the panel - and the panel is
   // either closed or still showing whatever was open before this double-click.
-  if (openPresetById(id, { source }, presetTargetAt(code, call.start)?.plugin ?? null, ed)) return true;
+  const target = presetTargetAt(code, call.start);
+  const sc = target?.plugin ?? null;
+  // A preset the device comes with, or the library's, has no definition here to edit: open the
+  // device's window instead, where it is shown on the picker - and where touching a control
+  // captures your own copy, which then shadows it.
+  if (target && !presetDefs.findDef(code, String(id), sc) && presetDefs.allIds(sc, code).some((r) => r.id === String(id) && !r.own)) {
+    source.clear();
+    showPluginEditor(blockTrackId(ed, target), target.slot);
+    return true;
+  }
+  if (openPresetById(id, { source }, sc, ed)) return true;
   source.clear();
   return false;
 }
@@ -13797,7 +14132,7 @@ function makeNamePicker({
       // A copy of this one under the next free spelling of its name, opened in its place - the same
       // data, to draw a variation on; the → beside it is then how the call comes to play the copy.
       // A library row copies too - its source is fetched first, so the copy lands a beat later.
-      if (row.act === 'open') {
+      if (row.act === 'open' && !row.none) {
         const dup = document.createElement('span');
         dup.className = 'def-pick-dup';
         dup.textContent = '⧉';

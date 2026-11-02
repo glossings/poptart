@@ -159,6 +159,8 @@ export function buildPanel(descriptor, values = {}, modulated = new Map(), opts 
     // group belongs to the ungrouped section, which is a section like any other.
     figures: figures.filter((f) => !sectioned.has(f.group)),
     // Named on the heading's tooltip, and the reason every descriptor is made to carry a license.
+    // The presets the device comes with, by name, for the window's preset picker.
+    presets: Object.keys(descriptor.presets ?? {}),
     credit: descriptor.vendor === 'poptart' ? null : { vendor: descriptor.vendor, license: descriptor.license, source: descriptor.source },
   };
 }

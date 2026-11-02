@@ -228,6 +228,9 @@ function readReport(id, raw) {
     }
     case 'Distort':
       return { meters: { autogain: raw[0], level: raw[1] } };
+    case 'Kick':
+      // The note last played, which the picture of the sweep labels its pitches for.
+      return { note: raw[0] };
     case 'Compressor':
     case 'Limiter': {
       const curve = curveLane(raw);
@@ -388,6 +391,16 @@ function deviceParam(device, name) {
 }
 
 /** Whether a control is a two-state switch, whatever widget it asked for. */
+/**
+ * Whether a pattern's change to this control is set outright at its time rather than glided to:
+ * a choice, a stepped control, a switch, or one the device reads when a hit starts. The browser's
+ * rule (web-engine's track.mjs, Track#_apply) - a glide through a mode list plays every mode on
+ * the way past, and a hit on the change's sample has to be struck with the new value.
+ */
+function isStepped(param) {
+  return !!(param.options || param.step || param.ui === 'toggle' || param.latch);
+}
+
 function isToggle(param) {
   return param.ui === 'toggle' || (param.min === 0 && param.max === 1 && param.step === 1 && !param.options);
 }
@@ -479,7 +492,31 @@ function paramPosition(device, name, arg) {
   return normalize(param, denormalize(param, n));
 }
 
+/** The controls a shipped preset leaves where they are (web-engine's catalog.mjs, PRESET_KEEPS). */
+const PRESET_KEEPS = ['level', 'voices'];
+
+/**
+ * The presets the devices ship, as `_preset()` definitions would hold them: { id, plugin, state },
+ * the state in the browser's format, the same string web-engine's shippedPresets makes - every
+ * control but PRESET_KEEPS, at the preset's value or its default. A host files them in the
+ * library layer, so `.preset("snare")` on a Drum plays one on either engine.
+ */
+function shippedPresets(opts) {
+  const out = [];
+  for (const d of nativeDevices(opts)) {
+    for (const [id, values] of Object.entries(d.presets ?? {})) {
+      const params = {};
+      for (const p of d.params) if (!PRESET_KEEPS.includes(p.id)) params[p.id] = values[p.id] ?? p.default;
+      const json = JSON.stringify({ device: d.id, version: d.version, params, files: {} });
+      out.push({ id, plugin: d.id, state: Buffer.from(json, 'utf8').toString('base64') });
+    }
+  }
+  return out;
+}
+
 module.exports = {
+  isStepped,
+  shippedPresets,
   internalDevice,
   nativeDevices,
   nativeDevice,

@@ -15,6 +15,11 @@ import { WAVETABLE, WavetableSynth } from '../devices/wavetable.mjs';
 import { FMSYNTH, FmSynth } from '../devices/fmsynth.mjs';
 import { GRANULAR, GranularSynth } from '../devices/granular.mjs';
 import { NOISE, NoiseSynth } from '../devices/noise.mjs';
+import { FORMANT, FormantSynth } from '../devices/formant.mjs';
+import { ADDITIVE, AdditiveSynth } from '../devices/additive.mjs';
+import { KICK, KickSynth } from '../devices/kick.mjs';
+import { HAT, HatSynth } from '../devices/hat.mjs';
+import { DRUM, DrumSynth } from '../devices/drum.mjs';
 import { sharedBuiltInTables } from '../dsp/tables.mjs';
 import { Reporter, bendOf, isDispose, offsetInBlock, parameterDescriptorsFor, realParams } from './shared.mjs';
 
@@ -110,6 +115,11 @@ const SYNTHS = [
   [FMSYNTH, () => new FmSynth(sampleRate)],
   [GRANULAR, () => new GranularSynth(sampleRate)],
   [NOISE, () => new NoiseSynth(sampleRate)],
+  [FORMANT, () => new FormantSynth(sampleRate)],
+  [ADDITIVE, () => new AdditiveSynth(sampleRate)],
+  [KICK, () => new KickSynth(sampleRate)],
+  [HAT, () => new HatSynth(sampleRate)],
+  [DRUM, () => new DrumSynth(sampleRate)],
 ];
 
 for (const [descriptor, make] of SYNTHS) {

@@ -16,6 +16,20 @@
 // The pinned file's format - one definition per line, found and replaced by name - belongs to the
 // desktop's pinned-defs.js, which is handed in rather than copied.
 
+/**
+ * Files the presets poptart's own devices ship (a Drum's snare) in the library layer, as the
+ * desktop's prebake run does: run after the layer is cleared and before the prebake's own code,
+ * so a preset somebody keeps under the same name for the same device wins.
+ */
+export function fileShippedPresets(patternCore, webEngine) {
+  patternCore.setRollLayer('prebake');
+  try {
+    for (const p of webEngine.shippedPresets?.() ?? []) patternCore._preset(p.id, p.plugin, p.state);
+  } finally {
+    patternCore.setRollLayer('buffer');
+  }
+}
+
 export function createPrebake({ patternCore, storage, prebakeDefs, createBlockEvaluator, pinnedDefs, remotePacks = null, log = () => {}, dehydrate = async (code) => ({ code }), afterClear = () => {} }) {
   /** Runs everything again. Answers the per-block errors, empty on success. */
   async function run() {

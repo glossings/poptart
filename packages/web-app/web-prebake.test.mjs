@@ -9,7 +9,7 @@ import * as patternCore from '@poptart/pattern-core';
 import { memoryStore } from './public/web/kv.mjs';
 import { createStorage } from './public/web/storage.mjs';
 import { createBlockEvaluator } from './public/web/block-eval.mjs';
-import { createPrebake } from './public/web/prebake.mjs';
+import { createPrebake, fileShippedPresets } from './public/web/prebake.mjs';
 import { registerPacks, restorePacks } from './public/web/samples.mjs';
 
 const require = createRequire(import.meta.url);
@@ -76,4 +76,23 @@ test('a prebake run leaves the sample packs registered, and a prebake pack of th
   await storage.writePrebake('_pack("pt_testkit", ["mine/x.wav"])');
   await prebake.run();
   assert.deepEqual(patternCore.lookupPack('pt_testkit').files, ['mine/x.wav'], 'somebody\'s own definition is not overwritten');
+});
+
+test('the presets the devices ship are library presets after every run, and the prebake\'s own win', async () => {
+  const webEngine = await import('@poptart/web-engine');
+  const storage = createStorage(memoryStore(), { meta });
+  const prebake = createPrebake({
+    patternCore, storage, prebakeDefs: new Map(), createBlockEvaluator, pinnedDefs,
+    afterClear: () => fileShippedPresets(patternCore, webEngine),
+  });
+  await prebake.run();
+  const snare = patternCore.lookupPreset('snare', 'Drum');
+  assert.equal(snare?.plugin, 'Drum');
+  assert.equal(snare.state, webEngine.shippedPresets().find((p) => p.plugin === 'Drum' && p.id === 'snare').state);
+  assert.ok(patternCore.presetIds().some((p) => p.id === 'clap' && p.plugin === 'Drum' && p.library), 'listed as the library\'s');
+
+  await storage.writePrebake('_preset("snare", "Drum", "mine")');
+  await prebake.run();
+  assert.equal(patternCore.lookupPreset('snare', 'Drum').state, 'mine');
+  assert.ok(patternCore.lookupPreset('rim', 'Drum')?.state, 'the rest are still there');
 });

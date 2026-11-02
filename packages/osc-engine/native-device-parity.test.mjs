@@ -49,6 +49,11 @@ import { FmSynth } from '../web-engine/src/devices/fmsynth.mjs';
 import { WavetableSynth } from '../web-engine/src/devices/wavetable.mjs';
 import { GranularSynth } from '../web-engine/src/devices/granular.mjs';
 import { NoiseSynth } from '../web-engine/src/devices/noise.mjs';
+import { FormantSynth } from '../web-engine/src/devices/formant.mjs';
+import { AdditiveSynth } from '../web-engine/src/devices/additive.mjs';
+import { KickSynth } from '../web-engine/src/devices/kick.mjs';
+import { HatSynth } from '../web-engine/src/devices/hat.mjs';
+import { DRUM, DrumSynth } from '../web-engine/src/devices/drum.mjs';
 import { LpgProcessor } from '../web-engine/src/devices/lpg.mjs';
 import { CrossoverProcessor } from '../web-engine/src/devices/crossover.mjs';
 import { FilterbankProcessor } from '../web-engine/src/devices/filterbank.mjs';
@@ -91,6 +96,11 @@ const PROCESSORS = {
   Wavetable: WavetableSynth,
   Granular: GranularSynth,
   Noise: NoiseSynth,
+  Formant: FormantSynth,
+  Additive: AdditiveSynth,
+  Kick: KickSynth,
+  Hat: HatSynth,
+  Drum: DrumSynth,
   LPG: LpgProcessor,
   Crossover: CrossoverProcessor,
   Filterbank: FilterbankProcessor,
@@ -346,7 +356,20 @@ const PINNED = {
     { color: 8, character: 0 },
     { color: 9, character: 1, pitch: -12 },
   ],
+  // Every preset it ships, and a body high enough that its upper modes are band-limited away.
+  Drum: [...Object.values(DRUM.presets), { pitch: 48, material: 0.5, drop: 12 }],
   LPG: [{ mode: 1 }, { mode: 2, resonance: 0.8 }, { level: 0.4, decay: 0.05, resonance: 0.5 }],
+  // Every source, at the ends of every part: the dense twelve held coarse with noise and the full
+  // body, the bell, the thin six long and bright, and pure noise at the shortest and darkest.
+  Hat: [
+    { source: 2, lofi: 1, noise: 0.5, body: 1, hold: 1, decay: 0.5 },
+    { source: 3, tone: 0.2, decay: 0.3, lofi: 0.3 },
+    { source: 1, tone: 1, decay: 4, body: 0.5, hold: 0 },
+    { tone: 0, decay: 0.01, noise: 1 },
+    // Folded, ringing and swept: up from below on the dense twelve, down from above on the analog six.
+    { source: 2, warp: 1, ring: 1, filtersweep: -48, decay: 0.3 },
+    { warp: 0.5, ring: 0.7, filtersweep: 48, body: 0.5, decay: 0.2 },
+  ],
   // Every slope on a cut and a shelf: highpass, lowpass, low shelf boosted, high shelf cut.
   EQ: Array.from({ length: 6 }, (_, slope) => ({
     'band1.type': 4, 'band1.slope': slope, 'band1.freq': 300, 'band1.q': 1.5,
@@ -354,6 +377,35 @@ const PINNED = {
     'band3.type': 1, 'band3.slope': slope, 'band3.freq': 800, 'band3.gain': 9,
     'band4.type': 2, 'band4.slope': slope, 'band4.freq': 2000, 'band4.gain': -9,
   })),
+  // Both modes, with a formant below the pitch (undertones), a train cut short by a high note, the
+  // impulse at both ends of its shape and fully driven, the formant following the note, and a glide.
+  Formant: [
+    { mode: 1 },
+    { mode: 1, shape: 0, air: 1, formant: 6000 },
+    { mode: 1, shape: 1, air: 0.6, formant: 150 },
+    { mode: 1, shape: 0.3, formant: 120, track: 0.5 },
+    { mode: 0, count: 12, decay: 1, formant: 400 },
+    { mode: 0, formant: 90, decay: 0.5 },
+    { mode: 0, track: 1, formant: 2000 },
+    { mode: 0, glide: 0.05, voices: 1 },
+    { mode: 1, glide: 0.05, voices: 1, air: 0.8 },
+  ],
+  // Every partial at one level; stretched and damped, as a struck string; squeezed, damped hard
+  // and mostly odd; only the even ones; and a glide still moving when the notes change.
+  Additive: [
+    { partials: 64, tilt: 0 },
+    { partials: 64, stretch: 0.02, damp: 0.3 },
+    { partials: 48, stretch: -0.3, damp: 1, odd: 0.6, tilt: -3 },
+    { partials: 40, odd: -1, tilt: -9 },
+    { glide: 0.05 },
+  ],
+  // The ends of every part: the most sweep on the longest pulse, all-noise click, the most drive,
+  // the softest tone with the thinnest tail, and the shortest hit with a click only.
+  Kick: [
+    { sweep: 48, clicklength: 15, drive: 1, clicktone: 1, click: 1 },
+    { sweep: 0, clicklength: 0.1, tail: 0, tone: 0, decay: 0.05 },
+    { clicktone: 0.5, click: 1, tone: 1, tail: 1, drive: 0 },
+  ],
 };
 
 const SAMPLED = {
@@ -703,8 +755,8 @@ function runBrowserSwept(descriptor, { values, input, frames, notes, channels, s
       dev.setBend(0);
       while (nextNote < notes.length && notes[nextNote].frame < at + n) {
         const one = notes[nextNote++];
-        if (one.velocity > 0) dev.queueNoteOn(one.note, one.velocity, 0);
-        else dev.queueNoteOff(one.note, 0);
+        if (one.velocity > 0) dev.queueNoteOn(one.note, one.velocity, one.frame - at);
+        else dev.queueNoteOff(one.note, one.frame - at);
       }
       dev.process(left, right, n);
     } else {
@@ -731,12 +783,18 @@ const PATCHED = [
   { id: 'Filter', param: 'cutoff' },
   { id: 'LPG', param: 'level' },
   { id: 'Noise', param: 'tone' },
+  { id: 'Formant', param: 'formant' },
   { id: 'Wavetable', param: 'osc1.phase' },
   { id: 'Crossover', param: 'frequency' },
   { id: 'Distort', param: 'drive' },
   { id: 'Distort', param: 'character' },
   { id: 'FM', param: 'level' },
   { id: 'Wavetable', param: 'osc1.semi' },
+  { id: 'Additive', param: 'level' },
+  { id: 'Kick', param: 'sweep' },
+  { id: 'Hat', param: 'tone' },
+  { id: 'Hat', param: 'warp' },
+  { id: 'Drum', param: 'level' },
 ];
 
 for (const { id, param } of PATCHED) {
@@ -765,6 +823,82 @@ for (const { id, param } of PATCHED) {
     assert.ok(differs > 1e-3, `${id}: sweeping ${param} per sample sounded no different from per block`);
   });
 }
+
+// ---- the Additive's partials, moved ------------------------------------------------------------
+//
+// The controls that shape the partials are read where each block ends and every partial's level
+// and step ramped there across the block, on both engines - so a signal on any of them has to come
+// out the same, and has to be heard moving.
+
+for (const param of ['partials', 'tilt', 'odd', 'stretch', 'damp']) {
+  test(`Additive follows a signal on ${param} the same on both engines`, { skip: compiler ? false : 'no clang++' }, () => {
+    const binary = buildHarness(devices);
+    const { device } = devices.find((d) => d.id === 'Additive');
+    const frames = BLOCK * 24;
+    const index = device.params.findIndex((p) => p.id === param);
+    const swept = sweptValues(device.params[index], frames, 20);
+    const file = writeFile(path.join(WORK, `Additive-${param}.f32`), swept);
+    const values = device.params.map((p) => (p.id === 'partials' && param !== 'partials' ? 48 : p.default));
+    const notes = [{ frame: 0, note: 45, velocity: 0.9 }, { frame: BLOCK * 3, note: 52, velocity: 0.7 }, { frame: BLOCK * 16, note: 45, velocity: 0 }];
+    const input = new Float32Array(frames * 2);
+    const native = runNative(binary, { id: 'Additive', values, input, frames, notes, moving: [{ param: index, file }] });
+    const browser = runBrowserSwept(device, { values, input, frames, notes, channels: 2, sweptId: param, swept });
+    const { rmsA } = compare('Additive', `with ${param} moving`, native, browser);
+    assert.ok(rmsA > 1e-3, 'nothing came out');
+    const still = runBrowser(device, { values, input, frames, notes });
+    let differs = 0;
+    for (let i = 0; i < still.length; i++) differs = Math.max(differs, Math.abs(still[i] - browser[i]));
+    assert.ok(differs > 1e-3, `moving ${param} sounded no different from leaving it`);
+  });
+}
+
+test('a drawn Additive spectrum plays the same on both engines', { skip: compiler ? false : 'no clang++' }, () => {
+  const binary = buildHarness(devices);
+  const { device } = devices.find((d) => d.id === 'Additive');
+  const spectrum = device.params.findIndex((p) => p.id === 'spectrum');
+  const slot = device.params[spectrum].options.length;
+  const table = drawnTable();
+  const file = writeFile(path.join(WORK, 'Additive-spectrum.f32'), table);
+  const frames = BLOCK * 24;
+  const notes = [{ frame: 0, note: 40, velocity: 0.9 }, { frame: BLOCK * 5 + 3, note: 59, velocity: 0.6 }, { frame: BLOCK * 15, note: 40, velocity: 0 }];
+  const input = new Float32Array(frames * 2);
+  for (const [when, change] of [['at its defaults', {}], ['with every partial, stretched and damped', { partials: 64, tilt: 0, stretch: 0.05, damp: 0.4 }]]) {
+    const values = device.params.map((p, i) => (i === spectrum ? slot : (p.id in change ? change[p.id] : p.default)));
+    const native = runNative(binary, { id: 'Additive', values, input, frames, notes, shapes: [{ param: spectrum, slot, file }] });
+    const browser = runBrowser(device, { values, input, frames, notes, shapes: [{ param: 'spectrum', slot, table }] });
+    const { rmsA } = compare('Additive', `through a drawn spectrum ${when}`, native, browser);
+    assert.ok(rmsA > 1e-3, 'nothing came out');
+    // Not the flat spectrum a slot with nothing drawn in it plays.
+    const flat = runNative(binary, { id: 'Additive', values, input, frames, notes });
+    let differs = 0;
+    for (let i = 0; i < native.length; i++) differs = Math.max(differs, Math.abs(native[i] - flat[i]));
+    assert.ok(differs > 1e-3, `Additive ${when}: the drawn spectrum sounded like a flat one`);
+  }
+});
+
+// The Drum reads its sound controls once, a sample into each hit: with them patched to audio and
+// hits all over the blocks - on an edge, off them, two a sample apart, one on a block's last
+// sample - every hit has to be struck with the same values on both engines.
+test('Drum strikes each hit with its controls where it lands, the same on both engines', { skip: compiler ? false : 'no clang++' }, () => {
+  const binary = buildHarness(devices);
+  const { device } = devices.find((d) => d.id === 'Drum');
+  const frames = BLOCK * 24;
+  const notes = [0, 37, 38, BLOCK * 3 + 127, BLOCK * 6, BLOCK * 9 + 64, BLOCK * 15 + 1]
+    .map((frame, k) => ({ frame, note: 45 + 3 * k, velocity: 0.6 + 0.05 * k }));
+  const input = new Float32Array(frames * 2);
+  let loudest = 0;
+  for (const param of ['material', 'pitch', 'noisetone', 'decay', 'stutter', 'edge', 'ring', 'noisetail', 'drive', 'noiselength', 'fm', 'fmratio', 'cutoff', 'resonance', 'filtersweep', 'filterdecay']) {
+    const index = device.params.findIndex((p) => p.id === param);
+    const swept = sweptValues(device.params[index], frames, 40);
+    const file = writeFile(path.join(WORK, `Drum-latch-${param}.f32`), swept);
+    const values = defaultValues(device).map((v, i) => (device.params[i].id === 'noise' ? 0.3 : v));
+    const native = runNative(binary, { id: 'Drum', values, input, frames, notes, samples: [], keyed: null, moving: [{ param: index, file }], outs: 2 });
+    const browser = runBrowserSwept(device, { values, input, frames, notes, channels: 2, sweptId: param, swept });
+    const { rmsA } = compare('Drum', `with ${param} patched, struck at every hit`, native, browser);
+    loudest = Math.max(loudest, rmsA);
+  }
+  assert.ok(loudest > 1e-3, 'nothing came out');
+});
 
 // ---- the looper, played through passes ---------------------------------------------------------
 //
@@ -1146,6 +1280,36 @@ test('a drawn Distort curve shapes the same on both engines', { skip: compiler ?
     let differs = 0;
     for (let i = 0; i < native.length; i++) differs = Math.max(differs, Math.abs(native[i] - empty[i]));
     assert.ok(differs > 1e-3, `Distort ${when}: the drawn curve sounded like no curve at all`);
+  }
+});
+
+test('the Kick plays a drawn pitch curve the same on both engines', { skip: compiler ? false : 'no clang++' }, () => {
+  const binary = buildHarness(devices);
+  const { device } = devices.find((d) => d.id === 'Kick');
+  const pitchParam = device.params.findIndex((p) => p.id === 'pitchenv');
+  const slot = device.params[pitchParam].options.length;
+  // A pitch that drops, bumps back up and settles on the note.
+  const sweep = Float32Array.from({ length: 256 }, (_, i) => Math.fround(Math.max(0, 0.7 * Math.exp(-i / 25) + 0.2 * Math.sin((Math.PI * i) / 200) * (i < 200))));
+  const sweepFile = writeFile(path.join(WORK, 'Kick-sweep.f32'), sweep);
+  const frames = BLOCK * 40;
+  const notes = [{ frame: 9, note: 36, velocity: 1 }, { frame: BLOCK * 20 + 33, note: 41, velocity: 0.7 }];
+  for (const [what, change] of [['at the defaults', {}], ['short and driven', { decay: 0.06, drive: 1, tail: 0.2 }]]) {
+    const values = device.params.map((p, i) => (i === pitchParam ? slot : (p.id in change ? change[p.id] : p.default)));
+    const native = runNative(binary, {
+      id: 'Kick', values, input: new Float32Array(frames * 2), frames, notes,
+      shapes: [{ param: pitchParam, slot, file: sweepFile }],
+    });
+    const browser = runBrowser(device, {
+      values, input: new Float32Array(frames * 2), frames, notes,
+      shapes: [{ param: 'pitchenv', slot, table: sweep }],
+    });
+    const { rmsA } = compare('Kick', `through a drawn pitch curve ${what}`, native, browser);
+    assert.ok(rmsA > 1e-3, `Kick ${what}: nothing came out`);
+    // Not the fixed curve a slot with nothing drawn in it falls back to.
+    const fixed = runBrowser(device, { values, input: new Float32Array(frames * 2), frames, notes });
+    let differs = 0;
+    for (let i = 0; i < browser.length; i++) differs = Math.max(differs, Math.abs(browser[i] - fixed[i]));
+    assert.ok(differs > 1e-3, `Kick ${what}: the drawn curve sounded like the fixed one`);
   }
 });
 

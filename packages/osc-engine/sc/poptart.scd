@@ -4612,10 +4612,12 @@ leafRampTime = { |track, slot, paramName|
         if (e.notNil and: { (e[\stepped] ? []).includes(leaf[0]) }) { 0 } { leafRampSec };
     };
 };
-rampTo = { |track, rampKey, slot, target, value|
+rampTo = { |track, rampKey, slot, target, value, step = false|
     var r = track[\ramps][rampKey];
     var prefix = "slot" ++ slot ++ "_";
-    var time = leafRampTime.(track, slot, rampKey.asString.copyToEnd(prefix.size));
+    // A stepped control (a choice, a switch, one a device reads when a hit starts - see
+    // native-devices.js's isStepped) is set outright at its time.
+    var time = if (step) { 0 } { leafRampTime.(track, slot, rampKey.asString.copyToEnd(prefix.size)) };
     var timeArgs = if (time.isNil) { [] } { [\time, time] };
     // A control a hand has taken in a plugin's window is not the poll's until Node hands it back
     // (see takeHand).
@@ -4871,6 +4873,7 @@ OSCdef(\poptartServerFail, { |msg|
 OSCdef(\poptartSetParam, { |msg|
     var key = msg[1].asSymbol, slot = msg[2].asInteger;
     var paramName = msg[3].asString, value = msg[4].asFloat, latency = msg[5].asFloat;
+    var step = (msg[6] ? 0).asInteger == 1;
     var track = tracks[key];
     var rampKey;
     if (track.isKindOf(Event)) {
@@ -4911,7 +4914,7 @@ OSCdef(\poptartSetParam, { |msg|
                 // Resolve by name (or a "Name#N" index suffix - see resolveParamIndex) and drive
                 // that specific parameter; values are normalized 0..1.
                 bundleNow.(latency, {
-                    paramTarget.(track, slot, paramName) !? { |target| rampTo.(track, rampKey, slot, target, value.clip(0, 1)) };
+                    paramTarget.(track, slot, paramName) !? { |target| rampTo.(track, rampKey, slot, target, value.clip(0, 1), step) };
                 });
             };
         };

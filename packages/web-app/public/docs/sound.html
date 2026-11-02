@@ -40,6 +40,11 @@
           <tr><td><code>FM</code></td><td>eight operators, each able to modulate every other</td></tr>
           <tr><td><code>Granular</code></td><td>a sample played as a cloud of grains</td></tr>
           <tr><td><code>Noise</code></td><td>noise in ten colors, from white to brown and on to velvet, crackle, digital, stepped and chaos</td></tr>
+          <tr><td><code>Formant</code></td><td>a spectral peak that stays put while the note moves: VOSIM pulse trains, or a driven impulse fired every cycle</td></tr>
+          <tr><td><code>Additive</code></td><td>up to sixty-four sine partials a voice, shaped by a slope, the balance of odd and even, a stretch toward bells, damping that darkens each note as it rings, and a spectrum you draw as a named shape</td></tr>
+          <tr><td><code>Kick</code></td><td>an analog-style bass drum: a saturated body swept down to the note, with a click (one hit at a time)</td></tr>
+          <tr><td><code>Hat</code></td><td>hi-hats, cymbals and a cowbell: clusters of square waves and noise through a bright band and a body band, analog or sampled in character (one hit at a time)</td></tr>
+          <tr><td><code>Drum</code></td><td>a struck body and a burst of noise: claves, wood blocks, rims, toms, congas, snares, claps and everything between</td></tr>
           <tr><td><code>Plaits</code></td><td>a macro oscillator with twenty-four models behind three controls (monophonic)</td></tr>
           <tr><td><code>Braids</code></td><td>forty-eight oscillator models behind two controls</td></tr>
           <tr><td><code>Rings</code></td><td>a resonator struck by its own exciter</td></tr>
@@ -84,6 +89,96 @@ kick: s("bd*4")
   .fx("Filterbank").param("Mode", "ripple").param("Where", 0.2)
   .param("Shape", perlin(4)).param("Width", 0.3)
   .postgain(0.5)</code></pre>
+
+        <p>
+          <code>Kick</code> plays one hit per note, and the note is the pitch it settles on: <code>f0</code>
+          to <code>a#0</code> is a kick, higher notes are toms and tuned bass. <code>Sweep</code> is how many
+          semitones above the note the pitch starts, falling on one fixed curve; <code>Decay</code> is the
+          length and <code>Drive</code> hardens the body. <code>Click</code> is the click's level,
+          <code>Click Tone</code> turns it from a pulse into noise, and <code>Click Length</code> is how
+          long it lasts: shorter is brighter, with less sweep. <code>Tone</code> brightens or softens the
+          whole hit and <code>Tail</code> keeps its belly. A new hit restarts the sweep; the last one fades
+          under it.
+        </p>
+        <pre data-run><code>kick: note("a0*4").synth("Kick")
+  .param("Sweep", "34st").param("Drive", 0.5).param("Tone", 0.8)
+  .decay("&lt;0.4 0.9&gt;").postgain(0.8)</code></pre>
+        <p>
+          <code>Pitch Env</code> takes a drawn shape in place of the fixed curve: the pitch over the first
+          400 ms of every hit, drawn on the device's graph in milliseconds and hertz. The curve is drawn
+          above the note, so it moves with whatever note is played; ending it on the bottom line ends the
+          hit on the note.
+        </p>
+        <pre data-run><code>kick: note("f0*4").synth("Kick")
+  .param("Pitch Env", "drop").decay(0.6).postgain(0.8)
+
+_shape("drop", "0,0.75 0.25,0.45,-2 0.5,0 1,0")</code></pre>
+
+        <p>
+          <code>Hat</code> plays one hit per note, and a new hit cuts the last, so a closed hat chokes an open
+          one: pattern <code>.decay()</code> and the long hits are the open ones. Middle C plays its squares at
+          their own pitches; other notes retune them. <code>Source</code> picks the squares: an analog cluster, a
+          thinner one, a dense one that stands in for a recorded cymbal, or two, which is a cowbell.
+          <code>Tone</code> moves the filters from dark to bright, <code>Hold</code> keeps the level up before it
+          drops, <code>Body</code> adds a lower band that rings on after the bright one, <code>Noise</code>
+          blends in white noise, and <code>Lofi</code> gives it the grit of a coarse recording.
+          <code>Warp</code> folds the squares into a denser, clangier metal, <code>Ring</code> makes the bright
+          band whistle, and <code>Filter Sweep</code> starts each hit's filters above or below <code>Tone</code> and
+          brings them back: a zap. Harder hits are louder and brighter and sweep further, and no two hits are
+          quite the same.
+        </p>
+        <pre data-run><code>hats: note("c3*8").synth("Hat")
+  .decay("&lt;0.07 0.07 0.5 0.07&gt;").vel("&lt;1 0.6 0.8 0.6&gt;")
+  .param("Tone", sine(0.25).range(0.7, 0.95))
+  .postgain(0.6)</code></pre>
+        <p>
+          Presets in four characters, each with a closed, an open and a pedal hat: <code>analog</code>,
+          <code>thin</code>, <code>crisp</code> and <code>grainy</code>, with cymbals, a crash, a ride and two
+          cowbells; and <code>zap</code>, <code>whistle</code>, <code>clang</code>, <code>foldcymbal</code> and
+          <code>shaker</code>.
+        </p>
+        <pre data-run><code>hats: note("c3*8").synth("Hat").preset("&lt;crispclosed crispclosed crispopen crisppedal&gt;").postgain(0.6)
+ride: note("c3*4").synth("Hat").preset("crispride").postgain(0.4)
+bell: note("~ c3 ~ c3").synth("Hat").preset("cowbell").postgain(0.5)
+zap: note("~ ~ c3 ~").synth("Hat").preset("&lt;zap clang&gt;").postgain(0.5)</code></pre>
+
+        <p>
+          <code>Drum</code> plays one hit per note: a struck body and a burst of noise. <code>Material</code>
+          is what is struck, from one resonance (a clave) through a wooden bar (a wood block) to a drum
+          skin (a tom, a conga), and the note is the pitch of the body's lowest mode. <code>Edge</code>
+          is where it is struck: turned up, the upper modes come forward, past the lowest at the top.
+          <code>Decay</code> is how long the body rings, <code>Ring</code> how long its upper modes
+          keep up (all the way is a metal shell), <code>Drop</code> how far above its pitch it starts and
+          <code>Click</code> the stick. <code>Noise</code> mixes the body against noise, up to all
+          noise; <code>Noise Tone</code> is where the noise sits, <code>Noise Length</code> how long it
+          lasts, <code>Noise Tail</code> a quieter second stage eight times as long, and
+          <code>Stutter</code> splits its start into quick bursts, as a clap does. <code>Cutoff</code> is a
+          resonant lowpass over each hit, which <code>Filter Sweep</code> starts above or below and brings
+          back over <code>Filter Decay</code>; <code>FM</code> bends the body with a second sine at <code>FM Ratio</code>
+          times the note, fading over the same time. <code>Drive</code> saturates the whole hit. Hits ring into one another,
+          and note offs are ignored. Each hit keeps the controls it was struck with while it rings, so
+          one track can play a whole kit: a preset or a control that changes per note changes the next
+          hit and leaves the last one ringing. <code>Level</code> follows as the hit plays.
+        </p>
+        <p>
+          It comes with presets, each at its own pitch on <code>c3</code>. Snares: <code>snare</code>,
+          <code>brightsnare</code>, <code>tightsnare</code>, <code>gritsnare</code>, <code>hisssnare</code>.
+          Claps: <code>clap</code>, <code>bigclap</code>, <code>shortclap</code>. Rims: <code>rim</code>,
+          <code>lowrim</code>, <code>woodrim</code>. Toms: <code>lowtom</code>, <code>midtom</code>,
+          <code>hightom</code>, <code>sweeplow</code>, <code>sweepmid</code>, <code>sweephigh</code>,
+          <code>ringlow</code>, <code>ringmid</code>, <code>ringhigh</code>. Hand drums: <code>conga</code>,
+          <code>bongo</code>, <code>slapbongo</code>, <code>lowbongo</code>, <code>doum</code>, <code>tek</code>,
+          <code>timbale</code>, <code>lowtimbale</code>. Wood: <code>woodblock</code>, <code>clave</code>.
+          Swept and bent: <code>zap</code>, <code>knock</code>, <code>clang</code>, <code>boom</code>,
+          <code>buzz</code>, <code>crunch</code>.
+          A preset sets every control but <code>Level</code> and <code>Voices</code>.
+        </p>
+        <pre data-run><code>kit: note("c3*8").synth("Drum")
+  .preset("&lt;[sweeplow brightsnare lowrim brightsnare] [slapbongo bigclap woodblock bigclap]&gt;")
+zaps: note("c3 [~ c3] [c3 c3] ~").synth("Drum").preset("&lt;zap knock&gt;")
+  .param("Filter Decay", "&lt;30ms 80ms 200ms&gt;").postgain(0.6)
+wood: note("c3*8").synth("Drum").preset("clave")
+  .param("Material", "&lt;0 0.25 0.5 0.75&gt;").postgain(0.4)</code></pre>
 
         <h2 id="params">Controls</h2>
         <p>

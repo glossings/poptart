@@ -19,6 +19,7 @@ const path = require('node:path');
 
 const { OscEngine } = require('./index.js');
 const {
+  shippedPresets,
   nativeDevice, nativeDevices, deviceParam, deviceParamArgs, deviceParamRows, deviceRows,
   devicePositions, paramPosition, forgetNativeDevices, deviceStateText, readDeviceState, readDeviceLive,
   migrateDeviceState,
@@ -961,4 +962,44 @@ test('a sync list saved at version 1 reads as the browser reads it, after 1/32T 
       for (const k of ids) assert.strictEqual(got[k], want[k], `${id} ${k} at old index ${i}`);
     }
   }
+});
+
+test('the presets a device ships are the same strings on the desktop as in the browser', async () => {
+  const { shippedPresets: browser } = await import(path.join(__dirname, '..', 'web-engine', 'src', 'catalog.mjs'));
+  const desktop = shippedPresets();
+  assert.ok(desktop.some((p) => p.plugin === 'Drum' && p.id === 'snare'), 'the Drum ships a snare');
+  // Same presets, same strings; the two catalogs list devices in their own orders.
+  const byName = (list) => [...list].sort((a, b) => `${a.plugin}/${a.id}`.localeCompare(`${b.plugin}/${b.id}`));
+  assert.deepStrictEqual(byName(desktop), byName(browser()));
+  // And each is a state the engine reads: every control but the level and the voices.
+  const snare = desktop.find((p) => p.plugin === 'Drum' && p.id === 'snare');
+  const doc = JSON.parse(Buffer.from(snare.state, 'base64').toString('utf8'));
+  assert.strictEqual(doc.device, 'Drum');
+  assert.ok(!('level' in doc.params) && !('voices' in doc.params));
+  assert.strictEqual(doc.params.stutter, 0, 'a control the preset does not name is at its default');
+});
+
+test('a control a device reads when a hit starts is set outright, not glided', () => {
+  const { e, sent } = engine();
+  e.loadInstrument('t', 'Drum');
+  e.setParam('t', 0, 'Material', 0.8, 0);
+  e.setParam('t', 0, 'Level', 0.5, 0);
+  const params = sent.filter((m) => m.addr === '/poptart/setParam');
+  assert.deepStrictEqual(params.map((m) => [m.args[2], m.args[5] ?? 0]), [['material', 1], ['level', 0]]);
+});
+
+test('a mode list and a switch on a native device are set outright, as the browser steps them', () => {
+  const { e, sent } = engine();
+  e.loadEffect('t', 'Distort', 1);
+  e.loadEffect('t', 'Filter', 2);
+  e.setParam('t', 1, 'Mode', 5, 0);
+  e.setParam('t', 2, 'Mode', 'bandpass', 0);
+  e.setParam('t', 2, 'Cutoff', 0.5, 0);
+  const toggle = nativeDevices().flatMap((d) => d.params.filter((p) => p.ui === 'toggle').map((p) => [d, p]))[0];
+  assert.ok(toggle, 'some native device has a switch');
+  const [device, control] = toggle;
+  (device.kind === 'synth' ? e.loadInstrument('u', device.id) : e.loadEffect('u', device.id, 1));
+  e.setParam('u', device.kind === 'synth' ? 0 : 1, control.id, 1, 0);
+  const steps = sent.filter((m) => m.addr === '/poptart/setParam').map((m) => [m.args[2], m.args[5] ?? 0]);
+  assert.deepStrictEqual(steps, [['mode', 1], ['mode', 1], ['cutoff', 0], [control.id, 1]]);
 });

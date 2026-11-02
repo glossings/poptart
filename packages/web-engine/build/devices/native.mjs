@@ -66,6 +66,11 @@ import { FMSYNTH } from '../../src/devices/fmsynth.mjs';
 import { WAVETABLE } from '../../src/devices/wavetable.mjs';
 import { GRANULAR } from '../../src/devices/granular.mjs';
 import { NOISE } from '../../src/devices/noise.mjs';
+import { FORMANT } from '../../src/devices/formant.mjs';
+import { ADDITIVE } from '../../src/devices/additive.mjs';
+import { KICK } from '../../src/devices/kick.mjs';
+import { HAT } from '../../src/devices/hat.mjs';
+import { DRUM } from '../../src/devices/drum.mjs';
 import { LPG } from '../../src/devices/lpg.mjs';
 import { FILTERBANK } from '../../src/devices/filterbank.mjs';
 import { RESONATOR } from '../../src/devices/resonator.mjs';
@@ -152,6 +157,11 @@ const OWN = [
   { descriptor: WAVETABLE, source: 'wavetable.cc' },
   { descriptor: GRANULAR, source: 'granular.cc' },
   { descriptor: NOISE, source: 'noise.cc' },
+  { descriptor: FORMANT, source: 'formant.cc' },
+  { descriptor: ADDITIVE, source: 'additive.cc' },
+  { descriptor: KICK, source: 'kick.cc' },
+  { descriptor: HAT, source: 'hat.cc' },
+  { descriptor: DRUM, source: 'drum.cc' },
   { descriptor: LPG, source: 'lpg.cc' },
   { descriptor: FILTERBANK, source: 'filterbank.cc' },
   { descriptor: RESONATOR, source: 'resonator.cc' },
@@ -486,7 +496,11 @@ export function catalogJson(devices, internal = INTERNAL_IDS) {
       ...(p.bank ? { bank: p.bank } : {}),
       // A control a captured state leaves out (a looper's Record): see deviceStateText.
       ...(p.saved === false ? { saved: false } : {}),
+      // Read once when a hit starts (descriptor.mjs's latch): stepped to, never glided.
+      ...(p.latch ? { latch: true } : {}),
     })),
+    // The named settings the device ships (descriptor.mjs's presets), filed as library presets.
+    ...(Object.keys(d.presets ?? {}).length ? { presets: d.presets } : {}),
   });
   const sorted = [...devices].sort((a, b) => a.id.localeCompare(b.id));
   // `devices` is every name a pattern can write; `internal` the ones the engine builds for itself

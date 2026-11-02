@@ -236,6 +236,11 @@ function defineParam(deviceId, spec, seen) {
   // does not replay the gesture when it is opened.
   const saved = spec.saved ?? true;
   if (typeof saved !== 'boolean') fail(deviceId, `param "${id}": saved is true or false`);
+  // Whether the device reads this control once, when a hit starts, rather than as it plays: a
+  // drum's material is what that hit is made of. A change to one steps rather than glides, so a
+  // hit on the same sample as the change is struck with the new value and not part way to it.
+  const latch = spec.latch ?? false;
+  if (typeof latch !== 'boolean') fail(deviceId, `param "${id}": latch is true or false`);
 
   if (seen.has(normalizeKey(id))) fail(deviceId, `duplicate param id "${id}"`);
   if (seen.has(normalizeKey(name))) fail(deviceId, `param name "${name}" collides with another param's id or name`);
@@ -265,6 +270,7 @@ function defineParam(deviceId, spec, seen) {
     bank,
     amp,
     saved,
+    latch,
     group: String(spec.group ?? '').trim() || null,
     description: String(spec.description ?? '').trim() || null,
   });
@@ -325,6 +331,13 @@ const FIGURE_KINDS = new Map([
   // A looper's loop: its bars, the playhead going round them, and a first take as it records -
   // all of it the device's report, with Length to lay it out on.
   ['loop', ['length']],
+  // An additive synth's partials: a bar per partial at its ratio above the note, as loud as it plays.
+  ['partials', ['spectrum', 'partials']],
+  // A drum hit's pitch over time, on a curve the hit plays fixed or drawn.
+  ['hitpitch', ['shape']],
+  // A struck body's modes - a bar per mode at its frequency, as loud as it starts - and the band
+  // its noise sits in.
+  ['modes', ['material', 'pitch']],
 ]);
 
 /**
@@ -529,6 +542,21 @@ export function defineDevice(spec) {
   if (migrate !== null && typeof migrate !== 'function') fail(id, 'migrate is a function of (params, fromVersion)');
   if (migrate && version === 1) fail(id, 'version 1 has nothing to migrate from');
 
+  // Named settings the device ships with, by name: each a few controls in real units, the rest
+  // at their defaults (see catalog.mjs's shippedPresets). They are filed as presets in the
+  // library layer, so `.preset("snare")` plays one and a preset of the same name somebody keeps
+  // wins.
+  const presets = {};
+  for (const [name, values] of Object.entries(spec.presets ?? {})) {
+    if (!/^[a-z][a-z0-9]*$/.test(name)) fail(id, `preset "${name}" must be one lowercase word`);
+    for (const [paramId, v] of Object.entries(values ?? {})) {
+      const param = params.find((p) => p.id === paramId);
+      if (!param) fail(id, `preset "${name}" sets "${paramId}", which this device does not have`);
+      if (!isFiniteNumber(v)) fail(id, `preset "${name}" sets "${paramId}" to something that is not a number`);
+    }
+    presets[name] = Object.freeze({ ...values });
+  }
+
   return Object.freeze({
     id,
     kind,
@@ -550,6 +578,7 @@ export function defineDevice(spec) {
     latencySec,
     params: Object.freeze(params),
     figures: Object.freeze(figures),
+    presets: Object.freeze(presets),
     panel: definePanel(id, spec.panel, params),
     // Free-form, device-specific setup the engine hands the processor at construction
     // (wavetable frames, an impulse response name). Never automation.

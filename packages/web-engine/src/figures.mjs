@@ -31,6 +31,10 @@ import { dbToGain } from './dsp/control.mjs';
 import { SYNC_OPTIONS, isFree, syncedHz, syncedSeconds } from './dsp/sync.mjs';
 import { lfoValue } from './dsp/moddelay.mjs';
 import { lengthBeats } from './devices/looper.mjs';
+import { ADDITIVE_PARTIALS, aimPartials, nyquistFade, shapePartials } from './devices/additive.mjs';
+import { KICK_DRAW_SEC, KICK_FIGURE_NOTE, KICK_SWEEP_MAX_ST, KickSweep, kickDrawnAt, kickSweptHz } from './devices/kick.mjs';
+import { midiToHz } from './dsp/voice.mjs';
+import { DRUM_MODES, drumModes } from './devices/drum.mjs';
 
 /** Points across one cycle of a drawn waveform. Half a frame is past what a panel can show. */
 const WAVE_POINTS = 256;
@@ -181,6 +185,9 @@ function figureData(descriptor, figure, values, opts) {
     case 'duck': return { ...common, ...duckFigure(read, bpm, report) };
     case 'bands': return { ...common, ...bandsFigure(read, report) };
     case 'loop': return { ...common, ...loopFigure(read, report) };
+    case 'partials': return { ...common, ...partialsFigure(descriptor, figure, read, sampleRate, { shapes, extras }) };
+    case 'hitpitch': return { ...common, ...hitPitchFigure(descriptor, figure, read, { shapes, extras, report }) };
+    case 'modes': return { ...common, ...modesFigure(read) };
     default: return common;
   }
 }
@@ -781,6 +788,82 @@ function breakpointsOf(curve) {
   }).join(' ');
 }
 
+// --- a drum hit's pitch -------------------------------------------------------------------------
+
+/** Points along a hit's pitch curve. */
+const HIT_POINTS = 192;
+
+/** Where the fixed curve is read for a copy of it to start a drawing from: dense where it moves. */
+const HIT_COPY_XS = [0, 0.04, 0.08, 0.12, 0.16, 0.2, 0.25, 0.3, 0.35, 0.4, 0.5, 0.7, 1];
+
+/** A note's name the way poptart writes one: c3 is 60. */
+function noteName(note) {
+  const names = ['c', 'c#', 'd', 'd#', 'e', 'f', 'f#', 'g', 'g#', 'a', 'a#', 'b'];
+  const n = Math.round(note);
+  return `${names[((n % 12) + 12) % 12]}${Math.floor(n / 12) - 2}`;
+}
+
+/** A frequency for an axis label. */
+const hzLabel = (hz) => (hz >= 1000 ? `${(hz / 1000).toFixed(1)} kHz` : `${Math.round(hz)} Hz`);
+
+/**
+ * A drum hit's pitch over its first KICK_DRAW_SEC seconds, as the voice plays it: the fixed curve
+ * stepped through the voice's own KickSweep at the Sweep and Click Length set, or the drawn curve
+ * the Pitch Env control is on. Laid out in the drawn curve's own space - x the square root of the
+ * time over the span, y the semitones above the note over KICK_SWEEP_MAX_ST - so the picture, the
+ * shape editor and the device read one curve the same way. The axes are labeled in milliseconds
+ * and in hertz for the note last played (f0 before any).
+ */
+function hitPitchFigure(descriptor, figure, read, { shapes, extras, report }) {
+  const mode = Math.round(read('shape') ?? 0);
+  const drawn = mode >= 1 ? shapes?.[mode] ?? null : null;
+  const table = drawn?.points ?? null;
+  const sweep = Math.min(KICK_SWEEP_MAX_ST, Math.max(0, read('sweep') ?? 0));
+  const clickMs = read('clicklength') ?? 1;
+  const note = Number.isFinite(report?.note) ? report.note : KICK_FIGURE_NOTE;
+  const noteHz = midiToHz(note);
+  const names = descriptor.params.find((p) => p.id === figure.params.shape)?.options ?? [];
+
+  // The fixed curve, stepped at the nominal rate and read at each point's time.
+  const fixedAt = (xs) => {
+    const steps = new KickSweep(NOMINAL_RATE);
+    steps.start(Math.max(0, clickMs) * 0.001 * NOMINAL_RATE);
+    const out = [];
+    let n = 0;
+    let e = 0;
+    for (const x of xs) {
+      const until = Math.round(x * x * KICK_DRAW_SEC * NOMINAL_RATE);
+      while (n <= until) e = steps.next(n++);
+      out.push(12 * Math.log2(kickSweptHz(1, sweep, e)) / KICK_SWEEP_MAX_ST);
+    }
+    return out;
+  };
+  const xs = Array.from({ length: HIT_POINTS }, (_, i) => i / (HIT_POINTS - 1));
+  const ys = table ? xs.map((x) => kickDrawnAt(table, x)) : fixedAt(xs);
+  const copy = fixedAt(HIT_COPY_XS);
+  const round = (v) => Math.round(v * 1000) / 1000;
+
+  const xTicks = [10, 25, 50, 100, 200, 400].map((ms) => ({ at: Math.sqrt(ms / 1000 / KICK_DRAW_SEC), label: `${ms} ms` }));
+  const yTicks = [0, 12, 24, 36, 48].filter((st) => st <= KICK_SWEEP_MAX_ST).map((st) => ({
+    at: st / KICK_SWEEP_MAX_ST,
+    label: st === 0 ? `${hzLabel(noteHz)} ${noteName(note)}` : hzLabel(noteHz * Math.pow(2, st / 12)),
+  }));
+  return {
+    shape: mode,
+    note,
+    noteHz,
+    startHz: noteHz * Math.pow(2, (ys[0] === undefined ? 0 : Math.max(...ys)) * KICK_SWEEP_MAX_ST / 12),
+    points: xs.map((x, i) => ({ x, y: ys[i] })),
+    data: drawn?.data ?? drawn?.name ?? extras?.[figure.params.shape]?.[mode] ?? null,
+    shapeParam: figure.params.shape,
+    curveName: curveNameOf(names, mode, drawn),
+    // A graph with real units on both axes, for the picture and for the shape editor alike.
+    shapeAxes: { x: 'time', y: 'pitch', grid: { x: xTicks, y: yTicks } },
+    // The fixed curve as breakpoints, for a copy of it to start a drawing from.
+    builtIns: Object.fromEntries(names.map((name) => [name, HIT_COPY_XS.map((x, i) => `${round(x)},${round(Math.min(1, Math.max(0, copy[i])))}`).join(' ')])),
+  };
+}
+
 // --- what a device is doing to the level -------------------------------------------------------
 
 /**
@@ -1203,6 +1286,30 @@ function bandsFigure(read, report) {
   return { bars, lowHz, highHz, live: false };
 }
 
+// --- a struck body ----------------------------------------------------------------------------
+
+/** The note a body's picture is drawn at: middle C, which is where a pattern plays one by default. */
+const MODES_NOTE = 60;
+
+/**
+ * A struck body's modes at middle C moved by Pitch, each as loud as it starts (Material and Edge)
+ * against the noise
+ * Noise mixes in, and the band the noise sits in - the drum's own drumModes, so the bars are the
+ * modes it plays.
+ */
+function modesFigure(read) {
+  const ratios = new Float64Array(DRUM_MODES);
+  const levels = new Float64Array(DRUM_MODES);
+  const norm = drumModes(read('material') ?? 1, read('edge') ?? 0, ratios, levels);
+  const f0 = 440 * Math.pow(2, (MODES_NOTE + (read('pitch') ?? 0) - 69) / 12);
+  const mix = Math.min(1, Math.max(0, read('noise') ?? 0));
+  const bars = [];
+  for (let k = 0; k < DRUM_MODES; k++) {
+    if (levels[k] > 0) bars.push({ hz: f0 * ratios[k], level: Math.min(1, levels[k] * norm * (1 - mix)) });
+  }
+  return { bars, hz: f0, noise: { hz: read('tone') ?? 3000, level: mix }, lowHz: RESPONSE_RANGE.lowHz, highHz: RESPONSE_RANGE.highHz };
+}
+
 // --- the looper ------------------------------------------------------------------------------
 
 /**
@@ -1221,5 +1328,55 @@ function loopFigure(read, report) {
     takenSec: num(r?.takenSec),
     takenBeats: num(r?.takenBeats),
     fixedBeats: lengthBeats(read('length') ?? 0),
+  };
+}
+
+// --- the additive synth's partials ------------------------------------------------------------
+
+/** The note the partials are drawn for: middle C, since a picture has no note of its own. */
+const PARTIALS_NOTE = 60;
+
+/** How far into a note the pale part of a bar shows Damp having taken it, in seconds. */
+const PARTIALS_DAMP_SEC = 0.25;
+
+/** A flat spectrum as breakpoints: what the editor opens on before anything is drawn. */
+const FLAT_SPECTRUM = '0,1 1,1';
+
+/**
+ * Every sounding partial as a bar: its ratio to the note, the level it plays at once the levels
+ * are brought to one loudness, that level after a quarter second of Damp, and how far the fade
+ * below Nyquist lets it through - all from the synth's own shapePartials and aimPartials, at
+ * middle C. `top` is the ratio the axis runs to: the last partial's at this stretch.
+ */
+function partialsFigure(descriptor, figure, read, sampleRate, { shapes, extras }) {
+  const slot = Math.round(read('spectrum') ?? 0);
+  const drawn = slot >= 1 ? (shapes?.[slot] ?? null) : null;
+  const ratio = new Float64Array(ADDITIVE_PARTIALS);
+  const base = new Float64Array(ADDITIVE_PARTIALS);
+  const dampMul = new Float64Array(ADDITIVE_PARTIALS);
+  const stretch = read('stretch') ?? 0;
+  shapePartials({
+    partials: read('partials') ?? 16, tilt: read('tilt') ?? 0, odd: read('odd') ?? 0, stretch, damp: read('damp') ?? 0,
+    table: drawn?.points ?? null,
+  }, sampleRate, ratio, base, dampMul);
+  const hz = midiToHz(PARTIALS_NOTE);
+  const level = new Float64Array(ADDITIVE_PARTIALS);
+  const norm = aimPartials(base, ratio, hz, sampleRate, level);
+  const after = PARTIALS_DAMP_SEC * sampleRate;
+  const bars = [];
+  for (let k = 0; k < ADDITIVE_PARTIALS; k++) {
+    if (!(base[k] > 0)) continue;
+    const v = level[k] * norm;
+    bars.push({ ratio: ratio[k], level: v, damped: v * Math.pow(dampMul[k], after), pass: nyquistFade(ratio[k] * hz, sampleRate) });
+  }
+  const names = descriptor.params.find((p) => p.id === figure.params.spectrum)?.options ?? [];
+  return {
+    bars,
+    top: Math.pow(ADDITIVE_PARTIALS, 1 + stretch),
+    shapeParam: figure.params.spectrum,
+    curveName: curveNameOf(names, slot, drawn),
+    shapeAxes: { x: 'partial', y: 'level' },
+    builtIns: Object.fromEntries(names.map((name) => [name, FLAT_SPECTRUM])),
+    data: drawn?.data ?? drawn?.name ?? extras?.[figure.params.spectrum]?.[slot] ?? FLAT_SPECTRUM,
   };
 }

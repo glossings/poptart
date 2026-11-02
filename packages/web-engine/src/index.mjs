@@ -31,7 +31,7 @@ export {
 } from './descriptor.mjs';
 
 export { createRegistry } from './registry.mjs';
-export { DEVICES, buildCatalog, catalog, licenseReport } from './catalog.mjs';
+export { DEVICES, PRESET_KEEPS, buildCatalog, catalog, licenseReport, shippedPresets } from './catalog.mjs';
 export { WASM_DEVICES };
 export { AIRWINDOWS_DEVICES } from './devices/airwindows.mjs';
 
@@ -41,6 +41,7 @@ export { RESPONSE_RANGE, buildFigures, figuresFor, subsumedParams } from './figu
 export { WAVETABLE, WavetableSynth, VOICES_KNOB, TABLE_NAMES, tableFromSample } from './devices/wavetable.mjs';
 export { FMSYNTH, FmSynth } from './devices/fmsynth.mjs';
 export { GRANULAR, GranularSynth } from './devices/granular.mjs';
+export { ADDITIVE, AdditiveSynth } from './devices/additive.mjs';
 export { sharedBuiltInTables, buildMipmaps } from './dsp/tables.mjs';
 export { DISTORT, DistortProcessor } from './devices/distort.mjs';
 export { REVERB, ReverbProcessor } from './devices/reverb.mjs';

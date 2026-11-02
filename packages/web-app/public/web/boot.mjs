@@ -27,7 +27,7 @@ import { createHost } from './host.mjs';
 import { createAudioOutputs } from './audio-output.mjs';
 import { createWebMidi } from './midi.mjs';
 import { createAudioInputs } from './audio-input.mjs';
-import { createPrebake } from './prebake.mjs';
+import { createPrebake, fileShippedPresets } from './prebake.mjs';
 import { createBlockEvaluator } from './block-eval.mjs';
 import { createRemotePacks } from './remote-packs.mjs';
 import { createLocalFolder } from './local-folder.mjs';
@@ -468,12 +468,14 @@ export async function boot({
         pinnedDefs: globalThis.poptartPinnedDefs,
         dehydrate: (code) => storage.dehydrateOnLoad(code),
         log: say,
-        afterClear: () => restorePacks(patternCore),
+        afterClear: () => { restorePacks(patternCore); fileShippedPresets(patternCore, webEngine); },
       });
       for (const line of await prebake.run()) warn(`prebake ${line}`);
     } catch (err) {
       warn(`the prebake did not run - ${err?.message ?? err}`);
     }
+  } else {
+    fileShippedPresets(patternCore, webEngine);
   }
 
   const host = createHost({

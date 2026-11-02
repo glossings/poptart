@@ -286,7 +286,7 @@ const API_DOCS = {
   preset: {
     kind: 'method',
     sig: 'preset(names)',
-    desc: 'Switches the last plugin in the chain between its saved presets; can be patterned. Double-click the name to create or adjust one.',
+    desc: 'Switches the last plugin in the chain between its saved presets, or the presets a built-in device comes with (a Drum\'s snare); can be patterned. Double-click the name to create or adjust one.',
     eg: '.preset("<init growl>")',
   },
   scale: {

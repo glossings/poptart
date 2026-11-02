@@ -12,7 +12,7 @@ import { ASYMMETRIC, IS_CURVE, SHAPER_INDEX, SHAPER_MODES, TAKES_CHARACTER, auto
 
 /** The curves Distort shipped with in 0.2.0, in their order: their indexes are in saved songs. */
 const SHIPPED = ['soft', 'hard', 'fold', 'sine', 'asym', 'tube', 'diode', 'westcoast', 'cheby'];
-import { Oversampler } from './src/dsp/oversample.mjs';
+import { Oversampler, Stage2x } from './src/dsp/oversample.mjs';
 import { harmonicsOf } from './src/dsp/fft.mjs';
 
 const SR = 48000;
@@ -144,6 +144,21 @@ test('the oversampler passes a signal through unchanged when it is doing nothing
     assert.ok(rms(tail) > 0.3, `${factor}x lost the signal: rms ${rms(tail).toFixed(4)}`);
     assert.ok(rms(tail) < 0.4, `${factor}x changed the level: rms ${rms(tail).toFixed(4)}`);
   }
+});
+
+// Decimating by two, at twice 48 kHz: what is under 24 kHz passes and what is over it, which would
+// fold back down, does not.
+test('a stage brought down by two passes the band under the new Nyquist and stops the band over it', () => {
+  const levelAfter = (hz) => {
+    const stage = new Stage2x();
+    const n = 4096;
+    const input = Float64Array.from({ length: 2 * n }, (_, i) => Math.sin((2 * Math.PI * hz * i) / 96000));
+    const out = new Float64Array(n);
+    stage.down(input, out, n);
+    return 20 * Math.log10(rms(out.subarray(n / 2)) * Math.SQRT2);
+  };
+  for (const hz of [1000, 10000, 18000]) assert.ok(levelAfter(hz) > -1.5, `${hz} Hz came out at ${levelAfter(hz).toFixed(1)} dB`);
+  for (const hz of [34000, 40000, 46000]) assert.ok(levelAfter(hz) < -60, `${hz} Hz came out at ${levelAfter(hz).toFixed(1)} dB`);
 });
 
 test('auto gain holds the level as the drive goes up, and off it does not', () => {

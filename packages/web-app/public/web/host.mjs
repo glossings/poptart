@@ -855,6 +855,21 @@ export function createHost({
       };
     },
 
+    // A preset picked in a device window: loaded into the slot now, even over the window's own
+    // hold - a deliberate "play this one" - once what the hands did is captured into the preset it
+    // was done on (see the desktop's route of the same name).
+    'POST /api/devicePreset': async (body) => {
+      const label = String(body?.trackId ?? '');
+      const slot = Number(body?.slot ?? 0);
+      const name = body?.preset == null ? null : String(body.preset);
+      if (name == null) return { loaded: false };
+      await takeCapture(label, slot);
+      const scheduler = evaluator.schedulers?.get(label);
+      const why = scheduler?.holdPreset?.(slot, name, { force: true }) ?? null;
+      scheduler?.holdPreset?.(slot, null);
+      return { loaded: !!scheduler, why };
+    },
+
     // The window closed: the processor can stop reporting.
     'POST /api/deviceWatch': async (body) => {
       const label = String(body?.trackId ?? '');

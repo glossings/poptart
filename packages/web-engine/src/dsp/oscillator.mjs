@@ -72,7 +72,7 @@ export function fillUnison(n, detuneCents, panSpread, ratios, gainsL, gainsR) {
  * sounds the same every time it is played - a unison whose phases are genuinely random is a
  * unison whose attack transient changes on every note, which is not a feature anybody asked for.
  */
-function hashPhase(seed, index) {
+export function hashPhase(seed, index) {
   let h = (seed * 2654435761 + index * 40503) >>> 0;
   h ^= h >>> 15;
   h = Math.imul(h, 2246822519) >>> 0;
