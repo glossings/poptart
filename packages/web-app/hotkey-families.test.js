@@ -307,7 +307,8 @@ test('the unlock-loop chord is the app\'s, because mod+L is the editor\'s select
   // macOS, ctrl elsewhere) - so from inside the editor, where the guide says to press it, only
   // macOS's ctrl+L ever arrived. As an app chord it is a key CodeMirror leaves alone everywhere.
   assert.equal(mac.HOTKEY_ACTIONS.find((a) => a.id === 'loops').combos[0], 'app+l');
-  const docs = guidePages().map(([, html]) => html).join('\n');
+  // Only the pages that name it: the shape editor binds mod+L to its own loop-a-span, in its own window.
+  const docs = guidePages().filter(([name]) => /arrange|reference/.test(name)).map(([, html]) => html).join('\n');
   assert.ok(docs.includes('{app+l}') && !docs.includes('{mod+l}'), 'the guide names the chord that is bound');
 });
 

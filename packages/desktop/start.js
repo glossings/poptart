@@ -22,6 +22,9 @@ try {
 // sets it again, deliberately, for the server child only.
 const env = { ...process.env };
 delete env.ELECTRON_RUN_AS_NODE;
+// Electron warns about any page that allows eval, and evaluating code is what poptart does. The
+// warning never shows in a packaged build; from source it is only noise in the console.
+env.ELECTRON_DISABLE_SECURITY_WARNINGS = "true";
 
 const child = spawn(binary, [__dirname, ...process.argv.slice(2)], { stdio: 'inherit', env });
 for (const signal of ['SIGINT', 'SIGTERM']) {

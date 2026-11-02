@@ -175,12 +175,16 @@ test('audio patched onto a native control is read every sample, and an audio-rat
   assert.ok(worstStep < 0.002, `the attack moved ${worstStep.toFixed(4)} in one sample - that is a block step, not a ramp`);
   assert.ok(Math.abs(sample(4, at(0.125)) - 0.5) < 0.03, `25 ms into a 50 ms attack: ${sample(4, at(0.125))}`);
   assert.ok(Math.abs(sample(4, at(0.45)) - 0.5) < 1e-3, `at sustain before the retrigger: ${sample(4, at(0.45))}`);
-  // With retrigger on, the second note climbs again from sustain; with it off it stays put.
-  assert.ok(sample(4, at(0.53)) > 0.7, `the retrigger did not restart the attack: ${sample(4, at(0.53))}`);
+  // With retrigger on, the second note drops to the floor and climbs its attack again: 30 ms into
+  // a 50 ms attack is 0.6. With it off it stays put.
+  assert.ok(sample(4, at(0.505)) < 0.2, `the retrigger did not drop to the floor: ${sample(4, at(0.505))}`);
+  assert.ok(Math.abs(sample(4, at(0.53)) - 0.6) < 0.05, `the retrigger did not restart the attack: ${sample(4, at(0.53))}`);
   assert.ok(Math.abs(sample(6, at(0.53)) - 0.5) < 1e-3, `without retrigger the envelope should hold at sustain: ${sample(6, at(0.53))}`);
   // The control-rate one, which a plugin's parameter reads, retriggers the same way.
   assert.ok(Math.abs(sample(8, at(0.45)) - 0.5) < 1e-3, `the control-rate envelope's sustain: ${sample(8, at(0.45))}`);
-  assert.ok(sample(8, at(0.53)) > 0.7, `the control-rate retrigger did not restart the attack: ${sample(8, at(0.53))}`);
+  assert.ok(sample(8, at(0.505)) < 0.2, `the control-rate retrigger did not drop to the floor: ${sample(8, at(0.505))}`);
+  // It drops and restarts a block or two later than the audio-rate one, so it is a little lower.
+  assert.ok(Math.abs(sample(8, at(0.53)) - 0.6) < 0.1, `the control-rate retrigger did not restart the attack: ${sample(8, at(0.53))}`);
   // Both sides of the pair carry it - a patch is read as the mean of the two.
   assert.strictEqual(sample(5, at(0.3)), sample(4, at(0.3)));
 });

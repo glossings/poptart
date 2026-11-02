@@ -432,9 +432,9 @@ test('the editing verbs take the edit modifier, never both - the app chords are 
   // census that keeps a new one from slipping in unexamined.
   assert.equal((SRC.match(/const (mod|meta) = e\.metaKey \|\| e\.ctrlKey;/g) ?? []).length, 0,
     'a key handler somewhere takes either modifier');
-  // ...and the roll, the sample lists, the library browser and the groove lanes answer the same
-  // way. Five: the browser keys ONE table now where it used to key three separate lists.
-  assert.equal((SRC.match(/const (mod|meta) = editMod\(e\);/g) ?? []).length, 5);
+  // ...and the roll, the sample lists, the library browser, the groove lanes and the shape editor
+  // answer the same way. Six: the browser keys ONE table now where it used to key three separate lists.
+  assert.equal((SRC.match(/const (mod|meta) = editMod\(e\);/g) ?? []).length, 6);
 });
 
 test('a marked span is shaded over the tracks, not only on the ruler', () => {
