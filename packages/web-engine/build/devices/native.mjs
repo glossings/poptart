@@ -53,7 +53,7 @@ import { LIMITER } from '../../src/devices/limiter.mjs';
 import { MULTIBAND } from '../../src/devices/multiband.mjs';
 import { REVERB } from '../../src/devices/reverb.mjs';
 import { FREQSHIFT } from '../../src/devices/freqshift.mjs';
-import { VOICE } from '../../src/devices/voice.mjs';
+import { VOCALSHIFT } from '../../src/devices/vocalshift.mjs';
 import { CHORUS } from '../../src/devices/chorus.mjs';
 import { FLANGER } from '../../src/devices/flanger.mjs';
 import { PHASER } from '../../src/devices/phaser.mjs';
@@ -138,7 +138,7 @@ const OWN = [
   { descriptor: MULTIBAND, source: 'multiband.cc' },
   { descriptor: REVERB, source: 'reverb.cc' },
   { descriptor: FREQSHIFT, source: 'freqshift.cc' },
-  { descriptor: VOICE, source: 'voice.cc' },
+  { descriptor: VOCALSHIFT, source: 'vocalshift.cc' },
   { descriptor: CHORUS, source: 'chorus.cc' },
   { descriptor: FLANGER, source: 'flanger.cc' },
   { descriptor: PHASER, source: 'phaser.cc' },

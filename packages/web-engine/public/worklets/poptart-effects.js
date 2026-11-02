@@ -4177,8 +4177,8 @@ class FreqShiftProcessor {
   }
 }
 
-// ---- src/devices/voice.mjs ---------------------------------------
-// The Voice effect: a pitch shifter for one voice at a time, quick enough to play through.
+// ---- src/devices/vocalshift.mjs ----------------------------------
+// The VocalShift effect: a pitch shifter for one voice at a time, quick enough to play through.
 //
 // Shift is spectral - it hears a whole 120 ms window before it can say anything - which is what
 // lets it move a chord or a full mix cleanly. A single voice needs much less: find its pitch
@@ -4204,22 +4204,22 @@ class FreqShiftProcessor {
 //     each as loud as before; down, fewer. Unshifted it is exactly 1, and the grains add back up to
 //     the input itself
 //
-// Translated line for line in osc-engine/native/devices/own/voice.cc, and held to it by
+// Translated line for line in osc-engine/native/devices/own/vocalshift.cc, and held to it by
 // native-device-parity.test.mjs: change one, change both.
 
 
 /** How late the output is, in seconds, and so what the scheduler plays notes early by. */
-const VOICE_LATENCY_SEC = 0.05;
+const VOCALSHIFT_LATENCY_SEC = 0.05;
 
-const VOICE = defineDevice({
-  id: 'Voice',
+const VOCALSHIFT = defineDevice({
+  id: 'VocalShift',
   kind: 'fx',
   version: 1,
   license: 'AGPL-3.0-only',
-  processor: 'poptart-voice',
+  processor: 'poptart-vocalshift',
   description: 'A pitch shifter for a single voice or line, with its own formant control - quick enough to play through.',
   channels: { in: 2, out: 2 },
-  latencySec: VOICE_LATENCY_SEC,
+  latencySec: VOCALSHIFT_LATENCY_SEC,
   // Both a-rate, so a signal can be patched onto them - `.param("Pitch", lfo(...))` is a vibrato.
   // The processor reads them once a block, as Shift does.
   params: [
@@ -4241,12 +4241,12 @@ const YIN_VOICED = 0.35;
 /** The highest pitch tracked, in hertz. */
 const MAX_PITCH_HZ = 1000;
 
-class VoiceProcessor {
+class VocalShiftProcessor {
   constructor(sampleRate) {
     this.sampleRate = sampleRate;
     // The delay, and the longest period it leaves room for: a grain is cut up to half a period
     // past its mark, reads a period either side of that, and is placed up to two periods ahead.
-    this.delay = Math.floor(VOICE_LATENCY_SEC * sampleRate + 0.5);
+    this.delay = Math.floor(VOCALSHIFT_LATENCY_SEC * sampleRate + 0.5);
     this.maxPeriod = Math.floor(this.delay / 4);
     this.minPeriod = Math.ceil(sampleRate / MAX_PITCH_HZ);
     this.unvoiced = Math.floor(this.maxPeriod / 2);
@@ -8018,7 +8018,7 @@ const EFFECTS = [
   [EQ, EqProcessor], [CHORUS, ChorusProcessor], [FLANGER, FlangerProcessor], [PHASER, PhaserProcessor],
   [DUCKER, DuckerProcessor], [OVERDRIVE, OverdriveProcessor], [MULTIBAND, MultibandProcessor],
   [STUTTER, StutterProcessor], [GRAINECHO, GrainEchoProcessor], [FREQSHIFT, FreqShiftProcessor],
-  [VOICE, VoiceProcessor], [LPG, LpgProcessor], [FILTERBANK, FilterbankProcessor], [RESONATOR, ResonatorProcessor], [CROSSOVER, CrossoverProcessor],
+  [VOCALSHIFT, VocalShiftProcessor], [LPG, LpgProcessor], [FILTERBANK, FilterbankProcessor], [RESONATOR, ResonatorProcessor], [CROSSOVER, CrossoverProcessor],
   [LOOPER, LooperProcessor],
 ];
 

@@ -89,7 +89,7 @@ test('every panel is opened against the deck its handle was double-clicked in', 
     /openSliceEditorFromCall\(sliceCall, code, idx, ed\)/,
     /openEnvelopeAt\(code, idx, ed\)/,
     /openRecordPanel\(rec, ed\)/,
-    /showPluginEditor\(blockTrackId\(ed, chain\), chain\.slot\)/,
+    /showPluginEditor\(blockTrackId\(ed, chain\), chain\.slot, chain\.name\)/,
   ]) assert.match(open, call);
   // An empty call is given its name in the deck it is in, and the handle reopened there.
   assert.equal((open.match(/Defs\.materialize\(ed\)/g) ?? []).length, 5);

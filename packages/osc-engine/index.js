@@ -515,6 +515,9 @@ class OscEngine {
     // a scan, so a host can show "47 of 312" while nothing else works yet.
     this.onScanState = null;
     this._warned = new Set(); // one-shot warning keys, so per-event problems don't spam the log
+    // Where a warning goes besides the terminal: the host points it at the editor's console, as
+    // the browser engine's `warn` is.
+    this.warn = null;
     // Which of poptart's own devices is in which slot, as "trackId:slot" - what a `.param()`
     // argument is resolved against (see setParam). Only this half knows: the scheduler sends a
     // name and a value and does not care what is hosting them, exactly as on the web.
@@ -1181,12 +1184,27 @@ class OscEngine {
     this._loopSent.delete(trackId);
     this._send('/poptart/destroyTrack', [trackId]);
   }
+  /**
+   * Why `name` cannot go in `slot` (0 the instrument, 1.. an effect), as the line the console is
+   * given, or null when it can. A name that is not one of poptart's own devices is a plugin's,
+   * which only the engine can look up.
+   */
+  slotRefusal(name, slot) {
+    const device = nativeDevice(name);
+    if (!device) return null;
+    if (slot === 0 && device.kind !== 'synth') return `[poptart] ${device.id} is an effect, not an instrument - use .fx("${device.id}")`;
+    if (slot !== 0 && device.kind !== 'fx') return `[poptart] ${device.id} is an instrument, not an effect - use .synth("${device.id}")`;
+    return null;
+  }
   loadInstrument(trackId, pluginId) {
     const device = nativeDevice(pluginId);
     if (device) {
-      if (device.kind !== 'synth') {
-        this._warnOnce(`device-kind:${device.id}`,
-          `[poptart] ${device.id} is an effect, not an instrument - use .fx("${device.id}")`);
+      // Refused, the slot is emptied rather than left holding the last evaluation's instrument:
+      // the track plays what the code says, and here that is nothing.
+      const refused = this.slotRefusal(pluginId, 0);
+      if (refused) {
+        this._warn(refused);
+        this.unloadInstrument(trackId);
         return;
       }
       this._rememberDevice(`${trackId}:0`, device);
@@ -1203,9 +1221,10 @@ class OscEngine {
     }
     const device = nativeDevice(pluginId);
     if (device) {
-      if (device.kind !== 'fx') {
-        this._warnOnce(`device-kind:${device.id}`,
-          `[poptart] ${device.id} is an instrument, not an effect - use .synth("${device.id}")`);
+      const refused = this.slotRefusal(pluginId, position >= 1 ? position : 1);
+      if (refused) {
+        this._warn(refused);
+        if (position >= 1) this.unloadEffect(trackId, position);
         return;
       }
       // A position of -1 is "the next free slot", which only sclang knows: the scheduler names
@@ -1219,6 +1238,11 @@ class OscEngine {
     if (position >= 0) this._forgetDevice(`${trackId}:${position}`);
     this._send('/poptart/loadEffect', [trackId, pluginId, position]);
     if (this._loopPlans.has(trackId)) this._sendLoops(trackId);
+  }
+  // Empties the instrument slot, so the track is silent. Engine-side no-op if it is already empty.
+  unloadInstrument(trackId) {
+    this._forgetDevice(`${trackId}:0`);
+    this._send('/poptart/unloadInstrument', [trackId]);
   }
   // Empties an effect slot: re-bypasses it and closes the plugin (freeing its memory).
   // Engine-side no-op if the slot is already empty.
@@ -1817,8 +1841,13 @@ class OscEngine {
   _warnOnce(key, message) {
     if (this._warned.has(key)) return;
     this._warned.add(key);
+    this._warn(message);
+  }
+
+  _warn(message) {
     // eslint-disable-next-line no-console
     console.warn(message);
+    this.warn?.(message);
   }
 
   /**

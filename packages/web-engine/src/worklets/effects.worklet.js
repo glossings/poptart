@@ -22,7 +22,7 @@ import { CHORUS, ChorusProcessor } from '../devices/chorus.mjs';
 import { FLANGER, FlangerProcessor } from '../devices/flanger.mjs';
 import { PHASER, PhaserProcessor } from '../devices/phaser.mjs';
 import { FREQSHIFT, FreqShiftProcessor } from '../devices/freqshift.mjs';
-import { VOICE, VoiceProcessor } from '../devices/voice.mjs';
+import { VOCALSHIFT, VocalShiftProcessor } from '../devices/vocalshift.mjs';
 import { DUCKER, DuckerProcessor } from '../devices/ducker.mjs';
 import { OVERDRIVE, OverdriveProcessor } from '../devices/overdrive.mjs';
 import { MULTIBAND, MultibandProcessor } from '../devices/multiband.mjs';
@@ -96,7 +96,7 @@ const EFFECTS = [
   [EQ, EqProcessor], [CHORUS, ChorusProcessor], [FLANGER, FlangerProcessor], [PHASER, PhaserProcessor],
   [DUCKER, DuckerProcessor], [OVERDRIVE, OverdriveProcessor], [MULTIBAND, MultibandProcessor],
   [STUTTER, StutterProcessor], [GRAINECHO, GrainEchoProcessor], [FREQSHIFT, FreqShiftProcessor],
-  [VOICE, VoiceProcessor], [LPG, LpgProcessor], [FILTERBANK, FilterbankProcessor], [RESONATOR, ResonatorProcessor], [CROSSOVER, CrossoverProcessor],
+  [VOCALSHIFT, VocalShiftProcessor], [LPG, LpgProcessor], [FILTERBANK, FilterbankProcessor], [RESONATOR, ResonatorProcessor], [CROSSOVER, CrossoverProcessor],
   [LOOPER, LooperProcessor],
 ];
 

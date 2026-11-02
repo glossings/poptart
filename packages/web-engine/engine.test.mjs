@@ -1383,3 +1383,30 @@ test('a deck on a clock of its own tells its tracks\' devices its tempo, and kee
   assert.equal(engine.trackTempo.size, 0);
   assert.equal(tempos('deckB').at(-1), 132);
 });
+
+test('an effect named as the instrument empties the slot the last evaluation filled, and says so each time', () => {
+  const { engine, warnings } = makeEngine();
+  engine.loadInstrument('t', 'Granular');
+  assert.equal(engine.deviceState('t', 0)?.descriptor.id, 'Granular');
+  // The next evaluation names an effect: the track follows the code, and is silent.
+  engine.loadInstrument('t', 'VocalShift');
+  assert.equal(engine.deviceState('t', 0), null, 'nothing of Granular is left for a window to open');
+  assert.equal(engine.tracks.get('t').slots.has(0), false);
+  assert.deepEqual(warnings, ['[web-engine] "VocalShift" is an effect, so it cannot go where an instrument belongs.']);
+  engine.loadInstrument('t', 'VocalShift');
+  assert.equal(warnings.length, 2, 'said on every evaluation, not once a session');
+  // What the editor's click on that synth() is answered with.
+  assert.equal(engine.slotRefusal('VocalShift', 0), warnings[0]);
+  assert.equal(engine.slotRefusal('Granular', 0), null);
+  // The reverse: an instrument named as an effect takes out the effect that was there.
+  engine.loadEffect('t', 'Filter', 1);
+  assert.ok(engine.deviceState('t', 1));
+  engine.loadEffect('t', 'Granular', 1);
+  assert.equal(engine.deviceState('t', 1), null);
+  assert.match(warnings.at(-1), /"Granular" is an instrument, so it cannot go where an effect belongs/);
+  // And a name with no device behind it, the same.
+  engine.loadInstrument('t', 'Granular');
+  engine.loadInstrument('t', 'Nonesuch');
+  assert.equal(engine.deviceState('t', 0), null);
+  assert.match(warnings.at(-1), /no device called "Nonesuch"/);
+});

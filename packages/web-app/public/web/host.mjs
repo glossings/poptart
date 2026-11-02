@@ -837,6 +837,10 @@ export function createHost({
       const label = String(body?.trackId ?? '');
       const slot = Number(body?.slot ?? 0);
       const tid = evaluator.trackIds.get(label) ?? label;
+      // The device the code names, when it cannot go in that slot: said, as the evaluation said
+      // it, rather than opening whatever the slot held before.
+      const refused = body?.name ? engine.slotRefusal?.(String(body.name), slot) : null;
+      if (refused) throw new Error(refused);
       const state = engine.deviceState(tid, slot);
       if (!state) throw new Error(`there is no device in slot ${slot} of "${label}" - evaluate the buffer and try again`);
       // The processor starts reporting where its controls are, so a control something else is

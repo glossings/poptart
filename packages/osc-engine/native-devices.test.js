@@ -33,6 +33,7 @@ function engine() {
   e._send = (addr, args) => sent.push({ addr, args });
   const warned = [];
   e._warnOnce = (key, message) => warned.push(message);
+  e._warn = (message) => warned.push(message);
   return { e, sent, warned };
 }
 
@@ -88,13 +89,54 @@ test('a load sends the device and its controls, and leaves plugin names alone', 
   assert.deepStrictEqual(pluginFx.args, ['u', 'ValhallaDelay', 2]);
 });
 
-test('a device in the wrong half of the chain warns instead of loading', () => {
+test('a device in the wrong half of the chain warns and empties the slot instead of loading', () => {
   const { e, sent, warned } = engine();
   e.loadInstrument('t', 'Galactic');
   e.loadEffect('t', 'Plaits', 1);
-  assert.deepStrictEqual(sent, [], 'nothing should have been loaded');
+  assert.deepStrictEqual(sent.map((m) => [m.addr, ...m.args]), [
+    ['/poptart/unloadInstrument', 't'],
+    ['/poptart/unloadEffect', 't', 1],
+  ], 'nothing loaded, and each slot emptied');
   assert.match(warned[0], /Galactic is an effect.*\.fx\("Galactic"\)/);
   assert.match(warned[1], /Plaits is an instrument.*\.synth\("Plaits"\)/);
+});
+
+test('an effect named in synth() takes out the instrument the last evaluation loaded', () => {
+  const { e, sent, warned } = engine();
+  e.loadInstrument('t', 'Granular');
+  assert.ok(e.deviceSlot('t', 0), 'Granular is in the slot');
+  sent.length = 0;
+  // The next evaluation names an effect: the slot follows the code, and is empty.
+  e.loadInstrument('t', 'VocalShift');
+  assert.deepStrictEqual(sent.map((m) => [m.addr, ...m.args]), [['/poptart/unloadInstrument', 't']]);
+  assert.strictEqual(e.deviceSlot('t', 0), null, 'nothing of Granular is left for a window to open');
+  assert.deepStrictEqual(warned, ['[poptart] VocalShift is an effect, not an instrument - use .fx("VocalShift")']);
+  // Said on every evaluation that names it, not once a session.
+  e.loadInstrument('t', 'VocalShift');
+  assert.strictEqual(warned.length, 2);
+  // What the editor's click on that synth() is answered with.
+  assert.strictEqual(e.slotRefusal('VocalShift', 0), warned[0]);
+  assert.strictEqual(e.slotRefusal('Granular', 0), null);
+  assert.match(e.slotRefusal('Granular', 2), /Granular is an instrument/);
+  assert.strictEqual(e.slotRefusal('A Plugin', 0), null, 'a plugin name is the engine\'s to look up');
+});
+
+test('the engine\'s warnings reach the host as well as the terminal', () => {
+  const e = new OscEngine({ sclangPath: '/usr/bin/false' });
+  e._send = () => {};
+  const heard = [];
+  e.warn = (line) => heard.push(line);
+  const original = console.warn;
+  console.warn = () => {};
+  try {
+    e.loadInstrument('t', 'VocalShift');
+    e.loadEffect('t', 'Granular', 1);
+  } finally {
+    console.warn = original;
+  }
+  assert.strictEqual(heard.length, 2);
+  assert.match(heard[0], /VocalShift is an effect/);
+  assert.match(heard[1], /Granular is an instrument/);
 });
 
 test('a control argument reaches sclang as a position, and an unknown one warns', () => {

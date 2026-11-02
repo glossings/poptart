@@ -338,7 +338,13 @@ var songLat;
 // no scsynth output means scsynth itself never started. Keep the text in sync with index.js.
 "poptart: engine script running".postln;
 
+// The sections below run as blocks of their own (`{ ... }.value;`): the file's top level is one
+// function, and sclang caps how many literals one function may hold ("Selector table too big"),
+// which every closure and handler written at the top level counts toward. A new section of
+// handlers goes in a block too.
+
 // --- tiny JSON writer (the class library has String.parseJSON but no serializer) ---
+{
 jsonEscape = { |str|
     str.asString
         .replace("\\", "\\\\").replace("\"", "\\\"")
@@ -892,6 +898,7 @@ channelDefault = { |name|
 // silent bus (so plugins see silence until routed), and the track's own send is parked to the
 // trash bus. setSidechain repoints the relevant args when a route is set up.
 scArgsFor = { [] }; // nothing is parked on the strip any more: its taps and sends are nodes made when wanted
+}.value;
 
 // --- a track's optional stages ---------------------------------------------------------------
 //
@@ -899,6 +906,7 @@ scArgsFor = { [] }; // nothing is parked on the strip any more: its taps and sen
 // a node of its own, made the first time it is wanted (see sharedTrackDef).
 
 // How many output pairs are in use (see the strip's `pairs`).
+{
 trackPairs = { max(1, min(playChannels, server.options.numOutputBusChannels) div: 2) };
 
 // The bus the strip writes for what listens after it, made the first time anything does.
@@ -1386,6 +1394,7 @@ unwireParamRoute = { |targetKey, slot, name|
         reorderTracks.();
     };
 };
+}.value;
 
 // --- what a param call is aimed at ----------------------------------------------------------
 //
@@ -1399,6 +1408,7 @@ unwireParamRoute = { |targetKey, slot, name|
 // Each has map (a control bus), unmap, and - where the reader takes one per sample - mapAudio /
 // unmapAudio (an audio bus). nil for a control that cannot be resolved (no plugin open yet, or no
 // such parameter). `index` short-circuits the lookup, for a teardown that only has what it stored.
+{
 exprLeaf = { |name|
     var m = name.asString.findRegexp("^~([0-9]+)~(.*)$");
     if (m.size >= 3) { [m[1][1].asInteger, m[2][1]] };
@@ -1497,6 +1507,7 @@ awaitTarget = { |track, slot, paramName, who|
         };
     };
 };
+}.value;
 
 // --- param expressions ('/poptart/setParamExpr') ----------------------------------------------
 //
@@ -1516,6 +1527,7 @@ awaitTarget = { |track, slot, paramName, who|
 // Tree nodes (parsed JSON, string keys): {k:const, v}, {k:in, i, rate, source?}, {k:op, op, a},
 // {k:fn, op, a}, {k:map, min, max, curve, a}. Walk order is pre-order, a map's min and max first.
 
+{
 exprKey = { |slot, name| ("slot" ++ slot ++ "_" ++ name).asSymbol };
 exprsOf = { |track| track[\exprs] ?? { var d = IdentityDictionary.new; track[\exprs] = d; d } };
 exprFeedsOf = { |track| track[\exprFeeds] ?? { var d = Dictionary.new; track[\exprFeeds] = d; d } };
@@ -2223,6 +2235,7 @@ resolveParamIndex = { |info, name|
     };
     idx;
 };
+}.value;
 
 // --- live MIDI input (midicc()/midikeys() - see /poptart/setParamCC and /poptart/midiRoute) ---
 
@@ -2230,6 +2243,7 @@ resolveParamIndex = { |info, name|
 // pattern first asks (any MIDI-flavored command, or Node's explicit /poptart/midiInit). Once
 // on, every incoming CC is also forwarded to Node as /poptart/midiIn - that live-value feed is
 // what a cc signal demoted to Tier-1 (arithmetic, .hold(), signal bounds) samples JS-side.
+{
 midiEnable = {
     if (midiInitialized.not) {
         midiInitialized = true;
@@ -2320,6 +2334,7 @@ midiWarnMissing = { |context, device|
             ++ ". Plug it in and re-evaluate.").warn;
     };
 };
+}.value;
 
 // --- live OSC input (osc() - see /poptart/setParamOSC) ---
 
@@ -3296,6 +3311,7 @@ server.waitForBoot {
 // Builds the track for a key nobody holds: reserves it with \pending, and commits the real track
 // at the end of the async build below. `birth` is the list of channel-control name/value pairs
 // the track synth is born with (see poptartCreateTrack).
+{
 buildTrack = { |key, birth|
     // This build's claim on the key. Only the holder of the current generation may commit, and a
     // reclaim bumps it - see reclaimStuckTrack for why a build has to be able to find out that
@@ -3504,6 +3520,7 @@ destroyTrack = { |key|
 OSCdef(\poptartDestroyTrack, { |msg|
     destroyTrack.(msg[1].asSymbol);
 }, '/poptart/destroyTrack');
+}.value;
 
 // --- a track's chain ('/poptart/setRouting') -------------------------------------------------
 //
@@ -3519,6 +3536,7 @@ OSCdef(\poptartDestroyTrack, { |msg|
 // its new buses, in the same block - and the old buses go back a moment later, once nothing reads
 // them. An effect the chain no longer runs through is parked (reading and writing nowhere) until
 // its unload frees it.
+{
 routeApply = { |key, track, spec|
     var made = (buses: List.new, index: Dictionary.new);
     var old = track[\route];
@@ -3840,6 +3858,7 @@ OSCdef(\poptartLoadEffect, { |msg|
         };
     };
 }, '/poptart/loadEffect');
+}.value;
 
 // --- poptart's own devices (native/devices/, and the same ones the browser build plays) ---
 //
@@ -3848,6 +3867,7 @@ OSCdef(\poptartLoadEffect, { |msg|
 // was there has to go - both because two loaded devices in one slot would both sound, and
 // because a controller is only good for the kind of UGen it was made against. Answers "is this
 // slot already the kind we want", and empties it when it is not.
+{
 slotKindGuard = { |key, track, slot, wantPlugin|
     var ctl = track[\controllers][slot];
     if (ctl.notNil and: { ctl.isKindOf(VSTPluginController) != wantPlugin }) {
@@ -4012,6 +4032,31 @@ OSCdef(\poptartUnloadEffect, { |msg|
     };
 }, '/poptart/unloadEffect');
 
+// A synth(...) naming something that cannot be an instrument: the instrument slot is emptied, so
+// the track is silent rather than still playing what the last evaluation loaded. No-op when the
+// slot is already empty or the track is still being built (it has loaded nothing yet).
+OSCdef(\poptartUnloadInstrument, { |msg|
+    var key = msg[1].asSymbol;
+    var track = tracks[key];
+    if (track.isKindOf(Event).not) {
+        if (track.isNil) { ("poptart: unloadInstrument: no track " ++ key).warn };
+    } {
+        var ctl = track[\controllers][0];
+        track[\wanted][0] = nil; // an in-flight open() must no longer commit
+        if (ctl.notNil) {
+            ctl.close;
+            track[\controllers][0] = nil;
+            dropSlotRamps.(key, track, 0);
+            track[\editWatch][0] !? { |funcs| funcs.do { |f| f.free } };
+            track[\editWatch][0] = nil;
+            track[\loaded][0] !? { |id| ("poptart: unloaded instrument " ++ id).postln };
+        };
+        track[\loaded][0] = nil;
+        tellSlot.(track, 0);
+    };
+}, '/poptart/unloadInstrument');
+}.value;
+
 // Host-transport mirror: stores the tempo for plugins that open later and pushes tempo + song
 // position (in beats, 4 per cycle) to every open plugin in one timestamped bundle. Sent by
 // the host on every setbpm change and as a periodic re-sync - between syncs plugins advance
@@ -4027,6 +4072,7 @@ OSCdef(\poptartUnloadEffect, { |msg|
 // re-anchored by each message (a few microseconds between real changes, so a routine scheduled
 // on it never drifts against the pattern grid). The plugins' emulated DAW transport was the
 // first thing to hang off the message; MIDI clock out is the second.
+{
 hostClock = TempoClock(currentTempo / 60).permanent_(true);
 
 // Re-anchor the mirror. `beats` is the transport's beat position at now + `latency` (the same
@@ -4137,11 +4183,13 @@ OSCdef(\poptartMidiClockOut, { |msg|
         replyOk.("/poptart/midiClockOut", requestId, toJson.((active: active)));
     };
 }, '/poptart/midiClockOut');
+}.value;
 
 // --- the desk's talk-back port (see the feedbackOut declaration) ---
 //
 // Point it at a destination ("" = off), by the same case-insensitive substring match the clock's
 // uses. Answers the matched name, or nil when nothing matched.
+{
 midiFeedbackSet = { |name|
     var p = name.asString.toLower, dest;
     var find = { MIDIClient.destinations.detect { |d| midiDestName.(d).toLower.contains(p) } };
@@ -4232,6 +4280,7 @@ OSCdef(\poptartSetTempo, { |msg|
         };
     });
 }, '/poptart/setTempo');
+}.value;
 
 // --- events (latency = seconds from now, computed by OscEngine against its own clock; ---
 // --- makeBundle turns it into a timestamped OSC bundle scsynth executes sample-accurately) ---
@@ -4252,6 +4301,7 @@ bundleNow = { |latency, func|
 // this side makes. They are told here as they change; Node never guesses one, and sends anything
 // it has no id for through the handlers below as before.
 // One closure, evaluated here: the top-level function is at sclang's selector-table limit.
+{
 {
 tellTrack = { |track|
     nodeAddr.sendMsg("/poptart/ids/track", track[\key], track[\group].nodeID, (track[\voices] ? track[\group]).nodeID,
@@ -4456,6 +4506,7 @@ OSCdef(\poptartNoteOff, { |msg|
         if (waitForLoad.(key, 0, Main.elapsedTime + latency, fire).not) { fire.(latency) };
     };
 }, '/poptart/noteOff');
+}.value;
 
 // --- hush: release everything a track is sounding, now ---
 // Sent by the host when a stopped track is played again. The stop itself lets everything ring
@@ -4473,6 +4524,7 @@ OSCdef(\poptartNoteOff, { |msg|
 // seconds on, for a caller hushing while events are still in flight (sent a lookahead early, they
 // are already the server's and spawn AFTER the first release) - on the same track object only,
 // since by then the key may belong to a track built afresh (a label removed and re-added).
+{
 hushTrack = { |key, again|
     var track = tracks[key];
     var release = { |t, notes|
@@ -4620,6 +4672,7 @@ takeHand = { |key, track, slot, index|
     if (taken.notEmpty) { track[\controllers][slot] !? { |ctl| ctl.unmap(index) } };
     taken
 };
+}.value;
 
 // --- a node the server does not have ----------------------------------------------------------
 //
@@ -4661,6 +4714,7 @@ nodeGoneSaid = IdentitySet.new;
 // Set far above any musical number on purpose. At a few KB of real-time memory apiece this is
 // single-digit megabytes of the 256 the server is given, so it is a guard on the server and never
 // the thing that shapes a pattern: a set that hits it is one that was going to fall over.
+{
 liveVoices = List.new;
 voiceBorn = { |synth|
     if (liveVoices.size >= maxVoices) {
@@ -5392,11 +5446,13 @@ OSCdef(\poptartClearParamLFO, { |msg|
     };
     if (track.isKindOf(Event)) { tellMods.(track) };
 }, '/poptart/clearParamLFO');
+}.value;
 
 // --- live MIDI input ---
 
 // Node asks for MIDI explicitly when a pattern's only MIDI use is Tier-1 (the native handlers
 // below all enable it themselves).
+{
 OSCdef(\poptartMidiInit, { midiEnable.() }, '/poptart/midiInit');
 
 // Connected sources as the "device name" strings midicc()/midikeys() match against, for the
@@ -5767,11 +5823,13 @@ clearMidiRoute = { |key|
 OSCdef(\poptartClearMidiRoute, { |msg|
     clearMidiRoute.(msg[1].asSymbol);
 }, '/poptart/clearMidiRoute');
+}.value;
 
 // --- audio + MIDI routing (the midi()/audio() source builders and injector methods) ---
 
 // Audio into an fx aux (Sig#audio injector): wireAudio handles both a track source (cross-track
 // bus + send + ordering) and a device source (SoundIn feeder). See wireAudio for the mechanics.
+{
 OSCdef(\poptartInjectAudio, { |msg|
     wireAudio.(msg[1].asSymbol, msg[2].asInteger, msg[3].asString, msg[4].asFloat,
         (msg[5] ? 0).asInteger, (msg[6] ? 1).asInteger);
@@ -6010,6 +6068,7 @@ OSCdef(\poptartClearMidiInject, { |msg|
         };
     };
 }, '/poptart/clearMidiInject');
+}.value;
 
 // --- sampler ---
 
@@ -6017,6 +6076,7 @@ OSCdef(\poptartClearMidiInject, { |msg|
 // defs): a mono file is both of its own sides, and a stereo one gets a one-channel copy of each,
 // read from disk the first time an event asks. nil means "not yet" - the reads are asynchronous -
 // and the playSample handler waits out what lead the event has rather than playing the wrong voice.
+{
 grainSidesFor = { |buf|
     var have = grainSides[buf.bufnum];
     case
@@ -6247,6 +6307,7 @@ OSCdef(\poptartPlaySample, { |msg|
       } { spawn.(latency, stopLatency, nil) };
     };
 }, '/poptart/playSample');
+}.value;
 
 // --- song decks ---
 // A full-length audio file on a DJ deck track (server.js's song section drives these). The
@@ -6260,6 +6321,7 @@ OSCdef(\poptartPlaySample, { |msg|
 // player (reported 2026-08-25 - re-cueing before the boundary stacked copies of the song).
 // So every message at a player goes through this clamp: no earlier than just after the spawn
 // time songStart recorded (0.02 covers the clock jitter between recording and comparing).
+{
 songLat = { |song, latency|
     max(latency ? 0, (song[\spawnUntil] ? 0) - Main.elapsedTime + 0.02);
 };
@@ -6408,9 +6470,11 @@ OSCdef(\poptartSongFree, { |msg|
         song[\buf] !? { |b| fork { (lat + 0.2).wait; b.free } };
     };
 }, '/poptart/songFree');
+}.value;
 
 // --- introspection ---
 
+{
 OSCdef(\poptartGetParams, { |msg|
     var requestId = msg[1], key = msg[2].asSymbol, slot = msg[3].asInteger;
     var track = tracks[key];
@@ -6468,11 +6532,13 @@ OSCdef(\poptartSetConfMode, { |msg|
         };
     };
 }, '/poptart/setConfMode');
+}.value;
 
 // --- plugin state (synth("Serum 2", { state }) round-trip - see OscEngine's gz64 framing) ---
 
 // Capture: write the slot's full program (VSTPlugin's own file format) to a temp file and
 // reply with its path; Node reads/deletes/compresses it.
+{
 OSCdef(\poptartGetPluginState, { |msg|
     var requestId = msg[1], key = msg[2].asSymbol, slot = msg[3].asInteger;
     var track = tracks[key];
@@ -6590,12 +6656,14 @@ OSCdef(\poptartScanPlugins, { |msg|
         replyOk.("/poptart/scanPlugins", requestId, toJson.((plugins: pluginList.(), crashed: [])));
     });
 }, '/poptart/scanPlugins');
+}.value;
 
 // --- per-track recording (see wav.js and web-app's track-record section) ---
 
 // Tap a track's post-fader output: a private bus, the track synth's rec send pointed at it, and a
 // meter synth streaming peaks to Node for the editor's record panel. Idempotent - opening the
 // panel, arming, and recording all call it, and only the first does anything.
+{
 startTap = { |key|
     var track = tracks[key];
     var entry = recTaps[key];
@@ -6641,6 +6709,7 @@ OSCdef(\poptartTapTrack, { |msg|
         if (on == 1) { awaitTrack.(key); startTap.(key) } { stopTap.(key) };
     };
 }, '/poptart/tapTrack');
+}.value;
 
 // --- global mixer monitoring (the editor's mixer modal - see web-app's mixer section) ---
 
@@ -6656,6 +6725,7 @@ OSCdef(\poptartTapTrack, { |msg|
 //     twenty times a second is a small fraction of what the bandpass bank it replaced cost (96
 //     filter pairs and 384 followers, ~1.6% of a core a track), so every playing track gets one.
 //     Without the device extension the bank is still built, as before.
+{
 buildMixDef = { |freqs|
     mixBandFreqs = freqs;
     SynthDef(\poptart_mix_analysis, {
@@ -6809,6 +6879,7 @@ OSCdef(\poptartMixMeters, { |msg|
         mixReconcile.();
     };
 }, '/poptart/mixMeters');
+}.value;
 
 // --- the editor's inline audio displays ('/poptart/viewTaps' - .scope(), .spectrum() and the
 // rest; see osc-engine/view-taps.js) -------------------------------------------------------------
@@ -6941,6 +7012,7 @@ OSCdef(\poptartHeadphones, { |msg|
 // synths wrote the buses earlier this block). Off: free them. The track-side sends are birth
 // args (mdeck), not touched here - an unread bus write costs nothing worth switching for.
 // Idempotent both ways; web-app ties this to the strip's SSE clients (first in / last out).
+{
 OSCdef(\poptartDeckMeters, { |msg|
     if (msg[1].asInteger == 1) {
         if (deckMeterSynths.isNil) {
@@ -7107,4 +7179,5 @@ OSCdef(\poptartQuit, { |msg|
     };
     server.quit(onComplete: { 0.exit }, onFailure: { 0.exit }, watchShutDown: false);
 }, '/poptart/quit');
+}.value;
 )

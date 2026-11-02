@@ -36,7 +36,7 @@ import { LimiterProcessor } from '../web-engine/src/devices/limiter.mjs';
 import { MultibandProcessor } from '../web-engine/src/devices/multiband.mjs';
 import { ReverbProcessor } from '../web-engine/src/devices/reverb.mjs';
 import { FreqShiftProcessor } from '../web-engine/src/devices/freqshift.mjs';
-import { VoiceProcessor } from '../web-engine/src/devices/voice.mjs';
+import { VocalShiftProcessor } from '../web-engine/src/devices/vocalshift.mjs';
 import { ChorusProcessor } from '../web-engine/src/devices/chorus.mjs';
 import { FlangerProcessor } from '../web-engine/src/devices/flanger.mjs';
 import { PhaserProcessor } from '../web-engine/src/devices/phaser.mjs';
@@ -78,7 +78,7 @@ const PROCESSORS = {
   Multiband: MultibandProcessor,
   Reverb: ReverbProcessor,
   FreqShift: FreqShiftProcessor,
-  Voice: VoiceProcessor,
+  VocalShift: VocalShiftProcessor,
   Chorus: ChorusProcessor,
   Flanger: FlangerProcessor,
   Phaser: PhaserProcessor,
@@ -329,7 +329,7 @@ function testSignal(frames, channels = 2, seed = 7, keyed = true) {
  * nothing for its first 50 ms, and has to have tracked a pitch and laid down grains before the two
  * engines can be said to agree about it.
  */
-const LONG_RUN = { Voice: BLOCK * 240 };
+const LONG_RUN = { VocalShift: BLOCK * 240 };
 
 // Settings a device is always ALSO played at, on top of its defaults and the seeded draws: a
 // mode the draws may never land on, with whatever it depends on turned up. Each is the defaults

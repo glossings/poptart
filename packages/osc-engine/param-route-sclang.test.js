@@ -35,7 +35,8 @@ function lift() {
   assert.ok(from > 0 && to > from, 'the parameter route closures are not where this test expects them in poptart.scd');
   const levels = src.match(/^trackLevels = \{[\s\S]*?^\};$/m);
   assert.ok(levels, 'trackLevels is not in poptart.scd any more');
-  return `${src.slice(from, to)}\n${levels[0]}`;
+  // The span crosses section blocks (`{` ... `}.value;`), cut through mid-block: their lines go.
+  return `${src.slice(from, to).replace(/^(\{|\}\.value;)$/gm, '')}\n${levels[0]}`;
 }
 
 const MOCK_CLASS = `

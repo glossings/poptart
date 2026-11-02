@@ -213,7 +213,7 @@ test('effectSlots says how far a track\'s effects go, however far that is', () =
 test('a chain in a Delay\'s loop: the Delay sends on a loop bus, and its return is read last, a block late', async () => {
   const { s, routePlan } = await core();
   const { loopLatencies } = require('./route-desktop');
-  const sig = s('x').fx('Delay', (x) => x.fx('Filter').fx('Voice')).fx('Reverb');
+  const sig = s('x').fx('Delay', (x) => x.fx('Filter').fx('VocalShift')).fx('Reverb');
   const plan = routePlan(sig).plan;
   const spec = desktopRouting(plan, { count: 4 });
   const fx = (slot) => spec.steps.find((st) => st.k === 'fx' && st.slot === slot);

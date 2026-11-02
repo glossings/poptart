@@ -4046,7 +4046,7 @@ function openWidgetAt(code, idx, ed = cm) {
   }
   const chain = findChainHandleAt(code, idx);
   if (chain) {
-    showPluginEditor(blockTrackId(ed, chain), chain.slot);
+    showPluginEditor(blockTrackId(ed, chain), chain.slot, chain.name);
     return true;
   }
   return false;
@@ -4082,8 +4082,12 @@ function findChainHandleAt(code, idx) {
   const block = labelsMod.splitLabeledBlocks(code).findLast((b) => idx >= b.start && idx <= b.end);
   if (!block) return null;
   // Commented-out calls aren't in the chain, so they hold no slot.
-  for (const { kind, index, slot } of slotCalls(code, block.start, block.end, blockOwnCode(code, block))) {
-    if (idx >= index && idx <= index + kind.length) return { label: block.label, monitored: !!block.monitored, slot };
+  for (const { kind, index, open, close, slot } of slotCalls(code, block.start, block.end, blockOwnCode(code, block))) {
+    if (idx >= index && idx <= index + kind.length) {
+      // The device the code names, so the window opened is that one's (see /api/showEditor).
+      const name = close > open ? firstStringLiteral(code, open + 1, close)?.content ?? null : null;
+      return { label: block.label, monitored: !!block.monitored, slot, name };
+    }
   }
   return null;
 }
@@ -4095,8 +4099,8 @@ function findChainHandleAt(code, idx) {
  * server.js). Opening one already open is a fine thing to do - it brings the window back to the
  * front, and takes the slot again if a click in the code had handed it back.
  */
-function showPluginEditor(trackId, slot) {
-  queueHandOp(() => api('POST', '/api/showEditor', { trackId, slot })
+function showPluginEditor(trackId, slot, name = null) {
+  queueHandOp(() => api('POST', '/api/showEditor', { trackId, slot, ...(name ? { name } : {}) })
     // A device with no window of its own is answered with the panel to draw instead of an
     // opened window. That is the only thing distinguishing the two here: not which build this
     // is, but whether what answered had a window to open.
@@ -21668,7 +21672,7 @@ function renderTracks(result) {
         uiBtn.className = 'small';
         uiBtn.textContent = 'ui';
         uiBtn.title = "open the plugin's own window (this slot holds its preset until you click back in the code)";
-        uiBtn.onclick = () => showPluginEditor(t.key ?? t.label, slot); // a monitored track's key is "<label>~M"
+        uiBtn.onclick = () => showPluginEditor(t.key ?? t.label, slot, plugin); // a monitored track's key is "<label>~M"
         row.appendChild(uiBtn);
       }
       trackInfo.appendChild(row);

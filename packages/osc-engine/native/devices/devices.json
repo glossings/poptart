@@ -7470,8 +7470,8 @@
       ]
     },
     {
-      "id": "Voice",
-      "name": "Voice",
+      "id": "VocalShift",
+      "name": "VocalShift",
       "kind": "fx",
       "version": 1,
       "sidechain": false,

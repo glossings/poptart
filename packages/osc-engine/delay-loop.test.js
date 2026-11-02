@@ -25,14 +25,14 @@ const core = () => import(path.join(__dirname, '..', 'pattern-core', 'src', 'ind
 test('the engine is told how late a Delay\'s loop is, and again when a late device opens in it', async () => {
   const { note, routePlan } = await core();
   const { engine, loops } = rig();
-  const sig = note('c2').synth('X').fx('Delay', (x) => x.fx('Voice'));
+  const sig = note('c2').synth('X').fx('Delay', (x) => x.fx('VocalShift'));
   engine.setRouting('t', routePlan(sig).plan, 2);
   assert.deepEqual(loops(), [['t', 2, 0]], 'nothing in the loop has opened yet');
-  engine.loadEffect('t', 'Voice', 1);
+  engine.loadEffect('t', 'VocalShift', 1);
   engine.loadEffect('t', 'Delay', 2);
   const late = engine._slotDevices.get('t:1').latencySec;
   assert.ok(late > 0);
-  assert.deepEqual(loops(), [['t', 2, 0], ['t', 2, late]], 'once, when the Voice opened');
+  assert.deepEqual(loops(), [['t', 2, 0], ['t', 2, late]], 'once, when the VocalShift opened');
   engine.setRouting('t', routePlan(sig).plan, 2);
   assert.equal(loops().length, 2, 'the same plan again says nothing new');
 });

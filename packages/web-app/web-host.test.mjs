@@ -280,6 +280,19 @@ test('a slot the buffer no longer fills says so rather than opening an empty win
   shutdown(rig);
 });
 
+test('a click on synth() naming an effect says so, rather than opening the instrument the slot held before', async () => {
+  const rig = makeHost();
+  await rig.host.call('POST', '/api/evaluate', { code: 'lead: n("0 2").synth("Granular")' });
+  assert.equal((await rig.host.call('POST', '/api/showEditor', { trackId: 'lead', slot: 0, name: 'Granular' })).panel.id, 'Granular');
+  await rig.host.call('POST', '/api/deviceWatch', { trackId: 'lead', slot: 0, on: false });
+  await rig.host.call('POST', '/api/evaluate', { code: 'lead: n("0 2").synth("VocalShift")' });
+  await assert.rejects(rig.host.call('POST', '/api/showEditor', { trackId: 'lead', slot: 0, name: 'VocalShift' }),
+    /"VocalShift" is an effect, so it cannot go where an instrument belongs/);
+  // Asked by slot alone, the slot is empty: Granular went with the evaluation that dropped it.
+  await assert.rejects(rig.host.call('POST', '/api/showEditor', { trackId: 'lead', slot: 0 }), /no device in slot 0/);
+  shutdown(rig);
+});
+
 test('a knob position becomes a real value, a printed readout and the text to write down', async () => {
   const rig = makeHost();
   await rig.host.call('POST', '/api/evaluate', { code: 'lead: n("0 2").synth("Wavetable").fx("Distort")' });

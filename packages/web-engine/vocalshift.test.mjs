@@ -1,11 +1,11 @@
-// Voice: a pitch shifter for one line at a time. Driven with a voice-shaped signal - a pulse train,
+// VocalShift: a pitch shifter for one line at a time. Driven with a voice-shaped signal - a pulse train,
 // a fundamental with its harmonics falling away - because that is what it is for: a pure sine has
 // no pulse to cut grains at, and no shifter of this kind moves one cleanly.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { VOICE, VOICE_LATENCY_SEC, VoiceProcessor } from './src/devices/voice.mjs';
+import { VOCALSHIFT, VOCALSHIFT_LATENCY_SEC, VocalShiftProcessor } from './src/devices/vocalshift.mjs';
 
 const SR = 48000;
 
@@ -31,7 +31,7 @@ function vowel(freq, seconds, peakHz, amp = 0.1) {
 }
 
 function run(input, pitch, formant) {
-  const fx = new VoiceProcessor(SR);
+  const fx = new VocalShiftProcessor(SR);
   const out = new Float32Array(input.length);
   for (let at = 0; at < input.length; at += 128) {
     const n = Math.min(128, input.length - at);
@@ -70,9 +70,9 @@ const rms = (sig, from, to) => {
 };
 
 test('the descriptor says how late it is, and it is late enough to compensate', () => {
-  assert.equal(VOICE.latencySec, VOICE_LATENCY_SEC);
+  assert.equal(VOCALSHIFT.latencySec, VOCALSHIFT_LATENCY_SEC);
   // Under the scheduler's 100 ms early-send budget, with room to spare.
-  assert.ok(VOICE.latencySec <= 0.06);
+  assert.ok(VOCALSHIFT.latencySec <= 0.06);
 });
 
 test('it moves the pitch by the interval asked for, across the range', () => {
@@ -90,7 +90,7 @@ test('at no shift it gives back close to what it was given, late by its delay', 
   const input = pulses(220, 1);
   const out = run(input, 0, 0);
   // The marks sit on the pulses, so the delay is the declared one to within half a period.
-  const D = Math.round(VOICE_LATENCY_SEC * SR);
+  const D = Math.round(VOCALSHIFT_LATENCY_SEC * SR);
   let best = Infinity;
   for (let lag = D - 120; lag <= D + 120; lag++) {
     let err = 0;

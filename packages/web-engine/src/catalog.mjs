@@ -29,7 +29,7 @@ import { CHORUS } from './devices/chorus.mjs';
 import { FLANGER } from './devices/flanger.mjs';
 import { PHASER } from './devices/phaser.mjs';
 import { FREQSHIFT } from './devices/freqshift.mjs';
-import { VOICE } from './devices/voice.mjs';
+import { VOCALSHIFT } from './devices/vocalshift.mjs';
 import { COMPRESSOR } from './devices/compressor.mjs';
 import { MULTIBAND } from './devices/multiband.mjs';
 import { LIMITER } from './devices/limiter.mjs';
@@ -46,7 +46,7 @@ import { MUTABLE_DEVICES } from './devices/mutable.mjs';
 export const DEVICES = Object.freeze([
   WAVETABLE, FMSYNTH, GRANULAR, NOISE,
   FILTER, EQ, FILTERBANK, RESONATOR, LPG, DISTORT, CRUSH, OVERDRIVE, COMPRESSOR, MULTIBAND, LIMITER, DUCKER,
-  DELAY, GRAINECHO, STUTTER, LOOPER, CHORUS, FLANGER, PHASER, FREQSHIFT, VOICE, REVERB, ...NODE_DEVICES,
+  DELAY, GRAINECHO, STUTTER, LOOPER, CHORUS, FLANGER, PHASER, FREQSHIFT, VOCALSHIFT, REVERB, ...NODE_DEVICES,
   ...AIRWINDOWS_DEVICES, ...CLOUDSEED_DEVICES, ...STRETCH_DEVICES, ...MUTABLE_DEVICES,
 ]);
 

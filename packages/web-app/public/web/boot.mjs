@@ -247,6 +247,9 @@ export async function boot({
     (m.level === 'warn' ? warn : say)(m.text);
     if (notes.length > 200) notes.splice(0, notes.length - 200);
   };
+  // The engine's warnings (a device named where it cannot go) reach the editor's console, as the
+  // desktop engine's do.
+  engine.warn = (text) => note({ level: 'warn', text });
   // Userland warnings (a pattern asking for something that no longer exists keeps playing - see
   // pattern-core's "Warnings, not exceptions") reach the editor's console the way the desktop's
   // do, with the position of the code that gave them when a block's builders were running.

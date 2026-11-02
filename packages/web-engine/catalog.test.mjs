@@ -30,7 +30,7 @@ test('the synths and the effects land on the right side of synth() and fx()', ()
     [
       'Chorus', 'CloudSeed', 'Clouds', 'Compressor', 'Convolver', 'Crush', 'Delay', 'Distort',
       'Ducker', 'EQ', 'Filter', 'Filterbank', 'Flanger', 'FreqShift', 'Galactic', 'GrainEcho', 'LPG', 'Limiter', 'Looper', 'Multiband',
-      'Overdrive', 'Phaser', 'Resonator', 'Reverb', 'Shift', 'Stutter', 'Voice',
+      'Overdrive', 'Phaser', 'Resonator', 'Reverb', 'Shift', 'Stutter', 'VocalShift',
     ],
   );
 });

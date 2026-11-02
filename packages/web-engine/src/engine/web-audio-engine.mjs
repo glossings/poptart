@@ -519,18 +519,29 @@ export class WebAudioEngine {
     };
   }
 
+  /**
+   * Why `deviceId` cannot go in `slot` (0 the instrument, 1.. an effect), as the line the console
+   * is given, or null when it can.
+   */
+  slotRefusal(deviceId, slot) {
+    const kind = slot === 0 ? 'synth' : 'fx';
+    const descriptor = this.registry.get(deviceId);
+    if (!descriptor) return `[web-engine] there is no device called "${deviceId}" in this build, so ${kind === 'synth' ? 'the track' : 'that slot'} is silent.`;
+    if (descriptor.kind !== kind) return `[web-engine] "${descriptor.id}" is ${descriptor.kind === 'synth' ? 'an instrument' : 'an effect'}, so it cannot go where ${kind === 'synth' ? 'an instrument' : 'an effect'} belongs.`;
+    return null;
+  }
+
   _load(trackId, deviceId, slot, kind) {
     const track = this.createTrack(trackId);
-    const descriptor = this.registry.get(deviceId);
-    if (!descriptor) {
-      this._warnOnce(`missing:${deviceId}`, `[web-engine] there is no device called "${deviceId}" in this build, so ${kind === 'synth' ? 'the track' : 'that slot'} is silent.`);
+    // Refused, the slot is emptied rather than left holding the last evaluation's device: the
+    // track plays what the code says, and here that is nothing. Said on every evaluation.
+    const refused = this.slotRefusal(deviceId, kind === 'synth' ? 0 : Math.max(1, slot));
+    if (refused) {
+      this.warn(refused);
       track.clearSlot(slot);
       return null;
     }
-    if (descriptor.kind !== kind) {
-      this._warnOnce(`kind:${deviceId}`, `[web-engine] "${descriptor.id}" is ${descriptor.kind === 'synth' ? 'an instrument' : 'an effect'}, so it cannot go where ${kind === 'synth' ? 'an instrument' : 'an effect'} belongs.`);
-      return null;
-    }
+    const descriptor = this.registry.get(deviceId);
     const existing = track.slots.get(slot);
     if (existing?.descriptor.id === descriptor.id && existing.descriptor.version === descriptor.version) return existing;
     // Whatever was driving the old device's parameters is taken down BEFORE the new one is

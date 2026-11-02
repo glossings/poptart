@@ -35,7 +35,8 @@ function lift() {
   const to = src.indexOf('// How deep each track sits (key -> depth)');
   assert.ok(from > 0 && to > from, 'the param expression section is not where this test expects it in poptart.scd');
   // No server answers here, so there is nothing to sync with.
-  return src.slice(from, to).replace(/server\.sync;/g, '');
+  // The span crosses section blocks (`{` ... `}.value;`), cut through mid-block: their lines go.
+  return src.slice(from, to).replace(/server\.sync;/g, '').replace(/^(\{|\}\.value;)$/gm, '');
 }
 
 const MOCK_CLASS = `

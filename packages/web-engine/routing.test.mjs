@@ -297,9 +297,9 @@ test('a chain in the Delay\'s loop: its repeats go out, through the chain, and b
 
 test('the way round counts the delay of each device in the loop, and goes when the chain does', () => {
   const { engine } = engineRig();
-  const late = catalog.get('Voice').latencySec;
+  const late = catalog.get('VocalShift').latencySec;
   assert.ok(late > 0);
-  const sig = note('c2').synth('X').fx('Delay', (x) => x.fx('Voice').fx('Filter'));
+  const sig = note('c2').synth('X').fx('Delay', (x) => x.fx('VocalShift').fx('Filter'));
   const track = play(engine, sig);
   const delay = track.slots.get(3).built;
   assert.equal(loopMessages(delay).at(-1), 128 / SR + late);

@@ -4494,6 +4494,11 @@ function wireEngine() {
     eventLogQueue.push(line);
     if (eventLogQueue.length > EVENT_LOG_MAX) eventLogQueue.splice(0, eventLogQueue.length - EVENT_LOG_MAX);
   };
+  // ...and so do the engine's (a device named where it cannot go), as the browser engine's do.
+  engine.warn = (text) => {
+    eventLogQueue.push({ level: 'warn', text });
+    if (eventLogQueue.length > EVENT_LOG_MAX) eventLogQueue.splice(0, eventLogQueue.length - EVENT_LOG_MAX);
+  };
   // audio("kick")/.midi("kick") reference other tracks by label inside engine-call arguments;
   // the wrapper turns those into engine track ids on the way down (see MappedEngine._trackRef).
   // A reference from inside a deck resolves within that deck first - deck b's audio("kick")
@@ -9175,6 +9180,10 @@ const routes = {
     if (!engine) throw new Error(engineError ?? 'engine not loaded');
     const trackId = body.trackId ?? 'default';
     const slot = body.slot ?? 0;
+    // The device the code names, when it cannot go in that slot: said, as the evaluation said it,
+    // rather than opening whatever the slot held before.
+    const refused = body.name ? engine.slotRefusal?.(String(body.name), slot) : null;
+    if (refused) throw new Error(refused);
     const device = await deviceInSlot(trackId, slot);
     // The window is up, so the slot's program is yours to change from here: take it now rather than
     // on the editor's next poll, or a swap in between would change the preset out from under the

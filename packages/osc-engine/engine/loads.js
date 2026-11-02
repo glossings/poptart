@@ -455,6 +455,32 @@ function install(E) {
       });
     }
   });
+
+  // A synth(...) naming something that cannot be an instrument: the instrument slot is emptied, so
+  // the track is silent rather than still playing what the last evaluation loaded. No-op when the
+  // slot is already empty or the track is still being built (it has loaded nothing yet).
+  E.on('/poptart/unloadInstrument', (msg) => {
+    const key = String(msg[1]);
+    const track = E.tracks.get(key);
+    if (!E.isTrack(track)) {
+      if (track == null) E.warn(`poptart: unloadInstrument: no track ${key}`);
+      return;
+    }
+    const ctl = track.controllers.get(0);
+    track.wanted.delete(0); // an in-flight open() must no longer commit
+    if (ctl != null) {
+      ctl.close();
+      track.controllers.delete(0);
+      E.dropSlotRamps?.(key, track, 0);
+      const funcs = track.editWatch.get(0);
+      if (funcs) funcs.forEach(freeFunc);
+      track.editWatch.delete(0);
+      const id = track.loaded.get(0);
+      if (id != null) E.post(`poptart: unloaded instrument ${id}`);
+    }
+    track.loaded.delete(0);
+    E.tellSlot(track, 0);
+  });
 }
 
 module.exports = { install, Lock };

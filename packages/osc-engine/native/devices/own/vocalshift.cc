@@ -1,6 +1,6 @@
-// The Voice effect: a pitch shifter for one voice at a time, by pitch-synchronous overlap-add.
+// The VocalShift effect: a pitch shifter for one voice at a time, by pitch-synchronous overlap-add.
 //
-// Translated from web-engine/src/devices/voice.mjs, where the method is written out. The pitch
+// Translated from web-engine/src/devices/vocalshift.mjs, where the method is written out. The pitch
 // period is tracked on a four-to-one mono copy of the input (YIN), analysis marks step a period
 // at a time and settle on the pulse nearest each step, and every output mark lays down a
 // Hann-windowed grain two periods long, cut at the analysis mark nearest to it.
@@ -11,9 +11,9 @@
 #include "own/pd-own.h"
 #include "pd-own-ids.h"
 
-namespace pd_Voice {
+namespace pd_VocalShift {
 
-namespace ids = pd_ids::Voice;
+namespace ids = pd_ids::VocalShift;
 using namespace pd_own;
 
 /** How late the output is, in seconds - the descriptor's latencySec. */
@@ -221,6 +221,6 @@ struct Device : pd_own::Device<ids::kCount> {
   }
 };
 
-}  // namespace pd_Voice
+}  // namespace pd_VocalShift
 
-extern "C" PdAny* pd_make_Voice() { return new PdAdapter<pd_Voice::Device>(); }
+extern "C" PdAny* pd_make_VocalShift() { return new PdAdapter<pd_VocalShift::Device>(); }
