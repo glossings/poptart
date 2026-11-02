@@ -730,6 +730,22 @@ test('a parameter something else is driving is reported, by what is driving it',
   assert.deepEqual([...engine.drivenParams('t1', 1)], []);
 });
 
+test('a pattern driving a control by poll is named in the window, a setting is not (as on the desktop)', () => {
+  const { engine } = makeEngine();
+  engine.createTrack('bass');
+  engine.loadEffect('bass', 'Distort', 2);
+  engine.holdParam('bass', 2, 'Mode', { steady: true });
+  engine.holdParam('bass', 2, 'Drive', { steady: false });
+  assert.deepEqual(Object.fromEntries(engine.deviceState('bass', 2).driven), { drive: 'pattern' });
+  assert.deepEqual([...engine.drivenParams('bass', 2)], [], 'a preset still sets it: the pattern puts its value back');
+  engine.holdParam('bass', 2, 'Drive', { steady: true });
+  assert.deepEqual(Object.fromEntries(engine.deviceState('bass', 2).driven), {}, 'the code now sets it');
+  engine.holdParam('bass', 2, 'drive');
+  assert.deepEqual(Object.fromEntries(engine.deviceState('bass', 2).driven), { drive: 'pattern' }, 'a hold that says nothing is a pattern');
+  engine.releaseParam('bass', 2, 'drive', 0);
+  assert.deepEqual(Object.fromEntries(engine.deviceState('bass', 2).driven), {}, 'released, nothing drives it');
+});
+
 test('a parameter an expression drives reads as driven too', () => {
   const { engine } = makeEngine();
   engine.createTrack('mod');

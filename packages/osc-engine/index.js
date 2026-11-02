@@ -2728,7 +2728,18 @@ class OscEngine {
   holdParam(trackId, slotIndex, paramName, { steady = false } = {}) {
     paramName = this._controlName(trackId, slotIndex, paramName);
     this._noteDriver(trackId, slotIndex, paramName, steady ? null : 'pattern');
-    this._send('/poptart/holdParam', [trackId, slotIndex, paramName]);
+    // sclang is told too: a setting is one a hand in the plugin's own window may take (see takeHand).
+    this._send('/poptart/holdParam', [trackId, slotIndex, paramName, steady ? 1 : 0]);
+  }
+  // Hands back the controls a hand took in a plugin's window, for the poll to set again: one, by
+  // slot and name, or every one on the track (an evaluation - see Scheduler#setPattern).
+  releaseParamHands(trackId, slotIndex = null, paramName = null) {
+    if (slotIndex == null || paramName == null) {
+      this._send('/poptart/releaseHands', [trackId]);
+      return;
+    }
+    paramName = this._controlName(trackId, slotIndex, paramName);
+    this._send('/poptart/releaseHands', [trackId, slotIndex, paramName]);
   }
   releaseParam(trackId, slotIndex, paramName, targetTime) {
     paramName = this._controlName(trackId, slotIndex, paramName);

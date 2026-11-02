@@ -300,6 +300,8 @@ var tellTrack, tellSlot, tellMods, tellRamp, tellTap, heldBy, shapesHandled = Id
 var modFreeDelay = 0.3, freeModulatorLater;
 // The ramp behind every polled control - see poptartSetParam.
 var rampTo, dropRamp, dropSlotRamps, leafRampSec, leafRampTime;
+// ...and a polled control a hand has taken in the plugin's own window - see takeHand.
+var takeHand;
 // ...and what happens when the server says that ramp's node is not there - see nodeGone.
 var nodeGone, nodeGoneSaid, nodeFailId, nodeMissing, nodeOwners, nodeOwns, deadNodes;
 var outOfRoom, outOfRoomSaid, outOfRoomPhrases;
@@ -3394,6 +3396,8 @@ buildTrack = { |key, birth|
                 oscs: IdentityDictionary.new,     // \slotN_param -> same shape as ccs, bound to an OSC address (see setParamOSC)
                 ramps: IdentityDictionary.new,    // \slotN_param -> (synth:, bus:, index:, slot:) - polled controls (see rampTo)
                 resting: IdentityDictionary.new,  // \slotN_param -> what the parameter was before the pattern took it (see \poptartHoldParam)
+                steady: IdentitySet.new,          // \slotN_param polled controls the code SETS rather than patterns (see \poptartHoldParam)
+                hands: IdentitySet.new,           // \slotN_param of those a hand has taken in the plugin's window (see takeHand)
                 editWatch: IdentityDictionary.new, // slot -> [OSCFunc] watching for plugin edits
                 key: key,                         // what Node calls it (see tellTrack)
                 held: 0,                          // active-note count, drives env gates
@@ -3690,6 +3694,7 @@ watchPluginEdits = { |track, key, slot, ctl|
         // re-announces every parameter when its program changes would drop its whole panel into
         // the code as .param(...) calls, none of which anyone touched.
         if (ours.value.not) {
+            takeHand.(key, track, slot, index);
             ctl.info.parameters[index] !? { |p|
                 nodeAddr.sendMsg("/poptart/paramAutomated", key, slot, p.name.asString, index, value.asFloat);
             };
@@ -4560,20 +4565,24 @@ rampTo = { |track, rampKey, slot, target, value|
     var prefix = "slot" ++ slot ++ "_";
     var time = leafRampTime.(track, slot, rampKey.asString.copyToEnd(prefix.size));
     var timeArgs = if (time.isNil) { [] } { [\time, time] };
-    if (r.isNil) {
-        var bus = Bus.control(server, 1);
-        var syn = Synth(\poptart_ramp, [\out, bus, \target, value] ++ timeArgs, target: track[\group], addAction: \addToHead);
-        nodeOwns.(syn.nodeID, "a polled control (" ++ rampKey ++ ")");
-        target[\map].(bus);
-        track[\ramps][rampKey] = (synth: syn, bus: bus, index: target[\index], slot: slot, target: value);
-        tellRamp.(track, rampKey, slot, syn, value);
-    } {
-        r[\target] = value;
-        // The plugin in this slot may have been swapped for one where the name is a different
-        // index: follow it. (An open also clears the UGen's mappings - see dropSlotRamps.)
-        if (target[\index] != r[\index]) { r[\index] = target[\index]; target[\map].(r[\bus]) };
-        r[\synth].set(\target, value, *timeArgs);
-        tellRamp.(track, rampKey, slot, r[\synth], value);
+    // A control a hand has taken in a plugin's window is not the poll's until Node hands it back
+    // (see takeHand).
+    if (track[\hands].isNil or: { track[\hands].includes(rampKey).not }) {
+        if (r.isNil) {
+            var bus = Bus.control(server, 1);
+            var syn = Synth(\poptart_ramp, [\out, bus, \target, value] ++ timeArgs, target: track[\group], addAction: \addToHead);
+            nodeOwns.(syn.nodeID, "a polled control (" ++ rampKey ++ ")");
+            target[\map].(bus);
+            track[\ramps][rampKey] = (synth: syn, bus: bus, index: target[\index], slot: slot, target: value);
+            tellRamp.(track, rampKey, slot, syn, value);
+        } {
+            r[\target] = value;
+            // The plugin in this slot may have been swapped for one where the name is a different
+            // index: follow it. (An open also clears the UGen's mappings - see dropSlotRamps.)
+            if (target[\index] != r[\index]) { r[\index] = target[\index]; target[\map].(r[\bus]) };
+            r[\synth].set(\target, value, *timeArgs);
+            tellRamp.(track, rampKey, slot, r[\synth], value);
+        };
     };
 };
 
@@ -4591,6 +4600,25 @@ dropRamp = { |key, track, rampKey|
 };
 dropSlotRamps = { |key, track, slot|
     track[\ramps].keys.copy.do { |k| if (track[\ramps][k][\slot] == slot) { dropRamp.(key, track, k) } };
+};
+
+// A parameter moved in the plugin's own window that the code sets with a steady value: the ramp
+// mapped onto it would put the code's value straight back, so it is unmapped and dropped, and
+// the poll is shut out of it (rampTo) until Node hands it back with /poptart/releaseHands - which
+// it does on the next evaluation, of code the editor has by then rewritten to say the new value.
+// A pattern is left mapped: it is the pattern's. Answers the keys taken.
+takeHand = { |key, track, slot, index|
+    var taken = List.new;
+    track[\ramps].keys.copy.do { |k|
+        var r = track[\ramps][k];
+        if ((r[\slot] == slot) and: { r[\index] == index } and: { track[\steady].includes(k) }) {
+            track[\hands].add(k);
+            dropRamp.(key, track, k);
+            taken.add(k);
+        };
+    };
+    if (taken.notEmpty) { track[\controllers][slot] !? { |ctl| ctl.unmap(index) } };
+    taken
 };
 
 // --- a node the server does not have ----------------------------------------------------------
@@ -4843,11 +4871,14 @@ OSCdef(\poptartSetParam, { |msg|
 // fresh Scheduler on the same track (an unmute), not a new starting point.
 OSCdef(\poptartHoldParam, { |msg|
     var key = msg[1].asSymbol, slot = msg[2].asInteger, paramName = msg[3].asString;
+    var steady = (msg[4] ? 0).asInteger == 1;
     var track = tracks[key];
     var ctl, rampKey, index;
     if (track.isKindOf(Event) and: { slot >= 0 }) {
         ctl = track[\controllers][slot];
         rampKey = ("slot" ++ slot ++ "_" ++ paramName).asSymbol;
+        // Whether a hand in the plugin's window may take it (see takeHand): only a setting may.
+        track[\steady] !? { |set| if (steady) { set.add(rampKey) } { set.remove(rampKey); track[\hands].remove(rampKey) } };
         if (ctl.notNil and: { ctl.info.notNil } and: { track[\resting][rampKey].isNil }) {
             index = resolveParamIndex.(ctl.info, paramName);
             if (index.notNil) {
@@ -4871,6 +4902,8 @@ OSCdef(\poptartReleaseParam, { |msg|
         ctl = track[\controllers][slot];
         rampKey = ("slot" ++ slot ++ "_" ++ paramName).asSymbol;
         resting = track[\resting].removeAt(rampKey);
+        track[\steady] !? { |set| set.remove(rampKey) };
+        track[\hands] !? { |set| set.remove(rampKey) };
         if (exprLeaf.(paramName).notNil or: { ctl.notNil and: { ctl.info.notNil } }) {
             bundleNow.(latency, {
                 var target = paramTarget.(track, slot, paramName);
@@ -4883,6 +4916,21 @@ OSCdef(\poptartReleaseParam, { |msg|
         };
     };
 }, '/poptart/releaseParam');
+
+// Node hands back controls a hand took in a plugin's window (see takeHand): one, by slot and name,
+// or with neither every one on the track - an evaluation, whose code now says what the hand left.
+// Nothing is re-mapped here: the next poll makes a fresh ramp at the code's value and maps it.
+OSCdef(\poptartReleaseHands, { |msg|
+    var key = msg[1].asSymbol;
+    var track = tracks[key];
+    if (track.isKindOf(Event)) {
+        if (msg.size >= 4) {
+            track[\hands].remove(("slot" ++ msg[2].asInteger ++ "_" ++ msg[3].asString).asSymbol);
+        } {
+            track[\hands].clear;
+        };
+    };
+}, '/poptart/releaseHands');
 
 // Pitch bend on its way out to a plugin (Sig#bend). The track synth posts its bend control at
 // bendPollHz while the track is bending (see buildTrackDef's SendReply); here that value becomes

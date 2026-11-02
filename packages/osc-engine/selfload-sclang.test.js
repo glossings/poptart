@@ -61,6 +61,7 @@ var selfLoads = IdentityDictionary.new;
 var coldWaitMax = 20;
 var selfLoadTail = 0.2;
 var slotKey, beginSelfLoad, endSelfLoad, selfLoading, watchPluginEdits;
+var takeHand = { |key, track, slot, index| }; // a hand taking a polled parameter (see takeHand) - none is polled here
 var edits = 0, params = 0, knob;
 // Stands in for the VSTPluginController: watchPluginEdits only ever asks it for the parameter
 // names conf mode reports, and for the synth an OSCFunc's argTemplate filters on. Its synth is a

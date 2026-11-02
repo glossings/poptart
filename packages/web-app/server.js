@@ -6334,6 +6334,10 @@ function mixStatus() {
 // ---------------------------------------------------------------------------------------------
 
 let conf = null; // { trackId, touched: Map<`slot|name`, { slot, name, value }>, seen: Set<addr> } while a track configures
+// The latest move per plugin parameter made in its own window outside conf, for the editor to
+// write into a `.param()` that sets it (see the editor's writePluginParam): `track|slot|name` ->
+// { trackId, slot, name, value }, drained by /api/pluginEdits.
+const handParamMoves = new Map();
 
 // Round to `sig` significant figures - real-world unit values (Hz, ms) span wide magnitudes, so a
 // fixed decimal count would be either lossy or noisy. Normalized values use a plain 4 decimals.
@@ -6365,7 +6369,14 @@ function handleParamAutomated(trackId, slot, name, index, normValue) {
     min: spec ? spec.min : 0, max: spec ? spec.max : 1, curve: spec?.curve === 'log' ? 'exp' : 'lin', curveExp: null, step: null,
     widget: 'knob', value,
   });
-  if (!conf || conf.trackId !== trackId) return;
+  if (!conf || conf.trackId !== trackId) {
+    // Not configuring: a parameter the code sets stays where the hand put it (sclang has already
+    // let go of it - see takeHand), and the editor rewrites that `.param()` to say so.
+    if (schedulers.get(trackId)?.takeParamByHand(slot, [addr, name])) {
+      handParamMoves.set(`${trackId}|${slot}|${addr}`, { trackId, slot, name: addr, value });
+    }
+    return;
+  }
   // One line per param per session (not per gesture - dragging floods otherwise), so the server
   // console shows what conf is capturing.
   if (!conf.seen.has(addr)) {
@@ -7144,6 +7155,9 @@ async function setDeviceParam(body) {
   const arg = found.options
     ? Math.round(value)
     : found.ui === 'toggle' ? (value >= 0.5 ? 1 : 0) : kit.descriptor.normalize(found, value);
+  // The hand's value stays rather than the code's being polled back over it; the editor writes it
+  // into the code's `.param()`, and the next evaluation plays that.
+  if (found.saved !== false) schedulers.get(trackLabel)?.takeParamByHand(slot, [found.id, found.name]);
   mappedEngine?.setParam(engineTrack(trackLabel), slot, found.id, arg, engine.getTime());
   if (body?.commit) noteDeviceEdit(trackLabel, slot, found, kit.panel.paramArgFor(descriptor, found.id, value, state.extras));
   return {
@@ -9100,11 +9114,22 @@ const routes = {
     // Takes a control's .record() finished since the last poll, for the editor to write into the
     // code (see pattern-core's motion.mjs).
     const motionTakes = patternCore.takeMotionTakes();
+    const params = [...handParamMoves.values()];
+    handParamMoves.clear();
     // Bare cc() calls a knob has filled in, and the device the first one still waiting names (see
     // pattern-core's midi-learn.mjs).
     const ccLearns = patternCore.takeMidiLearns();
     const ccWaiting = patternCore.midiLearnWaiting();
-    return { status: 200, body: { edits, logs, pending: holding, holds: currentHolds(), motionTakes, ccLearns, ccWaiting } };
+    return { status: 200, body: { edits, logs, pending: holding, holds: currentHolds(), motionTakes, params, ccLearns, ccWaiting } };
+  },
+
+  // A plugin parameter a hand took in the plugin's own window, given back to the code: the code
+  // sets it with something the editor cannot rewrite (a variable, a sum), so it is the code's, as
+  // a pattern is. Body: { trackId, slot, name }.
+  'POST /api/paramHandBack': async (body) => {
+    const trackId = String(body?.trackId ?? '');
+    schedulers.get(trackId)?.releaseParamByHand(Number(body?.slot ?? 0), [String(body?.name ?? '')]);
+    return { status: 200, body: { ok: true } };
   },
 
   // Hold one chain slot on a named preset while the editor's preset panel is open on it, so what

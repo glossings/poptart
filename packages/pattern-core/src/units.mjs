@@ -147,3 +147,61 @@ export function unitTree(conv, node) {
   }
   return lin;
 }
+
+const NUMBER_TEXT = /^-?(?:\d+\.?\d*|\.\d+)(?:e[-+]?\d+)?$/i;
+const NOTE_TEXT = /^[a-g](?:#|b|s|f)*-?\d*$/i;
+
+/** A number as somebody would type it: `digits` decimals at most, no trailing zeros. */
+function numberText(v, digits) {
+  const n = Number(v.toFixed(Math.max(0, Math.min(10, digits))));
+  return String(Object.is(n, -0) ? 0 : n);
+}
+
+/**
+ * A control's new value, written the way the `.param()` argument `written` already writes it - so
+ * a turn in a device window can be put back into the code without changing how the code reads:
+ *
+ *   "-6db"   -> "-20.4db"   a value in units stays in that unit, in the quotes it had
+ *   0.4      -> 0.9        a bare number stays a position (an index, for a choice or a switch)
+ *   "sine"   -> "saw"      an option stays a name
+ *   "c3"     -> "523hz"    a note on a control in hertz is written in hertz
+ *
+ * `to` is the control as it is now: `{ value }` in the control's own unit, `position` (0..1),
+ * `unit` (the control's, e.g. "hz"), `options` and `label` (a choice's names, and the one it is
+ * on), `index` (true for a choice or a switch), `decimals` (the readout's). null where `written` is not one plain value -
+ * a pattern, a signal, a variable - which the hand does not get to rewrite.
+ */
+export function restateParamArg(written, to) {
+  const text = String(written ?? '').trim();
+  const bare = (t) => {
+    if (!NUMBER_TEXT.test(t)) return null;
+    if (to.index) return String(Math.round(to.value));
+    return Number.isFinite(to.position) ? String(Number(to.position.toPrecision(4))) : null;
+  };
+  if (NUMBER_TEXT.test(text)) return bare(text);
+  const q = text[0];
+  if ((q !== '"' && q !== "'") || text[text.length - 1] !== q || text.length < 2) return null;
+  const inner = text.slice(1, -1);
+  if (inner.includes('\\') || inner.includes(q)) return null;
+  const quote = (s) => (String(s).includes(q) || String(s).includes('\\') ? JSON.stringify(String(s)) : `${q}${s}${q}`);
+  const content = inner.trim();
+  const own = unitOf(to.unit);
+  const u = /^(-?(?:\d+\.?\d*|\.\d+))(\s*)([a-z]+)$/i.exec(content);
+  if (u && UNITS[u[3].toLowerCase()]) {
+    const said = unitOf(u[3]);
+    if (!own || own.family !== said.family || !Number.isFinite(to.value)) return null;
+    // As many decimals as the readout shows, shifted by how much bigger the written unit is.
+    const digits = (to.decimals ?? 3) + Math.round(Math.log10(said.scale / own.scale));
+    return quote(`${numberText((to.value * own.scale) / said.scale, digits)}${u[2]}${u[3]}`);
+  }
+  if (NUMBER_TEXT.test(content)) {
+    const b = bare(content);
+    return b == null ? null : quote(b);
+  }
+  const named = (o) => String(o).trim().toLowerCase() === content.toLowerCase();
+  if (to.label != null && (to.options ?? []).some((o) => o != null && named(o))) return quote(to.label);
+  if (own?.family === 'hz' && own.scale === 1 && NOTE_TEXT.test(content) && noteHz(content) != null && Number.isFinite(to.value)) {
+    return quote(`${numberText(to.value, to.decimals ?? 0)}hz`);
+  }
+  return null;
+}

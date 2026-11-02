@@ -965,6 +965,9 @@ export function createHost({
       const stepped = !!(found.options || found.step || found.ui === 'toggle');
       // The engine takes what `.param()` takes: a position for a sweep, an index for a choice.
       const arg = found.options ? Math.round(value) : found.ui === 'toggle' ? (value >= 0.5 ? 1 : 0) : panel.normalize(found, value);
+      // The hand's value stays rather than the code's being polled back over it; the editor writes
+      // it into the code's `.param()`, and the next evaluation plays that.
+      if (found.saved !== false) evaluator.schedulers?.get(label)?.takeParamByHand?.(slot, [found.id, found.name]);
       engine.setParam(tid, slot, found.id, arg, engine.getTime(), stepped ? 0 : PANEL_GLIDE_SEC);
       // The end of a gesture. What a finished gesture is WRITTEN as is decided in one place, so
       // that a knob, a number box and a drag on a picture all behave the same (see noteDeviceEdit).
@@ -1016,7 +1019,16 @@ export function createHost({
       return {
         edits, logs: drainNotes(), pending: 0, holds, motionTakes: patternCore.takeMotionTakes?.() ?? [],
         ccLearns: patternCore.takeMidiLearns(), ccWaiting: patternCore.midiLearnWaiting(),
+        // `params`: moves made in a plugin's own window, which this build has no plugins to make.
+        params: [],
       };
+    },
+
+    // A control a hand took, given back to the code (the desktop's plugin windows - see server.js).
+    'POST /api/paramHandBack': async (body) => {
+      const label = String(body?.trackId ?? '');
+      evaluator.schedulers?.get(label)?.releaseParamByHand?.(Number(body?.slot ?? 0), [String(body?.name ?? '')]);
+      return { ok: true };
     },
 
     // A click in the buffer: every open window's slot goes back to its pattern (see holdSlot).

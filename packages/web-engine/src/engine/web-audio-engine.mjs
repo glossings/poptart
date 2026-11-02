@@ -229,6 +229,7 @@ export class WebAudioEngine {
     this.buses = new Map();         // bus name -> GainNode
     this.modulators = new Map();    // trackId -> Map("slot:name" -> connection)
     this.exprs = new Map();         // trackId -> Map("slot:name" -> parameter expression, see setParamExpr)
+    this.patterned = new Map();     // trackId -> Set("slot:name") a pattern drives by poll (see holdParam)
     this.envelopes = new Map();     // trackId -> Map("slot:name" -> EnvConnection), gated per note
     this.feeds = new Map();         // "device|cc" or "osc:address" -> Set(FeedConnection)
     // Every controller's and OSC address's latest 0..1 this session, which a feed made afresh starts
@@ -402,6 +403,7 @@ export class WebAudioEngine {
     this._clearAllModulators(trackId);
     for (const rec of this.exprs.get(trackId)?.values() ?? []) this._disposeExpr(trackId, rec, false);
     this.exprs.delete(trackId);
+    this.patterned.delete(trackId);
     for (const key of [...this._waiting.keys()]) if (key.split('|')[1] === trackId) this._waiting.delete(key);
     // What reads into it: the head input (a bus, another track, a hardware input) and the
     // hardware routes into its sidechains.
@@ -1642,15 +1644,33 @@ export class WebAudioEngine {
     track.setParamValue(slot, param.id, index, atTime, now, 0);
   }
 
-  /** The pattern is about to drive a plugin parameter by poll (see Track#holdParam). */
-  holdParam(trackId, slot, name) {
+  /**
+   * The pattern is about to drive a plugin parameter by poll (see Track#holdParam). `steady` says
+   * the value is one the code SETS - `.param("Mode", "asym")` - which a window stays free to
+   * change; a pattern would put its own value back over a hand, so the window names it instead.
+   */
+  holdParam(trackId, slot, name, { steady = false } = {}) {
     if (leafOf(name)) return;
     this.tracks.get(trackId)?.holdParam(slot, name);
+    const key = keyOf(slot, name);
+    if (steady) this.patterned.get(trackId)?.delete(key);
+    else {
+      if (!this.patterned.has(trackId)) this.patterned.set(trackId, new Set());
+      this.patterned.get(trackId).add(key);
+    }
   }
+
+  /**
+   * Gives back controls a hand took in a plugin's own window (the desktop's - see its takeHand).
+   * Nothing here maps a polled control onto a parameter, so there is nothing to give back: the
+   * scheduler's own hand (Scheduler#takeParamByHand) is the whole of it.
+   */
+  releaseParamHands() {}
 
   /** ...and is done with it: back to what it was before (see Track#releaseParam). */
   releaseParam(trackId, slot, name, atTime, glide) {
     const track = this.tracks.get(trackId);
+    this.patterned.get(trackId)?.delete(keyOf(slot, name));
     if (!track || this.modulators.get(trackId)?.has(keyOf(slot, name))) return;
     if (leafOf(name) || this._exprOwns(trackId, slot, name)) return;
     track.releaseParam(slot, name, atTime, this.getTime(), glide);
@@ -2514,10 +2534,18 @@ export class WebAudioEngine {
   deviceState(trackId, slot) {
     const filled = this.tracks.get(trackId)?.slots.get(slot);
     if (!filled) return null;
+    // A pattern driving a control by poll is named too, as the desktop names it, but only here:
+    // a preset still sets such a control (the pattern puts its own value back on the next poll).
+    const driven = this.drivenParams(trackId, slot);
+    for (const key of this.patterned.get(trackId) ?? []) {
+      if (!key.startsWith(`${slot}:`)) continue;
+      const found = findParam(filled.descriptor, key.slice(String(slot).length + 1));
+      if (found && !driven.has(found.id)) driven.set(found.id, 'pattern');
+    }
     return {
       descriptor: filled.descriptor,
       values: { ...filled.values },
-      driven: this.drivenParams(trackId, slot),
+      driven,
       extras: filled.extras,
       tables: filled.tables ?? null,
       // The tempo, for the pictures drawn on the clock: a synced delay's repeats land where the

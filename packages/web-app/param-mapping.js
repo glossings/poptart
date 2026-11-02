@@ -218,6 +218,10 @@ class MappedEngine {
     this.engine.holdParam(trackId, slot, amp ? amp.name : name, ...opts);
   }
 
+  releaseParamHands(trackId, slot = null, name = null) {
+    this.engine.releaseParamHands?.(trackId, slot, name);
+  }
+
   releaseParam(trackId, slot, name, targetTime) {
     const amp = this._amp(trackId, slot, name);
     if (amp === null) return;

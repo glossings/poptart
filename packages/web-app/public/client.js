@@ -46,6 +46,7 @@ let samplerctlMod = null; // samplerctl.mjs - the envelope panel's sampler-contr
 let grooveMod = null; // groove.mjs - the groove table's format, its presets and its slot arithmetic
 let lfoRateMod = null; // lfo-rate.mjs - a patterned LFO rate's phase count, for the shape panel's playhead
 let envctlMod = null; // envctl.mjs - the env() editor's reads and code edits
+let unitsMod = null; // units.mjs - a device control's value written the way its .param() writes it
 // Resolves once pattern-core is loaded (or failed) - the startup prebake waits on it so a
 // top-level noteToMidi()/etc. call in the prebake never races the import.
 const coreReady = Promise.all([
@@ -65,9 +66,11 @@ const coreReady = Promise.all([
   import('/pattern-core/groove.mjs'),
   import('/pattern-core/lfo-rate.mjs'),
   import('/pattern-core/envctl.mjs'),
+  import('/pattern-core/units.mjs'),
 ])
-  .then(([m, l, s, pr, nt, mx, rc, ar, hm, ro, sl, gr, sc, gv, lr, ec]) => {
+  .then(([m, l, s, pr, nt, mx, rc, ar, hm, ro, sl, gr, sc, gv, lr, ec, un]) => {
     envctlMod = ec;
+    unitsMod = un;
     grooveMod = gv;
     lfoRateMod = lr;
     groupsMod = gr;
@@ -1957,12 +1960,15 @@ function firstStringLiteral(code, from, to) {
 // the character range of its value argument (after the separator comma, up to the close paren), so
 // conf can overwrite the value in place instead of appending a duplicate. null if not present.
 // With a `slot`, only a call aiming at that slot counts - two devices can share a parameter name.
-function findParamCall(code, block, name, slot = null) {
+// `last` takes the last such call rather than the first: the one the pattern plays, since a later
+// `.param()` for a control replaces an earlier one.
+function findParamCall(code, block, name, slot = null, last = false) {
   const { start: from, end: to } = block;
   const re = /\.param\s*\(/g;
   re.lastIndex = from;
   const isCode = blockOwnCode(code, block);
   let m;
+  let found = null;
   while ((m = re.exec(code)) && m.index < to) {
     if (!isCode(m.index)) continue; // a commented-out .param() keeps its value; write a live one
     const open = m.index + m[0].length - 1;
@@ -1971,9 +1977,10 @@ function findParamCall(code, block, name, slot = null) {
     const args = paramCallArgs(code, open, close);
     if (!args || args.name !== name) continue;
     if (slot != null && paramSlotAt(code, m.index, args.target) !== slot) continue;
-    return { valueStart: args.valueStart, valueEnd: close };
+    found = { valueStart: args.valueStart, valueEnd: close };
+    if (!last) return found;
   }
-  return null;
+  return found;
 }
 
 /**
@@ -2461,7 +2468,7 @@ async function pollPluginEdits({ flush = false } = {}) {
   // motionless on a fader emits no pointermove, and the server would give the control back mid-mix.
   const channelHold = mixerHold?.value == null ? null : { trackId: mixerHold.label, name: mixerHold.name, value: mixerHold.value };
   const committed = [...commitQueue];
-  const { edits, logs, pending, holds, motionTakes, ccLearns, ccWaiting } = await api('POST', '/api/pluginEdits', {
+  const { edits, logs, pending, holds, motionTakes, params, ccLearns, ccWaiting } = await api('POST', '/api/pluginEdits', {
     flush,
     hold,
     channelHold,
@@ -2492,6 +2499,7 @@ async function pollPluginEdits({ flush = false } = {}) {
   // .log() event lines from the scheduler, which runs server-side - same drain, same 500ms.
   for (const line of logs ?? []) logLine(line);
   for (const t of motionTakes ?? []) writeMotionTake(t);
+  for (const p of params ?? []) writePluginParam(p);
   writeCcLearns(ccLearns ?? []);
   if (ccWaiting && !ccWaitingSaid) logLine(`cc(): waiting - turn a knob on "${ccWaiting}" to fill it in`);
   ccWaitingSaid = !!ccWaiting;
@@ -4146,6 +4154,7 @@ function hideDevicePanel() {
   deviceFigureEls.clear();
   deviceLiveEls.clear();
   deviceWidgetEls.clear();
+  deviceWidgetSpecs.clear();
 }
 
 document.getElementById('deviceClose').onclick = hideDevicePanel;
@@ -4363,6 +4372,8 @@ const deviceFigureEls = new Map();
  * both), and a drag on either has to leave the other saying the same thing.
  */
 const deviceWidgetEls = new Map();
+/** ...and what each of those controls is (its unit, its options, its readout's decimals). */
+const deviceWidgetSpecs = new Map();
 
 /**
  * The controls something else is driving, by parameter id, each with a way to move its readout:
@@ -4992,13 +5003,19 @@ function figureSender(trackLabel, slot) {
   const send = (body, commit) => {
     if (inFlight) { queued = [body, commit]; return; }
     inFlight = true;
-    api('POST', '/api/deviceParam', { trackId: trackLabel, slot, commit, ...body })
+    // Filed with the host unless every control it moved is one the code sets (see deviceWidget's send).
+    const ids = Array.isArray(body.params) ? body.params.map((p) => p.id) : [body.id];
+    const filed = commit && !ids.every((id) => windowWritesParam(trackLabel, slot, id));
+    api('POST', '/api/deviceParam', { trackId: trackLabel, slot, commit: filed, ...body })
       .then((res) => {
         applyDeviceFigures(res.figures);
         // The same parameter's knob, if it is on screen: dragging the waveform moves the
         // position knob under it, and dragging the response curve moves the cutoff. A gesture
         // that moved two controls answers for both.
-        for (const one of res.batch ?? [res]) deviceWidgetEls.get(one.id)?.(one);
+        for (const one of res.batch ?? [res]) {
+          writeWindowParam(trackLabel, slot, one);
+          deviceWidgetEls.get(one.id)?.(one);
+        }
       })
       .catch((e) => logLine(e.message ?? String(e), true))
       .finally(() => {
@@ -6579,6 +6596,7 @@ function showDevicePanel(trackLabel, slot, panel, { raise = true } = {}) {
   deviceFigureEls.clear();
   deviceLiveEls.clear();
   deviceWidgetEls.clear();
+  deviceWidgetSpecs.clear();
   // As wide as the device asks: two oscillators side by side want more than a rack of knobs.
   devicePanelEl.style.width = `${panel.width ?? 560}px`;
 
@@ -6641,8 +6659,107 @@ function paramSpellingInCode(trackId, { name, id }) {
   return [name, id].find((spelling) => findParamCall(code, block, spelling)) ?? name;
 }
 
+/**
+ * The `.param()` that sets a device control on this slot of a track's code, by either of the
+ * control's names - the last one, which is the one played - with its argument as written. null
+ * where the code does not name the control.
+ */
+function codeParamCall(trackLabel, slot, { id, name }) {
+  if (!labelsMod) return null;
+  const { ed, label } = deckTrackParts(trackLabel);
+  if (!ed) return null;
+  const code = ed.getValue();
+  const block = blockForTrack(code, label);
+  if (!block) return null;
+  const calls = [...new Set([name, id])].filter((n) => n != null)
+    .map((spelling) => findParamCall(code, block, spelling, slot, true)).filter(Boolean);
+  if (!calls.length) return null;
+  const call = calls.reduce((a, b) => (b.valueStart > a.valueStart ? b : a));
+  const raw = code.slice(call.valueStart, call.valueEnd);
+  const start = call.valueStart + (raw.length - raw.trimStart().length);
+  return { ed, start, end: start + raw.trim().length, text: raw.trim() };
+}
+
+/** A device control as restateParamArg reads it: an answer from the host, and what the control is. */
+function restateTarget(res, spec) {
+  const index = !!spec?.options || spec?.widget === 'toggle';
+  let label = null;
+  if (spec?.options) {
+    try { label = JSON.parse(res.arg); } catch { label = spec.options[Math.round(res.value)] ?? null; }
+  }
+  return {
+    value: res.value, position: res.position, unit: spec?.unit ?? null, options: spec?.options ?? null,
+    label: typeof label === 'string' ? label : null, index, decimals: spec?.decimals ?? null,
+  };
+}
+
+/**
+ * A control turned in a device window, written back into the code: where the track's code sets it
+ * with one plain value, that value is rewritten as the turn goes, spelled the way it was (see
+ * units.mjs's restateParamArg). The host holds the turned value against the code's until the next
+ * evaluation (see Scheduler#takeParamByHand), which is the code that now says it - so code, knob
+ * and sound agree. A control the code does not name is left to the capture, as before; conf, when
+ * armed on the track, writes its own `.param()` on release.
+ */
+function writeWindowParam(trackLabel, slot, res) {
+  if (!unitsMod || res?.id == null || confSession?.trackLabel === trackLabel) return;
+  const spec = deviceWidgetSpecs.get(res.id);
+  if (spec && (spec.widget === 'button' || spec.takes)) return;
+  const call = codeParamCall(trackLabel, slot, { id: res.id, name: res.name ?? spec?.name });
+  if (!call) return;
+  const next = unitsMod.restateParamArg(call.text, restateTarget(res, spec));
+  if (next == null || next === call.text) return;
+  call.ed.replaceRange(next, call.ed.posFromIndex(call.start), call.ed.posFromIndex(call.end), '+param');
+}
+
+/**
+ * A parameter moved in a plugin's own window, where the track's code sets it with a `.param()`: the
+ * host has let the hand keep it (sclang's takeHand), and here the number in that call is rewritten
+ * to what the hand left - a position, or a value in the units a mapping file gives the parameter,
+ * which is what the host sends. A call that says something else (a variable, a sum) cannot be
+ * rewritten, so the parameter is handed back to it, as a pattern keeps its own.
+ */
+function writePluginParam({ trackId, slot, name, value }) {
+  if (!unitsMod) return;
+  const call = codeParamCall(trackId, slot, { name });
+  if (!call) return;
+  const next = unitsMod.restateParamArg(call.text, { value, position: value, unit: null });
+  if (next == null) {
+    api('POST', '/api/paramHandBack', { trackId, slot, name }).catch(() => {});
+    return;
+  }
+  if (next !== call.text) call.ed.replaceRange(next, call.ed.posFromIndex(call.start), call.ed.posFromIndex(call.end), '+param');
+}
+
+/**
+ * Whether a turn of this control is written into the code (see writeWindowParam): the code sets it
+ * with one plain value. Such a turn is not a capture of the device - the code already says it.
+ */
+function windowWritesParam(trackLabel, slot, id) {
+  const spec = deviceWidgetSpecs.get(id);
+  if (!unitsMod || !spec || spec.modulatedBy || spec.takes || spec.widget === 'button') return false;
+  if (confSession?.trackLabel === trackLabel) return false;
+  return !!codeParamCall(trackLabel, slot, spec) && !setByCodeOnly(trackLabel, slot, spec);
+}
+
+/**
+ * Whether the code sets this control with something other than one plain value - a variable, a
+ * sum, a value in a unit the control is not in. The window draws it as driven: a turn there could
+ * not be written back, and the code would put its own value back on the next evaluation.
+ */
+function setByCodeOnly(trackLabel, slot, widget) {
+  if (!unitsMod || confSession?.trackLabel === trackLabel) return false;
+  const call = codeParamCall(trackLabel, slot, widget);
+  if (!call) return false;
+  const arg = widget.options ? JSON.stringify(widget.options[Math.round(widget.value)] ?? '') : null;
+  return unitsMod.restateParamArg(call.text, restateTarget({ ...widget, arg }, widget)) == null;
+}
+
 /** One control: its name, the widget itself, and what it currently reads. */
 function deviceWidget(trackLabel, slot, widget, { bare = false } = {}) {
+  const plain = !widget.modulatedBy && !widget.takes && widget.widget !== 'button';
+  if (plain && setByCodeOnly(trackLabel, slot, widget)) widget = { ...widget, modulatedBy: 'code' };
+  deviceWidgetSpecs.set(widget.id, widget);
   const cell = document.createElement('div');
   cell.className = bare ? 'device-widget device-widget-bare' : 'device-widget';
   if (widget.modulatedBy) cell.classList.add('driven');
@@ -6677,7 +6794,8 @@ function deviceWidget(trackLabel, slot, widget, { bare = false } = {}) {
   const isList = widget.takes === 'list' || widget.takes === 'scale';
   const readout = document.createElement('div');
   readout.className = 'device-widget-value';
-  readout.textContent = widget.modulatedBy ?? widget.text;
+  // Set by the code alone: nothing reports it moving, so what it is set to goes beside the name.
+  readout.textContent = widget.modulatedBy === 'code' ? `code \u00b7 ${widget.text}` : widget.modulatedBy ?? widget.text;
   /** Where this control's value is printed, whichever element that is. */
   let showValue = (text) => { readout.textContent = text; };
 
@@ -6688,14 +6806,17 @@ function deviceWidget(trackLabel, slot, widget, { bare = false } = {}) {
   // `commit` is the end of a gesture, and it is the host that decides what a finished gesture
   // means: a `.param()` call while conf is on for this track, and otherwise a capture of the
   // whole device into a preset, exactly as touching a plugin's own window does on the desktop.
-  // Nothing is written from here (see the auto-pin section).
+  // A control the code already sets is the exception: it is rewritten in the code as it turns
+  // (see writeWindowParam), so its gesture is not filed with the host at all.
   let inFlight = false;
   let queued = null;
   const send = (body, commit) => {
     if (inFlight) { queued = [body, commit]; return; }
     inFlight = true;
-    api('POST', '/api/deviceParam', { trackId: trackLabel, slot, id: widget.id, commit, ...body })
+    const filed = commit && !windowWritesParam(trackLabel, slot, widget.id);
+    api('POST', '/api/deviceParam', { trackId: trackLabel, slot, id: widget.id, commit: filed, ...body })
       .then((res) => {
+        writeWindowParam(trackLabel, slot, res);
         showValue(res.text);
         // A knob and a figure can be two views of one parameter - the filter's cutoff is both -
         // so turning the knob redraws the picture.

@@ -839,6 +839,32 @@ export class Scheduler {
     this._presetHold = new Map(); // slot -> preset the editor is holding it on (see holdPreset)
     this._stateHold = new Set(); // slots being edited by hand right now (see holdPluginState)
     this._channelHold = new Map(); // channel control -> value a mixer control is holding it at (see holdChannel)
+    this._handParams = new Set(); // "slot:name" (lower-cased) of device controls set by hand (see takeParamByHand)
+    this._heldSteady = new Map(); // "slot:name" -> whether the engine was last told its value is steady (see holdParam)
+  }
+
+  /**
+   * A device control turned in its window: the poll stops sending the code's value for it, so the
+   * one set by hand stays. Lasts until the next pattern, which is the code the window has written
+   * the new value into. `names` are the control's spellings (its id and its display name), since
+   * the pattern may name it by either.
+   */
+  takeParamByHand(slot, names) {
+    const want = new Set(names.filter((n) => n != null).map((n) => String(n).trim().toLowerCase()));
+    // A pattern keeps the control: a hand in a plugin's own window can reach one, and the engine
+    // leaves it mapped to the pattern (see the desktop's takeHand).
+    for (const [key, steady] of this._heldSteady) {
+      const [s, name] = splitHeldKey(key);
+      if (!steady && s === Number(slot) && want.has(String(name).trim().toLowerCase())) return false;
+    }
+    for (const name of want) this._handParams.add(`${slot}:${name}`);
+    return true;
+  }
+
+  /** Gives a control taken by hand back to the code: the poll sets it again from the next tick. */
+  releaseParamByHand(slot, names) {
+    for (const name of names) if (name != null) this._handParams.delete(`${slot}:${String(name).trim().toLowerCase()}`);
+    for (const name of names) if (name != null) this.engine.releaseParamHands?.(this.trackId, slot, name);
   }
 
   /**
@@ -1312,6 +1338,8 @@ export class Scheduler {
 
   setPattern(sig) {
     this.pattern = sig;
+    this._handParams.clear(); // the code is in charge again (see takeParamByHand)
+    this.engine.releaseParamHands?.(this.trackId); // ...and a plugin's window lets go of what a hand took there
     // The track's key, for a device tuned to it (a control that takes a 'scale'): the pattern's
     // own .scale(), else the setscale() in force when its chain was built - an evaluation's, which
     // is not always the one in force now - else the one in force now.
@@ -1447,14 +1475,25 @@ export class Scheduler {
         .filter((e) => e.slot !== CHANNEL_SLOT && !(e.sig.lfoIR || e.sig.envIR || e.sig.ccIR))
         .map((e) => `${e.slot}:${e.name}`),
     );
+    // A control the new code sets with a steady value where it had a pattern (or the other way
+    // round) is held again saying so: the engine tells a window which of the two it is.
+    for (const e of expanded.entries) {
+      const key = `${e.slot}:${e.name}`;
+      if (!this._heldParams.has(key) || !polled.has(key)) continue;
+      const steady = steadyValue(e.sig) !== undefined;
+      if (this._heldSteady.get(key) === steady) continue;
+      this._heldSteady.set(key, steady);
+      this.engine.holdParam(this.trackId, e.slot, e.name, { steady });
+    }
     for (const key of [...this._heldParams]) {
       if (polled.has(key)) continue;
       // Now an expression's: the engine hands the control over to it, and a release landing after
       // would take it back.
-      if (expanded.exprs.has(key)) { this._heldParams.delete(key); continue; }
+      if (expanded.exprs.has(key)) { this._heldParams.delete(key); this._heldSteady.delete(key); continue; }
       const [slot, name] = splitHeldKey(key);
       this.engine.releaseParam(this.trackId, slot, name, resetSec);
       this._heldParams.delete(key);
+      this._heldSteady.delete(key);
     }
 
     // Live head input from the midi()/audio() source builders (Sig#inputSource): play a named
@@ -1851,6 +1890,8 @@ export class Scheduler {
     // (see the note at the top of stop()). The holds are forgotten, and the engine keeps its first
     // reading, so the Scheduler that plays next takes over from where this one left things.
     this._heldParams.clear();
+    this._heldSteady.clear();
+    this._handParams.clear();
     // Nothing is sounding, so no slot is "on" a preset any more: a capture off one of these
     // plugins now belongs in its `{ state }` argument, not in a definition (see livePreset).
     this._livePresets.clear();
@@ -2702,6 +2743,8 @@ export class Scheduler {
         // holdChannel); the pattern's own value is what it returns to when you let go. Read with a
         // conditional rather than `&&` so a plugin param can't come out as `false ?? sample`.
         const held = c.slot === CHANNEL_SLOT ? this._channelHold.get(c.name) : undefined;
+        // A device control turned by hand keeps that value until the code that says it is played.
+        if (c.slot !== CHANNEL_SLOT && this._handParams.size && this._handParams.has(`${c.slot}:${String(c.name).trim().toLowerCase()}`)) continue;
         // The read that is applied - the one a control's .record() records from (see motion.mjs).
         const value = held ?? withLiveReads(() => c.sig.sample(applySec, this.transport.cps, applyCycle));
         if (c.slot !== CHANNEL_SLOT) {
@@ -2714,11 +2757,14 @@ export class Scheduler {
             // Whether the value is one the code SETS (a number, a name - what the panel's own
             // pickers write) or a pattern that keeps putting its value back: the engine tells a
             // window the difference, so a setting stays editable there and a pattern is named.
-            this.engine.holdParam(this.trackId, c.slot, c.name, { steady: steadyValue(c.sig) !== undefined });
+            const steady = steadyValue(c.sig) !== undefined;
+            this.engine.holdParam(this.trackId, c.slot, c.name, { steady });
             this._heldParams.add(key);
+            this._heldSteady.set(key, steady);
           } else if (!speaks && this._heldParams.has(key)) {
             this.engine.releaseParam(this.trackId, c.slot, c.name, applySec);
             this._heldParams.delete(key);
+            this._heldSteady.delete(key);
           }
         }
         if (typeof value === 'number') {
