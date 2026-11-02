@@ -27,6 +27,7 @@ import { ownDevices, ownIdsSource, registrySource } from '../web-engine/build/de
 import { DSP_FLAGS, compiler as cxx, exeName, linkFlags, targetFlags } from '../web-engine/build/devices/toolchain.mjs';
 import { denormalize } from '../web-engine/src/descriptor.mjs';
 import { FilterProcessor } from '../web-engine/src/devices/filter.mjs';
+import { DRIVEN_MODES, FILTER_MODES } from '../web-engine/src/dsp/filters.mjs';
 import { EqProcessor } from '../web-engine/src/devices/eq.mjs';
 import { CrushProcessor } from '../web-engine/src/devices/crush.mjs';
 import { OverdriveProcessor } from '../web-engine/src/devices/overdrive.mjs';
@@ -345,6 +346,13 @@ const LONG_RUN = { VocalShift: BLOCK * 240 };
 // mode the draws may never land on, with whatever it depends on turned up. Each is the defaults
 // with these controls changed.
 const PINNED = {
+  // Every circuit model at the ends of its controls: singing and driven hard low down, wide open
+  // and nearly singing, and shut at the bottom with a morph all the way over.
+  Filter: DRIVEN_MODES.flatMap((name) => [
+    { mode: FILTER_MODES.indexOf(name), cutoff: 300, resonance: 1, drive: 8, morph: 0.7 },
+    { mode: FILTER_MODES.indexOf(name), cutoff: 18000, resonance: 0.95, drive: 1, morph: 0.25 },
+    { mode: FILTER_MODES.indexOf(name), cutoff: 20, resonance: 0, drive: 4, morph: 1 },
+  ]),
   // Always-glide, with a glide long enough to still be moving when the chords change.
   Wavetable: [{ 'glide': 0.05, 'glide.mode': 1 }, { 'glide': 0.05, 'glide.mode': 0 }],
   // Every color, filtered and narrowed so the tone and width paths run too, and the digital
@@ -821,6 +829,26 @@ for (const { id, param } of PATCHED) {
     let differs = 0;
     for (let i = 0; i < held.length; i++) differs = Math.max(differs, Math.abs(held[i] - browser[i]));
     assert.ok(differs > 1e-3, `${id}: sweeping ${param} per sample sounded no different from per block`);
+  });
+}
+
+// The circuit models under a cutoff swept at audio rate: each one's own tuning path, resonant and
+// driven, per sample on both engines.
+for (const name of DRIVEN_MODES) {
+  test(`Filter's ${name} follows a cutoff swept at audio rate the same on both engines`, { skip: compiler ? false : 'no clang++' }, () => {
+    const binary = buildHarness(devices);
+    const { device } = devices.find((d) => d.id === 'Filter');
+    const frames = BLOCK * 24;
+    const index = device.params.findIndex((p) => p.id === 'cutoff');
+    const swept = sweptValues(device.params[index], frames);
+    const file = writeFile(path.join(WORK, `Filter-${name}-swept.f32`), swept);
+    const pin = { mode: FILTER_MODES.indexOf(name), resonance: 0.9, drive: 4, morph: 0.4 };
+    const values = device.params.map((p) => (p.id in pin ? pin[p.id] : p.default));
+    const input = testSignal(frames, 2);
+    const native = runNative(binary, { id: 'Filter', values, input, frames, moving: [{ param: index, file }] });
+    const browser = runBrowserSwept(device, { values, input, frames, notes: [], channels: 2, sweptId: 'cutoff', swept });
+    const { rmsA } = compare('Filter', `${name} with its cutoff swept at audio rate`, native, browser);
+    assert.ok(rmsA > 1e-3, `Filter ${name}: nothing came out`);
   });
 }
 

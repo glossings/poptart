@@ -116,8 +116,13 @@ test('a figure takes a control over only where the control has nothing to add', 
   // worth both a picture and a number.
   const filter = buildPanel(FILTER, defaultValues(FILTER), new Map(), opts);
   assert.equal(filter.sections[0].figures.length, 1);
-  assert.equal(filter.sections[0].widgets.length, 6);
+  assert.deepEqual(filter.sections[0].widgets.map((w) => w.id), ['mode', 'cutoff', 'resonance', 'mix', 'output'],
+    'drive and morph are hidden on a mode that ignores them');
   assert.deepEqual(filter.sections[0].figures[0].widgets, [], 'and takes no control onto its heading');
+  const on = (mode) => buildPanel(FILTER, { ...defaultValues(FILTER), mode: FILTER_MODES.indexOf(mode) }, new Map(), opts)
+    .sections[0].widgets.map((w) => w.id);
+  assert.deepEqual(on('ladder'), ['mode', 'cutoff', 'resonance', 'drive', 'mix', 'output'], 'a circuit model is driven');
+  assert.deepEqual(on('sallen'), ['mode', 'cutoff', 'resonance', 'drive', 'morph', 'mix', 'output'], 'and a two-pole one morphs');
 });
 
 test('a figure is handed to the section it named, and one with no group goes above the lot', () => {

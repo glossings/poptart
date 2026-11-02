@@ -1,4 +1,4 @@
-// The Filter effect: the state-variable and ladder filters, on the chain.
+// The Filter effect: the state-variable filters and the circuit models, on the chain.
 //
 // One filter for every instrument rather than one inside each: a synth's own filter is a
 // worse copy of this, and an `env()` on this cutoff is the filter envelope any of them wants.
@@ -8,7 +8,7 @@
 
 import { defineDevice } from '../descriptor.mjs';
 import { at, dbToGain, isMoving } from '../dsp/control.mjs';
-import { FILTER_MODES, MultiFilter } from '../dsp/filters.mjs';
+import { DRIVEN_MODES, FILTER_MODES, MORPHING_MODES, MultiFilter } from '../dsp/filters.mjs';
 
 export const FILTER = defineDevice({
   id: 'Filter',
@@ -16,15 +16,19 @@ export const FILTER = defineDevice({
   version: 1,
   license: 'AGPL-3.0-only',
   processor: 'poptart-filter',
-  description: 'A resonant filter: the classical shapes at three slopes, a driven four-pole ladder, and a comb, an allpass cascade and a formant bank. The cutoff follows a signal at the sample rate, so an envelope on it sweeps.',
+  description: 'A resonant filter: the classical shapes at three slopes, a comb, an allpass cascade and a formant bank, and eight analog circuits modeled with their saturation and their resonance. The cutoff follows a signal at the sample rate, so an envelope on it sweeps.',
   channels: { in: 2, out: 2 },
   params: [
     { id: 'mode', name: 'Mode', default: FILTER_MODES.indexOf('lowpass'), options: [...FILTER_MODES], rate: 'k',
-      description: 'The numbered modes are slopes in decibels per octave. Ladder is a four-pole with a saturating feedback path. Comb tunes an echo to the cutoff, allpass is a fixed phaser, formant sweeps through five vowels.' },
+      description: 'The numbered modes are slopes in decibels per octave. Comb tunes an echo to the cutoff, allpass is a fixed phaser, formant sweeps through five vowels. The rest are analog circuits. Ladder: the transistor four-pole, losing bass as the resonance rises and singing at the top. Diode: the diode four-pole of the classic bass line, rubbery, about 18 dB an octave, its peak moving with the resonance. Sallen: a two-pole whose clipped feedback screams. Statevar: a smooth two-pole that never quite sings, morphing through a notch. Cmos: a gritty, lopsided two-pole. Ota: a creamy four-pole that keeps its bass. Polar: a harsh two-pole whose integrators run out of slew. DiodePair: a two-pole of diode pairs with a squelchy peak.' },
     { id: 'cutoff', name: 'Cutoff', min: 20, max: 20000, default: 2000, unit: 'Hz', curve: 'exp' },
     { id: 'resonance', name: 'Resonance', min: 0, max: 1, default: 0.2 },
     { id: 'drive', name: 'Drive', min: 1, max: 8, default: 1, unit: 'x',
-      description: 'Only the ladder mode is driven; every other mode ignores it.' },
+      active: { param: 'mode', is: [...DRIVEN_MODES] },
+      description: 'Level into the circuit. Higher saturates its stages, and the resonance with them.' },
+    { id: 'morph', name: 'Morph', min: 0, max: 1, default: 0,
+      active: { param: 'mode', is: [...MORPHING_MODES] },
+      description: 'The response of the two-pole circuits: lowpass, bandpass, highpass from left to right. On statevar the middle is a notch.' },
     { id: 'mix', name: 'Mix', min: 0, max: 1, default: 1 },
     { id: 'output', name: 'Output', min: -24, max: 24, default: 0, unit: 'dB' },
   ],
@@ -34,10 +38,13 @@ export const FILTER = defineDevice({
       kind: 'response',
       title: 'response',
       description: 'The filter\'s magnitude response at the cutoff and resonance it is set to. Drag across for the cutoff, up for the resonance.',
-      params: { mode: 'mode', cutoff: 'cutoff', resonance: 'resonance', drive: 'drive' },
+      params: { mode: 'mode', cutoff: 'cutoff', resonance: 'resonance', drive: 'drive', morph: 'morph' },
       drag: { x: 'cutoff', y: 'resonance' },
     },
   ],
+  // Wide enough for every control in one row, so a mode that shows Drive and Morph does not
+  // push Output onto a second one.
+  panel: { width: 640 },
 });
 
 export class FilterProcessor {
@@ -48,14 +55,16 @@ export class FilterProcessor {
     this.lastCutoff = -1;
     this.lastRes = -1;
     this.lastDrive = -1;
+    this.lastMorph = -1;
   }
 
   reset() {
     for (const f of this.filters) f.reset();
   }
 
-  _tune(mode, hz, q, drive) {
+  _tune(mode, hz, q, drive, morph) {
     this.filters[0].drive = drive;
+    this.filters[0].morph = morph;
     this.filters[0].setCutoff(hz, q, mode);
     this.filters[1].follow(this.filters[0]);
   }
@@ -69,17 +78,19 @@ export class FilterProcessor {
     // (a comb at its default length, a formant bank at 1 kHz) until the cutoff next moved.
     // Invalidating the cutoff rather than tuning here is what the moving branch already does.
     if (mode !== this.lastMode) { this.reset(); this.lastMode = mode; this.lastCutoff = -1; }
-    const moving = isMoving(params.cutoff) || isMoving(params.resonance) || isMoving(params.drive);
+    const moving = isMoving(params.cutoff) || isMoving(params.resonance) || isMoving(params.drive) || isMoving(params.morph);
     if (!moving) {
       const hz = at(params.cutoff, 0);
       const q = at(params.resonance, 0);
       const drive = at(params.drive, 0);
-      // Drive is in the comparison because the ladder reads it at tuning time: a stepped drive
-      // change over a still cutoff is a change this filter has to hear.
-      if (hz !== this.lastCutoff || q !== this.lastRes || drive !== this.lastDrive) this._tune(mode, hz, q, drive);
+      const morph = at(params.morph, 0);
+      // Drive and morph are in the comparison because the circuit models read them at tuning
+      // time: a stepped change of either over a still cutoff is a change this filter has to hear.
+      if (hz !== this.lastCutoff || q !== this.lastRes || drive !== this.lastDrive || morph !== this.lastMorph) this._tune(mode, hz, q, drive, morph);
       this.lastCutoff = hz;
       this.lastRes = q;
       this.lastDrive = drive;
+      this.lastMorph = morph;
     } else {
       this.lastCutoff = -1;
     }
@@ -100,7 +111,7 @@ export class FilterProcessor {
       return;
     }
     for (let i = 0; i < count; i++) {
-      if (moving) this._tune(mode, at(params.cutoff, i), at(params.resonance, i), at(params.drive, i));
+      if (moving) this._tune(mode, at(params.cutoff, i), at(params.resonance, i), at(params.drive, i), at(params.morph, i));
       const mix = at(params.mix, i);
       const gain = dbToGain(at(params.output, i));
       const l = inL[i];

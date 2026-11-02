@@ -1,6 +1,9 @@
 // The two filters the wavetable synth offers, and the one-pole used as a tone control.
 //
-// A state-variable filter for the clean modes and a four-pole ladder for the dirty one. Both
+// The circuit-modeled modes - the ladder among them - are their own module (analog.mjs); this
+// one fronts them through MultiFilter.
+//
+// A state-variable filter for the clean modes and a four-pole ladder for the drum. Both
 // are written per-sample and allocation-free, and both take their cutoff as a frequency in Hz
 // so an envelope or an LFO can move it at audio rate without a lookup table in between.
 //
@@ -9,6 +12,8 @@
 // sample rate, so a filter envelope sweeping to the top of its range either sounds wrong or
 // stops being a filter. The ladder used to be the naive cascade, and above five kilohertz its
 // corner sat well above the number on the knob with the slope collapsed under it.
+
+import { ANALOG_MODELS, ANALOG_MORPHING, AnalogFilter } from './analog.mjs';
 
 /**
  * Every response the filter offers, in panel order.
@@ -19,11 +24,15 @@
  * plus a slope says in two. `lowpass`, `highpass` and `bandpass` keep their old names and their
  * old sound, which is twelve decibels an octave; the numbered ones are the other slopes.
  *
- * The four past the ladder are the responses that are not a slope at all. Each is an ordinary
+ * The three after the ladder are the responses that are not a slope at all. Each is an ordinary
  * textbook structure - a comb is a delay summed with itself, an allpass cascade is what every
  * phaser is built from, a formant bank is three bandpasses at the resonances of a vowel - and
  * they are here because a filter with only the four classical shapes is the one part of this
  * synth with nothing to discover in it.
+ *
+ * The ladder and everything after the formant bank are circuit models (see analog.mjs): each
+ * one a classic analog filter's own equations, with the saturation and the resonance that
+ * circuit has. They are listed by their model names, and in the model list's order.
  *
  * A song stores an enum by its LABEL (see valueToArg), so this list can be reordered without
  * changing what anything plays.
@@ -35,7 +44,17 @@ export const FILTER_MODES = Object.freeze([
   'notch', 'peak',
   'ladder',
   'comb', 'allpass', 'formant',
+  ...ANALOG_MODELS.filter((name) => name !== 'ladder'),
 ]);
+
+/** For each mode, the circuit model it runs, or -1 for the modes that are not one. */
+const ANALOG_OF_MODE = Object.freeze(FILTER_MODES.map((name) => ANALOG_MODELS.indexOf(name)));
+
+/** The modes the Drive control reaches: every circuit model, and nothing else. */
+export const DRIVEN_MODES = Object.freeze(FILTER_MODES.filter((name) => ANALOG_MODELS.includes(name)));
+
+/** The modes the Morph control reaches: the circuit models that are multimodes. */
+export const MORPHING_MODES = Object.freeze([...ANALOG_MORPHING]);
 
 /** What each mode is made of, which is what MultiFilter switches on. */
 const MODE = Object.freeze(Object.fromEntries(FILTER_MODES.map((name, i) => [name, i])));
@@ -142,9 +161,9 @@ const softClip = (x) => {
 };
 
 /**
- * A four-pole ladder lowpass with a saturated feedback path: the mode that is supposed to
- * color the sound rather than get out of its way. Resonance drives it into the nonlinearity,
- * which is where the character is.
+ * A four-pole ladder lowpass with a saturated feedback path, one saturator for the whole loop.
+ * The Drum's filter; the Filter device's `ladder` mode is the circuit model in analog.mjs, which
+ * saturates every stage and sings at the top of its resonance.
  *
  * Four one-pole stages in the topology-preserving form, with the feedback solved at the loop's
  * input rather than taken one sample late: what the stages would put out with no new input is
@@ -310,8 +329,9 @@ const ALLPASS_STAGES = 4;
 /**
  * Every filter response behind one interface, so a device switching mode does not switch code.
  *
- * The four classical shapes and their slopes come off a state-variable core; the ladder is its
- * own thing; the rest are each a small structure of their own, held here and idle until the
+ * The four classical shapes and their slopes come off a state-variable core; the circuit models
+ * share one AnalogFilter, which switches circuit with the mode; the rest are each a small
+ * structure of their own, held here and idle until the
  * mode picks them. That is the tradeoff this class makes deliberately: a few hundred bytes of
  * state per channel that is mostly asleep, against one filter that can be any of these without
  * the device knowing which. Everything is tuned per sample, exactly as the core is, so a
@@ -322,7 +342,7 @@ export class MultiFilter {
     this.sampleRate = sampleRate;
     // Two state-variable sections: the first is 12 dB, the pair in series is 24.
     this.svf = [new Svf(sampleRate), new Svf(sampleRate)];
-    this.ladder = new Ladder(sampleRate);
+    this.analog = new AnalogFilter(sampleRate);
     this.one = 0;                       // the one-pole's state, for the 6 dB slopes
     this.oneA = 0;
     this.apFb = 0;                      // what the allpass chain last put out, for its feedback
@@ -339,7 +359,7 @@ export class MultiFilter {
 
   reset() {
     for (const f of this.svf) f.reset();
-    this.ladder.reset();
+    this.analog.reset();
     this.one = 0;
     this.apFb = 0;
     this.comb.fill(0);
@@ -348,16 +368,24 @@ export class MultiFilter {
     for (const f of this.formant) f.reset();
   }
 
-  set drive(value) { this.ladder.drive = value; }
+  set drive(value) { this.analog.setDrive(value); }
+
+  /** The circuit models' multimode response, 0..1 (see AnalogFilter#setMorph). */
+  set morph(value) { this.analog.setMorph(value); }
 
   /** Tunes whichever structure the mode uses. Cheap for the ones it does not. */
   setCutoff(hz, resonance, mode) {
+    // The circuit models run oversampled, so they take their own ceiling rather than this one.
+    const model = ANALOG_OF_MODE[mode] ?? -1;
+    if (model >= 0) {
+      this.analog.setModel(model);
+      this.analog.setCutoff(hz);
+      this.analog.setResonance(resonance);
+      return;
+    }
     const nyquist = this.sampleRate * 0.5;
     const f = Math.min(nyquist * 0.49, Math.max(MIN_CUTOFF_HZ, hz));
     switch (mode) {
-      case MODE.ladder:
-        this.ladder.setCutoff(f, resonance);
-        return;
       case MODE['lowpass 6']:
       case MODE['highpass 6']:
         this.oneA = 1 - Math.exp((-2 * Math.PI * f) / this.sampleRate);
@@ -417,7 +445,7 @@ export class MultiFilter {
   follow(other) {
     this.svf[0].follow(other.svf[0]);
     this.svf[1].follow(other.svf[1]);
-    this.ladder.follow(other.ladder);
+    this.analog.follow(other.analog);
     this.oneA = other.oneA;
     this.combLen = other.combLen;
     this.combFb = other.combFb;
@@ -442,9 +470,8 @@ export class MultiFilter {
   }
 
   next(x, mode) {
+    if ((ANALOG_OF_MODE[mode] ?? -1) >= 0) return this.analog.process(x);
     switch (mode) {
-      case MODE.ladder:
-        return this.ladder.next(x);
       case MODE['lowpass 6']:
         this.one += this.oneA * (x - this.one);
         return this.one;

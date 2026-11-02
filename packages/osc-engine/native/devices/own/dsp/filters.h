@@ -9,6 +9,7 @@
 #include <cmath>
 
 #include "own/pd-own.h"
+#include "own/dsp/analog.h"
 
 namespace pd_own {
 
@@ -26,7 +27,25 @@ enum FilterMode {
   kModeNotch, kModePeak,
   kLadder,
   kComb, kAllpassMode, kFormant,
+  // The circuit models after the ladder, in ANALOG_MODELS' order.
+  kModeDiode, kModeSallen, kModeStatevar, kModeCmos, kModeOta, kModePolar, kModeDiodePair,
+  kFilterModeCount,
 };
+
+/** For each mode, the circuit model it runs, or -1 for the modes that are not one. */
+inline int analogOfMode(int mode) {
+  switch (mode) {
+    case kLadder: return kAnalogLadder;
+    case kModeDiode: return kAnalogDiode;
+    case kModeSallen: return kAnalogSallen;
+    case kModeStatevar: return kAnalogStatevar;
+    case kModeCmos: return kAnalogCmos;
+    case kModeOta: return kAnalogOta;
+    case kModePolar: return kAnalogPolar;
+    case kModeDiodePair: return kAnalogDiodePair;
+    default: return -1;
+  }
+}
 
 /** The five vowels the formant mode sweeps through, as the first three resonances of each. */
 constexpr double kFormants[5][3] = {
@@ -91,8 +110,8 @@ inline double softClip(double x) {
 }
 
 /**
- * A four-pole ladder lowpass with a saturated feedback path: the mode that is supposed to color
- * the sound rather than get out of its way. The feedback is solved at the loop's input rather
+ * A four-pole ladder lowpass with a saturated feedback path, one saturator for the whole loop:
+ * the Drum's filter. The Filter device's `ladder` mode is the circuit model in analog.h. The feedback is solved at the loop's input rather
  * than taken a sample late, so the resonance peak lands on the number the cutoff says.
  */
 struct Ladder {
@@ -212,7 +231,7 @@ constexpr int kCombMax = static_cast<int>(kCombMaxSec * 192000.0) + 8;
 struct MultiFilter {
   double sampleRate = 48000.0;
   Svf svf[2];
-  Ladder ladder;
+  AnalogFilter analog;
   double one = 0;        // the one-pole's state, for the 6 dB slopes
   double oneA = 0;
   double apFb = 0;       // what the allpass chain last put out, for its feedback
@@ -229,7 +248,7 @@ struct MultiFilter {
   void init(double sr) {
     sampleRate = sr;
     for (auto& f : svf) f.init(sr);
-    ladder.init(sr);
+    analog.init(sr);
     for (auto& f : formant) f.init(sr);
     combSize = static_cast<int>(std::ceil(kCombMaxSec * sr)) + 4;
     if (combSize > kCombMax) combSize = kCombMax;
@@ -238,7 +257,7 @@ struct MultiFilter {
 
   void reset() {
     for (auto& f : svf) f.reset();
-    ladder.reset();
+    analog.reset();
     one = 0;
     apFb = 0;
     for (int i = 0; i < combSize; ++i) comb[i] = 0;
@@ -247,16 +266,22 @@ struct MultiFilter {
     for (auto& f : formant) f.reset();
   }
 
-  void setDrive(double value) { ladder.drive = value; }
+  void setDrive(double value) { analog.setDrive(value); }
+  void setMorph(double value) { analog.setMorph(value); }
 
   /** Tunes whichever structure the mode uses. Cheap for the ones it does not. */
   void setCutoff(double hz, double resonance, int mode) {
+    // The circuit models run oversampled, so they take their own ceiling rather than this one.
+    const int model = analogOfMode(mode);
+    if (model >= 0) {
+      analog.setModel(model);
+      analog.setCutoff(hz);
+      analog.setResonance(resonance);
+      return;
+    }
     const double nyquist = sampleRate * 0.5;
     const double f = std::fmin(nyquist * 0.49, std::fmax(kMinCutoffHz, hz));
     switch (mode) {
-      case kLadder:
-        ladder.setCutoff(f, resonance);
-        return;
       case kLowpass6:
       case kHighpass6:
         oneA = 1.0 - std::exp((-2.0 * M_PI * f) / sampleRate);
@@ -308,7 +333,7 @@ struct MultiFilter {
   void follow(const MultiFilter& o) {
     svf[0].follow(o.svf[0]);
     svf[1].follow(o.svf[1]);
-    ladder.follow(o.ladder);
+    analog.follow(o.analog);
     oneA = o.oneA;
     combLen = o.combLen;
     combFb = o.combFb;
@@ -330,9 +355,8 @@ struct MultiFilter {
   }
 
   double next(double x, int mode) {
+    if (analogOfMode(mode) >= 0) return analog.process(x);
     switch (mode) {
-      case kLadder:
-        return ladder.next(x);
       case kLowpass6:
         one += oneA * (x - one);
         return one;

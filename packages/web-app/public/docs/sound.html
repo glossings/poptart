@@ -52,7 +52,7 @@
         </table>
         <table>
           <tr><th>Effects</th><th></th></tr>
-          <tr><td><code>Filter</code> · <code>EQ</code> · <code>LPG</code></td><td>multimode filter · four-band equalizer, each band's <code>Slope</code> setting a cut or shelf to 12, 24, 36, 48, 72 or 96 dB per octave · low-pass gate, struck by notes routed in with <code>.midi()</code></td></tr>
+          <tr><td><code>Filter</code> · <code>EQ</code> · <code>LPG</code></td><td>multimode filter: the classical shapes, and eight analog circuits modeled with their saturation and resonance · four-band equalizer, each band's <code>Slope</code> setting a cut or shelf to 12, 24, 36, 48, 72 or 96 dB per octave · low-pass gate, struck by notes routed in with <code>.midi()</code></td></tr>
           <tr><td><code>Filterbank</code> · <code>Resonator</code></td><td>filter banks whose band levels <code>Shape</code> moves, scrolled across the bands or rippling across them, and <code>Levels</code> steps, a cycle of a pattern at a time · narrow ringing bands on every note of the track's scale, or on the notes another track holds, with <code>.midi()</code></td></tr>
           <tr><td><code>Distort</code> · <code>Overdrive</code> · <code>Crush</code></td><td>waveshaping, with curves you draw as named shapes · band-limited drive · bits and rate</td></tr>
           <tr><td><code>Compressor</code> · <code>Multiband</code> · <code>Limiter</code> · <code>Ducker</code></td><td>dynamics; the compressor and ducker take a sidechain</td></tr>
@@ -71,6 +71,21 @@ bells: n("0 4 7 &lt;9 11&gt;").sc(4).synth("Rings")
 pulse: note("e1*8").synth("Braids").param("Shape", "'Saw Sub'")
   .fx("Filter").param("Mode", "ladder").param("Cutoff", saw(0.5).range(0.25, 0.55))
   .fx("Overdrive").postgain(0.3)</code></pre>
+
+        <p>
+          <code>Filter</code>'s circuit modes are each an analog filter's own equations, so they saturate as
+          <code>Drive</code> goes up and their resonance behaves the way the circuit's does. <code>ladder</code>
+          is the transistor four-pole: it loses bass as the resonance rises and sings at the top.
+          <code>diode</code> is the diode four-pole of acid bass lines: rubbery, its peak moving with the
+          resonance, ringing without ever quite singing. <code>ota</code> is a smoother four-pole that keeps
+          its bass. The two-poles take <code>Morph</code>, lowpass to bandpass to highpass:
+          <code>sallen</code> screams as its clipped feedback bites, <code>statevar</code> is smooth and runs
+          through a notch instead of a band, <code>cmos</code> grinds, <code>polar</code> is hard and harsh, and
+          <code>diodepair</code> has a squelchy peak.
+        </p>
+        <pre data-run><code>acid: note("c2 c2 c3 &lt;eb2 g2&gt; c2 bb1 c3 f2").synth("Wavetable")
+  .fx("Filter").param("Mode", "diode").param("Resonance", 0.85).param("Drive", 3)
+  .param("Cutoff", saw(2).range(0.25, 0.6)).postgain(0.5)</code></pre>
 
         <p>
           <code>Filterbank</code> and <code>Resonator</code> move their bands' levels with <code>Shape</code>. In

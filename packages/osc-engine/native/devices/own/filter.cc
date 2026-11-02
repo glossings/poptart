@@ -1,4 +1,4 @@
-// The Filter effect: the state-variable and ladder filters, on the chain.
+// The Filter effect: the state-variable filters and the circuit models, on the chain.
 //
 // Translated from web-engine/src/devices/filter.mjs. One filter for every instrument rather than
 // one inside each: a synth's own filter is a worse copy of this, and an `env()` on this cutoff is
@@ -20,7 +20,7 @@ using namespace pd_own;
 struct Device : pd_own::Device<ids::kCount> {
   MultiFilter filters[2];
   int lastMode = -1;
-  double lastCutoff = -1, lastRes = -1, lastDrive = -1;
+  double lastCutoff = -1, lastRes = -1, lastDrive = -1, lastMorph = -1;
 
   void pd_init(double sr) {
     sampleRate = sr;
@@ -29,12 +29,14 @@ struct Device : pd_own::Device<ids::kCount> {
     lastCutoff = -1;
     lastRes = -1;
     lastDrive = -1;
+    lastMorph = -1;
   }
 
   void reset() { for (auto& f : filters) f.reset(); }
 
-  void tune(int mode, double hz, double q, double drive) {
+  void tune(int mode, double hz, double q, double drive, double morph) {
     filters[0].setDrive(drive);
+    filters[0].setMorph(morph);
     filters[0].setCutoff(hz, q, mode);
     filters[1].follow(filters[0]);
   }
@@ -45,17 +47,19 @@ struct Device : pd_own::Device<ids::kCount> {
     // integrators into a new shape is a click at best and a blow-up at worst. The tuning goes
     // with it too - each mode reads the cutoff into a structure of its own.
     if (mode != lastMode) { reset(); lastMode = mode; lastCutoff = -1; }
-    const bool moving = isMoving(ids::cutoff) || isMoving(ids::resonance) || isMoving(ids::drive);
+    const bool moving = isMoving(ids::cutoff) || isMoving(ids::resonance) || isMoving(ids::drive) || isMoving(ids::morph);
     if (!moving) {
       const double hz = p[ids::cutoff];
       const double q = p[ids::resonance];
       const double drive = p[ids::drive];
-      // Drive is in the comparison because the ladder reads it at tuning time: a stepped drive
-      // change over a still cutoff is a change this filter has to hear.
-      if (hz != lastCutoff || q != lastRes || drive != lastDrive) tune(mode, hz, q, drive);
+      const double morph = p[ids::morph];
+      // Drive and morph are in the comparison because the circuit models read them at tuning
+      // time: a stepped change of either over a still cutoff is a change this filter has to hear.
+      if (hz != lastCutoff || q != lastRes || drive != lastDrive || morph != lastMorph) tune(mode, hz, q, drive, morph);
       lastCutoff = hz;
       lastRes = q;
       lastDrive = drive;
+      lastMorph = morph;
     } else {
       lastCutoff = -1;
     }
@@ -67,7 +71,7 @@ struct Device : pd_own::Device<ids::kCount> {
     // BOTH CHANNELS IN ONE LOOP, which is not a tidiness choice: a channel at a time meant the
     // right one ran on whatever tuning the left one's last sample left behind.
     for (int i = 0; i < frames; ++i) {
-      if (moving) tune(mode, ctl(ids::cutoff, i), ctl(ids::resonance, i), ctl(ids::drive, i));
+      if (moving) tune(mode, ctl(ids::cutoff, i), ctl(ids::resonance, i), ctl(ids::drive, i), ctl(ids::morph, i));
       const double mix = ctl(ids::mix, i);
       const double gain = dbToGain(ctl(ids::output, i));
       const double l = inl[i];

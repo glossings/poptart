@@ -207,7 +207,9 @@ test('a control switched out of the way by another is left off the panel, not dr
   // The editor has to know which controls do this, because moving one changes what the window
   // HAS rather than what it reads - so the panel is rebuilt rather than a knob repainted.
   assert.deepEqual(free.relayoutOn, ['sync']);
-  assert.deepEqual(buildPanel(FILTER, {}).relayoutOn, [], 'a device with no such control says so');
+  assert.deepEqual(buildPanel(FILTER, {}).relayoutOn, ['mode'], 'the filter\'s drive and morph follow its mode');
+  const plain = defineDevice({ id: 'T', kind: 'fx', license: 'AGPL-3.0-only', params: [{ id: 'a', name: 'A', min: 0, max: 1, default: 0 }] });
+  assert.deepEqual(buildPanel(plain, {}).relayoutOn, [], 'a device with no such control says so');
 });
 
 test('a device that names a control nobody has, or a value it cannot take, is refused', () => {

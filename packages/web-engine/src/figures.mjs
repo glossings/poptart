@@ -23,7 +23,7 @@ import { curveShape } from './dsp/adsr.mjs';
 import { gainComputer } from './devices/compressor.mjs';
 import { drawnWindow, grainWindow } from './devices/granular.mjs';
 import { BIQUAD_TYPES, biquadMagnitude, biquadSections, sectionCoefficients } from './dsp/biquad.mjs';
-import { FILTER_MODES, MultiFilter } from './dsp/filters.mjs';
+import { DRIVEN_MODES, FILTER_MODES, MultiFilter } from './dsp/filters.mjs';
 import { fillUnison } from './dsp/oscillator.mjs';
 import { WARP_MODES, crossModOf, warpPhase } from './dsp/warp.mjs';
 import { SHAPER_MODES, autoGainFor, harmonicsOf, shape } from './dsp/shapers.mjs';
@@ -331,24 +331,27 @@ function unisonFigure(read) {
  * mapping. So the corner is drawn where the filter actually put it, including the clamp that
  * stops it short of Nyquist, and a change to either mapping moves this curve with it.
  *
- * The magnitudes themselves are the analog prototypes the two topologies implement, evaluated at
+ * The magnitudes themselves are the analog prototypes the topologies implement, evaluated at
  * the prewarped frequency. That is exact for the clean modes and the small-signal answer for the
- * ladder, whose feedback path is saturated: at the top of the resonance the real thing is a few
- * decibels below this peak, because the saturation is what keeps it bounded. Drive is left out
- * of the curve entirely for the same reason - it is a nonlinearity, and a magnitude response is
- * not where it can be honestly drawn.
+ * circuit models, which saturate: at the top of the resonance the real thing is a few decibels
+ * below this peak, because the saturation is what keeps it bounded, and a model that sings is
+ * drawn as it is just before it starts (AnalogFilter#transfer). Drive is left out of the curve
+ * entirely for the same reason - it is a nonlinearity, and a magnitude response is not where it
+ * can be honestly drawn.
  */
 function responseFigure(read, sampleRate) {
   const mode = Math.round(read('mode') ?? 0);
   const cutoff = read('cutoff') ?? 1000;
   const resonance = Math.min(1, Math.max(0, read('resonance') ?? 0));
   const modeName = FILTER_MODES[mode] ?? FILTER_MODES[0];
+  const morph = read('morph') ?? 0;
 
   // ONE REAL FILTER, TUNED. Every coefficient below is read off it rather than recomputed here:
   // the prewarp, the resonance mapping, the cutoff clamps, the comb's delay length, the vowel
   // the formant bank blended to. A mode this does not know how to evaluate would draw the wrong
   // picture, which is why `transfer` covers all of them and the test walks the whole list.
   const filter = new MultiFilter(sampleRate);
+  filter.morph = morph;
   filter.setCutoff(cutoff, resonance, mode);
 
   const { lowHz, highHz } = RESPONSE_RANGE;
@@ -400,19 +403,6 @@ function svfResponse(w, k, which) {
   }
 }
 
-/**
- * The ladder: four one-poles inside a feedback loop, so `1 / ((1 + jw)^4 + k)`.
- *
- * At the corner with no resonance that is 1/4 - twelve decibels down, where the clean lowpass is
- * six. That is the difference the descriptor claims and the comment in filters.mjs explains, and
- * it falls out of this expression rather than being applied to it.
- */
-function ladderResponse(w, k) {
-  const re = 1 - 6 * w * w + w * w * w * w;
-  const im = 4 * w - 4 * w * w * w;
-  return cDiv(ONE, { re: re + k, im });
-}
-
 /** `z^-n` on the unit circle at this frequency - for the structures evaluated as digital ones. */
 const zPow = (omega, n) => ({ re: Math.cos(omega * n), im: -Math.sin(omega * n) });
 
@@ -425,6 +415,8 @@ const zPow = (omega, n) => ({ re: Math.cos(omega * n), im: -Math.sin(omega * n) 
  * pretending about, and its teeth land on the sample rate.
  */
 function transfer(filter, modeName, hz, sampleRate) {
+  // The circuit models answer for themselves, from the equations they run.
+  if (DRIVEN_MODES.includes(modeName)) return filter.analog.transfer(hz);
   const omega = (2 * Math.PI * hz) / sampleRate;
   const t = Math.tan((Math.PI * hz) / sampleRate);
   const svf = filter.svf[0];
@@ -463,10 +455,6 @@ function transfer(filter, modeName, hz, sampleRate) {
     case 'peak':
       // The normalized band added back to the signal: 1 + 4k(2 - k)·bp.
       return cAdd(ONE, cScale(svfResponse(w, k, 'bandpass'), 4 * k * (2 - k)));
-    case 'ladder': {
-      const g = filter.ladder.G / (1 - filter.ladder.G);
-      return ladderResponse(t / g, filter.ladder.k);
-    }
     case 'comb': {
       // w[n] = x[n] + fb·w[n-L] and the output is (x + w[n-L])/2.
       const zL = zPow(omega, filter.combLen);
@@ -498,6 +486,7 @@ function transfer(filter, modeName, hz, sampleRate) {
 
 /** The frequency the tuned filter is actually pointing at, for the line drawn through it. */
 function cornerOf(filter, modeName, cutoff, sampleRate) {
+  if (DRIVEN_MODES.includes(modeName)) return filter.analog.tuned;
   switch (modeName) {
     case 'lowpass 6':
     case 'highpass 6':
@@ -513,10 +502,6 @@ function cornerOf(filter, modeName, cutoff, sampleRate) {
     case 'formant':
       // The bank has three; the line marks the one that carries the vowel.
       return (Math.atan(filter.formant[0].g) * sampleRate) / Math.PI;
-    case 'ladder': {
-      const g = filter.ladder.G / (1 - filter.ladder.G);
-      return (Math.atan(g) * sampleRate) / Math.PI;
-    }
     default:
       return (Math.atan(filter.svf[0].g) * sampleRate) / Math.PI;
   }
