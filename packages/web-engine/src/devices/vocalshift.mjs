@@ -20,6 +20,7 @@
 //     periods apart in the input and add up in phase
 //   - a grain is two periods long, Hann-windowed, and written ahead into an output ring; output
 //     marks are a period apart divided by the pitch ratio
+//   - Mix lays the shifted voice over the input from `delay` samples back, so dry and wet line up
 //   - the level is held by sqrt(formant / pitch ratio): shifted up, there are more pulses a second,
 //     each as loud as before; down, fewer. Unshifted it is exactly 1, and the grains add back up to
 //     the input itself
@@ -61,6 +62,8 @@ export const VOCALSHIFT = defineDevice({
       description: 'Transposition in semitones. Whole numbers are the musical intervals; in between is a detune.' },
     { id: 'formant', name: 'Formant', min: -12, max: 12, default: 0, unit: 'st',
       description: 'Moves the resonances without moving the pitch: up for a smaller throat, down for a bigger one.' },
+    { id: 'mix', name: 'Mix', min: 0, max: 1, default: 1,
+      description: 'The shifted voice against the dry one, which is held back by the same 50 ms so the two line up.' },
   ],
   presets: VOCALSHIFT_PRESETS,
 });
@@ -127,8 +130,13 @@ export class VocalShiftProcessor {
         this.nextMark += this.period / ratio;
       }
       const k = this.n & mask;
-      outL[i] = this.acc[0][k] * g;
-      if (outR !== outL) outR[i] = this.acc[1][k] * g;
+      // The dry signal from as far back as the grains are cut, so it sits under them in time.
+      const d = (this.n - this.delay) & mask;
+      const mix = at(params.mix, i);
+      const dryL = this.input[0][d];
+      const dryR = this.input[1][d];
+      outL[i] = dryL + (this.acc[0][k] * g - dryL) * mix;
+      if (outR !== outL) outR[i] = dryR + (this.acc[1][k] * g - dryR) * mix;
       this.acc[0][k] = 0;
       this.acc[1][k] = 0;
       this.n += 1;

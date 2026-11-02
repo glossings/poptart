@@ -387,6 +387,8 @@ const LONG_RUN = { VocalShift: BLOCK * 240, Stutter: BLOCK * 240 };
 // mode the draws may never land on, with whatever it depends on turned up. Each is the defaults
 // with these controls changed.
 const PINNED = {
+  // Dry, a blend over a shift, and a blend over a shift and a formant move.
+  VocalShift: [{ mix: 0 }, { mix: 0.5, pitch: 7 }, { mix: 0.3, pitch: -5, formant: 3 }],
   // Every circuit model at the ends of its controls: singing and driven hard low down, wide open
   // and nearly singing, and shut at the bottom with a morph all the way over.
   Filter: DRIVEN_MODES.flatMap((name) => [

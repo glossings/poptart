@@ -93,8 +93,13 @@ struct Device : pd_own::Device<ids::kCount> {
         nextMark += period / ratio;
       }
       const int64_t k = n & mask;
-      outl[i] = static_cast<float>(acc[0][k] * g);
-      outr[i] = static_cast<float>(acc[1][k] * g);
+      // The dry signal from as far back as the grains are cut, so it sits under them in time.
+      const int64_t d = (n - delay) & mask;
+      const double mix = ctl(ids::mix, i);
+      const double dryL = input[0][d];
+      const double dryR = input[1][d];
+      outl[i] = static_cast<float>(dryL + (acc[0][k] * g - dryL) * mix);
+      outr[i] = static_cast<float>(dryR + (acc[1][k] * g - dryR) * mix);
       acc[0][k] = 0;
       acc[1][k] = 0;
       n += 1;

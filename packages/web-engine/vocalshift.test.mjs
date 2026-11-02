@@ -30,14 +30,14 @@ function vowel(freq, seconds, peakHz, amp = 0.1) {
   return out;
 }
 
-function run(input, pitch, formant) {
+function run(input, pitch, formant, mix = 1) {
   const fx = new VocalShiftProcessor(SR);
   const out = new Float32Array(input.length);
   for (let at = 0; at < input.length; at += 128) {
     const n = Math.min(128, input.length - at);
     const x = input.subarray(at, at + n);
     const o = [new Float32Array(n), new Float32Array(n)];
-    fx.process([x, x], o, n, { pitch: [pitch], formant: [formant] });
+    fx.process([x, x], o, n, { pitch: [pitch], formant: [formant], mix: [mix] });
     out.set(o[0], at);
   }
   return out;
@@ -142,4 +142,30 @@ test('silence in is silence out, and a bad sample does not stick', () => {
   bad[1000] = NaN;
   const out = run(bad, 0, 0);
   assert.ok(out.slice(-4800).every(Number.isFinite), 'the device stayed broken after a NaN');
+});
+
+test('Mix: dry is the input held back by the latency, and dry and wet line up', () => {
+  const input = pulses(150, 1);
+  const delay = Math.round(VOCALSHIFT_LATENCY_SEC * SR);
+  // Fully dry is the input, exactly the latency late.
+  const dry = run(input, 7, 0, 0);
+  for (let i = delay; i < input.length; i++) assert.ok(Math.abs(dry[i] - input[i - delay]) < 1e-6, `dry at ${i}`);
+  // Unshifted, the grains add back up to the same delayed input, so half and half is that input
+  // too: no comb from a dry path out of step with the wet one.
+  const rms = (a, from) => Math.sqrt(a.subarray(from).reduce((t, v) => t + v * v, 0) / (a.length - from));
+  const from = SR / 2;
+  const wet = run(input, 0, 0, 1);
+  const half = run(input, 0, 0, 0.5);
+  const ref = rms(input.subarray(from - delay, input.length - delay), 0);
+  assert.ok(Math.abs(rms(wet, from) / ref - 1) < 0.05, 'unshifted wet holds the level');
+  assert.ok(Math.abs(rms(half, from) / ref - 1) < 0.05, 'half and half holds the level, with no comb');
+  // In between it is the straight blend of the two.
+  const shifted = run(input, 7, 0, 1);
+  const blend = run(input, 7, 0, 0.3);
+  for (let i = from; i < from + 2000; i++) assert.ok(Math.abs(blend[i] - (dry[i] + (shifted[i] - dry[i]) * 0.3)) < 1e-6);
+});
+
+test('Mix is a control of its own, fully wet by default', () => {
+  const mix = VOCALSHIFT.params.find((p) => p.id === 'mix');
+  assert.deepEqual([mix.name, mix.min, mix.max, mix.default], ['Mix', 0, 1, 1]);
 });

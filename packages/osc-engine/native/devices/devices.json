@@ -11642,6 +11642,20 @@
           "ui": "knob",
           "group": "",
           "rate": "a"
+        },
+        {
+          "id": "mix",
+          "name": "Mix",
+          "min": 0,
+          "max": 1,
+          "default": 1,
+          "step": 0,
+          "curve": "lin",
+          "curveExp": 2,
+          "unit": "",
+          "ui": "knob",
+          "group": "",
+          "rate": "a"
         }
       ],
       "presets": {
