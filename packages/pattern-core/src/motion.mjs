@@ -29,11 +29,13 @@
 import { Sig, warnPattern } from './signal.mjs';
 import { defScope, lookupShape } from './rolls.mjs';
 import { parseShapePoints, serializeShapePoints, sampleShape } from './shape.mjs';
-import { evaluatingDeck, widgetGeneration, builtGeneration, registerMotionRecord, registerRecordingControl, onControlRead, widgetValue, sourceCalls } from './widgets.mjs';
+import { setWidgetValue, evaluatingDeck, widgetGeneration, builtGeneration, registerMotionRecord, registerRecordingControl, onControlRead, widgetValue, sourceCalls } from './widgets.mjs';
 import { PHRASE_CYCLES } from './record.mjs';
 import { onSourceFed } from './sources.mjs';
 import { midiDeviceMatches } from './midi.mjs';
 import { positionOnCurve, valueOnCurve } from './curves.mjs';
+import { parseCells } from './widget-calls.mjs';
+import { setPressClock, onButtonPress, onButtonDown, shapeEdges, takePeriod, buttonGrid, rowWithPress, rowEdges, rowCells, shapeAsRow } from './triggers.mjs';
 
 /** Cycles a take is when `.record()` on a control says none - the same as a track's recording. */
 export const MOTION_DEFAULT_CYCLES = 4;
@@ -350,6 +352,7 @@ const RUN_GAP = 0.25;
 const history = new Map(); // control key -> { control, samples, runs, lastPos, lastVals }
 
 function observeControl(control, pos) {
+  if (control.kind === 'button') return; // kept from its presses instead (see pressHistory)
   if (liveReads <= 0 || !Number.isFinite(pos)) return;
   const vals = control.read();
   if (!vals.every(Number.isFinite)) return;
@@ -387,6 +390,18 @@ function observeControl(control, pos) {
   while (h.runs.length && h.runs[0].end < reach) h.runs.shift();
 }
 onControlRead(observeControl);
+
+// A button's recent presses, for capture: kept as they happen rather than from polls, for the
+// reason a button's .record() is (see recordPresses) - a button that is only a rhythm,
+// .struct(button()), is never polled, and a poll smears a press and can miss a tap.
+const pressHistory = new Map(); // button key -> [{ on, off }], in cycles on its deck's clock
+
+function keepPress(key, on, off) {
+  let list = pressHistory.get(key);
+  if (!list) pressHistory.set(key, (list = []));
+  list.push({ on, off });
+  while (list.length && list[0].off < off - CAPTURE_KEEP_CYCLES) list.shift();
+}
 
 // The window a capture takes: the latest phrase of movement - the runs since the last stretch of
 // PHRASE_CYCLES without any - in the whole cycles that hold it, from the cycle the phrase began in
@@ -460,6 +475,7 @@ let clock = null; // { now: () => sec, cycleAt: (deck, sec) => cycle | null } - 
  */
 export function setMotionClock(c) {
   clock = c;
+  setPressClock(c); // a button's presses are stamped on the same clock
 }
 
 const sourceHistory = new Map(); // `${kind}:${identity}` -> { src, samples: [[sec, value]], runs: [{ start, end }], lastSec, lastVal }
@@ -579,8 +595,15 @@ export function captureMotion() {
       const on = sourceOnDeck(h, deck);
       if (on) params.push({ src: h.src, ...on });
     }
-    if (!controls.length && !sources.length && !params.length) continue;
-    const win = motionCaptureWindow([...controls, ...sources, ...params].flatMap((x) => x.runs));
+    // Each button on this deck pressed lately, its presses as its runs.
+    const buttons = [];
+    for (const [key, list] of pressHistory) {
+      const at = Number(key.slice(2));
+      if (!key.startsWith(`${deck}:`) || !list.length || widgetValue(deck, at) === undefined || recordsItself(key)) continue;
+      buttons.push({ at, presses: list, runs: list.map((p) => ({ start: p.on, end: p.off })) });
+    }
+    if (!controls.length && !sources.length && !params.length && !buttons.length) continue;
+    const win = motionCaptureWindow([...controls, ...sources, ...params, ...buttons].flatMap((x) => x.runs));
     if (!win) continue;
     const inWindow = (runs) => runs.some((r) => r.end >= win.start && r.start < win.end);
     for (const h of controls) {
@@ -590,6 +613,14 @@ export function captureMotion() {
       const { control } = h;
       const shapes = control.ranges.map((range, dim) => serializeShapePoints(takePoints(samples, win.start, win.cycles, range, dim, control.curves?.[dim] ?? null)));
       out.push({ deck, at: control.at, kind: control.kind, axes: control.axes, shapes, cycles: win.cycles, source: false });
+    }
+    for (const b of buttons) {
+      if (!inWindow(b.runs)) continue;
+      // The presses in the window, as the row a .record() on the button would have written.
+      const cells = buttonGrid(`${deck}:${b.at}`) * win.cycles;
+      let row = null;
+      for (const p of b.presses) if (p.off >= win.start && p.on < win.end) row = rowWithPress(row, p.on, { cycles: win.cycles, cells });
+      out.push({ deck, at: b.at, kind: 'button', axes: [''], row, cycles: win.cycles, source: false });
     }
     for (const s of sources) {
       if (!inWindow(s.runs)) continue;
@@ -609,6 +640,7 @@ export function captureMotion() {
 /** Forgets every control's and source's kept movement - for tests. */
 export function clearCaptureHistory() {
   history.clear();
+  pressHistory.clear();
   sourceHistory.clear();
   playing.clear();
 }
@@ -616,7 +648,7 @@ export function clearCaptureHistory() {
 // A control with a `.record()` on it in the code its deck last evaluated.
 function recordsItself(key) {
   const built = builtGeneration(key.startsWith('b:') ? 'b' : 'a');
-  return [...(recorders.get(key) ?? [])].some((r) => r.generation === built);
+  return [...(recorders.get(key) ?? []), ...(pressRecorders.get(key) ?? [])].some((r) => r.generation === built);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -675,8 +707,11 @@ export function recordMotion(src, opts = {}, at = null) {
     warnPattern(`[signal] .record() cycles is a length in cycles, more than 0 - got ${JSON.stringify(textOf(given.cycles) ?? given.cycles)}, recording ${MOTION_DEFAULT_CYCLES}`);
     cycles = MOTION_DEFAULT_CYCLES;
   }
-  let takeName = given.take == null ? null : textOf(given.take);
-  if (given.take != null && (takeName === null || !takeName.trim())) {
+  // A button's take is a steps() row written in place (see recordPresses); any other take is the
+  // name of a shape.
+  const takeRow = given.take instanceof Sig && typeof given.take.rowText === 'function' ? given.take : null;
+  let takeName = given.take == null || takeRow ? null : textOf(given.take);
+  if (given.take != null && !takeRow && (takeName === null || !takeName.trim())) {
     warnPattern('[signal] .record() take is the name of the shape a take is kept in, like take: "sweep"');
     takeName = null;
   }
@@ -691,7 +726,7 @@ export function recordMotion(src, opts = {}, at = null) {
   if (ms.key) registerRecordingControl(Number(ms.key.slice(2)));
   // What the hand punches into: this recorder's last take, or the one the code names.
   const recorder = createMotionRecorder({ cycles, ranges, curves, existing: (dim) => recorder.take?.points[dim] ?? stored(dim) });
-  if (ms.key) {
+  if (ms.key && !ms.button) {
     let set = recorders.get(ms.key);
     if (!set) recorders.set(ms.key, (set = new Set()));
     // One evaluation's recorders: the last one's no longer play, and a release must not reach them.
@@ -725,6 +760,8 @@ export function recordMotion(src, opts = {}, at = null) {
     return points;
   };
 
+  if (ms.button) return recordPresses(src, ms, { cycles, takeName, takeRow, deck, at, stored });
+  if (takeRow) warnPattern('[signal] .record() take: steps(...) is a button\'s take - a control\'s take is the name of a shape, like take: "sweep"');
   const readAll = (t, cps, pos) => sources.map((s) => s.sample(t, cps, pos));
   const sampleDim = (dim) => (t, cps, pos) => {
     const live = readAll(t, cps, pos);
@@ -758,6 +795,105 @@ export function recordMotion(src, opts = {}, at = null) {
     out.y = sigs[1];
   }
   return out;
+}
+
+const pressRecorders = new Map(); // button key -> Set of press recorders on it
+
+onButtonPress((key, on, off) => {
+  keepPress(key, on, off);
+  for (const r of pressRecorders.get(key) ?? []) {
+    if (r.generation !== builtGeneration(r.deck)) continue; // its evaluation has been replaced
+    const row = r.press(on);
+    if (row != null) outbox.push({ deck: r.deck, at: r.at, take: r.takeName, axes: [''], row, cycles: r.cycles });
+  }
+});
+
+// A press going down remembers the take it was played over - what was playing before it - so its
+// count can follow on from that take rather than from one it is itself about to be part of.
+onButtonDown((key) => {
+  for (const r of pressRecorders.get(key) ?? []) {
+    if (r.generation === builtGeneration(r.deck)) return r.state();
+  }
+  return null;
+});
+
+// `.record()` on a button(): its take is a row of cells, one per step of the grid its presses play
+// on, over the take's whole length - `take: steps("x . . x ...")` in the call (see triggers.mjs). A
+// button is not polled for it the way a knob is: a poll draws a press as a ramp between two polls
+// and loses a tap between them, and a button that is only a rhythm (.struct(button())) is never
+// polled at all. So each press, as it happens (triggers.mjs stamps it), switches on the cell it
+// lands on, and every other cell is kept - tapping a rhythm in press by press builds it up, and
+// pressing over a take adds to it. The row is the take: clicking its cells is what plays.
+//
+// Until the call has a row of its own the row is kept here and handed to the editor to write in;
+// once it has one, a press writes into that row's cells, so it plays at once and the editor's text
+// follows. A take kept as a shape (the older form) still plays, and its first new press writes it
+// out as a row.
+function recordPresses(src, ms, { cycles, takeName, takeRow, deck, at, stored }) {
+  const key = ms.key;
+  const rowAt = takeRow?.rowKey ? Number(takeRow.rowKey.slice(2)) : null;
+  const cells = () => buttonGrid(key) * cycles;
+  const recorder = { deck, at: Number.isFinite(at) ? at : null, takeName, cycles, generation: widgetGeneration(), row: null };
+  // The row as it stands: the call's, what this recorder has written since the evaluation, or none.
+  const rowNow = () => (takeRow ? takeRow.rowText() : recorder.row);
+  recorder.press = (on) => {
+    const was = rowNow() ?? (stored(0) ? shapeAsRow(stored(0), cells()) : null);
+    const row = rowWithPress(was, on, { cycles, cells: cells() });
+    if (rowAt !== null) setWidgetValue(deck, rowAt, row);
+    else recorder.row = row;
+    return row;
+  };
+  recorder.state = () => {
+    const row = rowNow();
+    return row != null ? { row } : { points: stored(0) };
+  };
+  let set = pressRecorders.get(key);
+  if (!set) pressRecorders.set(key, (set = new Set()));
+  for (const r of set) if (r.generation !== recorder.generation) set.delete(r);
+  set.add(recorder);
+
+  // The take's presses in [from, to): the row's cells - a drawn row's carry the spans its cells
+  // light by - or an older take's shape.
+  const edgesOf = (state, from, to) => {
+    if (state?.row != null) return rowEdges(rowCells(state.row), cycles, from, to);
+    return state?.points ? shapeEdges(state.points, cycles, from, to) : [];
+  };
+  const edges = (from, to) => {
+    if (takeRow) {
+      const on = takeRow.stepsForCycle(0).filter((st) => st.value != null).map((st) => ({ start: st.start, loc: st.loc }));
+      return rowEdges(on, cycles, from, to);
+    }
+    return edgesOf(recorder.state(), from, to);
+  };
+  const sig = new Sig((t, cps, pos) => {
+    const live = src.sample(t, cps, pos);
+    if (Number(live) >= 0.5) {
+      if (liveReads > 0) playing.delete(key);
+      return live;
+    }
+    const phase = mod(pos, cycles) / cycles;
+    let v;
+    const row = rowNow();
+    if (row != null) {
+      // On for the length of a cell that is on.
+      const cellsOn = rowCells(row);
+      const n = parseCells(row).length;
+      v = cellsOn.some((c) => Math.abs(c.start - Math.floor(phase * n) / n) < 1e-9) ? 1 : 0;
+    } else {
+      const pts = stored(0);
+      if (!pts) return live;
+      v = sampleShape(pts, phase);
+    }
+    if (liveReads > 0) playing.set(key, [v]);
+    return v;
+  });
+  sig.widgetLive = true;
+  sig.pressKey = key;
+  sig.triggerEdges = edges;
+  sig.triggerPeriod = takePeriod(cycles);
+  // The presses of another state of the take (one a press remembers, see onButtonDown).
+  sig.triggerEdgesOf = (state, from, to) => edgesOf(state, from, to);
+  return sig;
 }
 
 // The method itself. On a live control it records movement; on anything else it is the track's

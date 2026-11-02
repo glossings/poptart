@@ -1064,6 +1064,31 @@ test('auditioning a chop needs an evaluated track, and stopping one hushes it', 
   shutdown(rig);
 });
 
+test('a key on a sampler roll strikes the file, logged as a key; on a synth it is a note', async () => {
+  const rig = makeHost();
+  await rig.host.call('POST', '/api/evaluate', { code: 'drums: s("pt_kit:0")\nkeys: note("c3")' });
+  const struck = [];
+  const notes = [];
+  const { playSample, noteOn, noteOff } = rig.engine;
+  rig.engine.playSample = (tid, ref, cfg, ...rest) => { struck.push([ref, cfg]); return playSample.call(rig.engine, tid, ref, cfg, ...rest); };
+  rig.engine.noteOn = (tid, note, ...rest) => { notes.push(['on', note]); return noteOn.call(rig.engine, tid, note, ...rest); };
+  rig.engine.noteOff = (tid, note, ...rest) => { notes.push(['off', note]); return noteOff.call(rig.engine, tid, note, ...rest); };
+  const sample = { ref: 'pt_kit', index: 0, begin: 0, end: 1 };
+  await rig.host.call('POST', '/api/keyNote', { trackId: 'drums', note: 60, index: 1, vel: 0.8, isOn: true, sample });
+  await rig.host.call('POST', '/api/keyNote', { trackId: 'drums', note: 60, index: 1, isOn: false });
+  assert.equal(struck.length, 1);
+  assert.equal(struck[0][0], 'pt_kit');
+  assert.deepEqual({ ...struck[0][1], secPerCycle: undefined }, { index: 1, begin: 0, end: 1, vel: 0.8, note: 60, secPerCycle: undefined });
+  assert.deepEqual(notes, [], 'a struck file has no note-on or note-off');
+  await rig.host.call('POST', '/api/keyNote', { trackId: 'keys', note: 62, vel: 0.8, isOn: true });
+  await rig.host.call('POST', '/api/keyNote', { trackId: 'keys', note: 62, isOn: false });
+  assert.deepEqual(notes, [['on', 62], ['off', 62]]);
+  const { events } = await rig.host.call('POST', '/api/liveNotes', { trackId: 'drums' });
+  assert.equal(events.length, 1, 'the struck key is in the log a recording reads');
+  assert.equal(events[0].index, 1);
+  shutdown(rig);
+});
+
 test('the pack panel browses the packs as folders, and a pick is the "pack/file" a _pack() list plays', async () => {
   const rig = makeHost({
     builtIn: [{ id: 'pt_kit', files: [{ file: 'bd.wav' }, { file: 'sd.wav' }] }],

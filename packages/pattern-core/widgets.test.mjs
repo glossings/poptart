@@ -581,3 +581,59 @@ test('the curve maths: a position on each curve and back', () => {
   assert.equal(valueOnCurve({ min: 0, max: 10, curve: 'lin' }, 0.3), 3);
   assert.equal(positionOnCurve({ min: 0, max: 10 }, 30), 1, 'clamped');
 });
+
+test('a row folds whole when the cells are all its call has, else only the cells', () => {
+  const fold = (code) => {
+    const c = findWidgetCalls(code)[0];
+    const r = core.foldRange(c.kind, c, callArgs(code, c.open));
+    return [code.slice(r.from, r.to), r.whole];
+  };
+  assert.deepEqual(fold('steps("x . x .")'), ['steps("x . x .")', true]);
+  assert.deepEqual(fold('steps(8)'), ['steps(8)', true]);
+  assert.deepEqual(fold('steps()'), ['steps()', true]);
+  assert.deepEqual(fold('steps("x . x .", { mutate: 0.05 })'), ['"x . x ."', false]);
+  assert.deepEqual(fold('shiftreg(16, 0.05)'), ['16', false]);
+  assert.deepEqual(fold('sliders("0.2 0.8", 0, 10)'), ['"0.2 0.8"', false]);
+  assert.deepEqual(fold('matrix({ bd: "x..." }, { mutate: 1 })'), ['{ bd: "x..." }', false]);
+  assert.deepEqual(fold('steps(\n  "x . x .",\n  { mutate: 0.1 })'), ['"x . x ."', false]);
+  // No cells written, only options: the name and its paren fold, and the options stay.
+  assert.deepEqual(fold('steps({ mutate: 0.1 })'), ['steps(', false]);
+});
+
+test('coarser: each pair of cells becomes one, a hit when either was; an odd last cell stands alone', () => {
+  assert.equal(core.coarserRow('x . x x . . x .'), 'x x . x');
+  assert.equal(core.coarserRow('. x . . x x . x'), 'x . x x'); // a hit on the second of a pair moves a step earlier
+  assert.equal(core.coarserRow('x . x'), 'x x');
+  assert.equal(core.coarserRow('. . . . x'), '. . x');
+  // One character a step stays so; a word plays on, the first hit of its pair.
+  assert.equal(core.coarserRow('x..xx.'), 'xxx');
+  assert.equal(core.coarserRow('. sd bd .'), 'sd bd');
+  // The space around the row is kept, and a row of one cell has nothing to halve.
+  assert.equal(core.coarserRow('  x . x .  '), '  x x  ');
+  assert.equal(core.coarserRow('x'), 'x');
+  assert.equal(core.coarserRow(''), '');
+});
+
+test('finer: each cell becomes itself followed by a rest', () => {
+  assert.equal(core.finerRow('x . x x'), 'x . . . x . x .');
+  assert.equal(core.finerRow('x.x'), 'x...x.');
+  assert.equal(core.finerRow('bd sd'), 'bd . sd .');
+  assert.equal(core.finerRow('x'), 'x.');
+});
+
+test('finer then coarser is the row as it was; coarser then finer keeps every hit on its pair', () => {
+  for (const row of ['x . x x . . x . x x . . . x . x', 'x.xx', 'bd . sd .', '. x', 'x', 'x . x']) {
+    assert.equal(core.coarserRow(core.finerRow(row)), row, row);
+  }
+  const row = 'x . x x . . x .';
+  const hitsIn = (r) => parseCells(r).map((c) => c.on);
+  const back = hitsIn(core.finerRow(core.coarserRow(row)));
+  hitsIn(row).forEach((on, i) => { if (on) assert.ok(back[i - (i % 2)], `cell ${i}`); });
+});
+
+test('coarser and finer on a matrix: every row together, each by the same rule', () => {
+  const rows = { bd: 'x . . . x . . .', sd: '. . . . x . . .', hh: 'x x x x x x x x' };
+  const coarse = Object.fromEntries(Object.entries(rows).map(([k, v]) => [k, core.coarserRow(v)]));
+  assert.deepEqual(coarse, { bd: 'x . x .', sd: '. . x .', hh: 'x x x x' });
+  for (const [k, v] of Object.entries(rows)) assert.equal(core.coarserRow(core.finerRow(v)), v, k);
+});

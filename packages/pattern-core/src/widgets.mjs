@@ -17,12 +17,13 @@
 // Like macros.mjs this keeps its own store, apart from signal.mjs: the host writes it (POST
 // /api/widgets/set) and every widget signal reads it when it is sampled.
 
-import { Sig, channelAt, soundingEnd, timeShift, warnPattern, noteLiveRead } from './signal.mjs';
+import { Sig, mini, channelAt, soundingEnd, timeShift, warnPattern, noteLiveRead } from './signal.mjs';
 import { CURVES } from './curves.mjs';
 import { songSteps } from './arrange.mjs';
+import { notePress, forgetPresses } from './triggers.mjs';
 import {
   INPUT_WIDGETS, DISPLAY_WIDGETS, AUDIO_DISPLAYS, INPUT_SIZES, DISPLAY_SIZES, WIDGET_BOXES,
-  parseCells, cellCount, restRow, middleRow, DEFAULT_CELL_COUNT,
+  parseCells, cellCount, restRow, middleRow, randomRow, DEFAULT_CELL_COUNT, MUTATE_OPTION, DEVIATION_OPTION,
 } from './widget-calls.mjs';
 
 export { INPUT_WIDGETS, DISPLAY_WIDGETS, AUDIO_DISPLAYS };
@@ -33,6 +34,11 @@ const values = new Map(); // `${deck}:${at}` -> the live value (a number, a row'
 // moved by a set that says where the text is now (the editor writing a count out as cells), so a
 // row's cells carry the spans the highlighter lights without waiting for the next evaluation.
 const lits = new Map();
+// `${deck}:${at}` -> { [option]: Sig } - a row option written as a signal or a pattern, which the
+// editor asks the host for at each pass of the row (see widgetOption).
+const optionSigs = new Map();
+// The keys that are button()s: a change of their value is a press or a release (see triggers.mjs).
+const buttonKeys = new Set();
 let currentDeck = 'a';
 let registry = null; // { inputs, views } for the evaluation in progress, else null
 let generation = 0; // counts evaluations, so what one built can tell itself from the last one's
@@ -76,6 +82,9 @@ export function takeWidgets() {
   const live = new Set(r.inputs.map((w) => keyOf(currentDeck, w.at)));
   for (const k of [...values.keys()]) if (k.startsWith(`${currentDeck}:`) && !live.has(k)) values.delete(k);
   for (const k of [...lits.keys()]) if (k.startsWith(`${currentDeck}:`) && !live.has(k)) lits.delete(k);
+  for (const k of [...optionSigs.keys()]) if (k.startsWith(`${currentDeck}:`) && !live.has(k)) optionSigs.delete(k);
+  for (const k of [...buttonKeys]) if (k.startsWith(`${currentDeck}:`) && !live.has(k)) buttonKeys.delete(k);
+  forgetPresses(currentDeck, live);
   r.inputs.sort((a, b) => a.at - b.at);
   r.views.sort((a, b) => a.at - b.at);
   return { inputs: r.inputs, views: r.views, records: [...r.records].sort((a, b) => a - b), recording: [...r.recording].sort((a, b) => a - b) };
@@ -92,11 +101,18 @@ export function abandonWidgets() {
  * `{ row, text }` for one of a matrix's rows, or `{ [row]: text, ... }` for several of them at
  * once (what randomizing a grid sends). False when no widget has that key. `lit` is where the
  * row's text now starts in the document, when the host knows: a number, or `{ [row]: offset }`
- * for a matrix's rows (see `lits`).
+ * for a matrix's rows (see `lits`). `agoSec` is how long ago the hand did it, when the host knows: a
+ * button's press is stamped then (see triggers.mjs).
  */
-export function setWidgetValue(deck, at, value, lit = undefined) {
-  const key = keyOf(deck === 'b' ? 'b' : 'a', Number(at));
+export function setWidgetValue(deck, at, value, lit = undefined, agoSec = 0) {
+  const d = deck === 'b' ? 'b' : 'a';
+  const key = keyOf(d, Number(at));
   if (!values.has(key)) return false;
+  if (buttonKeys.has(key)) {
+    const was = Number(values.get(key)) >= 0.5;
+    const now = Number(value) >= 0.5;
+    if (Number.isFinite(Number(value)) && was !== now) notePress(key, d, now, agoSec);
+  }
   if (typeof lit === 'number' && Number.isFinite(lit)) lits.set(key, lit);
   else if (lit && typeof lit === 'object' && !Array.isArray(lit)) {
     const was = lits.get(key);
@@ -294,7 +310,7 @@ const litOf = (key) => lits.get(key) ?? -1;
 export function _input(loc, kind, ...all) {
   const where = locOf(loc);
   const { args, opts } = splitArgs(kind, all);
-  if (where) where.opts = inputOpts(kind, opts);
+  if (where) where.opts = inputOpts(kind, opts, where.at);
   switch (kind) {
     case 'slider': return rangedWidget('slider', where, args);
     case 'knob': return rangedWidget('knob', where, args);
@@ -304,6 +320,7 @@ export function _input(loc, kind, ...all) {
     case 'steps': return stepsWidget(where, args);
     case 'sliders': return slidersWidget(where, args);
     case 'matrix': return matrixWidget(where, args);
+    case 'shiftreg': return shiftregWidget(where, args);
     default: throw new Error(`[widgets] no input widget called ${kind}`);
   }
 }
@@ -330,13 +347,28 @@ function splitArgs(kind, all) {
 // the nearest end of it.
 const CURVED = new Set(['slider', 'knob']);
 
-function inputOpts(kind, opts) {
+// The options a row of cells takes besides its size: how much it changes each pass, and - for
+// sliders() - how far a value thrown again lands from the one it had. The editor does the
+// changing (see inline-widgets.mjs); these are read here so a wrong one is said once.
+const ROW_OPTIONS = {
+  steps: [MUTATE_OPTION],
+  matrix: [MUTATE_OPTION],
+  shiftreg: [MUTATE_OPTION],
+  sliders: [MUTATE_OPTION, DEVIATION_OPTION],
+};
+
+function inputOpts(kind, opts, at = null) {
   const out = {};
+  if (at !== null) optionSigs.delete(keyOf(currentDeck, at)); // what this evaluation says replaces the last one's
   if (opts === undefined) return out;
   const ranges = { ...(INPUT_SIZES[kind] ? { size: INPUT_SIZES[kind] } : {}) };
   if (WIDGET_BOXES[kind]) Object.assign(ranges, { width: WIDGET_BOXES[kind].width, height: WIDGET_BOXES[kind].height });
-  const names = [...Object.keys(ranges), ...(CURVED.has(kind) ? ['curve', 'curveExp'] : [])];
+  const names = [...Object.keys(ranges), ...(CURVED.has(kind) ? ['curve', 'curveExp'] : []), ...(ROW_OPTIONS[kind] ?? [])];
   for (const [k, raw] of Object.entries(opts)) {
+    if (ROW_OPTIONS[kind]?.includes(k)) {
+      rowOption(kind, k, raw, out, at);
+      continue;
+    }
     if (CURVED.has(kind) && k === 'curve') {
       const c = textOf(raw);
       if (c === null || !CURVES.includes(c)) warnPattern(`[widgets] ${kind}({ curve }) is one of ${CURVES.map((x) => `"${x}"`).join(', ')} - got ${JSON.stringify(c ?? raw)}, turning linear`);
@@ -362,6 +394,65 @@ function inputOpts(kind, opts) {
     out[k] = Math.round(Math.min(range.max, Math.max(range.min, v)));
   }
   return out;
+}
+
+// The range a row option's value is kept in.
+const optionRange = (key) => [0, key === MUTATE_OPTION ? 1 : Infinity];
+
+// A row option's value into `out`. A number is that number. A knob() or slider() puts its call's
+// position with it as `<key>From`, so the editor reads where the control is set now. Any other
+// signal or pattern - a midicc(), an lfo, "<0 0.1>" - is kept here, marked `<key>Live`, and the
+// editor asks the host for its value at each pass of the row (see widgetOption). `at` is the
+// row's call, null outside an evaluation.
+function rowOption(kind, key, raw, out, at = null) {
+  const numeric = (t) => typeof t === 'string' && /^\s*[-+]?(?:\d+\.?\d*|\.\d+)\s*$/.test(t);
+  const wants = key === MUTATE_OPTION ? 'a chance from 0 to 1' : 'a number from 0 up';
+  const [lo, hi] = optionRange(key);
+  let sig = raw instanceof Sig ? raw : null;
+  if (typeof raw === 'string' && !numeric(raw)) {
+    try {
+      sig = mini(raw); // a pattern written in an options object stays a plain string
+    } catch {
+      sig = null;
+    }
+  }
+  const control = sig && Number.isFinite(sig.widgetAt) ? sig.widgetAt : null;
+  const fixed = typeof raw === 'number' || numeric(raw) || (sig && typeof sig.constVal === 'number');
+  if (sig && control === null && !fixed) {
+    const first = numberOf(sig, 0);
+    out[key] = Math.min(hi, Math.max(lo, Number.isFinite(first) ? first : 0));
+    out[`${key}Live`] = true;
+    if (at !== null) optionSigs.set(keyOf(currentDeck, at), { ...optionSigs.get(keyOf(currentDeck, at)), [key]: sig });
+    return;
+  }
+  const v = numberOf(sig ?? raw, NaN);
+  if (!Number.isFinite(v)) {
+    warnPattern(`[widgets] ${kind}({ ${key} }) is ${wants}, a signal or a pattern - got ${JSON.stringify(textOf(raw) ?? raw)}`);
+    return;
+  }
+  if (v < lo || v > hi) warnPattern(`[widgets] ${kind}({ ${key} }) is ${wants} - got ${v}, using ${Math.min(hi, Math.max(lo, v))}`);
+  out[key] = Math.min(hi, Math.max(lo, v));
+  if (control !== null) out[`${key}From`] = control;
+}
+
+/**
+ * What a row option written as a signal or a pattern (see rowOption) is at cycle `pos`: the
+ * `mutate` of the row whose call is at `at` on `deck` as its pass begins, kept in its range. Null
+ * when that row has no such option, or it reads nothing there.
+ */
+export function widgetOption(deck, at, key, pos, cps = 0.5) {
+  const sig = optionSigs.get(keyOf(deck === 'b' ? 'b' : 'a', Number(at)))?.[key];
+  if (!sig) return null;
+  const p = Number(pos);
+  let v;
+  try {
+    v = Number(sig.sample(p / cps, cps, p));
+  } catch {
+    return null;
+  }
+  if (!Number.isFinite(v)) return null;
+  const [lo, hi] = optionRange(key);
+  return Math.min(hi, Math.max(lo, v));
 }
 
 // The row a steps() or sliders() argument says: its text, a count of cells (`steps(8)`, which
@@ -398,6 +489,7 @@ function rangedWidget(kind, where, [value, min, max, step]) {
   register({ input: true, kind, at: where.at, value: v, min: lo, max: hi, step: st, opts });
   const sig = liveSig(() => values.get(key) ?? v, controlOf(key, where.at, kind, [[lo, hi]], () => [Number(values.get(key) ?? v)], [curve]));
   sig.motionSource = { key, range: [lo, hi], curve }; // what .record() records (see motion.mjs)
+  sig.widgetAt = where.at; // which call it is, for an option that reads it (see rowOption)
   return sig;
 }
 
@@ -429,9 +521,12 @@ export function toggle(...all) {
 function buttonWidget(where) {
   if (!where) return new Sig(() => 0);
   const key = seed(where.at, 0);
+  buttonKeys.add(key);
   register({ input: true, kind: 'button', at: where.at, value: 0, opts: where.opts ?? {} });
   const sig = liveSig(() => (values.get(key) ? 1 : 0), controlOf(key, where.at, 'button', [[0, 1]], () => [values.get(key) ? 1 : 0]));
-  sig.motionSource = { key, range: [0, 1] };
+  sig.motionSource = { key, range: [0, 1], button: true };
+  // As a rhythm (.struct(), .advance()) it is its presses, not its value (see triggers.mjs).
+  sig.pressKey = key;
   return sig;
 }
 
@@ -483,10 +578,13 @@ function tokenValue(token) {
 // cells, parsed once per distinct text and position. `litAt()` is the document offset of the text,
 // so each cell carries the span the highlighter lights; -1 for text that isn't in the buffer as
 // written.
-function cellPattern(readText, litAt, valueOf = tokenValue) {
+// `rests` keeps a step for every rest as well, valued null: what .bits() reads a register's
+// zeros, and the spans of the cells they light, from.
+function cellPattern(readText, litAt, valueOf = tokenValue, { rests = false } = {}) {
   let lastText = null;
   let lastBase = null;
   let steps = [];
+  let count = 0;
   const current = () => {
     const text = readText();
     const litBase = litAt();
@@ -494,13 +592,14 @@ function cellPattern(readText, litAt, valueOf = tokenValue) {
       lastText = text;
       lastBase = litBase;
       const cells = parseCells(text ?? '');
+      count = cells.length;
       const w = cells.length ? 1 / cells.length : 1;
       steps = cells.map((c, i) => {
         const value = c.on ? valueOf(c.token) : null;
         const step = { start: i * w, end: (i + 1) * w, value };
         if (litBase >= 0) step.loc = [litBase + c.from, litBase + c.to];
         return step;
-      }).filter((s) => s.value != null);
+      }).filter((s) => rests || s.value != null);
     }
     return steps;
   };
@@ -508,19 +607,33 @@ function cellPattern(readText, litAt, valueOf = tokenValue) {
   const sample = (t, cps, pos) => {
     const p = pos ?? t * cps;
     const phase = p - Math.floor(p);
-    const hit = current().find((s) => phase >= s.start && phase < s.end);
+    const hit = current().find((s) => s.value != null && phase >= s.start && phase < s.end);
     return hit ? hit.value : null;
   };
-  return new Sig(sample, { stepsForCycle });
+  const sig = new Sig(sample, { stepsForCycle });
+  // How many cells the row has, rests and all: its step grid (see Sig#bits).
+  sig.gridSize = () => {
+    current();
+    return count;
+  };
+  sig.sameEveryCycle = true; // one cycle of cells, every cycle (see .advance()'s counting)
+  return sig;
 }
 
 function stepsWidget(where, [cells]) {
   const text = rowOf('steps', cells, restRow, 'steps("x . x . x . . x") or steps(8)');
-  if (!where) return cellPattern(() => text, () => -1);
+  if (!where) {
+    const sig = cellPattern(() => text, () => -1);
+    sig.rowText = () => text;
+    return sig;
+  }
   const key = seed(where.at, text, where.lit);
   register({ input: true, kind: 'steps', at: where.at, value: text, opts: where.opts ?? {} });
   const sig = cellPattern(() => values.get(key) ?? text, () => litOf(key));
   sig.widgetLive = true;
+  // Its text as it stands, and its key: what a button's take written as a row reads and writes.
+  sig.rowText = () => values.get(key) ?? text;
+  sig.rowKey = key;
   return sig;
 }
 
@@ -593,6 +706,7 @@ function matrixWidget(where, [rows]) {
     return null;
   };
   const sig = new Sig(sample, { stepsForCycle });
+  sig.sameEveryCycle = true;
   if (where) sig.widgetLive = true;
   return sig;
 }
@@ -600,6 +714,34 @@ function matrixWidget(where, [rows]) {
 /** `matrix({ bd: "x...", sd: 8 })` - a grid of cells drawn in the code, a row per name (text, or a count of rests); a pattern of the rows' names. */
 export function matrix(rows) {
   return matrixWidget(null, [rows]);
+}
+
+/** How many steps a shiftreg() reads as one value: the width of its register (see Sig#bits). */
+export const SHIFTREG_BITS = 8;
+
+// A row of cells read as a looping shift register: its pattern is the row through .bits(), a
+// value for every step. Written as a count, the row is thrown at random - half its cells hits -
+// and the editor writes what was thrown into the call, so the code says what plays. The second
+// argument is how much it changes each pass, as steps()'s `mutate` option.
+function shiftregWidget(where, [cells, mutate]) {
+  const text = rowOf('shiftreg', cells, (n) => randomRow(restRow(n)), 'shiftreg("x . x x . . x .") or shiftreg(16)');
+  if (!where) return cellPattern(() => text, () => -1, tokenValue, { rests: true }).bits(SHIFTREG_BITS);
+  const opts = { ...(where.opts ?? {}) };
+  if (mutate !== undefined) {
+    delete opts[`${MUTATE_OPTION}From`];
+    delete opts[`${MUTATE_OPTION}Live`];
+    rowOption('shiftreg', MUTATE_OPTION, mutate, opts, where.at);
+  }
+  const key = seed(where.at, text, where.lit);
+  register({ input: true, kind: 'shiftreg', at: where.at, value: text, opts });
+  const sig = cellPattern(() => values.get(key) ?? text, () => litOf(key), tokenValue, { rests: true }).bits(SHIFTREG_BITS);
+  sig.widgetLive = true;
+  return sig;
+}
+
+/** `shiftreg("x . x x . . x .", mutate)` or `shiftreg(16, mutate)` - a row of cells drawn in the code, read as a looping shift register: a value from 0 to 1 every step. */
+export function shiftreg(...all) {
+  return shiftregWidget(null, splitArgs('shiftreg', all).args);
 }
 
 // ---------------------------------------------------------------------------------------------

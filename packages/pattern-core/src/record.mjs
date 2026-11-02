@@ -284,3 +284,25 @@ function lcm(a, b) {
   while (y) [x, y] = [y, x % y];
   return (a / x) * b;
 }
+
+/**
+ * What a key struck on a SAMPLER track plays: `{ ref, cfg }` for the engine's playSample, or null
+ * when `sample` says nothing playable. A sampler answers no note-on, so a key on a roll's ⌨ is
+ * struck as the roll's own audition strikes a row (the editor's prPreviewFile): `sample` is
+ * `{ ref, index, begin, end, speed?, stretch? }` from the roll's chain, the key adds its pitch,
+ * its file (`index`, on an index roll) and how hard.
+ */
+export function keyStrike(sample, { note, index = null, vel = 1 } = {}) {
+  const ref = String(sample?.ref ?? '');
+  if (!ref) return null;
+  const num = (v, fallback) => (v != null && Number.isFinite(Number(v)) ? Number(v) : fallback);
+  const cfg = {
+    index: Math.max(0, Math.round(num(index, num(sample.index, 0)))),
+    begin: num(sample.begin, 0),
+    end: num(sample.end, 1),
+    vel: Math.max(0, Math.min(1, num(vel, 1))),
+  };
+  if (Number.isFinite(Number(note))) cfg.note = Number(note);
+  for (const key of ['speed', 'stretch']) if (sample[key] != null && Number.isFinite(Number(sample[key]))) cfg[key] = Number(sample[key]);
+  return { ref, cfg };
+}

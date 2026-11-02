@@ -100,9 +100,9 @@ export const DIVISION_LABEL = /^\s*(\d+\/\d+[.Tt]?|\d+\s+bars?)\s*$/;
 // A string that does not parse throws with `poptartSpan` on the error - the buffer span to point
 // at (the token it stopped on where that is known, the whole string where not) - whenever it has
 // an offset to place it by, which every string the location transpile wrapped does.
-export function parseMini(str, offset = 0, { speech = false } = {}) {
+export function parseMini(str, offset = 0, { speech = false, divisions = false } = {}) {
   try {
-    const tokens = speech ? tokenizeSpeech(str) : tokenize(str);
+    const tokens = speech ? tokenizeSpeech(str) : tokenize(str, { divisions });
     const { node, rest } = parseLayers(tokens, /* stopType */ null);
     if (rest.length > 0) {
       throw miniError(`[mini] unexpected token "${rest[0].text}" while parsing "${str}"`, rest[0]);
@@ -264,13 +264,23 @@ function readQuoted(str, i) {
   return { text: str.slice(i + 1, close), end: close + 1 };
 }
 
-function tokenize(str) {
+// `divisions`: a division label ("1/4", "1/8.", "1/16t", "2 bars") is one atom, as if quoted -
+// what `.slices("<1/4 1/8>")` means, where "1/4" read as mini would be 1 slowed by 4.
+const DIVISION_ATOM_RE = /^(\d+\/\d+[.Tt]?|\d+\s+bars?)(?![\w./])/;
+
+function tokenize(str, { divisions = false } = {}) {
   const tokens = [];
   let i = 0;
   while (i < str.length) {
     const ch = str[i];
     if (/\s/.test(ch)) {
       i++;
+      continue;
+    }
+    const div = divisions ? DIVISION_ATOM_RE.exec(str.slice(i)) : null;
+    if (div) {
+      tokens.push({ type: 'quoted', text: div[0], start: i, end: i + div[0].length });
+      i += div[0].length;
       continue;
     }
     if (ch === "'") {

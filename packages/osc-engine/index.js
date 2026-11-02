@@ -21,6 +21,7 @@ const { spawn } = require('node:child_process');
 const osc = require('osc');
 const { pidfilePath, reapOrphanedEngine, recordEnginePids, clearEnginePids, killAndAwaitExit } = require('./orphans');
 const { samplesRoot, listPackFiles, resolveSampleFile, expandPackEntries, sliceEntryFor } = require('./samples');
+const { fittedLength, isSliceGrid, gridSlices, assumedFitNote } = require('./slice-grid-core.mjs');
 const { splitPackFileRef, pickPackFile } = require('./pack-file-ref');
 const { recordingsRoot, resolveRecording } = require('./recordings');
 const { speechRoot, cachedSpeech, renderSpeech, parseSpeech, voiceInstalled } = require('./tts');
@@ -2114,7 +2115,9 @@ class OscEngine {
     // sample (see samples.js sliceEntryFor), so a set that says nothing about the one playing
     // leaves it exactly as it was - which is what lets one named set follow a .i() across several
     // breaks, each with its own chops and its own fit.
-    const authored = cfg.slices ? sliceEntryFor(cfg.slices, file.path) : null;
+    // A grid (.slices(8), .slices("1/4")) is laid over this file below, once its length is known.
+    const grid = isSliceGrid(cfg.slices) ? cfg.slices : null;
+    const authored = cfg.slices && !grid ? sliceEntryFor(cfg.slices, file.path) : null;
 
     const eventSec = offsetSec - onsetSec;
     // .splice(): the begin..end window - usually a slice's - is fitted to ITS OWN event, so
@@ -2132,11 +2135,7 @@ class OscEngine {
     const fit = spliced ? null : cfg.fit != null ? cfg.fit : authored?.fit ?? null;
     // The file's natural length in cycles, and the length a fit makes it (null without one).
     const measures = file.duration / cfg.secPerCycle;
-    let fitCycles = null;
-    if (fit != null) {
-      const target = fit === 'auto' ? 2 ** Math.round(Math.log2(measures)) : fit;
-      if (target > 0) fitCycles = target;
-    }
+    const fitCycles = fittedLength(fit, measures); // slice-grid-core.mjs - the browser uses the same
     // .play(): the controls that read the sample's length - the fitted one, or the natural one -
     // are read now that it is known (see pattern-core's withSampleLength).
     if (typeof cfg.atLength === 'function') cfg = { ...cfg, ...cfg.atLength(fitCycles ?? measures) };
@@ -2147,7 +2146,15 @@ class OscEngine {
       // Hand-drawn markers say where the chops are and win over the automatic analysis - they also
       // arrive ON the event, so an authored set never waits for a file to be analyzed and never
       // depends on the file being a WAV.
-      const slices = authored?.marks ?? this._slicesFor(file);
+      // A grid's chops come from the file's length: its fit (the chain's, else the set's - as for
+      // the rate, though a splice stands it down there), else the length .fit() would give it. The
+      // same layout the browser makes (slice-grid-core.mjs).
+      let laid = null;
+      if (grid) {
+        laid = gridSlices(grid, { fit: cfg.fit ?? authored?.fit ?? null, measures });
+        if (laid.assumed) this._warnOnce(`slicegrid:${file.path}`, `[poptart] ${assumedFitNote(grid, path.basename(file.path), laid.cycles)}`);
+      }
+      const slices = laid ? laid.positions : authored?.marks ?? this._slicesFor(file);
       if (slices === undefined) return { skipped: 'analyzing slices' };
       if (slices?.length) {
         const k = wrap(Math.round(cfg.slice), slices.length);

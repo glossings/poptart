@@ -32,6 +32,7 @@ import { songSteps, stepsUnderShift, withClipShift } from './arrange.mjs';
 import { sliceSetIsEmpty } from './slices.mjs';
 import { resolveInputChannels } from './audio-inputs.mjs';
 import { withLiveReads } from './motion.mjs';
+import { withPressWindow } from './triggers.mjs';
 import { routePlan, routeLatencies, routeControlDefault, routeItems } from './route.mjs';
 import { deviceParamSpec, unitConversion, unitPosition, unitTree, noteHz } from './units.mjs';
 import { plainText } from './eval-errors.mjs';
@@ -2072,7 +2073,11 @@ export class Scheduler {
     // it across a window edge. Each step comes with its SONG position (see setSongClock): that is
     // where the pattern has it and where every channel is read, while the transport position, one
     // offset away, is when it plays.
-    for (const { step, cycle, delta } of this._songSteps(this.pattern.stepsForCycle, fromCycle, toCycle)) {
+    // Read as the window being sent, so a live button's press not yet placed lands on a step this
+    // window or a later one sends (see triggers.mjs). The steps are read here, before the loop.
+    const window = { deck: this.deck, from: fromCycle, to: toCycle, posAt: (c) => this._songAt(c) };
+    const steps = withPressWindow(window, () => this._songSteps(this.pattern.stepsForCycle, fromCycle, toCycle));
+    for (const { step, cycle, delta } of steps) {
       if (step.value == null) continue; // rest
       if (step.cont) continue; // tie/hold: the sounding event's onset was in an earlier step
 
@@ -2398,10 +2403,20 @@ export class Scheduler {
    * pattern (the piano roll's slice rows), which has to cut where the pattern would.
    */
   sliceSetAt(sec) {
-    const slices = this.pattern?.sampler?.slices;
+    const sampler = this.pattern?.sampler;
+    const slices = sampler?.slices;
     if (!slices) return null;
-    const set = slices.sample(sec, this.transport.cps, this.transport.cycleAt(sec));
-    return set && !sliceSetIsEmpty(set) ? set : null;
+    const cycle = this.transport.cycleAt(sec);
+    const set = slices.sample(sec, this.transport.cps, cycle);
+    if (!set || sliceSetIsEmpty(set)) return null;
+    // A division is laid over the file's FITTED length, and an audition carries no fit of its own
+    // (it plays at the panel's rate) - so the chain's fit rides on the grid, and row 3 auditions
+    // the chop an event on row 3 plays.
+    if (set.grid?.every > 0 && sampler.fit) {
+      const fit = sampler.fit === 'auto' ? 'auto' : Number(sampler.fit.sample(sec, this.transport.cps, cycle));
+      if (fit === 'auto' || fit > 0) return { grid: { ...set.grid, fit } };
+    }
+    return set;
   }
 
   // Sampler config signals evaluated at one event's onset. `fit: 'auto'` passes through as-is

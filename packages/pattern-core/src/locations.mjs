@@ -65,7 +65,7 @@ export function injectLocationsMapped(code, base = 0, { miniOff = [], doc = null
     const after = masked.slice(lit.fullEnd);
     const position = lit.hasInterp ? false : isPatternPosition(before, after, code.slice(lit.contentStart, lit.fullEnd - 1));
     if (!position) continue;
-    edits.push([lit.fullStart, lit.fullEnd, `mini(${code.slice(lit.fullStart, lit.fullEnd)}, ${base + lit.contentStart}${position === 'speech' ? ", 'speech'" : ''})`]);
+    edits.push([lit.fullStart, lit.fullEnd, `mini(${code.slice(lit.fullStart, lit.fullEnd)}, ${base + lit.contentStart}${typeof position === 'string' ? `, '${position}'` : ''})`]);
   }
   // The editor's inline widgets (slider(), .scope(), ...) are tagged with where they are, which is
   // what keys a widget's live value and display to the control drawn there (see widget-calls.mjs).
@@ -173,7 +173,8 @@ const NAME_ONLY_CALLS = new Set(['samples', 'synth', 'fx', 'lfo', 'pianoroll', '
 const METHOD_NAME_ARG_CALLS = new Set(['se', 'sr']);
 
 // Is a string literal here used as a mini-notation pattern (vs a plugin/scale/param-name lookup)?
-// Truthy for a pattern: `true`, or `'speech'` for say()'s text, which parses in speech mode.
+// Truthy for a pattern: `true`, or the mini mode it parses in - `'speech'` for say()'s text,
+// `'divisions'` for .slices(), where "1/4" is a division label rather than 1 slowed by 4.
 // `before` is the code up to the opening quote, `after` the code from just past the closing quote.
 // In argument position the default is "pattern" (mini notation is what a string in a pattern
 // expression means) and NAME_ARG_CALLS is what pulls a literal back out:
@@ -242,6 +243,7 @@ export function isPatternPosition(before, after, text = '') {
       while (j > 0 && /\s/.test(before[j - 1])) j--;
       return j > 0 && before[j - 1] === '.' ? false : 'speech';
     }
+    if (first[1] === 'slices') return 'divisions';
     if (NAME_ARG_CALLS.has(first[1])) return false;
     // .wet(target, value) names a device first - the comma after the literal is what says this is
     // the two-argument form. A lone .wet("<1 0>") stays the value pattern it is.

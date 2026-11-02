@@ -75,7 +75,7 @@ const API_DOCS = {
   record: {
     kind: 'method',
     sig: 'record({ cycles, name, wrapTail, normalize, take })',
-    desc: 'On a track, records it to audio; double-click the name or press {app+b} in the block to open the recorder. cycles is the length (4 by default), name the file name, wrapTail: true folds the tail onto the start, normalize: false keeps the level. On a knob, slider, toggle, button, xy, midicc, osc or macro, records its movement and loops it; take names the kept shape.',
+    desc: 'On a track, records it to audio; double-click the name or press {app+b} in the block to open the recorder. cycles is the length (4 by default), name the file name, wrapTail: true folds the tail onto the start, normalize: false keeps the level. On a knob, slider, toggle, xy, midicc, osc or macro, records its movement and loops it; take names the kept shape. On a button, records its presses into take as a steps() row over the whole take, one cell per step.',
     eg: 'note("c2 eb2").synth("Serum 2").record({ cycles: 8 })',
   },
   mini: {
@@ -408,6 +408,12 @@ const API_DOCS = {
     desc: 'Reads the signal n times per cycle, holding each value for its step. n can be patterned. At the head of a chain, plays c3 n times a cycle.',
     eg: 'rand().seg(8)',
   },
+  bits: {
+    kind: 'method',
+    sig: 'bits(n = 8)',
+    desc: 'Reads the steps as a looping shift register: on every step, that step and the n-1 before it as a binary number, the step itself the top bit, from 0 to 1. A step is 1 when an event starts in it that is not a rest, 0 or false. n can be patterned.',
+    eg: 'steps("x . x x . . x .").bits().range(0, 7)',
+  },
   segment: { kind: 'both', sig: 'segment(n)', desc: 'Reads the signal n times per cycle, holding each value for its step. n can be patterned. At the head of a chain, plays c3 n times a cycle.', eg: 'rand().segment(8)' },
   rib: {
     kind: 'method',
@@ -442,9 +448,15 @@ const API_DOCS = {
   },
   struct: {
     kind: 'both',
-    sig: 'struct(bool)',
-    desc: 'Takes its rhythm from a boolean pattern and its values from this one. At the head of a chain, plays c3 in that rhythm.',
+    sig: 'struct(bool, grid)',
+    desc: 'Takes its rhythm from a boolean pattern and its values from this one. A button() or any 0-to-1 signal is a rhythm too: each press, or rise past 0.5, plays on the next step of grid (16 a cycle by default). At the head of a chain, plays c3 in that rhythm.',
     eg: 'note("c3 g3").struct("1 ~ 1 1")',
+  },
+  advance: {
+    kind: 'method',
+    sig: 'advance(trigger, grid)',
+    desc: 'Plays this pattern\'s values in turn, the next one on each trigger: the rhythm comes from trigger, anything struct takes. The values are the events of the cycle the trigger lands in; a chord is one value.',
+    eg: 'n(sliders("0 4 7", 0, 12).advance(button())).scale("A1:minor")',
   },
   ply: { kind: 'method', sig: 'ply(reps, fn)', desc: 'Repeats each event reps times within its own step. The optional (x, n) => pattern changes the nth repeat.', eg: '.ply(3, (x, n) => x.add(n * 12))' },
   echo: { kind: 'method', sig: 'echo(reps, time, fn)', desc: 'Repeats each event reps times, time cycles apart. The optional (x, n) => pattern changes the nth repeat.', eg: '.echo(4, 1/8, (x, n) => x.gain(0.6 ** n))' },
@@ -532,6 +544,7 @@ const API_DOCS = {
   play: { kind: 'method', sig: 'play()', desc: 'Plays a long sample through, one slice per cycle, wrapping at the end.', eg: 's("files:vocal.wav").fit("stretch").play()' },
   fitmode: { kind: 'both', sig: 'fitmode(mode)', desc: 'How fit() reaches its length: 0 or "repitch" changes pitch with speed, 1 or "stretch" keeps it.', eg: '.fit().fitmode("stretch")' },
   slice: { kind: 'both', sig: 'slice(n)', desc: 'Plays the nth slice of the sample, cut at its detected transients, wrapping past the last. WAV files only.', eg: '.slice(irand(8))' },
+  slices: { kind: 'method', sig: 'slices(set)', desc: 'Where slice() cuts the file: a number is that many equal slices, a division ("1/4", "1/8.", "1/16t") one slice per that much of the fitted file, a name a set drawn in the slice editor, a list positions 0..1. Patterns of them are read per event.', eg: 's("pt_keys:3").fit(2).slices("1/8").slice("0 3 2 1")' },
   splice: { kind: 'both', sig: 'splice(n, mode?)', desc: 'Plays the nth transient slice fitted to its event: splice("<0 1 2>*8") plays each slice as an eighth note. mode "stretch" keeps the pitch. With no n, fits the begin..end window.', eg: '.splice("<0 1 2>*8")' },
   splicemode: { kind: 'both', sig: 'splicemode(mode)', desc: 'How splice() fits a slice: 0 or "repitch" changes pitch with speed, 1 or "stretch" keeps it.', eg: '.splice("0 1 2 3").splicemode("stretch")' },
   attack: { kind: 'both', sig: 'attack(seconds)', desc: 'Amp envelope attack, in seconds: the fade in at the start of each note.', eg: '.attack(0.005)' },
@@ -568,7 +581,7 @@ const API_DOCS = {
   button: {
     kind: 'builder',
     sig: 'button({ width, height }?)',
-    desc: 'A button in the code: 1 while held, 0 otherwise. width and height in pixels.',
+    desc: 'A button in the code: 1 while held, 0 otherwise. As a rhythm (struct, advance) each press is a trigger; .record() keeps the presses as a steps() row. width and height in pixels.',
     eg: 's("bd*4").when(button().gt(0.5), x => x.fast(2))',
   },
   xy: {
@@ -579,21 +592,27 @@ const API_DOCS = {
   },
   steps: {
     kind: 'builder',
-    sig: 'steps(cells, { width, height }?)',
-    desc: 'A row of step cells in place of the call, played as a pattern: x is 1, . ~ - or _ a rest, numbers and words play as written; steps(8) is 8 rests. Click a cell to switch it, right-click to randomize. width and height size a cell.',
+    sig: 'steps(cells, { width, height, mutate }?)',
+    desc: 'A row of step cells in place of the call, played as a pattern: x is 1, . ~ - or _ a rest, numbers and words play as written; steps(8) is 8 rests. Click a cell to switch it, right-click to randomize. width and height size a cell; mutate is the chance each cell switches at the end of every cycle, written into the code as it plays.',
     eg: 's("bd").struct(steps("x . . x . . x ."))',
   },
   sliders: {
     kind: 'builder',
-    sig: 'sliders(values, min?, max?, { width, height }?)',
-    desc: 'A bar per step in place of the call, played as their values. Drag a bar to set it, right-click to randomize. min and max default to 0 and 1; sliders(8) is 8 bars halfway up.',
+    sig: 'sliders(values, min?, max?, { width, height, mutate, deviation }?)',
+    desc: 'A bar per step in place of the call, played as their values. Drag a bar to set it, right-click to randomize. min and max default to 0 and 1; sliders(8) is 8 bars halfway up. mutate is the chance each bar is thrown again at the end of every cycle; with deviation, a bar thrown again lands near where it was, by a bell curve with that standard deviation in the bars\' own units.',
     eg: 's("hh*8").vel(sliders("1 0.4 0.7 0.4 1 0.4 0.7 0.4"))',
   },
   matrix: {
     kind: 'builder',
-    sig: 'matrix(rows, { width, height }?)',
-    desc: 'A grid in place of the call, one row per name, played as a pattern of the names. Rows are cells as in steps(), or a count of rests: matrix({ bd: 8 }). Click or drag to switch cells, right-click to randomize.',
+    sig: 'matrix(rows, { width, height, mutate }?)',
+    desc: 'A grid in place of the call, one row per name, played as a pattern of the names. Rows are cells as in steps(), or a count of rests: matrix({ bd: 8 }). Click or drag to switch cells, right-click to randomize. mutate switches cells each cycle, as in steps().',
     eg: 's(matrix({ bd: "x . . . x . . .", sd: ". . . . x . . .", hh: "x x x x x x x x" }))',
+  },
+  shiftreg: {
+    kind: 'builder',
+    sig: 'shiftreg(cells, mutate?, { width, height }?)',
+    desc: 'A row of step cells in place of the call, read as a looping shift register: every step plays a value from 0 to 1, that step and the seven before it read as binary, the step itself the top bit. mutate is the chance each cell switches at the end of every cycle; shiftreg(16) throws a row of 16 cells and writes it into the code.',
+    eg: 'n(shiftreg(16, 0.05).range(0, 7).floor()).scale("A1:minor")',
   },
 
   // ----------------------------------------------------------------- inline displays
@@ -689,6 +708,169 @@ function lookupDoc(name, context) {
   return { name, ...doc, context: shown, display: (shown === 'method' ? '.' : '') + doc.sig };
 }
 
+// The keys a call's options object takes, each with its own description: what completion offers
+// inside `sliders("...", 0, 1, { sp` and what hovering a key written there says. A key is a word of
+// the call it is written in - `attack` in env()'s options is not the amp envelope's .attack() -
+// so these are looked up by the call (see optionContext), never in API_DOCS.
+const CELL_SIZE = {
+  width: 'One cell\'s width, in pixels.',
+  height: 'One cell\'s height, in pixels.',
+  size: 'Both sides of a cell, in pixels.',
+};
+const LFO_OPTIONS = {
+  rate: 'Passes per cycle, or "0.5hz" for a fixed speed; can be a pattern.',
+  phase: 'Where in its pass it starts, from 0 to 1.',
+};
+const BOX_SIZE = {
+  width: 'The width, in pixels.',
+  height: 'The height, in pixels.',
+};
+const CURVE_OPTIONS = {
+  curve: 'How it turns over its range: "lin", "exp" (a range above zero), "pow" or "sym".',
+  curveExp: 'How strongly "pow" and "sym" bend, above 0; 2 by default.',
+};
+const DISPLAY_BOX = {
+  width: 'The display\'s width, in pixels.',
+  height: 'The display\'s height, in pixels.',
+};
+const CELL_MUTATE = 'The chance, from 0 to 1, that each cell switches between hit and rest at the end of every cycle; the change is written into the code as it plays. It can be any signal or pattern - a knob, a MIDI cc, "<0 0.1>" - read as each cycle begins.';
+const OPTION_DOCS = {
+  steps: { mutate: CELL_MUTATE, ...CELL_SIZE },
+  matrix: { mutate: CELL_MUTATE, ...CELL_SIZE },
+  shiftreg: { mutate: CELL_MUTATE, ...CELL_SIZE },
+  sliders: {
+    mutate: 'The chance, from 0 to 1, that each bar is thrown again at the end of every cycle; the change is written into the code as it plays. It can be any signal or pattern - a knob, a MIDI cc, "<0 0.1>" - read as each cycle begins.',
+    deviation: 'How far a bar thrown again lands from where it was: a bell curve with this standard deviation, in the bars\' own units, kept in the range. Randomize uses it too.',
+    width: 'One bar\'s width, in pixels.',
+    height: 'One bar\'s height, in pixels.',
+    size: 'One bar\'s height, in pixels.',
+  },
+  record: {
+    cycles: 'How many cycles to record, 4 by default.',
+    name: 'The file name of a track\'s recording.',
+    wrapTail: 'true folds the tail that rings past the end back onto the start, so the recording loops cleanly.',
+    normalize: 'false keeps the recording\'s level as played.',
+    take: 'The name of a control\'s recorded movement, kept as a drawn shape.',
+  },
+  lfo: {
+    rate: 'Passes per cycle, or "0.5hz" for a fixed speed; can be a pattern.',
+    mode: 'free, retrigger (restarts each note) or envelope (once per note).',
+    phase: 'Where in the shape it starts, from 0 to 1.',
+    glide: 'How long it takes to move between patterned shapes.',
+    smooth: 'From 0 to 1: plays the drawing rounded off, keeping its points as drawn.',
+  },
+  env: {
+    attack: 'The rise at the start of each note, in seconds; with a source, how fast the level follows a rise.',
+    decay: 'The fall from the peak to the sustain level, in seconds.',
+    sustain: 'The level held while the note is held, from 0 to 1.',
+    release: 'The fall after the note ends, in seconds; with a source, how fast the level follows a fall.',
+    curve: 'The shape of the slopes: negative exponential, 0 straight, positive bowed.',
+    retrigger: 'false lets a note that starts while the last still sounds continue from where it is.',
+  },
+  sine: LFO_OPTIONS,
+  saw: LFO_OPTIONS,
+  isaw: LFO_OPTIONS,
+  tri: LFO_OPTIONS,
+  square: LFO_OPTIONS,
+  perlin: { ...LFO_OPTIONS, seed: 'Picks the drift: two perlin()s with one seed drift together.' },
+  rand: { seed: 'Picks the draws: two rand()s with one seed draw the same values.' },
+  sometimes: { seed: 'Picks which events: two .sometimes() with one seed pick the same ones.' },
+  midi: { note: 'The one MIDI note every event is sent as, for a plugin that listens on one key.' },
+  audio: { gain: 'How much of the source is sent, 1 by default.' },
+  slider: { ...BOX_SIZE, ...CURVE_OPTIONS, size: 'The slider\'s width, in pixels.' },
+  knob: { size: 'The knob\'s diameter, in pixels.', ...CURVE_OPTIONS },
+  toggle: { ...BOX_SIZE, size: 'The switch\'s width, in pixels.' },
+  button: { ...BOX_SIZE, size: 'The button\'s width, in pixels.' },
+  xy: { size: 'The pad\'s side, in pixels.' },
+  scope: { ...DISPLAY_BOX, scale: 'How far the trace is magnified, from 0.1 to 16.', window: 'How much time the trace shows, in milliseconds, from 2 to 40.' },
+  spectrum: { ...DISPLAY_BOX, min: 'The level at the bottom, in dB.', max: 'The level at the top, in dB.' },
+  waveform: { ...DISPLAY_BOX, cycles: 'How many cycles are drawn, from 1 to 16.' },
+  punchcard: { ...DISPLAY_BOX, cycles: 'How many cycles are drawn, from 1 to 16.' },
+  plot: { ...DISPLAY_BOX, cycles: 'How many cycles are drawn, from 1 to 16.', min: 'The value at the bottom.', max: 'The value at the top.' },
+  meter: { width: 'The meter\'s width, in pixels; taller than wide, it stands up.', height: 'The meter\'s height, in pixels.' },
+  imager: { size: 'The side of the square, in pixels.' },
+  chroma: { size: 'The side of the square, in pixels.' },
+};
+
+// The call an options object belongs to and the key being written in it, from `before` - the
+// code up to the caret, or up to the start of a word: `{ call, key, method }` when it ends where a
+// key goes in an object literal written as an argument of `call(...)` (straight after its `{`, or
+// after a comma at the object's own level), else null. `key` is the part of the key already typed.
+// Strings and comments are skipped; an object that is not an argument - a block, an arrow body,
+// `const o = {` - is not an options object.
+function optionContext(before) {
+  const src = String(before);
+  const key = /[A-Za-z_$][\w$]*$/.exec(src)?.[0] ?? '';
+  const end = src.length - key.length;
+  const stack = []; // open brackets: { ch, at, prev } - prev: the last code character before it
+  let last = ''; // the last code character seen at the current position (not space, not in a string)
+  let lastAt = -1;
+  for (let i = 0; i < end; i++) {
+    const c = src[i];
+    const d = src[i + 1];
+    if (c === '/' && d === '/') { while (i < end && src[i] !== '\n') i++; continue; }
+    if (c === '/' && d === '*') { i += 2; while (i < end && !(src[i] === '*' && src[i + 1] === '/')) i++; i++; continue; }
+    if (c === '"' || c === "'" || c === '`') {
+      i++;
+      while (i < end && src[i] !== c) { if (src[i] === '\\') i++; i++; }
+      last = c; lastAt = i;
+      continue;
+    }
+    if (/\s/.test(c)) continue;
+    if (c === '(' || c === '[' || c === '{') stack.push({ ch: c, at: i, prev: last, prevAt: lastAt });
+    else if (c === ')' || c === ']' || c === '}') stack.pop();
+    last = c; lastAt = i;
+  }
+  const obj = stack[stack.length - 1];
+  const paren = stack[stack.length - 2];
+  if (!obj || obj.ch !== '{' || !paren || paren.ch !== '(') return null;
+  // An argument: right after the paren or a comma. And a key: right after the brace or a comma.
+  if (obj.prev !== '(' && obj.prev !== ',') return null;
+  if (last !== '{' && last !== ',') return null;
+  const name = /([A-Za-z_$][\w$]*)\s*$/.exec(src.slice(0, paren.at));
+  if (!name) return null;
+  const method = /\.\s*$/.test(src.slice(0, paren.at - name[0].length));
+  return { call: name[1], key, method, written: writtenKeys(src.slice(obj.at + 1, end)) };
+}
+
+// The keys already written at the top level of an object's text so far (`body`, after its `{`).
+function writtenKeys(body) {
+  const keys = [];
+  let depth = 0;
+  let expectKey = true;
+  for (let i = 0; i < body.length; i++) {
+    const c = body[i];
+    if (c === '"' || c === "'" || c === '`') {
+      i++;
+      while (i < body.length && body[i] !== c) { if (body[i] === '\\') i++; i++; }
+      expectKey = false;
+      continue;
+    }
+    if (c === '/' && body[i + 1] === '/') { while (i < body.length && body[i] !== '\n') i++; continue; }
+    if (c === '/' && body[i + 1] === '*') { i += 2; while (i < body.length && !(body[i] === '*' && body[i + 1] === '/')) i++; i++; continue; }
+    if ('([{'.includes(c)) depth++;
+    else if (')]}'.includes(c)) depth--;
+    else if (c === ',' && depth === 0) { expectKey = true; continue; }
+    if (depth === 0 && expectKey && /[A-Za-z_$]/.test(c)) {
+      const m = /^([A-Za-z_$][\w$]*)\s*:/.exec(body.slice(i));
+      if (m) keys.push(m[1]);
+      expectKey = false;
+      if (m) i += m[1].length - 1;
+      continue;
+    }
+    if (!/\s/.test(c)) expectKey = false;
+  }
+  return keys;
+}
+
+// The doc for option `key` of `call`, shaped like lookupDoc's, or null when the call has no such key.
+function lookupOptionDoc(call, key, method = false) {
+  const desc = OPTION_DOCS[call]?.[key];
+  if (!desc) return null;
+  const sig = `${call}({ ${key} })`;
+  return { name: key, kind: 'option', sig, desc, context: 'option', display: (method ? '.' : '') + sig };
+}
+
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { API_DOCS, BUILDERS, METHODS, lookupDoc };
+  module.exports = { API_DOCS, BUILDERS, METHODS, lookupDoc, OPTION_DOCS, optionContext, lookupOptionDoc };
 }

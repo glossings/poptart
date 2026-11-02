@@ -53,7 +53,7 @@ function sources() {
     { from: path.join(webEngine, 'public', 'devices'), to: 'web-engine/devices' },
     // The maths both builds share, each a module of its own (see their headers): the sample map,
     // and a song's waveform and beatgrid for the DJ decks.
-    { from: path.join(repoRoot, 'packages', 'osc-engine'), to: 'osc-engine', only: ['sample-map-core.mjs', 'wave-core.mjs', 'song-detect-core.mjs', 'song-tags-core.mjs'] },
+    { from: path.join(repoRoot, 'packages', 'osc-engine'), to: 'osc-engine', only: ['sample-map-core.mjs', 'wave-core.mjs', 'song-detect-core.mjs', 'song-tags-core.mjs', 'slice-grid-core.mjs'] },
     // ...and the desk's tempo maths, which the desktop server require()s and the page imports.
     { from: here, to: 'shared', only: ['song-sync.js', 'link-sync.js'] },
   ];

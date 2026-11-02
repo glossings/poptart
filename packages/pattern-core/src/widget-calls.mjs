@@ -14,7 +14,7 @@
 // The curve a knob() or slider() turns on, shared with the editor that draws it.
 export { CURVES, positionOnCurve, valueOnCurve } from './curves.mjs';
 
-export const INPUT_WIDGETS = Object.freeze(['slider', 'knob', 'toggle', 'button', 'xy', 'steps', 'sliders', 'matrix']);
+export const INPUT_WIDGETS = Object.freeze(['slider', 'knob', 'toggle', 'button', 'xy', 'steps', 'sliders', 'matrix', 'shiftreg']);
 
 /** Calls that draw what a pattern is doing - its sound, or its events and values. */
 export const DISPLAY_WIDGETS = Object.freeze(['scope', 'spectrum', 'waveform', 'imager', 'meter', 'punchcard', 'plot', 'chroma']);
@@ -23,13 +23,13 @@ export const DISPLAY_WIDGETS = Object.freeze(['scope', 'spectrum', 'waveform', '
 export const AUDIO_DISPLAYS = Object.freeze(['scope', 'spectrum', 'waveform', 'imager', 'meter']);
 
 /** Input widgets whose first argument is the control's DATA, written out as plain text rather than mini notation. */
-export const RAW_TEXT_WIDGETS = Object.freeze(['steps', 'sliders', 'matrix']);
+export const RAW_TEXT_WIDGETS = Object.freeze(['steps', 'sliders', 'matrix', 'shiftreg']);
 
 /**
  * The input widgets the editor draws IN PLACE of their call: the text folds away under the control
  * (it stays in the buffer, and is still what is evaluated), and right-clicking the control opens it.
  */
-export const FOLDED_WIDGETS = Object.freeze(['steps', 'sliders', 'matrix']);
+export const FOLDED_WIDGETS = Object.freeze(['steps', 'sliders', 'matrix', 'shiftreg']);
 
 /**
  * Every input widget's size, in CSS pixels: what it is drawn at unless its call says `{ size }`,
@@ -48,6 +48,7 @@ export const INPUT_SIZES = Object.freeze({
   steps: Object.freeze({ size: 16, min: 8, max: 48 }),
   sliders: Object.freeze({ size: 64, min: 24, max: 240 }),
   matrix: Object.freeze({ size: 16, min: 8, max: 48 }),
+  shiftreg: Object.freeze({ size: 16, min: 8, max: 48 }),
 });
 
 /**
@@ -83,6 +84,7 @@ export const WIDGET_BOXES = Object.freeze({
   button: Object.freeze({ width: INPUT_SIZES.button, height: side(null, 14, 96), lone: 'width' }),
   steps: Object.freeze({ width: INPUT_SIZES.steps, height: INPUT_SIZES.steps, lone: 'both' }),
   matrix: Object.freeze({ width: INPUT_SIZES.matrix, height: INPUT_SIZES.matrix, lone: 'both' }),
+  shiftreg: Object.freeze({ width: INPUT_SIZES.shiftreg, height: INPUT_SIZES.shiftreg, lone: 'both' }),
   sliders: Object.freeze({ width: side(16, 6, 48), height: INPUT_SIZES.sliders, lone: 'height' }),
   meter: Object.freeze({ width: side(48, 6, 480), height: side(12, 6, 240), lone: null }),
   scope: Object.freeze({ width: DISPLAY_WIDTH, height: displayHeight('scope'), lone: 'height' }),
@@ -392,20 +394,160 @@ export function randomRow(text, random = Math.random) {
   return src.slice(0, lead) + row.join(compact ? '' : ' ') + src.slice(src.length - trail);
 }
 
+// A row's cells written back the way the row was - one character a step, or spaced - with any
+// space around it kept, so the grid redraws in place.
+function writeRow(src, tokens) {
+  const compact = !/\s/.test(src.trim());
+  const lead = src.length - src.trimStart().length;
+  const trail = src.length - src.trimEnd().length;
+  const body = compact ? tokens.map((t) => (t.length > 1 ? 'x' : t)).join('') : tokens.join(' ');
+  return src.slice(0, lead) + body + src.slice(src.length - trail);
+}
+
+/**
+ * The row at half its resolution: each pair of cells one cell, a hit when either was (spelled
+ * with the first hit's token), so nothing played is dropped - a hit moves earlier by at most one
+ * of the old steps. An odd last cell stands alone. A row of one cell, or none, is as it was.
+ */
+export function coarserRow(text) {
+  const src = String(text ?? '');
+  const cells = parseCells(src);
+  if (cells.length < 2) return src;
+  const tokens = [];
+  for (let i = 0; i < cells.length; i += 2) {
+    const hit = [cells[i], cells[i + 1]].find((c) => c?.on);
+    tokens.push(hit ? hit.token : '.');
+  }
+  return writeRow(src, tokens);
+}
+
+/** The row at twice its resolution: each cell itself followed by a rest. Undone by coarserRow. */
+export function finerRow(text) {
+  const src = String(text ?? '');
+  const cells = parseCells(src);
+  if (!cells.length) return src;
+  return writeRow(src, cells.flatMap((c) => [c.on ? c.token : '.', '.']));
+}
+
 /**
  * The row of values thrown again at random: as many as now, each anywhere from `min` to `max`,
- * written with `decimals` places. `random` is the generator, for tests.
+ * written with `decimals` places. With a `deviation`, each one is thrown near the value it had
+ * instead (see rerollValue). `random` is the generator, for tests.
  */
-export function randomValues(text, min = 0, max = 1, decimals = 2, random = Math.random) {
+export function randomValues(text, min = 0, max = 1, decimals = 2, random = Math.random, deviation = null) {
   const src = String(text ?? '');
   const cells = parseCells(src);
   if (!cells.length) return src;
   const lo = Number.isFinite(Number(min)) ? Number(min) : 0;
   const hi = Number.isFinite(Number(max)) ? Number(max) : 1;
-  const row = cells.map(() => formatNumber(lo + (hi - lo) * random(), decimals));
+  const row = deviation == null
+    ? cells.map(() => formatNumber(lo + (hi - lo) * random(), decimals))
+    : cells.map((c) => formatNumber(rerollValue(Number(c.token), { min: lo, max: hi, deviation, random }), decimals));
   const lead = src.length - src.trimStart().length;
   const trail = src.length - src.trimEnd().length;
   return src.slice(0, lead) + row.join(' ') + src.slice(src.length - trail);
+}
+
+// ---------------------------------------------------------------------------- mutation
+
+/** The option that makes a row change a little every time it comes round: `{ mutate: 0.05 }`. */
+export const MUTATE_OPTION = 'mutate';
+
+/** The option that keeps a re-thrown value of sliders() near the one it had: `{ deviation: 1 }`. */
+export const DEVIATION_OPTION = 'deviation';
+
+/**
+ * How long before a pass of a row ends its mutation is written, in seconds: the scheduler's
+ * lookahead (150 ms, see scheduler.mjs) plus a frame and the trip to the host, so the new row is
+ * in the host before the scheduler reads the first step of the next pass.
+ */
+export const MUTATE_LEAD_SEC = 0.2;
+
+const probability = (p) => {
+  const v = Number(p);
+  return Number.isFinite(v) ? Math.min(1, Math.max(0, v)) : 0;
+};
+
+// `edits` ({ from, to, text }, in order, not overlapping) applied to `src`.
+function applyEdits(src, edits) {
+  let out = '';
+  let at = 0;
+  for (const e of edits) {
+    out += src.slice(at, e.from) + e.text;
+    at = e.to;
+  }
+  return out + src.slice(at);
+}
+
+/**
+ * A row of cells after one pass of mutation: each cell on its own switches - a hit to a rest, a
+ * rest to a hit - with probability `p`. 0 leaves the row as it is, 0.5 throws every cell again,
+ * and 1 turns the row into its inverse, so it alternates with it. A cell switched on takes the
+ * nearest hit's token to its left in the row as it was (x when it had none); one switched off
+ * becomes `.`, written so the columns stay as toggleCell keeps them. `{ text, edits }`: the new
+ * row, and the edits over the old one that make it (`{ from, to, text }`, one per switched cell,
+ * in order). `random` is the generator - one draw per cell, in order - for tests.
+ */
+export function mutateRow(text, p, random = Math.random) {
+  const src = String(text ?? '');
+  const cells = parseCells(src);
+  const prob = probability(p);
+  const compact = !/\s/.test(src.trim());
+  const edits = [];
+  cells.forEach((cell, i) => {
+    if (!(random() < prob)) return;
+    let token;
+    if (cell.on) token = '.';
+    else {
+      const left = cells.slice(0, i).reverse().find((c) => c.on) ?? cells.find((c) => c.on);
+      token = left ? left.token : 'x';
+      if (compact && token.length > 1) token = 'x';
+    }
+    if (!compact && token.length < cell.to - cell.from) token = token.padEnd(cell.to - cell.from, ' ');
+    edits.push({ from: cell.from, to: cell.to, text: token });
+  });
+  return { text: applyEdits(src, edits), edits };
+}
+
+// A standard normal draw from two uniform ones.
+function normal(random) {
+  const u = 1 - random(); // (0, 1], so the log is finite
+  const v = random();
+  return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+}
+
+/**
+ * A value thrown again: anywhere from `min` to `max` alike, or - with a `deviation` - `old` plus a
+ * bell-curve step with that standard deviation, in the value's own units, so about two thirds
+ * land within one deviation of where they were. Kept inside min..max either way. A cell with no
+ * number to start from is thrown anywhere.
+ */
+export function rerollValue(old, { min = 0, max = 1, deviation = null, random = Math.random } = {}) {
+  const lo = Math.min(Number(min), Number(max));
+  const hi = Math.max(Number(min), Number(max));
+  const s = deviation == null ? NaN : Number(deviation);
+  const v = Number.isFinite(s) && s >= 0 && Number.isFinite(Number(old))
+    ? Number(old) + normal(random) * s
+    : Number(min) + (Number(max) - Number(min)) * random();
+  return Math.min(hi, Math.max(lo, v));
+}
+
+/**
+ * A row of values after one pass of mutation: each value on its own is thrown again (see
+ * rerollValue) with probability `p`, and written with `decimals` places. `{ text, edits }` as
+ * mutateRow gives them. `random` is the generator, for tests: one draw per cell for the choice,
+ * then what the throw takes.
+ */
+export function mutateValues(text, p, { min = 0, max = 1, decimals = 2, deviation = null, random = Math.random } = {}) {
+  const src = String(text ?? '');
+  const prob = probability(p);
+  const edits = [];
+  for (const cell of parseCells(src)) {
+    if (!(random() < prob)) continue;
+    const next = formatNumber(rerollValue(Number(cell.token), { min, max, deviation, random }), decimals);
+    if (next !== cell.token) edits.push({ from: cell.from, to: cell.to, text: next });
+  }
+  return { text: applyEdits(src, edits), edits };
 }
 
 /** A number as a widget writes it into the code: fixed decimals, no trailing zeros past one. */
@@ -553,6 +695,20 @@ export function foldable(kind, args) {
     return rows.length > 0 && rows.every((r) => r.form !== 'code');
   }
   return rowSource(pos[0]?.text).form !== 'code';
+}
+
+/**
+ * The span a drawn row of cells folds over, as `{ from, to, whole }` offsets into the code `call`
+ * (findWidgetCalls's) and `parsed` (callArgs's) were measured on. A call with nothing but its cells
+ * folds whole, name to closing paren. With anything else written - `{ mutate }`, sliders()'s
+ * range, shiftreg()'s chance - only the cells fold, and the rest stays code to read and edit:
+ * `steps(▮▮▯▮, { mutate: 0.05 })`. With no cells written, the name and its paren fold.
+ */
+export function foldRange(kind, call, parsed) {
+  const cells = positionalArgs(kind, parsed.args)[0] ?? null;
+  if (parsed.args.length === (cells ? 1 : 0)) return { from: call.at, to: parsed.close + 1, whole: true };
+  if (cells) return { from: cells.from, to: cells.to, whole: false };
+  return { from: call.at, to: call.open + 1, whole: false };
 }
 
 /**
@@ -771,7 +927,7 @@ function takeEntry(code, open) {
   if (!m) return { parsed, arg, lit: null };
   const vs = m.index + m[0].length;
   const q = arg.text[vs];
-  if (q !== '"' && q !== "'" && q !== '`') return { parsed, arg, lit: null, code: true };
+  if (q !== '"' && q !== "'" && q !== '`') return { parsed, arg, lit: null, code: true, value: arg.from + vs };
   const end = arg.text.indexOf(q, vs + 1);
   if (end < 0) return { parsed, arg, lit: null };
   return { parsed, arg, lit: { from: arg.from + vs + 1, to: arg.from + end, text: arg.text.slice(vs + 1, end) } };
@@ -792,8 +948,37 @@ export function recordTakeEdit(code, open, name) {
   const src = String(code);
   const e = takeEntry(src, open);
   if (!e) return null;
-  const lit = JSON.stringify(String(name));
   if (e.lit) return { from: e.lit.from, to: e.lit.to, text: String(name) };
+  return addTakeEdit(e, open, JSON.stringify(String(name)));
+}
+
+/**
+ * The one edit that makes the `.record(` call whose `(` is at `open` keep a button's take as the
+ * row `row`: `take: steps("x . . x ...")`. A row already written has its text replaced; a take
+ * named as a shape (the older form) is replaced by the row; otherwise the entry is added, as
+ * recordTakeEdit adds a name. `{ from, to, text }`, or null when the call is not closed or its take
+ * is some other code.
+ */
+export function recordTakeRowEdit(code, open, row) {
+  const src = String(code);
+  const e = takeEntry(src, open);
+  if (!e) return null;
+  const value = `steps(${JSON.stringify(String(row))})`;
+  if (e.lit) return { from: e.lit.from - 1, to: e.lit.to + 1, text: value };
+  if (e.code) {
+    const m = /^steps\s*\(/.exec(src.slice(e.value));
+    if (!m) return null;
+    const inner = callArgs(src, e.value + m[0].length - 1);
+    const first = inner?.args[0];
+    const lit = first ? /^(["'`])([^"'`]*)\1$/.exec(first.text) : null;
+    if (!lit) return null;
+    return { from: first.from + 1, to: first.to - 1, text: String(row) };
+  }
+  return addTakeEdit(e, open, value);
+}
+
+// The `take: <value>` entry added to a `.record(` call that has none.
+function addTakeEdit(e, open, lit) {
   const { parsed, arg } = e;
   if (!arg) return { from: open + 1, to: parsed.close, text: `{ take: ${lit} }` };
   if (arg.text[0] === '{') {

@@ -339,7 +339,7 @@ const INTERNAL_CALLS = { _record: 'record', _input: null, _display: null, _at: n
  */
 export function plainText(message) {
   return String(message ?? '')
-    .replace(/mini\(("(?:[^"\\\n]|\\.)*"|`[^`]*`|'(?:[^'\\\n]|\\.)*'), \d+(?:, 'speech')?\)/g, '$1')
+    .replace(/mini\(("(?:[^"\\\n]|\\.)*"|`[^`]*`|'(?:[^'\\\n]|\\.)*'), \d+(?:, '(?:speech|divisions)')?\)/g, '$1')
     .replace(/mini\(\.\.\.\)/g, '"…"')
     .replace(/\b_record\b/g, 'record')
     .replace(/\b_at\(\d+, /g, '')

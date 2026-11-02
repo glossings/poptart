@@ -27,7 +27,7 @@ export const BUILDER_NAMES = Object.freeze(['Signal', 'n', 'note', 'mini', 's', 
   'add', 'sub', 'mul', 'div', 'mod', 'set',
   // Structure-giving transforms at the head of a chain, on the default note: struct("1 ~ 1 1").s("bd").
   'struct', 'hold', 'seg', 'segment', 'chord',
-  'slider', 'knob', 'toggle', 'button', 'xy', 'steps', 'sliders', 'matrix', 'scope', 'spectrum', 'waveform', 'imager', 'meter', 'punchcard', 'chroma',
+  'slider', 'knob', 'toggle', 'button', 'xy', 'steps', 'sliders', 'matrix', 'shiftreg', 'scope', 'spectrum', 'waveform', 'imager', 'meter', 'punchcard', 'chroma',
   'noteToMidi', 'degreeToMidi', 'parseScaleName']);
 
 /** Builders the editor writes and nobody types: the calls behind a drawn roll, a shape, a pack. */

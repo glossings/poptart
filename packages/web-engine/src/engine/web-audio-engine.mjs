@@ -31,6 +31,7 @@ const UNKNOWN_SOURCE_GRACE_MS = 2000;
 import { MIX_BAND_FREQS, MixAnalysis, SpectrumTap } from './analysis.mjs';
 import { MidiRoutes } from './midi-routes.mjs';
 import { detectOnsets, monoOf, planSample, sliceEntryFor } from './sample-plan.mjs';
+import { isSliceGrid, assumedFitNote } from '../../../osc-engine/slice-grid-core.mjs';
 import { EnvConnection, FeedConnection, LfoConnection } from './modulators.mjs';
 import { GRAIN_CHANNEL_FIELDS, SUPPORTED_CHANNELS, Track, rampParam } from './track.mjs';
 import { DeskAudio } from './desk-audio.mjs';
@@ -2693,10 +2694,13 @@ export class WebAudioEngine {
     // The slice positions `.slice(n)` indexes: the hand-drawn set's marks for this file where it
     // has some, and the file's own transients otherwise - worked out on first ask, off the tick.
     const key = isRec ? `rec:${packId.slice(4)}.wav` : this.samples?.fileKey?.(source, index) ?? null;
-    const authored = cfg.slices ? sliceEntryFor(cfg.slices, key) ?? sliceEntryFor(cfg.slices, key?.split('/').pop()) : null;
-    const slices = cfg.slice != null ? authored?.marks ?? this._transientsOf(buffer) : null;
-    const plan = planSample({ duration: buffer.duration, rootNote }, { ...cfg }, onsetSec, offsetSec, { slices, authoredFit: authored?.fit ?? null, anchor: SAMPLER_ANCHOR });
+    // A grid (.slices(8), .slices("1/4")) is laid over the file by planSample, which knows its length.
+    const grid = isSliceGrid(cfg.slices) ? cfg.slices : null;
+    const authored = cfg.slices && !grid ? sliceEntryFor(cfg.slices, key) ?? sliceEntryFor(cfg.slices, key?.split('/').pop()) : null;
+    const slices = cfg.slice != null && !grid ? authored?.marks ?? this._transientsOf(buffer) : null;
+    const plan = planSample({ duration: buffer.duration, rootNote }, { ...cfg }, onsetSec, offsetSec, { slices, grid, authoredFit: authored?.fit ?? null, anchor: SAMPLER_ANCHOR });
     if (plan.skipped) return { skipped: plan.skipped };
+    if (plan.gridAssumed != null) this._warnOnce(`slicegrid:${key ?? packId}`, `[web-engine] ${assumedFitNote(grid, (key ?? String(packId)).split('/').pop(), plan.gridAssumed)}`);
     if (plan.noSlices) this._warnOnce(`slices:${key}`, `[web-engine] .slice(): no transients were found in ${key ?? packId} - playing the whole sample.`);
 
     const backwards = plan.speed < 0 ? reversedBuffer(this.ctx, buffer) : null;

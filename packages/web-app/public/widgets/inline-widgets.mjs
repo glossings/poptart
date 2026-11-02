@@ -3,7 +3,7 @@
 //   slider(0.5, 0, 1)   a box slider before the call's name; dragging it rewrites the first argument
 //   knob() toggle() button()                       ...and the other controls of that kind
 //   steps("x . x .") sliders("...") matrix({...})   drawn IN PLACE of their call: the call's text
-//                                                   folds away under the control (see makeFold)
+//   shiftreg("x . x x")                             folds away under the control (see makeFold)
 //   xy()                                            a pad in a row under the line
 //   .scope() .spectrum() .waveform() .imager()     the track's sound, from the engine's taps
 //   .meter()                                        the track's level, before the call's name
@@ -30,6 +30,7 @@
 // CodeMirror instance, its request helper, its clock mirror), and calls a few things back.
 
 import * as M from './widget-math.mjs';
+import { editOutsideHistory } from './history-rebase.mjs';
 
 const INLINE_KINDS = new Set(['slider', 'knob', 'toggle', 'button', 'meter']);
 const AUDIO_KINDS = new Set(['scope', 'spectrum', 'waveform', 'imager', 'meter']);
@@ -104,19 +105,29 @@ export function createInlineWidgets({
 
   // ---------------------------------------------------------------------------- the code side
 
-  // Where a widget's call starts: a bookmark's position, or the start of a fold's range.
+  // Where a widget's call starts: a bookmark's position, or a fold's - the start of its range when
+  // the whole call folded, else the name just before the cells it covers (see foldRange).
   function startOf(w) {
     const found = w.mark?.find();
     if (!found) return null;
-    return found.from ?? found;
+    const pos = found.from ?? found;
+    if (!w.folded || callNameAt(w, pos)) return pos;
+    const idx = cm.indexFromPos(pos);
+    const before = cm.getRange(cm.posFromIndex(Math.max(0, idx - 400)), pos);
+    const m = new RegExp(`(?:^|[^\\w$.])(${w.kind}\\s*\\(\\s*)$`).exec(before);
+    return m ? cm.posFromIndex(idx - m[1].length) : null;
+  }
+
+  // Whether the call's name is written at `pos`: the match of `name(` there, or null.
+  function callNameAt(w, pos) {
+    const m = /^([A-Za-z_$][\w$]*)\s*\(/.exec((cm.getLine(pos.line) ?? '').slice(pos.ch));
+    return m && m[1] === w.kind ? m : null;
   }
 
   /** Whether a widget's call is still where its mark is. */
   function alive(w) {
     const pos = startOf(w);
-    if (!pos) return false;
-    const m = /^([A-Za-z_$][\w$]*)\s*\(/.exec((cm.getLine(pos.line) ?? '').slice(pos.ch));
-    return !!m && m[1] === w.kind;
+    return !!pos && !!callNameAt(w, pos);
   }
 
   /**
@@ -126,14 +137,12 @@ export function createInlineWidgets({
    */
   function locate(w) {
     const found = w.mark?.find();
-    if (!found) return null;
-    const pos = found.from ?? found;
-    const line = cm.getLine(pos.line) ?? '';
-    const m = /^([A-Za-z_$][\w$]*)\s*\(/.exec(line.slice(pos.ch));
-    if (!m || m[1] !== w.kind) return null;
+    const pos = found ? startOf(w) : null;
+    const m = pos ? callNameAt(w, pos) : null;
+    if (!m) return null;
     const base = cm.indexFromPos(pos);
-    // A folded call is exactly its fold's range; anything else is read far enough to close.
-    let end = found.to;
+    // A call folded whole is exactly its fold's range; anything else is read far enough to close.
+    let end = found.to && cm.indexFromPos(found.from) === base ? found.to : null;
     if (!end) {
       const last = Math.min(cm.lineCount() - 1, pos.line + 60);
       end = { line: last, ch: (cm.getLine(last) ?? '').length };
@@ -166,28 +175,35 @@ export function createInlineWidgets({
    * written yet when it is the next in line. The options object, if any, stays where it is.
    */
   function writeArgs(w, texts) {
-    const at = locate(w);
-    if (!at) return false;
+    const edits = argEdits(w, texts);
+    if (!edits) return false;
     cm.operation(() => {
       // Back to front, so the earlier spans stay where they were measured.
-      const edits = [];
-      for (const [i, text] of texts) {
-        const a = at.pos[i];
-        if (a) edits.push([at.base + a.from, at.base + a.to, text]);
-        else if (i === at.pos.length) {
-          if (at.pos.length) {
-            const where = at.base + at.pos[at.pos.length - 1].to;
-            edits.push([where, where, `, ${text}`]);
-          } else {
-            const where = at.base + at.open + 1;
-            edits.push([where, where, at.opts ? `${text}, ` : text]);
-          }
-        }
-      }
       edits.sort((x, y) => y[0] - x[0]);
       for (const [from, to, text] of edits) replaceIdx(from, to, text);
     });
     return true;
+  }
+
+  // The `[from, to, text]` edits (document offsets) writeArgs makes, or null when the call is gone.
+  function argEdits(w, texts) {
+    const at = locate(w);
+    if (!at) return null;
+    const edits = [];
+    for (const [i, text] of texts) {
+      const a = at.pos[i];
+      if (a) edits.push([at.base + a.from, at.base + a.to, text]);
+      else if (i === at.pos.length) {
+        if (at.pos.length) {
+          const where = at.base + at.pos[at.pos.length - 1].to;
+          edits.push([where, where, `, ${text}`]);
+        } else {
+          const where = at.base + at.open + 1;
+          edits.push([where, where, at.opts ? `${text}, ` : text]);
+        }
+      }
+    }
+    return edits;
   }
 
   /** Rewrites the content of a positional argument that is a string literal. */
@@ -218,15 +234,72 @@ export function createInlineWidgets({
     return text ? calls.optionNumber(text, key) : null;
   }
 
+  // What rowOptionOf says of an option written as a signal or a pattern: only the host can read it.
+  const ON_HOST = Symbol('on the host');
+
+  // A row's option - `mutate`, `deviation` - as its call says it now: the number written there, or,
+  // written as anything else, what the evaluation found there - where the knob or slider it named
+  // is set now (the hand keeps that control's call up to date), else the number it read. Null when
+  // the call does not have it. A shiftreg()'s second argument is its `mutate`.
+  function rowOptionOf(w, key, at = locate(w)) {
+    if (!at) return null;
+    const positional = w.kind === 'shiftreg' && key === calls.MUTATE_OPTION ? at.pos[1] : null;
+    if (positional) {
+      const v = M.literalNumber(positional.text);
+      if (v !== null) return v;
+    } else {
+      const written = at.opts && new RegExp(`(?:^|[{,\\s])${key}\\s*:`).test(calls.maskCode(at.opts.text).masked);
+      if (!written) return null;
+      const v = calls.optionNumber(at.opts.text, key);
+      if (v !== null) return v;
+    }
+    const opts = keyEntryOf(w)?.entry?.opts ?? {};
+    const from = opts[`${key}From`];
+    const control = from == null ? null : widgets.find((x) => x.at === from && !x.gone);
+    const live = control ? numArg(locate(control), 0, null) : null;
+    if (live !== null) return live;
+    if (opts[`${key}Live`]) return ON_HOST;
+    return Number.isFinite(opts[key]) ? opts[key] : null;
+  }
+
+  // A row's option at cycle `pos`, as rowOptionOf reads it - and, for one written as a signal or a
+  // pattern (`{ mutate: cc(12) }`, "<0 0.1>"), as the host reads it there: MIDI, OSC and the
+  // patterns live on the host. A promise of a number, or null.
+  async function optionAt(w, key, pos) {
+    const v = rowOptionOf(w, key);
+    if (v !== ON_HOST) return v;
+    const at = keyOf(w);
+    if (at == null) return null;
+    const res = await api('GET', `/api/widgets/option?deck=${deck}&at=${at}&key=${encodeURIComponent(key)}&pos=${pos}`);
+    return Number.isFinite(res?.value) ? res.value : null;
+  }
+
+  // Writes `[from, to, text]` edits (document offsets) into the code as a gesture does, but outside
+  // the undo history: these are the code's own changes - a row mutating - and undo steps over them.
+  function writeQuietly(edits, w = null) {
+    return edits?.length ? holdingFold(w, () => editOutsideHistory(cm, edits)) > 0 : false;
+  }
+
+  // The edits that make a row of cells read `next`: `edits` (mutateRow's, over the row's text) where
+  // its text is written out, else the whole row written in place of its count.
+  function rowEdits(w, r, next, edits) {
+    if (r.abs >= 0) return edits.map((e) => [r.abs + e.from, r.abs + e.to, e.text]);
+    return argEdits(w, [[0, quoteRow(next)]]);
+  }
+
   // The key a widget's value goes to the host under: its own, for one built from an evaluation;
   // for a fold, the key the evaluation gave the call it covers - none until it has been evaluated.
   function keyOf(w) {
     if (!w.folded) return w.at;
+    return keyEntryOf(w)?.at ?? null;
+  }
+
+  // What the evaluation said about a fold's call - `{ at, entry }` - or null before it has been.
+  function keyEntryOf(w) {
     const start = startOf(w);
     if (!start) return null;
     const idx = cm.indexFromPos(start);
-    const k = keys.find((x) => x.kind === w.kind && x.mark.find() && cm.indexFromPos(x.mark.find()) === idx);
-    return k ? k.at : null;
+    return keys.find((x) => x.kind === w.kind && x.mark.find() && cm.indexFromPos(x.mark.find()) === idx) ?? null;
   }
 
   // One value in flight per widget, and the newest one waiting behind it: a drag makes more values
@@ -236,11 +309,12 @@ export function createInlineWidgets({
   function push(w, value, release = false) {
     const at = keyOf(w);
     if (at == null) return; // not evaluated yet: the code is all there is, and it has been written
+    if (w.kind === 'button') return pushEdge(w, at, value, release);
     const fold = FOLDED.has(w.kind);
     w.lastValue = value;
-    // A fold's row has just been written, so where its text is now goes with the value: a count
+    // A fold's row has just been written, so where its text is goes with the value: a count
     // written out as cells has a text the evaluation never saw.
-    w.want = { value, at, lit: fold ? textAt(w) : undefined, release: release || !!w.want?.release };
+    w.want = { value, at, lit: fold ? evaluatedLit(w, at, textAt(w)) : undefined, release: release || !!w.want?.release };
     if (w.sending) return;
     const send = () => {
       const next = w.want;
@@ -258,6 +332,64 @@ export function createInlineWidgets({
         })
         .catch(() => {})
         .finally(send);
+    };
+    send();
+  }
+
+  // Where a fold's text starts (textAt's) in the document as it was EVALUATED, which is what every
+  // span the highlighter is handed counts in - it moves them with the code itself. The call was at
+  // `at` then: an edit above it since (a row of sliders() above mutating to longer numbers) moved
+  // the call and its text alike.
+  function evaluatedLit(w, at, lit) {
+    const start = startOf(w);
+    if (lit === undefined || !start) return lit;
+    const moved = cm.indexFromPos(start) - at;
+    if (typeof lit === 'number') return lit - moved;
+    return Object.fromEntries(Object.entries(lit).map(([k, v]) => [k, v - moved]));
+  }
+
+  // Runs `fn`, a write of the hand's, as an undo step of its own: not merged into a click made just
+  // before it, nor the next one into it.
+  function asOneStep(fn) {
+    cm.changeGeneration(true);
+    const out = fn();
+    cm.changeGeneration(true);
+    return out;
+  }
+
+  // Runs `fn`, a write that replaces a fold's whole text (a count written out as cells), with the
+  // fold taking in what is written at its edges, so the new text stays folded rather than landing
+  // beside it. Only for the length of the write: typed beside a fold, text stays outside it.
+  function holdingFold(w, fn) {
+    const mk = w?.folded ? w.mark : null;
+    if (!mk) return fn();
+    const was = [mk.inclusiveLeft, mk.inclusiveRight];
+    mk.inclusiveLeft = mk.inclusiveRight = true;
+    try {
+      return fn();
+    } finally {
+      [mk.inclusiveLeft, mk.inclusiveRight] = was;
+    }
+  }
+
+  // A button's every edge reaches the host, in order: a press is a trigger (see pattern-core's
+  // triggers.mjs), so a tap shorter than a round trip is two edges, not a newest value. Each says
+  // how long it waited here, which the host stamps the press back by.
+  const clockMs = () => globalThis.performance?.now?.() ?? Date.now();
+  function pushEdge(w, at, value, release) {
+    w.lastValue = value;
+    (w.edges ??= []).push({ at, value, release, t: clockMs() });
+    if (w.sending) return;
+    const send = () => {
+      const next = w.edges.shift();
+      if (!next) {
+        w.sending = false;
+        return;
+      }
+      w.sending = true;
+      const body = { deck, at: next.at, value: next.value, ago: Math.max(0, clockMs() - next.t) / 1000 };
+      if (next.release) body.release = true;
+      Promise.resolve(api('POST', '/api/widgets/set', body)).catch(() => {}).finally(send);
     };
     send();
   }
@@ -465,7 +597,7 @@ export function createInlineWidgets({
       return { text: src.text, abs: at.base + a.from + lead + src.from, write: (next) => writeLiteral(w, next) };
     }
     const n = src.form === 'count' ? src.count : calls.DEFAULT_CELL_COUNT;
-    return { text: fill(n), abs: -1, write: (next) => writeArgs(w, [[0, quoteRow(next)]]) };
+    return { text: fill(n), abs: -1, write: (next) => holdingFold(w, () => writeArgs(w, [[0, quoteRow(next)]])) };
   }
 
   // The lit spans that fall inside a fold's call, document-absolute - what its cells can be lit
@@ -801,6 +933,26 @@ export function createInlineWidgets({
         push(w, next);
         w.dirty = true;
       };
+      // "coarser" and "finer": the row at half or twice its resolution, one undo step of its own.
+      const resolve = (change) => {
+        const r = row();
+        const next = change(r.text);
+        if (next === r.text) return;
+        asOneStep(() => r.write(next));
+        push(w, next);
+        w.dirty = true;
+      };
+      w.coarser = () => resolve(calls.coarserRow);
+      w.finer = () => resolve(calls.finerRow);
+      w.canCoarsen = () => calls.parseCells(row().text).length > 1;
+      // One pass of `mutate` (see mutateTick): written outside the undo history, heard as a click is.
+      w.mutate = (p) => {
+        const r = row();
+        const { text: next, edits } = calls.mutateRow(r.text, p);
+        if (!edits.length || !writeQuietly(rowEdits(w, r, next, edits), r.abs < 0 ? w : null)) return;
+        push(w, next);
+        w.dirty = true;
+      };
       onDrag(box, {
         down: (e) => {
           const i = cellIndex(e.target);
@@ -858,6 +1010,8 @@ export function createInlineWidgets({
         const max = numArg(at, 2, w.entry?.max ?? 1);
         return { ...rowOfCall(w, (n) => calls.middleRow(n, min, max)), min, max };
       };
+      // Every value is written with as many places as the range wants, as a drag writes it.
+      const placesFor = (s) => M.decimalsFor(s.min, s.max);
       const setAt = (e) => {
         const r = box.getBoundingClientRect();
         const s = state();
@@ -874,10 +1028,19 @@ export function createInlineWidgets({
         push(w, next);
         w.dirty = true;
       };
-      w.randomize = () => {
+      w.randomize = async () => {
+        const deviation = await optionAt(w, calls.DEVIATION_OPTION, cyclePos());
         const s = state();
-        const next = calls.randomValues(s.text, s.min, s.max, M.decimalsFor(s.min, s.max));
+        const next = calls.randomValues(s.text, s.min, s.max, placesFor(s), Math.random, deviation);
         s.write(next);
+        push(w, next);
+        w.dirty = true;
+      };
+      w.mutate = async (p, pos) => {
+        const deviation = await optionAt(w, calls.DEVIATION_OPTION, pos);
+        const s = state();
+        const { text: next, edits } = calls.mutateValues(s.text, p, { min: s.min, max: s.max, decimals: placesFor(s), deviation });
+        if (!edits.length || !writeQuietly(rowEdits(w, s, next, edits), s.abs < 0 ? w : null)) return;
         push(w, next);
         w.dirty = true;
       };
@@ -969,6 +1132,39 @@ export function createInlineWidgets({
         push(w, value);
         w.dirty = true;
       };
+      // "coarser" and "finer" on every row at once, as randomize: one edit, one value to the host.
+      const resolve = (change) => {
+        const value = {};
+        asOneStep(() => cm.operation(() => {
+          for (const row of [...rowsNow()].reverse()) { // back to front, so the earlier spans stay put
+            const next = change(row.text);
+            if (next === row.text) continue;
+            value[row.key] = next;
+            replaceIdx(row.abs + row.from, row.abs + row.to, row.form === 'text' ? next : quoteRow(next));
+          }
+        }));
+        if (!Object.keys(value).length) return;
+        push(w, value);
+        w.dirty = true;
+      };
+      w.coarser = () => resolve(calls.coarserRow);
+      w.finer = () => resolve(calls.finerRow);
+      w.canCoarsen = () => rowsNow().some((r) => calls.parseCells(r.text).length > 1);
+      // One pass of `mutate` over every row, in one edit and one value to the host, as randomize.
+      w.mutate = (p) => {
+        const value = {};
+        const edits = [];
+        for (const row of rowsNow()) {
+          const m = calls.mutateRow(row.text, p);
+          if (!m.edits.length) continue;
+          value[row.key] = m.text;
+          if (row.form === 'text') for (const e of m.edits) edits.push([row.abs + row.from + e.from, row.abs + row.from + e.to, e.text]);
+          else edits.push([row.abs + row.from, row.abs + row.to, quoteRow(m.text)]); // a count, written out
+        }
+        if (!edits.length || !writeQuietly(edits)) return;
+        push(w, value);
+        w.dirty = true;
+      };
       const hit = (target) => {
         const cell = target?.closest?.('.iw-cell');
         if (!cell || !grid.contains(cell)) return null;
@@ -1045,6 +1241,19 @@ export function createInlineWidgets({
         lightCells(w, els, on);
       };
       w.lit = '';
+      return root;
+    },
+
+    // A shiftreg() is a row of cells as steps() is - the same cells, clicks, menu and mutation -
+    // that the evaluation reads as a register. Written as a count, or as nothing, its evaluation
+    // throws the row at random, and the row it threw is written into the call (see adoptRow).
+    shiftreg(w) {
+      const root = BUILDERS.steps(w);
+      const tick = w.tick;
+      w.tick = (pos, running) => {
+        adoptRow(w);
+        tick(pos, running);
+      };
       return root;
     },
 
@@ -1986,12 +2195,56 @@ export function createInlineWidgets({
       }
       // A fold's cells light as they sound once the call is playing - evaluated, and its deck running.
       f.tick?.(pos, running && keyOf(f) != null);
+      mutateTick(f, running);
     }
     if (!running) {
       // Stopped: nothing moves, so the frames that were drawing go quiet.
       frames.clear();
     }
     rafId = win?.requestAnimationFrame ? win.requestAnimationFrame(frame) : 0;
+  }
+
+  // ---------------------------------------------------------------------------- mutation
+
+  // A row whose call asks for it - `{ mutate: 0.05 }`, a shiftreg()'s second argument - changes once
+  // a pass while its deck plays: each cell on its own, with that chance (see pattern-core's
+  // mutateRow), written into the code and pushed to the host as a click is, so the next pass plays
+  // the new row with no evaluation. A pass is a cycle of the deck's clock. The write goes
+  // MUTATE_LEAD_SEC before the pass ends: the scheduler reads a step a lookahead before it sounds,
+  // so a row that reached the host any later would miss the start of the next pass. Outside the undo
+  // history (see writeQuietly).
+  function mutateTick(f, running) {
+    if (!f.mutate || !running || !cycleAtMs || keyOf(f) == null) {
+      f.pass = null;
+      return;
+    }
+    const pass = Math.floor(cycleAtMs(Date.now() + calls.MUTATE_LEAD_SEC * 1000));
+    if (!Number.isFinite(pass)) return;
+    if (f.pass == null || pass < f.pass) {
+      f.pass = pass; // just started, or the clock went back: this pass plays as written
+      return;
+    }
+    if (pass === f.pass) return;
+    f.pass = pass;
+    // Read as the coming pass begins; asked of the host when it is a signal (see optionAt).
+    Promise.resolve(optionAt(f, calls.MUTATE_OPTION, pass))
+      .then((p) => { if (p > 0 && !f.gone) return f.mutate(Math.min(1, p), pass); })
+      .catch(() => {});
+  }
+
+  // A shiftreg() written as a count (or nothing) and just evaluated: the row its evaluation threw,
+  // written into the call in place of the count - once per evaluation, outside the undo history.
+  function adoptRow(w) {
+    const k = keyEntryOf(w);
+    const thrown = k?.entry?.value;
+    if (!k || k.adopted || typeof thrown !== 'string') return;
+    k.adopted = true;
+    const src = calls.rowSource(locate(w)?.pos[0]?.text);
+    const count = src.form === 'count' ? src.count : src.form === 'none' ? calls.DEFAULT_CELL_COUNT : null;
+    if (count === null || calls.parseCells(thrown).length !== count) return;
+    if (!writeQuietly(argEdits(w, [[0, quoteRow(thrown)]]), w)) return;
+    push(w, thrown);
+    w.dirty = true;
   }
 
   function ensureLoop() {
@@ -2103,6 +2356,24 @@ export function createInlineWidgets({
   }
 
   /**
+   * Makes the `.record(` call that was at `at` keep a button's take as the row `row` - `take:
+   * steps("...")` (see pattern-core's motion.mjs). 'written' when the call already had a row and
+   * only its cells changed, 'added' when the row is new to the call (it is drawn once the buffer is
+   * evaluated), false when the call is gone or its take is some other code.
+   */
+  function writeTakeRow(at, row) {
+    const call = recordCallAt(at);
+    if (!call) return false;
+    const code = cm.getValue();
+    const e = calls.recordTakeRowEdit(code, call.open, row);
+    if (!e) return false;
+    const close = calls.callArgs(code, call.open)?.close ?? call.open;
+    const had = /(?:^|[{,\s])take\s*:\s*steps\s*\(/.test(code.slice(call.open + 1, close));
+    cm.operation(() => replaceIdx(e.from, e.to, e.text));
+    return had ? 'written' : 'added';
+  }
+
+  /**
    * Where the drawn control whose key is `at` is now: `{ index, end }`, its name and just past its
    * `)`, with `recording` true when a `.record(` follows it. Null once it is gone.
    */
@@ -2120,10 +2391,10 @@ export function createInlineWidgets({
    * `source`, the live source's - the header's capture, for one that moved. False when it is gone
    * or already records.
    */
-  function addRecord(at, cycles, name, source = false) {
+  function addRecord(at, cycles, name, source = false, take = JSON.stringify(name)) {
     const call = controlCallAt(at, source);
     if (!call || call.recording) return false;
-    replaceIdx(call.end, call.end, `.record({ cycles: ${cycles}, take: ${JSON.stringify(name)} })`);
+    replaceIdx(call.end, call.end, `.record({ cycles: ${cycles}, take: ${take} })`);
     return true;
   }
 
@@ -2225,6 +2496,7 @@ export function createInlineWidgets({
     recordCallAt,
     motionRecordAt,
     writeTake,
+    writeTakeRow,
     controlCallAt,
     addRecord,
     get widgets() { return widgets; },

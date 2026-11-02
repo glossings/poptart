@@ -30,7 +30,9 @@ const SLICE_GRID_MAX = Number(/const SLICE_GRID_MAX = (\d+)/.exec(SRC)[1]);
 assert.ok(SLICE_GRID_MAX > 0);
 
 // eslint-disable-next-line no-new-func
-const sliceGridMarks = new Function('SLICE_GRID_MAX', `${grab('sliceGridMarks')}\nreturn sliceGridMarks;`)(SLICE_GRID_MAX);
+// ...and the rule the engines cut `.slices("1/16")` by, which the grid chop shares.
+const sliceGridMod = require('../osc-engine/slice-grid-core.mjs');
+const sliceGridMarks = new Function('SLICE_GRID_MAX', 'sliceGridMod', `${grab('sliceGridMarks')}\nreturn sliceGridMarks;`)(SLICE_GRID_MAX, sliceGridMod);
 
 test('a fitted file grids in cycles, not file fractions', () => {
   // Fitted to 2 cycles, 1/16 grid: 32 sixteenths, not 16 - the "not length/16" the feature is for.

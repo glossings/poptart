@@ -30,6 +30,8 @@
 // and a browser that had to import signal.mjs to get them would pull in the whole runtime. One
 // copy of the rule, two callers.
 
+import { DIVISION_LABEL } from './mini.mjs';
+
 /** How many decimals a written position keeps. Well past a single sample frame in a long file, and
  * short enough that a definition stays a line you can read. */
 export const SLICE_DECIMALS = 5;
@@ -106,6 +108,47 @@ export function normalizeSliceFit(fit) {
   if (fit === 'auto' || fit === true) return 'auto';
   const n = Number(fit);
   return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+/**
+ * A division label (`1/4`, `1/8.`, `1/16t`, `2 bars` - the sync labels, see mini.mjs) as its
+ * length in cycles: a cycle is a bar, so a quarter note is 0.25; dotted is half as long again and
+ * a triplet two thirds. Null for anything that isn't one.
+ */
+export function divisionCycles(label) {
+  const text = String(label ?? '').trim();
+  if (!DIVISION_LABEL.test(text)) return null;
+  const bars = /^(\d+)\s+bars?$/.exec(text);
+  if (bars) return Number(bars[1]) || null;
+  const [, n, d, mod] = /^(\d+)\/(\d+)([.Tt]?)$/.exec(text);
+  const len = (Number(n) / Number(d)) * (mod === '.' ? 1.5 : mod ? 2 / 3 : 1);
+  return len > 0 && Number.isFinite(len) ? len : null;
+}
+
+/**
+ * A `.slices()` value that lays a GRID rather than naming a set: a number is that many equal
+ * slices of every file (`{ grid: { count } }`), a division label one slice per that much of the
+ * file's fitted length (`{ grid: { every, label } }`, every in cycles). Null for anything else -
+ * which, for a string, means it names a set. The engine lays the grid over the file it resolved
+ * (osc-engine's slice-grid-core.mjs), since only it knows how long that file is.
+ */
+export function sliceGridOf(value) {
+  if (typeof value === 'number') {
+    const count = Math.round(value);
+    return Number.isFinite(count) && count >= 1 ? { grid: { count } } : null;
+  }
+  if (typeof value !== 'string') return null;
+  const text = value.trim();
+  if (/^\d+(\.\d+)?$/.test(text)) return sliceGridOf(Number(text));
+  const every = divisionCycles(text);
+  return every == null ? null : { grid: { every, label: text } };
+}
+
+/** True for a value `.slices()` reads as a grid rather than a set name - a number or a division. */
+export function isSliceGridLabel(value) {
+  if (typeof value === 'number') return true;
+  const text = String(value ?? '').trim();
+  return /^\d+(\.\d+)?$/.test(text) || DIVISION_LABEL.test(text);
 }
 
 /** True for a set that chops nothing - the state a set the editor has only just named is in. */

@@ -74,6 +74,7 @@
         <table>
           <tr><td><code>slider knob toggle button xy</code></td><td>controls drawn in the code, heard as you move them</td></tr>
           <tr><td><code>steps("x . x .")</code> · <code>sliders("0.2 0.8")</code> · <code>matrix({ bd: "x..." })</code></td><td>cells · a bar per step · a grid of rows; a count, <code>steps(8)</code>, is that many empty</td></tr>
+          <tr><td><code>shiftreg("x . x x", 0.05)</code> · <code>{ mutate: 0.05 }</code> · <code>{ deviation: 1 }</code></td><td>cells read as a shift register · cells that change each cycle · bars thrown near where they were</td></tr>
           <tr><td><code>.scope .spectrum .waveform .imager .meter</code></td><td>the track's sound</td></tr>
           <tr><td><code>.punchcard .chroma .plot</code></td><td>the pattern's events · its notes · a signal over time</td></tr>
           <tr><td><code>punchcard()</code> · <code>spectrum()</code> … on their own line</td><td>drawn behind the code: every track, or the song's output</td></tr>
@@ -85,6 +86,7 @@
           <tr><td><code>.add .sub .mul .div .mod .set</code> + <code>.in .out .squeeze</code></td><td>arithmetic, and whose events it plays on</td></tr>
           <tr><td><code>.fast .slow .rib .hold .seg</code></td><td>time</td></tr>
           <tr><td><code>.struct .mask .ply .echo .arp .bite .degrade</code></td><td>structure</td></tr>
+          <tr><td><code>.bits(n)</code></td><td>steps read as a shift register, 0..1 on every step</td></tr>
           <tr><td><code>.when .sometimes</code> · <code>choose irand cat seq</code></td><td>conditions · chance and sequence</td></tr>
           <tr><td><code>.fmap(fn)</code> · <code>.events(fn)</code></td><td>edit values · edit whole events</td></tr>
         </table>

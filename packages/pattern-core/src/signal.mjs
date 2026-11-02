@@ -17,7 +17,7 @@ import { parseShapePoints, serializeShapePoints, SHAPE_PRESETS, sampleShape, par
 import { grooveRef, resolveGroove, grooveTimeAt, grooveVelAt, grooveNameLike, looksLikeGrooveData, parseGroove, serializeGroove, setSessionGroove, sessionGroove, GROOVE_NAMES } from './groove.mjs';
 import { parsePianoRoll, normalizePianoRollSteps, noteIndex, noteSlice, noteNudgeChannel, pianoRollNoteGrid, PIANOROLL_DEFAULT_INDEX, PIANOROLL_MAX_NUDGE, PIANOROLL_MODES, looksLikeNoteString } from './pianoroll.mjs';
 import { inSpans, clipShiftNow } from './arrange.mjs';
-import { normalizeSlicePositions, normalizeSliceSet, sliceSetIsEmpty } from './slices.mjs';
+import { normalizeSlicePositions, normalizeSliceSet, sliceSetIsEmpty, sliceGridOf, isSliceGridLabel } from './slices.mjs';
 import { lookupRoll, registerRoll, lookupShape, registerShape, lookupPreset, registerPreset, presetPluginsFor, registerPack, lookupSlices, registerSlices, lookupAuto, registerAuto, lookupGroove, registerGroove, defScope } from './rolls.mjs';
 import { latestCC, registerMidiDevice } from './midi.mjs';
 import { latestOsc, registerOscAddress, normalizeOscAddress } from './osc.mjs';
@@ -27,6 +27,7 @@ import { Frac } from './frac.mjs';
 import { chordIntervals, chordExtension, invertVoices, spreadVoices, voicingVoices, leadVoices, VOICING_NAMES, justVoices, JI_LIMITS } from './harmony.mjs';
 import { rateLedger } from './lfo-rate.mjs';
 import { parseUnitValue } from './units.mjs';
+import { triggerGrid, sampledEdges, edgeSteps, pressSteps, placedPresses, createTriggerCounter, miniSameEveryCycle, noteButtonGrid } from './triggers.mjs';
 import { ENV_DEFAULTS, ENV_FLAGS } from './envctl.mjs';
 
 /**
@@ -2606,6 +2607,47 @@ export class Sig {
   }
 
   /**
+   * Reads the pattern's steps as the bits of a looping shift register: one value per step of the
+   * cycle's step grid, rests included, from 0 to 1 - the window of the current step and the n-1
+   * steps before it (wrapping round the cycle) read as a binary number, the current step as its
+   * most significant bit, divided by 2^n - 1. A step is a 1 when an event starts in it whose
+   * value is not a rest, 0 or false. Each value is the one before it halved, plus the new step's
+   * bit on top: runs of rests fall away step by step, and a hit leaps up.
+   *
+   * `n` may be patterned; it is read once a cycle, at its start. The grid is the fewest equal
+   * steps every event's start and end falls on - steps("x . x x . . x .") reads as eight.
+   */
+  bits(n = 8) {
+    if (!this.stepsForCycle) {
+      throw new Error('[signal] .bits() needs a step pattern, e.g. steps("x . x x . . x .").bits()');
+    }
+    const nSig = toSignal(n);
+    const widthAt = (cycle) => {
+      const v = Math.round(Number(nSig.sample(cycle, 1, cycle)));
+      return Number.isFinite(v) ? Math.max(1, v) : 8;
+    };
+    const base = this.stepsForCycle;
+    const sized = this.gridSize ?? null; // a row of cells knows its count even when it is all rests
+    const stepsForCycle = (cycle) => {
+      const src = (base(cycle) ?? []).filter((s) => !s.cont);
+      const count = sized?.() ?? stepGridOf(src);
+      if (!count) return [];
+      const width = widthAt(cycle);
+      const on = new Array(count).fill(0);
+      const from = Array.from({ length: count }, () => []);
+      for (const s of src) {
+        const i = Math.floor(s.start * count + 1e-9);
+        if (i < 0 || i >= count) continue;
+        if (isBitOn(s.value)) on[i] = 1;
+        from[i].push(s);
+      }
+      const top = 2 ** width - 1;
+      return registerWords(on, width).map((word, i) => withLocs({ start: i / count, end: (i + 1) / count, value: word / top }, ...from[i]));
+    };
+    return new Sig((t, cps, pos) => sampleViaSteps(stepsForCycle, t, cps, pos), { stepsForCycle, ...this._meta() });
+  }
+
+  /**
    * Loops a band of cycles forever: `.rib(14, 2)` plays cycles 14 and 15 over and over (a
    * ribbon). A query for cycle position `c` is remapped to `time + ((c - time) mod length)` -
    * exact via Frac, so a moment reached two different ways samples identically (deterministic
@@ -2835,18 +2877,18 @@ export class Sig {
    * chosen slices. Each trigger is its own attack and lasts its own width, so `"1@3 1"` is a long
    * hit then a short one, and a trigger landing over a rest sounds nothing. `.hold()` is the same
    * trigger grid used the other way round: it stretches each value to the NEXT trigger instead.
+   *
+   * The rhythm can also be a 0/1 SIGNAL - a button(), a recorded take of one, square(), a drawn
+   * shape: every time it rises through 0.5 is a trigger, on the next step of `grid` (16 a cycle
+   * unless given), lasting that step. `note("c3").struct(button())` plays c3 on each press.
    */
-  struct(bool) {
-    const trigSig = toSignal(bool);
-    if (!trigSig.stepsForCycle) {
-      throw new Error('[signal] .struct() needs a step pattern of triggers, e.g. note("c3").struct("1 ~ 1 1")');
-    }
+  struct(bool, grid) {
+    const triggers = triggerSource(bool, grid);
     const base = this.stepsForCycle;
     const stepsForCycle = (cycle) => {
       const srcSteps = base ? base(cycle) : null;
       const out = [];
-      for (const t of trigSig.stepsForCycle(cycle)) {
-        if (!gateOn(t.value)) continue;
+      for (const t of triggers.steps(cycle)) {
         // The source event SOUNDING at the trigger, taken WHOLE: its value plus every channel
         // already merged onto it (vel/clip/nudge, and the sampler's step.cfg), so the bundle a roll
         // or an .as() spec drew rides through onto the new rhythm rather than being re-sampled
@@ -2864,6 +2906,54 @@ export class Sig {
           const step = { ...(src ?? {}), start: t.start, end: t.end, value: ev.value, cont: undefined };
           const locs = joinLocs(ev, t);
           if (locs.length) step.locs = locs;
+          out.push(step);
+        }
+      }
+      return out;
+    };
+    return new Sig((t, cps, pos) => sampleViaSteps(stepsForCycle, t, cps, pos), { stepsForCycle, ...this._meta() });
+  }
+
+  /**
+   * Takes the RHYTHM from a trigger and steps through this pattern's values, one per trigger:
+   * the first trigger plays the first value, the next the next, round and round.
+   *
+   *   n("0 4 7").advance("1 ~ 1 1")                              // 0 4 7 0, 4 7 0 4, ...
+   *   n(sliders("0 4 7", 0, 12).advance(button())).scale("A1:minor")  // the next note on each press
+   *
+   * The values are this pattern's events in the cycle the trigger lands in, in time order, so a
+   * `<...>` still changes them cycle by cycle; events starting together (a chord, a stack) are one
+   * value, struck together. The trigger is anything .struct() takes - a step pattern, or a 0/1
+   * signal read on the next step of `grid` - and is counted from cycle 0, so the same cycle always
+   * plays the same values; a live button() counts its presses as they come, and a recorded one
+   * counts its take and its presses as one stream, each trigger the next. The whole event travels
+   * with its value - velocity, clip and the rest - as it does through .struct().
+   */
+  advance(trig, grid) {
+    const base = this.stepsForCycle;
+    if (!base) throw new Error('[signal] .advance() steps through a pattern of values, e.g. n("0 4 7").advance("1 ~ 1 1")');
+    const triggers = triggerSource(trig, grid);
+    const stepsForCycle = (cycle) => {
+      const trigs = triggers.counted(cycle);
+      if (!trigs.length) return [];
+      // The values in play this cycle: each onset with everything that starts with it.
+      const groups = [];
+      const onsets = base(cycle).filter((s) => s.value != null && !s.cont).sort((a, b) => a.start - b.start);
+      for (const s of onsets) {
+        const last = groups[groups.length - 1];
+        if (last && Math.abs(last[0].start - s.start) < MIX_EPS) last.push(s);
+        else groups.push([s]);
+      }
+      if (!groups.length) return [];
+      const out = [];
+      for (const t of trigs) {
+        const group = groups[(((t.k % groups.length) + groups.length) % groups.length)];
+        for (const src of group) {
+          // A fresh attack on the trigger's step, as .struct() strikes one.
+          const step = { ...src, start: t.start, end: t.end, cont: undefined };
+          const locs = joinLocs({ value: src.value, locs: stepLocs(src) }, t);
+          if (locs.length) step.locs = locs;
+          else delete step.locs;
           out.push(step);
         }
       }
@@ -4630,6 +4720,112 @@ function gateOn(value) {
   return Number.isNaN(n) ? true : n !== 0;
 }
 
+/**
+ * Where .struct() and .advance() take their triggers from: `{ steps(cycle), counted(cycle) }`,
+ * the triggers of a cycle as `[{ start, end, value }]` - `counted` with `k` on each, which trigger
+ * it is counting from cycle 0 (or, for a live button, from its first press).
+ *
+ *   - a step pattern: its `on` steps, as ever
+ *   - a live button(): its presses, each on the next step a scheduler has not sent (triggers.mjs)
+ *   - a recorded button take: the take's presses, plus the live ones not in it yet
+ *   - any other signal: where it rises through 0.5, each on the next step
+ *
+ * `grid` is the steps per cycle an edge lands on, for everything but a step pattern, which has
+ * steps of its own.
+ */
+function triggerSource(trig, grid) {
+  const sig = toSignal(trig);
+  if (sig.stepsForCycle) {
+    const steps = (cycle) => sig.stepsForCycle(cycle).filter((s) => gateOn(s.value));
+    const period = sig.sameEveryCycle || miniSameEveryCycle(sig.miniText) ? 1 : null;
+    return countedSource(steps, period);
+  }
+  const g = triggerGrid(grid);
+  if (sig.pressKey) noteButtonGrid(sig.pressKey, g); // a take is written at the grid it plays on
+  if (sig.triggerEdges || sig.pressKey) {
+    const fixed = sig.triggerEdges ? (cycle) => edgeSteps(sig.triggerEdges(cycle - 1 / g, cycle + 1), cycle, g) : () => [];
+    const live = sig.pressKey ? (cycle) => pressSteps(sig.pressKey, cycle, g) : () => [];
+    // A live press on a step the take already triggers is that trigger, not a second one.
+    const both = (cycle) => {
+      const own = fixed(cycle);
+      const extra = live(cycle).filter((p) => !own.some((t) => Math.abs(t.start - p.start) < MIX_EPS));
+      return { own, extra };
+    };
+    const steps = (cycle) => {
+      const { own, extra } = both(cycle);
+      return [...own, ...extra].sort((a, b) => a.start - b.start);
+    };
+    // The count. One stream: the take's triggers and the live presses, each trigger one more than
+    // the trigger before it - so a press plays the next value the moment it is placed, whether or
+    // not there is a take yet, and the take, once it plays, carries on from the last press rather
+    // than starting over. Before any press the take is counted from cycle 0 (seekable); after one,
+    // from the latest press (a button keeps its latest press for good).
+    const before = sig.triggerEdges ? createTriggerCounter((c) => fixed(c).length, sig.triggerPeriod ?? null) : null;
+    // Take triggers on steps before grid index `step`, counted from cycle 0.
+    const countBefore = (count, steps, step) => {
+      const cycle = Math.floor(step / g);
+      const idx = step - cycle * g;
+      return count(cycle) + steps(cycle).filter((t) => Math.round(t.start * g) < idx).length;
+    };
+    const takeBefore = (step) => (before ? countBefore(before, fixed, step) : 0);
+    // ...and the same for the take as a press found it when it went down, which is what the first
+    // press counts on from: with nothing recorded before it, that is 0.
+    const asWas = new WeakMap(); // a remembered take -> { count, steps }
+    const takeBeforeAsWas = (was, step) => {
+      if (!before) return 0;
+      if (!was || !sig.triggerEdgesOf) return takeBefore(step);
+      let read = asWas.get(was);
+      if (!read) {
+        const stepsOf = (cycle) => edgeSteps(sig.triggerEdgesOf(was, cycle - 1 / g, cycle + 1), cycle, g);
+        read = { steps: stepsOf, count: createTriggerCounter((c) => stepsOf(c).length, sig.triggerPeriod ?? null) };
+        asWas.set(was, read);
+      }
+      return countBefore(read.count, read.steps, step);
+    };
+    // Take triggers strictly between two steps: as the take is now, or as a press found it - which
+    // is what played up to that press, without the press's own pulse laid in after it.
+    const between = (a, b) => Math.max(0, takeBefore(b) - takeBefore(a + 1));
+    const betweenAsWas = (was, a, b) => Math.max(0, takeBeforeAsWas(was, b) - takeBeforeAsWas(was, a + 1));
+    // Kept on the press itself, so an evaluation that builds this source again finds it counted
+    // where it was - one count for a plain button, one for a button with a take.
+    const mode = before ? 'take' : 'live';
+    const pressK = (list, i) => {
+      const p = list[i];
+      p.at.k ??= {};
+      if (p.at.k[mode] === undefined) {
+        p.at.k[mode] = i === 0 ? takeBeforeAsWas(p.before, p.step) : pressK(list, i - 1) + 1 + betweenAsWas(p.before, list[i - 1].step, p.step);
+      }
+      return p.at.k[mode];
+    };
+    const kAt = (step) => {
+      const list = sig.pressKey ? placedPresses(sig.pressKey, g) : [];
+      let i = list.length - 1;
+      while (i >= 0 && list[i].step > step) i--;
+      if (i < 0) return takeBefore(step);
+      const k = pressK(list, i);
+      return list[i].step === step ? k : k + 1 + between(list[i].step, step);
+    };
+    const counted = (cycle) => steps(cycle).map((t) => ({ ...t, k: kAt(cycle * g + Math.round(t.start * g)) }));
+    return { steps, counted };
+  }
+  const read = (pos) => sig.sample(pos, 1, pos);
+  const steps = (cycle) => edgeSteps(sampledEdges(read, cycle - 1 / g, cycle + 1, g), cycle, g);
+  return countedSource(steps, null);
+}
+
+// A trigger source that is the same wherever it is asked: counted from cycle 0 by
+// createTriggerCounter, from one period when it has one.
+function countedSource(steps, period) {
+  const before = createTriggerCounter((c) => steps(c).length, period);
+  return {
+    steps,
+    counted: (cycle) => {
+      const k0 = before(cycle);
+      return steps(cycle).map((t, i) => ({ ...t, k: k0 + i }));
+    },
+  };
+}
+
 // Every step of `steps` sounding at cycle-phase `phase` (fraction of a cycle) - one for an ordinary
 // sequence, several for a `,`-stack, none over a rest. _binop reads the right operand this way so a
 // stacked operand fans the event out per layer (and so both operands' highlight spans survive the
@@ -6360,6 +6556,7 @@ function assertBuilderInput(builder, value) {
  */
 // `mode` 'speech' is say()'s text (see tokenizeSpeech in mini.mjs): prose punctuation stays in
 // its words, and every value stays the string it was written as - "007" is said as written.
+// 'divisions' reads a division label ("1/4", "1/8.", "2 bars") as one value (see .slices()).
 export function mini(str, offset = 0, mode) {
   assertBuilderInput('mini', str);
   if (str instanceof Sig) return str;
@@ -6367,11 +6564,11 @@ export function mini(str, offset = 0, mode) {
     const ast = parseMini(String(str), offset, { speech: true });
     return new Sig(miniStepSampler(ast), { stepsForCycle: miniStepsForCycle(ast) });
   }
-  const ast = parseMini(String(str), offset);
+  const ast = parseMini(String(str), offset, { divisions: mode === 'divisions' });
   const plainValue = (v) => (Number.isNaN(Number(v)) ? v : Number(v));
   // A number with a unit on it ("3x", "-6db") is the number, in the family's base unit, and the
   // signal says which unit (see units.mjs).
-  const unit = miniUnit(String(str));
+  const unit = mode === 'divisions' ? null : miniUnit(String(str));
   const valueFn = unit ? (v) => parseUnitValue(v)?.value ?? plainValue(v) : plainValue;
   const sig = new Sig(miniStepSampler(ast, valueFn), { stepsForCycle: miniStepsForCycle(ast, valueFn), unit });
   // The text it was written as, for the one reader that needs the literal back: a modulator's
@@ -8121,13 +8318,27 @@ function slicesSignal(v) {
     }
     return new Sig(() => set);
   }
-  const selector = toSignal(v);
+  // A string is read with division labels whole, so "<1/4 1/8>" is two divisions rather than two
+  // 1s slowed down (the location transpile wraps it the same way - see isPatternPosition).
+  const selector = typeof v === 'string' ? mini(v, 0, 'divisions') : toSignal(v);
   const warned = new Set(); // one line per unknown name, not one per event
   const cache = new Map(); // a name's normalized set, so a per-event lookup isn't a per-event sort
+  const grids = new Map(); // a number or division's grid, one object per value rather than per event
   const scope = defScope();
   const resolve = (value) => {
     if (Array.isArray(value)) return normalizeSlicePositions(value); // a Sig that yields lists
     if (value == null) return null;
+    // A number is that many equal slices and a division label one per that much of the file -
+    // grids the engine lays over whichever file plays (see sliceGridOf).
+    if (isSliceGridLabel(value)) {
+      if (!grids.has(value)) grids.set(value, sliceGridOf(value));
+      const grid = grids.get(value);
+      if (!grid && !warned.has(value)) {
+        warned.add(value);
+        warnUser(`[signal] .slices(${JSON.stringify(value)}): a number of slices has to be 1 or more - chopping on the sample's own transients instead.`);
+      }
+      return grid;
+    }
     const key = String(value).trim();
     if (!key) return null;
     const found = lookupSlices(key, null, scope);
@@ -8268,6 +8479,42 @@ function rngAtPos(cycle, phase, seed) {
 // randomised/structural combinators below (.degrade()/.ply()/.echo()) build their step grid first
 // and sample through it, so the two views can never disagree. Last covering step wins, so
 // overlapping copies (.echo()) read as the most recent onset.
+// The fewest equal steps a cycle divides into with every step's start and end on one of them
+// (see Sig#bits), or - for steps on no grid finer than GRID_SEARCH - null.
+const GRID_SEARCH = 1024;
+function stepGridOf(steps) {
+  if (!steps.length) return null;
+  const edges = [];
+  for (const s of steps) for (const e of [s.start, s.end]) if (Number.isFinite(e)) edges.push(e - Math.floor(e));
+  for (let n = 1; n <= GRID_SEARCH; n++) {
+    if (edges.every((e) => Math.abs(e * n - Math.round(e * n)) < 1e-6)) return n;
+  }
+  return null;
+}
+
+// Whether an event's value makes a 1 for .bits(): anything but a rest, 0 or false.
+function isBitOn(v) {
+  if (Array.isArray(v)) return v.some(isBitOn);
+  if (v == null || v === false) return false;
+  if (typeof v === 'number') return v !== 0;
+  if (typeof v === 'string') return v.trim() !== '' && Number(v) !== 0;
+  return true;
+}
+
+/**
+ * The register's words for a loop of bits (0s and 1s): for each step, it and the `width - 1` steps
+ * before it, wrapping round the loop, as a binary number with the step itself as the top bit. So
+ * each word is the one before it shifted down a place, with the new step's bit on top.
+ */
+export function registerWords(bits, width = 8) {
+  const n = bits.length;
+  return bits.map((_, i) => {
+    let word = 0;
+    for (let k = 0; k < width; k++) word = word * 2 + (bits[(((i - k) % n) + n) % n] ? 1 : 0);
+    return word;
+  });
+}
+
 function sampleViaSteps(stepsForCycleFn, t, cps, pos) {
   const cyclePos = pos ?? t * cps;
   const cycle = Math.floor(cyclePos);

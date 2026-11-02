@@ -382,7 +382,7 @@ function registry({ panelEd }) {
     applyEdits: () => {},
     chordLabel: (c) => c,
   };
-  const helpers = ['matchParen', 'splitFirstArg', 'idLiteralValue'].map(grab).join('\n\n');
+  const helpers = ['matchParen', 'splitFirstArg', 'idLiteralValue', 'idsNamedIn'].map(grab).join('\n\n');
   const keys = Object.keys(env).filter((k) => env[k] !== null);
   // eslint-disable-next-line no-new-func
   const make = new Function(...keys, `

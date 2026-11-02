@@ -42,6 +42,7 @@ let mixctlMod = null; // mixctl.mjs - the mixer's gain/pan trim reads and code e
 let groupsMod = null; // groups.mjs - the track tree: who is in which group, and in what order
 let recordMod = null; // record.mjs - a live take into a roll (the ● rec and capture paths)
 let slicesMod = null; // slices.mjs - reading, tidying and writing a _slices() set's positions
+let sliceGridMod = null; // osc-engine's slice-grid-core.mjs - where .slices(8)/.slices("1/4") cut a file
 let samplerctlMod = null; // samplerctl.mjs - the envelope panel's sampler-control reads and code edits
 let grooveMod = null; // groove.mjs - the groove table's format, its presets and its slot arithmetic
 let lfoRateMod = null; // lfo-rate.mjs - a patterned LFO rate's phase count, for the shape panel's playhead
@@ -67,10 +68,12 @@ const coreReady = Promise.all([
   import('/pattern-core/lfo-rate.mjs'),
   import('/pattern-core/envctl.mjs'),
   import('/pattern-core/units.mjs'),
+  import('/osc-engine/slice-grid-core.mjs'),
 ])
-  .then(([m, l, s, pr, nt, mx, rc, ar, hm, ro, sl, gr, sc, gv, lr, ec, un]) => {
+  .then(([m, l, s, pr, nt, mx, rc, ar, hm, ro, sl, gr, sc, gv, lr, ec, un, sg]) => {
     envctlMod = ec;
     unitsMod = un;
+    sliceGridMod = sg;
     grooveMod = gv;
     lfoRateMod = lr;
     groupsMod = gr;
@@ -478,6 +481,9 @@ const sliceDefs = makeDefRegistry({
   useCall: 'slices',
   emptyBody: '{}', // a set with no file in it yet - every sample it meets chops on its own transients
   isData: () => false,
+  // A number or a division in `.slices("<main 1/4 8>")` is a grid, never a set to name.
+  idsIn: (str) => idsNamedIn(String(str).replace(/\d+\/\d+[.Tt]?(?![\w./])|\d+\s+bars?\b/g, ' '))
+    .filter((id) => !/^\d+(?:\.\d+)?$/.test(id)),
   library: () => prPrebakeSlices.map((p) => p.id),
   libraryNote: 'prebake',
   panel: {
@@ -737,7 +743,8 @@ let chainSlots = [];
 let knownPlugins = [];
 
 // BUILDERS / METHODS / API_DOCS / lookupDoc come from api-docs.js (loaded just before this
-// script): one documented entry per userland name, and the word lists are derived from it.
+// script): one documented entry per userland name, and the word lists are derived from it. So do
+// OPTION_DOCS / optionContext / lookupOptionDoc, the keys of a call's options object.
 
 // The sublime keymap supplies the expected editing chords (Cmd/Ctrl-/ comment, Cmd/Ctrl-D
 // select-next, etc.); extraKeys layers transport + VS Code-style line moving/duplication
@@ -1647,7 +1654,9 @@ function foldWidgetCalls(ed, code) {
     if (calls.foldable && !calls.foldable(c.kind, parsed.args)) continue;
     if (foldsOf(ed).expanded.has(key)) continue;
     const fold = iw.makeFold(c.kind);
-    if (fold) foldSpan(ed, c.at, parsed.close + 1, fold, null, key);
+    // The cells fold; any other argument - { mutate }, a range - stays code beside them.
+    const span = calls.foldRange(c.kind, c, parsed);
+    if (fold) foldSpan(ed, span.from, span.to, fold, null, key);
   }
 }
 
@@ -1682,7 +1691,12 @@ function unfoldWidget(ed, hit) {
   foldsOf(ed).expanded.add(hit.key);
   const range = hit.mark?.find();
   refoldAll(ed);
-  if (range) ed.setCursor(ed.posFromIndex(ed.indexFromPos(range.from) + hit.kind.length + 1));
+  if (range) {
+    // Into the call: past its name when the whole call was folded, else at the start of its cells.
+    const at = ed.indexFromPos(range.from);
+    const whole = ed.getValue().startsWith(hit.kind, at);
+    ed.setCursor(ed.posFromIndex(at + (whole ? hit.kind.length + 1 : 0)));
+  }
   ed.focus();
 }
 
@@ -1837,9 +1851,9 @@ function runLineRange(code, run) {
 // rare, unlike the per-keystroke changes this deliberately ignores.
 onEveryDeck((ed) => ed.on('changes', (_, changes) => {
   if (changes.some((c) => c.origin === 'undo' || c.origin === 'redo')) refoldAll(ed);
-  // A steps(), sliders() or matrix() pasted or dropped in is drawn at once, as it was where it was
+  // A steps(), sliders(), matrix() or shiftreg() pasted or dropped in is drawn at once, as it was where it was
   // copied from, rather than sitting as text until the next evaluation.
-  else if (changes.some((c) => (c.origin === 'paste' || c.origin === 'drop') && /\b(?:steps|sliders|matrix)\s*\(/.test(c.text.join('\n')))) refoldAll(ed);
+  else if (changes.some((c) => (c.origin === 'paste' || c.origin === 'drop') && /\b(?:steps|sliders|matrix|shiftreg)\s*\(/.test(c.text.join('\n')))) refoldAll(ed);
 }));
 
 // String/bracket-aware scan from an opening paren to its matching close; -1 if unbalanced. The one
@@ -2589,7 +2603,18 @@ setInterval(() => pollPluginEdits().catch(() => {}), 500);
 function writeMotionTake(t) {
   const ed = deckEditor(t.deck);
   const iw = ed ? inlineWidgetsFor(ed) : null;
-  if (!iw || t.at == null || !Array.isArray(t.shapes)) return;
+  if (!iw || t.at == null) return;
+  if (typeof t.row === 'string') {
+    // A button's take is a row of cells in the call: written in place as each press lands, and
+    // evaluated when it is new to the call, so it is drawn as cells to click.
+    const how = iw.writeTakeRow(t.at, t.row);
+    if (how === 'added') {
+      logLine('take recorded: steps(…)');
+      evalEditor(ed);
+    }
+    return;
+  }
+  if (!Array.isArray(t.shapes)) return;
   const call = iw.recordCallAt(t.at);
   if (!call) return; // the call is gone since it was evaluated: there is nowhere to keep the take
   const axes = takeAxes(t);
@@ -2746,6 +2771,13 @@ async function captureAll() {
         }
         const call = iw.controlCallAt(t.at, !!t.source);
         if (!call || call.recording) continue;
+        if (typeof t.row === 'string') {
+          // A button's take: a row of cells, written into the call itself.
+          if (!iw.addRecord(t.at, t.cycles, null, false, `steps(${JSON.stringify(t.row)})`)) continue;
+          ids.push('steps(…)');
+          lengths.add(t.cycles);
+          continue;
+        }
         const axes = takeAxes(t);
         const name = freeTakeName(ed, call.index, axes);
         if (!iw.addRecord(t.at, t.cycles, name, !!t.source)) continue;
@@ -3512,6 +3544,18 @@ function scaleKeysHints(cur, typed) {
   return hintResult(cur, typed, matches.map((item) => ({ text: item.key, displayText: item.label })));
 }
 
+// The keys of `opt.call`'s options object (optionContext's) not yet written there, each
+// completing as `key: `.
+function optionHints(cur, opt) {
+  // A key already written in this object is not offered again.
+  const pool = Object.keys(OPTION_DOCS[opt.call]).filter((k) => !opt.written.includes(k)).map((k) => ({ key: k }));
+  const matches = opt.key ? rankedMatches(pool, opt.key, 24) : pool;
+  return hintResult(cur, opt.key, matches.map((item) => {
+    const doc = lookupOptionDoc(opt.call, item.key, opt.method);
+    return { text: `${item.key}: `, displayText: item.key, doc, render: renderHintRow };
+  }));
+}
+
 function wordHints(cur, typed, words, context) {
   const pool = words.map((w) => ({ key: w }));
   const completions = rankedMatches(pool, typed, 24).map((item) => {
@@ -3531,7 +3575,10 @@ function renderHintRow(el, data, completion) {
   nameEl.className = 'hint-name';
   nameEl.textContent = name;
   el.appendChild(nameEl);
-  const args = display.slice(display.indexOf(name) + name.length); // "(factor)", or "" for a value
+  // "(factor)", "" for a value, and for an option key the call it belongs to: deviation · sliders
+  const args = completion.doc.kind === 'option'
+    ? ` · ${display.slice(0, display.indexOf('('))}`
+    : display.slice(display.indexOf(name) + name.length);
   if (args) {
     const argsEl = document.createElement('span');
     argsEl.className = 'hint-args';
@@ -3592,6 +3639,11 @@ function poptartHint(editor) {
   // method (`n("0").s("clap")`), so a leading dot is allowed where se(/sr( forbid it.
   m = before.match(/(?<![\w$])\.?s\s*\(\s*["']([^"']*)$/);
   if (m) return samplePackHints(cur, m[1]);
+
+  // Where a key goes in a call's options object → that call's own keys (see api-docs.js's
+  // OPTION_DOCS): `sliders("…", 0, 1, { de` offers deviation, with sliders()'s words for it.
+  const opt = optionContext(before);
+  if (opt && OPTION_DOCS[opt.call]) return optionHints(cur, opt);
 
   // After a dot → chain methods; bare word → top-level builders. A dot straight after a digit is
   // the decimal point of a number being typed (`begin(0.3`), not a chain - offering the whole
@@ -3781,6 +3833,16 @@ function tokenAtCoords(editor, clientX, clientY) {
 function docAtCoords(editor, clientX, clientY) {
   const hit = tokenAtCoords(editor, clientX, clientY);
   if (!hit) return null;
+  // A key written in a call's options object is that call's word, not the function of the same
+  // name: `attack` in env({ attack }) is the envelope's option, not the amp envelope method. A key with
+  // nothing to say about it says nothing, rather than describing something else.
+  if (/^\s*:/.test(hit.line.slice(hit.token.end))) {
+    const opt = optionContext(editor.getRange(CodeMirror.Pos(0, 0), CodeMirror.Pos(hit.lineNo, hit.token.start)));
+    if (opt) {
+      const doc = lookupOptionDoc(opt.call, hit.token.string, opt.method);
+      return doc ? { doc, key: `${opt.call}.${hit.token.string}:option`, box: hit.box } : null;
+    }
+  }
   const context = /\.\s*$/.test(hit.line.slice(0, hit.token.start)) ? 'method' : 'builder';
   const doc = lookupDoc(hit.token.string, context);
   return doc ? { doc, key: `${hit.token.string}:${context}`, box: hit.box } : null;
@@ -12626,6 +12688,9 @@ function makeDefRegistry(opts) {
   // come apart wherever the call is named for the list it holds rather than for one of them.
   const {
     kind, label = kind, section, defCall, useCall, alsoCalls = [], legacyCall = null, emptyBody, isData, library, libraryNote, panel, scope = null,
+    // The names a use call's string says - idsNamedIn, unless the kind's argument also holds
+    // values that are not names (a slice grid: `.slices("<main 1/4>")`).
+    idsIn = idsNamedIn,
     // References to one of these that are NOT calls in the code. Only rolls have any: an
     // arrangement's clips name a roll (see clips()), so a rename has to carry them and a delete
     // has to see them, exactly as it does for the patterns that say the name.
@@ -12865,7 +12930,7 @@ function makeDefRegistry(opts) {
       rewrites.push([m.index, m.index + m[0].length, `${m[1]}(${JSON.stringify(id)})`]);
     }
     for (const call of idCalls(code)) {
-      for (const id of idsNamedIn(call.str)) {
+      for (const id of idsIn(call.str)) {
         if (isTaken(id, call.scope)) continue;
         claim(id, call.scope);
         created.push({ id, scope: call.scope });
@@ -13205,7 +13270,7 @@ function makeDefRegistry(opts) {
     }
   }
 
-  return { kind, label, section, defCall, useCall, legacyCall, libraryNote, isIdString, isIdCall, defsInBuffer, findDef, idCalls, refCalls, runs, removalRange, defsEdit, allIds, inLibrary, materialize, create, remove, rename, duplicate, adopt, pinState, pin, unpin, withEditor };
+  return { kind, label, section, defCall, useCall, legacyCall, libraryNote, idsIn, isIdString, isIdCall, defsInBuffer, findDef, idCalls, refCalls, runs, removalRange, defsEdit, allIds, inLibrary, materialize, create, remove, rename, duplicate, adopt, pinState, pin, unpin, withEditor };
 }
 
 
@@ -16720,7 +16785,12 @@ async function prSliceToNotes(targets) {
   const { code, at, call, ref } = chain;
   const live = targets.filter((nt) => !nt.hidden);
   if (!live.length) return;
-  const named = prSliceSetOnChain(code, at);
+  // A grid on the chain (.slices(8), .slices("1/4")) cuts each file itself - its chops are laid
+  // here as the engines lay them, and there is nothing to write down.
+  const gridCall = sliceCallOnChain(code, at);
+  const gridAt = gridCall ? sliceGridOnCall(gridCall, code, prCM) : null;
+  const grid = gridAt ? slicesMod.sliceGridOf(gridAt.label) : null;
+  const named = grid ? null : prSliceSetOnChain(code, at);
   // Which file each note plays: its own index where the roll sets any (the all-or-nothing rule the
   // builder applies - see pianoroll() in signal.mjs), otherwise whatever the chain names.
   const anyIndex = prLiveNotes(prState.notes)
@@ -16749,7 +16819,11 @@ async function prSliceToNotes(targets) {
       const entry = named && slicesMod ? slicesMod.sliceEntryFor(named.set, res.key) : null;
       let marks = entry?.marks ?? null;
       let drawn = true;
-      if (!marks?.length) {
+      if (grid) {
+        const fixed = fitCall && (fitCall.value === 'auto' || typeof fitCall.value === 'number') ? fitCall.value : null;
+        const dur = (await packLoadBuffer(res.file)).duration;
+        marks = sliceGridMod.gridSlices(grid, { fit: fixed, measures: dur * (transport.cps || 0) }).positions;
+      } else if (!marks?.length) {
         drawn = false;
         marks = (await api('GET', `/api/sampleSlices?file=${encodeURIComponent(res.file)}`)).slices;
       }
@@ -22275,9 +22349,9 @@ function stopLanded(result, perDeck) {
 // velocity. The settings tab picks between that piano and the same keyboard laid out IN KEY - see
 // KB_GAP_KEYS below. On an INDEX roll the same keys count files instead - `a` is the pack's first, `w` its
 // second… - struck at the roll's default pitch with the index riding along, so a drum roll records
-// from the keys the way it is drawn. (Nothing sounds for those yet: a sampler is triggered by
-// playSample, not noteOn, and keyNote only knows the latter - they record, and play back from the
-// roll on its next pass.)
+// from the keys the way it is drawn. On a SAMPLER track every key strikes the file, the way the
+// roll's audition strikes a row (a sampler answers no note-on): the edge carries the roll's sample,
+// and keyNote plays it through the track and logs the key as ever.
 // ---------------------------------------------------------------------------------------------
 
 // The INDEX axis's table - there the keys count a pack's files, so they stay a plain 0, 1, 2, …
@@ -22399,6 +22473,15 @@ function prSyncKeyboardBtn() {
 function kbSend(trackId, note, isOn, index = null) {
   const body = { trackId, note, vel: kbVelocity, isOn };
   if (index != null) body.index = index;
+  // What prPreviewFile auditions a row with - the file, its region and its rate - for keyNote to
+  // strike (pattern-core's keyStrike).
+  const ref = prState?.chain?.ref;
+  if (isOn && ref) {
+    const { begin, end } = prChainRegion();
+    body.sample = { ref: ref.ref, index: ref.index ?? 0, begin, end };
+    if (prState.chain.speed != null) body.sample.speed = prState.chain.speed;
+    if (prState.chain.stretch != null) body.sample.stretch = prState.chain.stretch;
+  }
   api('POST', '/api/keyNote', body).catch(() => {});
 }
 
@@ -27026,6 +27109,7 @@ function openSliceEditorFromCall(call, code, idx, ed = cm) {
     // moves every offset above it not at all and the call's own rewrite moves the rest along. The
     // same dance as the roll's, the shape's and the pack's.
     if (!code.slice(call.open + 1, call.close).trim()) return sliceMaterializeAt(idx, ed);
+    if (sliceGridOnCall(call, code, ed)) return openSliceFromSlicesCall(call, code, ed);
     if (!sliceDefs.isIdCall(code.slice(call.open + 1, call.close))) {
       logLine('this .slices([...]) carries its positions inline - the editor writes named sets, so give it a name (.slices("break")) to draw it here', true);
       return false;
@@ -27035,7 +27119,7 @@ function openSliceEditorFromCall(call, code, idx, ed = cm) {
   // Double-clicked `slice`: that call says WHICH chop to play, not where the chops are. Follow the
   // chain to the set it plays - or, the usual case the first time, give the chain one.
   const on = sliceCallOnChain(code, call.start);
-  if (on) return openSliceFromIdCall(on, code, ed);
+  if (on) return openSliceFromSlicesCall(on, code, ed);
   // ...but only where there is a sample to chop. `.slice(` is also an everyday JavaScript method,
   // and a setup block's `list.slice(2)` must not have `.slices()` written onto it - so a chain with
   // no sampler source declines the handle and the double-click goes on to whatever else wants it.
@@ -27053,6 +27137,101 @@ function sliceMaterializeAt(idx, ed = cm) {
   const back = at.find();
   at.clear();
   return !!(named && back) && openWidgetAt(ed.getValue(), ed.indexFromPos(back), ed);
+}
+
+/**
+ * The grid a `.slices(...)` call lays - `.slices(8)`, `.slices("1/4")`, or the one sounding in a
+ * `<8 main>` (the first written while stopped) - as `{ label, from, to }` over its text, or null
+ * where the call names a set instead.
+ */
+function sliceGridOnCall(call, code, ed = cm) {
+  if (!slicesMod || !sliceGridMod) return null;
+  const inner = code.slice(call.open + 1, call.close);
+  const bare = /^\s*(\d+(?:\.\d+)?)\s*$/.exec(inner);
+  if (bare) {
+    const from = call.open + 1 + bare.index + bare[0].indexOf(bare[1]);
+    return { label: bare[1], from, to: from + bare[1].length };
+  }
+  const range = idStringRange(call, code);
+  if (!range) return null;
+  const label = sliceGridLabelIn(code, range[0], range[1], ed);
+  return label ? { label, from: range[0], to: range[1] } : null;
+}
+
+/** The grid label a `.slices()` string lays at `from..to`: the one sounding, else the first. */
+function sliceGridLabelIn(code, from, to, ed = cm) {
+  const sounding = activeIdIn(from, to, ed);
+  const first = /\d+\/\d+[.Tt]?(?![\w./])|\d+\s+bars?\b|[\w$]+(?:\.\d+)?/.exec(code.slice(from, to));
+  const label = (sounding ?? first?.[0] ?? '').trim();
+  return label && slicesMod?.isSliceGridLabel(label) && slicesMod.sliceGridOf(label) ? label : null;
+}
+
+/** Opens what a `.slices(...)` call chops by: the grid it lays, or the set it names. */
+function openSliceFromSlicesCall(call, code, ed = cm) {
+  const grid = sliceGridOnCall(call, code, ed);
+  if (!grid) return openSliceFromIdCall(call, code, ed);
+  const source = ed.markText(ed.posFromIndex(grid.from), ed.posFromIndex(grid.to), {});
+  openSliceGrid(grid.label, { source, at: call.start }, ed);
+  return true;
+}
+
+/**
+ * The panel on a grid's chops: the file the chain plays, cut where `.slices(8)` or
+ * `.slices("1/4")` cuts it - read-only, since the call lays them and there is no set to write to.
+ */
+function openSliceGrid(label, from = {}, ed = cm) {
+  if (sliceState) closeSlicePanel();
+  sliceCM = ed;
+  sliceState = {
+    id: null,
+    grid: label,
+    set: [],
+    positions: [],
+    others: {},
+    fit: null,
+    own: false,
+    hand: false,
+    source: from.source ?? null,
+    at: from.at ?? null,
+    file: null, key: null, label: '', index: null, indices: [], srcName: '', ref: null,
+    buffer: null,
+    peaks: null,
+    detected: null,
+    detectWhy: '',
+    sel: 0,
+    view: { start: 0, span: 1 },
+    drag: null,
+    lit: [],
+  };
+  sliceTitle.textContent = `slices ${label}`;
+  syncPreviewRouting();
+  sliceBackdrop.classList.remove('hidden');
+  sliceSetHand(false);
+  sliceSyncFit();
+  sliceSyncHead();
+  sliceSay('');
+  sliceRender();
+  sliceLoadSample();
+  sliceCanvas.focus({ preventScroll: true });
+}
+
+/**
+ * Lays the grid on screen over the file the panel holds - through the function both engines cut
+ * with, at the fit in force (the chain's `.fit()`; a patterned one has no single length, so it
+ * counts as none), so the markers are the chops that play.
+ */
+function sliceLayGrid() {
+  const state = sliceState;
+  if (!state?.grid || !state.buffer || !sliceGridMod || !slicesMod) return;
+  const grid = slicesMod.sliceGridOf(state.grid);
+  if (!grid) return;
+  const override = sliceFitCall();
+  const fit = override && (override.value === 'auto' || typeof override.value === 'number') ? override.value : null;
+  const laid = sliceGridMod.gridSlices(grid, { fit, measures: state.buffer.duration * (transport.cps || 0) });
+  state.positions = laid.positions;
+  state.sel = Math.min(state.sel, Math.max(0, laid.positions.length - 1));
+  sliceSay(laid.assumed ? `no fit — laid over ${sliceFitNum(laid.cycles)} cy, as .fit() would` : '');
+  sliceRender();
 }
 
 /** Double-clicked the name of a .slices("<tight loose>"): open the one sounding, or the first named. */
@@ -27075,6 +27254,7 @@ function openSliceSetById(id, from = {}, ed = sliceState ? sliceCM : cm) {
   const key = String(id);
   const def = sliceDefOf(key);
   const lib = def ? null : prPrebakeSlices.find((p) => p.id === key);
+  sliceTitle.textContent = 'slices';
   if (!def && !lib) {
     logLine(`no slice set called "${key}" is defined in this buffer`, true);
     return false;
@@ -27183,6 +27363,7 @@ async function sliceLoadSample() {
     if (gen !== sliceLoadGen || sliceState !== state) return;
     state.peaks = slicePeakPyramid(state.buffer);
     sliceSyncFit(); // it needs the file's length, which is only known now
+    sliceLayGrid();
     sliceRender();
     await sliceDetect();
     if (gen !== sliceLoadGen || sliceState !== state) return;
@@ -27403,13 +27584,12 @@ function sliceFitBy(factor) {
  * definition should wear (SLICE_GRID_MAX).
  */
 function sliceGridMarks(div, cycles) {
-  if (!(cycles > 0) || !(div > 0)) return null;
-  // Ceil, less a twentieth of a division: a 1.001-measure loop wants 16 sixteenths, not 16 and a
-  // click's worth of tail promoted to a slice of its own by rounding.
-  const count = Math.max(1, Math.ceil(cycles * div - 0.05));
-  if (count > SLICE_GRID_MAX) return null;
-  const step = 1 / (cycles * div);
-  return Array.from({ length: count }, (_, k) => k * step);
+  if (!(cycles > 0) || !(div > 0) || !sliceGridMod) return null;
+  // The rule `.slices("1/16")` cuts by (slice-grid-core.mjs): ceil, less a twentieth of a division,
+  // so a 1.001-measure loop wants 16 sixteenths, not 16 and a click's worth of tail promoted to a
+  // slice of its own by rounding.
+  if (Math.ceil(cycles * div - 0.05) > SLICE_GRID_MAX) return null;
+  return sliceGridMod.divisionPositions(1 / div, cycles);
 }
 
 /** Chops the file on the select's grid - every marker replaced, like auto-slice, and said so. */
@@ -27454,9 +27634,11 @@ function sliceGridChop() {
 
 function sliceSetHand(on) {
   if (sliceState) sliceState.hand = !!on;
-  sliceSens.disabled = !!on;
-  sliceSensWrap.classList.toggle('slice-sens-off', !!on);
-  sliceSensWrap.title = on
+  // A grid's chops are laid by the call, so there is nothing for the detector to re-slice.
+  const off = !!on || !!sliceState?.grid;
+  sliceSens.disabled = off;
+  sliceSensWrap.classList.toggle('slice-sens-off', off);
+  sliceSensWrap.title = on && !sliceState?.grid
     ? 'these markers were drawn by hand — auto-slice to go back to detected ones'
     : SLICE_SENS_TITLE;
 }
@@ -27505,6 +27687,12 @@ function sliceLivePush() {
 /** The markers into the definition, and an evaluation behind them. Called when a gesture lands. */
 function sliceCommit() {
   if (!sliceState) return;
+  if (sliceState.grid) {
+    // The call lays these chops; the screen goes back to them.
+    sliceLayGrid();
+    sliceSay(`.slices(${sliceState.grid}) lays these chops itself — name a set to draw your own`, true);
+    return;
+  }
   if (!sliceState.own) {
     // A library set is shown as it is - editing it here would change every project silently. The ★
     // on its picker row is how it becomes this buffer's to edit.
@@ -27534,6 +27722,27 @@ function sliceSyncFromCode() {
   if (!sliceState || sliceSuppressSync) return;
   setTimeout(() => {
     if (!sliceState) return;
+    if (sliceState.grid) {
+      // The grid is the call's text: an edit to it (8 -> 16), or to the chain's .fit(), re-lays it.
+      // Typing over the whole label takes its marker with it, so the call is found again on the
+      // chain the panel was opened from.
+      const code = sliceCM.getValue();
+      let span = sliceState.source?.find();
+      if (!span) {
+        const call = sliceState.at == null ? null : sliceCallOnChain(code, sliceState.at);
+        const found = call ? sliceGridOnCall(call, code, sliceCM) : null;
+        if (!found) return closeSlicePanel();
+        sliceState.source = sliceCM.markText(sliceCM.posFromIndex(found.from), sliceCM.posFromIndex(found.to), {});
+        span = sliceState.source.find();
+      }
+      const label = sliceGridLabelIn(code, sliceCM.indexFromPos(span.from), sliceCM.indexFromPos(span.to), sliceCM);
+      if (!label) return;
+      sliceState.grid = label;
+      sliceTitle.textContent = `slices ${label}`;
+      sliceSyncFit();
+      sliceLayGrid();
+      return;
+    }
     const def = sliceDefOf(sliceState.id);
     if (!def) {
       if (sliceState.own && !prPrebakeSlices.some((p) => p.id === sliceState.id)) closeSlicePanel();
@@ -28144,7 +28353,7 @@ function sliceFollowTick() {
     const sounding = span
       ? activeIdIn(sliceCM.indexFromPos(span.from), sliceCM.indexFromPos(span.to), sliceCM)
       : null;
-    if (!sounding || sounding === sliceState.id) lit = sliceSoundingNow(region, currentCyclePos(region.deck));
+    if (!sounding || sounding === (sliceState.grid ?? sliceState.id)) lit = sliceSoundingNow(region, currentCyclePos(region.deck));
   }
   if (!lit.length && !sliceState.lit.length) return;
   sliceState.lit = lit;
@@ -39097,7 +39306,7 @@ function snippetRefsIn(code, from, to) {
   for (const reg of DEF_REGISTRIES) {
     for (const call of reg.idCalls(code)) {
       if (call.start < from || call.close >= to) continue;
-      for (const id of idsNamedIn(call.str)) {
+      for (const id of reg.idsIn(call.str)) {
         const scope = call.scope ?? '';
         const key = `${reg.kind}\0${id}\0${reg.kind === 'preset' ? scope : ''}`;
         if (seen.has(key)) continue;
@@ -39834,8 +40043,15 @@ function openEditorMenu(ed, e) {
         steps: 'as many hits as now, somewhere else',
         sliders: 'every bar at a new height',
         matrix: "each row's hits somewhere else",
+        shiftreg: 'as many hits as now, somewhere else',
       }[widgetHit.kind];
       items.unshift(['randomize', () => { fold.randomize(); ed.focus(); }, what]);
+    }
+    // Cells only - a row of bars has no hits to gather - and coarser only where there is a pair.
+    if (fold?.finer) {
+      const resolution = [['finer', () => { fold.finer(); ed.focus(); }, 'twice the steps: a rest after every cell']];
+      if (fold.canCoarsen()) resolution.unshift(['coarser', () => { fold.coarser(); ed.focus(); }, 'half the steps: each pair of cells one, a hit if either was']);
+      items.splice(fold.randomize ? 1 : 0, 0, ...resolution);
     }
   }
   // A number under the caret, drawn as a control: inside a `.param()` it takes the device

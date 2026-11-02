@@ -4812,7 +4812,7 @@ const BUILDER_NAMES = ['Signal', 'n', 'note', 'mini', 's', 'se', 'sr', 'sp', 'sa
   'struct', 'hold', 'seg', 'segment', 'chord',
   // The editor's inline widgets: controls drawn in the code, and the displays of the master output
   // (a display ON a pattern is a method). See pattern-core's widgets.mjs.
-  'slider', 'knob', 'toggle', 'button', 'xy', 'steps', 'sliders', 'matrix', 'scope', 'spectrum', 'waveform', 'imager', 'meter', 'punchcard', 'chroma',
+  'slider', 'knob', 'toggle', 'button', 'xy', 'steps', 'sliders', 'matrix', 'shiftreg', 'scope', 'spectrum', 'waveform', 'imager', 'meter', 'punchcard', 'chroma',
   // Pure music-theory helpers (not signal builders, but handy when writing your own): note-name
   // -> MIDI, scale-degree -> MIDI, and the raw {rootMidi, intervals} of a scale name. Exposed by
   // name so a custom `Signal.prototype.chord = ...` can call them. Real in the browser prebake too
@@ -8852,11 +8852,19 @@ const routes = {
   // evaluation; the editor has already written the new value into the code.
   'POST /api/widgets/set': async (body) => {
     const deck = body?.deck === 'b' ? 'b' : 'a';
-    const ok = patternCore.setWidgetValue(deck, Number(body?.at), body?.value, body?.lit);
+    // `ago`: how long the edit waited in the editor, which a button's press is stamped back by.
+    const ok = patternCore.setWidgetValue(deck, Number(body?.at), body?.value, body?.lit, Number(body?.ago) || 0);
     // The hand let go: a .record() on this control ends its take (see pattern-core's motion.mjs).
     if (body?.release) patternCore.releaseWidget(deck, Number(body?.at));
     return { status: 200, body: { ok } };
   },
+
+  // A row option written as a signal - { mutate: cc(12) } - read as the row's pass begins: query
+  // { deck, at, key, pos }, pos the cycle the pass starts on (see widget-host.mjs's option).
+  'GET /api/widgets/option': async (q) => ({
+    status: 200,
+    body: widgetHost().option(q.deck === 'b' ? 'b' : 'a', q.at, q.key, q.pos),
+  }),
 
   // The next stretch of the pattern displays' data - query { deck, from, count } - as the editor's
   // clock nears the end of what it holds.
@@ -8937,15 +8945,18 @@ const routes = {
       // Retrigger a re-pressed key cleanly (some layouts fire keydown without an intervening
       // keyup); the browser suppresses auto-repeat, so a real double-down means a new hit.
       if (held.has(key)) {
-        engine.noteOff(tid, note, now);
+        if (!held.get(key).struck) engine.noteOff(tid, note, now);
         handleMidiNoteIn(trackId, note, 0, false, index);
       }
-      engine.noteOn(tid, note, vel, now);
-      held.set(key, { note, index });
+      // A sampler answers no note-on: the key strikes the file, as the roll's audition does.
+      const strike = body.sample ? patternCore?.keyStrike?.(body.sample, { note, index, vel }) : null;
+      if (strike) engine.playSample(tid, strike.ref, strike.cfg, now, now + PREVIEW_SLICE_MAX_SEC);
+      else engine.noteOn(tid, note, vel, now);
+      held.set(key, { note, index, struck: !!strike }); // a struck file rings out: no note-off for it
       handleMidiNoteIn(trackId, note, vel, true, index);
     } else {
       if (!held.has(key)) return { status: 200, body: { ok: true } };
-      engine.noteOff(tid, note, now);
+      if (!held.get(key).struck) engine.noteOff(tid, note, now);
       held.delete(key);
       handleMidiNoteIn(trackId, note, 0, false, index);
     }
@@ -10938,7 +10949,7 @@ const STATIC_ROOTS = [
   { prefix: '/web-engine/packs/', root: path.join(WEB_ENGINE_PUBLIC, 'packs') },
   { prefix: '/web-engine/devices/', root: path.join(WEB_ENGINE_PUBLIC, 'devices') },
   // The modules of osc-engine both builds share; the rest of that package stays private.
-  { prefix: '/osc-engine/', root: OSC_ENGINE_DIR, only: ['sample-map-core.mjs', 'wave-core.mjs', 'song-detect-core.mjs', 'song-tags-core.mjs'] },
+  { prefix: '/osc-engine/', root: OSC_ENGINE_DIR, only: ['sample-map-core.mjs', 'wave-core.mjs', 'song-detect-core.mjs', 'song-tags-core.mjs', 'slice-grid-core.mjs'] },
   // This server's own files the page's desk shares (build-web.mjs's /shared).
   { prefix: '/shared/', root: __dirname, only: ['song-sync.js', 'link-sync.js'] },
   // The ★ library's file format, which the page's host imports from beside itself (build-web.mjs).

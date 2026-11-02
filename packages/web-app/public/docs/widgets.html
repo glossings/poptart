@@ -69,8 +69,10 @@ chords: note("&lt;[c3,eb3,g3] [ab2,c3,eb3]&gt;").synth("Wavetable")
           punches in: the stretch from the grab to the release is overwritten and the rest of the loop
           kept (a touch longer than the loop replaces it). While the take plays, the control is drawn
           where the take has it, marked with the accent. It works the same on <code>slider()</code>, <code>knob()</code>,
-          <code>toggle()</code>, <code>button()</code>, <code>xy()</code> (both axes),
-          <code>midicc()</code>, <code>osc()</code> and <code>macro()</code>.
+          <code>toggle()</code>, <code>xy()</code> (both axes),
+          <code>midicc()</code>, <code>osc()</code> and <code>macro()</code>; a
+          <code>button()</code> keeps its presses as cells instead (see
+          <a href="#triggers">a button as a rhythm</a>).
         </p>
         <pre data-run><code>setbpm(120)
 pad: note("&lt;c3 eb3 g3 bb2&gt;").synth("Wavetable")
@@ -102,10 +104,11 @@ pad: note("&lt;c3 eb3 g3 bb2&gt;").synth("Wavetable")
           <tr><td><code>steps("x . x .")</code></td><td>a row of cells, one per step: <code>.</code> is a rest, <code>x</code> plays 1, a number or a word plays as itself</td></tr>
           <tr><td><code>sliders("0.2 0.8", min, max)</code></td><td>a bar per step, each its own value</td></tr>
           <tr><td><code>matrix({ bd: "x...", sd: "..x." })</code></td><td>a grid with a row per name; a cell plays its row's name</td></tr>
+          <tr><td><code>shiftreg("x . x x . . x .")</code></td><td>a row of cells read as a shift register: a value from 0 to 1 on every step (see <a href="#mutate">below</a>)</td></tr>
           <tr><td><code>steps(8)</code> · <code>sliders(8)</code> · <code>matrix({ bd: 8, sd: 8 })</code></td><td>that many empty steps, bars halfway up, or empty rows, to click into</td></tr>
         </table>
         <p>
-          These three are drawn in place of their call: the cells stand where the text was, with a wider gap
+          These are drawn in place of their call: the cells stand where the text was, with a wider gap
           every four steps in a row of fours, so the beats can be counted. Click a cell to
           switch it, or drag across a row to paint; drag a bar up or down to set it. Each change rewrites the
           text behind the cells, so undo, copy and paste carry it like any other code. The first click on a
@@ -124,7 +127,11 @@ pad: note("&lt;c3 eb3 g3 bb2&gt;").synth("Wavetable")
           Right-click the cells for <strong>randomize</strong>: as many hits as the row has now, somewhere
           else, spelled with the row's own tokens (half the row when it has none, or nothing but); every
           bar of a <code>sliders()</code> at a new height in its range; every row of a <code>matrix()</code>
-          at once. <strong>Edit as text</strong> opens the call to type into; with the caret in it,
+          at once. <strong>coarser</strong> halves a row of cells: each pair of cells becomes one, a hit
+          if either was, so nothing played is lost and a hit moves earlier by at most a step.
+          <strong>finer</strong> doubles it: each cell followed by a rest, so it plays the same and has
+          room for more. Both work on <code>steps()</code>, <code>shiftreg()</code> and every row of a
+          <code>matrix()</code> at once. <strong>Edit as text</strong> opens the call to type into; with the caret in it,
           <strong>show as cells</strong> (<strong>show as bars</strong> for sliders) draws it again.
         </p>
         <pre data-run><code>setbpm(118)
@@ -141,6 +148,81 @@ hats: s("hh*8").vel(sliders("1 0.4 0.7 0.4 1 0.4 0.7 0.4")).postgain(0.3)</code>
   .fx("Filter").param("Cutoff", sliders("0.2 0.5 0.8 0.4"))
   .postgain(0.4)</code></pre>
 
+        <h2 id="mutate">Rows that change</h2>
+        <p>
+          <code>{ mutate }</code> on <code>steps()</code>, <code>sliders()</code> or <code>matrix()</code> makes the
+          row change a little each time it comes round. At the end of every cycle, while the song plays,
+          each cell on its own changes with that chance: a cell switches between hit and rest, a bar is
+          thrown again in its range. The change is written into the call, so you watch the row move and
+          the next cycle plays it, without evaluating. These writes stay out of undo, which steps back
+          through your own edits only.
+        </p>
+        <table>
+          <tr><th><code>mutate</code></th><th></th></tr>
+          <tr><td><code>0</code></td><td>the row stays as it is</td></tr>
+          <tr><td><code>0.05</code></td><td>about one cell in twenty changes each cycle: a pattern that drifts</td></tr>
+          <tr><td><code>0.5</code></td><td>every cell thrown again each cycle</td></tr>
+          <tr><td><code>1</code></td><td>every cell switches each cycle: the row and its inverse, one after the other</td></tr>
+        </table>
+        <p>
+          The chance can be any signal or pattern instead of a number, read as each cycle begins: a
+          <code>knob()</code> (<code>const amt = knob(0.05)</code>, then <code>{ mutate: amt }</code>), a
+          MIDI controller (<code>{ mutate: midicc("Twister")(12) }</code>), an LFO, or <code>"&lt;0 0.2&gt;"</code> to
+          change every other cycle. On <code>sliders()</code>, <code>{ deviation }</code> keeps a bar
+          thrown again near where it was: it moves by a bell curve with that standard deviation, in the
+          bars' own units, and stays in the range. <code>deviation: 1</code> on bars from 0 to 12 moves
+          about two in three of them by 1 or less. <strong>randomize</strong> uses it too.
+        </p>
+        <pre data-run><code>setbpm(120)
+kick: s("bd").struct(steps("x . . . x . . x . . x . x . . .", { mutate: 0.05 })).postgain(0.4)
+hats: s("hh*8").vel(sliders("1 0.4 0.7 0.4 1 0.4 0.7 0.4", 0, 1, { mutate: 0.2, deviation: 0.1 })).postgain(0.3)
+lead: n(sliders("0 4 7 4 2 9 7 4", 0, 12, { mutate: 0.1, deviation: 1 }).floor()).scale("C minor")
+  .synth("Wavetable").postgain(0.3)</code></pre>
+        <p>
+          <code>shiftreg()</code> is a row of cells read as a looping shift register. Every step gets a
+          value from 0 to 1: that step and the seven before it, round the row, read as a binary number
+          with the step itself as the top bit. Each value is the one before it halved, with the new step on
+          top, so a run of rests falls away step by step and a hit leaps up. Its second argument is the
+          chance a cell switches each cycle, as <code>mutate</code>. Written as a count,
+          <code>shiftreg(16, 0.05)</code> throws a row of that many cells, half of them hits, and writes it
+          into the call when it is evaluated.
+        </p>
+        <pre data-run><code>setbpm(120)
+bass: n(shiftreg("x . x x . . x . x x . . . x . x", 0.05).range(0, 7).floor())
+  .scale("A1:minor").synth("Wavetable").postgain(0.3)</code></pre>
+        <p>
+          <code>.bits(n)</code> reads any pattern with steps the same way, <code>n</code> steps wide (8 when it
+          is left out): a step is a 1 when an event starts in it that is not a rest, 0 or false.
+        </p>
+        <h2 id="triggers">A button as a rhythm</h2>
+        <p>
+          <code>.struct()</code> takes its rhythm from a <code>button()</code> as well as from a step
+          pattern: each press plays, on the next sixteenth after it, so a press is in time however it was
+          played. A second argument sets the grid, <code>.struct(button(), 8)</code> for eighths. Any
+          signal that goes between 0 and 1 is a rhythm the same way, a press wherever it rises past 0.5:
+          <code>square()</code>, a drawn shape, a recorded take.
+        </p>
+        <p>
+          <code>.advance()</code> takes the rhythm the same way and plays the pattern's values in turn,
+          the next one on each trigger, round and round. The values are the pattern's events in the
+          cycle the trigger lands in, in order, so <code>&lt;…&gt;</code> still changes them cycle by
+          cycle; a chord is one value. The trigger can be a step pattern too.
+        </p>
+        <pre data-run><code>setbpm(120)
+hit: note("c3").struct(button()).synth("Wavetable").postgain(0.4)
+arp: n(sliders("0 4 7", 0, 12).advance(button())).scale("A1:minor").synth("Wavetable").postgain(0.4)</code></pre>
+        <p>
+          <code>.record()</code> on the button keeps the presses as a row of cells in the call:
+          <code>button().record({ cycles: 2, take: steps("x . . . …") })</code>, one cell per step of
+          the grid the presses play on, across the take's whole length (two cycles of sixteenths is 32
+          cells). Each press switches on the cell it lands on and leaves the rest, so a rhythm is tapped
+          in press by press, and from then on it plays every pass. The row is drawn as cells like any
+          <code>steps()</code>: click one to change what plays, or press the button again to add to it.
+          <strong>capture</strong> writes a button's recent presses the same way.
+        </p>
+        <pre data-run><code>setbpm(120)
+bass: n("0 3 5 7").advance(button().record({ cycles: 2 })).scale("C minor").sub(7).synth("Wavetable").postgain(0.4)</code></pre>
+
         <h2 id="size">Size</h2>
         <p>
           Drag a widget's lower right corner to resize it, in either direction. The size is written into the
@@ -150,7 +232,7 @@ hats: s("hh*8").vel(sliders("1 0.4 0.7 0.4 1 0.4 0.7 0.4")).postgain(0.3)</code>
         </p>
         <table>
           <tr><th>Widget</th><th>width and height are</th></tr>
-          <tr><td><code>steps</code> · <code>matrix</code></td><td>one cell's; <code>{ size }</code> sets both</td></tr>
+          <tr><td><code>steps</code> · <code>matrix</code> · <code>shiftreg</code></td><td>one cell's; <code>{ size }</code> sets both</td></tr>
           <tr><td><code>sliders</code></td><td>one bar's; <code>{ size }</code> sets the height</td></tr>
           <tr><td><code>slider</code> · <code>toggle</code> · <code>button</code></td><td>the control's; <code>{ size }</code> sets the width</td></tr>
           <tr><td><code>knob</code> · <code>xy</code> · <code>.imager</code> · <code>.chroma</code></td><td><code>{ size }</code>: the side</td></tr>

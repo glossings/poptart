@@ -21,6 +21,8 @@
 // are at repitches around that, where the desktop always uses MIDI 60 (see the engine's note on
 // rootNote).
 
+import { fittedLength, gridSlices } from '../../../osc-engine/slice-grid-core.mjs';
+
 export const DEFAULT_RELEASE_SEC = 0.05;
 
 const clamp01 = (v) => Math.min(1, Math.max(0, Number(v) || 0));
@@ -46,12 +48,15 @@ export function envelopeSeconds(cfg) {
  * `file` is `{ duration, rootNote }`. `slices` is the positions a `.slice()` indexes - the
  * authored marks for this file, or its detected transients - `undefined` while those are still
  * being worked out (the event is skipped, as the desktop skips one), and null where there are
- * none. `authoredFit` is what an authored set says about this file's fit.
+ * none. `authoredFit` is what an authored set says about this file's fit. `grid` is a
+ * `.slices(8)`/`.slices("1/4")` grid, laid over the file here once its length is known, in place
+ * of `slices` - `gridAssumed` on the plan is the length it was laid over where nothing gave a fit.
  */
 export function planSample(file, cfg, onsetSec, offsetSec, opts = {}) {
   // Not a destructuring default: `slices: undefined` means "still being worked out", and a
   // default would quietly turn it into "there are none".
-  const { slices, authoredFit = null, anchor = 60 } = opts;
+  const { authoredFit = null, anchor = 60, grid = null } = opts;
+  let { slices } = opts;
   const amp = cfg.vel ?? 1;
   if (amp <= 0) return { skipped: 'vel 0' };
 
@@ -60,11 +65,7 @@ export function planSample(file, cfg, onsetSec, offsetSec, opts = {}) {
   const fit = spliced ? null : cfg.fit != null ? cfg.fit : authoredFit ?? null;
   // The file's natural length in cycles, and the length a fit makes it (null without one).
   const measures = cfg.secPerCycle > 0 ? file.duration / cfg.secPerCycle : NaN;
-  let fitCycles = null;
-  if (fit != null && measures > 0) {
-    const target = fit === 'auto' ? 2 ** Math.round(Math.log2(measures)) : fit;
-    if (target > 0) fitCycles = target;
-  }
+  const fitCycles = measures > 0 ? fittedLength(fit, measures) : null; // the desktop's rule, one copy
   // .play(): the controls that read the sample's length - the fitted one, or the natural one -
   // are read now that it is known (see pattern-core's withSampleLength).
   if (typeof cfg.atLength === 'function') cfg = { ...cfg, ...cfg.atLength(fitCycles ?? measures) };
@@ -72,7 +73,15 @@ export function planSample(file, cfg, onsetSec, offsetSec, opts = {}) {
   let begin = clamp01(cfg.begin ?? 0);
   let end = clamp01(cfg.end ?? 1);
   let noSlices = false;
+  let gridAssumed = null;
   if (cfg.slice != null) {
+    if (grid) {
+      // The fit the chain gave, else the set's - as for the rate, though a splice stands it down
+      // there - else the length .fit() would give the file. The desktop lays it the same way.
+      const laid = gridSlices(grid, { fit: cfg.fit ?? authoredFit ?? null, measures });
+      slices = laid.positions;
+      if (laid.assumed) gridAssumed = laid.cycles;
+    }
     if (slices === undefined) return { skipped: 'analyzing slices' };
     if (slices?.length) {
       const k = wrap(Math.round(cfg.slice), slices.length);
@@ -130,7 +139,7 @@ export function planSample(file, cfg, onsetSec, offsetSec, opts = {}) {
     begin, end, loop, speed, stretch, durSec, cut, amp, ...env,
     sustain: Number.isFinite(cfg.sustain) ? cfg.sustain : 1,
     loopLo, loopHi, loopEntry, pingpong, windowed,
-    onsetSec: onset, offsetSec, grain, noSlices,
+    onsetSec: onset, offsetSec, grain, noSlices, gridAssumed,
     fileSec: file.duration,
     fitCycles,
   };

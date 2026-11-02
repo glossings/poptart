@@ -135,12 +135,23 @@ hats: s("oh*8").vel("1 .5")
           <tr><td><code>.thru()</code></td><td>play the file through, an event's worth per event</td></tr>
           <tr><td><code>.slice("0 1 2 3")</code></td><td>play the nth chop (transients, found automatically)</td></tr>
           <tr><td><code>.splice("&lt;0 1 2&gt;*8")</code></td><td>each chop fitted to its hit; <code>.splicemode("stretch")</code> keeps the pitch</td></tr>
+          <tr><td><code>.slices(8)</code></td><td>chop into 8 equal slices instead</td></tr>
+          <tr><td><code>.slices("1/8")</code></td><td>one slice per 8th of the fitted file; <code>"1/8."</code> and <code>"1/16t"</code> too</td></tr>
           <tr><td><code>.slices("break")</code></td><td>use the chops you drew (below)</td></tr>
         </table>
         <pre data-run><code>// eight random starts a bar, through a held pad
 chops: s("pt_keys:3").fit(1).begin(irand(8).seg(8).div(8))
   .fx("Delay").param("Sync", "1/16.").postgain(0.4)
 kick: s("bd*4").postgain(0.4)</code></pre>
+        <pre data-run><code>// the pad fitted to two bars, cut on the 8ths and played out of order
+chops: s("pt_keys:3").fit(2).slices("1/8")
+  .slice("0 3 [2 13] 5 8 11 &lt;6 15&gt; 7").postgain(0.4)
+kick: s("bd*4").postgain(0.4)</code></pre>
+        <p>
+          A division is laid over the length the file is fitted to, so <code>.fit(2)</code> above makes
+          16 eighths. With no fit it is laid over the length <code>.fit()</code> would choose, and the
+          console says so. <code>.slices("&lt;1/8 1/16&gt;")</code> switches grid per cycle.
+        </p>
         <p>
           A loop of your own plays the same way:
           <code>s("files:loop.wav").fit()</code>.

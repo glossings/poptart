@@ -46,6 +46,9 @@ const SOURCE_URL = 'https://github.com/glossings/poptart';
  * worth of movement over about a dozen steps instead of three.
  */
 const PANEL_GLIDE_SEC = 0.03;
+// How long an audition may sound: an event this long never gates a chop, so it plays out as
+// recorded, and a whole long file still has an end. The desktop host uses the same figure.
+const PREVIEW_SLICE_MAX_SEC = 600;
 
 /**
  * Figure kinds that are a picture of what a device is DOING rather than of how it is set. These
@@ -656,11 +659,15 @@ export function createHost({
     // A control moved: its signal reads the new value on its next poll, no evaluation needed.
     'POST /api/widgets/set': async (body) => {
       const deck = body?.deck === 'b' ? 'b' : 'a';
-      const ok = patternCore.setWidgetValue(deck, Number(body?.at), body?.value, body?.lit);
+      // `ago`: how long the edit waited in the editor, which a button's press is stamped back by.
+      const ok = patternCore.setWidgetValue(deck, Number(body?.at), body?.value, body?.lit, Number(body?.ago) || 0);
       // The hand let go: a .record() on this control ends its take (see pattern-core's motion.mjs).
       if (body?.release) patternCore.releaseWidget?.(deck, Number(body?.at));
       return { ok };
     },
+    // A row option written as a signal, read as the row's pass begins (see widget-host.mjs's option).
+    'GET /api/widgets/option': async (_body, query) => evaluator.widgets?.option(query.get('deck') === 'b' ? 'b' : 'a', query.get('at'), query.get('key'), query.get('pos'))
+      ?? { value: null },
     'GET /api/widgets/window': async (_body, query) => evaluator.widgets?.window(query.get('deck') === 'b' ? 'b' : 'a', query.get('from'), query.get('count'))
       ?? { from: 0, count: 0, views: [] },
     // Polled while a display of sound is on screen, which is also what keeps its tap armed.
@@ -703,15 +710,18 @@ export function createHost({
         if (vel <= 0) return { ok: true };
         // A key pressed again without a keyup between: a new hit, cleanly.
         if (held.has(key)) {
-          engine.noteOff(tid, note, at);
+          if (!held.get(key).struck) engine.noteOff(tid, note, at);
           liveNotes.edge(label, note, 0, false, index);
         }
-        engine.noteOn(tid, note, vel, at);
-        held.set(key, { note, index });
+        // A sampler answers no note-on: the key strikes the file, as the roll's audition does.
+        const strike = body.sample ? patternCore.keyStrike?.(body.sample, { note, index, vel }) : null;
+        if (strike) engine.playSample(tid, strike.ref, { ...strike.cfg, secPerCycle: 1 / transport.cps }, at, at + PREVIEW_SLICE_MAX_SEC);
+        else engine.noteOn(tid, note, vel, at);
+        held.set(key, { note, index, struck: !!strike }); // a struck file rings out: no note-off for it
         liveNotes.edge(label, note, vel, true, index);
       } else {
         if (!held.has(key)) return { ok: true };
-        engine.noteOff(tid, note, at);
+        if (!held.get(key).struck) engine.noteOff(tid, note, at);
         held.delete(key);
         liveNotes.edge(label, note, 0, false, index);
       }
@@ -1464,7 +1474,7 @@ export function createHost({
         const set = evaluator.schedulers?.get(label)?.sliceSetAt?.(now);
         if (set) cfg.slices = set;
       }
-      const info = engine.playSample(tid, ref, cfg, now, now + 30);
+      const info = engine.playSample(tid, ref, cfg, now, now + PREVIEW_SLICE_MAX_SEC);
       return { ok: !info?.skipped, why: info?.skipped ?? null, durSec: info?.durSec ?? null };
     },
     // The `se("` completion walks a samples folder on disk. There is no folder here, so the

@@ -232,8 +232,9 @@ test('.struct() reads f/false as off', () => {
   assert.deepEqual(grid(note('c3').struct('t f t t')).map((st) => st.start), [0, 0.5, 0.75]);
 });
 
-test('.struct() needs a step pattern of triggers', () => {
-  assert.throws(() => note('c3').struct(1), /needs a step pattern/);
+test('.struct() of a signal that never rises has no triggers', () => {
+  // A plain number is a signal held at one level: no edge, so nothing plays (see triggers.test.mjs).
+  assert.deepEqual(note('c3').struct(1).stepsForCycle(0), []);
 });
 
 test('.struct() and .hold() use the same triggers different ways', () => {

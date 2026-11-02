@@ -10,12 +10,14 @@
 //                   Polling it is also what keeps the engine's taps armed: they come down a few
 //                   seconds after the editor stops asking - a closed tab costs the engine nothing.
 //   set(...)        a control moved (POST /api/widgets/set)
+//   option(...)     a row option written as a signal, read as the row's pass begins
+//                   (GET /api/widgets/option - see widgets.mjs's widgetOption)
 //
 // The engine side is two calls every engine implements: viewTaps(list) arms the taps and
 // viewRead() hands back their latest frames (see osc-engine/view-taps.js and the web engine's
 // view-taps.mjs).
 
-import { displayWindow, displayNow, setWidgetValue } from './widgets.mjs';
+import { displayWindow, displayNow, setWidgetValue, widgetOption } from './widgets.mjs';
 import { motionPlaying } from './motion.mjs';
 
 /** Cycles of display data shipped with an evaluation and with each top-up. */
@@ -224,5 +226,16 @@ export function createWidgetHost({ engine, engineId = (_deck, key) => key, cycle
     return setWidgetValue(deck, at, value, lit);
   }
 
-  return { afterEval, window, frames, set };
+  /**
+   * A row option written as a signal or a pattern - `{ mutate: cc(12) }` - read at cycle `pos` of
+   * `deck`'s clock (now, when not given): `{ value }`, a number or null. MIDI and OSC are fed in
+   * here, so this is where such a value is.
+   */
+  function option(deck, at, key, pos) {
+    const which = deck === 'b' ? 'b' : 'a';
+    const p = Number(pos);
+    return { value: widgetOption(which, at, key, Number.isFinite(p) && String(pos ?? '') !== '' ? p : cycleNow(which), cps()) };
+  }
+
+  return { afterEval, window, frames, set, option };
 }
