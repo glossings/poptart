@@ -676,6 +676,22 @@ export function createInlineWidgets({
     return w;
   }
 
+  // What the call says of `mutate` now (see pattern-core's mutateWritten), or null if it is gone.
+  function mutateWritten(w) {
+    const at = locate(w);
+    return at ? calls.mutateWritten(w.kind, at.parsed) : null;
+  }
+
+  // Writes `mutate` into the call as a gesture does (one undo step), or takes it out for null.
+  function setMutate(w, p) {
+    const at = locate(w);
+    if (!at || at.parsed.close < 0) return false;
+    const e = calls.mutateEdit(w.kind, at.parsed, p);
+    if (!e) return false;
+    cm.operation(() => replaceIdx(at.base + e.from, at.base + e.to, e.text));
+    return true;
+  }
+
   function destroy(w) {
     w.widgetMark?.clear();
     if (!w.folded) w.mark?.clear();
@@ -1770,6 +1786,9 @@ export function createInlineWidgets({
     f.el.classList.add('iw', `iw-${kind}`, 'iw-fold');
     f.el.title = f.el.title || kind;
     f.marker = () => f.mark;
+    // Mutation set from the editor menu, so a drawn row never has to be opened onto its text.
+    f.mutateWritten = () => mutateWritten(f);
+    f.setMutate = (p) => setMutate(f, p);
     f.attach = (mark) => {
       f.mark = mark;
       mark.poptartWidget = f;

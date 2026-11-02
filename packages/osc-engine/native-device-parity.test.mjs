@@ -20,8 +20,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFile, spawnSync } from 'node:child_process';
+import os from 'node:os';
+import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
+
+const execFileAsync = promisify(execFile);
 
 import { ownDevices, ownIdsSource, registrySource } from '../web-engine/build/devices/native.mjs';
 import { DSP_FLAGS, compiler as cxx, exeName, linkFlags, targetFlags } from '../web-engine/build/devices/toolchain.mjs';
@@ -131,13 +135,17 @@ function haveCompiler() {
  *
  * The flags matter: -O3 -ffast-math is what the devices are compiled with for real, so testing
  * them compiled any other way would be testing something nobody runs.
+ *
+ * Built once per run, before the tests: each source is its own object, compiled in parallel and
+ * kept until it or a header changes, so a run after a one-device edit compiles one file.
  */
-function buildHarness(devices) {
-  fs.mkdirSync(WORK, { recursive: true });
+async function compileHarness(devices) {
+  const objDir = path.join(WORK, 'obj');
+  fs.mkdirSync(objDir, { recursive: true });
   const ids = path.join(WORK, 'pd-own-ids.h');
   const registry = path.join(WORK, 'pd-own-registry.cc');
-  fs.writeFileSync(ids, ownIdsSource(devices), 'utf8');
-  fs.writeFileSync(registry, registrySource(devices.map((d) => d.device)), 'utf8');
+  writeIfChanged(ids, ownIdsSource(devices));
+  writeIfChanged(registry, registrySource(devices.map((d) => d.device)));
   const binary = path.join(WORK, exeName('harness'));
   const sources = [
     ...devices.map((d) => d.file),
@@ -145,18 +153,49 @@ function buildHarness(devices) {
     path.join(NATIVE_DIR, 'own', 'harness.cc'),
     registry,
   ];
-  const newest = Math.max(...sources.map((f) => fs.statSync(f).mtimeMs), fs.statSync(ids).mtimeMs);
-  if (fs.existsSync(binary) && fs.statSync(binary).mtimeMs > newest) return binary;
   // The platform's own flags as well (toolchain.mjs): on Windows those are what make the MSVC
   // headers spell M_PI and the runtime the shipped DLL links. No -arch: the machine's own.
   const target = targetFlags().filter((f) => f !== '-fPIC');
+  const headers = Math.max(fs.statSync(ids).mtimeMs, newestHeader(NATIVE_DIR));
+  const objectOf = (src) => path.join(objDir, `${path.relative(NATIVE_DIR, src).startsWith('..') ? path.basename(src) : path.relative(NATIVE_DIR, src).replace(/[\\/]/g, '_')}.o`);
+  const stale = sources.filter((src) => {
+    const obj = objectOf(src);
+    return !fs.existsSync(obj) || fs.statSync(obj).mtimeMs <= Math.max(fs.statSync(src).mtimeMs, headers);
+  });
+  const queue = [...stale];
+  const worker = async () => {
+    for (let src = queue.shift(); src; src = queue.shift()) {
+      await execFileAsync(cxx(), [...DSP_FLAGS, ...target, '-I', NATIVE_DIR, '-I', WORK, '-c', src, '-o', objectOf(src)]);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(os.availableParallelism(), queue.length) }, worker));
+  const objects = sources.map(objectOf);
+  const newest = Math.max(...objects.map((f) => fs.statSync(f).mtimeMs));
+  if (fs.existsSync(binary) && fs.statSync(binary).mtimeMs > newest) return binary;
   const link = process.platform === 'win32' ? linkFlags({ out: binary }).filter((f) => !['-shared', '-Wl,/noimplib'].includes(f)) : ['-o', binary];
-  execFileSync(cxx(), [
-    ...DSP_FLAGS, ...target,
-    '-I', NATIVE_DIR, '-I', WORK,
-    ...sources, ...link,
-  ], { stdio: ['ignore', 'pipe', 'pipe'] });
+  await execFileAsync(cxx(), [...DSP_FLAGS, ...target, ...objects, ...link]);
   return binary;
+}
+
+/** Writes `text` only when it differs, so an unchanged file keeps its time and its objects stay. */
+function writeIfChanged(file, text) {
+  if (fs.existsSync(file) && fs.readFileSync(file, 'utf8') === text) return;
+  fs.writeFileSync(file, text, 'utf8');
+}
+
+/** The latest change to any header under `dir`: a header edit makes every object stale. */
+function newestHeader(dir) {
+  let newest = 0;
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true, recursive: true })) {
+    if (entry.isFile() && /\.(h|hpp)$/.test(entry.name)) newest = Math.max(newest, fs.statSync(path.join(entry.parentPath, entry.name)).mtimeMs);
+  }
+  return newest;
+}
+
+let harness = null;
+/** The harness built before the tests ran (see compileHarness). */
+function buildHarness() {
+  return harness;
 }
 
 /** One device's output: the values in real units, the input, and what comes back. */
@@ -588,6 +627,7 @@ function compare(id, what, mine, theirs) {
 
 const compiler = haveCompiler();
 const devices = ownDevices();
+harness = compiler ? await compileHarness(devices) : null;
 
 test('every device poptart ships natively has a browser processor to be compared against', () => {
   for (const { id } of devices) {
@@ -869,6 +909,37 @@ for (const name of DRIVEN_MODES) {
     assert.ok(rmsA > 1e-3, `Filter ${name}: nothing came out`);
   });
 }
+
+// ---- Analog voices across a change of Voices ----------------------------------------------------
+//
+// Voices going from many to one and back with notes held (a preset switched mid-note does it): every
+// note has to end on its off, on both engines, and both have to be silent once the releases are over.
+
+test('Analog ends every note when Voices changes with notes held, the same on both engines', { skip: compiler ? false : 'no clang++' }, () => {
+  const binary = buildHarness(devices);
+  const { device } = devices.find((d) => d.id === 'Analog');
+  const frames = BLOCK * 64;
+  const index = device.params.findIndex((p) => p.id === 'voices');
+  // 8, then 1 with the chord still held, then 8 again, each from a block's start.
+  const swept = Float32Array.from({ length: frames }, (_, i) => (i < BLOCK * 6 ? 8 : i < BLOCK * 14 ? 1 : 8));
+  const file = writeFile(path.join(WORK, 'Analog-voices.f32'), swept);
+  const values = device.params.map((p) => (p.id === 'ampenv.release' ? 0.05 : p.default));
+  const chord = (frame, ns, velocity) => ns.map((note) => ({ frame, note, velocity }));
+  const notes = [
+    ...chord(0, [36, 43, 48, 55], 0.9),
+    ...chord(BLOCK * 8 + 17, [40], 0.7),
+    ...chord(BLOCK * 10 + 3, [36, 43, 48, 55], 0),
+    ...chord(BLOCK * 16 + 40, [40], 0),
+  ];
+  const input = new Float32Array(frames * 2);
+  const native = runNative(binary, { id: 'Analog', values, input, frames, notes, moving: [{ param: index, file }] });
+  const browser = runBrowserSwept(device, { values, input, frames, notes, channels: 2, sweptId: 'voices', swept });
+  const { rmsA } = compare('Analog', 'with Voices changed under held notes', native, browser);
+  assert.ok(rmsA > 1e-3, 'Analog: nothing came out');
+  let tail = 0;
+  for (let i = BLOCK * 40 * 2; i < native.length; i++) tail = Math.max(tail, Math.abs(native[i]));
+  assert.ok(tail < 1e-5, `Analog: still sounding (${tail}) after every note ended`);
+});
 
 // ---- the Additive's partials, moved ------------------------------------------------------------
 //

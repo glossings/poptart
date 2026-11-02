@@ -637,3 +637,31 @@ test('coarser and finer on a matrix: every row together, each by the same rule',
   assert.deepEqual(coarse, { bd: 'x . x .', sd: '. . x .', hh: 'x x x x' });
   for (const [k, v] of Object.entries(rows)) assert.equal(core.coarserRow(core.finerRow(v)), v, k);
 });
+
+test('mutate is set from the menu without opening the row: written, changed, and taken out again', () => {
+  const apply = (code, p) => {
+    const kind = code.slice(0, code.indexOf('('));
+    const e = core.mutateEdit(kind, callArgs(code, code.indexOf('(')), p);
+    return e ? code.slice(0, e.from) + e.text + code.slice(e.to) : code;
+  };
+  const said = (code) => core.mutateWritten(code.slice(0, code.indexOf('(')), callArgs(code, code.indexOf('(')));
+  assert.equal(apply('sliders("0.1 0.5")', 0.05), 'sliders("0.1 0.5", { mutate: 0.05 })');
+  assert.equal(apply('sliders("0.1 0.5", { mutate: 0.05 })', 0.25), 'sliders("0.1 0.5", { mutate: 0.25 })');
+  assert.equal(apply('steps("x . x .", { size: 20 })', 0.1), 'steps("x . x .", { size: 20, mutate: 0.1 })');
+  assert.equal(apply('matrix({ bd: "x . . ." })', 0.1), 'matrix({ bd: "x . . ." }, { mutate: 0.1 })');
+  // Off: the key goes, and an options object with nothing else in it goes too.
+  assert.equal(apply('sliders("0.1 0.5", { mutate: 0.05 })', null), 'sliders("0.1 0.5")');
+  assert.equal(apply('steps("x .", { size: 20, mutate: 0.1 })', null), 'steps("x .", { size: 20 })');
+  assert.equal(apply('matrix({ bd: "x" }, { mutate: 0.1 })', null), 'matrix({ bd: "x" })');
+  assert.equal(apply('steps("x .")', null), 'steps("x .")');
+  // A shiftreg()'s is its second argument.
+  assert.equal(apply('shiftreg("x . x .")', 0.05), 'shiftreg("x . x .", 0.05)');
+  assert.equal(apply('shiftreg("x . x .", 0.05)', 0.5), 'shiftreg("x . x .", 0.5)');
+  assert.equal(apply('shiftreg("x . x .", 0.05)', null), 'shiftreg("x . x .", 0)');
+  // What the call says now, and a mutate written as a signal, which the menu leaves alone.
+  assert.deepEqual(said('sliders("0.1")'), { value: null });
+  assert.deepEqual(said('sliders("0.1", { mutate: 0.25 })'), { value: 0.25 });
+  assert.deepEqual(said('sliders("0.1", { mutate: cc(12) })'), { driven: true });
+  assert.deepEqual(said('shiftreg(16, 0.05)'), { value: 0.05 });
+  assert.deepEqual(said('shiftreg(16, "<0 0.1>")'), { driven: true });
+});

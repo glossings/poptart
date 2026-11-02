@@ -487,6 +487,53 @@ test('releasing hands the slot back to the pattern', () => {
   assert.equal(sch.livePreset(0), 'a');
 });
 
+test('a preset picked over a window held by hand is the one a later edit belongs to', () => {
+  // A device window's preset menu loads the pick into the slot (holdPreset with force) and lets go
+  // at once. The window holds the slot by hand, so the pattern queues nothing for it, and the
+  // pick was the only thing that could say what the slot is on now. Without that, livePreset went
+  // on naming the preset the slot was on when the window opened, and the next capture of the
+  // device - holding the picked preset's controls - was filed under that older name.
+  clearRolls('buffer');
+  _preset('acid', 'Serum 2', 'H4sIacid');
+  _preset('brass', 'Serum 2', 'H4sIbrass');
+  const { engine, clock } = mockEngine();
+  const sch = new Scheduler(engine, { trackId: 'lead' });
+  sch.setPattern(track('acid'));
+  sch._schedulePresetSwaps(0, 1);
+  assert.equal(sch.livePreset(0), 'acid');
+
+  clock.now = 1;
+  sch.holdPluginState(0, true); // the window opened
+  sch.holdPreset(0, 'brass', { force: true }); // brass picked in it
+  sch.holdPreset(0, null);
+  assert.equal(sch.livePreset(0), 'brass');
+
+  // The evaluation that writes `.preset("brass")` into the code queues nothing for a held slot.
+  sch.setPattern(track('brass'));
+  clock.now = 3;
+  sch._schedulePresetSwaps(1, 2);
+  assert.equal(sch.livePreset(0), 'brass');
+});
+
+test('a hold that could not load leaves livePreset on what is sounding', () => {
+  clearRolls('buffer');
+  _preset('acid', 'Serum 2', 'H4sIacid');
+  _preset('q', 'Pro-Q 3', 'H4sIq');
+  const { engine } = mockEngine();
+  const sch = new Scheduler(engine, { trackId: 'lead' });
+  sch.setPattern(track('acid'));
+  sch._schedulePresetSwaps(0, 1);
+  // Another plugin's preset is refused, and a frozen slot is not loaded without force.
+  sch.holdPreset(0, 'q', { force: true });
+  sch.holdPreset(0, null);
+  assert.equal(sch.livePreset(0), 'acid');
+  _preset('b', 'Serum 2', 'H4sIb');
+  sch.holdPluginState(0, true);
+  sch.holdPreset(0, 'b');
+  sch.holdPreset(0, null);
+  assert.equal(sch.livePreset(0), 'acid');
+});
+
 test('a hold only takes the slot it names', () => {
   clearRolls('buffer');
   _preset('a', 'Serum 2', 'H4sIa');

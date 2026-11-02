@@ -222,3 +222,36 @@ test('a capture in flight is not a hold that expired: the slot stays frozen whil
   assert.ok(h.deps.uncaptured.has('pad|0'), 'still frozen until the code has the program');
   assert.equal(h.deps.autoPinReady.get('pad|0')?.seq, 7, 'filed under the gesture it captures, so the commit can release it');
 });
+
+test("one of poptart's own devices is never asked: a preset picked in its window is not filed as an edit", async () => {
+  // A device reports every gesture made in its window (the window posts it, see setDeviceParam),
+  // so there is nothing for asking to find - and asking finds something that is not there. A
+  // shipped preset leaves the controls it does not name where they are (PRESET_KEEPS), so the
+  // device read back after loading one says more than the preset did and never compares equal to
+  // it. Every focus, click in the code or closed window after a pick in the window's preset menu
+  // read as a hand edit, and the device's whole program - the picked preset's - was written into
+  // the code as a `_preset(...)` definition of whatever preset livePreset named, shadowing the
+  // shipped one. The browser build never asks either.
+  const nd = require('@poptart/osc-engine/native-devices');
+  const device = nd.nativeDevice('Analog');
+  const brass = nd.shippedPresets().find((p) => p.plugin === 'Analog' && p.id === 'brass').state;
+  const read = nd.readDeviceState(device, JSON.parse(Buffer.from(brass, 'base64').toString('utf8')));
+  const held = Buffer.from(nd.deviceStateText(device, { ...nd.devicePositions(device), ...read.positions }), 'utf8').toString('base64');
+
+  const h = harness({ program: held, applied: brass });
+  h.deps.mappedEngine.chains.set('t1', ['Analog']);
+  h.scheduler.applied = new Map([['0:Analog', brass]]);
+  h.scheduler.livePreset = () => 'acid';
+  h.deps.engine.deviceSlot = (tid, slot) => (slot === 0 ? { id: 'Analog', positions: {} } : null);
+  h.deps.handTaken.add('pad|0');
+
+  h.captureOpenEditors();
+  await h.captureDirtyPlugins();
+  assert.equal(h.deps.autoPinReady.size, 0, 'nothing written into the code');
+  assert.deepEqual(h.froze, [], 'and the slot is not frozen as though it had been edited');
+
+  // A gesture in the window is still an edit, filed under the preset it was made on.
+  h.markSlotDirty('pad', 0, false);
+  await h.captureDirtyPlugins();
+  assert.equal(h.deps.autoPinReady.get('pad|0')?.preset, 'acid');
+});

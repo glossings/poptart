@@ -40067,6 +40067,20 @@ function openEditorMenu(ed, e) {
       if (fold.canCoarsen()) resolution.unshift(['coarser', () => { fold.coarser(); ed.focus(); }, 'half the steps: each pair of cells one, a hit if either was']);
       items.splice(fold.randomize ? 1 : 0, 0, ...resolution);
     }
+    // How much the row changes each pass, written into the call without opening it onto its text.
+    // Left off the menu when the call drives it with a signal or a pattern.
+    const written = fold?.mutateWritten?.();
+    if (written && !written.driven) {
+      const now = written.value;
+      const amounts = [0.01, 0.05, 0.1, 0.25, 0.5, 1].map((p) => [
+        now === p ? `${p} (now)` : String(p),
+        () => { fold.setMutate(p); ed.focus(); },
+        p === 1 ? 'every cell changes every pass' : `each cell has a ${Math.round(p * 100)}% chance to change every pass`,
+      ]);
+      if (now) amounts.push('-', ['off', () => { fold.setMutate(null); ed.focus(); }, 'the row stays as written']);
+      const at = items.findIndex((it) => Array.isArray(it) && (it[0] === 'edit as text' || it[0].startsWith('show as')));
+      items.splice(at, 0, { sub: now ? `mutate (${now})` : 'mutate', items: amounts });
+    }
   }
   // A number under the caret, drawn as a control: inside a `.param()` it takes the device
   // control's range and curve, elsewhere a range the number fits in.

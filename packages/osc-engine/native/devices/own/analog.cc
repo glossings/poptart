@@ -398,6 +398,8 @@ struct Device : Base {
         --heldCount;
       }
       held[heldCount++] = note;
+      // One hold on the voice, so the note's off still ends it if Voices goes up before it comes.
+      voice.holds = 1;
       if (legato) {
         voice.slide(note);
         return;
@@ -419,7 +421,8 @@ struct Device : Base {
     if (voiceCount == 1) {
       int k = -1;
       for (int i = heldCount - 1; i >= 0; --i) if (held[i] == note) { k = i; break; }
-      if (k < 0) return;
+      // Not one the monosynth took: a note started while there were more voices (analog.mjs).
+      if (k < 0) { release(note); return; }
       for (int i = k + 1; i < heldCount; ++i) held[i - 1] = held[i];
       --heldCount;
       Voice& voice = voices[0];
@@ -429,6 +432,11 @@ struct Device : Base {
       if (top != voice.note) voice.slide(top);
       return;
     }
+    release(note);
+  }
+
+  /** Releases every voice sounding `note`, but for a pitch held twice (analog.mjs's _release). */
+  void release(double note) {
     for (auto& v : voices) {
       if (!(v.active() && v.note == note && !v.releasing)) continue;
       if (--v.holds > 0) continue;

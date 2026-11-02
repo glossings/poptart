@@ -610,6 +610,8 @@ export class AnalogSynth {
       const legato = this.held.length > 0 && voice.active && !voice.releasing;
       if (this.held.length >= ANALOG_HELD) this.held.shift();
       this.held.push(note);
+      // One hold on the voice, so the note's off still ends it if Voices goes up before it comes.
+      voice.holds = 1;
       if (legato) {
         voice.slide(note);
         return;
@@ -631,7 +633,9 @@ export class AnalogSynth {
     if (this.voiceCount === 1) {
       const held = this.held;
       const k = held.lastIndexOf(note);
-      if (k < 0) return;
+      // Not one the monosynth took: a note started while there were more voices, still sounding
+      // on one of them. It ends the way it would have.
+      if (k < 0) { this._release(note); return; }
       held.splice(k, 1);
       const voice = this.voices[0];
       if (!voice.active || voice.releasing) return;
@@ -641,6 +645,11 @@ export class AnalogSynth {
       if (top !== voice.note) voice.slide(top);
       return;
     }
+    this._release(note);
+  }
+
+  /** Releases every voice sounding `note`, but for a pitch held twice, whose last off ends it. */
+  _release(note) {
     for (const v of this.voices) {
       if (!(v.active && v.note === note && !v.releasing)) continue;
       if (--v.holds > 0) continue; // an earlier note on this pitch ending: a later one still holds it

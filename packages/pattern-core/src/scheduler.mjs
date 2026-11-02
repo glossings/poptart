@@ -934,7 +934,18 @@ export class Scheduler {
     // that gets through: picking a preset in the panel is a deliberate "let me hear this one", and
     // the server captures what your hands did before it asks (see its /api/presetHold route).
     if (this._stateHold.has(slot) && !force) return null;
-    return this._applyPreset(slot, name, this.engine.getTime());
+    const nowSec = this.engine.getTime();
+    const why = this._applyPreset(slot, name, nowSec);
+    // Loaded, so it is what the slot is on from now until the pattern's next swap, and what a
+    // capture taken after the hold is let go belongs to. A slot held by hand has nothing else to
+    // say so: the pattern queues nothing for it (see _schedulePresetSwaps), and a preset picked
+    // in its window would otherwise leave livePreset naming the one it was on when the window
+    // opened.
+    if (!why) {
+      const queue = this._presetQueue(slot).filter((e) => e.atSec > nowSec);
+      this._livePresets.set(slot, [{ atSec: nowSec, name }, ...queue]);
+    }
+    return why;
   }
 
   /**

@@ -795,6 +795,48 @@ export function optionDrop(kind, parsed, key) {
 }
 
 
+const NUMBER_TEXT = /^\s*[-+]?(?:\d+\.?\d*|\.\d+)\s*$/;
+
+/**
+ * What a row's call says of MUTATE_OPTION: `{ value }`, a number or null where it says nothing, or
+ * `{ driven: true }` where it is written as a signal or a pattern. A shiftreg()'s is its second
+ * argument.
+ */
+export function mutateWritten(kind, parsed) {
+  if (kind === 'shiftreg') {
+    const a = positionalArgs(kind, parsed.args)[1];
+    if (!a) return { value: null };
+    return NUMBER_TEXT.test(a.text) ? { value: Number(a.text) } : { driven: true };
+  }
+  const o = optionsIndex(kind, parsed.args);
+  const text = o >= 0 ? parsed.args[o].text : null;
+  if (!text || !new RegExp(`(?:^|[{,\\s])${MUTATE_OPTION}\\s*:`).test(maskCode(text).masked)) return { value: null };
+  const v = optionNumber(text, MUTATE_OPTION);
+  return v === null ? { driven: true } : { value: v };
+}
+
+/**
+ * The one edit that sets a row's MUTATE_OPTION to `p`, or takes it out for null - `{ from, to,
+ * text }` like optionEdit's, or null when there is nothing to do. An options object left empty goes
+ * with it; a shiftreg()'s is its second argument, and null there is 0.
+ */
+export function mutateEdit(kind, parsed, p) {
+  if (kind === 'shiftreg') {
+    const pos = positionalArgs(kind, parsed.args);
+    const text = String(p ?? 0);
+    if (pos[1]) return { from: pos[1].from, to: pos[1].to, text };
+    return pos[0] ? { from: pos[0].to, to: pos[0].to, text: `, ${text}` } : null;
+  }
+  if (p != null) return optionEdit(kind, parsed, MUTATE_OPTION, p);
+  const o = optionsIndex(kind, parsed.args);
+  if (o < 0) return null;
+  const opts = parsed.args[o];
+  const only = new RegExp(`^\\{\\s*${MUTATE_OPTION}\\s*:\\s*[-+]?(?:\\d+\\.?\\d*|\\.\\d+)\\s*,?\\s*\\}$`).test(maskCode(opts.text).masked);
+  if (!only) return optionDrop(kind, parsed, MUTATE_OPTION);
+  const prev = parsed.args[o - 1];
+  return { from: prev ? prev.to : opts.from, to: opts.to, text: '' };
+}
+
 // ---------------------------------------------------------------------------- .record()
 
 /**

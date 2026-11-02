@@ -300,3 +300,117 @@ test('eight voices stay affordable', () => {
   // Generous: a fraction of a second for a second of eight voices on any machine CI runs.
   assert.ok(ms < 1000 * seconds * 0.5, `eight voices took ${ms.toFixed(0)} ms for ${seconds} s`);
 });
+
+// ---- voices that end ----------------------------------------------------------------------------
+//
+// A preset can change Voices, the filter and everything else on voices that are sounding. Whatever
+// it changes, every note has to end on its off, the output has to stay finite and sane, and the
+// synth has to fall silent once the last release is over.
+
+/** The controls a shipped preset sets, as the engine loads one: every control but those it keeps. */
+function presetValues(name) {
+  const p = ANALOG.presets[name];
+  return Object.fromEntries(ANALOG.params.filter((q) => !['level', 'voices'].includes(q.id) || q.id in p).map((q) => [q.id, p[q.id] ?? q.default]));
+}
+
+/**
+ * Plays `steps` - [frame, note or null] onsets, each ending at the next - with `change(values, at)`
+ * free to change the controls before any block. Returns the output, its peak and the voices
+ * still sounding at the end.
+ */
+function session(start, steps, endFrame, change = null) {
+  const synth = new AnalogSynth(SR);
+  const values = { ...defaults(), ...start };
+  synth.setParams(values);
+  synth.setBend(0);
+  const out = new Float32Array(endFrame);
+  const l = new Float32Array(BLOCK);
+  const r = new Float32Array(BLOCK);
+  let k = 0;
+  let sounding = [];
+  for (let at = 0; at < endFrame; at += BLOCK) {
+    change?.(values, at);
+    synth.setParams(values);
+    while (k < steps.length && steps[k][0] < at + BLOCK) {
+      const [frame, notes] = steps[k++];
+      for (const n of sounding) synth.queueNoteOff(n, frame - at);
+      sounding = notes ?? [];
+      for (const n of sounding) synth.queueNoteOn(n, 0.8, frame - at);
+    }
+    l.fill(0);
+    r.fill(0);
+    synth.process(l, r, BLOCK);
+    out.set(l.subarray(0, Math.min(BLOCK, endFrame - at)), at);
+  }
+  let peak = 0;
+  for (const x of out) {
+    assert.ok(Number.isFinite(x), 'something that is not a number came out');
+    peak = Math.max(peak, Math.abs(x));
+  }
+  return { out, peak, active: synth.activeVoices };
+}
+
+const quietAfter = (out, from) => {
+  let top = 0;
+  for (let i = from; i < out.length; i++) top = Math.max(top, Math.abs(out[i]));
+  return top;
+};
+
+test('a preset switched mid-note, between every pair of presets, ends every note and stays sane', () => {
+  const names = Object.keys(ANALOG.presets);
+  const step = Math.round(0.15 * SR);
+  // A line and a chord, low and high, the switch landing halfway through a held chord.
+  const line = [[0, [36]], [step, [48]], [2 * step, [36, 43, 51]], [4 * step, [60]], [5 * step, [24]], [6 * step, null]];
+  for (const a of names) {
+    for (const b of names) {
+      if (a === b) continue;
+      const release = Math.max(ANALOG.presets[a]['ampenv.release'], ANALOG.presets[b]['ampenv.release']);
+      const end = 6 * step + Math.round((release + 0.25) * SR);
+      const { out, peak, active } = session(presetValues(a), line, end, (values, at) => {
+        if (at >= 3 * step && at < 3 * step + BLOCK) Object.assign(values, presetValues(b));
+      });
+      assert.ok(peak <= 2, `${a} to ${b}: a peak of ${peak.toFixed(2)}`);
+      assert.equal(active, 0, `${a} to ${b}: ${active} voices still sounding after every note ended`);
+      assert.ok(quietAfter(out, end - Math.round(0.05 * SR)) < 1e-4, `${a} to ${b}: not silent after the last release`);
+    }
+  }
+});
+
+test('changing Voices with notes held ends every one of them on its off', () => {
+  const step = Math.round(0.2 * SR);
+  const chord = [[0, [36, 43, 48, 55]], [step, [40, 47]], [2 * step, null]];
+  const end = 2 * step + Math.round(0.5 * SR);
+  for (const [from, to] of [[8, 1], [1, 8], [8, 2], [2, 1], [1, 3]]) {
+    for (const glide of [0, 0.05]) {
+      const { out, active } = session({ voices: from, glide }, chord, end, (values, at) => {
+        if (at >= step / 2 && at < step / 2 + BLOCK) values.voices = to;
+        if (at >= 1.5 * step && at < 1.5 * step + BLOCK) values.voices = from;
+      });
+      assert.equal(active, 0, `voices ${from} to ${to}, glide ${glide}: ${active} still sounding`);
+      assert.ok(quietAfter(out, end - Math.round(0.05 * SR)) < 1e-4, `voices ${from} to ${to}: not silent at the end`);
+    }
+  }
+});
+
+test('every filter type at every end of its controls, on notes c1 to c8, stays finite and bounded and ends', () => {
+  const ends = [];
+  for (const cutoff of [20, 20000]) for (const resonance of [0, 1]) for (const drive of [1, 8]) {
+    for (const keytrack of [0, 1]) for (const envamount of [-96, 96]) for (const morph of [0, 1]) ends.push({ cutoff, resonance, drive, keytrack, envamount, morph });
+  }
+  const hold = Math.round(0.2 * SR);
+  const end = hold + Math.round(0.3 * SR);
+  let worst = 0;
+  for (let type = 0; type < ANALOG_FILTER_TYPES.length; type++) {
+    for (const set of ends) {
+      for (const note of [24, 36, 48, 60, 72, 84, 96, 108]) {
+        const { out, peak, active } = session({ ...set, 'filter.type': type, 'fenv.sustain': 1, 'ampenv.release': 0.05 }, [[0, [note]], [hold, null]], end);
+        worst = Math.max(worst, peak);
+        assert.equal(active, 0, `${ANALOG_FILTER_TYPES[type]} ${JSON.stringify(set)} on ${note}: still sounding`);
+        assert.ok(quietAfter(out, end - Math.round(0.05 * SR)) < 1e-4, `${ANALOG_FILTER_TYPES[type]} ${JSON.stringify(set)} on ${note}: not silent`);
+      }
+    }
+  }
+  // Drive at eight into a filter singing at its top is the loudest the synth gets: a circuit at
+  // its rails, not one running away.
+  assert.ok(worst < 5, `the loudest single note peaked at ${worst.toFixed(2)}`);
+});

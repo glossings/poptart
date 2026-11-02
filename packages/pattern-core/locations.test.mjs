@@ -485,3 +485,23 @@ test('a modulator\'s rate written in its options object is a pattern, and lights
   // Other option words stay as they are.
   assert.equal(injectLocations('lfo("swell", { mode: "free" })', 0), 'lfo(mini("swell", 5), { mode: "free" })');
 });
+
+test('a per-onset operand (choose) lights the pick each event played, under a binop', async () => {
+  const core = await import('./src/index.mjs');
+  const code = 'note("60 62 64 65 67 69 71 72").sub(choose("24", ["0", 0.3]))';
+  const out = core.injectLocations(code, 0);
+  const names = Object.keys(core);
+  const sig = new Function(...names, `return ${out}`)(...names.map((k) => core[k]));
+  let seen = new Set();
+  for (let cycle = 0; cycle < 8; cycle++) {
+    const base = [60, 62, 64, 65, 67, 69, 71, 72];
+    sig.stepsForCycle(cycle).filter((s) => s.value != null).forEach((s, i) => {
+      const lit = stepLocs(s).map(([a, b]) => code.slice(a, b));
+      const pick = lit.find((t) => t === '24' || t === '0');
+      assert.ok(pick, `event ${i} of cycle ${cycle} lights its pick (${lit.join('+')})`);
+      assert.equal(s.value, base[i] - Number(pick), 'the lit pick is the one that played');
+      seen.add(pick);
+    });
+  }
+  assert.deepEqual([...seen].sort(), ['0', '24'], 'both picks come up and light');
+});

@@ -179,9 +179,12 @@ test('closing the window reads the sound out before handing the slot back', () =
   const body = route('POST /api/deviceWatch');
   assert.match(body, /releaseDeviceSlot\(trackId, slot\)/);
   const release = SRC.slice(SRC.indexOf('function releaseDeviceSlot('), SRC.indexOf('/**', SRC.indexOf('function releaseDeviceSlot(')));
-  const capture = release.indexOf('captureOpenEditors([key])');
+  // Only an edit the window reported: a device is never asked on the off-chance (see
+  // autopin-speculative.test.js), or a preset picked in its menu reads as one.
+  assert.doesNotMatch(release, /captureOpenEditors/);
+  const capture = release.indexOf('if (autoPinDirty.has(key)) await flushPluginCaptures()');
   const hold = release.indexOf('syncStateHold(key)');
-  assert.ok(capture > 0 && hold > capture, 'the capture is queued before the hold is lifted');
+  assert.ok(capture > 0 && hold > capture, 'the capture is taken before the hold is lifted');
 });
 
 test('the live poll answers with nothing rather than with a guess', () => {

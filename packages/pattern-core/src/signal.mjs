@@ -1954,7 +1954,11 @@ export class Sig {
               }
               // A modified operand (.add.in/.squeeze) is read off the steps it was fitted to; one
               // with no grid, under .in, is read at the event's onset.
-              const b = !otherSig.how ? otherSig.sample(cycle + at, 1)
+              // A per-onset operand (choose/irand) with no layer here is read once, value and lit
+              // atom together, as crossMerge reads one - so `.sub(choose("24", "0"))` lights its pick.
+              const picked = !otherSig.how && !layers.length && otherSig.eventAt ? readEvent(otherSig, cycle + at) : null;
+              const b = picked ? picked.value
+                : !otherSig.how ? otherSig.sample(cycle + at, 1)
                 : otherSteps ? layers[0]?.value ?? null
                 : readEvent(otherSig, cycle + (otherSig.how === 'in' ? s.start : at)).value;
               if (b == null) {
@@ -1965,7 +1969,7 @@ export class Sig {
               }
               // Union the highlight spans of both operands, so `n("0 1").add("7 0")` lights the
               // live atom in each literal - the value that sounds genuinely propagated from both.
-              const locs = joinLocs(s, layers.length === 1 && layers[0]);
+              const locs = joinLocs(s, (layers.length === 1 && layers[0]) || picked);
               out.push({ ...s, start, end, cont: mixedCont(s, layers[0], start), value: fnAtPos(fn, cycle + start)(numericValue(s.value), numericValue(b)), locs, ...chainWith(s, op, fn, numericValue(b)) });
             }
           }

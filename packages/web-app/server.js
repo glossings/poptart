@@ -6880,12 +6880,22 @@ function markSlotDirty(trackId, slot, speculative) {
  * off), so anything that came back different came from your hands. Outside it a preset pattern is
  * driving the slot, and capturing there would file the pattern's own sound back into the code as
  * though someone had dialled it in.
+ *
+ * One of poptart's own devices is never asked. Its window reports every gesture made in it (see
+ * setDeviceParam), so there is nothing unreported to find, and the answer is not comparable the
+ * way a plugin's is: a shipped preset leaves the controls it does not name where they are, so a
+ * device read back after one loads says more than the preset did and never matches it. Asked,
+ * every focus or click after a pick in the window's preset menu filed the picked preset back into
+ * the code as a hand edit. The browser build never asks either.
  */
 function captureOpenEditors(keys = handTaken) {
   let queued = 0;
   for (const key of [...keys]) {
     const at = key.lastIndexOf('|'); // a label may contain a pipe; the slot never does
-    if (markSlotDirty(key.slice(0, at), Number(key.slice(at + 1)), true)) queued += 1;
+    const trackId = key.slice(0, at);
+    const slot = Number(key.slice(at + 1));
+    if (engine?.deviceSlot?.(engineTrack(trackId), slot)) continue;
+    if (markSlotDirty(trackId, slot, true)) queued += 1;
   }
   return queued;
 }
@@ -7084,14 +7094,18 @@ function noteDeviceEdit(trackLabel, slot, param, arg) {
   handlePluginEdited(trackLabel, slot);
 }
 
-/** The window closed: read the sound out of the device, then hand the slot back to its pattern. */
-function releaseDeviceSlot(trackLabel, slot) {
+/**
+ * The window closed: take any edit made in it, then hand the slot back to its pattern - the
+ * browser host's order. Only an edit the window reported: a device is never asked on the
+ * off-chance (see captureOpenEditors). Taken before the hold is lifted, so the capture reads what
+ * you made rather than whatever the pattern puts there next; a device's capture is read from the
+ * engine's own record of its controls, so taking it now interrupts nothing.
+ */
+async function releaseDeviceSlot(trackLabel, slot) {
   const key = `${trackLabel}|${slot}`;
   if (!handTaken.has(key)) return false;
+  if (autoPinDirty.has(key)) await flushPluginCaptures();
   handTaken.delete(key);
-  // Queued before the hold is lifted, exactly as releaseSlotsHeldByHand does it, so the capture
-  // reads what you made rather than whatever the pattern puts there next.
-  captureOpenEditors([key]);
   syncStateHold(key);
   return true;
 }
@@ -9245,7 +9259,7 @@ const routes = {
   'POST /api/deviceWatch': async (body) => {
     const trackId = String(body?.trackId ?? '');
     const slot = Number(body?.slot ?? 0);
-    if (!body?.on) releaseDeviceSlot(trackId, slot);
+    if (!body?.on) await releaseDeviceSlot(trackId, slot);
     return { status: 200, body: { ok: true } };
   },
 
