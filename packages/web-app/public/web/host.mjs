@@ -1012,7 +1012,11 @@ export function createHost({
       // Never anything pending: an edit is taken the moment its window closes, which is now, so
       // there is no held gesture for the editor to warn about the way there is on the desktop.
       // Takes a control's .record() finished since the last poll (see pattern-core's motion.mjs).
-      return { edits, logs: drainNotes(), pending: 0, holds, motionTakes: patternCore.takeMotionTakes?.() ?? [] };
+      // ...and bare cc() calls a knob has filled in (see pattern-core's midi-learn.mjs).
+      return {
+        edits, logs: drainNotes(), pending: 0, holds, motionTakes: patternCore.takeMotionTakes?.() ?? [],
+        ccLearns: patternCore.takeMidiLearns(), ccWaiting: patternCore.midiLearnWaiting(),
+      };
     },
 
     // A click in the buffer: every open window's slot goes back to its pattern (see holdSlot).

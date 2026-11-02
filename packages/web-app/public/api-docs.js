@@ -119,7 +119,7 @@ const API_DOCS = {
   midicc: {
     kind: 'builder',
     sig: 'midicc(device)',
-    desc: 'A MIDI controller as a signal from 0 to 1. Call the result with (cc, channel).',
+    desc: 'A MIDI controller as a signal from 0 to 1. Call the result with (cc, channel), or with nothing to learn: the next knob turned on the device is written into the call.',
     eg: 'midicc("Twister")(12).range(200, 5000)',
   },
   osc: {

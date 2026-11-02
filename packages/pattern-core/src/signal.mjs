@@ -182,6 +182,7 @@ export class Sig {
     this.lfoIR = opts.lfoIR ?? null; // present only for the sine/saw/tri/square builders below
     this.envIR = opts.envIR ?? null; // present only for the env() builder below
     this.ccIR = opts.ccIR ?? null; // present only for midicc() signals (see midicc below)
+    this.ccLearn = opts.ccLearn ?? null; // a bare cc() waiting for a knob: { device }
     // Reads this signal as one EVENT - value plus the highlight spans of the atom that produced
     // it - at an exact cycle position (see readEvent). Present ONLY on signals whose value varies
     // WITHIN a cycle (choose/irand): their stepsForCycle can only report the phase-0 draw, so as a
@@ -9039,11 +9040,16 @@ function assertMidiDevice(builder, device) {
  * CC 12 on channel 1; omit the channel to aggregate all 16 (last event on any channel wins).
  * `.range(lo, hi)` rescales it (signal-valued bounds welcome, as with LFOs), and linear math
  * (.mul/.add/...) rewrites the bounds symbolically so the binding stays native.
+ *
+ * Called bare - `cc()` - it is a learn: it rests until the next knob turned on the device, which
+ * the editor writes into the call as `cc(12, 1)` (see midi-learn.mjs).
  */
 export function midicc(device) {
   assertMidiDevice('midicc', device);
   registerMidiDevice(device);
-  return (cc, channel = null) => {
+  return (...args) => {
+    if (args.length === 0) return new Sig(() => null, { ccLearn: { device } });
+    const [cc, channel = null] = args;
     if (typeof cc !== 'number' || Number.isNaN(cc)) {
       throw new Error('[signal] midicc: the device function takes (ccNumber, channel?) - e.g. cc(12, 1); channel omitted listens on all channels');
     }

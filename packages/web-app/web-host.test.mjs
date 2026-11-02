@@ -1181,6 +1181,30 @@ test('capture: a hardware knob\'s moves are kept as they arrive and come back as
   shutdown(rig);
 });
 
+test('a bare cc() waits for a knob, and the next one turned comes back for the editor to write in, in order', async () => {
+  const rig = makeHost();
+  const code = 'const cc = midicc("Encoder Box")\npad: note("c3").synth("Wavetable").param("Osc 1 Position", cc()).param("Osc 2 Position", cc())';
+  await rig.host.call('POST', '/api/evaluate', { code, start: false });
+  const first = code.indexOf('cc()');
+  const second = code.indexOf('cc()', first + 1);
+  const poll = () => rig.host.call('POST', '/api/pluginEdits', {});
+  const still = () => new Promise((r) => setTimeout(r, patternCore.MIDI_LEARN_SETTLE_MS + 50));
+  assert.equal((await poll()).ccWaiting, 'Encoder Box', 'the editor is told something is waiting');
+  patternCore.feedMidiCC('Some Keyboard', 1, 7, 0.5); // another device: not this call's
+  patternCore.feedMidiCC('Encoder Box Port 1', 2, 12, 0.5); // as boot.mjs feeds a cc message
+  await still();
+  patternCore.feedMidiCC('Encoder Box Port 1', 2, 13, 0.5);
+  await still();
+  const { ccLearns, ccWaiting } = await poll();
+  assert.deepEqual(ccLearns, [
+    { deck: 'a', at: first, device: 'Encoder Box Port 1', channel: 2, cc: 12 },
+    { deck: 'a', at: second, device: 'Encoder Box Port 1', channel: 2, cc: 13 },
+  ]);
+  assert.equal(ccWaiting, null);
+  assert.deepEqual((await poll()).ccLearns, [], 'each is handed over once');
+  shutdown(rig);
+});
+
 test('capture: a knob dragged in a device window comes back as a param take in that control\'s units and curve', async () => {
   patternCore.clearCaptureHistory();
   const rig = makeHost();

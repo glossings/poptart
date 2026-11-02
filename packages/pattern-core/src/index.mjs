@@ -11,6 +11,7 @@ export { channelAt, soundingEnd, timeShift, grooveAt, grooveVelScale, endEdgeSte
 export { steadyValue } from './signal.mjs';
 export { setPatternWarn, lfoShapes, lfoPoints, withNoteGate, withEventSpan, noteGateFromGrid, sampleEnvIR, NOTE_GATE_LOOKBACK_CYCLES } from './signal.mjs';
 export { feedMidiCC, midiInUse } from './midi.mjs';
+export { takeMidiLearns, midiLearnWaiting, MIDI_LEARN_SETTLE_MS } from './midi-learn.mjs';
 export { feedOsc, oscInUse, latestOsc, normalizeOscAddress } from './osc.mjs';
 export { setAudioInputLayout, audioInputLayout, audioInputChannelCount, resolveInputChannels } from './audio-inputs.mjs';
 export { setMacro, macroValue, MACRO_COUNT } from './macros.mjs';

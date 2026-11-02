@@ -210,6 +210,32 @@ test('a controller reaches every midicc() naming a fragment of its device, on it
   assert.deepEqual(fed, [['cutoff', 0.25], ['cutoff', 0.75], ['res', 0.75]]);
 });
 
+test('a midicc() feed made afresh starts where its knob was last seen, the floor until it has moved', () => {
+  const { engine } = makeEngine();
+  engine.loadInstrument('keys', 'Wavetable');
+  engine.loadEffect('keys', 'Filter', 1);
+  // Turned before anything listened: channel 1 to a quarter, then channel 3 to three quarters.
+  engine.midiIn('Encoder Box Port 1', 'cc', 1, 12, 0.25, 0);
+  engine.midiIn('Encoder Box Port 1', 'cc', 3, 12, 0.75, 0);
+  engine.setParamCC('keys', 1, 'Cutoff', { device: 'encoder box', cc: 12, channel: 1, min: 0, max: 1 });
+  engine.setParamCC('keys', 1, 'Resonance', { device: 'Encoder Box', cc: 12, channel: null, min: 0.2, max: 0.6 });
+  engine.setParamCC('keys', 1, 'Drive', { device: 'Encoder Box', cc: 13, channel: null, min: 0.1, max: 0.9 });
+  const conns = engine.modulators.get('keys');
+  assert.equal(conns.get('1:Cutoff').unit, 0.25, 'its own channel\'s position');
+  assert.equal(conns.get('1:Resonance').unit, 0.75, 'the last on any channel');
+  assert.ok(Math.abs(conns.get('1:Resonance').value() - 0.5) < 1e-9, 'scaled into its range');
+  assert.equal(conns.get('1:Drive').unit, null, 'a knob that has not moved: no position yet');
+  assert.equal(conns.get('1:Drive').value(), 0.1, '...so the floor of its range');
+  // A stop takes the feed down and the next evaluation makes it again: where the knob is now.
+  engine.midiIn('Encoder Box Port 1', 'cc', 1, 12, 0.5, 0);
+  engine.clearParamCC('keys', 1, 'Cutoff');
+  engine.setParamCC('keys', 1, 'Cutoff', { device: 'encoder box', cc: 12, channel: 1, min: 0, max: 1 });
+  assert.equal(engine.modulators.get('keys').get('1:Cutoff').unit, 0.5);
+  // Another device's knob is not this one's.
+  engine.setParamCC('keys', 1, 'Mix', { device: 'Keystep', cc: 12, channel: null, min: 0, max: 1 });
+  assert.equal(engine.modulators.get('keys').get('1:Mix').unit, null);
+});
+
 // --- the ducker, played by notes ---------------------------------------------------------------
 
 const SR = 48000;

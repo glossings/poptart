@@ -1695,7 +1695,7 @@ export function createDesk({ patternCore, engine, transport, songSync, linkSync,
   let mixMidiLearn = null;
 
   // Long enough for a hand holding shift to reach a pad, short enough not to feel like a pause.
-  const MIX_LEARN_SETTLE_MS = 450;
+  const MIX_LEARN_SETTLE_MS = patternCore.MIDI_LEARN_SETTLE_MS;
   let mixMidiMonitor = false; // while the desk's `midi` mode is on: say what the hardware sends
   const mixMidiSaid = new Map(); // "kind num ch" -> when the monitor last printed it (throttle)
   const mixMidiDown = new Map(); // target -> was the pad down last message: what makes an EDGE

@@ -42,7 +42,7 @@ const keyOf = (deck, at) => `${deck}:${at}`;
 /** Start collecting the widgets an evaluation of `deck`'s buffer builds. */
 export function beginWidgets(deck = 'a') {
   currentDeck = deck === 'b' ? 'b' : 'a';
-  registry = { inputs: [], views: [], seen: new Set(), records: new Set(), recording: new Set(), sources: [] };
+  registry = { inputs: [], views: [], seen: new Set(), records: new Set(), recording: new Set(), sources: [], learns: [] };
   generation++;
 }
 
@@ -66,10 +66,11 @@ export function builtGeneration(deck) {
  * widgets that the evaluation no longer has are forgotten, so a deleted slider's key can't be set.
  */
 export function takeWidgets() {
-  const r = registry ?? { inputs: [], views: [], seen: new Set(), records: new Set(), recording: new Set(), sources: [] };
+  const r = registry ?? { inputs: [], views: [], seen: new Set(), records: new Set(), recording: new Set(), sources: [], learns: [] };
   if (registry) {
     built[currentDeck] = generation;
     lastSources[currentDeck] = r.sources;
+    lastLearns[currentDeck] = r.learns.sort((a, b) => a.at - b.at);
   }
   registry = null;
   const live = new Set(r.inputs.map((w) => keyOf(currentDeck, w.at)));
@@ -200,6 +201,8 @@ function controlOf(key, at, kind, ranges, read, curves = ranges.map(() => null))
 
 // Each deck's live sources, as its last evaluation that went through wrote them (see _at).
 const lastSources = { a: [], b: [] };
+// ...and its bare cc() calls still waiting for a knob, in document order: `{ at, device }`.
+const lastLearns = { a: [], b: [] };
 
 /**
  * The transpiled form of every live source written in a buffer: `_at(AT, cc(12, 1))`,
@@ -209,6 +212,11 @@ const lastSources = { a: [], b: [] };
  */
 export function _at(at, sig) {
   if (!registry || !Number.isFinite(at) || !(sig instanceof Sig)) return sig;
+  if (sig.ccLearn) {
+    // Once each: a block that copy()s another builds that block's calls again.
+    if (!registry.learns.some((l) => l.at === at)) registry.learns.push({ at, device: sig.ccLearn.device });
+    return sig;
+  }
   const ir = sig.ccIR;
   if (ir?.osc) registry.sources.push({ at, kind: 'osc', address: ir.osc, index: ir.index ?? 0 });
   else if (ir) registry.sources.push({ at, kind: 'cc', device: ir.device, cc: ir.cc, channel: ir.channel ?? null });
@@ -219,6 +227,17 @@ export function _at(at, sig) {
 /** `deck`'s live sources as of its last evaluation: `[{ at, kind, ... }]` (see _at). */
 export function sourceCalls(deck) {
   return lastSources[deck === 'b' ? 'b' : 'a'];
+}
+
+/** `deck`'s bare cc() calls still waiting for a knob, in document order: `[{ at, device }]`. */
+export function learnCalls(deck) {
+  return lastLearns[deck === 'b' ? 'b' : 'a'];
+}
+
+/** The bare cc() at `at` has been given its knob: the next one turned goes to the call after it. */
+export function learnFilled(deck, at) {
+  const d = deck === 'b' ? 'b' : 'a';
+  lastLearns[d] = lastLearns[d].filter((l) => l.at !== at);
 }
 
 /**

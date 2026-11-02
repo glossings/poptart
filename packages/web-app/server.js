@@ -1954,9 +1954,6 @@ const MIX_MIDI_TARGETS = new Set([...MIX_MIDI_GLOBAL,
 // quietly, which is the same shape the switch sweep above uses. A single press settles to itself,
 // so the only cost is the window.
 let mixMidiLearn = null;
-
-// Long enough for a hand holding shift to reach a pad, short enough not to feel like a pause.
-const MIX_LEARN_SETTLE_MS = 450;
 let mixMidiMonitor = false; // while the desk's `midi` mode is on: say what the hardware sends
 const mixMidiSaid = new Map(); // "kind num ch" -> when the monitor last printed it (throttle)
 const mixMidiDown = new Map(); // target -> was the pad down last message: what makes an EDGE
@@ -9103,7 +9100,11 @@ const routes = {
     // Takes a control's .record() finished since the last poll, for the editor to write into the
     // code (see pattern-core's motion.mjs).
     const motionTakes = patternCore.takeMotionTakes();
-    return { status: 200, body: { edits, logs, pending: holding, holds: currentHolds(), motionTakes } };
+    // Bare cc() calls a knob has filled in, and the device the first one still waiting names (see
+    // pattern-core's midi-learn.mjs).
+    const ccLearns = patternCore.takeMidiLearns();
+    const ccWaiting = patternCore.midiLearnWaiting();
+    return { status: 200, body: { edits, logs, pending: holding, holds: currentHolds(), motionTakes, ccLearns, ccWaiting } };
   },
 
   // Hold one chain slot on a named preset while the editor's preset panel is open on it, so what
@@ -9719,7 +9720,9 @@ const routes = {
       mixMidiLearn.finish(null); // a new arm supersedes a stale one
     }
     // `settle` (a boolean from the caller) learns a COMBINATION - see the mixMidiLearn note.
-    const settle = body.settle ? MIX_LEARN_SETTLE_MS : 0;
+    // Long enough for a hand holding shift to reach a pad, short enough not to feel like a pause -
+    // the window a bare cc() in the code is learned with too.
+    const settle = body.settle ? patternCore.MIDI_LEARN_SETTLE_MS : 0;
     const learned = await new Promise((resolve) => {
       mixMidiLearn = {
         target,

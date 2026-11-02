@@ -231,6 +231,10 @@ export class WebAudioEngine {
     this.exprs = new Map();         // trackId -> Map("slot:name" -> parameter expression, see setParamExpr)
     this.envelopes = new Map();     // trackId -> Map("slot:name" -> EnvConnection), gated per note
     this.feeds = new Map();         // "device|cc" or "osc:address" -> Set(FeedConnection)
+    // Every controller's and OSC address's latest 0..1 this session, which a feed made afresh starts
+    // from (see setParamCC): "device name|cc|channel" (channel 0 = the last on any) and
+    // "osc|address|index". A stop, a mute or a rebuilt track takes the feeds down, never this.
+    this.feedSeen = new Map();
     this.held = new Map();          // trackId -> how many of its notes are held, which gates its env()s
     this.sounding = new Map();      // trackId -> Map("slot:note" -> the time its off is due; Infinity until sent)
     this.voices = new Map();        // trackId -> Set of sample voices still to finish (see _voice)
@@ -1517,6 +1521,9 @@ export class WebAudioEngine {
     this._setModulator(trackId, slot, name, ir, (target) => {
       const conn = new FeedConnection(this.ctx, target, ir);
       this._fileFeed(conn, this._feedKeyOf('setParamCC', ir));
+      // Starts where the knob was last seen this session, as on the desktop; the floor until then.
+      const seen = this._latestCC(ir.device, ir.cc, ir.channel);
+      if (seen != null) conn.feed(seen);
       this.onMidiWanted?.();
       return conn;
     }, 'a midi control', 'setParamCC');
@@ -1526,8 +1533,27 @@ export class WebAudioEngine {
     this._setModulator(trackId, slot, name, ir, (target) => {
       const conn = new FeedConnection(this.ctx, target, ir);
       this._fileFeed(conn, this._feedKeyOf('setParamOSC', ir));
+      const seen = this.feedSeen.get(`osc|${ir.osc}|${ir.index ?? 0}`);
+      if (seen != null) conn.feed(seen);
       return conn;
     }, 'an osc message', 'setParamOSC');
+  }
+
+  /** The latest 0..1 of a cc on a device named by a fragment (channel null = any), or undefined. */
+  _latestCC(device, cc, channel) {
+    const want = String(device ?? '').toLowerCase();
+    for (const [key, unit] of this.feedSeen) {
+      if (key.startsWith('osc|')) continue;
+      const b = key.lastIndexOf('|');
+      const a = key.lastIndexOf('|', b - 1);
+      const name = key.slice(0, a);
+      const num = key.slice(a + 1, b);
+      const ch = key.slice(b + 1);
+      if (Number(num) !== cc || Number(ch) !== (channel || 0)) continue;
+      if (want && !name.includes(want)) continue;
+      return unit;
+    }
+    return undefined;
   }
 
   _clearModulator(trackId, slot, name) {
@@ -1674,6 +1700,8 @@ export class WebAudioEngine {
    */
   _feedCCFrom(deviceName, channel, cc, unit, atTime) {
     const name = String(deviceName).toLowerCase();
+    this.feedSeen.set(`${name}|${cc}|${channel}`, unit);
+    this.feedSeen.set(`${name}|${cc}|0`, unit);
     for (const [key, conns] of this.feeds) {
       if (!key.startsWith('cc|')) continue;
       const cut = key.lastIndexOf('|');
@@ -1690,6 +1718,7 @@ export class WebAudioEngine {
 
   /** The host feeds an OSC message in. */
   feedOsc(address, index, unit, atTime) {
+    this.feedSeen.set(`osc|${address}|${index ?? 0}`, unit);
     for (const conn of this.feeds.get(`osc|${address}|${index ?? 0}`) ?? []) conn.feed(unit, atTime);
   }
 

@@ -176,6 +176,7 @@ pad: note("&lt;c3 eb3&gt;").synth("Wavetable").adsr(0.3, 0, 1, 1).postgain(0.3)
           <tr><th>Write</th><th>Is</th></tr>
           <tr><td><code>macro1</code> … <code>macro8</code></td><td>the knobs in the session tab</td></tr>
           <tr><td><code>midicc("Twister")(12)</code></td><td>controller 12 on a MIDI device (any part of its name)<span data-build="web">, through the browser's Web MIDI (not in Safari)</span></td></tr>
+          <tr><td><code>cc()</code></td><td>after <code>const cc = midicc("…")</code>: the next knob turned on the device, written into the call as <code>cc(12, 1)</code></td></tr>
           <tr data-build="desktop"><td><code>osc("/1/fader3")</code></td><td>a value sent over OSC to port 57160</td></tr>
           <tr><td><code>auto("sweep")</code></td><td>an automation lane drawn in the arrangement (<a href="/docs/arrange.html#automation">Arranging</a>)</td></tr>
         </table>

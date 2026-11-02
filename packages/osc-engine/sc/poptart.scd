@@ -199,7 +199,8 @@ var hushTrack, clearMidiRoute, markSounding, noteKey;
 var beginSelfLoad, endSelfLoad, selfLoading;
 var midiInitialized = false, midiWarned = IdentitySet.new;
 var midiEnable, midiNameForUid, midiSourceFor, midiWarnMissing, midiRefreshSources, midiConnected;
-var oscInitialized = false, oscEnable;
+var midiCCSeen = Dictionary.new, midiSawCC, midiLatestCC;
+var oscInitialized = false, oscEnable, oscSeen = Dictionary.new;
 // The host transport's mirror (see hostClockSync) and what hangs off it: MIDI clock out.
 var hostClock, hostClockSync, clockOut, clockOutName, clockOutLatency = 0.05, clockRunning = false, clockLocate = false;
 // The desk's talk-back port ('/poptart/midiFeedback'): one destination the host writes short
@@ -2234,7 +2235,9 @@ midiEnable = {
         MIDIIn.connectAll;
         midiConnected = IdentitySet.newFrom(MIDIClient.sources.collect { |s| s.uid });
         MIDIdef.cc(\poptart_cc_forward, { |val, num, chan, src|
-            nodeAddr.sendMsg("/poptart/midiIn", midiNameForUid.(src), chan + 1, num, val / 127.0, "cc");
+            var name = midiNameForUid.(src);
+            midiSawCC.(name, num, chan + 1, val / 127);
+            nodeAddr.sendMsg("/poptart/midiIn", name, chan + 1, num, val / 127.0, "cc");
         });
         // NOTES are forwarded too, and the trailing word is which kind of message this is - a
         // cc 7 and a note 7 are different controls and must never bind to each other. Node uses
@@ -2287,6 +2290,17 @@ midiNameForUid = { |uid|
     if (s.isNil) { midiRefreshSources.(); s = MIDIClient.sources.detect { |e| e.uid == uid } };
     if (s.notNil) { s.device.asString ++ " " ++ s.name.asString } { "unknown" };
 };
+// Every controller's latest position this session, by "device name|cc|channel" and, for a binding
+// on all channels, "device name|cc|0" (the last on any channel). Kept apart from the bindings, which
+// a stop, a mute or a rebuilt track tears down: a binding made afresh starts where the knob IS
+// rather than at the bottom of its range (see setParamCC). pattern-core's midi.mjs keeps the same
+// table for the Tier-1 path.
+midiSawCC = { |name, num, chan, v|
+    midiCCSeen[name ++ "|" ++ num ++ "|" ++ chan] = v;
+    midiCCSeen[name ++ "|" ++ num ++ "|0"] = v;
+};
+// The 0..1 a binding on device `name` starts from, or nil when that knob has not moved this session.
+midiLatestCC = { |name, cc, channel| midiCCSeen[name ++ "|" ++ cc ++ "|" ++ channel] };
 // Same matching rule as pattern-core's midi.mjs: case-insensitive substring of "device name",
 // so both the native paths here and Node's Tier-1 store agree on which controller a name means.
 midiSourceFor = { |pattern|
@@ -2322,6 +2336,9 @@ oscEnable = {
         if (thisProcess.openUDPPort(oscInPort)) {
             thisProcess.addOSCRecvFunc({ |msg, time, addr, recvPort|
                 if (recvPort == oscInPort) {
+                    // Each address's latest arguments this session, which a binding made afresh
+                    // starts from (see setParamOSC) - as midiSawCC keeps a knob's.
+                    oscSeen[msg[0].asString] = msg[1..];
                     nodeAddr.sendMsg("/poptart/oscIn", msg[0], *(msg[1..].select { |a| a.isNumber }));
                 };
             });
@@ -5419,9 +5436,12 @@ OSCdef(\poptartSetParamCC, { |msg|
                             existing[\bus].set(lo + (existing[\last] * (hi - lo)));
                         } {
                             var bus = Bus.control(server, 1);
-                            var entry = (bus: bus, index: index, lo: lo, hi: hi, last: 0,
+                            // Where the knob was last seen this session; the floor only for one
+                            // that has not moved yet.
+                            var seen = midiLatestCC.(src.device.asString ++ " " ++ src.name.asString, cc, channel);
+                            var entry = (bus: bus, index: index, lo: lo, hi: hi, last: seen ? 0,
                                 binding: binding, defKey: defKey);
-                            bus.set(lo); // hardware position unknown until the knob moves - start at the floor
+                            bus.set(lo + (entry[\last] * (hi - lo)));
                             registerDef.(entry);
                             dropRamp.(key, track, ccKey);
                             target[\map].(bus);
@@ -5504,9 +5524,13 @@ OSCdef(\poptartSetParamOSC, { |msg|
                         existing[\bus].set(lo + (existing[\last] * (hi - lo)));
                     } {
                         var bus = Bus.control(server, 1);
-                        var entry = (bus: bus, index: index, lo: lo, hi: hi, last: 0,
+                        // Where the fader was last seen this session; the floor only for one that
+                        // has not sent yet.
+                        var seen = oscSeen[address.asString] !? { |args| args[argIndex] };
+                        var entry = (bus: bus, index: index, lo: lo, hi: hi,
+                            last: if (seen.isNumber) { seen.asFloat } { 0 },
                             binding: binding, defKey: defKey);
-                        bus.set(lo); // the fader's position is unknown until it moves - start at the floor
+                        bus.set(lo + (entry[\last] * (hi - lo)));
                         registerDef.(entry);
                         dropRamp.(key, track, oscKey);
                         target[\map].(bus);

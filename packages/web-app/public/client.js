@@ -2295,6 +2295,7 @@ function convertLegacyStates(ed = cm) {
 // Deliberately does NOT re-evaluate: the state is already live in the plugin (it came from
 // there), so an eval would only push it back and make the plugin reload what it already has.
 let pinsPending = 0; // slots the server is holding uncaptured, so we mention it once, not per poll
+let ccWaitingSaid = false; // a bare cc() is waiting for a knob and the console has said so
 
 // ---------------------------------------------------------------------------------------------
 // Hand editing. A plugin whose own window you are turning knobs in holds a sound the code doesn't
@@ -2460,7 +2461,7 @@ async function pollPluginEdits({ flush = false } = {}) {
   // motionless on a fader emits no pointermove, and the server would give the control back mid-mix.
   const channelHold = mixerHold?.value == null ? null : { trackId: mixerHold.label, name: mixerHold.name, value: mixerHold.value };
   const committed = [...commitQueue];
-  const { edits, logs, pending, holds, motionTakes } = await api('POST', '/api/pluginEdits', {
+  const { edits, logs, pending, holds, motionTakes, ccLearns, ccWaiting } = await api('POST', '/api/pluginEdits', {
     flush,
     hold,
     channelHold,
@@ -2491,6 +2492,9 @@ async function pollPluginEdits({ flush = false } = {}) {
   // .log() event lines from the scheduler, which runs server-side - same drain, same 500ms.
   for (const line of logs ?? []) logLine(line);
   for (const t of motionTakes ?? []) writeMotionTake(t);
+  writeCcLearns(ccLearns ?? []);
+  if (ccWaiting && !ccWaitingSaid) logLine(`cc(): waiting - turn a knob on "${ccWaiting}" to fill it in`);
+  ccWaitingSaid = !!ccWaiting;
   // Said once when edits start being held, so a plugin tweak that hasn't reached the code yet
   // doesn't look like auto-pin missed it.
   if (pending && !pinsPending) {
@@ -2524,6 +2528,27 @@ function writeMotionTake(t) {
   refoldAll(ed);
   logLine(`take recorded: ${ids.join(', ')}`);
   showWrittenTake(ed, ids);
+}
+
+/**
+ * Bare cc() calls a knob has filled in (see pattern-core's midi-learn.mjs): `{ deck, at, device,
+ * channel, cc }` each, `at` where the call was when its buffer was evaluated. Each becomes
+ * `cc(12, 1)`, and every deck written to is evaluated, which is what binds the knob.
+ */
+function writeCcLearns(learns) {
+  const decks = new Set();
+  for (const l of learns) {
+    const ed = deckEditor(l.deck);
+    const call = ed ? inlineWidgetsFor(ed)?.controlCallAt(l.at, true) : null;
+    if (!call) continue; // the call is gone since it was evaluated
+    const open = /\(\s*\)$/.exec(ed.getValue().slice(call.index, call.end));
+    if (!open) continue; // filled in by hand since
+    ed.replaceRange(`(${l.cc}, ${l.channel})`, ed.posFromIndex(call.index + open.index), ed.posFromIndex(call.end));
+    logLine(`cc(${l.cc}, ${l.channel}) learned from ${l.device}`);
+    decks.add(l.deck);
+  }
+  if (decks.has('a')) evaluate(false);
+  if (decks.has('b')) evalDeckB(false);
 }
 
 // A take's shape-name suffixes, one per shape: `['']`, or `['-x', '-y']` for a pad.
