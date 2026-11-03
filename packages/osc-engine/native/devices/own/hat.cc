@@ -195,7 +195,7 @@ struct Voice {
   int choke = -1;
   double lastTone = -1;
   int lastSource = -1;
-  double lastRing = -1, lastShift = 0, swept = 1, ringGain = 1, kSweep = 1;
+  double lastRing = -1, lastShift = 0, swept = 1, ringGain = 1, kSweep = 1, rise = 0;
   long long age = 0;
 
   void init(double sr) {
@@ -212,6 +212,7 @@ struct Voice {
     velocity = 1; toneShift = 0; decayScale = 1;
     choke = -1; lastTone = -1; lastSource = -1;
     lastRing = -1; lastShift = 0; swept = 1; ringGain = 1;
+    rise = 0;
     env.start(); bodyEnv.start();
     band.reset(); high.reset(); bodyBand.reset(); bodyHigh.reset();
   }
@@ -231,7 +232,7 @@ struct Voice {
 
   void chokeOff() { if (active && choke < 0) choke = chokeLength(); }
 
-  double next(double x, int source, double tone, double decay, double hold, double body, double ring, double sweep, double level) {
+  double next(double x, int source, double tone, double attack, double decay, double hold, double body, double ring, double sweep, double level) {
     const double t = clamp(tone + toneShift, 0.0, 1.0);
     double shift = sweep * velocity * swept;
     if (std::fabs(shift) < kSweepDone) shift = 0;
@@ -249,10 +250,19 @@ struct Voice {
       lastShift = shift;
       ringGain = std::sqrt(high.k / 2);
     }
-    const double d = decay * decayScale;
-    const double floor = hold * kHoldFloor;
-    const double e = env.next(d, floor);
-    const double eBody = bodyEnv.next(d * kBodyLength, floor);
+    double e;
+    double eBody;
+    if (rise < 1 && attack > 0) {
+      e = rise * rise;
+      eBody = e;
+      rise += 1 / (attack * sampleRate);
+    } else {
+      rise = 1;
+      const double d = decay * decayScale;
+      const double floor = hold * kHoldFloor;
+      e = env.next(d, floor);
+      eBody = bodyEnv.next(d * kBodyLength, floor);
+    }
     const double upper = high.next(band.next(x, 2) * band.k * e, 1) * ringGain;
     const double lower = bodyHigh.next(bodyBand.next(x, 2) * bodyBand.k * eBody, 1);
     const double out = upper + lower * body * kBodyGain;
@@ -262,7 +272,7 @@ struct Voice {
       choke -= 1;
       if (choke < 0) active = false;
     }
-    if (e <= 0 && (eBody <= 0 || body <= 0) && std::fabs(upper) + std::fabs(lower * body) < 1e-6) active = false;
+    if (rise >= 1 && e <= 0 && (eBody <= 0 || body <= 0) && std::fabs(upper) + std::fabs(lower * body) < 1e-6) active = false;
     return out * gain;
   }
 };
@@ -338,6 +348,7 @@ struct Device : Base {
       const double warp = clamp(ctl(ids::warp, i), 0.0, 1.0);
       const double x = source.next(src, ratio, noise, warp, lf);
       const double tone = clamp(ctl(ids::tone, i), 0.0, 1.0);
+      const double attack = std::fmax(0.0, ctl(ids::attack, i));
       const double decay = std::fmax(1e-3, ctl(ids::decay, i));
       const double hold = clamp(ctl(ids::hold, i), 0.0, 1.0);
       const double body = clamp(ctl(ids::body, i), 0.0, 1.0);
@@ -345,8 +356,8 @@ struct Device : Base {
       const double sweep = ctl(ids::filtersweep, i);
       const double level = ctl(ids::level, i);
       double v = 0;
-      if (a.active) v += a.next(x, src, tone, decay, hold, body, ring, sweep, level);
-      if (b.active) v += b.next(x, src, tone, decay, hold, body, ring, sweep, level);
+      if (a.active) v += a.next(x, src, tone, attack, decay, hold, body, ring, sweep, level);
+      if (b.active) v += b.next(x, src, tone, attack, decay, hold, body, ring, sweep, level);
       outl[i] = static_cast<float>(outl[i] + v);
       outr[i] = static_cast<float>(outr[i] + v);
     }

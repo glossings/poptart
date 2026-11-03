@@ -4,7 +4,7 @@
 // Material moves them and how the noise's bursts are laid out. The same state, the same
 // arithmetic in the same order, in double; the parity test holds the two together. Every sound
 // control is read once, a sample into the hit, and kept while it rings; Level is read per sample
-// (see own/pd-own.h).
+// (see own/pd-own.h). A Click Sample reaches it through pd_sample, summed to one channel by the host.
 
 #include "own/pd-own.h"
 #include "own/dsp/adsr.h"
@@ -40,6 +40,19 @@ constexpr double kFmFull = 0.35;
 constexpr double kFmNone = 0.5;
 constexpr double kClickSec = 0.003;
 constexpr double kClickGain = 1.5;
+constexpr double kClickHpMin = 20;
+constexpr double kClickLpMax = 20000;
+constexpr double kClickPitchSt = 24;
+constexpr double kSqrtHalf = 0.7071067811865476;
+/** The room a fresh device has for click files. */
+constexpr int kFirstSampleSlots = 4;
+
+/** One loaded click: mono frames at the file's own rate, owned by the host. */
+struct Sample {
+  const float* data = nullptr;
+  int frames = 0;
+  double sampleRate = 48000.0;
+};
 constexpr double kNoiseRes = 0.3;
 constexpr double kBlFull = 0.4;
 constexpr double kBlNone = 0.45;
@@ -132,6 +145,11 @@ struct Voice {
   double tailAt = 0;
   bool tailOn = true;
   double click = 0, lastWhite = 0;
+  const Sample* sample = nullptr;
+  double spos = 0, sstep = 1;
+  bool hpOn = false, lpOn = false;
+  double hb0 = 0, hb1 = 0, hb2 = 0, ha1 = 0, ha2 = 0, kLp = 1;
+  double hx1 = 0, hx2 = 0, hy1 = 0, hy2 = 0, clp = 0;
   // What the hit was struck with (see noteOn).
   double norm = 1, pitch = 0, drop = 0, dropG = 0, clickLevel = 0, mix = 0, toneGain = 1, tailG = 0, burstG = 0;
   double slowLevel = 0, slowG = 0, driveAmount = 0, slow = 0;
@@ -159,6 +177,9 @@ struct Voice {
     tailOn = true;
     click = 0;
     lastWhite = 0;
+    spos = 0;
+    hx1 = 0; hx2 = 0; hy1 = 0; hy2 = 0;
+    clp = 0;
     sweepEnv = 0;
     fmPhase = 0;
     filter.reset();
@@ -166,7 +187,7 @@ struct Voice {
   }
 
   /** Starts a hit, reading every sound control at sample `j` of this call - the strike. */
-  void noteOn(double n, double vel, unsigned int seed, const Base& c, int j) {
+  void noteOn(double n, double vel, unsigned int seed, const Base& c, int j, const Sample* file) {
     reset();
     note = n;
     velocity = vel;
@@ -185,6 +206,26 @@ struct Voice {
     pitch = c.ctl(ids::pitch, j);
     drop = c.ctl(ids::drop, j);
     clickLevel = c.ctl(ids::click, j);
+    sample = file;
+    const double st = std::fmin(kClickPitchSt, std::fmax(-kClickPitchSt, c.ctl(ids::clickpitch, j)));
+    sstep = file ? (file->sampleRate / sr) * std::pow(2.0, st / 12) : 1.0;
+    const double floorHz = file ? midiToHz(n + pitch + std::fmax(0.0, drop)) : 0.0;
+    const double hpHz = std::fmin(0.45 * sr, std::fmax(floorHz, c.ctl(ids::clickhp, j)));
+    hpOn = hpHz > kClickHpMin;
+    if (hpOn) {
+      const double w = (kTwoPi * hpHz) / sr;
+      const double cw = std::cos(w);
+      const double alpha = std::sin(w) / (2 * kSqrtHalf);
+      const double a0 = 1 + alpha;
+      hb0 = (1 + cw) / 2 / a0;
+      hb1 = -(1 + cw) / a0;
+      hb2 = hb0;
+      ha1 = (-2 * cw) / a0;
+      ha2 = (1 - alpha) / a0;
+    }
+    const double lpHz = c.ctl(ids::clicklp, j);
+    lpOn = lpHz < kClickLpMax;
+    kLp = 1 - std::exp((-kTwoPi * std::fmin(0.49 * sr, std::fmax(1.0, lpHz))) / sr);
     mix = std::fmin(1.0, std::fmax(0.0, c.ctl(ids::noise, j)));
     const double tone = c.ctl(ids::noisetone, j);
     filter.setCutoff(tone, kNoiseRes);
@@ -225,7 +266,7 @@ struct Voice {
     const double sr = sampleRate;
     const double hz = midiToHz(note + pitch + bend);
     const double clickG = std::exp(-kLn1000 / (kClickSec * sr));
-    const double clickGain = kClickGain * velocity * clickLevel;
+    const double clickGain = (sample ? 1.0 : kClickGain) * velocity * clickLevel;
 
     for (int i = 0; i < count; ++i) {
       const double semis = drop * dropEnv;
@@ -268,9 +309,33 @@ struct Voice {
       burst *= burstG;
       tail *= tailG;
       slow *= slowG;
-      const double clk = (w - lastWhite) * click;
+      double clk = 0;
+      if (sample) {
+        const float* d = sample->data;
+        const int len = sample->frames;
+        if (spos < len) {
+          const long long k = static_cast<long long>(std::floor(spos));
+          const double fr = spos - static_cast<double>(k);
+          const double a = d[k];
+          const double b = k + 1 < len ? static_cast<double>(d[k + 1]) : 0.0;
+          clk = a + (b - a) * fr;
+          spos += sstep;
+        }
+      } else {
+        clk = (w - lastWhite) * click;
+        click *= clickG;
+      }
       lastWhite = w;
-      click *= clickG;
+      if (hpOn) {
+        const double y = hb0 * clk + hb1 * hx1 + hb2 * hx2 - ha1 * hy1 - ha2 * hy2;
+        hx2 = hx1; hx1 = clk;
+        hy2 = hy1; hy1 = y;
+        clk = y;
+      }
+      if (lpOn) {
+        clp += kLp * (clk - clp);
+        clk = clp;
+      }
       t = t + 1;
 
       double x = ((1 - mix) * norm * body + mix * noise + clickGain * clk) * velocity;
@@ -284,18 +349,21 @@ struct Voice {
       outR[i] = static_cast<float>(outR[i] + v);
     }
 
-    if (!isPlayable(filter.ic1 + filter.ic2 + phase[0] + env[0])) {
+    if (!isPlayable(filter.ic1 + filter.ic2 + phase[0] + env[0] + hy1 + clp)) {
       reset();
       active = false;
       return;
     }
     const bool ringing = filtered && std::fabs(ladder.s[0]) + std::fabs(ladder.s[1]) + std::fabs(ladder.s[2]) + std::fabs(ladder.s[3]) >= kSilent;
-    if (tailOn && env[0] < kSilent && tail < kSilent && slowLevel * slow < kSilent && burst < kSilent && click < kSilent && !ringing) active = false;
+    const bool clicking = (sample ? spos < sample->frames : click >= kSilent) || std::fabs(hy1) + std::fabs(clp) >= kSilent;
+    if (tailOn && env[0] < kSilent && tail < kSilent && slowLevel * slow < kSilent && burst < kSilent && !clicking && !ringing) active = false;
   }
 };
 
 struct Device : Base {
   Pool<Voice> voices;
+  /** The loaded clicks, by Click Sample's option slot. */
+  Pool<Sample> samples;
   int voiceCount = 8;
   long long clock = 0;
   unsigned int seed = 1;
@@ -308,6 +376,7 @@ struct Device : Base {
     sampleRate = sr;
     voices.reserve(kFirstVoices, [](Voice&) {});
     for (auto& v : voices) v.init(sr);
+    samples.reserve(kFirstSampleSlots, [](Sample&) {});
     voiceCount = 8;
     clock = 0;
     seed = 1;
@@ -333,13 +402,31 @@ struct Device : Base {
     voiceCount = asked < voices.size() ? asked : voices.size();
   }
 
-  bool pd_work_wanted() { return voices.wanted(); }
+  /** A file the host read for us, for Click Sample: summed to one channel. */
+  bool pd_sample(int param, int slot, const PdSample& file) {
+    if (param != ids::clicksample || slot < 0) return true;
+    if (slot >= samples.size()) { samples.ask(slot + 1); return false; }
+    samples[slot] = Sample{ file.mono, file.frames, file.sampleRate > 0 ? file.sampleRate : sampleRate };
+    return true;
+  }
+
+  bool pd_work_wanted() { return voices.wanted() | samples.wanted(); }
   void pd_work() {
     const double sr = sampleRate;
     voices.build([sr](Voice& v) { v.init(sr); });
+    samples.build([](Sample&) {});
   }
-  void pd_work_done() { voices.install(); }
-  void pd_work_release() { voices.release(); }
+  void pd_work_done() { voices.install(); samples.install(); }
+  void pd_work_release() { voices.release(); samples.release(); }
+
+  /** The click file Click Sample is on at sample `j`, or none. */
+  const Sample* clickFile(int j) {
+    const double index = jsRound(ctl(ids::clicksample, j));
+    if (!(index >= 1)) return nullptr;
+    const int i = static_cast<int>(index);
+    if (i >= samples.size() || !samples[i].data || samples[i].frames <= 0) return nullptr;
+    return &samples[i];
+  }
 
   Voice* allocate() {
     Voice* oldest = nullptr;
@@ -355,7 +442,7 @@ struct Device : Base {
     Voice* voice = allocate();
     voice->age = clock++;
     seed = static_cast<unsigned int>(seed * 1664525u + 1013904223u);
-    voice->noteOn(note, velocity, seed, *this, j);
+    voice->noteOn(note, velocity, seed, *this, j, clickFile(j));
   }
 
   void pd_process(int frames) {

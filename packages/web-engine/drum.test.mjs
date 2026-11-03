@@ -436,3 +436,69 @@ test('at the top of Resonance a hit rings at its cutoff long after the body, and
   assert.equal(long.synth.activeVoices, 0, 'and the voice is free again in the end');
   assert.ok(synth);
 });
+
+/** Renders one hit with a click file loaded in slot 1. */
+function renderSample(params, data, rate = 44100, frames = 4096) {
+  const synth = new DrumSynth(SR);
+  synth.loadSample('clicksample', 1, { channels: [data], sampleRate: rate });
+  const values = { ...defaultValues(DRUM), ...params };
+  const L = new Float32Array(frames);
+  const R = new Float32Array(frames);
+  for (let at = 0; at < frames; at += BLOCK) {
+    synth.setParams(values);
+    synth.setBend(0);
+    if (at === 0) synth.queueNoteOn(60, 1, 0);
+    synth.process(L.subarray(at, at + BLOCK), R.subarray(at, at + BLOCK), BLOCK);
+  }
+  return L;
+}
+
+test('Click HP and Click LP filter the stick, and are not there at the ends of their ranges', () => {
+  const stick = (change) => {
+    const all = render({ ...BARE, click: 1, ...change }, { frames: 2048 }).L;
+    return all;
+  };
+  // At the ends, the click is the stick as it always was.
+  assert.deepEqual(stick({ clickhp: 20, clicklp: 20000 }), stick({}));
+  // The click alone, and how bright it is: the energy of its slope against its own.
+  const body = stick({ click: 0 });
+  const only = (change) => stick(change).map((v, i) => v - body[i]);
+  // The stick is nearly all top, so a lowpass under it takes most of it away.
+  const energy = (x) => x.slice(0, 512).reduce((e, v) => e + v * v, 0);
+  assert.ok(energy(only({ clicklp: 800 })) < energy(only({})) * 0.05, 'Click LP darkens the stick');
+  const lowE = (x) => levelAt(x, 400, 0, 512);
+  assert.ok(lowE(only({ clickhp: 6000 })) < lowE(only({})) * 0.3, 'Click HP thins the stick');
+});
+
+test('a click sample replaces the stick, its lows cut at the body\'s start, transposed by Click Pitch', () => {
+  const rate = 44100;
+  // A low hum and a buzz together.
+  const data = Float32Array.from({ length: Math.round(0.03 * rate) }, (_, i) => 0.5 * Math.sin((2 * Math.PI * 60 * i) / rate) + 0.5 * Math.sin((2 * Math.PI * 3000 * i) / rate));
+  const quiet = { ...BARE, click: 1, clicksample: 1 };
+  const click = renderSample(quiet, data);
+  assert.ok(levelAt(click, 3000, 0, 1024) > levelAt(click, 60, 0, 1024) * 10, 'the buzz stays and the hum is cut');
+  // The stick is gone: Click Pitch, Click HP and Click LP are the sample's.
+  const up = renderSample({ ...quiet, clickpitch: 12 }, data);
+  assert.ok(levelAt(up, 6000, 0, 512) > levelAt(up, 3000, 0, 512) * 5, 'an octave up at +12 st');
+  assert.ok(levelAt(renderSample({ ...quiet, clicklp: 400 }, data), 3000, 0, 1024) < levelAt(click, 3000, 0, 1024) * 0.3, 'Click LP cuts the buzz');
+  assert.ok(levelAt(renderSample({ ...quiet, clickhp: 8000 }, data), 3000, 0, 1024) < levelAt(click, 3000, 0, 1024) * 0.3, 'Click HP cuts the buzz');
+  // A slot with nothing loaded plays the stick.
+  const stick = render({ ...BARE, click: 1 }, { frames: 4096 }).L;
+  assert.deepEqual(render({ ...BARE, click: 1, clicksample: 3 }, { frames: 4096 }).L, stick);
+  // The hit ends once the file has played out.
+  const synth = new DrumSynth(SR);
+  synth.loadSample('clicksample', 1, { channels: [data], sampleRate: rate });
+  synth.setParams({ ...defaultValues(DRUM), ...quiet, decay: 0.01 });
+  synth.queueNoteOn(60, 1, 0);
+  const L = new Float32Array(BLOCK);
+  for (let b = 0; b < 120; b++) { L.fill(0); synth.process(L, new Float32Array(BLOCK), BLOCK); }
+  assert.equal(synth.activeVoices, 0);
+});
+
+test('Click Pitch is only on the panel with a click sample', async () => {
+  const { buildPanel } = await import('./src/panel.mjs');
+  const ids = (values) => buildPanel(DRUM, values).sections.flatMap((s) => s.widgets.map((w) => w.id));
+  assert.ok(!ids({}).includes('clickpitch'));
+  assert.ok(ids({ clicksample: 1 }).includes('clickpitch'));
+  assert.ok(ids({}).includes('clickhp') && ids({}).includes('clicklp'));
+});

@@ -416,7 +416,7 @@ const PINNED = {
     { color: 9, character: 1, pitch: -12 },
   ],
   // A body high enough that its upper modes are band-limited away.
-  Drum: [{ pitch: 48, material: 0.5, drop: 12 }],
+  Drum: [{ pitch: 48, material: 0.5, drop: 12 }, { click: 1, clickhp: 2000, clicklp: 3000 }],
   // A catch on every 1/32 that happens half the time, or never: which beats fire is the hash's
   // say, and both engines have to draw the same ones.
   Stutter: [
@@ -436,6 +436,8 @@ const PINNED = {
     // Folded, ringing and swept: up from below on the dense twelve, down from above on the analog six.
     { source: 2, warp: 1, ring: 1, filtersweep: -48, decay: 0.3 },
     { warp: 0.5, ring: 0.7, filtersweep: 48, body: 0.5, decay: 0.2 },
+    // A slow rise into both bands, then the fall from the top.
+    { attack: 0.03, noise: 0.8, body: 0.6, hold: 0.4, decay: 0.15 },
   ],
   // Every slope on a cut and a shelf: highpass, lowpass, low shelf boosted, high shelf cut.
   EQ: Array.from({ length: 6 }, (_, slope) => ({
@@ -881,6 +883,7 @@ const PATCHED = [
   { id: 'Kick', param: 'sweep' },
   { id: 'Hat', param: 'tone' },
   { id: 'Hat', param: 'warp' },
+  { id: 'Hat', param: 'attack' },
   { id: 'Drum', param: 'level' },
   { id: 'Analog', param: 'cutoff' },
   { id: 'Analog', param: 'mix' },
@@ -1525,6 +1528,29 @@ test('the Kick plays a drawn amp curve the same on both engines', { skip: compil
     let differs = 0;
     for (let i = 0; i < browser.length; i++) differs = Math.max(differs, Math.abs(browser[i] - fixed[i]));
     assert.ok(differs > 1e-3, `Kick ${what}: the drawn level sounded like the fixed one`);
+  }
+});
+
+test('the Drum plays a click sample the same on both engines', { skip: compiler ? false : 'no clang++' }, () => {
+  const binary = buildHarness(devices);
+  const { device } = devices.find((d) => d.id === 'Drum');
+  const param = device.params.findIndex((p) => p.id === 'clicksample');
+  const slot = device.params[param].options.length;
+  const file = testFile(0.05);
+  const samples = [{ param, slot, rate: file.rate, file: writeFile(path.join(WORK, 'Drum-click.f32'), file.data) }];
+  const load = { param: 'clicksample', slot, data: file.data, rate: file.rate };
+  const frames = BLOCK * 40;
+  const notes = [{ frame: 9, note: 48, velocity: 1 }, { frame: BLOCK * 20 + 33, note: 55, velocity: 0.7 }];
+  for (const [what, change] of [['at the defaults', { click: 1 }], ['transposed and filtered', { click: 1, clickpitch: -7, clickhp: 3000, clicklp: 5000, drop: 12 }]]) {
+    const values = device.params.map((p, i) => (i === param ? slot : (p.id in change ? change[p.id] : p.default)));
+    const native = runNative(binary, { id: 'Drum', values, input: new Float32Array(frames * 2), frames, notes, samples });
+    const browser = runBrowser(device, { values, input: new Float32Array(frames * 2), frames, notes, load });
+    const { rmsA } = compare('Drum', `with a click sample ${what}`, native, browser);
+    assert.ok(rmsA > 1e-3, `Drum ${what}: nothing came out`);
+    const none = runBrowser(device, { values, input: new Float32Array(frames * 2), frames, notes });
+    let differs = 0;
+    for (let i = 0; i < browser.length; i++) differs = Math.max(differs, Math.abs(browser[i] - none[i]));
+    assert.ok(differs > 1e-3, `Drum ${what}: the click sample sounded like the stick`);
   }
 });
 

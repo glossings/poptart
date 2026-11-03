@@ -208,9 +208,15 @@ function defineParam(deviceId, spec, seen) {
   // one that does nothing. `active: { param: 'sync', is: 'free' }` says which - the panel draws
   // the control only when the named parameter is on that setting, and swaps them when it moves.
   // `is` may be a list - a waveshaper's Character knob is live on most of its curves, not one.
+  // `not` says it the other way round: live on every setting but these - a control that only
+  // means something once a file is loaded is live on anything but "none".
+  const list = (v) => (v === undefined ? undefined : Array.isArray(v) ? Object.freeze([...v]) : v);
+  if (spec.active !== undefined && (spec.active.is === undefined) === (spec.active.not === undefined)) {
+    fail(deviceId, `param "${id}": active takes one of is or not`);
+  }
   const active = spec.active === undefined ? null : Object.freeze({
     param: String(spec.active.param ?? ''),
-    is: Array.isArray(spec.active.is) ? Object.freeze([...spec.active.is]) : spec.active.is,
+    ...(spec.active.is !== undefined ? { is: list(spec.active.is) } : { not: list(spec.active.not) }),
   });
 
   // A second reading of the same knob, in force while another control is off one setting: a
@@ -502,7 +508,7 @@ function defineDevice(spec) {
     if (!p.active) continue;
     const on = params.find((x) => x.id === p.active.param);
     if (!on) fail(id, `param "${p.id}" is active on "${p.active.param}", which this device does not have`);
-    for (const is of [p.active.is].flat()) {
+    for (const is of [p.active.is ?? p.active.not].flat()) {
       if (argToValue(on, is) === null) fail(id, `param "${p.id}" is active on "${p.active.param}" being ${JSON.stringify(is)}, which is not one of its values`);
     }
   }

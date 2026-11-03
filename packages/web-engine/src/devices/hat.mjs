@@ -17,7 +17,10 @@
 // spectrum is. The upper band is the sizzle and lasts Decay. The lower one, an octave under it, is
 // the body: Body sets its level and it rings several times as long, so a
 // cymbal or an open hat falls fast from its attack and then hangs on - the two-stage tail of the
-// real thing. Each envelope falls exponentially and lands on silence at a fixed point.
+// real thing. Each envelope falls exponentially and lands on silence at a fixed point. ATTACK first
+// brings both up together from silence along a square-law curve - slow to leave silence, then
+// quicker, a shaker's swell - and Decay and Hold run from the top once they are there. At zero a
+// hit starts at full.
 //
 // WARP folds the squares' sum before it is drawn, crossing them into each other for a denser,
 // clangier metal, still band-limited (dsp/metal.mjs). RING puts resonance on the bright band's
@@ -117,8 +120,8 @@ const HAT_GAIN = 5;
  * Starting points the device ships with, by name: some of its controls in their units, the rest at
  * their defaults. Four characters - an analog cluster, a thinner analog one, a crisp sampled one and a
  * grainier sampled one - each with a closed, an open and a pedal hat, and their cymbals and bells;
- * then a few that are none of those: folded, ringing and swept. All at levels that put their peaks
- * together.
+ * then a few that are none of those: folded, ringing, swept and swelling. All at levels that put
+ * their peaks together.
  */
 export const HAT_PRESETS = Object.freeze({
   analogclosed: Object.freeze({ source: 1, tone: 1, decay: 0.02, hold: 0, body: 1, noise: 0.55, lofi: 0.3, level: 0.51 }),
@@ -144,7 +147,7 @@ export const HAT_PRESETS = Object.freeze({
   whistle: Object.freeze({ source: 1, tone: 0.82, decay: 0.09, hold: 0.15, body: 0, noise: 0.1, lofi: 0, warp: 0, ring: 0.95, filtersweep: 0, level: 0.81 }),
   clang: Object.freeze({ source: 0, tone: 0.72, decay: 0.14, hold: 0.1, body: 0.4, noise: 0, lofi: 0, warp: 0.8, ring: 0.3, filtersweep: 0, level: 0.79 }),
   foldcymbal: Object.freeze({ source: 2, tone: 0.66, decay: 0.6, hold: 0.2, body: 0.6, noise: 0.2, lofi: 0, warp: 0.6, ring: 0.5, filtersweep: -7, level: 0.37 }),
-  shaker: Object.freeze({ source: 0, tone: 0.78, decay: 0.07, hold: 0.5, body: 0, noise: 1, lofi: 0, warp: 0, ring: 0.8, filtersweep: -12, level: 0.31 }),
+  shaker: Object.freeze({ source: 0, tone: 0.78, attack: 0.02, decay: 0.06, hold: 0.4, body: 0, noise: 1, lofi: 0, warp: 0, ring: 0.8, filtersweep: -12, level: 0.25 }),
 });
 
 export const HAT = defineDevice({
@@ -160,6 +163,8 @@ export const HAT = defineDevice({
       description: 'The squares: the analog circuit\'s six, a thinner six, a dense twelve that stands in for a recorded cymbal, or two, which is a cowbell.' },
     { id: 'tone', name: 'Tone', min: 0, max: 1, default: 0.86, group: 'Hat',
       description: 'The filters, from dark to bright.' },
+    { id: 'attack', name: 'Attack', min: 0, max: 0.2, default: 0, unit: 's', curve: 'pow', curveExp: 3, group: 'Hat', amp: 'attack',
+      description: 'How long each hit takes to rise to full. None is a sharp strike; a few tens of milliseconds is a shaker\'s swell.' },
     { id: 'decay', name: 'Decay', min: 0.01, max: 4, default: 0.07, unit: 's', curve: 'exp', group: 'Hat', amp: 'decay',
       description: 'The length of the hit: the time the bright band takes to fall 60 dB. Short is closed, long is open.' },
     { id: 'hold', name: 'Hold', min: 0, max: 1, default: 0.15, group: 'Hat',
@@ -375,6 +380,7 @@ class HatVoice {
     this.lastShift = 0;
     this.swept = 1;
     this.ringGain = 1;
+    this.rise = 0;
     this.env.start();
     this.bodyEnv.start();
     this.band.reset();
@@ -402,7 +408,7 @@ class HatVoice {
   }
 
   /** One sample of this hit from one sample of the source. */
-  next(x, source, tone, decay, hold, body, ring, sweep, level) {
+  next(x, source, tone, attack, decay, hold, body, ring, sweep, level) {
     const t = Math.min(1, Math.max(0, tone + this.toneShift));
     // The sweep: semitones off Tone, falling back toward it, as far as the hit was hard.
     let shift = sweep * this.velocity * this.swept;
@@ -422,10 +428,20 @@ class HatVoice {
       // A ringing highpass is as loud at its corner as it is resonant; this takes most of that back.
       this.ringGain = Math.sqrt(this.high.k / 2);
     }
-    const d = decay * this.decayScale;
-    const floor = hold * HOLD_FLOOR;
-    const e = this.env.next(d, floor);
-    const eBody = this.bodyEnv.next(d * BODY_LENGTH, floor);
+    // Attack: both envelopes rise together, along a square law, before either starts to fall.
+    let e;
+    let eBody;
+    if (this.rise < 1 && attack > 0) {
+      e = this.rise * this.rise;
+      eBody = e;
+      this.rise += 1 / (attack * this.sampleRate);
+    } else {
+      this.rise = 1;
+      const d = decay * this.decayScale;
+      const floor = hold * HOLD_FLOOR;
+      e = this.env.next(d, floor);
+      eBody = this.bodyEnv.next(d * BODY_LENGTH, floor);
+    }
     const upper = this.high.next(this.band.next(x, 2) * this.band.k * e, 1) * this.ringGain;
     const lower = this.bodyHigh.next(this.bodyBand.next(x, 2) * this.bodyBand.k * eBody, 1);
     const out = upper + lower * body * BODY_GAIN;
@@ -436,7 +452,7 @@ class HatVoice {
       if (this.choke < 0) this.active = false;
     }
     // Finished once both envelopes have landed and the highpasses have let go of the last of it.
-    if (e <= 0 && (eBody <= 0 || body <= 0) && Math.abs(upper) + Math.abs(lower * body) < 1e-6) this.active = false;
+    if (this.rise >= 1 && e <= 0 && (eBody <= 0 || body <= 0) && Math.abs(upper) + Math.abs(lower * body) < 1e-6) this.active = false;
     return out * gain;
   }
 }
@@ -526,6 +542,7 @@ export class HatSynth {
       const warp = Math.min(1, Math.max(0, at(p.warp, j)));
       const x = this.source.next(source, ratio, noise, warp, lofi);
       const tone = Math.min(1, Math.max(0, at(p.tone, j)));
+      const attack = Math.max(0, at(p.attack, j));
       const decay = Math.max(1e-3, at(p.decay, j));
       const hold = Math.min(1, Math.max(0, at(p.hold, j)));
       const body = Math.min(1, Math.max(0, at(p.body, j)));
@@ -533,8 +550,8 @@ export class HatSynth {
       const sweep = at(p.filtersweep, j);
       const level = at(p.level, j);
       let v = 0;
-      if (a.active) v += a.next(x, source, tone, decay, hold, body, ring, sweep, level);
-      if (b.active) v += b.next(x, source, tone, decay, hold, body, ring, sweep, level);
+      if (a.active) v += a.next(x, source, tone, attack, decay, hold, body, ring, sweep, level);
+      if (b.active) v += b.next(x, source, tone, attack, decay, hold, body, ring, sweep, level);
       outL[i] += v;
       outR[i] += v;
     }

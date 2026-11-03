@@ -303,6 +303,56 @@ test('no edge folds back: a high square and the hold leave nothing at their alia
   }
 });
 
+test('at no Attack a hit is what it always was, sample for sample', () => {
+  // Taken from the Hat before it had an Attack: two hits, the second cutting the first.
+  const before = {
+    default: { sum: 121.3464965, at: [0, 0, 0.011266411, -0.000019904874, -0.00024443123, -0.0080842264, 0] },
+    analogopen: { sum: 1307.793196, at: [0, -0.055065177, 0.12757973, -0.08821509, 0.071877666, -0.022738475, -0.15214922] },
+    crispclosed: { sum: 123.7870765, at: [0, 0.043171369, 0.029357087, 0.000011813073, -0.0110325, 0.033552207, -0.00023940636] },
+    cowbell: { sum: 671.0675826, at: [0, -0.022396466, 0.24444576, 0.025157301, -0.0014780326, 0.5170927, -0.0020052635] },
+    zap: { sum: 338.0104388, at: [0, -0.084733702, 0.053500511, -0.017952351, -0.019413672, 0.077323996, 0] },
+  };
+  const hits = [{ at: 0, note: 60, velocity: 1 }, { at: 9000, note: 67, velocity: 0.6 }];
+  const close = (a, b) => Math.abs(a - b) <= 1e-6 * Math.max(1, Math.abs(b));
+  for (const [name, want] of Object.entries(before)) {
+    const { L } = render({ ...(HAT_PRESETS[name] ?? {}), attack: 0 }, { hits, frames: 24000 });
+    let sum = 0;
+    for (const v of L) sum += Math.abs(v);
+    assert.ok(close(sum, want.sum), `${name}: ${sum} against ${want.sum}`);
+    [1, 37, 400, 3000, 9001, 9100, 15000].forEach((i, k) => assert.ok(close(L[i], want.at[k]), `${name}: sample ${i} is ${L[i]}, was ${want.at[k]}`));
+  }
+});
+
+test('Attack: both bands rise together from silence over its time, then fall from the top', () => {
+  // A track's .attack() is this control.
+  assert.equal(findParam(HAT, '@amp.attack')?.id, 'attack');
+  const attack = 0.03;
+  const decay = 0.1;
+  const w = Math.round(0.003 * SR);
+  const at = (x, sec) => rms(x, Math.round(sec * SR), Math.round(sec * SR) + w);
+  let endedAt = null;
+  const { L } = render({ attack, decay, noise: 1, body: 1, hold: 0.3 }, {
+    frames: SR,
+    onBlock: (synth, a) => { if (endedAt === null && synth.activeVoices === 0) endedAt = a; },
+  });
+  const top = at(L, attack - 0.003);
+  // From near silence, climbing, to the top at Attack.
+  assert.ok(db(at(L, 0), top) < -25, `the start is not soft: ${db(at(L, 0), top).toFixed(1)} dB`);
+  const third = db(at(L, attack / 3), top);
+  const twoThirds = db(at(L, (2 * attack) / 3), top);
+  assert.ok(third < twoThirds - 3 && twoThirds < -1, `not rising: ${third.toFixed(1)} then ${twoThirds.toFixed(1)} dB`);
+  // Then Decay and Hold run from the top as they would with none: the same fall, Attack later.
+  const plain = render({ attack: 0, decay, noise: 1, body: 1, hold: 0.3 }, { frames: SR }).L;
+  for (const t of [0.01, 0.05, 0.1, 0.3]) {
+    const off = db(at(L, attack + t), at(plain, t));
+    assert.ok(Math.abs(off) < 2, `${t} s past the top it is ${off.toFixed(1)} dB off a hit with no Attack`);
+  }
+  const ended = (x) => { for (let i = x.length - 1; i >= 0; i--) if (Math.abs(x[i]) > 1e-5) return i / SR; return 0; };
+  const late = ended(L) - ended(plain);
+  assert.ok(Math.abs(late - attack) < 0.01, `the tail is ${late.toFixed(3)} s later, not Attack later`);
+  assert.ok(endedAt !== null && endedAt / SR > attack + decay, 'the hit ended before it fell');
+});
+
 test('every preset is a setting of the controls, and plays', () => {
   const ids = new Set(HAT.params.map((p) => p.id));
   for (const [name, preset] of Object.entries(HAT_PRESETS)) {

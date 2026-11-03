@@ -140,7 +140,8 @@ _shape("drop", "0,1 0.25,0.6,-2 0.5,0 1,0")</code></pre>
           one: pattern <code>.decay()</code> and the long hits are the open ones. Middle C plays its squares at
           their own pitches; other notes retune them. <code>Source</code> picks the squares: an analog cluster, a
           thinner one, a dense one that stands in for a recorded cymbal, or two, which is a cowbell.
-          <code>Tone</code> moves the filters from dark to bright, <code>Hold</code> keeps the level up before it
+          <code>Tone</code> moves the filters from dark to bright, <code>Attack</code> lets each hit swell
+          up as a shaker does (<code>.attack()</code> sets it), <code>Hold</code> keeps the level up before it
           drops, <code>Body</code> adds a lower band that rings on after the bright one, <code>Noise</code>
           blends in white noise, and <code>Lofi</code> gives it the grit of a coarse recording.
           <code>Warp</code> folds the squares into a denser, clangier metal, <code>Ring</code> makes the bright
@@ -170,7 +171,9 @@ zap: note("~ ~ c3 ~").synth("Hat").preset("&lt;zap clang&gt;").postgain(0.5)</co
           is where it is struck: turned up, the upper modes come forward, past the lowest at the top.
           <code>Decay</code> is how long the body rings, <code>Ring</code> how long its upper modes
           keep up (all the way is a metal shell), <code>Drop</code> how far above its pitch it starts and
-          <code>Click</code> the stick. <code>Noise</code> mixes the body against noise, up to all
+          <code>Click</code> the stick, which <code>Click HP</code> and <code>Click LP</code> filter.
+          <code>Click Sample</code> plays a file as the click instead, with its lows cut at least at the
+          body's starting pitch, and <code>Click Pitch</code> transposes it. <code>Noise</code> mixes the body against noise, up to all
           noise; <code>Noise Tone</code> is where the noise sits, <code>Noise Length</code> how long it
           lasts, <code>Noise Tail</code> a quieter second stage eight times as long, and
           <code>Stutter</code> splits its start into quick bursts, as a clap does. <code>Cutoff</code> is a

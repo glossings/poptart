@@ -208,9 +208,15 @@ function defineParam(deviceId, spec, seen) {
   // one that does nothing. `active: { param: 'sync', is: 'free' }` says which - the panel draws
   // the control only when the named parameter is on that setting, and swaps them when it moves.
   // `is` may be a list - a waveshaper's Character knob is live on most of its curves, not one.
+  // `not` says it the other way round: live on every setting but these - a control that only
+  // means something once a file is loaded is live on anything but "none".
+  const list = (v) => (v === undefined ? undefined : Array.isArray(v) ? Object.freeze([...v]) : v);
+  if (spec.active !== undefined && (spec.active.is === undefined) === (spec.active.not === undefined)) {
+    fail(deviceId, `param "${id}": active takes one of is or not`);
+  }
   const active = spec.active === undefined ? null : Object.freeze({
     param: String(spec.active.param ?? ''),
-    is: Array.isArray(spec.active.is) ? Object.freeze([...spec.active.is]) : spec.active.is,
+    ...(spec.active.is !== undefined ? { is: list(spec.active.is) } : { not: list(spec.active.not) }),
   });
 
   // A second reading of the same knob, in force while another control is off one setting: a
@@ -502,7 +508,7 @@ function defineDevice(spec) {
     if (!p.active) continue;
     const on = params.find((x) => x.id === p.active.param);
     if (!on) fail(id, `param "${p.id}" is active on "${p.active.param}", which this device does not have`);
-    for (const is of [p.active.is].flat()) {
+    for (const is of [p.active.is ?? p.active.not].flat()) {
       if (argToValue(on, is) === null) fail(id, `param "${p.id}" is active on "${p.active.param}" being ${JSON.stringify(is)}, which is not one of its values`);
     }
   }
@@ -8817,7 +8823,10 @@ class MetalSource {
 // spectrum is. The upper band is the sizzle and lasts Decay. The lower one, an octave under it, is
 // the body: Body sets its level and it rings several times as long, so a
 // cymbal or an open hat falls fast from its attack and then hangs on - the two-stage tail of the
-// real thing. Each envelope falls exponentially and lands on silence at a fixed point.
+// real thing. Each envelope falls exponentially and lands on silence at a fixed point. ATTACK first
+// brings both up together from silence along a square-law curve - slow to leave silence, then
+// quicker, a shaker's swell - and Decay and Hold run from the top once they are there. At zero a
+// hit starts at full.
 //
 // WARP folds the squares' sum before it is drawn, crossing them into each other for a denser,
 // clangier metal, still band-limited (dsp/metal.mjs). RING puts resonance on the bright band's
@@ -8912,8 +8921,8 @@ const HAT_GAIN = 5;
  * Starting points the device ships with, by name: some of its controls in their units, the rest at
  * their defaults. Four characters - an analog cluster, a thinner analog one, a crisp sampled one and a
  * grainier sampled one - each with a closed, an open and a pedal hat, and their cymbals and bells;
- * then a few that are none of those: folded, ringing and swept. All at levels that put their peaks
- * together.
+ * then a few that are none of those: folded, ringing, swept and swelling. All at levels that put
+ * their peaks together.
  */
 const HAT_PRESETS = Object.freeze({
   analogclosed: Object.freeze({ source: 1, tone: 1, decay: 0.02, hold: 0, body: 1, noise: 0.55, lofi: 0.3, level: 0.51 }),
@@ -8939,7 +8948,7 @@ const HAT_PRESETS = Object.freeze({
   whistle: Object.freeze({ source: 1, tone: 0.82, decay: 0.09, hold: 0.15, body: 0, noise: 0.1, lofi: 0, warp: 0, ring: 0.95, filtersweep: 0, level: 0.81 }),
   clang: Object.freeze({ source: 0, tone: 0.72, decay: 0.14, hold: 0.1, body: 0.4, noise: 0, lofi: 0, warp: 0.8, ring: 0.3, filtersweep: 0, level: 0.79 }),
   foldcymbal: Object.freeze({ source: 2, tone: 0.66, decay: 0.6, hold: 0.2, body: 0.6, noise: 0.2, lofi: 0, warp: 0.6, ring: 0.5, filtersweep: -7, level: 0.37 }),
-  shaker: Object.freeze({ source: 0, tone: 0.78, decay: 0.07, hold: 0.5, body: 0, noise: 1, lofi: 0, warp: 0, ring: 0.8, filtersweep: -12, level: 0.31 }),
+  shaker: Object.freeze({ source: 0, tone: 0.78, attack: 0.02, decay: 0.06, hold: 0.4, body: 0, noise: 1, lofi: 0, warp: 0, ring: 0.8, filtersweep: -12, level: 0.25 }),
 });
 
 const HAT = defineDevice({
@@ -8955,6 +8964,8 @@ const HAT = defineDevice({
       description: 'The squares: the analog circuit\'s six, a thinner six, a dense twelve that stands in for a recorded cymbal, or two, which is a cowbell.' },
     { id: 'tone', name: 'Tone', min: 0, max: 1, default: 0.86, group: 'Hat',
       description: 'The filters, from dark to bright.' },
+    { id: 'attack', name: 'Attack', min: 0, max: 0.2, default: 0, unit: 's', curve: 'pow', curveExp: 3, group: 'Hat', amp: 'attack',
+      description: 'How long each hit takes to rise to full. None is a sharp strike; a few tens of milliseconds is a shaker\'s swell.' },
     { id: 'decay', name: 'Decay', min: 0.01, max: 4, default: 0.07, unit: 's', curve: 'exp', group: 'Hat', amp: 'decay',
       description: 'The length of the hit: the time the bright band takes to fall 60 dB. Short is closed, long is open.' },
     { id: 'hold', name: 'Hold', min: 0, max: 1, default: 0.15, group: 'Hat',
@@ -9170,6 +9181,7 @@ class HatVoice {
     this.lastShift = 0;
     this.swept = 1;
     this.ringGain = 1;
+    this.rise = 0;
     this.env.start();
     this.bodyEnv.start();
     this.band.reset();
@@ -9197,7 +9209,7 @@ class HatVoice {
   }
 
   /** One sample of this hit from one sample of the source. */
-  next(x, source, tone, decay, hold, body, ring, sweep, level) {
+  next(x, source, tone, attack, decay, hold, body, ring, sweep, level) {
     const t = Math.min(1, Math.max(0, tone + this.toneShift));
     // The sweep: semitones off Tone, falling back toward it, as far as the hit was hard.
     let shift = sweep * this.velocity * this.swept;
@@ -9217,10 +9229,20 @@ class HatVoice {
       // A ringing highpass is as loud at its corner as it is resonant; this takes most of that back.
       this.ringGain = Math.sqrt(this.high.k / 2);
     }
-    const d = decay * this.decayScale;
-    const floor = hold * HOLD_FLOOR;
-    const e = this.env.next(d, floor);
-    const eBody = this.bodyEnv.next(d * BODY_LENGTH, floor);
+    // Attack: both envelopes rise together, along a square law, before either starts to fall.
+    let e;
+    let eBody;
+    if (this.rise < 1 && attack > 0) {
+      e = this.rise * this.rise;
+      eBody = e;
+      this.rise += 1 / (attack * this.sampleRate);
+    } else {
+      this.rise = 1;
+      const d = decay * this.decayScale;
+      const floor = hold * HOLD_FLOOR;
+      e = this.env.next(d, floor);
+      eBody = this.bodyEnv.next(d * BODY_LENGTH, floor);
+    }
     const upper = this.high.next(this.band.next(x, 2) * this.band.k * e, 1) * this.ringGain;
     const lower = this.bodyHigh.next(this.bodyBand.next(x, 2) * this.bodyBand.k * eBody, 1);
     const out = upper + lower * body * BODY_GAIN;
@@ -9231,7 +9253,7 @@ class HatVoice {
       if (this.choke < 0) this.active = false;
     }
     // Finished once both envelopes have landed and the highpasses have let go of the last of it.
-    if (e <= 0 && (eBody <= 0 || body <= 0) && Math.abs(upper) + Math.abs(lower * body) < 1e-6) this.active = false;
+    if (this.rise >= 1 && e <= 0 && (eBody <= 0 || body <= 0) && Math.abs(upper) + Math.abs(lower * body) < 1e-6) this.active = false;
     return out * gain;
   }
 }
@@ -9321,6 +9343,7 @@ class HatSynth {
       const warp = Math.min(1, Math.max(0, at(p.warp, j)));
       const x = this.source.next(source, ratio, noise, warp, lofi);
       const tone = Math.min(1, Math.max(0, at(p.tone, j)));
+      const attack = Math.max(0, at(p.attack, j));
       const decay = Math.max(1e-3, at(p.decay, j));
       const hold = Math.min(1, Math.max(0, at(p.hold, j)));
       const body = Math.min(1, Math.max(0, at(p.body, j)));
@@ -9328,8 +9351,8 @@ class HatSynth {
       const sweep = at(p.filtersweep, j);
       const level = at(p.level, j);
       let v = 0;
-      if (a.active) v += a.next(x, source, tone, decay, hold, body, ring, sweep, level);
-      if (b.active) v += b.next(x, source, tone, decay, hold, body, ring, sweep, level);
+      if (a.active) v += a.next(x, source, tone, attack, decay, hold, body, ring, sweep, level);
+      if (b.active) v += b.next(x, source, tone, attack, decay, hold, body, ring, sweep, level);
       outL[i] += v;
       outR[i] += v;
     }
@@ -9386,7 +9409,10 @@ class HatSynth {
 // as they do in wood and skin alike, and what is left of a long hit is its lowest tone. Ring
 // takes that away: at one every mode rings as long as the lowest, which is a metal shell. Drop is
 // how far the whole body starts above its pitch, falling back over an eighth of the decay.
-// Click is a short burst of differentiated noise on the strike: the stick, not the drum.
+// Click is a short burst of differentiated noise on the strike: the stick, not the drum. A Click
+// Sample replaces it: the file plays from its start, transposed by Click Pitch, with its lows cut
+// at least at the body's starting pitch so they cannot fight it. Either goes through Click HP and
+// Click LP, which are not there at all at the ends of their ranges.
 //
 // THE NOISE is white noise through a bandpass at Noise Tone, lasting Noise Length. Noise
 // crossfades the body against it, from none to all-noise. Stutter splits the start of the noise
@@ -9416,7 +9442,7 @@ class HatSynth {
 // their own.
 //
 // EVERY SOUND CONTROL IS READ ONCE, WHEN THE HIT STARTS - Pitch, Material, Edge, Decay, Ring,
-// Drop, Click, Noise, Noise Tone, Noise Length, Noise Tail, Stutter and Drive - and the hit keeps them while it rings, as a struck drum keeps
+// Drop, the click's, Noise, Noise Tone, Noise Length, Noise Tail, Stutter and Drive - and the hit keeps them while it rings, as a struck drum keeps
 // what it was made of. So one track plays a whole kit: a preset or a control changed per note
 // strikes the next hit with it and leaves the ones still ringing alone, and a signal on a control
 // is sampled at each strike. They are read a sample into the hit, because a change timed with the
@@ -9472,6 +9498,11 @@ const DRUM_CUTOFF_TOP = 20000;
 /** The click's 60 dB fall. */
 const CLICK_SEC = 0.003;
 const CLICK_GAIN = 1.5;
+/** Click HP at its bottom and Click LP at its top: no filter. */
+const DRUM_CLICK_HP_MIN = 20;
+const DRUM_CLICK_LP_MAX = 20000;
+/** How far Click Pitch transposes a click sample, either way. */
+const DRUM_CLICK_PITCH_ST = 24;
 /** The noise bandpass's resonance (the filter's 0..1). */
 const NOISE_RES = 0.3;
 /** A mode is full up to this share of the sample rate and gone by the next: nothing folds back. */
@@ -9547,6 +9578,7 @@ function drive(x, amount) {
 }
 
 const BODY = 'Body';
+const CLICK = 'Click';
 const NOISE_GROUP = 'Noise';
 const COLOR = 'Color';
 const VOICE = 'Voice';
@@ -9572,8 +9604,17 @@ const DRUM = defineDevice({
       description: 'How long the upper modes ring: at zero they die sooner the higher they are, at one they last as long as the lowest, like a metal shell.' },
     { id: 'drop', latch: true, name: 'Drop', min: 0, max: 24, default: 2, unit: 'st', group: BODY,
       description: 'How far above its pitch the body starts, falling back quickly.' },
-    { id: 'click', latch: true, name: 'Click', min: 0, max: 1, default: 0.2, group: BODY,
-      description: 'The stick: a short bright burst on the strike.' },
+    { id: 'click', latch: true, name: 'Click', min: 0, max: 1, default: 0.2, group: CLICK,
+      description: 'The stick: a short bright burst on the strike, or the click sample\'s level.' },
+    { id: 'clickpitch', latch: true, name: 'Click Pitch', min: -DRUM_CLICK_PITCH_ST, max: DRUM_CLICK_PITCH_ST, default: 0, unit: 'st', group: CLICK,
+      active: { param: 'clicksample', not: 'none' },
+      description: 'How far the click sample is transposed, in semitones.' },
+    { id: 'clickhp', latch: true, name: 'Click HP', min: DRUM_CLICK_HP_MIN, max: 8000, default: DRUM_CLICK_HP_MIN, unit: 'Hz', curve: 'exp', group: CLICK,
+      description: 'A highpass on the click. A sample is always cut at least at the body\'s starting pitch.' },
+    { id: 'clicklp', latch: true, name: 'Click LP', min: 300, max: DRUM_CLICK_LP_MAX, default: DRUM_CLICK_LP_MAX, unit: 'Hz', curve: 'exp', group: CLICK,
+      description: 'A lowpass on the click.' },
+    { id: 'clicksample', latch: true, name: 'Click Sample', default: 0, options: ['none'], takes: 'sample', rate: 'k', group: CLICK,
+      description: 'A file to play as the click instead of the stick, with its lows cut at the body\'s starting pitch so it sits on the body.' },
     { id: 'noise', latch: true, name: 'Noise', min: 0, max: 1, default: 0.1, group: NOISE_GROUP,
       description: 'The mix of noise against the body, from none to all noise.' },
     { id: 'noisetone', latch: true, name: 'Noise Tone', min: 100, max: 16000, default: 3000, unit: 'Hz', curve: 'exp', group: NOISE_GROUP,
@@ -9602,7 +9643,7 @@ const DRUM = defineDevice({
     { id: 'voices', name: 'Voices', min: 1, open: true, uiMax: DRUM_VOICES_KNOB, default: 8, step: 1, rate: 'k', ui: 'number', group: VOICE,
       description: 'How many hits ring at once. A hit past that takes the oldest one\'s place.' },
   ],
-  panel: { rows: [[BODY], [COLOR], [NOISE_GROUP], [VOICE]] },
+  panel: { rows: [[BODY], [CLICK], [COLOR], [NOISE_GROUP], [VOICE]] },
   figures: [
     {
       id: 'body',
@@ -9690,6 +9731,12 @@ class DrumVoice {
     this.drop = 0;
     this.dropG = 0;
     this.clickLevel = 0;
+    this.sample = null;
+    this.sstep = 1;
+    this.hpOn = false;
+    this.lpOn = false;
+    this.hb0 = 0; this.hb1 = 0; this.hb2 = 0; this.ha1 = 0; this.ha2 = 0;
+    this.kLp = 1;
     this.mix = 0;
     this.toneGain = 1;
     this.tailG = 0;
@@ -9722,6 +9769,9 @@ class DrumVoice {
     this.tailOn = true;
     this.click = 0;
     this.lastWhite = 0;
+    this.spos = 0;
+    this.hx1 = 0; this.hx2 = 0; this.hy1 = 0; this.hy2 = 0;
+    this.clp = 0;
     this.sweepEnv = 0;
     this.fmPhase = 0;
     this.filter.reset();
@@ -9732,7 +9782,7 @@ class DrumVoice {
    * Starts a hit, reading every sound control at sample `j` of the block's values `p` - the
    * strike. The hit keeps them for as long as it rings.
    */
-  noteOn(note, velocity, seed, p, j) {
+  noteOn(note, velocity, seed, p, j, sample) {
     this.reset();
     this.note = note;
     this.velocity = velocity;
@@ -9751,6 +9801,28 @@ class DrumVoice {
     this.pitch = at(p.pitch, j);
     this.drop = at(p.drop, j);
     this.clickLevel = at(p.click, j);
+    // The click sample, and the click's filters: a sample's highpass never below the body's start.
+    this.sample = sample;
+    const st = Math.min(DRUM_CLICK_PITCH_ST, Math.max(-DRUM_CLICK_PITCH_ST, at(p.clickpitch, j)));
+    this.sstep = sample !== null ? (sample.sampleRate / sr) * Math.pow(2, st / 12) : 1;
+    const floor = sample !== null ? midiToHz(note + this.pitch + Math.max(0, this.drop)) : 0;
+    const hpHz = Math.min(0.45 * sr, Math.max(floor, at(p.clickhp, j)));
+    this.hpOn = hpHz > DRUM_CLICK_HP_MIN;
+    if (this.hpOn) {
+      // Second-order Butterworth, the cookbook's.
+      const w = (DRUM_TWO_PI * hpHz) / sr;
+      const cw = Math.cos(w);
+      const alpha = Math.sin(w) / (2 * Math.SQRT1_2);
+      const a0 = 1 + alpha;
+      this.hb0 = (1 + cw) / 2 / a0;
+      this.hb1 = -(1 + cw) / a0;
+      this.hb2 = this.hb0;
+      this.ha1 = (-2 * cw) / a0;
+      this.ha2 = (1 - alpha) / a0;
+    }
+    const lpHz = at(p.clicklp, j);
+    this.lpOn = lpHz < DRUM_CLICK_LP_MAX;
+    this.kLp = 1 - Math.exp((-DRUM_TWO_PI * Math.min(0.49 * sr, Math.max(1, lpHz))) / sr);
     this.mix = Math.min(1, Math.max(0, at(p.noise, j)));
     const tone = at(p.noisetone, j);
     this.filter.setCutoff(tone, NOISE_RES);
@@ -9802,7 +9874,8 @@ class DrumVoice {
     const velocity = this.velocity;
     const norm = this.norm;
     const mix = this.mix;
-    const clickGain = CLICK_GAIN * velocity * this.clickLevel;
+    // A sample is played at its own level; the stick's burst is louder than white noise's.
+    const clickGain = (this.sample !== null ? 1 : CLICK_GAIN) * velocity * this.clickLevel;
 
     for (let i = 0; i < count; i++) {
       const j = offset + i;
@@ -9854,9 +9927,33 @@ class DrumVoice {
       this.burst *= this.burstG;
       this.tail *= this.tailG;
       this.slow *= this.slowG;
-      const click = (w - this.lastWhite) * this.click;
+      // The click: the sample, or the stick's burst; then Click HP and Click LP where they are on.
+      let click = 0;
+      if (this.sample !== null) {
+        const d = this.sample.data;
+        if (this.spos < d.length) {
+          const k = Math.floor(this.spos);
+          const fr = this.spos - k;
+          const a = d[k];
+          const b = k + 1 < d.length ? d[k + 1] : 0;
+          click = a + (b - a) * fr;
+          this.spos += this.sstep;
+        }
+      } else {
+        click = (w - this.lastWhite) * this.click;
+        this.click *= clickG;
+      }
       this.lastWhite = w;
-      this.click *= clickG;
+      if (this.hpOn) {
+        const y = this.hb0 * click + this.hb1 * this.hx1 + this.hb2 * this.hx2 - this.ha1 * this.hy1 - this.ha2 * this.hy2;
+        this.hx2 = this.hx1; this.hx1 = click;
+        this.hy2 = this.hy1; this.hy1 = y;
+        click = y;
+      }
+      if (this.lpOn) {
+        this.clp += this.kLp * (click - this.clp);
+        click = this.clp;
+      }
       this.t = t + 1;
 
       let x = ((1 - mix) * norm * body + mix * noise + clickGain * click) * velocity;
@@ -9870,14 +9967,16 @@ class DrumVoice {
       outR[i] += v;
     }
 
-    if (!Number.isFinite(this.filter.ic1 + this.filter.ic2 + phase[0] + env[0])) {
+    if (!Number.isFinite(this.filter.ic1 + this.filter.ic2 + phase[0] + env[0] + this.hy1 + this.clp)) {
       this.reset();
       this.active = false;
       return;
     }
     const ls = this.ladder.s;
     const ringing = this.filtered && Math.abs(ls[0]) + Math.abs(ls[1]) + Math.abs(ls[2]) + Math.abs(ls[3]) >= SILENT;
-    if (this.tailOn && env[0] < SILENT && this.tail < SILENT && this.slowLevel * this.slow < SILENT && this.burst < SILENT && this.click < SILENT && !ringing) {
+    const clicking = (this.sample !== null ? this.spos < this.sample.data.length : this.click >= SILENT)
+      || Math.abs(this.hy1) + Math.abs(this.clp) >= SILENT;
+    if (this.tailOn && env[0] < SILENT && this.tail < SILENT && this.slowLevel * this.slow < SILENT && this.burst < SILENT && !clicking && !ringing) {
       this.active = false;
     }
   }
@@ -9893,6 +9992,7 @@ class DrumSynth {
     this.events = [];
     this.bend = 0;
     this.bendArray = null;
+    this.samples = [];        // option index -> a loaded click
     this.state = {
       values: Object.fromEntries(DRUM.params.map((p) => [p.id, p.default])),
       bendArray: null,
@@ -9923,6 +10023,27 @@ class DrumSynth {
       this.bendArray = bend;
     }
     this.state.bendArray = this.bendArray;
+  }
+
+  /** Keeps a loaded click, summed to one channel at its own rate, in a Click Sample slot. */
+  loadSample(paramId, index, payload) {
+    if (paramId !== 'clicksample' || !payload?.channels?.length) return false;
+    const chans = payload.channels;
+    let data = chans[0];
+    if (chans.length > 1) {
+      data = new Float32Array(chans[0].length);
+      for (const c of chans) for (let i = 0; i < data.length; i++) data[i] += c[i] / chans.length;
+    }
+    this.samples[Math.max(0, Math.round(index))] = { data, sampleRate: payload.sampleRate ?? this.sampleRate };
+    return true;
+  }
+
+  /** The click file Click Sample is on at sample `j`, or null for none. */
+  _sample(j) {
+    const index = Math.round(at(this.state.values.clicksample, j));
+    if (!(index >= 1)) return null;
+    const one = this.samples[index];
+    return one?.data?.length ? one : null;
   }
 
   queueNoteOn(note, velocity, offset = 0) {
@@ -9959,7 +10080,7 @@ class DrumSynth {
     const voice = this.allocate();
     voice.age = this.clock++;
     this.seed = (this.seed * 1664525 + 1013904223) >>> 0;
-    voice.noteOn(note, velocity, this.seed, this.state.values, j);
+    voice.noteOn(note, velocity, this.seed, this.state.values, j, this._sample(j));
   }
 
   /** Renders one block, split wherever a queued hit falls. */

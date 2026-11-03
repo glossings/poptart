@@ -3202,8 +3202,74 @@
           "curveExp": 2,
           "unit": "",
           "ui": "knob",
-          "group": "Body",
+          "group": "Click",
           "rate": "a",
+          "latch": true
+        },
+        {
+          "id": "clickpitch",
+          "name": "Click Pitch",
+          "min": -24,
+          "max": 24,
+          "default": 0,
+          "step": 0,
+          "curve": "lin",
+          "curveExp": 2,
+          "unit": "st",
+          "ui": "knob",
+          "group": "Click",
+          "rate": "a",
+          "latch": true
+        },
+        {
+          "id": "clickhp",
+          "name": "Click HP",
+          "min": 20,
+          "max": 8000,
+          "default": 20,
+          "step": 0,
+          "curve": "exp",
+          "curveExp": 2,
+          "unit": "Hz",
+          "ui": "knob",
+          "group": "Click",
+          "rate": "a",
+          "latch": true
+        },
+        {
+          "id": "clicklp",
+          "name": "Click LP",
+          "min": 300,
+          "max": 20000,
+          "default": 20000,
+          "step": 0,
+          "curve": "exp",
+          "curveExp": 2,
+          "unit": "Hz",
+          "ui": "knob",
+          "group": "Click",
+          "rate": "a",
+          "latch": true
+        },
+        {
+          "id": "clicksample",
+          "name": "Click Sample",
+          "min": 0,
+          "max": 1,
+          "default": 0,
+          "step": 1,
+          "curve": "lin",
+          "curveExp": 2,
+          "unit": "",
+          "ui": "enum",
+          "group": "Click",
+          "rate": "k",
+          "options": [
+            "none"
+          ],
+          "takes": "sample",
+          "open": true,
+          "sampleAs": "audio",
           "latch": true
         },
         {
@@ -8713,6 +8779,21 @@
           "rate": "a"
         },
         {
+          "id": "attack",
+          "name": "Attack",
+          "min": 0,
+          "max": 0.2,
+          "default": 0,
+          "step": 0,
+          "curve": "pow",
+          "curveExp": 3,
+          "unit": "s",
+          "ui": "knob",
+          "group": "Hat",
+          "rate": "a",
+          "amp": "attack"
+        },
+        {
           "id": "decay",
           "name": "Decay",
           "min": 0.01,
@@ -9086,15 +9167,16 @@
         "shaker": {
           "source": 0,
           "tone": 0.78,
-          "decay": 0.07,
-          "hold": 0.5,
+          "attack": 0.02,
+          "decay": 0.06,
+          "hold": 0.4,
           "body": 0,
           "noise": 1,
           "lofi": 0,
           "warp": 0,
           "ring": 0.8,
           "filtersweep": -12,
-          "level": 0.31
+          "level": 0.25
         }
       }
     },
