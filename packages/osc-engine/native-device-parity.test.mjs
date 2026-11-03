@@ -60,10 +60,12 @@ import { ANALOG, ANALOG_FILTER_TYPES, AnalogSynth } from '../web-engine/src/devi
 import { KickSynth } from '../web-engine/src/devices/kick.mjs';
 import { HatSynth } from '../web-engine/src/devices/hat.mjs';
 import { DrumSynth } from '../web-engine/src/devices/drum.mjs';
+import { PluckSynth } from '../web-engine/src/devices/pluck.mjs';
 import { LpgProcessor } from '../web-engine/src/devices/lpg.mjs';
 import { CrossoverProcessor } from '../web-engine/src/devices/crossover.mjs';
 import { FilterbankProcessor } from '../web-engine/src/devices/filterbank.mjs';
 import { ResonatorProcessor } from '../web-engine/src/devices/resonator.mjs';
+import { SpringProcessor } from '../web-engine/src/devices/spring.mjs';
 import { parseScaleName } from '../pattern-core/src/notes.mjs';
 import { IR_NAMES, bufferFromChannels, synthesizeImpulse } from '../web-engine/src/devices/builtins.mjs';
 import { Biquad, BIQUAD_TYPES } from '../web-engine/src/dsp/biquad.mjs';
@@ -108,10 +110,12 @@ const PROCESSORS = {
   Kick: KickSynth,
   Hat: HatSynth,
   Drum: DrumSynth,
+  Pluck: PluckSynth,
   LPG: LpgProcessor,
   Crossover: CrossoverProcessor,
   Filterbank: FilterbankProcessor,
   Resonator: ResonatorProcessor,
+  Spring: SpringProcessor,
   // Convolver is deliberately not here: there is no JavaScript processor for it to be compared
   // against, because in the browser it IS a ConvolverNode. It has a test of its own at the end
   // of this file, against Chromium's documented behavior.
@@ -381,12 +385,16 @@ function testSignal(frames, channels = 2, seed = 7, keyed = true) {
  * nothing for its first 50 ms, and has to have tracked a pitch and laid down grains before the two
  * engines can be said to agree about it.
  */
-const LONG_RUN = { VocalShift: BLOCK * 240, Stutter: BLOCK * 240 };
+// The Spring's first echo arrives after its Length, so a short run would compare silence.
+// A Pluck string rings past its release, and its voice is freed only once it is silent.
+const LONG_RUN = { VocalShift: BLOCK * 240, Stutter: BLOCK * 240, Spring: BLOCK * 240, Pluck: BLOCK * 240 };
 
 // Settings a device is always ALSO played at, on top of its defaults and the seeded draws: a
 // mode the draws may never land on, with whatever it depends on turned up. Each is the defaults
 // with these controls changed.
 const PINNED = {
+  // Trigger pressed from the first sample: a dip, on top of whatever notes play.
+  Ducker: [{ trigger: 1, length: 0.2 }],
   // Dry, a blend over a shift, and a blend over a shift and a formant move.
   VocalShift: [{ mix: 0 }, { mix: 0.5, pitch: 7 }, { mix: 0.3, pitch: -5, formant: 3 }],
   // Every circuit model at the ends of its controls: singing and driven hard low down, wide open
@@ -417,7 +425,7 @@ const PINNED = {
     { interval: 1, grid: 1, repeats: 2, chance: 0.2, seed: 42 },
     { interval: 1, grid: 1, repeats: 2, chance: 0 },
   ],
-  LPG: [{ mode: 1 }, { mode: 2, resonance: 0.8 }, { level: 0.4, decay: 0.05, resonance: 0.5 }],
+  LPG: [{ mode: 1 }, { mode: 2, resonance: 0.8 }, { level: 0.4, decay: 0.05, resonance: 0.5 }, { trigger: 1, decay: 0.1 }],
   // Every source, at the ends of every part: the dense twelve held coarse with noise and the full
   // body, the bell, the thin six long and bright, and pure noise at the shortest and darkest.
   Hat: [
@@ -473,11 +481,15 @@ const PINNED = {
     { voices: 2, glide: 0.05 },
   ],
   // The ends of every part: the most sweep on the longest pulse, all-noise click, the most drive,
-  // the softest tone with the thinnest tail, and the shortest hit with a click only.
+  // the softest tone with the thinnest tail, the shortest hit, a pure tick low and high, and a
+  // pulse dulled by Click Pitch.
   Kick: [
     { sweep: 48, clicklength: 15, drive: 1, clicktone: 1, click: 1 },
-    { sweep: 0, clicklength: 0.1, tail: 0, tone: 0, decay: 0.05 },
-    { clicktone: 0.5, click: 1, tone: 1, tail: 1, drive: 0 },
+    { sweep: 0, clicklength: 0.1, dcurve: 0, tone: 0, decay: 0.05 },
+    { clicktone: 0.5, click: 1, tone: 1, dcurve: 1, drive: 0 },
+    { clicktone: 0, click: 1, clickpitch: 375, clicklength: 15, tone: 1, clickhp: 600 },
+    { clicktone: 0.25, click: 1, clickpitch: 6000, clicklength: 6, drive: 0.8, clicklp: 2000 },
+    { clicktone: 0.75, click: 1, clickpitch: 900, clickhp: 8000, clicklp: 300 },
   ],
 };
 
@@ -872,6 +884,9 @@ const PATCHED = [
   { id: 'Drum', param: 'level' },
   { id: 'Analog', param: 'cutoff' },
   { id: 'Analog', param: 'mix' },
+  { id: 'Spring', param: 'drive' },
+  { id: 'Spring', param: 'shake' },
+  { id: 'Pluck', param: 'level' },
 ];
 
 for (const { id, param } of PATCHED) {
@@ -900,6 +915,49 @@ for (const { id, param } of PATCHED) {
     assert.ok(differs > 1e-3, `${id}: sweeping ${param} per sample sounded no different from per block`);
   });
 }
+
+// The Spring's transition frequency is read once a block and glides from there, bending what is
+// already in the springs: swept slowly across its range, the glide and the fractional stretch
+// have to follow the same path on both engines.
+test('Spring glides its transition frequency the same on both engines', { skip: compiler ? false : 'no clang++' }, () => {
+  const binary = buildHarness(devices);
+  const { device } = devices.find((d) => d.id === 'Spring');
+  const frames = BLOCK * 240;
+  const index = device.params.findIndex((p) => p.id === 'transition');
+  const swept = sweptValues(device.params[index], frames, 3);
+  const file = writeFile(path.join(WORK, 'Spring-transition.f32'), swept);
+  const values = defaultValues(device);
+  const input = testSignal(frames, 2);
+  for (const [what, over] of [['rising', { chirp: 0.8 }], ['falling, fed back past one', { chirp: -0.8, feedback: 1.2 }]]) {
+    const set = values.map((v, i) => (device.params[i].id in over ? over[device.params[i].id] : v));
+    const native = runNative(binary, { id: 'Spring', values: set, input, frames, notes: [], samples: [], keyed: null, moving: [{ param: index, file }], outs: 2 });
+    const browser = runBrowserSwept(device, { values: set, input, frames, notes: [], channels: 2, sweptId: 'transition', swept });
+    const { rmsA } = compare('Spring', `${what}, with the transition swept`, native, browser);
+    assert.ok(rmsA > 1e-3, 'nothing came out');
+  }
+});
+
+test('Spring is tuned and pinged by routed notes the same on both engines', { skip: compiler ? false : 'no clang++' }, () => {
+  const binary = buildHarness(devices);
+  const { device } = devices.find((d) => d.id === 'Spring');
+  const frames = BLOCK * 240;
+  const values = defaultValues(device);
+  const input = testSignal(frames, 2);
+  // Off the block edges, at different pitches and velocities, two inside one block, and one
+  // under the lowest transition frequency.
+  const notes = [
+    { frame: 61, note: 72, velocity: 1 },
+    { frame: BLOCK * 30 + 5, note: 84, velocity: 0.4 },
+    { frame: BLOCK * 30 + 90, note: 60, velocity: 0.8 },
+    { frame: BLOCK * 80 + 127, note: 72, velocity: 0 },
+    { frame: BLOCK * 120 + 64, note: 30, velocity: 1 },
+    { frame: BLOCK * 170 + 1, note: 96, velocity: 0.7 },
+  ];
+  const native = runNative(binary, { id: 'Spring', values, input, frames, notes, keyed: false, samples: [], outs: 2 });
+  const browser = runBrowser(device, { values, input, frames, notes, channels: 2, keyed: false });
+  const { rmsA } = compare('Spring', 'with notes routed in', native, browser);
+  assert.ok(rmsA > 1e-3, 'nothing came out');
+});
 
 // The circuit models under a cutoff swept at audio rate: each one's own tuning path, resonant and
 // driven, per sample on both engines.
@@ -1421,7 +1479,7 @@ test('the Kick plays a drawn pitch curve the same on both engines', { skip: comp
   const sweepFile = writeFile(path.join(WORK, 'Kick-sweep.f32'), sweep);
   const frames = BLOCK * 40;
   const notes = [{ frame: 9, note: 36, velocity: 1 }, { frame: BLOCK * 20 + 33, note: 41, velocity: 0.7 }];
-  for (const [what, change] of [['at the defaults', {}], ['short and driven', { decay: 0.06, drive: 1, tail: 0.2 }]]) {
+  for (const [what, change] of [['at the defaults', {}], ['short and driven', { decay: 0.06, drive: 1, dcurve: 0.2 }], ['shallow', { sweep: 7 }]]) {
     const values = device.params.map((p, i) => (i === pitchParam ? slot : (p.id in change ? change[p.id] : p.default)));
     const native = runNative(binary, {
       id: 'Kick', values, input: new Float32Array(frames * 2), frames, notes,
@@ -1438,6 +1496,60 @@ test('the Kick plays a drawn pitch curve the same on both engines', { skip: comp
     let differs = 0;
     for (let i = 0; i < browser.length; i++) differs = Math.max(differs, Math.abs(browser[i] - fixed[i]));
     assert.ok(differs > 1e-3, `Kick ${what}: the drawn curve sounded like the fixed one`);
+  }
+});
+
+test('the Kick plays a drawn amp curve the same on both engines', { skip: compiler ? false : 'no clang++' }, () => {
+  const binary = buildHarness(devices);
+  const { device } = devices.find((d) => d.id === 'Kick');
+  const ampParam = device.params.findIndex((p) => p.id === 'ampenv');
+  const slot = device.params[ampParam].options.length;
+  // A level that dips, swells back and falls away.
+  const level = Float32Array.from({ length: 256 }, (_, i) => Math.fround(Math.max(0, 1 - i / 255) * (0.6 + 0.4 * Math.cos((Math.PI * i) / 64))));
+  const levelFile = writeFile(path.join(WORK, 'Kick-level.f32'), level);
+  const frames = BLOCK * 40;
+  const notes = [{ frame: 9, note: 36, velocity: 1 }, { frame: BLOCK * 20 + 33, note: 41, velocity: 0.7 }];
+  for (const [what, change] of [['at the defaults', {}], ['short and driven', { decay: 0.06, drive: 1 }]]) {
+    const values = device.params.map((p, i) => (i === ampParam ? slot : (p.id in change ? change[p.id] : p.default)));
+    const native = runNative(binary, {
+      id: 'Kick', values, input: new Float32Array(frames * 2), frames, notes,
+      shapes: [{ param: ampParam, slot, file: levelFile }],
+    });
+    const browser = runBrowser(device, {
+      values, input: new Float32Array(frames * 2), frames, notes,
+      shapes: [{ param: 'ampenv', slot, table: level }],
+    });
+    const { rmsA } = compare('Kick', `through a drawn amp curve ${what}`, native, browser);
+    assert.ok(rmsA > 1e-3, `Kick ${what}: nothing came out`);
+    const fixed = runBrowser(device, { values, input: new Float32Array(frames * 2), frames, notes });
+    let differs = 0;
+    for (let i = 0; i < browser.length; i++) differs = Math.max(differs, Math.abs(browser[i] - fixed[i]));
+    assert.ok(differs > 1e-3, `Kick ${what}: the drawn level sounded like the fixed one`);
+  }
+});
+
+test('the Kick plays a click sample the same on both engines', { skip: compiler ? false : 'no clang++' }, () => {
+  const binary = buildHarness(devices);
+  const { device } = devices.find((d) => d.id === 'Kick');
+  const param = device.params.findIndex((p) => p.id === 'clicksample');
+  const slot = device.params[param].options.length;
+  const file = testFile(0.05);
+  const samples = [{ param, slot, rate: file.rate, file: writeFile(path.join(WORK, 'Kick-click.f32'), file.data) }];
+  const load = { param: 'clicksample', slot, data: file.data, rate: file.rate };
+  const frames = BLOCK * 40;
+  const notes = [{ frame: 9, note: 36, velocity: 1 }, { frame: BLOCK * 20 + 33, note: 29, velocity: 0.7 }];
+  for (const [what, change] of [['at the defaults', {}], ['loud and driven', { click: 1, drive: 1, sweep: 12 }],
+    ['transposed and filtered', { click: 1, clickpitch: 2300, clickhp: 3000, clicklp: 5000 }]]) {
+    const values = device.params.map((p, i) => (i === param ? slot : (p.id in change ? change[p.id] : p.default)));
+    const native = runNative(binary, { id: 'Kick', values, input: new Float32Array(frames * 2), frames, notes, samples });
+    const browser = runBrowser(device, { values, input: new Float32Array(frames * 2), frames, notes, load });
+    const { rmsA } = compare('Kick', `with a click sample ${what}`, native, browser);
+    assert.ok(rmsA > 1e-3, `Kick ${what}: nothing came out`);
+    // Not the built-in click a slot with nothing loaded falls back to.
+    const none = runBrowser(device, { values, input: new Float32Array(frames * 2), frames, notes });
+    let differs = 0;
+    for (let i = 0; i < browser.length; i++) differs = Math.max(differs, Math.abs(browser[i] - none[i]));
+    assert.ok(differs > 1e-3, `Kick ${what}: the click sample sounded like the built-in click`);
   }
 });
 

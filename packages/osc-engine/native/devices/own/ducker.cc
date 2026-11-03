@@ -37,6 +37,7 @@ struct Device : pd_own::Device<ids::kCount, 4> {
   double env = 0;
   bool keyed = false;
   bool noteRouted = false;
+  bool triggered = false;   // Trigger as the last sample read it
   double pending[kMaxPending] = { 0 };
   int pendingCount = 0;
   double hit = 0;
@@ -82,6 +83,7 @@ struct Device : pd_own::Device<ids::kCount, 4> {
     env = 0;
     keyed = false;
     noteRouted = false;
+    triggered = false;
     pendingCount = 0;
     hit = 0;
     at = 0;
@@ -132,6 +134,13 @@ struct Device : pd_own::Device<ids::kCount, 4> {
     double peak = 0;
 
     for (int i = 0; i < frames; ++i) {
+      const bool held = ctl(ids::trigger, i) >= 0.5;
+      if (held && !triggered) {
+        elapsed = 0;
+        dipping = true;
+        hit = 1;
+      }
+      triggered = held;
       // Where this sample sits on the clock: a trigger fires when the beat index changes.
       if (byNotes) {
         // A note at or before this sample starts the dip here. Anything that arrived late lands

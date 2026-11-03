@@ -127,3 +127,50 @@ test('nothing at the ends of the controls plays a number nobody can play', () =>
     }
   }
 });
+
+/** Runs the gate block by block with Trigger given per sample; `routed` is the engine's word that it is set. */
+function runTrigger(params, input, trigger, routed = true) {
+  const fx = new LpgProcessor(SR);
+  const full = { ...defaultValues(LPG), ...params };
+  if (routed) fx.setNoteRoute(true);
+  const out = new Float32Array(input.length);
+  const outR = new Float32Array(input.length);
+  for (let at = 0; at < input.length; at += BLOCK) {
+    const inp = input.subarray(at, at + BLOCK);
+    full.trigger = trigger.subarray(at, at + BLOCK);
+    fx.process([inp, inp], [out.subarray(at, at + BLOCK), outR.subarray(at, at + BLOCK)], BLOCK, full, null, at / SR);
+  }
+  return out;
+}
+
+/** A Trigger that is 1 over each [from, to) and 0 elsewhere. */
+const presses = (frames, spans) => {
+  const t = new Float32Array(frames);
+  for (const [from, to] of spans) t.fill(1, from, to);
+  return t;
+};
+
+test('Trigger set rests the gate closed, and a press strikes it open', () => {
+  const input = sines(SR, [220]);
+  const out = runTrigger({ decay: 0.3 }, input, presses(SR, [[2400, 2400 + 4800]]));
+  assert.ok(rms(out, 0, 2400) < 1e-6, 'before the press it rests closed');
+  const peak = rms(out, 2400 + 240, 2400 + 960);
+  assert.ok(peak > 0.15, `the press should open it most of the way (rms ${peak.toFixed(3)})`);
+  assert.ok(rms(out, SR - 4800, SR) < peak * 0.05, 'a second later it should have closed');
+});
+
+test('a held Trigger strikes once; let go and pressed again, it strikes again', () => {
+  const input = sines(SR, [220]);
+  const once = runTrigger({ decay: 0.1 }, input, presses(SR, [[0, SR]]));
+  assert.ok(rms(once, SR / 2, SR) < 1e-4, 'held down, it closes after the one strike');
+  const twice = runTrigger({ decay: 0.1 }, input, presses(SR, [[0, 1000], [SR / 2, SR / 2 + 1000]]));
+  assert.ok(rms(twice, SR / 2 + 240, SR / 2 + 960) > 0.15, 'the second press strikes it open again');
+});
+
+test('Level sets how far a press opens it', () => {
+  const input = sines(SR / 4, [220]);
+  const t = presses(SR / 4, [[0, 1000]]);
+  const full = rms(runTrigger({ level: 1 }, input, t), 240, 960);
+  const half = rms(runTrigger({ level: 0.5 }, input, t), 240, 960);
+  assert.ok(half < full * 0.6, `half Level should strike lower (${half.toFixed(3)} against ${full.toFixed(3)})`);
+});

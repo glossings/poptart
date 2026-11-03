@@ -61,8 +61,80 @@ export const GRAINECHO = defineDevice({
       description: 'How far grains are panned either way.' },
     { id: 'mix', name: 'Mix', min: 0, max: 1, default: 0.5 },
   ],
+  figures: [
+    {
+      id: 'cloud',
+      kind: 'cloud',
+      title: 'cloud',
+      description: 'The grains one hit sets off, time across and pitch up: each repeat a scatter of grains Size long, as many as Density catches, spread by Spray and Random Pitch, a step of Pitch from the last and quieter by Feedback. Left and right grains are drawn in two shades. Drag across for the time, up for the pitch.',
+      params: { time: 'time', sync: 'sync', size: 'size', density: 'density', pitch: 'pitch', random: 'random', spray: 'spray', feedback: 'feedback', spread: 'spread' },
+      drag: { x: 'time', y: 'pitch' },
+    },
+  ],
   presets: GRAINECHO_PRESETS,
 });
+
+/** The grains' random sequence: xorshift32 on a 32-bit seed, the next seed. */
+function nextSeed(seed) {
+  let x = seed;
+  x ^= x << 13; x >>>= 0; x ^= x >>> 17; x ^= x << 5; x >>>= 0;
+  return x;
+}
+
+/** Where the grains' random sequence starts. */
+const GRAINECHO_SEED = 0x2545f491;
+
+/** The most repeats, and grains a repeat, the picture draws. */
+const CLOUD_REPEATS = 16;
+const CLOUD_GRAINS = 24;
+/** The quietest repeat drawn, in decibels under the first. */
+const CLOUD_FLOOR_DB = -60;
+/** The longest the picture runs, in seconds. */
+const CLOUD_SPAN_MAX = 8;
+
+/**
+ * The cloud one hit makes, for the device's picture: every grain of every repeat, where it is
+ * heard, at what pitch, how loud, and which way it is panned.
+ *
+ * Built the way the processor builds it. A hit is caught by the grains whose window covers it
+ * when they read it back - about Density times Size of them - and each is heard Time back, give
+ * or take Spray of it, plus half a grain, since a grain starts reading half its length before the
+ * point it is centered on. Each of those grains is caught again by the next repeat, Feedback
+ * quieter, transposed by Pitch again and by its own Random Pitch, so a repeat's grains sit around
+ * its parents'. The random draws are the processor's own sequence from its own seed, so the
+ * picture is a sample of the same spread the sound draws from, and the same sample each time.
+ */
+export function grainEchoCloud({ time, size, density, pitch, random, spray, feedback, spread }) {
+  let seed = GRAINECHO_SEED;
+  const rnd = () => {
+    seed = nextSeed(seed);
+    return seed / 4294967296;
+  };
+  const len = Math.max(0.001, size * 0.001);
+  const caught = Math.max(1, Math.min(CLOUD_GRAINS, Math.round(density * len)));
+  const fbDb = feedback > 0 ? 20 * Math.log10(feedback) : -Infinity;
+  const grains = [];
+  let parents = [{ t: 0, st: 0 }];
+  for (let n = 1; n <= CLOUD_REPEATS; n++) {
+    const db = (n - 1) * fbDb;
+    if (!(db > CLOUD_FLOOR_DB)) break;
+    const next = [];
+    for (let g = 0; g < caught; g++) {
+      const parent = parents[Math.floor(rnd() * parents.length)];
+      const back = Math.max(0.001, time + spray * time * (rnd() * 2 - 1));
+      const st = parent.st + pitch + random * (rnd() * 2 - 1);
+      const pan = (rnd() * 2 - 1) * spread;
+      const t = parent.t + back + len / 2;
+      if (t - len / 2 > CLOUD_SPAN_MAX) continue;
+      next.push({ t, st });
+      grains.push({ t, length: len, st, db, pan, repeat: n });
+    }
+    if (!next.length) break;
+    parents = next;
+  }
+  const last = grains.reduce((m, g) => Math.max(m, g.t + g.length / 2), 0);
+  return { grains, span: Math.min(CLOUD_SPAN_MAX, Math.max(0.3, last * 1.08)), floorDb: CLOUD_FLOOR_DB };
+}
 
 /** One grain: where it reads, how far through it is, its rate and pan. */
 class DelayGrain {
@@ -78,7 +150,7 @@ export class GrainEchoProcessor {
     this.write = 0;
     this.grains = Array.from({ length: MAX_GRAINS }, () => new DelayGrain());
     this.until = 0;        // samples until the next grain starts
-    this.seed = 0x2545f491;
+    this.seed = GRAINECHO_SEED;
     this.bpm = 120;
     this.dcK = 1 - (2 * Math.PI * GRAINECHO_DC_HZ) / sampleRate;
     this.dcInL = 0; this.dcInR = 0; this.dcOutL = 0; this.dcOutR = 0;
@@ -88,10 +160,8 @@ export class GrainEchoProcessor {
 
   /** A deterministic 0..1, so the cloud is the same cloud every play. */
   random() {
-    let x = this.seed;
-    x ^= x << 13; x >>>= 0; x ^= x >>> 17; x ^= x << 5; x >>>= 0;
-    this.seed = x;
-    return x / 4294967296;
+    this.seed = nextSeed(this.seed);
+    return this.seed / 4294967296;
   }
 
   process(inputs, outputs, count, params) {

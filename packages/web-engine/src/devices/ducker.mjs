@@ -5,7 +5,9 @@
 // beat falls - so it is on the grid whatever is playing through it. Played by another track's
 // notes (`.fx("Ducker").midi("kick")`) it dips on each note instead, at the note's own sample,
 // which is the way to duck to a kick exactly without listening for it. With a sidechain patched
-// in (`.audio("kick")`) it triggers on that signal's transients. Either way the shape is the thing: a curve from the dip's floor back up to full over the
+// in (`.audio("kick")`) it triggers on that signal's transients. Trigger dips it each time it
+// rises past a half - `.param("Trigger", button())` - and setting it stops the clock dipping on its
+// own, as a route of notes does. Either way the shape is the thing: a curve from the dip's floor back up to full over the
 // length set, which is what a sidechain compressor's release does with far less to set.
 
 import { defineDevice } from '../descriptor.mjs';
@@ -33,13 +35,13 @@ export const DUCKER = defineDevice({
   migrate: migrateSyncLists(['sync']),
   license: 'AGPL-3.0-only',
   processor: 'poptart-ducker',
-  description: 'A level dip on the beat, on the notes of a track routed in with .midi(), or on the transients of a sidechained track: the pump of a sidechain compressor, with a shape to draw instead of a detector to fight.',
+  description: 'A level dip on the beat, on the notes of a track routed in with .midi(), on Trigger, or on the transients of a sidechained track: the pump of a sidechain compressor, with a shape to draw instead of a detector to fight.',
   channels: { in: 2, out: 2 },
   sidechain: true,
   notes: true,
   params: [
     { id: 'sync', name: 'Sync', default: SYNC_OPTIONS.indexOf('1/4'), options: [...SYNC_OPTIONS], rate: 'k',
-      description: 'How often the dip happens on the clock. Ignored when notes or a sidechain trigger it instead.' },
+      description: 'How often the dip happens on the clock. Ignored when notes, Trigger or a sidechain trigger it instead.' },
     { id: 'amount', name: 'Amount', min: 0, max: 1, default: 0.8,
       description: 'How far the level drops at the dip.' },
     { id: 'length', name: 'Length', min: 0.05, max: 1, default: 0.5,
@@ -50,6 +52,8 @@ export const DUCKER = defineDevice({
       description: 'The shape of the recovery: positive starts slow and rises fast, the classic pump; negative snaps back.' },
     { id: 'threshold', name: 'Threshold', min: -60, max: 0, default: -24, unit: 'dB',
       description: 'The level a sidechained signal has to reach to trigger the dip. Notes trigger it whatever their level.' },
+    { id: 'trigger', name: 'Trigger', min: 0, max: 1, default: 0, ui: 'button', saved: false,
+      description: 'Starts a dip each time it rises past a half. Set, it stops the clock dipping on its own.' },
   ],
   figures: [
     {
@@ -81,6 +85,7 @@ export class DuckerProcessor {
     // Notes routed in with .midi(): while a route is set, notes are the only trigger, and the
     // clock stops dipping on its own. `pending` is note-on times not yet reached, oldest first.
     this.noteRouted = false;
+    this.triggered = false;   // Trigger as the last sample read it
     this.pending = [];
     this.hit = 0;             // a marker for the picture: one at a note, falling away after it
     this.at = 0;              // transport seconds at the end of the last block (see report)
@@ -139,6 +144,13 @@ export class DuckerProcessor {
     const threshold = Math.pow(10, at(params.threshold, 0) / 20);
     const releaseK = 1 - Math.exp(-1 / (0.05 * sr));
     for (let i = 0; i < count; i++) {
+      // A press dips as a note does.
+      const held = at(params.trigger, i) >= 0.5;
+      if (held && !this.triggered) {
+        this.elapsed = 0;
+        this.hit = 1;
+      }
+      this.triggered = held;
       // Where this sample sits on the clock: a trigger fires when the beat index changes.
       if (byNotes) {
         // A note at or before this sample starts the dip here. Anything that arrived late

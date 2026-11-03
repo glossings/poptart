@@ -3,8 +3,9 @@
 // Translated from web-engine/src/devices/kick.mjs, which says what each part is and why. The
 // same state, the same arithmetic in the same order, in double; the parity test holds the two
 // together. A control a signal moves is read per sample where the browser reads it per sample
-// (see own/pd-own.h). A drawn Pitch Env curve reaches it through the host's /shape command
-// (pd_shape), sampled by the engine exactly as the browser's engine samples it.
+// (see own/pd-own.h). A drawn Pitch Env or Amp Env curve reaches it through the host's /shape
+// command (pd_shape), sampled by the engine exactly as the browser's engine samples it, and a
+// Click Sample through pd_sample, summed to one channel by the host.
 
 #include "own/pd-own.h"
 #include "own/dsp/adsr.h"
@@ -23,12 +24,15 @@ constexpr double kChargeSec = 0.0005;
 constexpr double kDrawSec = 0.4;
 constexpr double kDriveMin = 0.1;
 constexpr double kDriveMax = 6;
-constexpr double kTailKneeMin = 0.02;
-constexpr double kTailKneeMax = 3;
+constexpr double kCurveKneeMin = 0.02;
+constexpr double kCurveKneeMax = 3;
 constexpr double kBodyBias = 0.08;
 constexpr double kBodyHpHz = 4;
 constexpr double kClickRiseSec = 0.0004;
 constexpr double kNoiseGain = 0.7;
+constexpr double kClickPitchMin = 375;
+constexpr double kClickPitchCenter = 1500;
+constexpr double kClickPitchMax = 6000;
 constexpr double kToneSoftHz = 150;
 constexpr double kToneBrightHz = 20000;
 constexpr double kSilent = 1e-5;
@@ -36,13 +40,15 @@ constexpr double kChokeSec = 0.003;
 constexpr double kDriveFull = 1.0 / 48;
 constexpr double kDriveNone = 1.0 / 12;
 constexpr double kTwoPi = 6.283185307179586;
+constexpr double kSqrtHalf = 0.7071067811865476;
 /** The points a drawn curve is sampled at: the browser engine's SHAPE_POINTS. */
 constexpr int kShapePoints = 256;
-/** The room a fresh device has for drawn curves. */
+/** The room a fresh device has for drawn curves and click files. */
 constexpr int kFirstShapeSlots = 8;
+constexpr int kFirstSampleSlots = 4;
 
 inline double kickDrive(double drive) { return kDriveMin + (kDriveMax - kDriveMin) * clamp(drive, 0.0, 1.0); }
-inline double kickTailKnee(double tail) { return kTailKneeMin * std::pow(kTailKneeMax / kTailKneeMin, clamp(tail, 0.0, 1.0)); }
+inline double kickCurveKnee(double curve) { return kCurveKneeMin * std::pow(kCurveKneeMax / kCurveKneeMin, clamp(curve, 0.0, 1.0)); }
 inline double kickDrawX(double seconds) { return std::sqrt(std::fmax(0.0, seconds) / kDrawSec); }
 inline double kickSweptHz(double hz, double st, double e) { return hz * (1 + (std::pow(2.0, st / 12) - 1) * e); }
 
@@ -71,6 +77,13 @@ inline double gateAt(long long n, double edge) {
 }
 
 struct Drawn { float table[kShapePoints]; int length = 0; };
+
+/** One loaded click: mono frames at the file's own rate, owned by the host. */
+struct Sample {
+  const float* data = nullptr;
+  int frames = 0;
+  double sampleRate = 48000.0;
+};
 
 /** The fixed sweep, stepped a sample at a time (kick.mjs's KickSweep). */
 struct Sweep {
@@ -110,10 +123,16 @@ struct Voice {
   long long age = 0;
   double phase = 0, edge = 0, env = 1;
   const Drawn* pitchTable = nullptr;
+  const Drawn* ampTable = nullptr;
   Sweep sweep;
   int choke = -1;
   unsigned int state = 1;
   double hpIn = 0, hpOut = 0, lp = 0;
+  double tickPhase = 0, clp = 0;
+  const Sample* sample = nullptr;
+  double spos = 0, sstep = 1;
+  double floorHz = 0;
+  double hx1 = 0, hx2 = 0, hy1 = 0, hy2 = 0;
 
   void init(double sr) { sampleRate = sr; sweep.init(sr); reset(); age = 0; }
 
@@ -122,14 +141,21 @@ struct Voice {
     n = 0; note = 0; velocity = 1;
     phase = 0; edge = 0;
     pitchTable = nullptr;
+    ampTable = nullptr;
     sweep.start(0);
     env = 1;
     choke = -1;
     state = 1;
     hpIn = 0; hpOut = 0; lp = 0;
+    tickPhase = 0; clp = 0;
+    sample = nullptr;
+    spos = 0; sstep = 1;
+    floorHz = 0;
+    hx1 = 0; hx2 = 0; hy1 = 0; hy2 = 0;
   }
 
-  void noteOn(double nn, double vel, unsigned int seed, double clickMs, const Drawn* pt) {
+  void noteOn(double nn, double vel, unsigned int seed, double clickMs, const Drawn* pt, const Drawn* at,
+              const Sample* file, double sweepSt) {
     const long long keepAge = age;
     reset();
     age = keepAge;
@@ -140,6 +166,14 @@ struct Voice {
     edge = std::fmax(0.0, clickMs) * 0.001 * sampleRate;
     sweep.start(edge);
     pitchTable = pt;
+    ampTable = at;
+    if (file) {
+      const double sr = sampleRate;
+      sample = file;
+      sstep = file->sampleRate / sr;
+      const double st = clamp(sweepSt, 0.0, kSweepMaxSt);
+      floorHz = midiToHz(nn) * std::pow(2.0, st / 12);
+    }
   }
 
   int chokeLength() const {
@@ -165,43 +199,101 @@ struct Voice {
     double lastTone = -1;
     double kTone = 1;
     double lastDecay = -1;
-    double lastTail = -1;
+    double lastCurve = -1;
     double knee = 1;
     double kEnv = 1;
+    double lastHp = -1;
+    double hb0 = 0, hb1 = 0, hb2 = 0, ha1 = 0, ha2 = 0;
+    double lastLp = -1;
+    double kClick = 1;
     for (int i = 0; i < count; ++i) {
       if (!active) break;
       const long long nn = n;
       const double nd = static_cast<double>(nn);
 
       const double noteHz = midiToHz(note + bend);
+      const double st = clamp(c.ctl(ids::sweep, i), 0.0, kSweepMaxSt);
       double hz;
       if (pitchTable) {
-        hz = noteHz * std::pow(2.0, (kSweepMaxSt * drawnAt(pitchTable->table, pitchTable->length, kickDrawX(nd / sr))) / 12);
+        hz = noteHz * std::pow(2.0, (st * drawnAt(pitchTable->table, pitchTable->length, kickDrawX(nd / sr))) / 12);
       } else {
-        const double st = clamp(c.ctl(ids::sweep, i), 0.0, kSweepMaxSt);
         hz = kickSweptHz(noteHz, st, sweep.next(nd));
       }
       hz = std::fmin(0.49 * sr, hz);
 
       const double decay = std::fmax(1e-3, c.ctl(ids::decay, i));
-      const double tail = c.ctl(ids::tail, i);
-      if (decay != lastDecay || tail != lastTail) {
-        knee = kickTailKnee(tail);
-        kEnv = std::exp(-std::log((1 + knee) / knee) / (decay * sr));
-        lastDecay = decay;
-        lastTail = tail;
+      double level;
+      if (ampTable) {
+        const double x = nd / (decay * sr);
+        const double v = x < 1 ? drawnAt(ampTable->table, ampTable->length, x) : 0.0;
+        level = v > 0 ? v : 0.0;
+      } else {
+        const double curve = c.ctl(ids::dcurve, i);
+        if (decay != lastDecay || curve != lastCurve) {
+          knee = kickCurveKnee(curve);
+          kEnv = std::exp(-std::log((1 + knee) / knee) / (decay * sr));
+          lastDecay = decay;
+          lastCurve = curve;
+        }
+        const double envNow = (1 + knee) * env - knee;
+        level = envNow > 0 ? envNow : 0.0;
+        env *= kEnv;
       }
-      const double envNow = (1 + knee) * env - knee;
-      const double level = envNow > 0 ? envNow : 0.0;
-      env *= kEnv;
 
-      const double gate = gateAt(nn, edge);
-      double click = 0;
-      if (nd <= edge + 1) {
-        const double tone = clamp(c.ctl(ids::clicktone, i), 0.0, 1.0);
+      const double pitch = clamp(c.ctl(ids::clickpitch, i), kClickPitchMin, kClickPitchMax);
+      double src = 0;
+      bool sounding = false;
+      if (sample) {
+        const float* d = sample->data;
+        const int len = sample->frames;
+        if (spos < len) {
+          const long long k = static_cast<long long>(std::floor(spos));
+          const double f = spos - static_cast<double>(k);
+          const double a = d[k];
+          const double b = k + 1 < len ? static_cast<double>(d[k + 1]) : 0.0;
+          src = a + (b - a) * f;
+          spos += sstep * (pitch / kClickPitchCenter);
+          sounding = true;
+        }
+      } else if (nd <= edge + 1) {
+        const double gate = gateAt(nn, edge);
+        const double shape = clamp(c.ctl(ids::clicktone, i), 0.0, 1.0);
         const double pulse = gate * (1 - std::pow(kRise, nd));
-        click = c.ctl(ids::click, i) * ((1 - tone) * pulse + tone * white() * kNoiseGain * gate);
+        if (shape < 0.5) {
+          const double w = shape * 2;
+          const double tick = pulse * std::sin(kTwoPi * tickPhase);
+          src = (1 - w) * tick + w * pulse;
+        } else {
+          const double w = (shape - 0.5) * 2;
+          src = (1 - w) * pulse + w * white() * kNoiseGain * gate;
+        }
+        tickPhase += pitch / sr;
+        if (tickPhase >= 1) tickPhase -= 1;
       }
+
+      const double hpHz = std::fmin(0.45 * sr, std::fmax(floorHz, c.ctl(ids::clickhp, i)));
+      if (hpHz != lastHp) {
+        const double w = (kTwoPi * hpHz) / sr;
+        const double cw = std::cos(w);
+        const double alpha = std::sin(w) / (2 * kSqrtHalf);
+        const double a0 = 1 + alpha;
+        hb0 = (1 + cw) / 2 / a0;
+        hb1 = -(1 + cw) / a0;
+        hb2 = hb0;
+        ha1 = (-2 * cw) / a0;
+        ha2 = (1 - alpha) / a0;
+        lastHp = hpHz;
+      }
+      const double y = hb0 * src + hb1 * hx1 + hb2 * hx2 - ha1 * hy1 - ha2 * hy2;
+      hx2 = hx1; hx1 = src;
+      hy2 = hy1; hy1 = y;
+      const double lpHz = clamp(c.ctl(ids::clicklp, i), 1.0, 0.49 * sr);
+      if (lpHz != lastLp) {
+        kClick = 1 - std::exp((-kTwoPi * lpHz) / sr);
+        lastLp = lpHz;
+      }
+      clp += kClick * (y - clp);
+      const double click = c.ctl(ids::click, i) * clp;
 
       const double ratio = hz / sr;
       const double room = clamp((kDriveNone - ratio) / (kDriveNone - kDriveFull), 0.0, 1.0);
@@ -231,16 +323,20 @@ struct Voice {
       outR[i] = static_cast<float>(outR[i] + v);
       n = nn + 1;
 
-      if (level == 0 && nd > edge + 1 && std::fabs(lp) < kSilent && std::fabs(hpOut) < kSilent) active = false;
+      if (level == 0 && !sounding && nd > edge + 1 && std::fabs(click) < kSilent
+          && std::fabs(lp) < kSilent && std::fabs(hpOut) < kSilent) active = false;
     }
-    if (!isPlayable(lp + hpOut + phase)) reset();
+    if (!isPlayable(lp + hpOut + phase + clp + hy1)) reset();
   }
 };
 
 struct Device : Base {
   Voice voices[2];
-  /** The drawn pitch curves, by option slot. */
-  Pool<Drawn> shapes;
+  /** The drawn curves, by option slot: Pitch Env's and Amp Env's, each numbered on its own. */
+  Pool<Drawn> pitchShapes;
+  Pool<Drawn> ampShapes;
+  /** The loaded clicks, by Click Sample's option slot. */
+  Pool<Sample> samples;
   long long clock = 0;
   unsigned int seed = 1;
   double bend = 0;
@@ -253,7 +349,9 @@ struct Device : Base {
   void pd_init(double sr) {
     sampleRate = sr;
     for (auto& v : voices) v.init(sr);
-    shapes.reserve(kFirstShapeSlots, [](Drawn&) {});
+    pitchShapes.reserve(kFirstShapeSlots, [](Drawn&) {});
+    ampShapes.reserve(kFirstShapeSlots, [](Drawn&) {});
+    samples.reserve(kFirstSampleSlots, [](Sample&) {});
     clock = 0;
     seed = 1;
     bend = 0;
@@ -275,14 +373,23 @@ struct Device : Base {
 
   void pd_bend(float semitones) { bend = isPlayable(semitones) ? semitones : 0.0; }
 
-  /** A curve somebody drew, for a Pitch Env slot past the fixed one. */
+  /** A curve somebody drew, for a Pitch Env or Amp Env slot past the fixed one. */
   bool pd_shape(int param, int slot, const float* table, int count) {
-    if (param != ids::pitchenv || slot < 0 || !table || count <= 0) return true;
-    if (slot >= shapes.size()) { shapes.ask(slot + 1); return false; }
+    Pool<Drawn>* pool = param == ids::pitchenv ? &pitchShapes : (param == ids::ampenv ? &ampShapes : nullptr);
+    if (!pool || slot < 0 || !table || count <= 0) return true;
+    if (slot >= pool->size()) { pool->ask(slot + 1); return false; }
     const int n = count < kShapePoints ? count : kShapePoints;
-    Drawn& one = shapes[slot];
+    Drawn& one = (*pool)[slot];
     std::memcpy(one.table, table, sizeof(float) * static_cast<size_t>(n));
     one.length = n;
+    return true;
+  }
+
+  /** A file the host read for us, for Click Sample: summed to one channel. */
+  bool pd_sample(int param, int slot, const PdSample& file) {
+    if (param != ids::clicksample || slot < 0) return true;
+    if (slot >= samples.size()) { samples.ask(slot + 1); return false; }
+    samples[slot] = Sample{ file.mono, file.frames, file.sampleRate > 0 ? file.sampleRate : sampleRate };
     return true;
   }
 
@@ -293,17 +400,29 @@ struct Device : Base {
     return 1;
   }
 
-  bool pd_work_wanted() { return shapes.wanted(); }
-  void pd_work() { shapes.build([](Drawn&) {}); }
-  void pd_work_done() { shapes.install(); }
-  void pd_work_release() { shapes.release(); }
+  bool pd_work_wanted() { return pitchShapes.wanted() | ampShapes.wanted() | samples.wanted(); }
+  void pd_work() {
+    pitchShapes.build([](Drawn&) {});
+    ampShapes.build([](Drawn&) {});
+    samples.build([](Sample&) {});
+  }
+  void pd_work_done() { pitchShapes.install(); ampShapes.install(); samples.install(); }
+  void pd_work_release() { pitchShapes.release(); ampShapes.release(); samples.release(); }
 
-  const Drawn* drawn() {
-    const double index = jsRound(p[ids::pitchenv]);
+  const Drawn* drawn(int param, Pool<Drawn>& pool) {
+    const double index = jsRound(p[param]);
     if (!(index >= 1)) return nullptr;
     const int i = static_cast<int>(index);
-    if (i >= shapes.size() || shapes[i].length <= 0) return nullptr;
-    return &shapes[i];
+    if (i >= pool.size() || pool[i].length <= 0) return nullptr;
+    return &pool[i];
+  }
+
+  const Sample* clickFile() {
+    const double index = jsRound(p[ids::clicksample]);
+    if (!(index >= 1)) return nullptr;
+    const int i = static_cast<int>(index);
+    if (i >= samples.size() || !samples[i].data || samples[i].frames <= 0) return nullptr;
+    return &samples[i];
   }
 
   void startNote(double note, double velocity) {
@@ -312,7 +431,8 @@ struct Device : Base {
     if (!voice) voice = voices[0].age <= voices[1].age ? &voices[0] : &voices[1];
     for (auto& v : voices) if (&v != voice) v.chokeOff();
     seed = static_cast<unsigned int>(seed * 1664525u + 1013904223u);
-    voice->noteOn(note, velocity, seed, p[ids::clicklength], drawn());
+    voice->noteOn(note, velocity, seed, p[ids::clicklength], drawn(ids::pitchenv, pitchShapes), drawn(ids::ampenv, ampShapes),
+                  clickFile(), p[ids::sweep]);
     voice->age = clock++;
     lastNote = note;
     played = true;

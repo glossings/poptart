@@ -2757,6 +2757,7 @@ function writeParamTake(ed, t) {
 function controlCallText(kind, valueText, { min, max, step = null, curve = 'lin', curveExp = null }) {
   const args = [valueText, String(min), String(max)];
   if (step != null && Number.isFinite(step)) args.push(String(step));
+  else if ((!curve || curve === 'lin') && Number(min) === 0 && Number(max) === 1) return `${kind}(${valueText})`; // 0..1 is the default
   if (curve && curve !== 'lin') {
     const opts = [`curve: ${JSON.stringify(curve)}`];
     if ((curve === 'pow' || curve === 'sym') && curveExp != null && curveExp !== 2) opts.push(`curveExp: ${curveExp}`);
@@ -4601,7 +4602,7 @@ function startDeviceLive(trackLabel, slot, panel) {
 const LIVE_FIGURE_KINDS = new Set(['sample', 'meter', 'transfer', 'eq', 'shaper', 'sweep', 'duck', 'bands', 'loop', 'hitpitch']);
 
 /** How tall each kind of figure is drawn, in CSS pixels. */
-const FIGURE_HEIGHT = { wavetable: 176, unison: 64, response: 108, adsr: 108, eq: 128, band: 52, matrix: 176, sample: 96, grain: 64, meter: 22, transfer: 120, shaper: 108, echoes: 84, repeats: 72, decay: 72, sweep: 96, duck: 112, bands: 96, loop: 44, partials: 96, hitpitch: 108, modes: 96 };
+const FIGURE_HEIGHT = { wavetable: 176, unison: 64, response: 108, adsr: 108, eq: 128, band: 52, matrix: 176, sample: 96, grain: 64, meter: 22, transfer: 120, shaper: 108, echoes: 84, repeats: 72, decay: 72, sweep: 96, duck: 112, bands: 96, loop: 44, partials: 96, hitpitch: 108, hitlevel: 108, modes: 96 };
 
 /** How near a press counts as being on an envelope handle - the sampler's panel allows the same. */
 const FIGURE_HIT_PX = 9;
@@ -4874,7 +4875,8 @@ function deviceShapePicker(trackLabel, slot, widget, showValue) {
   const isBuiltIn = (id) => builtIns.includes(id);
   const say = (text, err = false) => logLine(`${trackLabel}: ${text}`, err);
   const figure = () => figureShapeOf(widget.id);
-  const axesOptions = () => (figure()?.shapeAxes ? { axes: figure().shapeAxes } : {});
+  // The axes a device's curve is drawn on, and the curves it offers to start a drawing from.
+  const axesOptions = () => (figure()?.shapeAxes ? { axes: figure().shapeAxes, presets: figure().presets ?? null } : {});
 
   const make = (tag, cls, text) => {
     const el = document.createElement(tag);
@@ -5867,6 +5869,34 @@ function drawTableStackWith(ctx, place, stack, between, frame, wave, c) {
   figureStroke(ctx, place(frame, wave), c.accent, 1.75);
 }
 
+/**
+ * The grid under a time-by-frequency figure: a tick along the bottom every step of time, and a
+ * line at 100 Hz, 1 kHz and 10 kHz on the log axis, labeled at the left.
+ */
+function figureTimeFreqGrid(ctx, w, top, size, span, yOf, range, c) {
+  ctx.strokeStyle = c.grid;
+  ctx.lineWidth = 1;
+  ctx.globalAlpha = 1;
+  const step = span > 4 ? 1 : span > 1 ? 0.5 : 0.1;
+  for (let t = step; t < span; t += step) {
+    const gx = (t / span) * w;
+    ctx.beginPath();
+    ctx.moveTo(gx, top + size - 4);
+    ctx.lineTo(gx, top + size);
+    ctx.stroke();
+  }
+  for (const hz of [100, 1000, 10000]) {
+    if (hz <= range.lowHz || hz >= range.highHz) continue;
+    const y = Math.round(yOf(hz)) + 0.5;
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    ctx.lineTo(w, y);
+    ctx.stroke();
+    // Above its line, or under it where the line is too near the top for the label to fit.
+    figureLabel(ctx, hz >= 1000 ? `${hz / 1000}k` : String(hz), 3, y - 11 < top ? y + 2 : y - 11, c.dim);
+  }
+}
+
 const FIGURE_DRAWERS = {
   /**
    * The waveform this oscillator is reading, over the stack it is reading from, with a scrubber
@@ -6582,23 +6612,69 @@ const FIGURE_DRAWERS = {
   },
 
   /**
-   * A reverb's tail: silence for the predelay, then sixty decibels down over the decay time.
-   * The dashed line is where the tail reaches the floor the decay is measured to.
+   * A spring's echoes, time across and frequency up on a log axis: echo n of each row lands n
+   * trips in (plus the hold before the output), n - 1 trips quieter than the first, and the rows
+   * of one echo joined are its chirp. The full-band chirps are drawn faint under it, the small copy
+   * in front of each echo thin, and the transition frequency dashed.
    */
-  decay(ctx, w, h, f, c) {
-    const { topDb, bottomDb } = f.range;
+  chirps(ctx, w, h, f, c) {
     const top = FIGURE_PAD_Y / 2;
     const size = Math.max(1, h - FIGURE_PAD_Y);
+    const { lowHz, highHz, floorDb } = f.range;
     const xOf = (t) => (t / f.span) * w;
-    const yOf = (db) => top + ((topDb - db) / (topDb - bottomDb)) * size;
+    const yOf = (hz) => top + (1 - Math.log(hz / lowHz) / Math.log(highHz / lowHz)) * size;
+    figureTimeFreqGrid(ctx, w, top, size, f.span, yOf, f.range, c);
+    const series = [
+      { rows: f.high, delay: 0, extra: 0, color: c.dim, width: 1, alpha: 0.6 },
+      { rows: f.main, delay: 0, extra: f.copyDb, color: c.accent, width: 1, alpha: 0.6 },
+      { rows: f.main, delay: f.ahead, extra: 0, color: c.accent, width: 1.75, alpha: 1 },
+    ];
+    const shortest = (rows) => rows.reduce((m, r) => Math.min(m, r.trip), Infinity);
+    ctx.lineCap = 'round';
+    for (const s of series) {
+      ctx.strokeStyle = s.color;
+      ctx.lineWidth = s.width;
+      const step = shortest(s.rows);
+      for (let n = 1; n < 400 && n * step + s.delay < f.span; n++) {
+        let heard = false;
+        let last = null;
+        for (const r of s.rows) {
+          const db = Math.min(0, r.firstDb + (n - 1) * r.tripDb) + s.extra;
+          const pt = { x: xOf(n * r.trip + s.delay), y: yOf(r.hz), db };
+          if (last && (pt.db > floorDb || last.db > floorDb)) {
+            heard = true;
+            const level = Math.max(0, Math.min(1, ((pt.db + last.db) / 2 - floorDb) / -floorDb));
+            ctx.globalAlpha = s.alpha * level * level;
+            ctx.beginPath();
+            ctx.moveTo(last.x, last.y);
+            ctx.lineTo(pt.x, pt.y);
+            ctx.stroke();
+          }
+          last = pt;
+        }
+        if (!heard && n > 1) break;
+      }
+    }
+    ctx.globalAlpha = 1;
+    figureDashed(ctx, 0, yOf(f.transition), w, yOf(f.transition), c.warn);
+    return `${figureSeconds(f.decay)} · ${figureHz(f.transition)}`;
+  },
+
+  /**
+   * A grain delay's cloud from one hit, time across and pitch up in semitones: each grain a bar
+   * as long as it plays at its pitch, as loud as its repeat, left-panned grains in the accent and
+   * right-panned ones lighter. Pitches past the window run off its edge, as they run off the
+   * top of what can be heard.
+   */
+  cloud(ctx, w, h, f, c) {
+    const top = FIGURE_PAD_Y / 2;
+    const size = Math.max(1, h - FIGURE_PAD_Y);
+    const { lowSt, highSt } = f.range;
+    const xOf = (t) => (t / f.span) * w;
+    const yOf = (st) => top + ((highSt - st) / (highSt - lowSt)) * size;
     ctx.strokeStyle = c.grid;
     ctx.lineWidth = 1;
-    for (const db of [-20, -40]) {
-      ctx.beginPath();
-      ctx.moveTo(0, yOf(db));
-      ctx.lineTo(w, yOf(db));
-      ctx.stroke();
-    }
+    ctx.globalAlpha = 1;
     const step = f.span > 4 ? 1 : f.span > 1 ? 0.5 : 0.1;
     for (let t = step; t < f.span; t += step) {
       const gx = xOf(t);
@@ -6607,14 +6683,84 @@ const FIGURE_DRAWERS = {
       ctx.lineTo(gx, top + size);
       ctx.stroke();
     }
+    for (const st of [-24, -12, 0, 12, 24]) {
+      const y = Math.round(yOf(st)) + 0.5;
+      ctx.beginPath();
+      ctx.moveTo(0, y);
+      ctx.lineTo(w, y);
+      ctx.stroke();
+      figureLabel(ctx, st > 0 ? `+${st}` : String(st), 3, y - 11, c.dim);
+    }
     ctx.save();
     ctx.beginPath();
-    ctx.rect(0, 0, w, top + size);
+    ctx.rect(0, top, w, size);
     ctx.clip();
-    const pts = f.points.map((pt) => [xOf(pt.t), yOf(pt.db)]);
-    figureFill(ctx, pts, c.accent, top + size);
-    figureStroke(ctx, pts, c.accent, 1.75);
+    for (const g of f.grains) {
+      const level = (g.db - f.floorDb) / -f.floorDb;
+      if (level <= 0) continue;
+      const x0 = xOf(g.t - g.length / 2);
+      const x1 = xOf(g.t + g.length / 2);
+      ctx.fillStyle = g.pan > 0 ? c.text : c.accent;
+      ctx.globalAlpha = 0.25 + 0.75 * level * level;
+      ctx.fillRect(x0, yOf(g.st) - 1.5, Math.max(1.5, x1 - x0), 3);
+    }
     ctx.restore();
+    ctx.globalAlpha = 1;
+    const st = Math.round(f.pitch * 10) / 10;
+    return `${figureSeconds(f.time)} · ${figurePad(`${st > 0 ? '+' : ''}${st.toFixed(1)} st`, 8)}`;
+  },
+
+  /**
+   * A reverb's tail, time across and frequency up on a log axis: nothing for the predelay, the
+   * first reflections as lines as loud as the network leaves them, then a wash per row filling in
+   * over a few trips and falling at that row's rate - so the top dies first. The dashed line is
+   * where the bottom of the wash reaches sixty decibels down.
+   */
+  tailmap(ctx, w, h, f, c) {
+    const top = FIGURE_PAD_Y / 2;
+    const size = Math.max(1, h - FIGURE_PAD_Y);
+    const { lowHz, highHz, floorDb } = f.range;
+    const xOf = (t) => (t / f.span) * w;
+    const yOf = (hz) => top + (1 - Math.log(hz / lowHz) / Math.log(highHz / lowHz)) * size;
+    const cols = Math.max(1, Math.floor(w / 3));
+    // Whole-pixel edges, each cell meeting the next exactly: cells that overlapped would add their
+    // alpha along the seams and draw a grid that is not in the sound.
+    const edgeX = (k) => Math.round((k / cols) * w);
+    const edgeY = (i) => Math.round(top + size - (i / f.rows.length) * size);
+    ctx.fillStyle = c.accent;
+    f.rows.forEach((r, i) => {
+      const y0 = edgeY(i + 1);
+      const y1 = edgeY(i);
+      for (let k = 0; k < cols; k++) {
+        const t = ((k + 0.5) / cols) * f.span;
+        if (t < f.start) continue;
+        let db = r.startDb + r.slopeDb * (t - f.start);
+        if (t < f.start + f.onset) db += 20 * Math.log10(Math.max(1e-6, (t - f.start) / f.onset));
+        const level = (db - floorDb) / -floorDb;
+        if (level <= 0) continue;
+        ctx.globalAlpha = 0.75 * Math.min(1, level) ** 1.5;
+        ctx.fillRect(edgeX(k), y0, edgeX(k + 1) - edgeX(k), y1 - y0);
+      }
+    });
+    // The reflections, one line per pixel column at the loudest that lands in it: drawn one by
+    // one, the many that share a column would stack into a solid bar.
+    const columns = new Map();
+    for (const r of f.reflections) {
+      const x = Math.round(xOf(r.t));
+      const level = (r.db - floorDb) / -floorDb;
+      if (level > (columns.get(x) ?? 0)) columns.set(x, level);
+    }
+    ctx.strokeStyle = c.text;
+    ctx.lineWidth = 1;
+    for (const [x, level] of columns) {
+      ctx.globalAlpha = 0.4 * level * level;
+      ctx.beginPath();
+      ctx.moveTo(x + 0.5, top);
+      ctx.lineTo(x + 0.5, top + size);
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+    figureTimeFreqGrid(ctx, w, top, size, f.span, yOf, f.range, c);
     figureDashed(ctx, xOf(f.predelay + f.decay), 0, xOf(f.predelay + f.decay), h, c.warn);
     figureLabel(ctx, '-60 dB', xOf(f.predelay + f.decay) + 3, 2, c.dim);
     return `${figureSeconds(f.decay)} · pre ${figureSeconds(f.predelay)}`;
@@ -6938,26 +7084,40 @@ const FIGURE_DRAWERS = {
    * curve is drawn on, so the first few are wide) and hertz up, labeled for the note last played.
    */
   hitpitch(ctx, w, h, f, c) {
-    const grid = f.shapeAxes?.grid ?? { x: [], y: [] };
-    ctx.strokeStyle = c.grid;
-    ctx.lineWidth = 1;
-    for (const tick of grid.x) {
-      const x = Math.round(tick.at * w) + 0.5;
-      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke();
-      figureLabel(ctx, tick.label, x - 2, h - 10, c.dim, 'end');
-    }
-    for (const tick of grid.y) {
-      const y = Math.round(figureLevelY(tick.at, h)) + 0.5;
-      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
-      figureLabel(ctx, tick.label, 3, y - 9, c.dim);
-    }
-    const pts = f.points.map((pt) => [pt.x * w, figureLevelY(pt.y, h)]);
-    figureFill(ctx, pts, c.accent, figureLevelY(0, h));
-    figureStroke(ctx, pts, c.accent);
+    figureHitGraph(ctx, w, h, f, c);
     // Where the hit starts and the note it settles on.
     return `${figureHz(f.startHz)} → ${figureHz(f.noteHz)}`;
   },
+
+  /**
+   * A drum hit's level over time, as a graph: time across on a square-root axis out to the
+   * longest Decay, so Decay visibly lengthens it, and Decay Curve or a drawn curve shapes it.
+   */
+  hitlevel(ctx, w, h, f, c) {
+    figureHitGraph(ctx, w, h, f, c);
+    return '';
+  },
 };
+
+/** A drum hit's curve over its gridlines: the picture both hit figures draw. */
+function figureHitGraph(ctx, w, h, f, c) {
+  const grid = f.grid ?? { x: [], y: [] };
+  ctx.strokeStyle = c.grid;
+  ctx.lineWidth = 1;
+  for (const tick of grid.x) {
+    const x = Math.round(tick.at * w) + 0.5;
+    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke();
+    figureLabel(ctx, tick.label, x - 2, h - 10, c.dim, 'end');
+  }
+  for (const tick of grid.y) {
+    const y = Math.round(figureLevelY(tick.at, h)) + 0.5;
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
+    figureLabel(ctx, tick.label, 3, y - 9, c.dim);
+  }
+  const pts = f.points.map((pt) => [pt.x * w, figureLevelY(pt.y, h)]);
+  figureFill(ctx, pts, c.accent, figureLevelY(0, h));
+  figureStroke(ctx, pts, c.accent);
+}
 
 /**
  * A span that may run off either end of a 0..1 axis, as the one or two pieces that are on it -
@@ -7091,7 +7251,7 @@ function restateTarget(res, spec) {
   }
   return {
     value: res.value, position: res.position, unit: spec?.unit ?? null, options: spec?.options ?? null,
-    label: typeof label === 'string' ? label : null, index, decimals: spec?.decimals ?? null,
+    label: typeof label === 'string' ? label : null, index, decimals: spec?.decimals ?? null, alt: spec?.alt ?? null,
   };
 }
 
@@ -7280,6 +7440,7 @@ function deviceWidget(trackLabel, slot, widget, { bare = false } = {}) {
     // it: a wavetable folder is a couple of thousand files in subfolders, which is a browser's
     // job and not a dropdown's, and two ways to set one control is one too many. The arrows
     // either side step to the file before or after it, in the picker's own order.
+    cell.classList.add('device-widget-file');
     const box = document.createElement('div');
     box.className = 'device-file-box';
     const button = document.createElement('button');
@@ -7304,9 +7465,9 @@ function deviceWidget(trackLabel, slot, widget, { bare = false } = {}) {
     const source = () => ({
       kind: widget.sampleAs === 'wavetable' ? 'wavetable' : 'audio',
       pack: widget.pack ?? 'files',
-      // The device's own tables, which are not files and are written by their label. Offered
-      // only where there is more than one: a lone "none" is not a list to browse.
-      builtIn: (widget.fixed ?? 0) > 1 ? widget.options.slice(0, widget.fixed) : [],
+      // The device's own entries, which are not files and are written by their label - "none"
+      // among them, which is the way back from a file to no file.
+      builtIn: widget.options.slice(0, widget.fixed ?? 0),
     });
     const pick = (ref) => api('POST', '/api/deviceParam', { trackId: trackLabel, slot, id: widget.id, sample: ref, commit: true })
       .then((res) => {
@@ -7993,7 +8154,8 @@ function lfoUseInCall(id) {
  */
 function lfoCarry() {
   const parts = lfoCallParts();
-  if (!parts) return {};
+  // A device's curve has no call behind it, but keeps the device's axes and presets.
+  if (!parts) return lfoState?.axes ? { options: { axes: lfoState.axes, presets: lfoState.presets ?? null } } : {};
   const { rate, rateHz, ratePattern, mode, phase, glide, smooth } = parseLfoCall(parts.opts);
   return { callSource: lfoState.callSource, loopCycles: lfoState.loopCycles ?? null, options: { rate, rateHz, ratePattern, mode, phase, glide, callSmooth: smooth } };
 }
@@ -8286,8 +8448,25 @@ function syncLfoFromCode() {
   drawLfoShape();
 }
 
+/** The curves the preset menu offers: the device's own on a device's curve, else the shape presets. */
+function lfoPresetsNow() {
+  if (lfoState?.axes) return lfoState.presets ?? null;
+  return shapeMod?.SHAPE_PRESETS ?? null;
+}
+
+/** Fills the preset menu with `presets`' names, unless it already holds exactly those. */
+let lfoPresetNames = null;
+function lfoFillPresets(presets) {
+  const names = Object.keys(presets ?? {});
+  if (lfoPresetNames && lfoPresetNames.join('\n') === names.join('\n')) return;
+  lfoPresetNames = names;
+  while (lfoPreset.options.length > 1) lfoPreset.remove(1);
+  for (const name of names) lfoPreset.add(new Option(name, name));
+  lfoPreset.value = '';
+}
+
 function initLfoEditor() {
-  for (const name of Object.keys(shapeMod.SHAPE_PRESETS)) lfoPreset.add(new Option(name, name));
+  lfoFillPresets(shapeMod.SHAPE_PRESETS);
 
   // Opening is initWidgetHandles' job (double-click the name). Closing is the ✕, Escape, or the
   // call itself leaving the buffer - see syncLfoFromCode. Nothing about where the text cursor
@@ -8335,8 +8514,9 @@ function initLfoEditor() {
   });
 
   lfoPreset.addEventListener('change', () => {
-    if (!lfoState || !lfoPreset.value) return;
-    lfoState.points = shapeMod.parseShapePoints(shapeMod.SHAPE_PRESETS[lfoPreset.value]);
+    const data = lfoPresetsNow()?.[lfoPreset.value];
+    if (!lfoState || data == null) return;
+    lfoState.points = shapeMod.parseShapePoints(data);
     lfoClearSelection();
     writeLfoCall();
     drawLfoShape();
@@ -13551,7 +13731,12 @@ function legacyLabelLines(code) {
 // would invite editing something this panel isn't looking at.
 const lfoHead = makeNamePicker({
   els: { wrap: lfoPickWrap, title: lfoTitle, name: lfoName, btn: lfoPickBtn, picker: lfoPickBox, search: lfoSearch, list: lfoPickList },
-  reg: shapeDefs,
+  // A device's curve lists what the device's own picker lists: the shapes in time (a swell, a
+  // pluck) mean nothing as a kick's pitch or a waveshaper's curve.
+  reg: {
+    ...shapeDefs,
+    allIds: (...args) => shapeDefs.allIds(...args).filter((r) => !(lfoState?.axes && r.note === shapeDefs.libraryNote && shapeMod?.SHAPE_PRESETS?.[r.id] != null)),
+  },
   current: () => lfoState?.shapeId ?? null,
   // Carried, so browsing the list doesn't lose the call the panel came from - see lfoCarry.
   open: (id) => openShapeById(id, lfoCarry()),
@@ -13563,8 +13748,11 @@ const lfoHead = makeNamePicker({
 
 function lfoSyncHead() {
   lfoPickWrap.classList.remove('hidden');
-  // The presets are shapes in time - a swell, a pluck - and mean nothing as a device's curve.
-  lfoPreset.classList.toggle('hidden', !!lfoState?.axes);
+  // The presets are shapes in time - a swell, a pluck - and mean nothing as a device's curve, so
+  // a device's curve offers its own instead, or none.
+  const presets = lfoPresetsNow();
+  lfoFillPresets(presets);
+  lfoPreset.classList.toggle('hidden', !presets);
   const named = !!lfoState?.shapeId;
   // rate and mode belong to the lfo() CALL. An inline one is the call; a definition has them only
   // while the panel still knows which call it was opened through.

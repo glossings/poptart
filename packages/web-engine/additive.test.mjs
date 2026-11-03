@@ -247,7 +247,7 @@ test('the picture of the partials draws the levels the synth plays, with Spectru
   assert.equal(figure.curveName, 'flat');
   // A drawn spectrum is read from the slot it was loaded into, as the synth reads it.
   const points = Array.from({ length: 256 }, (_, i) => (i < 128 ? 1 : 0.1));
-  const drawn = buildFigures(ADDITIVE, { ...settings, partials: 64, spectrum: 1 }, { sampleRate: SR, shapes: { 1: { name: 'half', data: 'half', points } } })
+  const drawn = buildFigures(ADDITIVE, { ...settings, partials: 64, spectrum: 1 }, { sampleRate: SR, shapes: { spectrum: { 1: { name: 'half', data: 'half', points } } } })
     .find((f) => f.kind === 'partials');
   assert.equal(drawn.curveName, 'half');
   assert.ok(drawn.bars.at(-1).level < drawn.bars[0].level * 0.2);

@@ -1198,7 +1198,11 @@ export class WebAudioEngine {
     }
     let points;
     let name = null;
-    let key = data; // what the loaded table is filed under: a name AND its points, or the points
+    // What the loaded table is filed under: its control's store, then a name AND its points, or
+    // the points. By store, because a device with two curve controls (the Kick's Pitch Env and
+    // Amp Env) numbers each one's slots on its own.
+    const store = param.bank ?? param.id;
+    let key = `${store}|${data}`;
     if (reader.looksLikeShapeData(data)) {
       points = reader.parseShapePoints(data);
     } else {
@@ -1209,7 +1213,7 @@ export class WebAudioEngine {
       }
       name = data;
       points = defined;
-      key = `${data}=${JSON.stringify(defined)}`;
+      key = `${store}|${data}=${JSON.stringify(defined)}`;
     }
     filled.loaded ??= new Map();
     const held = filled.loaded.get(key);
@@ -1222,15 +1226,16 @@ export class WebAudioEngine {
       return;
     }
     // A name keeps the slot it already has, so a redraw replaces the curve rather than adding one.
-    filled.named ??= new Map(); // name -> { index, param }: the slot each named curve holds
-    let optionIndex = name != null ? filled.named.get(name)?.index : undefined;
+    filled.named ??= new Map(); // store|name -> { index, param, name }: the slot each named curve holds
+    const namedKey = `${store}|${name}`;
+    let optionIndex = name != null ? filled.named.get(namedKey)?.index : undefined;
     if (optionIndex === undefined) {
-      optionIndex = this._spareOption(filled, param, key);
+      optionIndex = this._spareOption(filled, param, key, name ?? data);
       if (optionIndex === null) return;
-      for (const [other, at] of filled.named) if (at.index === optionIndex) filled.named.delete(other);
-      if (name != null) filled.named.set(name, { index: optionIndex, param });
+      for (const [other, at] of filled.named) if (at.index === optionIndex && (at.param.bank ?? at.param.id) === store) filled.named.delete(other);
+      if (name != null) filled.named.set(namedKey, { index: optionIndex, param, name });
     } else {
-      for (const [other, at] of filled.loaded) if (at === optionIndex) filled.loaded.delete(other);
+      for (const [other, at] of filled.loaded) if (at === optionIndex && other.startsWith(`${store}|`)) filled.loaded.delete(other);
       filled.loaded.set(key, optionIndex);
     }
     // The option's label is the name where there is one - what the menu shows and the code says.
@@ -1254,12 +1259,13 @@ export class WebAudioEngine {
     if (!reader?.lookupShape) return;
     for (const track of this.tracks.values()) {
       for (const filled of track.slots.values()) {
-        for (const [name, { index, param }] of filled.named ?? []) {
+        for (const { index, param, name } of filled.named?.values() ?? []) {
           const points = reader.lookupShape(name);
           if (!points?.length) continue;
-          const key = `${name}=${JSON.stringify(points)}`;
+          const store = param.bank ?? param.id;
+          const key = `${store}|${name}=${JSON.stringify(points)}`;
           if (filled.loaded?.get(key) === index) continue;
-          for (const [other, at] of filled.loaded) if (at === index) filled.loaded.delete(other);
+          for (const [other, at] of filled.loaded) if (at === index && other.startsWith(`${store}|`)) filled.loaded.delete(other);
           filled.loaded.set(key, index);
           this._postShapeTable(filled, param, index, name, name, points);
         }
@@ -1272,7 +1278,8 @@ export class WebAudioEngine {
     const reader = this.shapeReader;
     const table = new Float32Array(SHAPE_POINTS);
     for (let i = 0; i < SHAPE_POINTS; i++) table[i] = reader.sampleShape(points, i / (SHAPE_POINTS - 1));
-    (filled.shapes ??= {})[index] = { name, data, points: [...table] };
+    // By control, then slot: two curve controls on one device each have a slot 1.
+    ((filled.shapes ??= {})[param.id] ??= {})[index] = { name, data, points: [...table] };
     const built = filled.built;
     if (typeof built.loadShape === 'function') built.loadShape(param.id, index, table);
     else built.node?.port?.postMessage?.({ kind: 'shape', param: param.id, index, table }, [table.buffer]);
@@ -1283,7 +1290,7 @@ export class WebAudioEngine {
    * last one: the list grows by what is loaded. Shared by the two things that fill it: a loaded
    * file and a drawn shape.
    */
-  _spareOption(filled, param, name) {
+  _spareOption(filled, param, name, label = name) {
     const first = param.options.length;
     // Every control that loads into the same store (its bank - the Wavetable's two oscillators
     // read one set of tables) shares that store's slots, and lists what is in them.
@@ -1293,7 +1300,7 @@ export class WebAudioEngine {
     let optionIndex = first;
     while (sharing.some((p) => extrasOf(p)[optionIndex] !== undefined)) optionIndex++;
     filled.loaded.set(name, optionIndex);
-    for (const p of sharing) extrasOf(p)[optionIndex] = name;
+    for (const p of sharing) extrasOf(p)[optionIndex] = label;
     return optionIndex;
   }
 
@@ -1313,7 +1320,8 @@ export class WebAudioEngine {
     const now = this.getTime();
     const track = this.tracks.get(trackId);
     filled.loaded ??= new Map();
-    const held = filled.loaded.get(ref);
+    const loadedKey = `${param.bank ?? param.id}|${ref}`;
+    const held = filled.loaded.get(loadedKey);
     if (held !== undefined) {
       track.setParamValue(slot, param.id, held, atTime, now, glide);
       return;
@@ -1332,7 +1340,7 @@ export class WebAudioEngine {
     // is full the oldest loaded one is taken, which is what a song that walks through a folder of
     // tables would want rather than a refusal.
     const extras = (filled.extras[param.id] ??= {});
-    const optionIndex = this._spareOption(filled, param, ref);
+    const optionIndex = this._spareOption(filled, param, loadedKey, ref);
     extras[optionIndex] = `${parsed.pack}:${parsed.key}`;
     track.setParamValue(slot, param.id, optionIndex, atTime, now, glide);
 
@@ -1426,6 +1434,8 @@ export class WebAudioEngine {
         }
       }
     }
+    // A pack nothing has played yet is still to be downloaded and decoded. Off the tick, this can wait for it.
+    await store.ready?.(pack);
     const got = store.get?.(pack, index);
     const buffer = got?.buffer ?? got;
     if (!buffer?.getChannelData) return null;
@@ -2420,13 +2430,33 @@ export class WebAudioEngine {
       return;
     }
     this.midiRoutes.add(name, trackId, slot, { note });
-    try { filled.built.node?.port?.postMessage({ kind: 'noteRoute', on: true }); } catch { /* no port */ }
+    filled.midiRouted = true;
+    this._tellNoteRoute(filled);
   }
 
   clearMidiInject(trackId, slot) {
     this.midiRoutes.remove(trackId, slot, this.getTime());
     const filled = this.tracks.get(trackId)?.slots.get(slot);
-    try { filled?.built.node?.port?.postMessage({ kind: 'noteRoute', on: false }); } catch { /* no port */ }
+    if (!filled) return;
+    filled.midiRouted = false;
+    this._tellNoteRoute(filled);
+  }
+
+  /**
+   * The code sets (or no longer sets) the Trigger control of the device in a slot. A device that
+   * has one rests between strikes as it does with notes routed in, so it is told the same way.
+   */
+  triggerRoute(trackId, slot, on) {
+    const filled = this.tracks.get(trackId)?.slots.get(slot);
+    if (!filled || !findParam(filled.descriptor, 'trigger')) return;
+    filled.triggerSet = !!on;
+    this._tellNoteRoute(filled);
+  }
+
+  /** Whether a device is struck rather than left to run: notes routed in, or Trigger set. */
+  _tellNoteRoute(filled) {
+    const on = Boolean(filled.midiRouted || filled.triggerSet);
+    try { filled.built.node?.port?.postMessage({ kind: 'noteRoute', on }); } catch { /* no port */ }
   }
 
   // -- device state ------------------------------------------------------------------------

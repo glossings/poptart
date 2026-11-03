@@ -202,6 +202,21 @@ test('notes routed into a device in a band arrive when the track\'s own do', asy
   assert.equal(on.args[1], 1, 'into the user\'s own slot 1');
 });
 
+test('Trigger set on the LPG tells it it is struck, until neither Trigger nor a route is set', () => {
+  const { e, sent } = engine();
+  e.loadEffect('lead', 'LPG', 1);
+  e.loadEffect('lead', 'Filter', 2);
+  const routes = (slot) => sent.filter((m) => m.addr === '/poptart/deviceNoteRoute' && m.args[1] === slot).map((m) => m.args[2]);
+  e.triggerRoute('lead', 1, true);
+  e.injectMidi('lead', 1, 'kick');
+  e.clearMidiInject('lead', 1);
+  assert.deepEqual(routes(1), [1, 1, 1], 'a route taken away leaves it struck while Trigger is set');
+  e.triggerRoute('lead', 1, false);
+  assert.equal(routes(1).at(-1), 0);
+  e.triggerRoute('lead', 2, true);
+  assert.deepEqual(routes(2), [], 'a Filter has no Trigger and is told nothing');
+});
+
 test('effectSlots says how far a track\'s effects go, however far that is', () => {
   const { e } = engine();
   for (let slot = 1; slot <= 30; slot++) e.loadEffect('t', 'Filter', slot);

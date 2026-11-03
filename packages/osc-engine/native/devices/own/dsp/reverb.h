@@ -34,6 +34,9 @@ constexpr double kOutputGain = 0.75;
  */
 constexpr double kFloor = 1e-20;
 
+/** How far Modulation 1 moves each delay line, in samples either way (reverb.mjs's MOD_DEPTH). */
+constexpr double kModDepth = 48;
+
 /**
  * A delay line with a movable read point, sized once and never reallocated.
  *
@@ -178,7 +181,7 @@ struct Reverb {
     preDelaySamples = pre;
     const double cutHz = clamp(lowCut, 10.0, 2000.0);
     lowCutCoef = 1.0 - std::exp((-2.0 * M_PI * cutHz) / sampleRate);
-    modDepth = std::fmax(0.0, modulation) * 12.0;
+    modDepth = std::fmax(0.0, modulation) * kModDepth;
   }
 
   /**

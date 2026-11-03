@@ -670,8 +670,8 @@ export function createSampleStore({
     ensure,
     /**
      * Loads a pack and answers when its files are in memory - what something that CAN wait asks,
-     * such as drawing a sample in the file picker. The engine never uses this: it asks inside a
-     * scheduler tick and takes null for an answer.
+     * such as drawing a sample in the file picker, or loading a file onto a device's control. A
+     * sound played from a scheduler tick never uses this: it takes null for an answer.
      */
     async ready(pack) {
       if (manifests.has(pack)) return true;

@@ -32,8 +32,11 @@ import { SYNC_OPTIONS, isFree, syncedHz, syncedSeconds } from './dsp/sync.mjs';
 import { lfoValue } from './dsp/moddelay.mjs';
 import { lengthBeats } from './devices/looper.mjs';
 import { ADDITIVE_PARTIALS, aimPartials, nyquistFade, shapePartials } from './devices/additive.mjs';
-import { KICK_DRAW_SEC, KICK_FIGURE_NOTE, KICK_SWEEP_MAX_ST, KickSweep, kickDrawnAt, kickSweptHz } from './devices/kick.mjs';
+import { KICK_AMP_CURVES, KICK_DECAY_MAX, KICK_DRAW_SEC, KICK_FIGURE_NOTE, KICK_PITCH_CURVES, KICK_SWEEP_MAX_ST, KickSweep, kickDrawnAt, kickLevelAt, kickSweptHz } from './devices/kick.mjs';
 import { midiToHz } from './dsp/voice.mjs';
+import { Reverb } from './dsp/reverb.mjs';
+import { grainEchoCloud } from './devices/grainecho.mjs';
+import { ECHO_AHEAD, ECHO_GAIN, HF_LEVEL, HF_STAGES, LF_STAGES, SpringTank, chainDelay, dampingGain } from './dsp/spring.mjs';
 import { DRUM_MODES, drumModes } from './devices/drum.mjs';
 import { ANALOG, analogResponse } from './devices/analog.mjs';
 
@@ -64,6 +67,9 @@ export const UNISON_AXIS_CENTS = 100;
 
 /** The sample rate a response curve is computed at when nobody says otherwise. */
 const NOMINAL_RATE = 48000;
+
+/** The role that names a figure's curve control, for the figures that draw a drawn curve. */
+const SHAPE_ROLE = Object.freeze({ sample: 'window', grain: 'shape', shaper: 'mode', partials: 'spectrum', hitpitch: 'shape', hitlevel: 'shape' });
 
 /** The tempo a picture on the beat grid is drawn at when no engine says otherwise. */
 const NOMINAL_BPM = 120;
@@ -166,6 +172,10 @@ function figureData(descriptor, figure, values, opts) {
       }))
       : null,
   };
+  // The drawn curves this figure's own curve control holds, by slot: they are kept by control,
+  // since two curve controls on one device each number their slots from the same place.
+  const shapeRole = SHAPE_ROLE[figure.kind];
+  const ownShapes = shapeRole ? (shapes?.[figure.params[shapeRole]] ?? null) : null;
   switch (figure.kind) {
     case 'wavetable': return { ...common, ...wavetableFigure(descriptor, figure, read, { tables, extras }) };
     case 'unison': return { ...common, ...unisonFigure(read) };
@@ -174,20 +184,23 @@ function figureData(descriptor, figure, values, opts) {
     case 'eq': return { ...common, ...eqFigure(figure, read, sampleRate, descriptor, report) };
     case 'band': return { ...common, ...bandFigure(figure, read) };
     case 'matrix': return { ...common, ...matrixFigure(figure, read) };
-    case 'sample': return { ...common, ...sampleFigure(figure, read, { waves, extras, report, shapes }) };
-    case 'grain': return { ...common, ...grainFigure(descriptor, figure, read, { shapes, extras }) };
+    case 'sample': return { ...common, ...sampleFigure(figure, read, { waves, extras, report, shapes: ownShapes }) };
+    case 'grain': return { ...common, ...grainFigure(descriptor, figure, read, { shapes: ownShapes, extras }) };
     case 'meter': return { ...common, ...meterFigure(figure, read, report) };
     case 'transfer': return { ...common, ...transferFigure(figure, read, report) };
-    case 'shaper': return { ...common, ...shaperFigure(descriptor, figure, read, { report, shapes, extras }) };
+    case 'shaper': return { ...common, ...shaperFigure(descriptor, figure, read, { report, shapes: ownShapes, extras }) };
     case 'echoes': return { ...common, ...echoesFigure(read, bpm) };
     case 'repeats': return { ...common, ...repeatsFigure(read, bpm) };
-    case 'decay': return { ...common, ...decayFigure(read) };
+    case 'chirps': return { ...common, ...chirpsFigure(read, sampleRate) };
+    case 'cloud': return { ...common, ...cloudFigure(read, bpm) };
+    case 'tailmap': return { ...common, ...tailMapFigure(read, sampleRate) };
     case 'sweep': return { ...common, ...sweepFigure(figure, read, descriptor, bpm, report) };
     case 'duck': return { ...common, ...duckFigure(read, bpm, report) };
     case 'bands': return { ...common, ...bandsFigure(read, report) };
     case 'loop': return { ...common, ...loopFigure(read, report) };
-    case 'partials': return { ...common, ...partialsFigure(descriptor, figure, read, sampleRate, { shapes, extras }) };
-    case 'hitpitch': return { ...common, ...hitPitchFigure(descriptor, figure, read, { shapes, extras, report }) };
+    case 'partials': return { ...common, ...partialsFigure(descriptor, figure, read, sampleRate, { shapes: ownShapes, extras }) };
+    case 'hitpitch': return { ...common, ...hitPitchFigure(descriptor, figure, read, { shapes: ownShapes, extras, report }) };
+    case 'hitlevel': return { ...common, ...hitLevelFigure(descriptor, figure, read, { shapes: ownShapes, extras }) };
     case 'modes': return { ...common, ...modesFigure(read) };
     default: return common;
   }
@@ -793,13 +806,17 @@ function noteName(note) {
 /** A frequency for an axis label. */
 const hzLabel = (hz) => (hz >= 1000 ? `${(hz / 1000).toFixed(1)} kHz` : `${Math.round(hz)} Hz`);
 
+/** A curve read at `xs` as breakpoints, each held to 0..1. */
+const breakpointsAt = (xs, ys) => xs.map((x, i) => `${Math.round(x * 1000) / 1000},${Math.round(Math.min(1, Math.max(0, ys[i])) * 1000) / 1000}`).join(' ');
+
 /**
  * A drum hit's pitch over its first KICK_DRAW_SEC seconds, as the voice plays it: the fixed curve
  * stepped through the voice's own KickSweep at the Sweep and Click Length set, or the drawn curve
- * the Pitch Env control is on. Laid out in the drawn curve's own space - x the square root of the
- * time over the span, y the semitones above the note over KICK_SWEEP_MAX_ST - so the picture, the
- * shape editor and the device read one curve the same way. The axes are labeled in milliseconds
- * and in hertz for the note last played (f0 before any).
+ * the Pitch Env control is on, Sweep deep. x is the square root of the time over the span, as a
+ * drawn curve's is. The picture's y is the semitones above the note over KICK_SWEEP_MAX_ST, so
+ * turning Sweep visibly deepens a drawn curve; the shape editor's y is a drawn curve's own, the
+ * share of Sweep, labeled for the Sweep set. The axes are labeled in milliseconds and in hertz for
+ * the note last played (f0 before any).
  */
 function hitPitchFigure(descriptor, figure, read, { shapes, extras, report }) {
   const mode = Math.round(read('shape') ?? 0);
@@ -811,7 +828,7 @@ function hitPitchFigure(descriptor, figure, read, { shapes, extras, report }) {
   const noteHz = midiToHz(note);
   const names = descriptor.params.find((p) => p.id === figure.params.shape)?.options ?? [];
 
-  // The fixed curve, stepped at the nominal rate and read at each point's time.
+  // The fixed curve in semitones, stepped at the nominal rate and read at each point's time.
   const fixedAt = (xs) => {
     const steps = new KickSweep(NOMINAL_RATE);
     steps.start(Math.max(0, clickMs) * 0.001 * NOMINAL_RATE);
@@ -821,33 +838,82 @@ function hitPitchFigure(descriptor, figure, read, { shapes, extras, report }) {
     for (const x of xs) {
       const until = Math.round(x * x * KICK_DRAW_SEC * NOMINAL_RATE);
       while (n <= until) e = steps.next(n++);
-      out.push(12 * Math.log2(kickSweptHz(1, sweep, e)) / KICK_SWEEP_MAX_ST);
+      out.push(12 * Math.log2(kickSweptHz(1, sweep, e)));
     }
     return out;
   };
   const xs = Array.from({ length: HIT_POINTS }, (_, i) => i / (HIT_POINTS - 1));
-  const ys = table ? xs.map((x) => kickDrawnAt(table, x)) : fixedAt(xs);
-  const copy = fixedAt(HIT_COPY_XS);
-  const round = (v) => Math.round(v * 1000) / 1000;
+  const sts = table ? xs.map((x) => sweep * kickDrawnAt(table, x)) : fixedAt(xs);
+  const fixedShare = sweep > 0 ? fixedAt(HIT_COPY_XS).map((st) => st / sweep) : HIT_COPY_XS.map(() => 0);
 
   const xTicks = [10, 25, 50, 100, 200, 400].map((ms) => ({ at: Math.sqrt(ms / 1000 / KICK_DRAW_SEC), label: `${ms} ms` }));
-  const yTicks = [0, 12, 24, 36, 48].filter((st) => st <= KICK_SWEEP_MAX_ST).map((st) => ({
-    at: st / KICK_SWEEP_MAX_ST,
-    label: st === 0 ? `${hzLabel(noteHz)} ${noteName(note)}` : hzLabel(noteHz * Math.pow(2, st / 12)),
-  }));
+  const hzAt = (st) => (st === 0 ? `${hzLabel(noteHz)} ${noteName(note)}` : hzLabel(noteHz * Math.pow(2, st / 12)));
+  const yTicks = [0, 12, 24, 36, 48].map((st) => ({ at: st / KICK_SWEEP_MAX_ST, label: hzAt(st) }));
+  // The editor's: the octaves under Sweep, and Sweep itself at the top.
+  const shareTicks = sweep > 0
+    ? [...[0, 12, 24, 36].filter((st) => st < sweep - 3).map((st) => ({ at: st / sweep, label: hzAt(st) })), { at: 1, label: hzAt(sweep) }]
+    : [{ at: 0, label: hzAt(0) }];
+  const fixed = breakpointsAt(HIT_COPY_XS, fixedShare);
   return {
     shape: mode,
     note,
     noteHz,
-    startHz: noteHz * Math.pow(2, (ys[0] === undefined ? 0 : Math.max(...ys)) * KICK_SWEEP_MAX_ST / 12),
-    points: xs.map((x, i) => ({ x, y: ys[i] })),
+    startHz: noteHz * Math.pow(2, (sts.length ? Math.max(...sts) : 0) / 12),
+    points: xs.map((x, i) => ({ x, y: sts[i] / KICK_SWEEP_MAX_ST })),
     data: drawn?.data ?? drawn?.name ?? extras?.[figure.params.shape]?.[mode] ?? null,
     shapeParam: figure.params.shape,
     curveName: curveNameOf(names, mode, drawn),
-    // A graph with real units on both axes, for the picture and for the shape editor alike.
-    shapeAxes: { x: 'time', y: 'pitch', grid: { x: xTicks, y: yTicks } },
+    grid: { x: xTicks, y: yTicks },
+    // A graph with real units on both axes for the shape editor, in a drawn curve's own space.
+    // The editor prints its times along the top, where the first would sit on Sweep's label.
+    shapeAxes: { x: 'time', y: 'pitch', grid: { x: xTicks.slice(1), y: shareTicks } },
     // The fixed curve as breakpoints, for a copy of it to start a drawing from.
-    builtIns: Object.fromEntries(names.map((name) => [name, HIT_COPY_XS.map((x, i) => `${round(x)},${round(Math.min(1, Math.max(0, copy[i])))}`).join(' ')])),
+    builtIns: Object.fromEntries(names.map((name) => [name, fixed])),
+    // What the shape editor offers to start a drawing from.
+    presets: { fixed, ...KICK_PITCH_CURVES },
+  };
+}
+
+// --- a drum hit's level -------------------------------------------------------------------------
+
+/** Where the fixed level is read for a copy of it to start a drawing from. */
+const LEVEL_COPY_XS = [0, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 1];
+
+/** A time for an axis label. */
+const msLabel = (sec) => (sec >= 1 ? `${Math.round(sec * 10) / 10} s` : `${Math.round(sec * 1000)} ms`);
+
+/**
+ * A drum hit's level over time, out to the longest Decay: the fixed envelope at the Decay Curve
+ * set, or the drawn curve the Amp Env control is on, stretched over Decay. The picture's x is the
+ * square root of the time over KICK_DECAY_MAX, so Decay visibly lengthens the hit; the shape
+ * editor's x is a drawn curve's own, the share of Decay, labeled for the Decay set.
+ */
+function hitLevelFigure(descriptor, figure, read, { shapes, extras }) {
+  const mode = Math.round(read('shape') ?? 0);
+  const drawn = mode >= 1 ? shapes?.[mode] ?? null : null;
+  const table = drawn?.points ?? null;
+  const decay = Math.max(1e-3, read('decay') ?? 1);
+  const curve = read('curve') ?? 0.5;
+  const names = descriptor.params.find((p) => p.id === figure.params.shape)?.options ?? [];
+  const levelAt = (u) => {
+    if (u >= 1) return 0;
+    return table ? Math.max(0, kickDrawnAt(table, u)) : kickLevelAt(curve, u);
+  };
+  const xs = Array.from({ length: HIT_POINTS }, (_, i) => i / (HIT_POINTS - 1));
+  const fixed = breakpointsAt(LEVEL_COPY_XS, LEVEL_COPY_XS.map((u) => kickLevelAt(curve, u)));
+  const xTicks = [0.1, 0.25, 0.5, 1, 2, 4].map((sec) => ({ at: Math.sqrt(sec / KICK_DECAY_MAX), label: msLabel(sec) }));
+  const yTicks = [{ at: 0.5, label: '50%' }, { at: 1, label: '100%' }];
+  const shareTicks = [0.25, 0.5, 0.75, 1].map((u) => ({ at: u, label: msLabel(u * decay) }));
+  return {
+    shape: mode,
+    points: xs.map((x) => ({ x, y: levelAt((x * x * KICK_DECAY_MAX) / decay) })),
+    data: drawn?.data ?? drawn?.name ?? extras?.[figure.params.shape]?.[mode] ?? null,
+    shapeParam: figure.params.shape,
+    curveName: curveNameOf(names, mode, drawn),
+    grid: { x: xTicks, y: yTicks },
+    shapeAxes: { x: 'time', y: 'level', grid: { x: shareTicks, y: yTicks } },
+    builtIns: Object.fromEntries(names.map((name) => [name, fixed])),
+    presets: { fixed, ...KICK_AMP_CURVES },
   };
 }
 
@@ -1093,25 +1159,217 @@ function repeatsFigure(read, bpm) {
 
 // --- a reverb's tail -------------------------------------------------------------------------
 
-/** The decibel window a tail is drawn in: down to where the reverb's decay time is measured. */
-const DECAY_RANGE = Object.freeze({ topDb: 0, bottomDb: -60 });
-const DECAY_POINTS = 96;
+const dbOf = (gain) => 20 * Math.log10(Math.max(1e-12, gain));
+
+/** Rows of a time-by-frequency figure: `count` frequencies, log-spaced across the range. */
+function logRows(range, count, sampleRate) {
+  const rows = [];
+  for (let i = 0; i < count; i++) {
+    const hz = range.lowHz * Math.pow(range.highHz / range.lowHz, i / (count - 1));
+    if (hz < sampleRate * 0.49) rows.push(hz);
+  }
+  return rows;
+}
+
+/** The pitch window a grain cloud is drawn in, in semitones: fixed, so two settings compare by eye. */
+const CLOUD_RANGE = Object.freeze({ lowSt: -36, highSt: 36 });
 
 /**
- * How the tail falls away after a hit: silence for the predelay, then a straight line down in
- * decibels, sixty of them over the decay time - which is what the decay control is, an RT60.
+ * A grain delay's cloud from one hit, from the device's own picture of it (grainecho.mjs's
+ * grainEchoCloud): the grains of each repeat over time and pitch. The time is the synced one
+ * when Sync names a division, as the processor reads it.
  */
-function decayFigure(read) {
-  const decay = Math.max(0.05, read('decay') ?? 2);
-  const predelay = Math.max(0, read('predelay') ?? 0);
-  const span = Math.max(0.3, (predelay + decay) * 1.15);
-  const points = new Array(DECAY_POINTS);
-  for (let i = 0; i < DECAY_POINTS; i++) {
-    const t = (i / (DECAY_POINTS - 1)) * span;
-    const db = t < predelay ? 0 : (-60 * (t - predelay)) / decay;
-    points[i] = { t, db: Math.max(DECAY_RANGE.bottomDb - 10, db) };
+function cloudFigure(read, bpm) {
+  const sync = Math.round(read('sync') ?? 0);
+  const time = Math.min(GRAINECHO_TIME_MAX, syncedSeconds(sync, bpm, read('time') ?? 0.25));
+  const pitch = read('pitch') ?? 0;
+  const cloud = grainEchoCloud({
+    time,
+    size: read('size') ?? 80,
+    density: read('density') ?? 20,
+    pitch,
+    random: read('random') ?? 0,
+    spray: read('spray') ?? 0.2,
+    feedback: read('feedback') ?? 0.3,
+    spread: read('spread') ?? 0.5,
+  });
+  return { ...cloud, range: CLOUD_RANGE, time, pitch, synced: !isFree(sync) };
+}
+
+/** The longest delay the grain processor reads back (its GRAIN_MAX_SEC, with its margin). */
+const GRAINECHO_TIME_MAX = 4 * 0.9;
+
+/** The band and the floor the spring's echoes are drawn in. */
+const CHIRPS_RANGE = Object.freeze({ lowHz: 40, highHz: 12000, floorDb: -60 });
+const CHIRPS_ROWS = 40;
+const CHIRPS_SPAN_MIN = 0.3;
+const CHIRPS_SPAN_MAX = 3;
+
+/** A tank per sample rate for the figure to set and read, made once: it holds a lot of memory. */
+const figureTanks = new Map();
+
+/**
+ * A spring's echoes over time and frequency: every echo is a chirp, each frequency arriving when
+ * the delay and the allpass chain have held it, and as loud as the trips it has made have left it.
+ *
+ * Read off a real tank set to these controls - the same delays, coefficients, loop gains and
+ * filters it plays with - one row per frequency: how long a trip round the loop takes there, what
+ * a trip keeps, and how loud the first echo comes out. The client draws echo n of a row at
+ * n trips (plus the hold before the output), n - 1 trips down from the first. The main series is
+ * the left spring's; the full-band series is drawn under it, quieter, as it sounds. Modulation is
+ * not drawn: it moves the delay by under two milliseconds, which is heard as a pitch wobble and is
+ * too small to see on this scale.
+ */
+function chirpsFigure(read, sampleRate) {
+  let tank = figureTanks.get(sampleRate);
+  if (!tank) {
+    tank = new SpringTank(sampleRate);
+    figureTanks.set(sampleRate, tank);
   }
-  return { decay, predelay, span, points, range: DECAY_RANGE };
+  const decay = read('decay') ?? 2.5;
+  tank.reset();
+  tank.set({
+    decay,
+    length: read('length') ?? 0.045,
+    chirp: read('chirp') ?? 0.6,
+    transition: read('transition') ?? 4300,
+    modulation: 0,
+    damping: read('damping') ?? 5000,
+    lowCut: read('lowcut') ?? 180,
+    feedback: read('feedback') ?? 0,
+  });
+  const spring = tank.springs[0];
+  const stretch = tank.stretch;
+  const sr = sampleRate;
+  const main = [];
+  const high = [];
+  for (const hz of logRows(CHIRPS_RANGE, CHIRPS_ROWS, sr)) {
+    const w = (2 * Math.PI * hz) / sr;
+    let loop = 1;
+    for (const section of spring.lowpass) loop *= section.gain(w);
+    let out = 1;
+    for (const section of spring.outLowpass) out *= section.gain(w);
+    const lowcut = spring.lowcut.gain(w);
+    const damp = dampingGain(spring.dampCoef, w);
+    main.push({
+      hz,
+      trip: (spring.lfDelay + chainDelay(spring.aLf, stretch, LF_STAGES, w)) / sr,
+      tripDb: dbOf(spring.lfGain * loop * damp),
+      firstDb: dbOf(loop * out * lowcut),
+    });
+    high.push({
+      hz,
+      trip: (spring.hfDelay + chainDelay(spring.aHf, 1, HF_STAGES, w)) / sr,
+      tripDb: dbOf(spring.hfGain * damp),
+      firstDb: dbOf(HF_LEVEL * lowcut),
+    });
+  }
+  // The loudest first echo is the top of the window.
+  const ref = Math.max(...main.map((r) => r.firstDb));
+  for (const r of main) r.firstDb -= ref;
+  for (const r of high) r.firstDb -= ref;
+  // Long enough for four trips and for the tail to fall away, and no longer than a window holds.
+  const longest = Math.max(...main.map((r) => r.trip));
+  const span = Math.min(CHIRPS_SPAN_MAX, Math.max(CHIRPS_SPAN_MIN, 4 * longest, decay * 1.05));
+  return {
+    span,
+    range: CHIRPS_RANGE,
+    // The chirps go out this much later than they come round, with their small copy at the time
+    // they came, this much quieter.
+    ahead: (ECHO_AHEAD * spring.lfDelay) / sr,
+    copyDb: dbOf(ECHO_GAIN),
+    main,
+    high,
+    transition: sr / (2 * stretch),
+    decay,
+  };
+}
+
+/** The band and floor a reverb's tail is drawn in. */
+const TAIL_RANGE = Object.freeze({ lowHz: 30, highHz: 16000, floorDb: -60 });
+const TAIL_ROWS = 40;
+/** How many trips of the network the first reflections are drawn for: the rest is a wash. */
+const TAIL_ORDERS = 2;
+
+/** A network per sample rate for the figure to set and read. */
+const figureReverbs = new Map();
+
+/**
+ * A reverb's tail over time and frequency, read off a real network set to these controls.
+ *
+ * Each row is a frequency: the wash there starts as loud as the low cut leaves it and falls by
+ * what a trip round the network keeps of it - the feedback gain times the damping filter - every
+ * mean trip. So the top of the picture dies first as Damping comes down, and the bottom thins as
+ * Low Cut goes up. Over it, the first reflections: every way the input can go once and twice
+ * round the network's delay lines, at the times Size scales them to, each as loud as
+ * the feedback matrix and the trips leave it - sparse at the start, thickening into the wash.
+ * Modulation is not drawn: it moves the lines by a millisecond at most, which is heard as a slow
+ * chorus and is too small to see on this scale.
+ */
+function tailMapFigure(read, sampleRate) {
+  let rv = figureReverbs.get(sampleRate);
+  if (!rv) {
+    rv = new Reverb(sampleRate);
+    figureReverbs.set(sampleRate, rv);
+  }
+  const decay = Math.max(0.05, read('decay') ?? 2);
+  rv.set({
+    decay,
+    size: read('size') ?? 0.7,
+    damping: read('damping') ?? 6000,
+    preDelay: read('predelay') ?? 0.01,
+    lowCut: read('lowcut') ?? 120,
+    modulation: 0,
+  });
+  const sr = sampleRate;
+  const lines = rv.lineLengths.map((n) => (n * rv.size) / sr);
+  const meanTrip = lines.reduce((a, b) => a + b, 0) / lines.length;
+  const predelay = rv.preDelaySamples / sr;
+  const rows = logRows(TAIL_RANGE, TAIL_ROWS, sr).map((hz) => {
+    const w = (2 * Math.PI * hz) / sr;
+    // The low cut takes the lowpassed sum off the output: what is left is one minus the lowpass.
+    const k = rv.lowCutCoef;
+    const re = 1 - (k * (1 - (1 - k) * Math.cos(w))) / (1 - 2 * (1 - k) * Math.cos(w) + (1 - k) * (1 - k));
+    const im = -(k * (1 - k) * Math.sin(w)) / (1 - 2 * (1 - k) * Math.cos(w) + (1 - k) * (1 - k));
+    return {
+      hz,
+      startDb: dbOf(Math.hypot(re, im)),
+      slopeDb: dbOf(rv.decayGain * dampingGain(rv.dampCoef, w)) / meanTrip,
+    };
+  });
+  // The first reflections: each way round the lines up to TAIL_ORDERS trips. The feedback matrix
+  // hands a line 1 - 2/8 of itself and minus 2/8 of each other line, so a path that stays on one
+  // line is louder than one that crosses; the paths that land together are summed, signs and all.
+  const share = 2 / lines.length;
+  const taps = new Map();
+  const walk = (order, from, t, amp) => {
+    for (let k = 0; k < lines.length; k++) {
+      const gain = from < 0 ? 1 : (k === from ? 1 - share : -share) * rv.decayGain;
+      const at = t + lines[k];
+      const a = amp * gain;
+      const key = Math.round(at * sr);
+      taps.set(key, (taps.get(key) ?? 0) + a);
+      if (order < TAIL_ORDERS) walk(order + 1, k, at, a);
+    }
+  };
+  walk(1, -1, 0, 1);
+  const top = Math.max(...[...taps.values()].map(Math.abs));
+  const reflections = [...taps.entries()]
+    .map(([key, a]) => ({ t: predelay + key / sr, db: dbOf(Math.abs(a) / top) }))
+    .filter((r) => r.db > TAIL_RANGE.floorDb)
+    .sort((a, b) => a.t - b.t);
+  const start = predelay + Math.min(...lines);
+  return {
+    span: Math.max(0.3, (predelay + decay) * 1.15),
+    range: TAIL_RANGE,
+    predelay,
+    // Where the wash begins, and how long it takes to fill in: a few trips of the network.
+    start,
+    onset: 3 * meanTrip,
+    rows,
+    reflections,
+    decay,
+  };
 }
 
 // --- a modulated effect's sweep --------------------------------------------------------------

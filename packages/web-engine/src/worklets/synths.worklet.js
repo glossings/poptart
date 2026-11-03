@@ -21,6 +21,7 @@ import { ANALOG, AnalogSynth } from '../devices/analog.mjs';
 import { KICK, KickSynth } from '../devices/kick.mjs';
 import { HAT, HatSynth } from '../devices/hat.mjs';
 import { DRUM, DrumSynth } from '../devices/drum.mjs';
+import { PLUCK, PluckSynth } from '../devices/pluck.mjs';
 import { sharedBuiltInTables } from '../dsp/tables.mjs';
 import { Reporter, bendOf, isDispose, offsetInBlock, parameterDescriptorsFor, realParams } from './shared.mjs';
 
@@ -122,6 +123,7 @@ const SYNTHS = [
   [KICK, () => new KickSynth(sampleRate)],
   [HAT, () => new HatSynth(sampleRate)],
   [DRUM, () => new DrumSynth(sampleRate)],
+  [PLUCK, () => new PluckSynth(sampleRate)],
 ];
 
 for (const [descriptor, make] of SYNTHS) {

@@ -1,4 +1,5 @@
-// The Chorus effect: up to three modulated copies, each a few milliseconds behind and drifting.
+// The Chorus effect: up to three modulated copies, each a few milliseconds behind and drifting,
+// with feedback into the delay.
 
 import { defineDevice } from '../descriptor.mjs';
 import { at } from '../dsp/control.mjs';
@@ -36,6 +37,8 @@ export const CHORUS = defineDevice({
       description: 'How far the delay sweeps.' },
     { id: 'delay', name: 'Delay', min: 1, max: 50, default: 12, unit: 'ms',
       description: 'The center of the sweep. Short is a thickening; long is a doubling.' },
+    { id: 'feedback', name: 'Feedback', min: -0.95, max: 0.95, default: 0,
+      description: 'How much of the delayed signal goes back into the delay. Up from 0 the copies ring and smear; negative feedback rings hollower.' },
     { id: 'voices', name: 'Voices', min: 1, max: 3, default: 2, step: 1, rate: 'k', ui: 'number' },
     { id: 'spread', name: 'Spread', min: 0, max: 1, default: 0.7,
       description: 'How far the right channel\'s sweep sits behind the left\'s.' },
@@ -81,7 +84,7 @@ export class ChorusProcessor {
         depthSec: at(params.depth, i) * 0.001,
         rateHz: syncedHz(sync, this.bpm, at(params.rate, i)),
         spread: at(params.spread, i),
-        feedback: 0,
+        feedback: at(params.feedback, i),
         shape,
         voices,
       });

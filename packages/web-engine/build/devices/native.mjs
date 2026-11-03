@@ -72,9 +72,11 @@ import { ANALOG } from '../../src/devices/analog.mjs';
 import { KICK } from '../../src/devices/kick.mjs';
 import { HAT } from '../../src/devices/hat.mjs';
 import { DRUM } from '../../src/devices/drum.mjs';
+import { PLUCK } from '../../src/devices/pluck.mjs';
 import { LPG } from '../../src/devices/lpg.mjs';
 import { FILTERBANK } from '../../src/devices/filterbank.mjs';
 import { RESONATOR } from '../../src/devices/resonator.mjs';
+import { SPRING } from '../../src/devices/spring.mjs';
 import { CROSSOVER } from '../../src/devices/crossover.mjs';
 import { CONVOLVER } from '../../src/devices/builtins.mjs';
 
@@ -164,9 +166,11 @@ const OWN = [
   { descriptor: KICK, source: 'kick.cc' },
   { descriptor: HAT, source: 'hat.cc' },
   { descriptor: DRUM, source: 'drum.cc' },
+  { descriptor: PLUCK, source: 'pluck.cc' },
   { descriptor: LPG, source: 'lpg.cc' },
   { descriptor: FILTERBANK, source: 'filterbank.cc' },
   { descriptor: RESONATOR, source: 'resonator.cc' },
+  { descriptor: SPRING, source: 'spring.cc' },
   // The engine's own, never the user's: built into the extension, listed apart in the catalog (see
   // catalogJson), so no name a pattern writes reaches it.
   { descriptor: CROSSOVER, source: 'crossover.cc', internal: true },
@@ -494,6 +498,9 @@ export function catalogJson(devices, internal = INTERNAL_IDS) {
       ...(p.open ? { open: true } : {}),
       ...(p.legacyMax != null ? { legacyMax: p.legacyMax } : {}),
       ...(p.sampleAs ? { sampleAs: p.sampleAs } : {}),
+      // A second reading of the knob in another unit (descriptor.mjs's alt), which a value
+      // written in that unit is read in.
+      ...(p.alt ? { alt: { unit: p.alt.unit, min: p.alt.min, max: p.alt.max } } : {}),
       // Controls sharing one store of files, which hand out its slots between them.
       ...(p.bank ? { bank: p.bank } : {}),
       // A control a captured state leaves out (a looper's Record): see deviceStateText.

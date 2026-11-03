@@ -209,6 +209,21 @@ function defineParam(deviceId, spec, seen) {
     is: Array.isArray(spec.active.is) ? Object.freeze([...spec.active.is]) : spec.active.is,
   });
 
+  // A second reading of the same knob, in force while another control is off one setting: a
+  // Kick's Click Pitch is the tick's pitch in hertz, and with a click sample on, how far the sample
+  // is transposed in semitones. `alt: { param, not, unit, min, max }` reads the knob's position
+  // linearly from `min` to `max` in `unit` while `param` is anything but `not`. The value kept is
+  // in the control's own unit either way; the readout and values written in `unit` use the second.
+  let alt = null;
+  if (spec.alt !== undefined) {
+    const a = spec.alt;
+    if (!UNITS.has(a.unit ?? '') || !(isFiniteNumber(a.min) && isFiniteNumber(a.max) && a.max > a.min)) {
+      fail(deviceId, `param "${id}": alt needs a known unit and a min below its max`);
+    }
+    // `off`, the index of `not`, is filled in once every control exists (see defineDevice).
+    alt = { param: String(a.param ?? ''), not: a.not, unit: a.unit, min: a.min, max: a.max, off: null };
+  }
+
   // How many digits after the point the readout prints. The span says it well enough for most
   // controls (see decimalsFor); a parameter whose useful values are all crowded into one end of
   // a long range - a few milliseconds of a ten-second envelope - says so itself.
@@ -259,6 +274,7 @@ function defineParam(deviceId, spec, seen) {
     curve,
     curveExp,
     active,
+    alt,
     decimals,
     step,
     options: options ? Object.freeze(options) : null,
@@ -319,8 +335,12 @@ const FIGURE_KINDS = new Map([
   ['echoes', ['time', 'feedback']],
   // One catch of a beat repeat and the repeats it plays.
   ['repeats', ['grid', 'repeats']],
-  // A reverb's tail falling away.
-  ['decay', ['decay']],
+  // A grain delay's cloud from one hit: its grains over time and pitch, repeat by repeat.
+  ['cloud', ['time', 'size', 'density', 'pitch', 'feedback']],
+  // A spring's echoes over time and frequency: each one a chirp, fading trip by trip.
+  ['chirps', ['decay', 'length', 'chirp', 'transition']],
+  // A reverb's tail over time and frequency: the first reflections, then the wash dying away.
+  ['tailmap', ['decay', 'size']],
   // A modulated effect's sweep over one LFO cycle, with a playhead where it is.
   ['sweep', ['rate', 'depth']],
   // A ducker's dip: the shape over a beat, and the signal it is pumping.
@@ -335,6 +355,8 @@ const FIGURE_KINDS = new Map([
   ['partials', ['spectrum', 'partials']],
   // A drum hit's pitch over time, on a curve the hit plays fixed or drawn.
   ['hitpitch', ['shape']],
+  // A drum hit's level over time, on a curve the hit plays fixed or drawn.
+  ['hitlevel', ['shape']],
   // A struck body's modes - a bar per mode at its frequency, as loud as it starts - and the band
   // its noise sits in.
   ['modes', ['material', 'pitch']],
@@ -479,6 +501,15 @@ export function defineDevice(spec) {
     for (const is of [p.active.is].flat()) {
       if (argToValue(on, is) === null) fail(id, `param "${p.id}" is active on "${p.active.param}" being ${JSON.stringify(is)}, which is not one of its values`);
     }
+  }
+
+  for (const p of params) {
+    if (!p.alt) continue;
+    const on = params.find((x) => x.id === p.alt.param);
+    const off = on ? argToValue(on, p.alt.not) : null;
+    if (off === null) fail(id, `param "${p.id}" has a second reading off "${p.alt.param}" being ${JSON.stringify(p.alt.not)}, which this device does not have`);
+    p.alt.off = off;
+    Object.freeze(p.alt);
   }
 
   // Pictures the panel draws instead of, or as well as, some of those knobs - see figures.mjs,
@@ -812,12 +843,30 @@ export function decimalsFor(param) {
 }
 
 /**
+ * A control's second reading (see `alt` in defineParam) when the device's `values` put it in
+ * force, or null.
+ */
+export function altInForce(param, values) {
+  const alt = param?.alt;
+  if (!alt || !values) return null;
+  const on = values[alt.param];
+  if (typeof on !== 'number') return null;
+  return Math.round(on) === alt.off ? null : alt;
+}
+
+/**
  * How a value prints in a readout: the unit appended, an enum printed as its label. Shared by the
  * panel and by any log line that quotes a parameter, so a value reads the same everywhere.
  * `extras` names the option slots a device filled at run time, past the descriptor's own list.
  */
-export function formatValue(param, value, extras = null) {
+export function formatValue(param, value, extras = null, values = null) {
   const v = clampParam(param, value);
+  const alt = altInForce(param, values);
+  if (alt) {
+    const a = alt.min + (alt.max - alt.min) * normalize(param, v);
+    const text = a.toFixed(decimalsFor({ decimals: null, step: null, min: alt.min, max: alt.max }));
+    return alt.unit ? `${text} ${alt.unit}` : text;
+  }
   if (param.options) {
     const i = Math.round(v);
     return param.options[i] ?? extras?.[i] ?? (param.open ? 'empty' : String(v));

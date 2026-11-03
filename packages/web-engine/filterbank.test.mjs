@@ -214,6 +214,14 @@ test('Filterbank takes any band count asked for', () => {
   assert.ok(rms(outL) > 0.01);
 });
 
+test('bands added to a running bank carry on from its top band rather than starting silent', () => {
+  const f = runField(16, { scroll: 8 }, 0.5, () => 1);
+  f.ensure(40);
+  f.setup(40, SR, 0, 8, 0, 0, 0, 0);
+  f.tick(1);
+  for (let k = 0; k < 40; k++) assert.equal(f.cells.lvL[k], 1, `band ${k}`);
+});
+
 test('Shape at 0 silences the bank, and Mix 0 is the dry signal exactly', () => {
   const quiet = play(FilterbankProcessor, FILTERBANK, { shape: 0 }, 0.05).outL;
   assert.ok(rms(quiet) < 1e-9);

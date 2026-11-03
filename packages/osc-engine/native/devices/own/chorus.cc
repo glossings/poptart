@@ -48,7 +48,8 @@ struct Device : pd_own::Device<ids::kCount> {
       const double depthSec = ctl(ids::depth, i) * 0.001;
       const double rateHz = syncedHz(sync, bpm, ctl(ids::rate, i));
       const double spread = ctl(ids::spread, i);
-      delay.next(l, r, wet, baseSec, depthSec, rateHz, spread, 0.0, shape, voices);
+      const double feedback = ctl(ids::feedback, i);
+      delay.next(l, r, wet, baseSec, depthSec, rateHz, spread, feedback, shape, voices);
       const double mix = ctl(ids::mix, i);
       outl[i] = static_cast<float>(l + (wet[0] - l) * mix);
       outr[i] = static_cast<float>(r + (wet[1] - r) * mix);

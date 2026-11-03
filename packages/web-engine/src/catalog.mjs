@@ -20,6 +20,7 @@ import { ANALOG } from './devices/analog.mjs';
 import { KICK } from './devices/kick.mjs';
 import { HAT } from './devices/hat.mjs';
 import { DRUM } from './devices/drum.mjs';
+import { PLUCK } from './devices/pluck.mjs';
 import { LPG } from './devices/lpg.mjs';
 import { FILTERBANK } from './devices/filterbank.mjs';
 import { RESONATOR } from './devices/resonator.mjs';
@@ -27,6 +28,7 @@ import { DISTORT } from './devices/distort.mjs';
 import { CRUSH } from './devices/crush.mjs';
 import { OVERDRIVE } from './devices/overdrive.mjs';
 import { REVERB } from './devices/reverb.mjs';
+import { SPRING } from './devices/spring.mjs';
 import { FILTER } from './devices/filter.mjs';
 import { EQ } from './devices/eq.mjs';
 import { DELAY } from './devices/delay.mjs';
@@ -50,9 +52,9 @@ import { MUTABLE_DEVICES } from './devices/mutable.mjs';
 
 /** Every device, newest version of each. Ordered as the browser lists them. */
 export const DEVICES = Object.freeze([
-  WAVETABLE, FMSYNTH, GRANULAR, NOISE, FORMANT, ADDITIVE, ANALOG, KICK, HAT, DRUM,
+  WAVETABLE, FMSYNTH, GRANULAR, NOISE, FORMANT, ADDITIVE, ANALOG, KICK, HAT, DRUM, PLUCK,
   FILTER, EQ, FILTERBANK, RESONATOR, LPG, DISTORT, CRUSH, OVERDRIVE, COMPRESSOR, MULTIBAND, LIMITER, DUCKER,
-  DELAY, GRAINECHO, STUTTER, LOOPER, CHORUS, FLANGER, PHASER, FREQSHIFT, VOCALSHIFT, REVERB, ...NODE_DEVICES,
+  DELAY, GRAINECHO, STUTTER, LOOPER, CHORUS, FLANGER, PHASER, FREQSHIFT, VOCALSHIFT, REVERB, SPRING, ...NODE_DEVICES,
   ...AIRWINDOWS_DEVICES, ...CLOUDSEED_DEVICES, ...STRETCH_DEVICES, ...MUTABLE_DEVICES,
 ]);
 

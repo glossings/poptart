@@ -1306,6 +1306,20 @@
           "rate": "a"
         },
         {
+          "id": "feedback",
+          "name": "Feedback",
+          "min": -0.95,
+          "max": 0.95,
+          "default": 0,
+          "step": 0,
+          "curve": "lin",
+          "curveExp": 2,
+          "unit": "",
+          "ui": "knob",
+          "group": "",
+          "rate": "a"
+        },
+        {
           "id": "voices",
           "name": "Voices",
           "min": 1,
@@ -3938,6 +3952,21 @@
           "ui": "knob",
           "group": "",
           "rate": "a"
+        },
+        {
+          "id": "trigger",
+          "name": "Trigger",
+          "min": 0,
+          "max": 1,
+          "default": 0,
+          "step": 0,
+          "curve": "lin",
+          "curveExp": 2,
+          "unit": "",
+          "ui": "button",
+          "group": "",
+          "rate": "a",
+          "saved": false
         }
       ],
       "presets": {
@@ -9091,19 +9120,23 @@
           "rate": "a"
         },
         {
-          "id": "decay",
-          "name": "Decay",
-          "min": 0.05,
-          "max": 4,
-          "default": 0.69,
-          "step": 0,
-          "curve": "exp",
+          "id": "pitchenv",
+          "name": "Pitch Env",
+          "min": 0,
+          "max": 1,
+          "default": 0,
+          "step": 1,
+          "curve": "lin",
           "curveExp": 2,
-          "unit": "s",
-          "ui": "knob",
+          "unit": "",
+          "ui": "enum",
           "group": "Body",
-          "rate": "a",
-          "amp": "decay"
+          "rate": "k",
+          "options": [
+            "fixed"
+          ],
+          "takes": "shape",
+          "open": true
         },
         {
           "id": "drive",
@@ -9120,8 +9153,37 @@
           "rate": "a"
         },
         {
-          "id": "pitchenv",
-          "name": "Pitch Env",
+          "id": "decay",
+          "name": "Decay",
+          "min": 0.05,
+          "max": 4,
+          "default": 0.69,
+          "step": 0,
+          "curve": "exp",
+          "curveExp": 2,
+          "unit": "s",
+          "ui": "knob",
+          "group": "Amp Env",
+          "rate": "a",
+          "amp": "decay"
+        },
+        {
+          "id": "dcurve",
+          "name": "Decay Curve",
+          "min": 0,
+          "max": 1,
+          "default": 0.86,
+          "step": 0,
+          "curve": "lin",
+          "curveExp": 2,
+          "unit": "",
+          "ui": "knob",
+          "group": "Amp Env",
+          "rate": "a"
+        },
+        {
+          "id": "ampenv",
+          "name": "Amp Env",
           "min": 0,
           "max": 1,
           "default": 0,
@@ -9130,7 +9192,7 @@
           "curveExp": 2,
           "unit": "",
           "ui": "enum",
-          "group": "Body",
+          "group": "Amp Env",
           "rate": "k",
           "options": [
             "fixed"
@@ -9157,11 +9219,58 @@
           "name": "Click Tone",
           "min": 0,
           "max": 1,
-          "default": 0.05,
+          "default": 0.525,
           "step": 0,
           "curve": "lin",
           "curveExp": 2,
           "unit": "",
+          "ui": "knob",
+          "group": "Click",
+          "rate": "a"
+        },
+        {
+          "id": "clickpitch",
+          "name": "Click Pitch",
+          "min": 375,
+          "max": 6000,
+          "default": 1500,
+          "step": 0,
+          "curve": "exp",
+          "curveExp": 2,
+          "unit": "Hz",
+          "ui": "knob",
+          "group": "Click",
+          "rate": "a",
+          "alt": {
+            "unit": "st",
+            "min": -24,
+            "max": 24
+          }
+        },
+        {
+          "id": "clickhp",
+          "name": "Click HP",
+          "min": 20,
+          "max": 8000,
+          "default": 20,
+          "step": 0,
+          "curve": "exp",
+          "curveExp": 2,
+          "unit": "Hz",
+          "ui": "knob",
+          "group": "Click",
+          "rate": "a"
+        },
+        {
+          "id": "clicklp",
+          "name": "Click LP",
+          "min": 300,
+          "max": 20000,
+          "default": 20000,
+          "step": 0,
+          "curve": "exp",
+          "curveExp": 2,
+          "unit": "Hz",
           "ui": "knob",
           "group": "Click",
           "rate": "a"
@@ -9181,25 +9290,31 @@
           "rate": "k"
         },
         {
+          "id": "clicksample",
+          "name": "Click Sample",
+          "min": 0,
+          "max": 1,
+          "default": 0,
+          "step": 1,
+          "curve": "lin",
+          "curveExp": 2,
+          "unit": "",
+          "ui": "enum",
+          "group": "Click",
+          "rate": "k",
+          "options": [
+            "none"
+          ],
+          "takes": "sample",
+          "open": true,
+          "sampleAs": "audio"
+        },
+        {
           "id": "tone",
           "name": "Tone",
           "min": 0,
           "max": 1,
           "default": 0.45,
-          "step": 0,
-          "curve": "lin",
-          "curveExp": 2,
-          "unit": "",
-          "ui": "knob",
-          "group": "Output",
-          "rate": "a"
-        },
-        {
-          "id": "tail",
-          "name": "Tail",
-          "min": 0,
-          "max": 1,
-          "default": 0.86,
           "step": 0,
           "curve": "lin",
           "curveExp": 2,
@@ -9228,9 +9343,9 @@
           "sweep": 31,
           "decay": 0.69,
           "drive": 0.32,
-          "tail": 0.86,
+          "dcurve": 0.86,
           "click": 0.51,
-          "clicktone": 0.05,
+          "clicktone": 0.525,
           "clicklength": 2,
           "tone": 0.45
         },
@@ -9238,9 +9353,9 @@
           "sweep": 29,
           "decay": 0.42,
           "drive": 0.72,
-          "tail": 0.37,
+          "dcurve": 0.37,
           "click": 1,
-          "clicktone": 0.55,
+          "clicktone": 0.775,
           "clicklength": 2.15,
           "tone": 0.41
         },
@@ -9248,9 +9363,9 @@
           "sweep": 25,
           "decay": 0.67,
           "drive": 0.29,
-          "tail": 0.65,
+          "dcurve": 0.65,
           "click": 0.55,
-          "clicktone": 0.18,
+          "clicktone": 0.59,
           "clicklength": 1.84,
           "tone": 0.79
         },
@@ -9258,9 +9373,9 @@
           "sweep": 27.5,
           "decay": 0.11,
           "drive": 0.36,
-          "tail": 0.65,
+          "dcurve": 0.65,
           "click": 0.4,
-          "clicktone": 0.21,
+          "clicktone": 0.605,
           "clicklength": 1.9,
           "tone": 0.61
         },
@@ -9268,9 +9383,9 @@
           "sweep": 25,
           "decay": 2,
           "drive": 0.28,
-          "tail": 0.5,
+          "dcurve": 0.5,
           "click": 0.39,
-          "clicktone": 0.2,
+          "clicktone": 0.6,
           "clicklength": 1.5,
           "tone": 0.64
         },
@@ -9278,9 +9393,9 @@
           "sweep": 35,
           "decay": 0.95,
           "drive": 0.55,
-          "tail": 0.9,
+          "dcurve": 0.9,
           "click": 0.44,
-          "clicktone": 0,
+          "clicktone": 0.5,
           "clicklength": 2.2,
           "tone": 0.05
         }
@@ -9550,6 +9665,21 @@
           "ui": "knob",
           "group": "",
           "rate": "a"
+        },
+        {
+          "id": "trigger",
+          "name": "Trigger",
+          "min": 0,
+          "max": 1,
+          "default": 0,
+          "step": 0,
+          "curve": "lin",
+          "curveExp": 2,
+          "unit": "",
+          "ui": "button",
+          "group": "",
+          "rate": "a",
+          "saved": false
         }
       ],
       "presets": {
@@ -10771,6 +10901,223 @@
       ]
     },
     {
+      "id": "Pluck",
+      "name": "Pluck",
+      "kind": "synth",
+      "version": 1,
+      "sidechain": false,
+      "params": [
+        {
+          "id": "burst",
+          "name": "Burst",
+          "min": 0.0005,
+          "max": 0.2,
+          "default": 0.004,
+          "step": 0,
+          "curve": "exp",
+          "curveExp": 2,
+          "unit": "s",
+          "ui": "knob",
+          "group": "Exciter",
+          "rate": "a"
+        },
+        {
+          "id": "tone",
+          "name": "Tone",
+          "min": 200,
+          "max": 20000,
+          "default": 9000,
+          "step": 0,
+          "curve": "exp",
+          "curveExp": 2,
+          "unit": "Hz",
+          "ui": "knob",
+          "group": "Exciter",
+          "rate": "a"
+        },
+        {
+          "id": "position",
+          "name": "Position",
+          "min": 0,
+          "max": 0.5,
+          "default": 0.13,
+          "step": 0,
+          "curve": "lin",
+          "curveExp": 2,
+          "unit": "",
+          "ui": "knob",
+          "group": "Exciter",
+          "rate": "a"
+        },
+        {
+          "id": "decay",
+          "name": "Decay",
+          "min": 0.05,
+          "max": 30,
+          "default": 2.5,
+          "step": 0,
+          "curve": "exp",
+          "curveExp": 2,
+          "unit": "s",
+          "ui": "knob",
+          "group": "String",
+          "rate": "a"
+        },
+        {
+          "id": "damping",
+          "name": "Damping",
+          "min": 0,
+          "max": 1,
+          "default": 0.35,
+          "step": 0,
+          "curve": "lin",
+          "curveExp": 2,
+          "unit": "",
+          "ui": "knob",
+          "group": "String",
+          "rate": "a"
+        },
+        {
+          "id": "stretch",
+          "name": "Stretch",
+          "min": 0,
+          "max": 1,
+          "default": 0,
+          "step": 0,
+          "curve": "lin",
+          "curveExp": 2,
+          "unit": "",
+          "ui": "knob",
+          "group": "String",
+          "rate": "a"
+        },
+        {
+          "id": "detune",
+          "name": "Detune",
+          "min": 0,
+          "max": 50,
+          "default": 6,
+          "step": 0,
+          "curve": "lin",
+          "curveExp": 2,
+          "unit": "ct",
+          "ui": "knob",
+          "group": "String",
+          "rate": "a"
+        },
+        {
+          "id": "release",
+          "name": "Release",
+          "min": 0.01,
+          "max": 10,
+          "default": 0.5,
+          "step": 0,
+          "curve": "exp",
+          "curveExp": 2,
+          "unit": "s",
+          "ui": "knob",
+          "group": "Voice",
+          "rate": "a"
+        },
+        {
+          "id": "level",
+          "name": "Level",
+          "min": 0,
+          "max": 1,
+          "default": 0.5,
+          "step": 0,
+          "curve": "lin",
+          "curveExp": 2,
+          "unit": "",
+          "ui": "knob",
+          "group": "Voice",
+          "rate": "a"
+        },
+        {
+          "id": "voices",
+          "name": "Voices",
+          "min": 1,
+          "max": 128,
+          "default": 8,
+          "step": 1,
+          "curve": "lin",
+          "curveExp": 2,
+          "unit": "",
+          "ui": "number",
+          "group": "Voice",
+          "rate": "k",
+          "open": true
+        }
+      ],
+      "presets": {
+        "nylon": {
+          "tone": 5000,
+          "position": 0.2,
+          "decay": 3,
+          "damping": 0.5,
+          "detune": 3
+        },
+        "steel": {
+          "tone": 14000,
+          "position": 0.1,
+          "decay": 6,
+          "damping": 0.25,
+          "detune": 4
+        },
+        "bass": {
+          "burst": 0.008,
+          "tone": 2500,
+          "position": 0.25,
+          "decay": 4,
+          "damping": 0.55,
+          "detune": 0
+        },
+        "harp": {
+          "tone": 7000,
+          "position": 0.45,
+          "decay": 5,
+          "damping": 0.4,
+          "detune": 2,
+          "release": 3
+        },
+        "muted": {
+          "tone": 3000,
+          "position": 0.15,
+          "decay": 0.25,
+          "damping": 0.75,
+          "release": 0.08,
+          "level": 1
+        },
+        "bell": {
+          "burst": 0.001,
+          "tone": 16000,
+          "position": 0.07,
+          "decay": 8,
+          "damping": 0.1,
+          "stretch": 0.85,
+          "detune": 8,
+          "release": 4
+        },
+        "metal": {
+          "burst": 0.002,
+          "tone": 12000,
+          "decay": 2.5,
+          "damping": 0.2,
+          "stretch": 0.6,
+          "detune": 25
+        },
+        "bowed": {
+          "burst": 0.15,
+          "tone": 4000,
+          "position": 0.3,
+          "decay": 6,
+          "damping": 0.45,
+          "detune": 10,
+          "release": 1.5
+        }
+      }
+    },
+    {
       "id": "Resonator",
       "name": "Resonator",
       "kind": "fx",
@@ -11377,6 +11724,309 @@
           "rate": "k"
         }
       ]
+    },
+    {
+      "id": "Spring",
+      "name": "Spring",
+      "kind": "fx",
+      "version": 1,
+      "sidechain": false,
+      "params": [
+        {
+          "id": "decay",
+          "name": "Decay",
+          "min": 0.2,
+          "max": 12,
+          "default": 2.5,
+          "step": 0,
+          "curve": "exp",
+          "curveExp": 2,
+          "unit": "s",
+          "ui": "knob",
+          "group": "Spring",
+          "rate": "a"
+        },
+        {
+          "id": "length",
+          "name": "Length",
+          "min": 0.015,
+          "max": 0.12,
+          "default": 0.045,
+          "step": 0,
+          "curve": "exp",
+          "curveExp": 2,
+          "unit": "s",
+          "ui": "knob",
+          "group": "Spring",
+          "rate": "a"
+        },
+        {
+          "id": "chirp",
+          "name": "Chirp",
+          "min": -1,
+          "max": 1,
+          "default": 0.6,
+          "step": 0,
+          "curve": "lin",
+          "curveExp": 2,
+          "unit": "",
+          "ui": "knob",
+          "group": "Spring",
+          "rate": "a"
+        },
+        {
+          "id": "transition",
+          "name": "Transition",
+          "min": 100,
+          "max": 8000,
+          "default": 4300,
+          "step": 0,
+          "curve": "exp",
+          "curveExp": 2,
+          "unit": "Hz",
+          "ui": "knob",
+          "group": "Spring",
+          "rate": "a"
+        },
+        {
+          "id": "feedback",
+          "name": "Feedback",
+          "min": 0,
+          "max": 1.5,
+          "default": 0,
+          "step": 0,
+          "curve": "lin",
+          "curveExp": 2,
+          "unit": "",
+          "ui": "knob",
+          "group": "Spring",
+          "rate": "a"
+        },
+        {
+          "id": "modulation",
+          "name": "Modulation",
+          "min": 0,
+          "max": 1,
+          "default": 0.25,
+          "step": 0,
+          "curve": "lin",
+          "curveExp": 2,
+          "unit": "",
+          "ui": "knob",
+          "group": "Spring",
+          "rate": "a"
+        },
+        {
+          "id": "drive",
+          "name": "Drive",
+          "min": 0,
+          "max": 24,
+          "default": 0,
+          "step": 0,
+          "curve": "lin",
+          "curveExp": 2,
+          "unit": "dB",
+          "ui": "knob",
+          "group": "Spring",
+          "rate": "a"
+        },
+        {
+          "id": "shake",
+          "name": "Shake",
+          "min": 0,
+          "max": 1,
+          "default": 0,
+          "step": 0,
+          "curve": "lin",
+          "curveExp": 2,
+          "unit": "",
+          "ui": "button",
+          "group": "Spring",
+          "rate": "a",
+          "saved": false
+        },
+        {
+          "id": "damping",
+          "name": "Damping",
+          "min": 500,
+          "max": 16000,
+          "default": 5000,
+          "step": 0,
+          "curve": "exp",
+          "curveExp": 2,
+          "unit": "Hz",
+          "ui": "knob",
+          "group": "Tone",
+          "rate": "a"
+        },
+        {
+          "id": "lowcut",
+          "name": "Low Cut",
+          "min": 10,
+          "max": 2000,
+          "default": 180,
+          "step": 0,
+          "curve": "exp",
+          "curveExp": 2,
+          "unit": "Hz",
+          "ui": "knob",
+          "group": "Tone",
+          "rate": "a"
+        },
+        {
+          "id": "width",
+          "name": "Width",
+          "min": 0,
+          "max": 1,
+          "default": 1,
+          "step": 0,
+          "curve": "lin",
+          "curveExp": 2,
+          "unit": "",
+          "ui": "knob",
+          "group": "Tone",
+          "rate": "a"
+        },
+        {
+          "id": "mix",
+          "name": "Mix",
+          "min": 0,
+          "max": 1,
+          "default": 0.35,
+          "step": 0,
+          "curve": "lin",
+          "curveExp": 2,
+          "unit": "",
+          "ui": "knob",
+          "group": "Tone",
+          "rate": "a"
+        },
+        {
+          "id": "output",
+          "name": "Output",
+          "min": -24,
+          "max": 24,
+          "default": 0,
+          "step": 0,
+          "curve": "lin",
+          "curveExp": 2,
+          "unit": "dB",
+          "ui": "knob",
+          "group": "Tone",
+          "rate": "a"
+        }
+      ],
+      "presets": {
+        "amp": {
+          "decay": 1.6,
+          "length": 0.035,
+          "chirp": 0.55,
+          "damping": 4500,
+          "lowcut": 250,
+          "mix": 0.25
+        },
+        "surf": {
+          "decay": 3.5,
+          "length": 0.06,
+          "chirp": 0.7,
+          "drive": 12,
+          "damping": 6000,
+          "lowcut": 300,
+          "mix": 0.45
+        },
+        "dub": {
+          "decay": 6,
+          "length": 0.08,
+          "chirp": 0.65,
+          "transition": 3000,
+          "modulation": 0.5,
+          "damping": 2500,
+          "lowcut": 120,
+          "mix": 0.5
+        },
+        "tight": {
+          "decay": 0.7,
+          "length": 0.025,
+          "chirp": 0.5,
+          "damping": 7000,
+          "lowcut": 300,
+          "mix": 0.3
+        },
+        "boing": {
+          "decay": 4,
+          "length": 0.1,
+          "chirp": 0.9,
+          "transition": 2500,
+          "damping": 5000,
+          "mix": 0.5
+        },
+        "bright": {
+          "decay": 2.5,
+          "length": 0.045,
+          "chirp": 0.6,
+          "transition": 5500,
+          "damping": 10000,
+          "lowcut": 400,
+          "mix": 0.35
+        },
+        "wobbly": {
+          "decay": 3,
+          "length": 0.07,
+          "chirp": 0.65,
+          "modulation": 1,
+          "damping": 4000,
+          "mix": 0.4
+        },
+        "endless": {
+          "decay": 12,
+          "length": 0.09,
+          "chirp": 0.6,
+          "transition": 3500,
+          "modulation": 0.6,
+          "damping": 3000,
+          "mix": 0.5,
+          "output": -4
+        },
+        "falling": {
+          "decay": 3,
+          "length": 0.06,
+          "chirp": -0.7,
+          "transition": 3500,
+          "damping": 6000,
+          "mix": 0.45
+        },
+        "laser": {
+          "decay": 3,
+          "length": 0.08,
+          "chirp": -0.95,
+          "transition": 3000,
+          "damping": 9000,
+          "lowcut": 120,
+          "mix": 0.5
+        },
+        "howl": {
+          "decay": 4,
+          "length": 0.05,
+          "chirp": 0.8,
+          "transition": 2200,
+          "feedback": 1.15,
+          "drive": 12,
+          "damping": 3000,
+          "mix": 0.5,
+          "output": -8
+        },
+        "drone": {
+          "decay": 12,
+          "length": 0.12,
+          "chirp": 0.7,
+          "transition": 900,
+          "feedback": 1,
+          "modulation": 0.6,
+          "damping": 2000,
+          "mix": 0.6,
+          "output": -6
+        }
+      }
     },
     {
       "id": "Stutter",

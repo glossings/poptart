@@ -113,6 +113,8 @@ export class ShapeField {
     this.c2 = 0;
     this.lambda = 1;
     this.primed = false;
+    // How many cells hold the picture: past them, a bank that has just grown.
+    this.filled = 0;
   }
 
   reset() {
@@ -120,6 +122,7 @@ export class ShapeField {
     for (const name of c.names) c[name].fill(0);
     this.phase = 0;
     this.primed = false;
+    this.filled = 0;
   }
 
   /** Room for n cells (and the n + 1 snapshots a scroll keeps). */
@@ -158,6 +161,18 @@ export class ShapeField {
         c.uL[k] = shape; c.pL[k] = shape; c.uR[k] = shape; c.pR[k] = shape;
       }
       this.primed = true;
+      this.filled = n;
+    }
+    if (n < this.filled) this.filled = n;
+    if (n > this.filled) {
+      // Bands just added carry on from the top of the bank as it was, rather than starting silent
+      // and waiting for Shape to scroll or ripple into them.
+      const top = this.filled - 1;
+      for (let k = this.filled; k <= n; k++) {
+        c.hist[k] = c.hist[this.filled];
+        c.uL[k] = c.uL[top]; c.pL[k] = c.pL[top]; c.uR[k] = c.uR[top]; c.pR[k] = c.pR[top];
+      }
+      this.filled = n;
     }
     if (this.mode === 1) {
       for (let s = 0; s < this.sub; s++) {

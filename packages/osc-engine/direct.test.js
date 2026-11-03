@@ -209,6 +209,16 @@ test('a polled value moves the ramp sclang built, and a channel coming to rest g
   assert.strictEqual(d.setParam('kick', 0, 'Cutoff', 0.2, 1000.3), false, 'a dropped ramp is never written');
 });
 
+test('one of our own devices takes an open control past 1, as a file loaded past a convolver\'s spaces is', () => {
+  const { d, sent } = rig();
+  populate(d, { native: true });
+  d.handle(msg('ramp', 'kick', 'slot0_ir', 3001, 0, 1));
+  assert.ok(d.setParam('kick', 0, 'ir', 1.25, 1000.15, true));
+  assert.deepStrictEqual(flat(sent[0])[0].args.slice(0, 3), [3001, 'target', 1.25]);
+  assert.ok(d.setParam('kick', 0, 'ir', -0.5, 1000.2, true));
+  assert.deepStrictEqual(flat(sent[1])[0].args.slice(0, 3), [3001, 'target', 0], 'still nothing below 0');
+});
+
 test('an event with no lead is sent unstamped, as bundleNow does', () => {
   const { d, sent } = rig();
   populate(d);

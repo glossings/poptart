@@ -25,6 +25,7 @@ constexpr int kMaxPending = 64;
 
 struct Device : pd_own::Device<ids::kCount, 2> {
   bool noteRouted = false;
+  bool triggered = false;   // Trigger as the last sample read it
   double pending[kMaxPending] = { 0 };   // velocities of strikes not yet played
   int pendingCount = 0;
   int strikeLen = 192;
@@ -45,6 +46,7 @@ struct Device : pd_own::Device<ids::kCount, 2> {
   void pd_init(double sr) {
     sampleRate = sr;
     noteRouted = false;
+    triggered = false;
     pendingCount = 0;
     strikeLen = jsRoundInt(kStrikeSec * sr);
     attackK = 1 / (1 + kAttackSec * sr);
@@ -78,6 +80,9 @@ struct Device : pd_own::Device<ids::kCount, 2> {
     float* outr = outR();
     for (int i = 0; i < frames; ++i) {
       const double level = clamp(ctl(ids::level, i), 0.0, 1.0);
+      const bool held = ctl(ids::trigger, i) >= 0.5;
+      const bool pressed = held && !triggered;
+      triggered = held;
       double drive = level;
       if (noteRouted) {
         // Every strike that arrived before this block lands on its first sample.
@@ -88,6 +93,10 @@ struct Device : pd_own::Device<ids::kCount, 2> {
             pulseLeft = strikeLen;
           }
           pendingCount = 0;
+        }
+        if (pressed) {
+          pulse = pulseLeft > 0 ? std::fmax(pulse, level) : level;
+          pulseLeft = strikeLen;
         }
         drive = pulseLeft > 0 ? pulse : 0;
         if (pulseLeft > 0) pulseLeft -= 1;

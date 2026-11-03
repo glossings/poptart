@@ -45,6 +45,13 @@ const OUTPUT_GAIN = 0.75;
  */
 const FLOOR = 1e-20;
 
+/**
+ * How far Modulation 1 moves each delay line, in samples either way. At the 0.7 Hz it moves at,
+ * that bends the tail's pitch by about eight cents either way: a slow chorus at the top of the
+ * knob, and still only a drift in the middle of it.
+ */
+const MOD_DEPTH = 48;
+
 /** A delay line with a movable read point, sized once and never reallocated. */
 export class DelayLine {
   constructor(maxSamples) {
@@ -167,7 +174,7 @@ export class Reverb {
       const hz = Math.min(2000, Math.max(10, lowCut));
       this.lowCutCoef = 1 - Math.exp((-2 * Math.PI * hz) / this.sampleRate);
     }
-    if (modulation !== undefined) this.modDepth = Math.max(0, modulation) * 12;
+    if (modulation !== undefined) this.modDepth = Math.max(0, modulation) * MOD_DEPTH;
   }
 
   /**

@@ -458,7 +458,10 @@ class DirectPath {
       return this._ok(false);
     }
     const leaf = /^~\d+~/.test(name);
-    const v = slot >= 0 && !leaf ? Math.min(1, Math.max(0, value)) : value;
+    // A plugin's parameter is 0..1. One of our own devices takes an open control past 1 (a file
+    // loaded past a convolver's built-in spaces), and the device clamps the rest itself.
+    const native = !!tr.slots.get(slot)?.native;
+    const v = slot >= 0 && !leaf ? (native ? Math.max(0, value) : Math.min(1, Math.max(0, value))) : value;
     // A stepped control's ramp takes no time, so the value is in place at its own time.
     const args = [i32(r.node), str('target'), f32(v)];
     if (step) args.push(str('time'), f32(0));

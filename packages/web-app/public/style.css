@@ -2060,6 +2060,11 @@ li.CodeMirror-hint-active {
   width: 96px;
 }
 
+/* So is a file in a row of knobs: the pack and the file's name want more room than a menu's word. */
+.device-widget-file {
+  width: 160px;
+}
+
 .device-widget select {
   padding: 5px 20px 5px 8px;
   background-position: right 7px center;

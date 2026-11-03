@@ -32,6 +32,7 @@ import { GRAINECHO, GrainEchoProcessor } from '../devices/grainecho.mjs';
 import { LPG, LpgProcessor } from '../devices/lpg.mjs';
 import { FILTERBANK, FilterbankProcessor } from '../devices/filterbank.mjs';
 import { RESONATOR, ResonatorProcessor } from '../devices/resonator.mjs';
+import { SPRING, SpringProcessor } from '../devices/spring.mjs';
 import { CROSSOVER, CrossoverProcessor } from '../devices/crossover.mjs';
 import { RecorderTap } from '../devices/recorder.mjs';
 import { compileExpr, exprConsts, exprHasFollower, exprInputCount, renderExpr } from '../dsp/expr.mjs';
@@ -97,7 +98,7 @@ const EFFECTS = [
   [DUCKER, DuckerProcessor], [OVERDRIVE, OverdriveProcessor], [MULTIBAND, MultibandProcessor],
   [STUTTER, StutterProcessor], [GRAINECHO, GrainEchoProcessor], [FREQSHIFT, FreqShiftProcessor],
   [VOCALSHIFT, VocalShiftProcessor], [LPG, LpgProcessor], [FILTERBANK, FilterbankProcessor], [RESONATOR, ResonatorProcessor], [CROSSOVER, CrossoverProcessor],
-  [LOOPER, LooperProcessor],
+  [LOOPER, LooperProcessor], [SPRING, SpringProcessor],
 ];
 
 for (const [descriptor, Impl] of EFFECTS) {

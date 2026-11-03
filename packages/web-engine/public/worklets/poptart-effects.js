@@ -213,6 +213,21 @@ function defineParam(deviceId, spec, seen) {
     is: Array.isArray(spec.active.is) ? Object.freeze([...spec.active.is]) : spec.active.is,
   });
 
+  // A second reading of the same knob, in force while another control is off one setting: a
+  // Kick's Click Pitch is the tick's pitch in hertz, and with a click sample on, how far the sample
+  // is transposed in semitones. `alt: { param, not, unit, min, max }` reads the knob's position
+  // linearly from `min` to `max` in `unit` while `param` is anything but `not`. The value kept is
+  // in the control's own unit either way; the readout and values written in `unit` use the second.
+  let alt = null;
+  if (spec.alt !== undefined) {
+    const a = spec.alt;
+    if (!UNITS.has(a.unit ?? '') || !(isFiniteNumber(a.min) && isFiniteNumber(a.max) && a.max > a.min)) {
+      fail(deviceId, `param "${id}": alt needs a known unit and a min below its max`);
+    }
+    // `off`, the index of `not`, is filled in once every control exists (see defineDevice).
+    alt = { param: String(a.param ?? ''), not: a.not, unit: a.unit, min: a.min, max: a.max, off: null };
+  }
+
   // How many digits after the point the readout prints. The span says it well enough for most
   // controls (see decimalsFor); a parameter whose useful values are all crowded into one end of
   // a long range - a few milliseconds of a ten-second envelope - says so itself.
@@ -263,6 +278,7 @@ function defineParam(deviceId, spec, seen) {
     curve,
     curveExp,
     active,
+    alt,
     decimals,
     step,
     options: options ? Object.freeze(options) : null,
@@ -323,8 +339,12 @@ const FIGURE_KINDS = new Map([
   ['echoes', ['time', 'feedback']],
   // One catch of a beat repeat and the repeats it plays.
   ['repeats', ['grid', 'repeats']],
-  // A reverb's tail falling away.
-  ['decay', ['decay']],
+  // A grain delay's cloud from one hit: its grains over time and pitch, repeat by repeat.
+  ['cloud', ['time', 'size', 'density', 'pitch', 'feedback']],
+  // A spring's echoes over time and frequency: each one a chirp, fading trip by trip.
+  ['chirps', ['decay', 'length', 'chirp', 'transition']],
+  // A reverb's tail over time and frequency: the first reflections, then the wash dying away.
+  ['tailmap', ['decay', 'size']],
   // A modulated effect's sweep over one LFO cycle, with a playhead where it is.
   ['sweep', ['rate', 'depth']],
   // A ducker's dip: the shape over a beat, and the signal it is pumping.
@@ -339,6 +359,8 @@ const FIGURE_KINDS = new Map([
   ['partials', ['spectrum', 'partials']],
   // A drum hit's pitch over time, on a curve the hit plays fixed or drawn.
   ['hitpitch', ['shape']],
+  // A drum hit's level over time, on a curve the hit plays fixed or drawn.
+  ['hitlevel', ['shape']],
   // A struck body's modes - a bar per mode at its frequency, as loud as it starts - and the band
   // its noise sits in.
   ['modes', ['material', 'pitch']],
@@ -483,6 +505,15 @@ function defineDevice(spec) {
     for (const is of [p.active.is].flat()) {
       if (argToValue(on, is) === null) fail(id, `param "${p.id}" is active on "${p.active.param}" being ${JSON.stringify(is)}, which is not one of its values`);
     }
+  }
+
+  for (const p of params) {
+    if (!p.alt) continue;
+    const on = params.find((x) => x.id === p.alt.param);
+    const off = on ? argToValue(on, p.alt.not) : null;
+    if (off === null) fail(id, `param "${p.id}" has a second reading off "${p.alt.param}" being ${JSON.stringify(p.alt.not)}, which this device does not have`);
+    p.alt.off = off;
+    Object.freeze(p.alt);
   }
 
   // Pictures the panel draws instead of, or as well as, some of those knobs - see figures.mjs,
@@ -816,12 +847,30 @@ function decimalsFor(param) {
 }
 
 /**
+ * A control's second reading (see `alt` in defineParam) when the device's `values` put it in
+ * force, or null.
+ */
+function altInForce(param, values) {
+  const alt = param?.alt;
+  if (!alt || !values) return null;
+  const on = values[alt.param];
+  if (typeof on !== 'number') return null;
+  return Math.round(on) === alt.off ? null : alt;
+}
+
+/**
  * How a value prints in a readout: the unit appended, an enum printed as its label. Shared by the
  * panel and by any log line that quotes a parameter, so a value reads the same everywhere.
  * `extras` names the option slots a device filled at run time, past the descriptor's own list.
  */
-function formatValue(param, value, extras = null) {
+function formatValue(param, value, extras = null, values = null) {
   const v = clampParam(param, value);
+  const alt = altInForce(param, values);
+  if (alt) {
+    const a = alt.min + (alt.max - alt.min) * normalize(param, v);
+    const text = a.toFixed(decimalsFor({ decimals: null, step: null, min: alt.min, max: alt.max }));
+    return alt.unit ? `${text} ${alt.unit}` : text;
+  }
   if (param.options) {
     const i = Math.round(v);
     return param.options[i] ?? extras?.[i] ?? (param.open ? 'empty' : String(v));
@@ -3008,6 +3057,13 @@ const OUTPUT_GAIN = 0.75;
  */
 const FLOOR = 1e-20;
 
+/**
+ * How far Modulation 1 moves each delay line, in samples either way. At the 0.7 Hz it moves at,
+ * that bends the tail's pitch by about eight cents either way: a slow chorus at the top of the
+ * knob, and still only a drift in the middle of it.
+ */
+const MOD_DEPTH = 48;
+
 /** A delay line with a movable read point, sized once and never reallocated. */
 class DelayLine {
   constructor(maxSamples) {
@@ -3130,7 +3186,7 @@ class Reverb {
       const hz = Math.min(2000, Math.max(10, lowCut));
       this.lowCutCoef = 1 - Math.exp((-2 * Math.PI * hz) / this.sampleRate);
     }
-    if (modulation !== undefined) this.modDepth = Math.max(0, modulation) * 12;
+    if (modulation !== undefined) this.modDepth = Math.max(0, modulation) * MOD_DEPTH;
   }
 
   /**
@@ -3240,7 +3296,7 @@ const REVERB = defineDevice({
       description: 'Scales the delay network, so a small room and a hall differ in more than their decay time.' },
     { id: 'predelay', name: 'Predelay', min: 0, max: 0.25, default: 0.01, unit: 's', group: 'Room' },
     { id: 'modulation', name: 'Modulation', min: 0, max: 1, default: 0.2, group: 'Room',
-      description: 'Moves the delay lengths slowly, which breaks up the ringing a still network develops.' },
+      description: 'Moves the delay lengths slowly, which breaks up the ringing a still network develops. Turned up, the tail takes on a slow chorus.' },
     { id: 'damping', name: 'Damping', min: 200, max: 20000, default: 6000, unit: 'Hz', curve: 'exp', group: 'Tone',
       description: 'Where the tail starts losing its top as it decays. Lower is a softer room.' },
     { id: 'lowcut', name: 'Low Cut', min: 10, max: 2000, default: 120, unit: 'Hz', curve: 'exp', group: 'Tone' },
@@ -3250,12 +3306,12 @@ const REVERB = defineDevice({
   figures: [
     {
       id: 'tail',
-      kind: 'decay',
+      kind: 'tailmap',
       group: 'Room',
       title: 'tail',
-      description: 'How the tail falls away after a hit: nothing for the predelay, then sixty decibels down over the decay time. Drag across for the decay.',
-      params: { decay: 'decay', predelay: 'predelay' },
-      drag: { x: 'decay' },
+      description: 'The tail of one hit, time across and frequency up: nothing for the predelay, the first reflections as lines, then the wash dying away - the top first, as the damping takes it. Drag across for the decay, up for the damping.',
+      params: { decay: 'decay', size: 'size', predelay: 'predelay', damping: 'damping', lowcut: 'lowcut' },
+      drag: { x: 'decay', y: 'damping' },
     },
   ],
   presets: REVERB_PRESETS,
@@ -4563,7 +4619,8 @@ class ModDelay {
 }
 
 // ---- src/devices/chorus.mjs --------------------------------------
-// The Chorus effect: up to three modulated copies, each a few milliseconds behind and drifting.
+// The Chorus effect: up to three modulated copies, each a few milliseconds behind and drifting,
+// with feedback into the delay.
 
 
 /** Starting points for the preset menu: each the defaults with these controls changed. */
@@ -4597,6 +4654,8 @@ const CHORUS = defineDevice({
       description: 'How far the delay sweeps.' },
     { id: 'delay', name: 'Delay', min: 1, max: 50, default: 12, unit: 'ms',
       description: 'The center of the sweep. Short is a thickening; long is a doubling.' },
+    { id: 'feedback', name: 'Feedback', min: -0.95, max: 0.95, default: 0,
+      description: 'How much of the delayed signal goes back into the delay. Up from 0 the copies ring and smear; negative feedback rings hollower.' },
     { id: 'voices', name: 'Voices', min: 1, max: 3, default: 2, step: 1, rate: 'k', ui: 'number' },
     { id: 'spread', name: 'Spread', min: 0, max: 1, default: 0.7,
       description: 'How far the right channel\'s sweep sits behind the left\'s.' },
@@ -4642,7 +4701,7 @@ class ChorusProcessor {
         depthSec: at(params.depth, i) * 0.001,
         rateHz: syncedHz(sync, this.bpm, at(params.rate, i)),
         spread: at(params.spread, i),
-        feedback: 0,
+        feedback: at(params.feedback, i),
         shape,
         voices,
       });
@@ -5538,7 +5597,9 @@ class Adsr {
 // beat falls - so it is on the grid whatever is playing through it. Played by another track's
 // notes (`.fx("Ducker").midi("kick")`) it dips on each note instead, at the note's own sample,
 // which is the way to duck to a kick exactly without listening for it. With a sidechain patched
-// in (`.audio("kick")`) it triggers on that signal's transients. Either way the shape is the thing: a curve from the dip's floor back up to full over the
+// in (`.audio("kick")`) it triggers on that signal's transients. Trigger dips it each time it
+// rises past a half - `.param("Trigger", button())` - and setting it stops the clock dipping on its
+// own, as a route of notes does. Either way the shape is the thing: a curve from the dip's floor back up to full over the
 // length set, which is what a sidechain compressor's release does with far less to set.
 
 
@@ -5561,13 +5622,13 @@ const DUCKER = defineDevice({
   migrate: migrateSyncLists(['sync']),
   license: 'AGPL-3.0-only',
   processor: 'poptart-ducker',
-  description: 'A level dip on the beat, on the notes of a track routed in with .midi(), or on the transients of a sidechained track: the pump of a sidechain compressor, with a shape to draw instead of a detector to fight.',
+  description: 'A level dip on the beat, on the notes of a track routed in with .midi(), on Trigger, or on the transients of a sidechained track: the pump of a sidechain compressor, with a shape to draw instead of a detector to fight.',
   channels: { in: 2, out: 2 },
   sidechain: true,
   notes: true,
   params: [
     { id: 'sync', name: 'Sync', default: SYNC_OPTIONS.indexOf('1/4'), options: [...SYNC_OPTIONS], rate: 'k',
-      description: 'How often the dip happens on the clock. Ignored when notes or a sidechain trigger it instead.' },
+      description: 'How often the dip happens on the clock. Ignored when notes, Trigger or a sidechain trigger it instead.' },
     { id: 'amount', name: 'Amount', min: 0, max: 1, default: 0.8,
       description: 'How far the level drops at the dip.' },
     { id: 'length', name: 'Length', min: 0.05, max: 1, default: 0.5,
@@ -5578,6 +5639,8 @@ const DUCKER = defineDevice({
       description: 'The shape of the recovery: positive starts slow and rises fast, the classic pump; negative snaps back.' },
     { id: 'threshold', name: 'Threshold', min: -60, max: 0, default: -24, unit: 'dB',
       description: 'The level a sidechained signal has to reach to trigger the dip. Notes trigger it whatever their level.' },
+    { id: 'trigger', name: 'Trigger', min: 0, max: 1, default: 0, ui: 'button', saved: false,
+      description: 'Starts a dip each time it rises past a half. Set, it stops the clock dipping on its own.' },
   ],
   figures: [
     {
@@ -5609,6 +5672,7 @@ class DuckerProcessor {
     // Notes routed in with .midi(): while a route is set, notes are the only trigger, and the
     // clock stops dipping on its own. `pending` is note-on times not yet reached, oldest first.
     this.noteRouted = false;
+    this.triggered = false;   // Trigger as the last sample read it
     this.pending = [];
     this.hit = 0;             // a marker for the picture: one at a note, falling away after it
     this.at = 0;              // transport seconds at the end of the last block (see report)
@@ -5667,6 +5731,13 @@ class DuckerProcessor {
     const threshold = Math.pow(10, at(params.threshold, 0) / 20);
     const releaseK = 1 - Math.exp(-1 / (0.05 * sr));
     for (let i = 0; i < count; i++) {
+      // A press dips as a note does.
+      const held = at(params.trigger, i) >= 0.5;
+      if (held && !this.triggered) {
+        this.elapsed = 0;
+        this.hit = 1;
+      }
+      this.triggered = held;
       // Where this sample sits on the clock: a trigger fires when the beat index changes.
       if (byNotes) {
         // A note at or before this sample starts the dip here. Anything that arrived late
@@ -6748,8 +6819,80 @@ const GRAINECHO = defineDevice({
       description: 'How far grains are panned either way.' },
     { id: 'mix', name: 'Mix', min: 0, max: 1, default: 0.5 },
   ],
+  figures: [
+    {
+      id: 'cloud',
+      kind: 'cloud',
+      title: 'cloud',
+      description: 'The grains one hit sets off, time across and pitch up: each repeat a scatter of grains Size long, as many as Density catches, spread by Spray and Random Pitch, a step of Pitch from the last and quieter by Feedback. Left and right grains are drawn in two shades. Drag across for the time, up for the pitch.',
+      params: { time: 'time', sync: 'sync', size: 'size', density: 'density', pitch: 'pitch', random: 'random', spray: 'spray', feedback: 'feedback', spread: 'spread' },
+      drag: { x: 'time', y: 'pitch' },
+    },
+  ],
   presets: GRAINECHO_PRESETS,
 });
+
+/** The grains' random sequence: xorshift32 on a 32-bit seed, the next seed. */
+function nextSeed(seed) {
+  let x = seed;
+  x ^= x << 13; x >>>= 0; x ^= x >>> 17; x ^= x << 5; x >>>= 0;
+  return x;
+}
+
+/** Where the grains' random sequence starts. */
+const GRAINECHO_SEED = 0x2545f491;
+
+/** The most repeats, and grains a repeat, the picture draws. */
+const CLOUD_REPEATS = 16;
+const CLOUD_GRAINS = 24;
+/** The quietest repeat drawn, in decibels under the first. */
+const CLOUD_FLOOR_DB = -60;
+/** The longest the picture runs, in seconds. */
+const CLOUD_SPAN_MAX = 8;
+
+/**
+ * The cloud one hit makes, for the device's picture: every grain of every repeat, where it is
+ * heard, at what pitch, how loud, and which way it is panned.
+ *
+ * Built the way the processor builds it. A hit is caught by the grains whose window covers it
+ * when they read it back - about Density times Size of them - and each is heard Time back, give
+ * or take Spray of it, plus half a grain, since a grain starts reading half its length before the
+ * point it is centered on. Each of those grains is caught again by the next repeat, Feedback
+ * quieter, transposed by Pitch again and by its own Random Pitch, so a repeat's grains sit around
+ * its parents'. The random draws are the processor's own sequence from its own seed, so the
+ * picture is a sample of the same spread the sound draws from, and the same sample each time.
+ */
+function grainEchoCloud({ time, size, density, pitch, random, spray, feedback, spread }) {
+  let seed = GRAINECHO_SEED;
+  const rnd = () => {
+    seed = nextSeed(seed);
+    return seed / 4294967296;
+  };
+  const len = Math.max(0.001, size * 0.001);
+  const caught = Math.max(1, Math.min(CLOUD_GRAINS, Math.round(density * len)));
+  const fbDb = feedback > 0 ? 20 * Math.log10(feedback) : -Infinity;
+  const grains = [];
+  let parents = [{ t: 0, st: 0 }];
+  for (let n = 1; n <= CLOUD_REPEATS; n++) {
+    const db = (n - 1) * fbDb;
+    if (!(db > CLOUD_FLOOR_DB)) break;
+    const next = [];
+    for (let g = 0; g < caught; g++) {
+      const parent = parents[Math.floor(rnd() * parents.length)];
+      const back = Math.max(0.001, time + spray * time * (rnd() * 2 - 1));
+      const st = parent.st + pitch + random * (rnd() * 2 - 1);
+      const pan = (rnd() * 2 - 1) * spread;
+      const t = parent.t + back + len / 2;
+      if (t - len / 2 > CLOUD_SPAN_MAX) continue;
+      next.push({ t, st });
+      grains.push({ t, length: len, st, db, pan, repeat: n });
+    }
+    if (!next.length) break;
+    parents = next;
+  }
+  const last = grains.reduce((m, g) => Math.max(m, g.t + g.length / 2), 0);
+  return { grains, span: Math.min(CLOUD_SPAN_MAX, Math.max(0.3, last * 1.08)), floorDb: CLOUD_FLOOR_DB };
+}
 
 /** One grain: where it reads, how far through it is, its rate and pan. */
 class DelayGrain {
@@ -6765,7 +6908,7 @@ class GrainEchoProcessor {
     this.write = 0;
     this.grains = Array.from({ length: MAX_GRAINS }, () => new DelayGrain());
     this.until = 0;        // samples until the next grain starts
-    this.seed = 0x2545f491;
+    this.seed = GRAINECHO_SEED;
     this.bpm = 120;
     this.dcK = 1 - (2 * Math.PI * GRAINECHO_DC_HZ) / sampleRate;
     this.dcInL = 0; this.dcInR = 0; this.dcOutL = 0; this.dcOutR = 0;
@@ -6775,10 +6918,8 @@ class GrainEchoProcessor {
 
   /** A deterministic 0..1, so the cloud is the same cloud every play. */
   random() {
-    let x = this.seed;
-    x ^= x << 13; x >>>= 0; x ^= x >>> 17; x ^= x << 5; x >>>= 0;
-    this.seed = x;
-    return x / 4294967296;
+    this.seed = nextSeed(this.seed);
+    return this.seed / 4294967296;
   }
 
   process(inputs, outputs, count, params) {
@@ -6877,7 +7018,9 @@ class GrainEchoProcessor {
 // Two ways to drive it. With nothing routed in, Level is how far open it is - set it, sweep it,
 // or put an env() or lfo() on it, and the response smooths whatever arrives. With notes routed
 // in (`.fx("LPG").midi("lead")`), each note STRIKES it: a few milliseconds of drive, as high as
-// Level times the note's velocity, and then it closes on its own over Decay.
+// Level times the note's velocity, and then it closes on its own over Decay. Trigger strikes it
+// the same way each time it rises past a half - `.param("Trigger", button())` - and setting it
+// rests the gate closed between strikes, as a route of notes does.
 //
 // Translated line for line into native/devices/own/lpg.cc for the desktop, and held to it by
 // native-device-parity.test.mjs.
@@ -6915,12 +7058,12 @@ const LPG = defineDevice({
   version: 1,
   license: 'AGPL-3.0-only',
   processor: 'poptart-lpg',
-  description: 'A low-pass gate: a level and a lowpass opened together through a slow, uneven response, so a sound dulls as it dies away. Notes routed in with .midi() strike it open.',
+  description: 'A low-pass gate: a level and a lowpass opened together through a slow, uneven response, so a sound dulls as it dies away. Notes routed in with .midi(), or Trigger, strike it open.',
   channels: { in: 2, out: 2 },
   notes: true,
   params: [
     { id: 'level', name: 'Level', min: 0, max: 1, default: 1,
-      description: 'How far open the gate is. With notes routed in with .midi(), how far each note strikes it open, times its velocity.' },
+      description: 'How far open the gate is. With notes routed in with .midi(), how far each note strikes it open, times its velocity; with Trigger set, how far each press does.' },
     { id: 'decay', name: 'Decay', min: 0.02, max: 5, default: 0.4, unit: 's', curve: 'pow', curveExp: 2,
       description: 'How long the gate takes to close. The end of the close is slower than the start.' },
     { id: 'mode', name: 'Mode', default: 0, options: [...LPG_MODES], rate: 'k',
@@ -6928,6 +7071,8 @@ const LPG = defineDevice({
     { id: 'resonance', name: 'Resonance', min: 0, max: 1, default: 0,
       description: 'A peak at the cutoff, which rings as the gate closes.' },
     { id: 'output', name: 'Output', min: -24, max: 24, default: 0, unit: 'dB' },
+    { id: 'trigger', name: 'Trigger', min: 0, max: 1, default: 0, ui: 'button', saved: false,
+      description: 'Strikes the gate open each time it rises past a half. Set, it rests the gate closed between strikes.' },
   ],
   presets: LPG_PRESETS,
 });
@@ -6937,6 +7082,7 @@ class LpgProcessor {
     this.sampleRate = sampleRate;
     this.frames = 0;
     this.noteRouted = false;
+    this.triggered = false;   // Trigger as the last sample read it
     this.pending = [];        // [time, velocity] of strikes not yet reached, oldest first
     this.strikeLen = Math.round(STRIKE_SEC * sampleRate);
     this.attackK = 1 / (1 + ATTACK_SEC * sampleRate);
@@ -6982,12 +7128,19 @@ class LpgProcessor {
     const mode = Math.min(LPG_MODES.length - 1, Math.max(0, Math.round(at(params.mode, 0))));
     for (let i = 0; i < count; i++) {
       const level = Math.min(1, Math.max(0, at(params.level, i)));
+      const held = at(params.trigger, i) >= 0.5;
+      const pressed = held && !this.triggered;
+      this.triggered = held;
       let drive = level;
       if (this.noteRouted) {
         const now = start + i / sr;
         while (this.pending.length && this.pending[0][0] <= now) {
           const strike = level * this.pending.shift()[1];
           this.pulse = this.pulseLeft > 0 ? Math.max(this.pulse, strike) : strike;
+          this.pulseLeft = this.strikeLen;
+        }
+        if (pressed) {
+          this.pulse = this.pulseLeft > 0 ? Math.max(this.pulse, level) : level;
           this.pulseLeft = this.strikeLen;
         }
         drive = this.pulseLeft > 0 ? this.pulse : 0;
@@ -7159,6 +7312,8 @@ class ShapeField {
     this.c2 = 0;
     this.lambda = 1;
     this.primed = false;
+    // How many cells hold the picture: past them, a bank that has just grown.
+    this.filled = 0;
   }
 
   reset() {
@@ -7166,6 +7321,7 @@ class ShapeField {
     for (const name of c.names) c[name].fill(0);
     this.phase = 0;
     this.primed = false;
+    this.filled = 0;
   }
 
   /** Room for n cells (and the n + 1 snapshots a scroll keeps). */
@@ -7204,6 +7360,18 @@ class ShapeField {
         c.uL[k] = shape; c.pL[k] = shape; c.uR[k] = shape; c.pR[k] = shape;
       }
       this.primed = true;
+      this.filled = n;
+    }
+    if (n < this.filled) this.filled = n;
+    if (n > this.filled) {
+      // Bands just added carry on from the top of the bank as it was, rather than starting silent
+      // and waiting for Shape to scroll or ripple into them.
+      const top = this.filled - 1;
+      for (let k = this.filled; k <= n; k++) {
+        c.hist[k] = c.hist[this.filled];
+        c.uL[k] = c.uL[top]; c.pL[k] = c.pL[top]; c.uR[k] = c.uR[top]; c.pR[k] = c.pR[top];
+      }
+      this.filled = n;
     }
     if (this.mode === 1) {
       for (let s = 0; s < this.sub; s++) {
@@ -7869,6 +8037,676 @@ class ResonatorProcessor {
     }
     this.frames += count;
     if (!this.field.playable() || !this.bank.playable()) this.reset();
+  }
+}
+
+// ---- src/dsp/spring.mjs ------------------------------------------
+// A spring reverb tank, modeled on its sound rather than its physics.
+//
+// What makes a spring sound like a spring is dispersion: a click sent down the wire arrives as a
+// chirp, because different frequencies take different times to cross it. Below the spring's
+// transition frequency the highs arrive last, so every echo is a rising chirp that bends up into
+// the transition frequency, and each trip round the tank bends it further. Above the transition
+// frequency there is a much quieter series of chirps across the whole band, the lows arriving
+// last.
+//
+// The model is the parametric one from the literature (Välimäki, Parker and Abel, "Parametric
+// spring reverberation effect", JAES 2010; Parker, "Efficient dispersion generation structures
+// for spring reverb emulation", EURASIP 2011): each series is a feedback loop holding a delay
+// line and a long cascade of first-order allpasses. In the main series each allpass has its unit
+// delay stretched to k samples, which puts its peak group delay at fs / 2k - the transition
+// frequency - and mirrors the curve above it, so that loop's output is low-passed at the
+// transition frequency. The second series uses plain allpasses with a negative coefficient,
+// which delay the lows most. Each chirp has a small copy of itself a fifth of a trip in front of
+// it, as a real tank's does where the spring meets its mount; that copy is made on the way out
+// rather than in the loop, where it would cost the tail level on every trip and shorten the
+// decay. The delay is moved by a slow random wander, as a hanging spring is.
+//
+// Past what a real tank can do: the stretch is fractional (a whole-sample delay and a first-order
+// allpass for the rest), so the transition frequency glides and bends what is already in the
+// springs; a negative coefficient turns the chirps over so they fall; the loop gain can be pushed
+// past one, with a saturator in each loop holding the result; and a shake knocks the tank with a
+// thump and a burst of noise, through the driver. Notes routed in play it: each one glides the
+// transition frequency to the note's and pings the tank with the burst alone, as loud as its
+// velocity.
+//
+// A tank has two springs here, one per side, of slightly different lengths. Everything is in
+// double precision and every random number comes from a fixed generator, so the desktop's
+// translation (osc-engine/native/devices/own/dsp/spring.h) can be held to it sample for sample.
+
+/** Allpasses in the main chain and in the full-band one. */
+const LF_STAGES = 100;
+const HF_STAGES = 80;
+
+/** The transition frequency's range, in Hz. The low end sets the longest stretch. */
+const MIN_TRANSITION = 100;
+const MAX_TRANSITION = 8000;
+
+/** The most loop gain Feedback asks for: past one the loop's saturator is what holds it. */
+const MAX_FEEDBACK = 1.5;
+
+/** The longest round trip the Length control asks for, in seconds. */
+const MAX_LENGTH = 0.12;
+
+/** How much longer the right spring is than the left, and its full-band loop than its own. */
+const SPRING_RATIOS = [1, 1.127];
+const HF_RATIOS = [0.53, 0.61];
+/** How fast each spring's delay wanders, in Hz, and the seed of its wander. */
+const WANDER_HZ = [2.3, 1.7];
+const SEEDS = [0x9e3779b9, 0x7f4a7c15];
+
+/** How far in front of each chirp its small copy sits, as a share of the round trip, and its level. */
+const ECHO_AHEAD = 0.2;
+const ECHO_GAIN = 0.12;
+
+/** The full-band series' level against the main one. */
+const HF_LEVEL = 0.035;
+
+/** The deepest the wander moves the delay, in seconds, at Modulation 1. */
+const MAX_WANDER = 0.0015;
+
+/**
+ * The wet signal's level. MEASURED: with this a sustained input at the defaults sits about six
+ * decibels under the dry signal, as the Reverb's does, so the middle of Mix means something.
+ */
+const WET_GAIN = 0.86;
+
+/** How long the transition frequency takes to glide to a new value, in seconds. */
+const GLIDE = 0.02;
+
+/** The most the main chain's coefficient reaches, at Chirp 1 or -1. */
+const MAX_COEFFICIENT = 0.9;
+
+/** A shake: a half-sine thump this long, under a burst of noise falling away this fast. */
+const SHAKE_THUMP = 0.008;
+const SHAKE_FALL = 0.012;
+const SHAKE_THUMP_LEVEL = 1.4;
+const SHAKE_NOISE_LEVEL = 0.9;
+const SHAKE_LENGTH = 0.25;
+const SHAKE_SEED = 0x2545f491;
+
+/** Added to everything written into a loop, so a dying tail settles here and not in denormals. */
+const SPRING_FLOOR = 1e-20;
+
+/** Q of each section of an eighth-order Butterworth low-pass. */
+const BUTTERWORTH_8 = [0.5097955791, 0.6013448869, 0.8999762231, 2.5629154477];
+
+/** A delay line of doubles, with a fractional read. */
+class Line {
+  constructor(maxSamples) {
+    let size = 16;
+    while (size < maxSamples) size *= 2;
+    this.buffer = new Float64Array(size);
+    this.mask = size - 1;
+    this.pos = 0;
+  }
+
+  reset() {
+    this.buffer.fill(0);
+    this.pos = 0;
+  }
+
+  write(v) {
+    this.buffer[this.pos] = v;
+    this.pos = (this.pos + 1) & this.mask;
+  }
+
+  read(delay) {
+    const whole = Math.floor(delay);
+    const frac = delay - whole;
+    const a = this.buffer[(this.pos - whole) & this.mask];
+    const b = this.buffer[(this.pos - whole - 1) & this.mask];
+    return a + (b - a) * frac;
+  }
+}
+
+/** A cascade of identical plain first-order allpasses: (a + z^-1) / (1 + a z^-1). */
+class PlainChain {
+  constructor(stages) {
+    this.stages = stages;
+    this.state = new Float64Array(stages);
+  }
+
+  reset() { this.state.fill(0); }
+
+  next(x, a) {
+    const s = this.state;
+    let v = x;
+    for (let m = 0; m < this.stages; m++) {
+      const old = s[m];
+      const w = v - a * old;
+      s[m] = w;
+      v = a * w + old;
+    }
+    return v;
+  }
+}
+
+/**
+ * A cascade of identical first-order allpasses with their delay stretched to k samples, k need
+ * not be whole: (a + D(z)) / (1 + a D(z)), where D is `whole` samples of delay and a first-order
+ * allpass, coefficient `eta`, for the fraction between a half and one and a half samples. D is an
+ * allpass, so every stage still is, and k can move while the chain is full.
+ *
+ * Every stage advances together: one write position, and stage m's history at m * size.
+ */
+class StretchedChain {
+  constructor(stages, maxStretch) {
+    this.stages = stages;
+    this.size = maxStretch + 3;
+    this.state = new Float64Array(stages * this.size);
+    this.frac = new Float64Array(stages);
+    this.pos = 0;
+  }
+
+  reset() {
+    this.state.fill(0);
+    this.frac.fill(0);
+    this.pos = 0;
+  }
+
+  next(x, a, whole, eta) {
+    const s = this.state;
+    const f = this.frac;
+    const size = this.size;
+    const pos = this.pos;
+    let r0 = pos - whole;
+    if (r0 < 0) r0 += size;
+    let r1 = r0 - 1;
+    if (r1 < 0) r1 += size;
+    let v = x;
+    for (let m = 0, base = 0; m < this.stages; m++, base += size) {
+      const d = eta * s[base + r0] + s[base + r1] - eta * f[m];
+      f[m] = d;
+      const w = v - a * d;
+      s[base + pos] = w;
+      v = a * w + d;
+    }
+    this.pos = pos + 1 === size ? 0 : pos + 1;
+    return v;
+  }
+}
+
+/** One biquad section, transposed direct form II, with its coefficients set from outside. */
+class Section {
+  constructor() {
+    this.b0 = 1; this.b1 = 0; this.b2 = 0; this.a1 = 0; this.a2 = 0;
+    this.z1 = 0; this.z2 = 0;
+  }
+
+  reset() { this.z1 = 0; this.z2 = 0; }
+
+  lowpass(hz, q, sampleRate) {
+    const w = (2 * Math.PI * hz) / sampleRate;
+    const cos = Math.cos(w);
+    const alpha = Math.sin(w) / (2 * q);
+    const a0 = 1 + alpha;
+    this.b0 = (1 - cos) / 2 / a0;
+    this.b1 = (1 - cos) / a0;
+    this.b2 = this.b0;
+    this.a1 = (-2 * cos) / a0;
+    this.a2 = (1 - alpha) / a0;
+  }
+
+  highpass(hz, q, sampleRate) {
+    const w = (2 * Math.PI * hz) / sampleRate;
+    const cos = Math.cos(w);
+    const alpha = Math.sin(w) / (2 * q);
+    const a0 = 1 + alpha;
+    this.b0 = (1 + cos) / 2 / a0;
+    this.b1 = -(1 + cos) / a0;
+    this.b2 = this.b0;
+    this.a1 = (-2 * cos) / a0;
+    this.a2 = (1 - alpha) / a0;
+  }
+
+  /** Its gain at `w` radians a sample, from the coefficients it is filtering with. */
+  gain(w) {
+    const c1 = Math.cos(w);
+    const s1 = Math.sin(w);
+    const c2 = Math.cos(2 * w);
+    const s2 = Math.sin(2 * w);
+    const nr = this.b0 + this.b1 * c1 + this.b2 * c2;
+    const ni = -this.b1 * s1 - this.b2 * s2;
+    const dr = 1 + this.a1 * c1 + this.a2 * c2;
+    const di = -this.a1 * s1 - this.a2 * s2;
+    return Math.sqrt((nr * nr + ni * ni) / (dr * dr + di * di));
+  }
+
+  next(x) {
+    const y = this.b0 * x + this.z1;
+    this.z1 = this.b1 * x - this.a1 * y + this.z2;
+    this.z2 = this.b2 * x - this.a2 * y;
+    return y;
+  }
+}
+
+/**
+ * How long a cascade of `stages` allpasses (a + z^-k) / (1 + a z^-k) holds `w` radians a sample,
+ * in samples: its group delay, which is where in time each frequency of a chirp comes out.
+ */
+function chainDelay(a, stretch, stages, w) {
+  return (stages * stretch * (1 - a * a)) / (1 + 2 * a * Math.cos(w * stretch) + a * a);
+}
+
+/** The gain at `w` of the one-pole lowpass y += k (x - y), the damping in each loop. */
+function dampingGain(k, w) {
+  return k / Math.sqrt(1 - 2 * (1 - k) * Math.cos(w) + (1 - k) * (1 - k));
+}
+
+/**
+ * A slow random wander between -1 and 1: a new target every 1/hz seconds, eased toward with a
+ * smoothstep so it never turns a corner. xorshift32, so the desktop draws the same numbers.
+ */
+class Wander {
+  constructor(sampleRate, hz, seed) {
+    this.period = Math.max(1, Math.round(sampleRate / hz));
+    this.seed0 = seed >>> 0;
+    this.reset();
+  }
+
+  reset() {
+    this.seed = this.seed0;
+    this.from = 0;
+    this.to = this.random();
+    this.count = 0;
+  }
+
+  random() {
+    let x = this.seed;
+    x = (x ^ (x << 13)) >>> 0;
+    x = (x ^ (x >>> 17)) >>> 0;
+    x = (x ^ (x << 5)) >>> 0;
+    this.seed = x;
+    return (x / 4294967296) * 2 - 1;
+  }
+
+  next() {
+    if (this.count >= this.period) {
+      this.from = this.to;
+      this.to = this.random();
+      this.count = 0;
+    }
+    const t = this.count / this.period;
+    this.count++;
+    return this.from + (this.to - this.from) * (t * t * (3 - 2 * t));
+  }
+}
+
+/** One spring: the main chirp series and the full-band one, each a loop of its own. */
+class Spring {
+  constructor(sampleRate, maxStretch, index) {
+    this.sampleRate = sampleRate;
+    this.ratio = SPRING_RATIOS[index];
+    this.hfRatio = HF_RATIOS[index];
+    const longest = Math.ceil(sampleRate * (MAX_LENGTH * this.ratio + MAX_WANDER)) + 8;
+    this.lfLine = new Line(longest);
+    this.hfLine = new Line(longest);
+    this.echoLine = new Line(Math.ceil(longest * ECHO_AHEAD) + 8);
+    this.lf = new StretchedChain(LF_STAGES, maxStretch);
+    this.hf = new PlainChain(HF_STAGES);
+    this.wander = new Wander(sampleRate, WANDER_HZ[index], SEEDS[index]);
+    this.lowpass = BUTTERWORTH_8.map(() => new Section());
+    this.outLowpass = BUTTERWORTH_8.map(() => new Section());
+    this.lowcut = new Section();
+    this.lfDamp = 0;
+    this.hfDamp = 0;
+    this.lfBack = 0;
+    this.hfBack = 0;
+    // Set by Spring.set: the delays in samples, the loop gains and the coefficients.
+    this.lfDelay = 1000;
+    this.hfDelay = 500;
+    this.lfGain = 0;
+    this.hfGain = 0;
+    this.aLf = 0.5;
+    this.aHf = -0.5;
+    this.dampCoef = 0.5;
+    this.depth = 0;
+  }
+
+  reset() {
+    this.lfLine.reset();
+    this.hfLine.reset();
+    this.echoLine.reset();
+    this.lf.reset();
+    this.hf.reset();
+    this.wander.reset();
+    for (const s of this.lowpass) s.reset();
+    for (const s of this.outLowpass) s.reset();
+    this.lowcut.reset();
+    this.lfDamp = 0;
+    this.hfDamp = 0;
+    this.lfBack = 0;
+    this.hfBack = 0;
+  }
+
+  set(c) {
+    const sr = this.sampleRate;
+    this.aLf = c.aLf;
+    this.aHf = c.aHf;
+    this.lfDelay = Math.max(4, c.length * this.ratio * sr);
+    this.hfDelay = Math.max(4, c.length * this.hfRatio * sr);
+    this.depth = c.depth;
+    // A round trip is the delay and the chain's mean group delay, which is one sample per stage
+    // per sample of stretch; the loop gain takes sixty decibels off over the decay time, unless
+    // Feedback asks for more.
+    const lfTrip = (this.lfDelay + c.stretch * LF_STAGES) / sr;
+    const hfTrip = (this.hfDelay + HF_STAGES) / sr;
+    this.lfGain = Math.max(c.feedback, Math.min(0.9995, Math.pow(10, (-3 * lfTrip) / c.decay)));
+    this.hfGain = Math.max(c.feedback, Math.min(0.9995, Math.pow(10, (-3 * hfTrip) / c.decay)));
+    this.dampCoef = c.dampCoef;
+    // The low-pass sits at the frequency the stretch is at.
+    const top = Math.min(sr * 0.45, sr / (2 * c.stretch));
+    for (let s = 0; s < this.lowpass.length; s++) {
+      this.lowpass[s].lowpass(top, BUTTERWORTH_8[s], sr);
+      this.outLowpass[s].lowpass(top, BUTTERWORTH_8[s], sr);
+    }
+    this.lowcut.highpass(c.lowCut, Math.SQRT1_2, sr);
+  }
+
+  next(x, whole, eta) {
+    const wobble = this.depth * this.wander.next();
+
+    // The main series: round the delay, then the chain.
+    this.lfLine.write(x + this.lfBack + SPRING_FLOOR);
+    const arrived = this.lfLine.read(this.lfDelay + wobble);
+    // The stretched chain mirrors its chirps above the transition frequency. The low-pass is in
+    // the loop, so a mirrored chirp is cut again on every trip rather than going round with the
+    // real ones.
+    let lf = this.lf.next(arrived, this.aLf, whole, eta);
+    for (let s = 0; s < this.lowpass.length; s++) lf = this.lowpass[s].next(lf);
+    this.lfDamp += this.dampCoef * (lf - this.lfDamp);
+    // The saturator holds a loop pushed past one; at the levels a decaying tail runs at it is
+    // all but straight.
+    this.lfBack = Math.tanh(this.lfDamp * this.lfGain);
+
+    // The full-band series: a shorter loop, a plain chain.
+    this.hfLine.write(x + this.hfBack + SPRING_FLOOR);
+    const hf = this.hf.next(this.hfLine.read(this.hfDelay + wobble * 0.5), this.aHf);
+    this.hfDamp += this.dampCoef * (hf - this.hfDamp);
+    this.hfBack = Math.tanh(this.hfDamp * this.hfGain);
+
+    // Once more on the way out, so the first trip is as clean above the transition as the rest.
+    let low = lf;
+    for (let s = 0; s < this.outLowpass.length; s++) low = this.outLowpass[s].next(low);
+    // The chirps go out a fifth of a trip late, with their small copy at the time they came.
+    this.echoLine.write(low);
+    const main = this.echoLine.read(this.lfDelay * ECHO_AHEAD) + ECHO_GAIN * low;
+    return this.lowcut.next(main + HF_LEVEL * hf);
+  }
+}
+
+/** The tank: two springs fed the same mono signal through a saturating driver. */
+class SpringTank {
+  constructor(sampleRate) {
+    this.sampleRate = sampleRate;
+    this.maxStretch = Math.ceil(sampleRate / (2 * MIN_TRANSITION));
+    this.springs = [new Spring(sampleRate, this.maxStretch, 0), new Spring(sampleRate, this.maxStretch, 1)];
+    this.glide = 1 - Math.exp(-1 / (GLIDE * sampleRate));
+    this.thump = Math.max(1, Math.round(SHAKE_THUMP * sampleRate));
+    this.fall = SHAKE_FALL * sampleRate;
+    this.shakeLength = Math.round(SHAKE_LENGTH * sampleRate);
+    this.reset();
+  }
+
+  reset() {
+    for (const s of this.springs) s.reset();
+    this.stretch = 0; // none yet: the first set() lands on its value rather than gliding to it
+    this.target = 2;
+    this.shakeAt = -1;
+    this.shakeLevel = 1;
+    this.shakeThump = true;
+    this.shakeSeed = SHAKE_SEED;
+  }
+
+  /** The stretch a transition frequency asks for, in samples. Not whole: it glides. */
+  stretchFor(hz) {
+    const f = Math.min(MAX_TRANSITION, Math.max(MIN_TRANSITION, hz));
+    return Math.max(2, Math.min(this.maxStretch, this.sampleRate / (2 * f)));
+  }
+
+  /**
+   * Sets the tank's geometry, once a block. `decay` is an RT60 in seconds, `length` the left
+   * spring's round trip in seconds, `chirp` -1..1, `transition` and `damping` and `lowCut` in Hz,
+   * `modulation` 0..1, `feedback` the loop gain to hold at the least, 0..MAX_FEEDBACK.
+   */
+  set({ decay, length, chirp, transition, modulation, damping, lowCut, feedback }) {
+    const sr = this.sampleRate;
+    const c = Math.min(1, Math.max(-1, chirp));
+    const dampHz = Math.min(sr * 0.45, Math.max(200, damping));
+    this.target = this.stretchFor(transition);
+    if (this.stretch === 0) this.stretch = this.target;
+    const settings = {
+      stretch: this.stretch,
+      aLf: MAX_COEFFICIENT * c,
+      aHf: -(0.3 + 0.4 * Math.abs(c)),
+      length: Math.min(MAX_LENGTH, Math.max(0.01, length)),
+      decay: Math.max(0.05, decay),
+      feedback: Math.min(MAX_FEEDBACK, Math.max(0, feedback)),
+      depth: Math.min(1, Math.max(0, modulation)) * MAX_WANDER * sr,
+      dampCoef: 1 - Math.exp((-2 * Math.PI * dampHz) / sr),
+      lowCut: Math.min(sr * 0.45, Math.max(10, lowCut)),
+    };
+    for (const s of this.springs) s.set(settings);
+  }
+
+  /** The shake's noise: xorshift32, as the wander's. */
+  shakeNoise() {
+    let x = this.shakeSeed;
+    x = (x ^ (x << 13)) >>> 0;
+    x = (x ^ (x >>> 17)) >>> 0;
+    x = (x ^ (x << 5)) >>> 0;
+    this.shakeSeed = x;
+    return (x / 4294967296) * 2 - 1;
+  }
+
+  /** Glides to a new transition frequency now, rather than at the next set(). */
+  retune(hz) {
+    this.target = this.stretchFor(hz);
+  }
+
+  /**
+   * Knocks the tank from the next sample: the burst of noise as loud as `level`, with the thump
+   * under it or not. A press of Shake has it; a note does not, so its ping is the springs' own
+   * sweep up to the note rather than a thud under it.
+   */
+  knock(level, thump) {
+    this.shakeAt = 0;
+    this.shakeLevel = level;
+    this.shakeThump = thump;
+  }
+
+  /** One sample into the driver; the springs' outputs, wet only. */
+  next(x, drive, out) {
+    let input = x;
+    if (this.shakeAt >= 0) {
+      const t = this.shakeAt;
+      input += this.shakeLevel * SHAKE_NOISE_LEVEL * this.shakeNoise() * Math.exp(-t / this.fall);
+      if (this.shakeThump && t < this.thump) input += this.shakeLevel * SHAKE_THUMP_LEVEL * Math.sin((Math.PI * t) / this.thump);
+      this.shakeAt = t + 1 >= this.shakeLength ? -1 : t + 1;
+    }
+    // The driver saturates: at any drive a quiet input goes in at its own level and a loud one
+    // is rounded off, harder the more drive there is.
+    const g = Math.max(1, drive);
+    const driven = Math.tanh(input * g) / g;
+
+    // The stretch glides, and splits into whole samples and a fraction between a half and one
+    // and a half, which is where a first-order allpass delays evenly.
+    this.stretch += this.glide * (this.target - this.stretch);
+    const whole = Math.floor(this.stretch - 0.5);
+    const d = this.stretch - whole;
+    const eta = (1 - d) / (1 + d);
+    out[0] = this.springs[0].next(driven, whole, eta) * WET_GAIN;
+    out[1] = this.springs[1].next(driven, whole, eta) * WET_GAIN;
+  }
+}
+
+// ---- src/devices/spring.mjs --------------------------------------
+// The Spring device: the descriptor, and the block processor that drives the tank.
+//
+// The tank's geometry (decay, length, chirp, transition, modulation, damping, low cut, feedback)
+// is set per block, as the Reverb's is, and the transition frequency glides from there. Drive,
+// Shake, width, mix and output are read per sample.
+//
+// Notes routed in with .midi() play it, as they strike the LPG: each note, on its own sample,
+// glides the transition frequency to the note's frequency and pings the tank with Shake's burst
+// of noise, without its thump, as loud as the note's velocity. A note off changes nothing. While notes are routed
+// in, the last note's frequency stands in for the Transition control.
+
+
+/** Starting points for the preset menu: each the defaults with these controls changed. */
+const SPRING_PRESETS = Object.freeze({
+  amp: { decay: 1.6, length: 0.035, chirp: 0.55, damping: 4500, lowcut: 250, mix: 0.25 },
+  surf: { decay: 3.5, length: 0.06, chirp: 0.7, drive: 12, damping: 6000, lowcut: 300, mix: 0.45 },
+  dub: { decay: 6, length: 0.08, chirp: 0.65, transition: 3000, modulation: 0.5, damping: 2500, lowcut: 120, mix: 0.5 },
+  tight: { decay: 0.7, length: 0.025, chirp: 0.5, damping: 7000, lowcut: 300, mix: 0.3 },
+  boing: { decay: 4, length: 0.1, chirp: 0.9, transition: 2500, damping: 5000, mix: 0.5 },
+  bright: { decay: 2.5, length: 0.045, chirp: 0.6, transition: 5500, damping: 10000, lowcut: 400, mix: 0.35 },
+  wobbly: { decay: 3, length: 0.07, chirp: 0.65, modulation: 1, damping: 4000, mix: 0.4 },
+  endless: { decay: 12, length: 0.09, chirp: 0.6, transition: 3500, modulation: 0.6, damping: 3000, mix: 0.5, output: -4 },
+  falling: { decay: 3, length: 0.06, chirp: -0.7, transition: 3500, damping: 6000, mix: 0.45 },
+  laser: { decay: 3, length: 0.08, chirp: -0.95, transition: 3000, damping: 9000, lowcut: 120, mix: 0.5 },
+  howl: { decay: 4, length: 0.05, chirp: 0.8, transition: 2200, feedback: 1.15, drive: 12, damping: 3000, mix: 0.5, output: -8 },
+  drone: { decay: 12, length: 0.12, chirp: 0.7, transition: 900, feedback: 1, modulation: 0.6, damping: 2000, mix: 0.6, output: -6 },
+});
+
+const SPRING = defineDevice({
+  id: 'Spring',
+  kind: 'fx',
+  version: 1,
+  license: 'AGPL-3.0-only',
+  processor: 'poptart-spring',
+  description: 'A spring reverb: two springs whose echoes arrive as chirps, through a driver that saturates. Notes routed in with .midi() tune it and knock it.',
+  channels: { in: 2, out: 2 },
+  notes: true,
+  params: [
+    { id: 'decay', name: 'Decay', min: 0.2, max: 12, default: 2.5, unit: 's', curve: 'exp', group: 'Spring',
+      description: 'How long the tail takes to fall sixty decibels, below the damping frequency. Above it the tail is shorter.' },
+    { id: 'length', name: 'Length', min: 0.015, max: MAX_LENGTH, default: 0.045, unit: 's', curve: 'exp', group: 'Spring',
+      description: 'The time between echoes: one round trip of the left spring. The right spring is a little longer.' },
+    { id: 'chirp', name: 'Chirp', min: -1, max: 1, default: 0.6, group: 'Spring',
+      description: 'How far each echo is spread in time from low to high frequencies. Above 0 the chirps rise; below 0 they fall; at 0 the echoes are not spread.' },
+    { id: 'transition', name: 'Transition', min: MIN_TRANSITION, max: MAX_TRANSITION, default: 4300, unit: 'Hz', curve: 'exp', group: 'Spring',
+      description: 'The frequency the chirps rise to or fall from. Changing it glides, and bends the echoes already in the springs. With notes routed in with .midi(), each note sets it to the note\'s frequency.' },
+    { id: 'feedback', name: 'Feedback', min: 0, max: MAX_FEEDBACK, default: 0, group: 'Spring',
+      description: 'The least each trip round the springs keeps, in place of Decay where it is higher. At 1 the tail holds; above 1 it grows until the springs saturate.' },
+    { id: 'modulation', name: 'Modulation', min: 0, max: 1, default: 0.25, group: 'Spring',
+      description: 'Moves the springs\' delay slowly and at random, by up to 1.5 ms.' },
+    { id: 'drive', name: 'Drive', min: 0, max: 24, default: 0, unit: 'dB', group: 'Spring',
+      description: 'Gain into the driver, which saturates. The level into the springs stays the same.' },
+    { id: 'shake', name: 'Shake', min: 0, max: 1, default: 0, ui: 'button', saved: false, group: 'Spring',
+      description: 'Knocks the tank: a thump and a burst of noise into the springs, through the driver. Notes routed in with .midi() ping it with the burst alone, as loud as their velocity.' },
+    { id: 'damping', name: 'Damping', min: 500, max: 16000, default: 5000, unit: 'Hz', curve: 'exp', group: 'Tone',
+      description: 'Where the tail starts losing its top as it decays.' },
+    { id: 'lowcut', name: 'Low Cut', min: 10, max: 2000, default: 180, unit: 'Hz', curve: 'exp', group: 'Tone' },
+    { id: 'width', name: 'Width', min: 0, max: 1, default: 1, group: 'Tone',
+      description: 'At 1 each spring is on its own side; at 0 both are in the middle.' },
+    { id: 'mix', name: 'Mix', min: 0, max: 1, default: 0.35, group: 'Tone' },
+    { id: 'output', name: 'Output', min: -24, max: 24, default: 0, unit: 'dB', group: 'Tone' },
+  ],
+  figures: [
+    {
+      id: 'echoes',
+      kind: 'chirps',
+      group: 'Spring',
+      title: 'echoes',
+      description: 'The echoes of one hit, time across and frequency up: each one a chirp, rising to the transition frequency or falling from it, quieter every trip. The faint lines are the full-band chirps. Drag across for the length, up for the transition frequency.',
+      params: { decay: 'decay', length: 'length', chirp: 'chirp', transition: 'transition', feedback: 'feedback', damping: 'damping', lowcut: 'lowcut' },
+      drag: { x: 'length', y: 'transition' },
+    },
+  ],
+  presets: SPRING_PRESETS,
+});
+
+class SpringProcessor {
+  constructor(sampleRate) {
+    this.tank = new SpringTank(sampleRate);
+    this.wet = new Float64Array(2);
+    this.shaking = false; // Shake as the last sample read it
+    this.sampleRate = sampleRate;
+    this.frames = 0;
+    this.noteRouted = false;
+    this.noteHz = null;   // the last routed note's frequency, once one has arrived
+    this.pending = [];    // [time in seconds, frequency, velocity], soonest first
+  }
+
+  reset() {
+    this.tank.reset();
+  }
+
+  /** A route of notes was set or cleared (see the engine's injectMidi). */
+  setNoteRoute(on) {
+    this.noteRouted = !!on;
+    if (!this.noteRouted) {
+      this.pending.length = 0;
+      this.noteHz = null;
+    }
+  }
+
+  /** A note from the routed track: it lands on its own sample, inside the block. */
+  noteOn(note, velocity, time) {
+    if (!(velocity > 0)) return;
+    this.noteRouted = true;
+    const t = Number.isFinite(time) ? time : 0;
+    let i = this.pending.length;
+    while (i > 0 && this.pending[i - 1][0] > t) i -= 1;
+    this.pending.splice(i, 0, [t, 440 * Math.pow(2, (note - 69) / 12), velocity]);
+    if (this.pending.length > 64) this.pending.shift();
+  }
+
+  /** A note is a knock and a pitch, not a gate: an off changes nothing. */
+  noteOff() {}
+
+  process(inputs, outputs, count, params, _sidechain = null, timeSec = null) {
+    const sr = this.sampleRate;
+    const start = timeSec ?? this.frames / sr;
+    this.frames += count;
+    // Every block: the transition frequency glides, so what follows from it moves while it does.
+    this.tank.set({
+      decay: at(params.decay, 0),
+      length: at(params.length, 0),
+      chirp: at(params.chirp, 0),
+      transition: this.noteRouted && this.noteHz != null ? this.noteHz : at(params.transition, 0),
+      modulation: at(params.modulation, 0),
+      damping: at(params.damping, 0),
+      lowCut: at(params.lowcut, 0),
+      feedback: at(params.feedback, 0),
+    });
+
+    const inL = inputs[0];
+    const inR = inputs[1] ?? inputs[0];
+    const outL = outputs[0];
+    const outR = outputs[1] ?? outputs[0];
+    const wet = this.wet;
+    for (let i = 0; i < count; i++) {
+      const l = inL ? inL[i] : 0;
+      const r = inR ? inR[i] : 0;
+      const held = at(params.shake, i) >= 0.5;
+      const pressed = held && !this.shaking;
+      this.shaking = held;
+      let level = pressed ? 1 : 0;
+      // The notes due by this sample, as a whole sample number from the block's start.
+      while (this.pending.length && Math.round((this.pending[0][0] - start) * sr) <= i) {
+        const [, hz, velocity] = this.pending.shift();
+        this.noteHz = hz;
+        this.tank.retune(hz);
+        level = Math.max(level, velocity);
+      }
+      if (level > 0) this.tank.knock(level, pressed);
+      this.tank.next((l + r) * 0.5, dbToGain(at(params.drive, i)), wet);
+      const width = Math.min(1, Math.max(0, at(params.width, i)));
+      const same = (1 + width) * 0.5;
+      const cross = (1 - width) * 0.5;
+      const wl = wet[0] * same + wet[1] * cross;
+      const wr = wet[1] * same + wet[0] * cross;
+      const mix = Math.min(1, Math.max(0, at(params.mix, i)));
+      const gain = dbToGain(at(params.output, i));
+      const ol = (l * (1 - mix) + wl * mix) * gain;
+      const or = (r * (1 - mix) + wr * mix) * gain;
+      outL[i] = ol;
+      if (outR !== outL) outR[i] = or; else outL[i] = (ol + or) * 0.5;
+    }
+    if (!Number.isFinite(outL[count - 1])) this.tank.reset();
   }
 }
 
@@ -9061,7 +9899,7 @@ const EFFECTS = [
   [DUCKER, DuckerProcessor], [OVERDRIVE, OverdriveProcessor], [MULTIBAND, MultibandProcessor],
   [STUTTER, StutterProcessor], [GRAINECHO, GrainEchoProcessor], [FREQSHIFT, FreqShiftProcessor],
   [VOCALSHIFT, VocalShiftProcessor], [LPG, LpgProcessor], [FILTERBANK, FilterbankProcessor], [RESONATOR, ResonatorProcessor], [CROSSOVER, CrossoverProcessor],
-  [LOOPER, LooperProcessor],
+  [LOOPER, LooperProcessor], [SPRING, SpringProcessor],
 ];
 
 for (const [descriptor, Impl] of EFFECTS) {

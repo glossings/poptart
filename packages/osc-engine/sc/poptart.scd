@@ -300,6 +300,8 @@ var tellTrack, tellSlot, tellMods, tellRamp, tellTap, heldBy, shapesHandled = Id
 var modFreeDelay = 0.3, freeModulatorLater;
 // The ramp behind every polled control - see poptartSetParam.
 var rampTo, dropRamp, dropSlotRamps, leafRampSec, leafRampTime;
+// ...and the ones a device window left behind, which a program loaded into the device replaces - see dropHandRamps.
+var dropHandRamps;
 // ...and a polled control a hand has taken in the plugin's own window - see takeHand.
 var takeHand;
 // ...and what happens when the server says that ramp's node is not there - see nodeGone.
@@ -4664,6 +4666,26 @@ dropSlotRamps = { |key, track, slot|
     track[\ramps].keys.copy.do { |k| if (track[\ramps][k][\slot] == slot) { dropRamp.(key, track, k) } };
 };
 
+// A program about to land in one of poptart's own devices (a preset, a `{ state }`). The program
+// moves every control nothing drives (PoptartDeviceController's readProgram) and puts the driven
+// ones back on their buses. A control turned in the device's window is not driven - the turn went
+// out through rampTo like any polled value, for its glide - but its ramp is still mapped onto it,
+// so the load would map it straight back onto that ramp, still writing the hand's value, and no
+// preset would ever move it again. So those ramps go first, and their controls are set where the
+// hand left them: the program then moves them like any other, and one it does not name stays
+// put. A ramp the pattern polls is the pattern's (held for it - see \poptartHoldParam) and stays,
+// as does an expression's input.
+dropHandRamps = { |key, track, slot|
+    var ctl = track[\controllers][slot];
+    track[\ramps].keys.copy.do { |k|
+        var r = track[\ramps][k];
+        if ((r[\slot] == slot) and: { r[\index].isInteger } and: { track[\resting][k].isNil }) {
+            dropRamp.(key, track, k);
+            ctl !? { ctl.set(r[\index], r[\target]) };
+        };
+    };
+};
+
 // A parameter moved in the plugin's own window that the code sets with a steady value: the ramp
 // mapped onto it would put the code's value straight back, so it is unmapped and dropped, and
 // the poll is shut out of it (rampTo) until Node hands it back with /poptart/releaseHands - which
@@ -4922,7 +4944,12 @@ OSCdef(\poptartSetParam, { |msg|
                 // Resolve by name (or a "Name#N" index suffix - see resolveParamIndex) and drive
                 // that specific parameter; values are normalized 0..1.
                 bundleNow.(latency, {
-                    paramTarget.(track, slot, paramName) !? { |target| rampTo.(track, rampKey, slot, target, value.clip(0, 1), step) };
+                    // A plugin's parameter is 0..1. One of our own devices (`audio`) takes an open
+                    // control past 1 - a file loaded past a convolver's built-in spaces - and
+                    // clamps the rest itself.
+                    paramTarget.(track, slot, paramName) !? { |target|
+                        rampTo.(track, rampKey, slot, target, if (target[\audio] == true) { value.max(0) } { value.clip(0, 1) }, step)
+                    };
                 });
             };
         };
@@ -6595,6 +6622,8 @@ OSCdef(\poptartSetPluginState, { |msg|
             var ctl;
             if (track.notNil and: { awaitLoaded.(track, slot) }) {
                 ctl = track[\controllers][slot];
+                // A device's controls a window left on ramps of their own take the program too.
+                if (ctl.respondsTo(\mapAudio)) { dropHandRamps.(key, track, slot) };
                 // From here until a little after it lands, whatever this plugin says about itself
                 // is this program arriving, not a pair of hands (see selfLoads).
                 beginSelfLoad.(seqKey);

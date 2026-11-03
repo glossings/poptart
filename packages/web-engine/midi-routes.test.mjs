@@ -152,6 +152,29 @@ test('a track\'s own notes strike the LPG on its own chain', () => {
   assert.deepEqual(warnings, []);
 });
 
+test('Trigger set on the LPG tells it it is struck, until neither Trigger nor a route is set', () => {
+  const { engine, warnings } = makeEngine();
+  engine.loadInstrument('lead', 'Wavetable');
+  engine.loadEffect('lead', 'LPG', 1);
+  const gate = slotNode(engine, 'lead', 1);
+  const routes = () => gate.messages.filter((m) => m.kind === 'noteRoute').map((m) => m.on);
+  engine.triggerRoute('lead', 1, true);
+  engine.injectMidi('lead', 1, 'lead', null);
+  engine.clearMidiInject('lead', 1);
+  assert.deepEqual(routes(), [true, true, true], 'a route taken away leaves it struck while Trigger is set');
+  engine.triggerRoute('lead', 1, false);
+  assert.deepEqual(routes().at(-1), false);
+  assert.deepEqual(warnings, []);
+});
+
+test('Trigger on a device without one tells it nothing', () => {
+  const { engine } = makeEngine();
+  engine.loadInstrument('lead', 'Wavetable');
+  engine.loadEffect('lead', 'Filter', 1);
+  engine.triggerRoute('lead', 1, true);
+  assert.ok(!slotNode(engine, 'lead', 1).messages.some((m) => m.kind === 'noteRoute'));
+});
+
 test('.midi() into an effect that is not played by notes says so by name', () => {
   const { engine, warnings } = makeEngine();
   engine.loadInstrument('keys', 'Wavetable');

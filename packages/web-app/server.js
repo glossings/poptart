@@ -7028,7 +7028,7 @@ function deviceLiveBody(state, live, trackLabel, slot = null) {
     const value = kit.descriptor.denormalize(p, position);
     merged[p.id] = value;
     if (state.driven.has(p.id)) {
-      values[p.id] = { value, position, text: kit.descriptor.formatValue(p, value, state.extras?.[p.id] ?? null) };
+      values[p.id] = { value, position, text: kit.descriptor.formatValue(p, value, state.extras?.[p.id] ?? null, merged) };
     }
   }
   const report = live.report;
@@ -7071,12 +7071,17 @@ function widgetsOf(panel) {
  */
 // A sweep or a switch moved in a device window, kept for the header's capture (pattern-core's
 // feedParamMove): a choice, a file and a control a state never holds are not movements.
-function notePanelMove(trackLabel, slot, param, value) {
+// In the units `.param()` takes: a position 0..1 for a sweep, the value itself for an open one.
+function notePanelMove(trackLabel, slot, param, value, position) {
   if (param.options || param.takes || param.saved === false) return;
+  const toggle = param.ui === 'toggle';
+  const swept = !toggle && !param.open;
   patternCore.feedParamMove({
     deck: deckOfKey(trackLabel), trackId: trackLabel, slot, id: param.id, name: param.name,
-    min: param.min, max: param.max, curve: param.curve ?? 'lin', curveExp: param.curveExp ?? null, step: param.step ?? null,
-    widget: param.ui === 'toggle' ? 'toggle' : 'knob', value,
+    ...(swept
+      ? { min: 0, max: 1, curve: 'lin', curveExp: null, step: null, value: position }
+      : { min: param.min, max: param.max, curve: param.curve ?? 'lin', curveExp: param.curveExp ?? null, step: param.step ?? null, value }),
+    widget: toggle ? 'toggle' : 'knob',
   });
 }
 
@@ -7162,7 +7167,7 @@ async function setDeviceParam(body) {
       name: found.name,
       value,
       position: kit.descriptor.normalize(found, value),
-      text: kit.descriptor.formatValue(found, value, after.extras?.[found.id] ?? null),
+      text: kit.descriptor.formatValue(found, value, after.extras?.[found.id] ?? null, after.values),
       arg: kit.panel.paramArgFor(descriptor, found.id, value, after.extras),
       // The option list, which has grown by one: the file's own name is on it now.
       options: widgetsOf(deviceWindow(after)).find((w) => w.id === found.id)?.options ?? null,
@@ -7172,11 +7177,13 @@ async function setDeviceParam(body) {
   const value = body.position === undefined
     ? kit.descriptor.clampParam(found, Number(body.value))
     : kit.panel.valueFromPosition(descriptor, found.id, body.position);
-  notePanelMove(trackLabel, slot, found, value);
-  // The engine takes what `.param()` takes: a position for a sweep, an index for a choice.
+  notePanelMove(trackLabel, slot, found, value, kit.descriptor.normalize(found, value));
+  // The engine takes what `.param()` takes: a position for a sweep, an index for a choice, the
+  // count itself for an open count.
   const arg = found.options
     ? Math.round(value)
-    : found.ui === 'toggle' ? (value >= 0.5 ? 1 : 0) : kit.descriptor.normalize(found, value);
+    : found.ui === 'toggle' ? (value >= 0.5 ? 1 : 0)
+      : found.open ? value : kit.descriptor.normalize(found, value);
   // The hand's value stays rather than the code's being polled back over it; the editor writes it
   // into the code's `.param()`, and the next evaluation plays that.
   if (found.saved !== false) schedulers.get(trackLabel)?.takeParamByHand(slot, [found.id, found.name]);
@@ -7187,7 +7194,7 @@ async function setDeviceParam(body) {
     name: found.name,
     value,
     position: kit.descriptor.normalize(found, value),
-    text: kit.descriptor.formatValue(found, value, state.extras?.[found.id] ?? null),
+    text: kit.descriptor.formatValue(found, value, state.extras?.[found.id] ?? null, state.values),
     // The argument, not the whole call: the editor overwrites the argument of a `.param()` that
     // is already there rather than appending a second one.
     arg: kit.panel.paramArgFor(descriptor, found.id, value, state.extras),

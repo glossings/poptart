@@ -819,6 +819,7 @@ export class Scheduler {
     this._expandedCache = null;
     this._sentInputRoute = null; // audioRouteKey of the head audio input last wired (null: none, or MIDI)
     this._prevMidiInjectSlots = new Set(); // fx slots the previous pattern MIDI-injected (named sources)
+    this._prevTriggerSlots = new Set(); // fx slots whose Trigger the previous pattern set
     this._prevInputSource = null; // live head input (midi()/audio() source) the previous pattern held
     this._busRouted = false; // track output currently diverted to a named bus (see Sig#bus)
     this._sentBusSends = null; // bus sends as last resolved and pushed, for diffing (see _syncBusSends)
@@ -1627,6 +1628,22 @@ export class Scheduler {
         if (!nextSlots.has(slot)) this.engine.clearMidiInject(this.trackId, slot);
       }
       this._prevMidiInjectSlots = nextSlots;
+    }
+
+    // A device struck by notes (a low-pass gate, a ducker) can be struck by its Trigger control
+    // instead, and setting Trigger rests it as a route of notes does: closed, off the clock. The
+    // device cannot tell a Trigger at rest from one nobody set, so it is told, as it is of a route.
+    if (typeof this.engine.triggerRoute === 'function') {
+      const expanded = this._expanded(sig);
+      const nextSlots = new Set();
+      const isTrigger = (slot, name) => slot !== CHANNEL_SLOT && String(name).trim().toLowerCase() === 'trigger';
+      for (const e of expanded.entries) if (isTrigger(e.slot, e.name)) nextSlots.add(e.slot);
+      for (const e of expanded.exprs.values()) if (isTrigger(e.slot, e.name)) nextSlots.add(e.slot);
+      for (const slot of nextSlots) this.engine.triggerRoute(this.trackId, slot, true);
+      for (const slot of this._prevTriggerSlots) {
+        if (!nextSlots.has(slot)) this.engine.triggerRoute(this.trackId, slot, false);
+      }
+      this._prevTriggerSlots = nextSlots;
     }
 
     // Tier-2 modulators are persistent engine-side synths mapped onto the VST parameter - they

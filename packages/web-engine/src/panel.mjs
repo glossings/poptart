@@ -79,7 +79,9 @@ export function buildPanel(descriptor, values = {}, modulated = new Map(), opts 
         widget: widgetFor(p),
         value,
         position: normalize(p, value),
-        text: formatValue(p, value, loaded),
+        text: formatValue(p, value, loaded, values),
+        // A second reading of the knob, which the editor writes values in that unit back with.
+        alt: p.alt ? { unit: p.alt.unit, min: p.alt.min, max: p.alt.max, decimals: decimalsFor({ decimals: null, step: null, min: p.alt.min, max: p.alt.max }) } : null,
         unit: p.unit,
         min: p.min,
         max: p.max,
@@ -147,7 +149,7 @@ export function buildPanel(descriptor, values = {}, modulated = new Map(), opts 
     version: descriptor.version,
     // Controls that switch other controls in and out. Moving one of these changes what the
     // window HAS, not just what it reads, so the editor redraws the panel rather than the knob.
-    relayoutOn: Object.freeze([...new Set(descriptor.params.filter((p) => p.active).map((p) => p.active.param))]),
+    relayoutOn: Object.freeze([...new Set(descriptor.params.flatMap((p) => [p.active?.param, p.alt?.param]).filter(Boolean))]),
     kind: descriptor.kind,
     title: descriptor.id,
     description: descriptor.description,

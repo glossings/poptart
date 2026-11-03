@@ -24,13 +24,13 @@ test('the catalog resolves every device it ships, by the name userland would typ
 });
 
 test('the synths and the effects land on the right side of synth() and fx()', () => {
-  assert.deepEqual(catalog.list('synth').map((d) => d.id).sort(), ['Additive', 'Analog', 'Braids', 'Drum', 'Elements', 'FM', 'Formant', 'Granular', 'Hat', 'Kick', 'Noise', 'Plaits', 'Rings', 'Wavetable']);
+  assert.deepEqual(catalog.list('synth').map((d) => d.id).sort(), ['Additive', 'Analog', 'Braids', 'Drum', 'Elements', 'FM', 'Formant', 'Granular', 'Hat', 'Kick', 'Noise', 'Plaits', 'Pluck', 'Rings', 'Wavetable']);
   assert.deepEqual(
     catalog.list('fx').map((d) => d.id).sort(),
     [
       'Chorus', 'CloudSeed', 'Clouds', 'Compressor', 'Convolver', 'Crush', 'Delay', 'Distort',
       'Ducker', 'EQ', 'Filter', 'Filterbank', 'Flanger', 'FreqShift', 'Galactic', 'GrainEcho', 'LPG', 'Limiter', 'Looper', 'Multiband',
-      'Overdrive', 'Phaser', 'Resonator', 'Reverb', 'Shift', 'Stutter', 'VocalShift',
+      'Overdrive', 'Phaser', 'Resonator', 'Reverb', 'Shift', 'Spring', 'Stutter', 'VocalShift',
     ],
   );
 });

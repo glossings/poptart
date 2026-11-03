@@ -119,6 +119,8 @@ struct ShapeField {
   double c2 = 0;
   double lambda = 1;
   bool primed = false;
+  // How many cells hold the picture: past them, a bank that has just grown.
+  int filled = 0;
 
   double* A(int which) { return cells.a[which]; }
 
@@ -126,6 +128,7 @@ struct ShapeField {
     for (int i = 0; i < kArrays; ++i) cells.fill(i, 0);
     phase = 0;
     primed = false;
+    filled = 0;
   }
 
   /** Room for n cells, and the n + 1 snapshots a scroll keeps. */
@@ -157,6 +160,16 @@ struct ShapeField {
       double* a = A(uL); double* b = A(pL); double* c = A(uR); double* d = A(pR);
       for (int k = 0; k <= n; ++k) { h[k] = shape; a[k] = shape; b[k] = shape; c[k] = shape; d[k] = shape; }
       primed = true;
+      filled = n;
+    }
+    if (n < filled) filled = n;
+    if (n > filled) {
+      // Bands just added carry on from the top of the bank as it was, rather than starting silent
+      // and waiting for Shape to scroll or ripple into them.
+      double* a = A(uL); double* b = A(pL); double* c = A(uR); double* d = A(pR);
+      const int top = filled - 1;
+      for (int k = filled; k <= n; ++k) { h[k] = h[filled]; a[k] = a[top]; b[k] = b[top]; c[k] = c[top]; d[k] = d[top]; }
+      filled = n;
     }
     if (mode == 1) {
       for (int s = 0; s < sub; ++s) {

@@ -46,6 +46,7 @@
           <tr><td><code>Kick</code></td><td>an analog-style bass drum: a saturated body swept down to the note, with a click (one hit at a time)</td></tr>
           <tr><td><code>Hat</code></td><td>hi-hats, cymbals and a cowbell: clusters of square waves and noise through a bright band and a body band, analog or sampled in character (one hit at a time)</td></tr>
           <tr><td><code>Drum</code></td><td>a struck body and a burst of noise: claves, wood blocks, rims, toms, congas, snares, claps and everything between</td></tr>
+          <tr><td><code>Pluck</code></td><td>plucked strings: a burst of noise into a tuned delay loop, two strings a voice, from nylon and steel through muted and bowed to stiff bars and bells</td></tr>
           <tr><td><code>Plaits</code></td><td>a macro oscillator with twenty-four models behind three controls (monophonic)</td></tr>
           <tr><td><code>Braids</code></td><td>forty-eight oscillator models behind two controls</td></tr>
           <tr><td><code>Rings</code></td><td>a resonator struck by its own exciter</td></tr>
@@ -53,13 +54,13 @@
         </table>
         <table>
           <tr><th>Effects</th><th></th></tr>
-          <tr><td><code>Filter</code> · <code>EQ</code> · <code>LPG</code></td><td>multimode filter: the classical shapes, and eight analog circuits modeled with their saturation and resonance · four-band equalizer, each band's <code>Slope</code> setting a cut or shelf to 12, 24, 36, 48, 72 or 96 dB per octave · low-pass gate, struck by notes routed in with <code>.midi()</code></td></tr>
+          <tr><td><code>Filter</code> · <code>EQ</code> · <code>LPG</code></td><td>multimode filter: the classical shapes, and eight analog circuits modeled with their saturation and resonance · four-band equalizer, each band's <code>Slope</code> setting a cut or shelf to 12, 24, 36, 48, 72 or 96 dB per octave · low-pass gate, struck by notes routed in with <code>.midi()</code> or by its <code>Trigger</code>: <code>.param("Trigger", button())</code></td></tr>
           <tr><td><code>Filterbank</code> · <code>Resonator</code></td><td>filter banks whose band levels <code>Shape</code> moves, scrolled across the bands or rippling across them, and <code>Levels</code> steps, a cycle of a pattern at a time · narrow ringing bands on every note of the track's scale, or on the notes another track holds, with <code>.midi()</code></td></tr>
           <tr><td><code>Distort</code> · <code>Overdrive</code> · <code>Crush</code></td><td>waveshaping, with curves you draw as named shapes · band-limited drive · bits and rate</td></tr>
           <tr><td><code>Compressor</code> · <code>Multiband</code> · <code>Limiter</code> · <code>Ducker</code></td><td>dynamics; the compressor and ducker take a sidechain</td></tr>
           <tr><td><code>Delay</code> · <code>GrainEcho</code> · <code>Stutter</code></td><td>stereo delay · grain delay · synced repeats</td></tr>
           <tr><td><code>Chorus</code> · <code>Flanger</code> · <code>Phaser</code></td><td>modulation</td></tr>
-          <tr><td><code>Reverb</code> · <code>Convolver</code> · <code>CloudSeed</code> · <code>Galactic</code></td><td>algorithmic · impulse responses · two very large spaces</td></tr>
+          <tr><td><code>Reverb</code> · <code>Spring</code> · <code>Convolver</code> · <code>CloudSeed</code> · <code>Galactic</code></td><td>algorithmic · a two-spring tank whose echoes arrive as rising or falling chirps, with a saturating driver, feedback past unity and <code>Shake</code> to knock it; notes routed in with <code>.midi()</code> tune it and ping it · impulse responses · two very large spaces</td></tr>
           <tr><td><code>Clouds</code> · <code>FreqShift</code></td><td>granular processing · frequency shifting</td></tr>
           <tr><td><code>Shift</code> · <code>VocalShift</code></td><td>pitch and formant shifting: chords and whole mixes · one voice or line, with less delay</td></tr>
           <tr><td><code>Looper</code></td><td>a press of <code>Record</code> records the next pass of <code>Length</code> bars, starting and ending on that grid; the first pass sets the loop and the rest overdub onto it; <code>Mix</code> crossfades the input against the loop, heard and (while recording) recorded; tape-style speed and reverse, and <code>Clear</code> to start again</td></tr>
@@ -109,26 +110,30 @@ kick: s("bd*4")
         <p>
           <code>Kick</code> plays one hit per note, and the note is the pitch it settles on: <code>f0</code>
           to <code>a#0</code> is a kick, higher notes are toms and tuned bass. <code>Sweep</code> is how many
-          semitones above the note the pitch starts, falling on one fixed curve; <code>Decay</code> is the
-          length and <code>Drive</code> hardens the body. <code>Click</code> is the click's level,
-          <code>Click Tone</code> turns it from a pulse into noise, and <code>Click Length</code> is how
-          long it lasts: shorter is brighter, with less sweep. <code>Tone</code> brightens or softens the
-          whole hit and <code>Tail</code> keeps its belly. A new hit restarts the sweep; the last one fades
-          under it.
+          semitones above the note the pitch starts, falling on one fixed curve; <code>Drive</code> hardens
+          the body. <code>Decay</code> is the length and <code>Decay Curve</code> its shape: up keeps the
+          belly, down falls away into a thin tail. <code>Click</code> is the click's level,
+          <code>Click Tone</code> turns it from a pitched tick through a pulse into noise, <code>Click
+          Pitch</code> is the tick's pitch, and <code>Click HP</code> and <code>Click LP</code> filter the
+          click. <code>Click Length</code> is the trigger: a shorter one is a brighter click and less sweep.
+          <code>Click Sample</code> plays a file as the click instead, with its lows cut at least where the
+          sweep starts; <code>Click Pitch</code> then transposes it, in semitones. <code>Tone</code> brightens or softens the whole hit. A new hit
+          restarts the sweep; the last one fades under it.
         </p>
         <pre data-run><code>kick: note("a0*4").synth("Kick")
   .param("Sweep", "34st").param("Drive", 0.5).param("Tone", 0.8)
   .decay("&lt;0.4 0.9&gt;").postgain(0.8)</code></pre>
         <p>
           <code>Pitch Env</code> takes a drawn shape in place of the fixed curve: the pitch over the first
-          400 ms of every hit, drawn on the device's graph in milliseconds and hertz. The curve is drawn
-          above the note, so it moves with whatever note is played; ending it on the bottom line ends the
-          hit on the note.
+          400 ms of every hit, from <code>Sweep</code> above the note at the top to the note at the bottom.
+          The curve moves with whatever note is played, and <code>Sweep</code> still sets how deep it goes;
+          ending it on the bottom line ends the hit on the note. <code>Amp Env</code> takes a drawn level
+          the same way, stretched over <code>Decay</code>.
         </p>
         <pre data-run><code>kick: note("f0*4").synth("Kick")
-  .param("Pitch Env", "drop").decay(0.6).postgain(0.8)
+  .param("Pitch Env", "drop").param("Sweep", "36st").decay(0.6).postgain(0.8)
 
-_shape("drop", "0,0.75 0.25,0.45,-2 0.5,0 1,0")</code></pre>
+_shape("drop", "0,1 0.25,0.6,-2 0.5,0 1,0")</code></pre>
 
         <p>
           <code>Hat</code> plays one hit per note, and a new hit cuts the last, so a closed hat chokes an open

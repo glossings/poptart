@@ -18,6 +18,8 @@ import { DISTORT } from './src/devices/distort.mjs';
 import { DELAY } from './src/devices/delay.mjs';
 import { STUTTER } from './src/devices/stutter.mjs';
 import { REVERB } from './src/devices/reverb.mjs';
+import { GRAINECHO } from './src/devices/grainecho.mjs';
+import { SPRING } from './src/devices/spring.mjs';
 import { CHORUS } from './src/devices/chorus.mjs';
 import { PHASER } from './src/devices/phaser.mjs';
 import { DUCKER } from './src/devices/ducker.mjs';
@@ -608,7 +610,7 @@ test('the shaper figure shows the harmonics, and opens the draw button on the cu
 test('a drawn curve is drawn from the table the device plays', () => {
   const drawnMode = SHAPER_MODES.length;
   const points = Array.from({ length: 256 }, (_, i) => 1 - i / 255); // an inverter
-  const f = only(DISTORT, 'shaper', { mode: drawnMode, drive: 0, autogain: 0 }, { shapes: { [drawnMode]: { name: 'grit', points } } });
+  const f = only(DISTORT, 'shaper', { mode: drawnMode, drive: 0, autogain: 0 }, { shapes: { mode: { [drawnMode]: { name: 'grit', points } } } });
   assert.equal(f.modeName, 'grit', 'named after its definition');
   assert.equal(f.data, 'grit');
   assert.ok(Math.abs(f.points[0].y - 1) < 1e-6);
@@ -645,13 +647,54 @@ test('the repeats figure stretches a repeat that has dropped in pitch', () => {
   assert.ok(f.span >= f.end && f.span >= f.interval);
 });
 
-test('the tail figure is silence for the predelay, then sixty decibels down over the decay', () => {
-  const f = only(REVERB, 'decay', { decay: 2, predelay: 0.1 });
-  assert.equal(f.points[0].db, 0);
-  const at = (t) => f.points.reduce((b, p) => (Math.abs(p.t - t) < Math.abs(b.t - t) ? p : b));
-  assert.equal(at(0.05).db, 0, 'still nothing inside the predelay');
-  assert.ok(Math.abs(at(1.1).db + 30) < 1.5, 'halfway down halfway through');
-  assert.ok(f.span > 2.1);
+test('the reverb tail map starts after the predelay and falls as fast as the network keeps it, the top first', () => {
+  const f = only(REVERB, 'tailmap', { decay: 2, predelay: 0.1, damping: 3000, lowcut: 120 });
+  assert.ok(f.start > 0.1, 'nothing before the predelay and the first line');
+  assert.ok(f.reflections.every((r) => r.t >= 0.1));
+  const near = (hz) => f.rows.reduce((b, r) => (Math.abs(Math.log(r.hz / hz)) < Math.abs(Math.log(b.hz / hz)) ? r : b));
+  // Well under the damping, sixty decibels over about the decay time.
+  assert.ok(Math.abs(near(200).slopeDb * 2 + 60) < 6, `200 Hz falls ${near(200).slopeDb.toFixed(1)} dB a second`);
+  assert.ok(near(10000).slopeDb < near(200).slopeDb * 2, 'the top dies faster than the bottom');
+  assert.ok(near(40).startDb < near(1000).startDb - 3, 'the low cut thins the bottom');
+});
+
+test('the reverb tail map moves with every control it names', () => {
+  const base = only(REVERB, 'tailmap', {});
+  const differs = (over, pick) => JSON.stringify(pick(only(REVERB, 'tailmap', over))) !== JSON.stringify(pick(base));
+  assert.ok(differs({ size: 0.2 }, (f) => f.reflections.map((r) => r.t)), 'size spaces the reflections');
+  assert.ok(differs({ decay: 6 }, (f) => f.rows.map((r) => r.slopeDb)), 'decay');
+  assert.ok(differs({ damping: 1000 }, (f) => f.rows.map((r) => r.slopeDb)), 'damping');
+  assert.ok(differs({ lowcut: 800 }, (f) => f.rows.map((r) => r.startDb)), 'low cut');
+  assert.ok(differs({ predelay: 0.2 }, (f) => f.start), 'predelay');
+  const small = only(REVERB, 'tailmap', { size: 0.2 });
+  const big = only(REVERB, 'tailmap', { size: 1 });
+  assert.ok(small.reflections[0].t < big.reflections[0].t, 'a smaller room answers sooner');
+});
+
+test('the spring echo map puts each frequency where the chain holds it, rising or falling', () => {
+  const rising = only(SPRING, 'chirps', { chirp: 0.8, transition: 4000 });
+  const falling = only(SPRING, 'chirps', { chirp: -0.8, transition: 4000 });
+  const near = (f, hz) => f.main.reduce((b, r) => (Math.abs(Math.log(r.hz / hz)) < Math.abs(Math.log(b.hz / hz)) ? r : b));
+  assert.ok(near(rising, 3500).trip > near(rising, 300).trip + 0.005, 'rising: the highs come round last');
+  assert.ok(near(falling, 300).trip > near(falling, 3500).trip + 0.005, 'falling: the lows come round last');
+  assert.ok(Math.abs(rising.transition - 4000) < 1, 'the transition is where the stretch put it');
+  // Above the transition the main series is cut; under it, it is not.
+  assert.ok(near(rising, 8000).firstDb < near(rising, 1000).firstDb - 30);
+});
+
+test('the spring echo map moves with every control it names, and holds with feedback past one', () => {
+  const base = only(SPRING, 'chirps', {});
+  const differs = (over, pick) => JSON.stringify(pick(only(SPRING, 'chirps', over))) !== JSON.stringify(pick(base));
+  assert.ok(differs({ length: 0.1 }, (f) => f.main.map((r) => r.trip)), 'length');
+  assert.ok(differs({ chirp: 0.2 }, (f) => f.main.map((r) => r.trip)), 'chirp');
+  assert.ok(differs({ transition: 2000 }, (f) => f.main.map((r) => r.firstDb)), 'transition');
+  assert.ok(differs({ decay: 8 }, (f) => f.main.map((r) => r.tripDb)), 'decay');
+  assert.ok(differs({ damping: 1000 }, (f) => f.main.map((r) => r.tripDb)), 'damping');
+  assert.ok(differs({ lowcut: 1000 }, (f) => f.main.map((r) => r.firstDb)), 'low cut');
+  const held = only(SPRING, 'chirps', { feedback: 1.2 });
+  assert.ok(held.main.some((r) => r.tripDb >= 0), 'past one, a trip keeps it all');
+  // The longest trip in the window: four echoes are always shown.
+  assert.ok(base.span >= 4 * Math.max(...base.main.map((r) => r.trip)) - 1e-9);
 });
 
 test('the sweep figure reads the LFO the delay line reads, per voice and side', () => {
@@ -768,3 +811,30 @@ test('the bands figure heads the Shape section and takes Levels (and the Resonat
   assert.ok(bands.hz.length > 100);
   assert.ok(bands.level.at(-1) > bands.level[0], 'tilted up');
 });
+
+test('the grain cloud lands each repeat about a delay time and half a grain after the last', () => {
+  const f = only(GRAINECHO, 'cloud', { sync: 0, time: 0.5, size: 100, density: 40, spray: 0, pitch: 0, random: 0, feedback: 0.5 });
+  const first = f.grains.filter((g) => g.repeat === 1);
+  const second = f.grains.filter((g) => g.repeat === 2);
+  assert.equal(first.length, 4, 'Density times Size grains catch the hit');
+  for (const g of first) assert.ok(Math.abs(g.t - 0.55) < 1e-9);
+  for (const g of second) assert.ok(Math.abs(g.t - 1.1) < 1e-9);
+  assert.ok(Math.abs(second[0].db - 20 * Math.log10(0.5)) < 1e-9, 'Feedback quieter');
+});
+
+test('the grain cloud steps by Pitch every repeat, scatters by Spray and Random Pitch, and stops with no feedback', () => {
+  const up = only(GRAINECHO, 'cloud', { pitch: 7, random: 0, feedback: 0.6 });
+  for (const g of up.grains) assert.ok(Math.abs(g.st - 7 * g.repeat) < 1e-9, 'a step of Pitch each repeat');
+  const scattered = only(GRAINECHO, 'cloud', { spray: 1, random: 5, feedback: 0.6, density: 100 });
+  const ones = scattered.grains.filter((g) => g.repeat === 1);
+  assert.ok(new Set(ones.map((g) => g.t)).size > 1 && new Set(ones.map((g) => g.st)).size > 1);
+  assert.ok(ones.every((g) => Math.abs(g.st) <= 5 + 1e-9));
+  const dry = only(GRAINECHO, 'cloud', { feedback: 0 });
+  assert.ok(dry.grains.every((g) => g.repeat === 1), 'no feedback, one repeat');
+  // The same picture every time it is drawn.
+  assert.deepEqual(only(GRAINECHO, 'cloud', { spray: 1, random: 5 }), only(GRAINECHO, 'cloud', { spray: 1, random: 5 }));
+  // Synced, the time follows the tempo.
+  const synced = only(GRAINECHO, 'cloud', { sync: SYNC_OPTIONS.indexOf('1/4'), spray: 0 }, { bpm: 120 });
+  assert.ok(Math.abs(synced.time - 0.5) < 1e-9);
+});
+

@@ -523,6 +523,8 @@ class OscEngine {
     // argument is resolved against (see setParam). Only this half knows: the scheduler sends a
     // name and a value and does not care what is hosting them, exactly as on the web.
     this._slotDevices = new Map();
+    this._midiRouted = new Set(); // "track:slot" of the slots notes are routed into (see _tellNoteRoute)
+    this._triggerSet = new Set(); // "track:slot" of the slots whose Trigger the code sets
     // The id each control name resolved to, as "trackId:slot|name" (see _controlName).
     this._controlNames = new Map();
     // What expression each track's controls carry, as "slot:name" -> the tree's JSON - which a
@@ -1380,7 +1382,7 @@ class OscEngine {
     // What has been loaded onto the controls that play a file, by the option slot it went into:
     // the name a window prints on that control, and what a `.param()` written from it says.
     const files = {};
-    // And the drawn curves, by option slot, as the browser's engine keeps them for its figures.
+    // And the drawn curves, by control and option slot, as the browser's engine keeps them for its figures.
     let shapes = null;
     // And where each loaded file is on disk, by option slot - { name, path, table } - for the
     // window's picture of it: the outline of a file played as audio, the frames of a table (the
@@ -1398,7 +1400,8 @@ class OscEngine {
         // A named curve is filed under its name and its points; the window prints the name.
         for (const [name, index] of one.named ?? []) files[control][index] = name;
       }
-      if (one.tables) shapes = { ...(shapes ?? {}), ...one.tables };
+      // By control, then slot, as the browser's engine keeps them.
+      if (one.tables) for (const control of controls.length ? controls : [store]) shapes = { ...(shapes ?? {}), [control]: { ...one.tables } };
       for (const [ref, index] of one.byRef) {
         const at = one.paths?.get(index);
         if (at?.path) (sources ??= {})[index] = { name: ref, path: at.path, table: at.table };
@@ -3191,7 +3194,8 @@ class OscEngine {
   // (no `{ note }` in the call) means the source's own pitch, and DEFAULT_ROUTE_NOTE for a
   // source that has none - a drum pattern, which is what a ducker is usually keyed off.
   injectMidi(trackId, slot, name, note = null) {
-    this._tellNoteRoute(trackId, slot, true);
+    this._midiRouted.add(`${trackId}:${slot}`);
+    this._tellNoteRoute(trackId, slot);
     if (this._isDevice(name)) {
       this._send('/poptart/injectMidiDevice', [trackId, slot, this._deviceName(name), note ?? DEFAULT_ROUTE_NOTE]);
       return;
@@ -3199,7 +3203,8 @@ class OscEngine {
     this._addMidiRoute(name, trackId, slot, note);
   }
   clearMidiInject(trackId, slot) {
-    this._tellNoteRoute(trackId, slot, false);
+    this._midiRouted.delete(`${trackId}:${slot}`);
+    this._tellNoteRoute(trackId, slot);
     this._removeMidiRoute(trackId, slot);
     this._send('/poptart/clearMidiInject', [trackId, slot]); // frees any device MIDIdefs for this sink
   }
@@ -3210,11 +3215,27 @@ class OscEngine {
    * The ducker is the device that asks: with a route set its dip fires on those notes and not on
    * the clock, and the one thing it cannot work out for itself is the route being taken AWAY -
    * no notes arriving is also what a quiet bar sounds like. A plugin needs no telling, so a slot
-   * holding one sends nothing.
+   * holding one sends nothing. Trigger set on a device that has one says the same: struck, not
+   * left to run (see triggerRoute).
    */
-  _tellNoteRoute(trackId, slot, routed) {
-    if (!this._slotDevices.get(`${trackId}:${slot}`)) return;
+  _tellNoteRoute(trackId, slot) {
+    const key = `${trackId}:${slot}`;
+    if (!this._slotDevices.get(key)) return;
+    const routed = this._midiRouted.has(key) || this._triggerSet.has(key);
     this._send('/poptart/deviceNoteRoute', [trackId, slot, routed ? 1 : 0]);
+  }
+
+  /**
+   * The code sets (or no longer sets) the Trigger control of the device in a slot. A device that
+   * has one rests between strikes as it does with notes routed in, so it is told the same way.
+   */
+  triggerRoute(trackId, slot, on) {
+    const key = `${trackId}:${slot}`;
+    const device = this._slotDevices.get(key);
+    if (!device || !deviceParam(device, 'trigger')) return;
+    if (on) this._triggerSet.add(key);
+    else this._triggerSet.delete(key);
+    this._tellNoteRoute(trackId, slot);
   }
 
   // --- internals ---

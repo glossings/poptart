@@ -844,7 +844,7 @@ test('a named curve keeps its slot when it is redrawn, and an evaluation resends
   assert.strictEqual(paramSends(sent).length, params);
   // And the window can name it and draw it.
   assert.strictEqual(e.deviceSlot('g', 0).files.window[slot], 'swell');
-  assert.strictEqual(e.deviceSlot('g', 0).shapes[slot].points.length, 256);
+  assert.strictEqual(e.deviceSlot('g', 0).shapes.window[slot].points.length, 256);
 });
 
 test('an unknown curve warns and keeps playing, and so does a host with no shape reader', async () => {

@@ -353,6 +353,7 @@ class MappedEngine {
   clearAudioInject(...a) { return this.engine.clearAudioInject(...a); }
   injectMidi(trackId, slot, name, ...a) { return this.engine.injectMidi(trackId, slot, this._trackRef(name, trackId), ...a); }
   clearMidiInject(...a) { return this.engine.clearMidiInject(...a); }
+  triggerRoute(...a) { return this.engine.triggerRoute(...a); }
   // An expression on a control (see pattern-core's Expressions): the audio sources inside it are
   // routing names, translated like the injectors above, and a plugin parameter a mapping file
   // gives real units has the whole expression converted at its root - the inputs and the math are

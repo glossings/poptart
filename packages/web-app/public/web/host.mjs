@@ -911,7 +911,7 @@ export function createHost({
       const values = {};
       for (const id of driven) {
         const p = panel.findParam(state.descriptor, id);
-        if (p) values[id] = { value: live[id], position: panel.normalize(p, live[id]), text: panel.formatValue(p, live[id], state.extras?.[id] ?? null) };
+        if (p) values[id] = { value: live[id], position: panel.normalize(p, live[id]), text: panel.formatValue(p, live[id], state.extras?.[id] ?? null, { ...state.values, ...live }) };
       }
       const merged = { ...state.values, ...live };
       const opts = figureOpts(state, report);
@@ -971,7 +971,7 @@ export function createHost({
         if (body?.commit) noteDeviceEdit(label, slot, found, panel.paramArgFor(state.descriptor, found.id, value, after.extras));
         return {
           id: found.id, value, position: panel.normalize(found, value), name: found.name,
-          text: panel.formatValue(found, value, after.extras?.[found.id] ?? null),
+          text: panel.formatValue(found, value, after.extras?.[found.id] ?? null, after.values),
           arg: panel.paramArgFor(state.descriptor, found.id, value, after.extras),
           options: widgetsOf(panel.buildPanel(state.descriptor, after.values, after.driven, figureOpts(after))).find((w) => w.id === found.id)?.options ?? null,
           figures: panel.figuresFor ? panel.figuresFor(state.descriptor, found.id, after.values, figureOpts(after, engine.liveReport?.(tid, slot) ?? null)) : [],
@@ -981,12 +981,17 @@ export function createHost({
         ? panel.clampParam(found, Number(body.value))
         : panel.valueFromPosition(state.descriptor, found.id, body.position);
       // Kept for the header's capture (pattern-core's feedParamMove): a sweep or a switch, not a
-      // choice, a file or a control a state never holds.
+      // choice, a file or a control a state never holds. In the units `.param()` takes: a
+      // position 0..1 for a sweep, the value itself for an open one.
       if (!found.options && !found.takes && found.saved !== false) {
+        const toggle = found.ui === 'toggle';
+        const swept = !toggle && !found.open;
         patternCore.feedParamMove?.({
           deck: label.startsWith('b:') ? 'b' : 'a', trackId: label, slot, id: found.id, name: found.name,
-          min: found.min, max: found.max, curve: found.curve ?? 'lin', curveExp: found.curveExp ?? null, step: found.step ?? null,
-          widget: found.ui === 'toggle' ? 'toggle' : 'knob', value,
+          ...(swept
+            ? { min: 0, max: 1, curve: 'lin', curveExp: null, step: null, value: panel.normalize(found, value) }
+            : { min: found.min, max: found.max, curve: found.curve ?? 'lin', curveExp: found.curveExp ?? null, step: found.step ?? null, value }),
+          widget: toggle ? 'toggle' : 'knob',
         });
       }
       // A control being dragged moves for as long as the gesture does, and a device reads each
@@ -994,8 +999,11 @@ export function createHost({
       // or the staircase is heard as a buzz over the sound. A setting that picks between named
       // states is stepped instead: gliding through an enum sweeps the ones in between.
       const stepped = !!(found.options || found.step || found.ui === 'toggle');
-      // The engine takes what `.param()` takes: a position for a sweep, an index for a choice.
-      const arg = found.options ? Math.round(value) : found.ui === 'toggle' ? (value >= 0.5 ? 1 : 0) : panel.normalize(found, value);
+      // The engine takes what `.param()` takes: a position for a sweep, an index for a choice, the
+      // count itself for an open count.
+      const arg = found.options ? Math.round(value)
+        : found.ui === 'toggle' ? (value >= 0.5 ? 1 : 0)
+          : found.open ? value : panel.normalize(found, value);
       // The hand's value stays rather than the code's being polled back over it; the editor writes
       // it into the code's `.param()`, and the next evaluation plays that.
       if (found.saved !== false) evaluator.schedulers?.get(label)?.takeParamByHand?.(slot, [found.id, found.name]);
@@ -1007,7 +1015,7 @@ export function createHost({
         id: found.id,
         value,
         position: panel.normalize(found, value),
-        text: panel.formatValue(found, value, state.extras?.[found.id] ?? null),
+        text: panel.formatValue(found, value, state.extras?.[found.id] ?? null, state.values),
         // The argument, not the whole call: the editor overwrites the argument of a `.param()`
         // that is already there rather than appending a second one.
         name: found.name,

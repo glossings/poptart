@@ -64,3 +64,21 @@ test('the report says where on the clock the newest entry is', () => {
   const expected = steps[steps.length - 1] + BLOCK / RATE;
   assert.ok(Math.abs(at - expected) < 1e-9, `${at} against ${expected}`);
 });
+
+test('Trigger dips it on each press, and set, the clock does not dip on its own', () => {
+  const fx = new DuckerProcessor(RATE);
+  fx.setTempo(120, 0);
+  fx.setNoteRoute(true); // the engine's word that Trigger is set
+  const params = { ...defaultValues(DUCKER), amount: 0.8, length: 0.5, attack: 1 };
+  const inputs = [new Float32Array(BLOCK).fill(0.5), new Float32Array(BLOCK).fill(0.5)];
+  const outputs = [new Float32Array(BLOCK), new Float32Array(BLOCK)];
+  const pressAt = Math.round((0.7 * RATE) / BLOCK);
+  const gains = [];
+  for (const [n, timeSec] of blocksOver(0, 1.2).entries()) {
+    params.trigger = n >= pressAt && n < pressAt + 4 ? 1 : 0;
+    fx.process(inputs, outputs, BLOCK, params, null, timeSec);
+    gains.push(fx.gain);
+  }
+  assert.ok(gains.slice(0, pressAt).every((g) => g > 0.99), 'the beat at 0.5 s does not dip');
+  assert.ok(Math.min(...gains.slice(pressAt, pressAt + 10)) < 0.3, 'the press dips');
+});

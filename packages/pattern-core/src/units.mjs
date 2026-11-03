@@ -81,6 +81,11 @@ export function deviceParamSpec(device, name) {
  */
 export function unitConversion(spec, unit) {
   if (spec.options) return 'it picks from a list of options';
+  // A second reading of the knob (a Kick's Click Pitch in semitones): straight along its travel.
+  const alt = unitOf(spec.alt?.unit);
+  if (alt && alt.family === unit && unitOf(spec.unit)?.family !== unit) {
+    return { spec: { min: spec.alt.min, max: spec.alt.max, curve: 'lin' }, divide: alt.scale };
+  }
   const own = unitOf(spec.unit);
   if (!own) return 'it has no unit, so it takes a 0 to 1 position';
   if (own.family !== unit) return `it is in ${spec.unit}`;
@@ -185,7 +190,8 @@ function numberText(v, digits) {
  *
  * `to` is the control as it is now: `{ value }` in the control's own unit, `position` (0..1),
  * `unit` (the control's, e.g. "hz"), `options` and `label` (a choice's names, and the one it is
- * on), `index` (true for a choice or a switch), `decimals` (the readout's). null where `written` is not one plain value -
+ * on), `index` (true for a choice or a switch), `decimals` (the readout's), `alt` (a second
+ * reading: `{ unit, min, max, decimals }` along the knob's travel). null where `written` is not one plain value -
  * a pattern, a signal, a variable - which the hand does not get to rewrite.
  */
 export function restateParamArg(written, to) {
@@ -202,10 +208,16 @@ export function restateParamArg(written, to) {
   if (inner.includes('\\') || inner.includes(q)) return null;
   const quote = (s) => (String(s).includes(q) || String(s).includes('\\') ? JSON.stringify(String(s)) : `${q}${s}${q}`);
   const content = inner.trim();
-  const own = unitOf(to.unit);
+  let own = unitOf(to.unit);
   const u = /^(-?(?:\d+\.?\d*|\.\d+))(\s*)([a-z]+)$/i.exec(content);
   if (u && UNITS[u[3].toLowerCase()]) {
     const said = unitOf(u[3]);
+    // Written in the knob's second reading (see unitConversion): the value is read off its position.
+    const alt = unitOf(to.alt?.unit);
+    if (alt && alt.family === said.family && own?.family !== said.family && Number.isFinite(to.position)) {
+      own = alt;
+      to = { ...to, value: to.alt.min + (to.alt.max - to.alt.min) * to.position, decimals: to.alt.decimals ?? to.decimals };
+    }
     if (!own || own.family !== said.family || !Number.isFinite(to.value)) return null;
     // As many decimals as the readout shows, shifted by how much bigger the written unit is.
     const digits = (to.decimals ?? 3) + Math.round(Math.log10(said.scale / own.scale));

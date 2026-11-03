@@ -7,9 +7,9 @@
 // as an exponential with an offset: (1 + knee) e^(-t/tau) - knee, which reaches the note in a
 // finite time (about 70 ms) with a knee rather than creeping in for ever. The excess is in hertz,
 // as an oscillator driven by a control current has it, so the drop is slow at the top and quick
-// near the note. A drawn curve replaces the fixed one: the pitch over time, in semitones above
-// the note, on a square-root time axis 0 to 400 ms (see KICK_DRAW_SEC) - so a curve transposes
-// with the note it is played on.
+// near the note. A drawn curve replaces the fixed one's shape and Sweep stays its depth: the
+// curve's top is Sweep semitones above the note, its bottom the note, on a square-root time axis
+// 0 to 400 ms (see KICK_DRAW_SEC) - so a curve transposes with the note it is played on.
 //
 // THE BODY is a sine through the level envelope and then a saturator (tanh) whose Drive is the
 // circuit's, offset a little so the wave is tipped and has even harmonics: at the measured
@@ -17,12 +17,17 @@
 // after the envelope, the level holds near full while the envelope is above it and the wave
 // rounds off as the hit dies. A slow highpass after it sags the flat tops, as a coupling
 // capacitor does. The level envelope is the same offset exponential: Decay is the time it
-// reaches zero, Tail its shape - up holds the belly, down falls away quickly into a thin tail.
+// reaches zero, Decay Curve its shape - up holds the belly, down falls away quickly into a thin
+// tail. A drawn Amp Env replaces that shape, stretched over Decay.
 //
 // THE CLICK is the trigger pulse (rising over a fraction of a millisecond, falling on the pulse's
-// end) or a burst of white noise for as long as it lasts (Click Tone between the two), at Click's
-// level, added before the saturator. Both edges of the pulse are band-limited with a polynomial
-// step correction. Tone is a gentle lowpass over the whole hit: up is bright, down is soft.
+// end), a tick of sine at Click Pitch for as long as the pulse, or a burst of white noise for as
+// long (Click Tone runs from the tick through the pulse to the noise). Both edges of the pulse are
+// band-limited with a polynomial step correction. A Click Sample replaces that source: the file
+// plays from its start, transposed by Click Pitch, which reads in semitones while a sample is on.
+// Either goes through Click HP and Click LP and is added before the saturator at Click's level; a
+// sample's highpass never sits below where the sweep starts, so its lows cannot fight the body's.
+// Tone is a gentle lowpass over the whole hit: up is bright, down is soft.
 //
 // One hit sounds at a time: a new note restarts the sweep, and whatever was still ringing is
 // faded out over a few milliseconds rather than cut. Note offs are ignored - a hit plays out.
@@ -35,7 +40,7 @@ import { defineDevice } from '../descriptor.mjs';
 import { at } from '../dsp/control.mjs';
 import { midiToHz } from '../dsp/voice.mjs';
 
-/** The most Sweep reaches, and the top of a drawn curve, in semitones above the note. */
+/** The most Sweep reaches, in semitones above the note. */
 export const KICK_SWEEP_MAX_ST = 48;
 /** The fixed curve's time constant and knee (see the header). */
 export const KICK_SWEEP_SEC = 0.073;
@@ -44,14 +49,16 @@ export const KICK_SWEEP_KNEE = 0.66;
 export const KICK_SWEEP_HOLD_SEC = 0.003;
 /** How fast the trigger pulse charges the sweep: a pulse this long gets it to 63%. */
 export const KICK_CHARGE_SEC = 0.0005;
-/** A drawn curve's time axis: 0 to this many seconds, read on a square root (x = sqrt(t / span)). */
+/** A drawn pitch curve's time axis: 0 to this many seconds, read on a square root (x = sqrt(t / span)). */
 export const KICK_DRAW_SEC = 0.4;
 /** Drive's saturation, from clean to square. */
 export const KICK_DRIVE_MIN = 0.1;
 export const KICK_DRIVE_MAX = 6;
-/** Tail's knee on the level envelope: an exponential at the bottom, near a straight line at the top. */
-export const KICK_TAIL_KNEE_MIN = 0.02;
-export const KICK_TAIL_KNEE_MAX = 3;
+/** Decay Curve's knee on the level envelope: an exponential at the bottom, near a straight line at the top. */
+export const KICK_CURVE_KNEE_MIN = 0.02;
+export const KICK_CURVE_KNEE_MAX = 3;
+/** The longest Decay, which is the span the picture of the level is drawn over. */
+export const KICK_DECAY_MAX = 4;
 /** The saturator's offset, which tips the wave and gives it its even harmonics (about -25 dB second). */
 export const KICK_BODY_BIAS = 0.08;
 /** The coupling highpass after the saturator. */
@@ -60,6 +67,13 @@ const KICK_BODY_HP_HZ = 4;
 const KICK_CLICK_RISE_SEC = 0.0004;
 /** The noise's level against the pulse's. */
 const KICK_NOISE_GAIN = 0.7;
+/**
+ * Click Pitch's range. Its middle is a sample's own pitch, and either end is two octaves from it,
+ * which is what the knob reads in semitones while a sample is on.
+ */
+export const KICK_CLICK_PITCH_MIN = 375;
+export const KICK_CLICK_PITCH_CENTER = 1500;
+export const KICK_CLICK_PITCH_MAX = 6000;
 /** Tone's lowpass, fully soft and fully bright. */
 const KICK_TONE_SOFT_HZ = 150;
 const KICK_TONE_BRIGHT_HZ = 20000;
@@ -80,21 +94,54 @@ const KICK_TWO_PI = 2 * Math.PI;
 
 /** Drive's position to the saturator's gain. */
 export const kickDrive = (drive) => KICK_DRIVE_MIN + (KICK_DRIVE_MAX - KICK_DRIVE_MIN) * Math.min(1, Math.max(0, drive));
-/** Tail's position to the level envelope's knee. */
-export const kickTailKnee = (tail) => KICK_TAIL_KNEE_MIN * Math.pow(KICK_TAIL_KNEE_MAX / KICK_TAIL_KNEE_MIN, Math.min(1, Math.max(0, tail)));
+/** Decay Curve's position to the level envelope's knee. */
+export const kickCurveKnee = (curve) => KICK_CURVE_KNEE_MIN * Math.pow(KICK_CURVE_KNEE_MAX / KICK_CURVE_KNEE_MIN, Math.min(1, Math.max(0, curve)));
+
+/** The fixed level envelope `t` of the way through a hit (0..1 of Decay), at a Decay Curve of `curve`. */
+export function kickLevelAt(curve, t) {
+  const knee = kickCurveKnee(curve);
+  const v = (1 + knee) * Math.pow(knee / (1 + knee), t) - knee;
+  return v > 0 ? v : 0;
+}
 
 /**
  * Settings that start from a kind of kick, by name: controls in real units, the rest at their
  * defaults. Each is the middle of a group of measured hits; the defaults are `classic`.
  */
 export const KICK_PRESETS = Object.freeze({
-  classic: { sweep: 31, decay: 0.69, drive: 0.32, tail: 0.86, click: 0.51, clicktone: 0.05, clicklength: 2, tone: 0.45 },
-  hard: { sweep: 29, decay: 0.42, drive: 0.72, tail: 0.37, click: 1, clicktone: 0.55, clicklength: 2.15, tone: 0.41 },
-  bright: { sweep: 25, decay: 0.67, drive: 0.29, tail: 0.65, click: 0.55, clicktone: 0.18, clicklength: 1.84, tone: 0.79 },
-  short: { sweep: 27.5, decay: 0.11, drive: 0.36, tail: 0.65, click: 0.4, clicktone: 0.21, clicklength: 1.9, tone: 0.61 },
-  rumble: { sweep: 25, decay: 2, drive: 0.28, tail: 0.5, click: 0.39, clicktone: 0.2, clicklength: 1.5, tone: 0.64 },
-  soft: { sweep: 35, decay: 0.95, drive: 0.55, tail: 0.9, click: 0.44, clicktone: 0, clicklength: 2.2, tone: 0.05 },
+  classic: { sweep: 31, decay: 0.69, drive: 0.32, dcurve: 0.86, click: 0.51, clicktone: 0.525, clicklength: 2, tone: 0.45 },
+  hard: { sweep: 29, decay: 0.42, drive: 0.72, dcurve: 0.37, click: 1, clicktone: 0.775, clicklength: 2.15, tone: 0.41 },
+  bright: { sweep: 25, decay: 0.67, drive: 0.29, dcurve: 0.65, click: 0.55, clicktone: 0.59, clicklength: 1.84, tone: 0.79 },
+  short: { sweep: 27.5, decay: 0.11, drive: 0.36, dcurve: 0.65, click: 0.4, clicktone: 0.605, clicklength: 1.9, tone: 0.61 },
+  rumble: { sweep: 25, decay: 2, drive: 0.28, dcurve: 0.5, click: 0.39, clicktone: 0.6, clicklength: 1.5, tone: 0.64 },
+  soft: { sweep: 35, decay: 0.95, drive: 0.55, dcurve: 0.9, click: 0.44, clicktone: 0.5, clicklength: 2.2, tone: 0.05 },
 });
+
+/**
+ * Pitch curves for the shape editor to start a drawing from, in the drawn curve's space: x the
+ * square root of the time over KICK_DRAW_SEC, y the share of Sweep. The fixed curve is added by
+ * the picture, at the Sweep and Click Length set.
+ */
+export const KICK_PITCH_CURVES = Object.freeze({
+  snap: '0,1 0.05,0.7 0.12,0.35 0.2,0.1 0.25,0 1,0',
+  glide: '0,1 0.1,0.75 0.25,0.45 0.45,0.22 0.7,0.08 0.87,0 1,0',
+  'two-stage': '0,1 0.08,0.45 0.15,0.3 0.5,0.15 0.8,0 1,0',
+  linear: '0,1 0.158,0.9 0.25,0.75 0.354,0.5 0.433,0.25 0.5,0 1,0',
+});
+
+/**
+ * Level curves for the shape editor to start a drawing from: x the share of Decay, y the level.
+ * The fixed curve is added by the picture, at the Decay Curve set.
+ */
+export const KICK_AMP_CURVES = Object.freeze({
+  hold: '0,1 0.7,0.95 0.85,0.4 1,0',
+  exponential: '0,1 0.1,0.55 0.25,0.25 0.5,0.07 1,0',
+  linear: '0,1 1,0',
+  punch: '0,1 0.05,0.6 0.4,0.5 0.8,0.2 1,0',
+});
+
+const FIXED_ONLY = { param: 'ampenv', is: 'fixed' };
+const NO_SAMPLE = { param: 'clicksample', is: 'none' };
 
 export const KICK = defineDevice({
   id: 'Kick',
@@ -106,23 +153,34 @@ export const KICK = defineDevice({
   channels: { in: 0, out: 2 },
   params: [
     { id: 'sweep', name: 'Sweep', min: 0, max: KICK_SWEEP_MAX_ST, default: 31, unit: 'st', group: 'Body',
-      description: 'How far above the note the pitch starts, in semitones. High is a hard, punchy hit; low a round one.' },
-    { id: 'decay', name: 'Decay', min: 0.05, max: 4, default: 0.69, unit: 's', curve: 'exp', group: 'Body', amp: 'decay',
-      description: 'The length of the hit: the time its level takes to reach zero.' },
+      description: 'How far above the note the pitch starts, in semitones - the depth of the fixed curve or a drawn one. High is a hard, punchy hit; low a round one.' },
+    { id: 'pitchenv', name: 'Pitch Env', default: 0, options: ['fixed'], takes: 'shape', rate: 'k', group: 'Body',
+      description: 'The shape of the pitch over the hit: the fixed curve, or one you draw over the first 400 ms, from Sweep above the note down to the note.' },
     { id: 'drive', name: 'Drive', min: 0, max: 1, default: 0.32, group: 'Body',
       description: 'Saturates the body, from a clean sine to a squared-off, harder tone that holds its level longer.' },
-    { id: 'pitchenv', name: 'Pitch Env', default: 0, options: ['fixed'], takes: 'shape', rate: 'k', group: 'Body',
-      description: 'The pitch over the hit: the fixed curve, or one you draw, in semitones above the note over the first 400 ms.' },
+    { id: 'decay', name: 'Decay', min: 0.05, max: KICK_DECAY_MAX, default: 0.69, unit: 's', curve: 'exp', group: 'Amp Env', amp: 'decay',
+      description: 'The length of the hit: the time its level takes to reach zero.' },
+    { id: 'dcurve', name: 'Decay Curve', min: 0, max: 1, default: 0.86, group: 'Amp Env', active: FIXED_ONLY,
+      description: 'The shape of the decay: up holds the belly to the end, down falls away quickly into a thin tail.' },
+    { id: 'ampenv', name: 'Amp Env', default: 0, options: ['fixed'], takes: 'shape', rate: 'k', group: 'Amp Env',
+      description: 'The level over the hit: the fixed curve Decay Curve shapes, or one you draw, stretched over Decay.' },
     { id: 'click', name: 'Click', min: 0, max: 1, default: 0.51, group: 'Click',
       description: 'The level of the click on top of the hit.' },
-    { id: 'clicktone', name: 'Click Tone', min: 0, max: 1, default: 0.05, group: 'Click',
-      description: 'From the trigger pulse (0) to a burst of noise (1).' },
+    { id: 'clicktone', name: 'Click Tone', min: 0, max: 1, default: 0.525, group: 'Click', active: NO_SAMPLE,
+      description: 'From a pitched tick (0) through the trigger pulse (0.5) to a burst of noise (1).' },
+    { id: 'clickpitch', name: 'Click Pitch', min: KICK_CLICK_PITCH_MIN, max: KICK_CLICK_PITCH_MAX, default: KICK_CLICK_PITCH_CENTER,
+      unit: 'Hz', curve: 'exp', group: 'Click', alt: { param: 'clicksample', not: 'none', unit: 'st', min: -24, max: 24 },
+      description: 'The pitch of the tick, or with a Click Sample on, how far the sample is transposed, in semitones.' },
+    { id: 'clickhp', name: 'Click HP', min: 20, max: 8000, default: 20, unit: 'Hz', curve: 'exp', group: 'Click',
+      description: 'A highpass on the click. A sample is always cut at least where the sweep starts.' },
+    { id: 'clicklp', name: 'Click LP', min: 300, max: 20000, default: 20000, unit: 'Hz', curve: 'exp', group: 'Click',
+      description: 'A lowpass on the click.' },
     { id: 'clicklength', name: 'Click Length', min: 0.1, max: 15, default: 2, unit: 'ms', curve: 'exp', rate: 'k', group: 'Click',
       description: 'The length of the trigger pulse. Shorter is a brighter click and less sweep.' },
+    { id: 'clicksample', name: 'Click Sample', default: 0, options: ['none'], takes: 'sample', rate: 'k', group: 'Click',
+      description: 'A file to play as the click instead of the pulse, with its lows cut where the sweep starts so it sits on the body.' },
     { id: 'tone', name: 'Tone', min: 0, max: 1, default: 0.45, group: 'Output',
       description: 'A gentle lowpass over the whole hit: up is bright and punchy, down is soft and round.' },
-    { id: 'tail', name: 'Tail', min: 0, max: 1, default: 0.86, group: 'Output',
-      description: 'The shape of the decay: up holds the belly to the end, down falls away quickly into a thin tail.' },
     { id: 'level', name: 'Level', min: 0, max: 1, default: 0.7, group: 'Output' },
   ],
   figures: [
@@ -134,6 +192,14 @@ export const KICK = defineDevice({
       description: 'The pitch over the first 400 ms of the hit, labeled for the note last played.',
       params: { shape: 'pitchenv', sweep: 'sweep', clicklength: 'clicklength' },
       // The curve control belongs ON the picture of the curve, as a waveshaper's mode heads its own.
+      subsumes: ['shape'],
+    },
+    {
+      id: 'level',
+      kind: 'hitlevel',
+      group: 'Amp Env',
+      description: 'The level over the hit, out to the longest Decay.',
+      params: { shape: 'ampenv', decay: 'decay', curve: 'dcurve' },
       subsumes: ['shape'],
     },
   ],
@@ -150,7 +216,7 @@ export function kickDrawnAt(table, t) {
   return a + (b - a) * (x - i);
 }
 
-/** Where `seconds` into the hit sits on a drawn curve's time axis, 0..1. */
+/** Where `seconds` into the hit sits on a drawn pitch curve's time axis, 0..1. */
 export const kickDrawX = (seconds) => Math.sqrt(Math.max(0, seconds) / KICK_DRAW_SEC);
 
 /**
@@ -223,6 +289,7 @@ class KickVoice {
     this.phase = 0;
     this.edge = 0;
     this.pitchTable = null;
+    this.ampTable = null;
     this.sweep.start(0);
     this.env = 1;
     this.choke = -1;
@@ -230,10 +297,20 @@ class KickVoice {
     this.hpIn = 0;
     this.hpOut = 0;
     this.lp = 0;
+    this.tickPhase = 0;
+    this.clp = 0;
+    this.sample = null;
+    this.spos = 0;
+    this.sstep = 1;
+    this.floorHz = 0;
+    this.hx1 = 0; this.hx2 = 0; this.hy1 = 0; this.hy2 = 0;
   }
 
-  /** Starts a hit. The pulse's length is read here: it is the trigger, not a control on the sound. */
-  noteOn(note, velocity, seed, clickMs, pitchTable) {
+  /**
+   * Starts a hit. The pulse's length is read here: it is the trigger, not a control on the sound.
+   * So are the click sample and the lowest its highpass goes - where the sweep starts for this note.
+   */
+  noteOn(note, velocity, seed, clickMs, pitchTable, ampTable, sample, sweepSt) {
     this.reset();
     this.active = true;
     this.note = note;
@@ -242,6 +319,14 @@ class KickVoice {
     this.edge = Math.max(0, clickMs) * 0.001 * this.sampleRate;
     this.sweep.start(this.edge);
     this.pitchTable = pitchTable;
+    this.ampTable = ampTable;
+    if (sample !== null) {
+      const sr = this.sampleRate;
+      this.sample = sample;
+      this.sstep = sample.sampleRate / sr;
+      const st = Math.min(KICK_SWEEP_MAX_ST, Math.max(0, sweepSt));
+      this.floorHz = midiToHz(note) * Math.pow(2, st / 12);
+    }
   }
 
   /** Fades the hit out: a new one has replaced it. */
@@ -268,46 +353,107 @@ class KickVoice {
     let lastTone = -1;
     let kTone = 1;
     let lastDecay = -1;
-    let lastTail = -1;
+    let lastCurve = -1;
     let knee = 1;
     let kEnv = 1;
+    let lastHp = -1;
+    let hb0 = 0, hb1 = 0, hb2 = 0, ha1 = 0, ha2 = 0;
+    let lastLp = -1;
+    let kClick = 1;
     for (let i = 0; i < count; i++) {
       if (!this.active) break;
       const j = offset + i;
       const n = this.n;
 
-      // The pitch: the fixed sweep, or the drawn curve in semitones above the note.
+      // The pitch: the fixed sweep, or the drawn curve, Sweep deep.
       const noteHz = midiToHz(this.note + s.bendAt(j));
+      const st = Math.min(KICK_SWEEP_MAX_ST, Math.max(0, at(p.sweep, j)));
       let hz;
       if (this.pitchTable !== null) {
-        hz = noteHz * Math.pow(2, (KICK_SWEEP_MAX_ST * kickDrawnAt(this.pitchTable, kickDrawX(n / sr))) / 12);
+        hz = noteHz * Math.pow(2, (st * kickDrawnAt(this.pitchTable, kickDrawX(n / sr))) / 12);
       } else {
-        const st = Math.min(KICK_SWEEP_MAX_ST, Math.max(0, at(p.sweep, j)));
         hz = kickSweptHz(noteHz, st, this.sweep.next(n));
       }
       hz = Math.min(0.49 * sr, hz);
 
-      // The level envelope: an exponential with a knee, reaching zero at Decay.
+      // The level envelope: an exponential with a knee reaching zero at Decay, or the drawn one
+      // stretched over Decay.
       const decay = Math.max(1e-3, at(p.decay, j));
-      const tail = at(p.tail, j);
-      if (decay !== lastDecay || tail !== lastTail) {
-        knee = kickTailKnee(tail);
-        kEnv = Math.exp(-Math.log((1 + knee) / knee) / (decay * sr));
-        lastDecay = decay;
-        lastTail = tail;
+      let level;
+      if (this.ampTable !== null) {
+        const x = n / (decay * sr);
+        const v = x < 1 ? kickDrawnAt(this.ampTable, x) : 0;
+        level = v > 0 ? v : 0;
+      } else {
+        const curve = at(p.dcurve, j);
+        if (decay !== lastDecay || curve !== lastCurve) {
+          knee = kickCurveKnee(curve);
+          kEnv = Math.exp(-Math.log((1 + knee) / knee) / (decay * sr));
+          lastDecay = decay;
+          lastCurve = curve;
+        }
+        const envNow = (1 + knee) * this.env - knee;
+        level = envNow > 0 ? envNow : 0;
+        this.env *= kEnv;
       }
-      const envNow = (1 + knee) * this.env - knee;
-      const level = envNow > 0 ? envNow : 0;
-      this.env *= kEnv;
 
-      // The click: the pulse, rising, or noise for as long as it is high.
-      const gate = kickGateAt(n, this.edge);
-      let click = 0;
-      if (n <= this.edge + 1) {
-        const tone = Math.min(1, Math.max(0, at(p.clicktone, j)));
+      // The click's source: the sample, transposed by Click Pitch; or the tick, the pulse or the
+      // noise for as long as the pulse is high.
+      const pitch = Math.min(KICK_CLICK_PITCH_MAX, Math.max(KICK_CLICK_PITCH_MIN, at(p.clickpitch, j)));
+      let src = 0;
+      let sounding = false;
+      if (this.sample !== null) {
+        const d = this.sample.data;
+        if (this.spos < d.length) {
+          const k = Math.floor(this.spos);
+          const f = this.spos - k;
+          const a = d[k];
+          const b = k + 1 < d.length ? d[k + 1] : 0;
+          src = a + (b - a) * f;
+          this.spos += this.sstep * (pitch / KICK_CLICK_PITCH_CENTER);
+          sounding = true;
+        }
+      } else if (n <= this.edge + 1) {
+        const gate = kickGateAt(n, this.edge);
+        const shape = Math.min(1, Math.max(0, at(p.clicktone, j)));
         const pulse = gate * (1 - Math.pow(kRise, n));
-        click = at(p.click, j) * ((1 - tone) * pulse + tone * this.white() * KICK_NOISE_GAIN * gate);
+        if (shape < 0.5) {
+          const w = shape * 2;
+          const tick = pulse * Math.sin(KICK_TWO_PI * this.tickPhase);
+          src = (1 - w) * tick + w * pulse;
+        } else {
+          const w = (shape - 0.5) * 2;
+          src = (1 - w) * pulse + w * this.white() * KICK_NOISE_GAIN * gate;
+        }
+        this.tickPhase += pitch / sr;
+        if (this.tickPhase >= 1) this.tickPhase -= 1;
       }
+
+      // Click HP, a second-order Butterworth (the cookbook's), never below a sample's floor; then
+      // Click LP, one pole.
+      const hpHz = Math.min(0.45 * sr, Math.max(this.floorHz, at(p.clickhp, j)));
+      if (hpHz !== lastHp) {
+        const w = (KICK_TWO_PI * hpHz) / sr;
+        const cw = Math.cos(w);
+        const alpha = Math.sin(w) / (2 * Math.SQRT1_2);
+        const a0 = 1 + alpha;
+        hb0 = (1 + cw) / 2 / a0;
+        hb1 = -(1 + cw) / a0;
+        hb2 = hb0;
+        ha1 = (-2 * cw) / a0;
+        ha2 = (1 - alpha) / a0;
+        lastHp = hpHz;
+      }
+      const y = hb0 * src + hb1 * this.hx1 + hb2 * this.hx2 - ha1 * this.hy1 - ha2 * this.hy2;
+      this.hx2 = this.hx1; this.hx1 = src;
+      this.hy2 = this.hy1; this.hy1 = y;
+      const lpHz = Math.min(0.49 * sr, Math.max(1, at(p.clicklp, j)));
+      if (lpHz !== lastLp) {
+        kClick = 1 - Math.exp((-KICK_TWO_PI * lpHz) / sr);
+        lastLp = lpHz;
+      }
+      this.clp += kClick * (y - this.clp);
+      const click = at(p.click, j) * this.clp;
 
       // The body, through the saturator with the click, as much Drive as the pitch allows.
       const ratio = hz / sr;
@@ -340,9 +486,10 @@ class KickVoice {
       this.n = n + 1;
 
       // Finished once the level has gone and the click with it.
-      if (level === 0 && n > this.edge + 1 && Math.abs(this.lp) < KICK_SILENT && Math.abs(this.hpOut) < KICK_SILENT) this.active = false;
+      if (level === 0 && !sounding && n > this.edge + 1 && Math.abs(click) < KICK_SILENT
+        && Math.abs(this.lp) < KICK_SILENT && Math.abs(this.hpOut) < KICK_SILENT) this.active = false;
     }
-    if (!Number.isFinite(this.lp + this.hpOut + this.phase)) this.reset();
+    if (!Number.isFinite(this.lp + this.hpOut + this.phase + this.clp + this.hy1)) this.reset();
   }
 }
 
@@ -356,7 +503,8 @@ export class KickSynth {
     this.events = [];
     this.bend = 0;
     this.bendArray = null;
-    this.shapes = [];         // option index -> a drawn pitch curve
+    this.shapes = { pitchenv: [], ampenv: [] }; // control -> option index -> a drawn curve
+    this.samples = [];        // option index -> a loaded click
     this.lastNote = null;     // what the picture labels its pitches for
     this.state = {
       values: Object.fromEntries(KICK.params.map((p) => [p.id, p.default])),
@@ -385,10 +533,23 @@ export class KickSynth {
     }
   }
 
-  /** Keeps a drawn pitch curve in a Pitch Env slot. */
+  /** Keeps a drawn curve in a Pitch Env or Amp Env slot. */
   loadShape(paramId, index, table) {
-    if (paramId !== 'pitchenv' || !table?.length) return false;
-    this.shapes[Math.max(0, Math.round(index))] = table;
+    if (!(paramId in this.shapes) || !table?.length) return false;
+    this.shapes[paramId][Math.max(0, Math.round(index))] = table;
+    return true;
+  }
+
+  /** Keeps a loaded click, summed to one channel at its own rate, in a Click Sample slot. */
+  loadSample(paramId, index, payload) {
+    if (paramId !== 'clicksample' || !payload?.channels?.length) return false;
+    const chans = payload.channels;
+    let data = chans[0];
+    if (chans.length > 1) {
+      data = new Float32Array(chans[0].length);
+      for (const c of chans) for (let i = 0; i < data.length; i++) data[i] += c[i] / chans.length;
+    }
+    this.samples[Math.max(0, Math.round(index))] = { data, sampleRate: payload.sampleRate ?? this.sampleRate };
     return true;
   }
 
@@ -415,11 +576,19 @@ export class KickSynth {
     return n;
   }
 
-  /** The drawn curve Pitch Env is on, or null for the fixed one. */
-  _drawn() {
-    const index = Math.round(at(this.state.values.pitchenv, 0));
+  /** The drawn curve `id` is on, or null for the fixed one. */
+  _drawn(id) {
+    const index = Math.round(at(this.state.values[id], 0));
     if (!(index >= 1)) return null;
-    return this.shapes[index] ?? null;
+    return this.shapes[id][index] ?? null;
+  }
+
+  /** The click file Click Sample is on, or null for none. */
+  _sample() {
+    const index = Math.round(at(this.state.values.clicksample, 0));
+    if (!(index >= 1)) return null;
+    const one = this.samples[index];
+    return one?.data?.length ? one : null;
   }
 
   startNote(note, velocity) {
@@ -429,7 +598,9 @@ export class KickSynth {
     if (!voice) voice = this.voices[0].age <= this.voices[1].age ? this.voices[0] : this.voices[1];
     for (const v of this.voices) if (v !== voice) v.chokeOff();
     this.seed = (this.seed * 1664525 + 1013904223) >>> 0;
-    voice.noteOn(note, velocity, this.seed, at(this.state.values.clicklength, 0), this._drawn());
+    const values = this.state.values;
+    voice.noteOn(note, velocity, this.seed, at(values.clicklength, 0), this._drawn('pitchenv'), this._drawn('ampenv'),
+      this._sample(), at(values.sweep, 0));
     voice.age = this.clock++;
     this.lastNote = note;
   }

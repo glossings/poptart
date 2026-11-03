@@ -311,6 +311,15 @@ test('a knob position becomes a real value, a printed readout and the text to wr
   shutdown(rig);
 });
 
+test('a number box on an open count sets the count itself, not a position along the box', async () => {
+  const rig = makeHost();
+  await rig.host.call('POST', '/api/evaluate', { code: 'lead: n("0 2").synth("Wavetable").fx("Filterbank")' });
+  const res = await rig.host.call('POST', '/api/deviceParam', { trackId: 'lead', slot: 1, id: 'bands', value: 17 });
+  assert.equal(res.value, 17);
+  assert.equal(rig.engine.deviceState(rig.evaluator.trackIds.get('lead'), 1).values.bands, 17);
+  shutdown(rig);
+});
+
 test('a dragged control glides and a switched one steps, because a device reads once per block', async () => {
   const rig = makeHost();
   await rig.host.call('POST', '/api/evaluate', { code: 'lead: n("0 2").synth("Wavetable").fx("Distort")' });
@@ -1000,7 +1009,7 @@ test('a curve drawn for a device control is sampled and written into the code as
   });
   assert.equal(res.value, window.options.length, 'the first slot past the shapes it ships with');
   assert.equal(res.arg, '"0,0 0.1,1 1,0"', 'and the call written down draws it again');
-  assert.equal(rig.engine.deviceState(tid, 0).shapes[res.value].points.length, 256, 'sampled into a table');
+  assert.equal(rig.engine.deviceState(tid, 0).shapes.window[res.value].points.length, 256, 'sampled into a table');
 
   // The picture is drawn from that same table, so what is on screen is what is being played.
   const grain = res.figures.find((f) => f.kind === 'grain');
@@ -1155,11 +1164,11 @@ test('a shape redefined by an evaluation reaches the device on it, playing or no
   const node = rig.engine.tracks.get(tid).slots.get(1).built.node;
   const sent = () => node.messages.filter((m) => m.kind === 'shape');
   const before = sent().length;
-  assert.ok(state().shapes[index].points[0] > 0.9, 'an inverter: it starts at the top');
+  assert.ok(state().shapes.mode[index].points[0] > 0.9, 'an inverter: it starts at the top');
   // Stopped, redrawn: the device is on the same slot, with the new curve in it.
   await rig.host.call('POST', '/api/evaluate', { code: code('0,0 1,1') });
   assert.equal(state().values.mode, index, 'the control has not moved');
-  assert.ok(state().shapes[index].points[0] < 0.1, 'and the slot holds the redrawn curve');
+  assert.ok(state().shapes.mode[index].points[0] < 0.1, 'and the slot holds the redrawn curve');
   assert.equal(sent().length, before + 1, 'posted to the device once');
   // Evaluated again unchanged: nothing is re-sent.
   await rig.host.call('POST', '/api/evaluate', { code: code('0,0 1,1') });
@@ -1274,12 +1283,13 @@ test('a bare cc() waits for a knob, and the next one turned comes back for the e
   shutdown(rig);
 });
 
-test('capture: a knob dragged in a device window comes back as a param take in that control\'s units and curve', async () => {
+test('capture: a knob dragged in a device window comes back as a param take in the 0..1 position `.param()` takes', async () => {
   patternCore.clearCaptureHistory();
   const rig = makeHost();
   await rig.host.call('POST', '/api/evaluate', { code: 'pad: note("c3").synth("Wavetable")', start: true });
   const d = catalog.get('Wavetable');
-  const p = d.params.find((x) => !x.options && x.ui !== 'toggle' && !x.takes && x.saved !== false);
+  // A sweep whose range is not 0..1, so a take in the device's own units would show.
+  const p = d.params.find((x) => !x.options && x.ui !== 'toggle' && !x.takes && x.saved !== false && !x.open && !x.step && (x.min !== 0 || x.max !== 1));
   const tick = (sec) => {
     rig.ctx.advance(sec);
     for (const s of rig.evaluator.schedulers.values()) s._tick();
@@ -1294,10 +1304,10 @@ test('capture: a knob dragged in a device window comes back as a param take in t
   assert.equal(takes.length, 1);
   const [t] = takes;
   assert.equal(t.source, 'param');
-  assert.deepEqual([t.deck, t.trackId, t.slot, t.id, t.name, t.min, t.max, t.curve, t.widget], ['a', 'pad', 0, p.id, p.name, p.min, p.max, p.curve ?? 'lin', 'knob']);
+  assert.deepEqual([t.deck, t.trackId, t.slot, t.id, t.name, t.min, t.max, t.curve, t.widget], ['a', 'pad', 0, p.id, p.name, 0, 1, 'lin', 'knob']);
   const ys = patternCore.parseShapePoints(t.shapes[0]).map((q) => q.y);
-  assert.ok(Math.min(...ys) < 0.15 && Math.max(...ys) > 0.85, `the sweep, as positions on the control's curve: ${t.shapes[0]}`);
-  assert.ok(Math.abs(patternCore.positionOnCurve(p, t.value) - 0.9) < 0.01, 'the value it was left at, in its own units');
+  assert.ok(Math.min(...ys) < 0.15 && Math.max(...ys) > 0.85, `the sweep, as positions: ${t.shapes[0]}`);
+  assert.ok(Math.abs(t.value - 0.9) < 0.01, `the position it was left at: ${t.value}`);
   shutdown(rig);
 });
 

@@ -10,7 +10,9 @@
 // Two ways to drive it. With nothing routed in, Level is how far open it is - set it, sweep it,
 // or put an env() or lfo() on it, and the response smooths whatever arrives. With notes routed
 // in (`.fx("LPG").midi("lead")`), each note STRIKES it: a few milliseconds of drive, as high as
-// Level times the note's velocity, and then it closes on its own over Decay.
+// Level times the note's velocity, and then it closes on its own over Decay. Trigger strikes it
+// the same way each time it rises past a half - `.param("Trigger", button())` - and setting it
+// rests the gate closed between strikes, as a route of notes does.
 //
 // Translated line for line into native/devices/own/lpg.cc for the desktop, and held to it by
 // native-device-parity.test.mjs.
@@ -50,12 +52,12 @@ export const LPG = defineDevice({
   version: 1,
   license: 'AGPL-3.0-only',
   processor: 'poptart-lpg',
-  description: 'A low-pass gate: a level and a lowpass opened together through a slow, uneven response, so a sound dulls as it dies away. Notes routed in with .midi() strike it open.',
+  description: 'A low-pass gate: a level and a lowpass opened together through a slow, uneven response, so a sound dulls as it dies away. Notes routed in with .midi(), or Trigger, strike it open.',
   channels: { in: 2, out: 2 },
   notes: true,
   params: [
     { id: 'level', name: 'Level', min: 0, max: 1, default: 1,
-      description: 'How far open the gate is. With notes routed in with .midi(), how far each note strikes it open, times its velocity.' },
+      description: 'How far open the gate is. With notes routed in with .midi(), how far each note strikes it open, times its velocity; with Trigger set, how far each press does.' },
     { id: 'decay', name: 'Decay', min: 0.02, max: 5, default: 0.4, unit: 's', curve: 'pow', curveExp: 2,
       description: 'How long the gate takes to close. The end of the close is slower than the start.' },
     { id: 'mode', name: 'Mode', default: 0, options: [...LPG_MODES], rate: 'k',
@@ -63,6 +65,8 @@ export const LPG = defineDevice({
     { id: 'resonance', name: 'Resonance', min: 0, max: 1, default: 0,
       description: 'A peak at the cutoff, which rings as the gate closes.' },
     { id: 'output', name: 'Output', min: -24, max: 24, default: 0, unit: 'dB' },
+    { id: 'trigger', name: 'Trigger', min: 0, max: 1, default: 0, ui: 'button', saved: false,
+      description: 'Strikes the gate open each time it rises past a half. Set, it rests the gate closed between strikes.' },
   ],
   presets: LPG_PRESETS,
 });
@@ -72,6 +76,7 @@ export class LpgProcessor {
     this.sampleRate = sampleRate;
     this.frames = 0;
     this.noteRouted = false;
+    this.triggered = false;   // Trigger as the last sample read it
     this.pending = [];        // [time, velocity] of strikes not yet reached, oldest first
     this.strikeLen = Math.round(STRIKE_SEC * sampleRate);
     this.attackK = 1 / (1 + ATTACK_SEC * sampleRate);
@@ -117,12 +122,19 @@ export class LpgProcessor {
     const mode = Math.min(LPG_MODES.length - 1, Math.max(0, Math.round(at(params.mode, 0))));
     for (let i = 0; i < count; i++) {
       const level = Math.min(1, Math.max(0, at(params.level, i)));
+      const held = at(params.trigger, i) >= 0.5;
+      const pressed = held && !this.triggered;
+      this.triggered = held;
       let drive = level;
       if (this.noteRouted) {
         const now = start + i / sr;
         while (this.pending.length && this.pending[0][0] <= now) {
           const strike = level * this.pending.shift()[1];
           this.pulse = this.pulseLeft > 0 ? Math.max(this.pulse, strike) : strike;
+          this.pulseLeft = this.strikeLen;
+        }
+        if (pressed) {
+          this.pulse = this.pulseLeft > 0 ? Math.max(this.pulse, level) : level;
           this.pulseLeft = this.strikeLen;
         }
         drive = this.pulseLeft > 0 ? this.pulse : 0;
