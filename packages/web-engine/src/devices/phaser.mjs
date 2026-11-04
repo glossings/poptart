@@ -7,10 +7,20 @@
 
 import { defineDevice } from '../descriptor.mjs';
 import { at } from '../dsp/control.mjs';
+import { DcBlocker } from '../dsp/filters.mjs';
 import { lfoValue } from '../dsp/moddelay.mjs';
 import { SYNC_OPTIONS, syncedHz, migrateSyncLists } from '../dsp/sync.mjs';
 
 const MAX_STAGES = 12;
+
+/**
+ * The corner of the blocker on what the feedback's curve adds, in Hz: low, because round a loop
+ * of nearly one its turn in phase is heard well above it, on the bass the feedback lifts.
+ */
+const PHASER_LOOP_DC_HZ = 2;
+
+/** The corner of the output's coupling, in Hz. */
+const PHASER_DC_HZ = 8;
 
 /** Starting points for the preset menu: each the defaults with these controls changed. */
 export const PHASER_PRESETS = Object.freeze({
@@ -63,14 +73,16 @@ export const PHASER = defineDevice({
   presets: PHASER_PRESETS,
 });
 
-/** One channel's chain of first-order allpasses and its feedback sample. */
+/** One channel's chain of first-order allpasses, its feedback sample and its output's coupling. */
 class Chain {
-  constructor() {
+  constructor(sampleRate) {
     this.z = new Float64Array(MAX_STAGES);
     this.fb = 0;
+    this.dc = new DcBlocker(sampleRate, PHASER_LOOP_DC_HZ);
+    this.out = new DcBlocker(sampleRate, PHASER_DC_HZ);
   }
 
-  reset() { this.z.fill(0); this.fb = 0; }
+  reset() { this.z.fill(0); this.fb = 0; this.dc.reset(); this.out.reset(); }
 
   /** Runs a sample through `stages` allpasses with coefficient `a`. */
   next(x, stages, a, feedback) {
@@ -80,7 +92,10 @@ class Chain {
       this.z[s] = v + a * y;
       v = y;
     }
-    this.fb = Math.tanh(v);
+    // The allpasses pass DC, so DC the curve makes of a lopsided wave goes round the loop and,
+    // with the feedback near one, builds up into a large offset. What the curve adds is
+    // AC-coupled, so it cannot, while the feedback itself keeps its bass.
+    this.fb = v + this.dc.next(Math.tanh(v) - v);
     return v;
   }
 }
@@ -88,7 +103,7 @@ class Chain {
 export class PhaserProcessor {
   constructor(sampleRate) {
     this.sampleRate = sampleRate;
-    this.chains = [new Chain(), new Chain()];
+    this.chains = [new Chain(sampleRate), new Chain(sampleRate)];
     this.phase = 0;
     this.bpm = 120;
   }
@@ -121,8 +136,10 @@ export class PhaserProcessor {
       const r = inR ? inR[i] : 0;
       const wetL = this.chains[0].next(l, stages, aL, feedback);
       const wetR = this.chains[1].next(r, stages, aR, feedback);
-      outL[i] = l + (wetL - l) * mix;
-      if (outR !== outL) outR[i] = r + (wetR - r) * mix;
+      // The output's coupling, on the mixed signal so the dry and the wet turn together: a fast sweep
+      // mixes what goes round at its own rate down to DC, which the feedback then builds on.
+      outL[i] = this.chains[0].out.next(l + (wetL - l) * mix);
+      if (outR !== outL) outR[i] = this.chains[1].out.next(r + (wetR - r) * mix);
     }
     if (!Number.isFinite(outL[count - 1])) for (const c of this.chains) c.reset();
   }

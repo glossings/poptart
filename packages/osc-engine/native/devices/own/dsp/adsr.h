@@ -76,6 +76,17 @@ struct Adsr {
     stagePos = 0;
   }
 
+  /**
+   * A note slid into while this one was letting go: the release stops where it is and the level
+   * goes back to the sustain over the decay, with no new attack - the slide carries the note on.
+   */
+  void resume() {
+    if (stage != kAdsrRelease) return;
+    stageFrom = value;
+    stage = kAdsrDecay;
+    stagePos = 0;
+  }
+
   /** Releases a note from wherever the envelope currently is. */
   void gateOff() {
     if (stage == kAdsrIdle) return;

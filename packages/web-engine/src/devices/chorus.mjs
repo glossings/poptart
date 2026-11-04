@@ -3,7 +3,8 @@
 
 import { defineDevice } from '../descriptor.mjs';
 import { at } from '../dsp/control.mjs';
-import { ModDelay } from '../dsp/moddelay.mjs';
+import { DcBlocker } from '../dsp/filters.mjs';
+import { MOD_DC_HZ, ModDelay } from '../dsp/moddelay.mjs';
 import { SYNC_OPTIONS, syncedHz, migrateSyncLists } from '../dsp/sync.mjs';
 
 /** Starting points for the preset menu: each the defaults with these controls changed. */
@@ -62,6 +63,7 @@ export class ChorusProcessor {
   constructor(sampleRate) {
     this.delay = new ModDelay(sampleRate, 0.08);
     this.bpm = 120;
+    this.outs = [new DcBlocker(sampleRate, MOD_DC_HZ), new DcBlocker(sampleRate, MOD_DC_HZ)];
     this.wet = [0, 0];
   }
 
@@ -89,10 +91,12 @@ export class ChorusProcessor {
         voices,
       });
       const mix = at(params.mix, i);
-      outL[i] = l + (wet[0] - l) * mix;
-      if (outR !== outL) outR[i] = r + (wet[1] - r) * mix;
+      // The output's coupling, on the mixed signal so the dry and the wet turn together: a fast sweep
+      // mixes what goes round at its own rate down to DC, which the feedback then builds on.
+      outL[i] = this.outs[0].next(l + (wet[0] - l) * mix);
+      if (outR !== outL) outR[i] = this.outs[1].next(r + (wet[1] - r) * mix);
     }
-    if (!Number.isFinite(outL[count - 1])) this.delay.reset();
+    if (!Number.isFinite(outL[count - 1])) { this.delay.reset(); for (const d of this.outs) d.reset(); }
   }
 
   /** Where the LFO is, so the picture's playhead follows the sound. */

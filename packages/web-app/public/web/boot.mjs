@@ -227,6 +227,7 @@ export async function boot({
       looksLikeShapeData: patternCore.looksLikeShapeData,
       parseShapePoints: patternCore.parseShapePoints,
       sampleShape: patternCore.sampleShape,
+      sampleShapeTable: patternCore.sampleShapeTable,
       // A curve named rather than drawn inline: the _shape(...) definitions the last evaluation
       // registered, so a device control names a shape exactly as lfo() does.
       lookupShape: patternCore.lookupShape,

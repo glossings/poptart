@@ -16,7 +16,8 @@
 // pd_denormalize's job and is tested separately), then the input as interleaved stereo floats.
 // stdout: the output as interleaved floats - stereo, or as many channels as the device writes
 // (the Crossover's six). Notes come in on the command line, as
-// `-n frame:note:velocity` for an instrument, and land ON THEIR FRAME: the run is cut there and
+// `-n frame:note:velocity[:slide]` for an instrument (slide 1 = a note marked to slide, as
+// /noteOn's third number says), and land ON THEIR FRAME: the run is cut there and
 // the note made between the two pieces, as PoptartDevice cuts its render at a note's offset into
 // the block. `-k 0` says that nothing is routed into the slot's key input (the default for a
 // sidechained device is that something is).
@@ -69,7 +70,7 @@
 
 namespace {
 
-struct Note { int frame; float note; float velocity; };
+struct Note { int frame; float note; float velocity; bool slide; };
 struct Loaded {
   int param; int slot; double rate; int channels; int frameLength;
   std::vector<float> frames; std::vector<float> mono;
@@ -206,8 +207,9 @@ int main(int argc, char** argv) {
     if (std::strcmp(argv[i], "-n") != 0 || i + 1 >= argc) continue;
     int frame = 0;
     float note = 60, velocity = 1;
-    std::sscanf(argv[++i], "%d:%f:%f", &frame, &note, &velocity);
-    notes.push_back({ frame, note, velocity });
+    int slide = 0;
+    std::sscanf(argv[++i], "%d:%f:%f:%d", &frame, &note, &velocity, &slide);
+    notes.push_back({ frame, note, velocity, slide != 0 });
   }
 
   const PdDeviceInfo* info = pd_find_device(name);
@@ -283,14 +285,16 @@ int main(int argc, char** argv) {
       while (nextNote < notes.size() && notes[nextNote].frame < until) {
         const Note& one = notes[nextNote++];
         const int offset = one.frame > at ? one.frame - at : 0;
-        if (one.velocity > 0) device->noteOnAt(one.note, one.velocity, offset);
+        if (one.velocity > 0 && one.slide) device->noteSlideAt(one.note, one.velocity, offset);
+        else if (one.velocity > 0) device->noteOnAt(one.note, one.velocity, offset);
         else device->noteOffAt(one.note, offset);
       }
     } else {
       // The notes due on this frame, then a piece up to the next note or the end of the block.
       while (nextNote < notes.size() && notes[nextNote].frame <= at) {
         const Note& one = notes[nextNote++];
-        if (one.velocity > 0) device->noteOn(one.note, one.velocity);
+        if (one.velocity > 0 && one.slide) device->noteSlide(one.note, one.velocity);
+        else if (one.velocity > 0) device->noteOn(one.note, one.velocity);
         else device->noteOff(one.note);
       }
       if (nextNote < notes.size() && notes[nextNote].frame < until) until = notes[nextNote].frame;

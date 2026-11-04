@@ -91,6 +91,8 @@ _roll("lead", "48,0,8 52,8,4 55,12,4", { grid: 16, len: 16 })</code></pre>
           <tr><td><code>.degrade(p)</code></td><td>drop events at random</td></tr>
           <tr><td><code>.vel(v)</code> · <code>.clip(v)</code></td><td>velocity · note length as a multiple of its step</td></tr>
           <tr><td><code>.legato()</code></td><td>hold every note until the next one starts</td></tr>
+          <tr><td><code>.slide("0 1")</code></td><td>glide into each note marked 1 from the note before, without a new attack</td></tr>
+          <tr><td><code>.octave("0 1 0 -1")</code></td><td>move each note by whole octaves when it plays, whatever the chain did to its pitch</td></tr>
         </table>
         <figure class="timeline">
           <div class="row">note("c3 e3 g3 b3").struct("1 ~ 1 1 ~ 1 1 ~")</div>

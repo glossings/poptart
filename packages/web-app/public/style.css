@@ -1934,20 +1934,26 @@ li.CodeMirror-hint-active {
   padding-top: 2px;
 }
 
-/* One control: the knob (or select, toggle or number) with its name over it and its value under it. */
+/* One control: the knob (or select, toggle or number) with its name over it and its value under it.
+   As wide as a knob, or as its readout's widest reading where that is wider (the readout carries
+   that as a min-width, see deviceWidget): the width is settled when the window is built, never by
+   the value, so a reading that grows a digit cannot wrap and push the rows below it down. */
 .device-widget {
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 2px;
-  width: 64px;
+  width: min-content;
+  min-width: 64px;
 }
 
 /* A number box: the value itself, dragged up and down or typed. The knob's height, so a row of
    knobs and boxes lines up. */
 .device-number {
-  /* Digits of one width, so a number dragged past a power of ten does not shuffle sideways. */
+  /* Digits of one width, so a number dragged past a power of ten does not shuffle sideways - and
+     the padding that keeps it the width of its widest reading kept, not collapsed. */
   font-variant-numeric: tabular-nums;
+  white-space: pre;
   width: 100%;
   height: 28px;
   box-sizing: border-box;
@@ -2032,6 +2038,9 @@ li.CodeMirror-hint-active {
 
 .device-widget-value {
   font-variant-numeric: tabular-nums;
+  /* One line, and the padding to its widest reading kept (see readoutPad). */
+  white-space: pre;
+  text-align: center;
   font-size: 9px;
   font-family: var(--mono);
   color: var(--text);
@@ -2047,6 +2056,13 @@ li.CodeMirror-hint-active {
 
 .device-widget.driven .device-widget-value {
   color: var(--accent);
+}
+
+/* What drives it, on a line of its own over the reading: a name never changes while it plays, so
+   it may wrap, and the reading under it keeps its own fixed line. */
+.device-widget-driver {
+  white-space: normal;
+  line-height: 1.1;
 }
 
 .device-widget select,
@@ -2682,6 +2698,14 @@ span.color-swatch {
 
 /* Armed counts the take in, live is the take itself - the same two states the transport's
    record button uses, so one glance reads the same in both places. */
+/* "● bounce" becomes a countdown and then a count while a take runs: digits of one width and
+   room for the longest of them ("● 128.0/128"), so the button never resizes mid-take. */
+#recordGo {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  min-width: 13ch;
+}
+
 #recordGo.rec-armed {
   color: var(--warn);
   border-color: var(--warn);
@@ -3085,6 +3109,17 @@ span.color-swatch {
   letter-spacing: 0;
 }
 
+/* note / index / slice: as wide as the longest of them whichever is showing, so the tool button
+   beside it stays put when the mode changes. */
+#pianorollMode {
+  min-width: calc(5ch + 20px);
+}
+
+/* cyc / hz: the same, for the controls after it on the lfo's row. */
+#lfoRateUnit {
+  min-width: calc(3ch + 20px);
+}
+
 /* The key setScale() set, next to the panel title - what the grid's tonic/in-key shading means.
    Empty (and so invisible) until a scale is in force. */
 .pianoroll-scale {
@@ -3361,7 +3396,11 @@ select.sel-open {
 }
 
 .ctx-menu .ctx-param output {
-  width: 2.5em;
+  /* At least 2.5em, and as wide as the param's widest reading (set from the code), so a drag
+     never widens the popover. Right-aligned fixed decimals keep the digits where they are. */
+  min-width: 2.5em;
+  flex: none;
+  white-space: nowrap;
   text-align: right;
   font-variant-numeric: tabular-nums;
   color: var(--text);
@@ -3666,7 +3705,9 @@ body.mix-on #phraseViz {
 /* label swaps between "● rec" and countdowns - fixed width keeps the header from jittering. The
    options chevron is the button's other half: one segmented control, joined at the seam. */
 #recBtn {
-  min-width: 88px;
+  min-width: 96px; /* "● in 12.3" and "● 16.0/16" fit, not only "● rec" */
+  font-variant-numeric: tabular-nums; /* the count's digits hold still as it runs */
+  white-space: nowrap;
   border-radius: 8px 0 0 8px;
 }
 
@@ -4159,9 +4200,14 @@ body.mix-on #phraseViz {
   border-radius: 3px;
 }
 
+/* A fixed slot with the number at its right edge (see mixerFmtDb), so the digits hold still as the
+   fader moves. */
 .mixer-db {
   font-size: 10px;
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  min-width: 9ch;
+  text-align: right;
   color: var(--text-dim);
 }
 
@@ -4523,6 +4569,8 @@ body.mix-on #phraseViz {
 
 .pack-play-time {
   min-width: 8em;
+  white-space: pre;
+  font-variant-numeric: tabular-nums;
   font-size: 10.5px;
   font-family: var(--mono);
   color: var(--text-dim);
@@ -5183,8 +5231,12 @@ body.mix-on #deckBPane {
 }
 /* The loop length, inside the loop button (scrolling over it halves or doubles). Fixed width and
    tabular, because a length changing under the hand must not resize the button under the pointer. */
+/* Room for "1/32 beat" whatever length is showing. Inline-block, so the min-width holds inside
+   deck B's loop button too, which is not a flex box the way deck A's is. */
 .deck-loop-len {
-  min-width: 52px;
+  display: inline-block;
+  min-width: calc(9ch + 1px);
+  white-space: nowrap;
   text-align: center;
   font-family: var(--mono);
   font-variant-numeric: tabular-nums;
@@ -5729,10 +5781,13 @@ body.mix-on #deckBPane {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* Room for "0:00.0 / 0:00" before a song is loaded, so the phrase and rate beside it do not move
+   when the time appears; the elapsed part is padded to the length's width (songFmtPlayed). */
 .song-time {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   color: var(--text-dim);
-  white-space: nowrap;
+  white-space: pre;
+  min-width: 13ch;
 }
 .song-phrase {
   min-width: 9ch;
@@ -5748,6 +5803,11 @@ body.mix-on #deckBPane {
   min-width: 7ch;
   text-align: right;
   font-variant-numeric: tabular-nums;
+}
+/* ½×, 1× and 2× in one mono width, so auto flipping the ratio moves nothing beside it. */
+.song-mult {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  min-width: calc(2ch + 18px);
 }
 .song-ctl-row {
   display: flex;
@@ -6357,6 +6417,9 @@ body.mix-on #deckAHead .deck-live-ctl.hidden {
 }
 #orgCount {
   flex: none;
+  text-align: right;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
   font-style: normal;
   font-size: 10px;
   color: var(--text-dim);
@@ -6377,6 +6440,10 @@ body.mix-on #deckAHead .deck-live-ctl.hidden {
 #orgClean {
   flex: none;
   white-space: nowrap;
+}
+
+#orgMeasure {
+  font-variant-numeric: tabular-nums; /* its count's digits hold still while a pass runs */
 }
 
 /* The filter button. Its label says what the filter is set to, so it changes width as the filter
@@ -7140,9 +7207,11 @@ td.org-empty {
   font-family: var(--mono);
 }
 
+/* Room for "auto · 0.125 cy", so the ÷2 and ×2 beside it stay under the pointer as they are clicked. */
 .slice-fit-val {
   font-family: var(--mono);
-  min-width: 6.5em;
+  min-width: calc(15ch + 18px);
+  white-space: nowrap;
 }
 
 .slice-fit-val:disabled {
@@ -7289,6 +7358,7 @@ html[data-embed] .cm-s-poptart .CodeMirror-gutters {
 .replay-time {
   flex: none;
   min-width: 128px;
+  white-space: pre;
   text-align: right;
   font-family: var(--mono);
   font-variant-numeric: tabular-nums;

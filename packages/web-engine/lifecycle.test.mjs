@@ -153,7 +153,7 @@ test('swapping the device in a slot carries what was driving it onto the new dev
   assert.ok(carried.node.outputs.includes(reverb.built.node.parameters.get('mix')), 'onto the new device\'s Mix');
   assert.equal(expr.target, null, 'a name the new device lacks is not connected to anything');
   assert.equal(expr.node.outputs.length, 0);
-  assert.deepEqual([...engine.drivenParams('t1', 1)], [['mix', 'an lfo']]);
+  assert.deepEqual([...engine.drivenParams('t1', 1)], [['mix', 'lfo']]);
 
   // And the new device's other parameters are ordinary again: nothing stale claims them.
   engine.setParam('t1', 1, 'Decay', 0.5, ctx.currentTime);

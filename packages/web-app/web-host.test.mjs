@@ -66,6 +66,7 @@ function makeHost({ builtIn = [], library = { packs: [], problems: [], urlFor: c
       looksLikeShapeData: patternCore.looksLikeShapeData,
       parseShapePoints: patternCore.parseShapePoints,
       sampleShape: patternCore.sampleShape,
+      sampleShapeTable: patternCore.sampleShapeTable,
       // A curve named rather than drawn inline: the _shape(...) definitions the last evaluation
       // registered, so a device control names a shape exactly as lfo() does.
       lookupShape: patternCore.lookupShape,
@@ -363,7 +364,7 @@ test('a parameter under a modulator is drawn read-only, and named by what is mov
   });
   const { panel } = await rig.host.call('POST', '/api/showEditor', { trackId: 'lead', slot: 1 });
   const cutoff = panel.sections.flatMap((s) => s.widgets).find((w) => w.id === 'cutoff');
-  assert.equal(cutoff.modulatedBy, 'an lfo');
+  assert.equal(cutoff.modulatedBy, 'lfo');
   shutdown(rig);
 });
 
@@ -767,7 +768,7 @@ test('a figure says what is driving a parameter, so its axis can refuse to be dr
   });
   const { panel } = await rig.host.call('POST', '/api/showEditor', { trackId: 'lead', slot: 1 });
   const response = panel.sections.flatMap((s) => s.figures).find((f) => f.id === 'response');
-  assert.deepEqual(response.driven, { cutoff: 'an lfo' });
+  assert.deepEqual(response.driven, { cutoff: 'lfo' });
   shutdown(rig);
 });
 

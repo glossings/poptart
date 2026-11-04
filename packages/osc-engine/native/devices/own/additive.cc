@@ -121,6 +121,16 @@ struct Voice {
     env.gateOn(true);
   }
 
+  /** A slide into `n`: the pitch glides there over Glide, the envelope carries on (see Sig#slide). */
+  void slideTo(double n) {
+    note = n;
+    targetHz = midiToHz(n);
+    if (releasing) {
+      releasing = false;
+      env.resume();
+    }
+  }
+
   void noteOff() {
     releasing = true;
     env.gateOff();
@@ -205,7 +215,7 @@ struct Device : pd_own::Device<ids::kCount, 2> {
   int voiceCount = 8;
   long long clock = 0;
   unsigned int seed = 1;
-  struct Event { int at; int kind; double note; double velocity; };
+  struct Event { int at; int kind; double note; double velocity; bool slide; };
   Event events[64];
   int eventCount = 0;
   /** A drawn spectrum, by Spectrum slot. Copied: the host's memory is not ours. */
@@ -228,7 +238,11 @@ struct Device : pd_own::Device<ids::kCount, 2> {
   void pd_note_off(float note) { pd_note_off_at(note, 0); }
 
   void pd_note_on_at(float note, float velocity, int offset) {
-    if (eventCount < 64) events[eventCount++] = { offset > 0 ? offset : 0, 1, note, velocity };
+    if (eventCount < 64) events[eventCount++] = { offset > 0 ? offset : 0, 1, note, velocity, false };
+  }
+  void pd_note_slide(float note, float velocity) { pd_note_slide_at(note, velocity, 0); }
+  void pd_note_slide_at(float note, float velocity, int offset) {
+    if (eventCount < 64) events[eventCount++] = { offset > 0 ? offset : 0, 1, note, velocity, true };
   }
 
   void pd_note_off_at(float note, int offset) {
@@ -241,7 +255,7 @@ struct Device : pd_own::Device<ids::kCount, 2> {
       }
       return;
     }
-    if (eventCount < 64) events[eventCount++] = { offset > 0 ? offset : 0, 0, note, 0 };
+    if (eventCount < 64) events[eventCount++] = { offset > 0 ? offset : 0, 0, note, 0, false };
   }
 
   void pd_bend(float semitones) { params.bend = isPlayable(semitones) ? semitones : 0.0; }
@@ -330,7 +344,24 @@ struct Device : pd_own::Device<ids::kCount, 2> {
     return &voices[0];
   }
 
-  void startNote(double note, double velocity) {
+  /** The voice a slide carries on: the one that started last, while it is still sounding. */
+  Voice* slideVoice() {
+    Voice* last = nullptr;
+    for (int i = 0; i < voiceCount; ++i) {
+      Voice& v = voices[i];
+      if (v.active() && (!last || v.age > last->age)) last = &v;
+    }
+    return last;
+  }
+
+  void startNote(double note, double velocity, bool slide = false) {
+    Voice* carried = slide ? slideVoice() : nullptr;
+    if (carried) {
+      carried->slideTo(note);
+      carried->holds = 1;
+      carried->age = clock++;
+      return;
+    }
     Voice* voice = allocate(note);
     const double from = voice->active() && voice->note >= 0 ? midiToHz(voice->note) : -1;
     const int holds = voice->active() && voice->note == note && !voice->releasing ? voice->holds + 1 : 1;
@@ -367,7 +398,7 @@ struct Device : pd_own::Device<ids::kCount, 2> {
     while (at < frames) {
       while (next < eventCount && events[next].at <= at) {
         const Event& e = events[next++];
-        if (e.kind == 1) startNote(e.note, e.velocity);
+        if (e.kind == 1) startNote(e.note, e.velocity, e.slide);
         else stopNote(e.note);
       }
       const int until = next < eventCount && events[next].at < frames ? events[next].at : frames;

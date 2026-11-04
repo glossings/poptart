@@ -40,7 +40,7 @@ test('only a real env( call is found', () => {
 });
 
 test('a missing setting reads as env()\'s own default', () => {
-  assert.deepEqual(ENV_DEFAULTS, (({ attack, decay, sustain, release, curve }) => ({ attack, decay, sustain, release, curve }))(env().envIR));
+  assert.deepEqual(ENV_DEFAULTS, (({ attack, decay, sustain, release, curve, min, max }) => ({ attack, decay, sustain, release, curve, min, max }))(env().envIR));
   const code = 'gain(env({ attack: 0.05, retrigger: true }))';
   const read = readEnvCall(code, at(code));
   assert.deepEqual(read.values, { ...ENV_DEFAULTS, ...ENV_FLAGS, attack: 0.05, retrigger: true });
@@ -128,4 +128,10 @@ test('retrigger is an on/off setting, on unless the call says false', () => {
   assert.equal(readEnvCall(code, at(code)).values.retrigger, true);
   const named = 'env({ retrigger: r })';
   assert.deepEqual(write(named, { retrigger: false }).skipped, ['retrigger']);
+});
+
+test('min and max: the range it moves over, written like any other setting, the same as .range()', () => {
+  assert.deepEqual([env({ min: 200, max: 2000 }).envIR.min, env({ min: 200, max: 2000 }).envIR.max], [200, 2000]);
+  const code = 'gain(env({ attack: 0.01 }))';
+  assert.equal(write(code, { min: 0.2, max: 0.9 }).code, 'gain(env({ attack: 0.01, min: 0.2, max: 0.9 }))');
 });

@@ -9,6 +9,7 @@
 #include "own/dsp/history.h"
 #include "own/dsp/biquad.h"
 #include "own/dsp/dynamics.h"
+#include "own/dsp/filters.h"
 #include "pd-own-ids.h"
 
 namespace pd_Multiband {
@@ -33,6 +34,7 @@ struct Device : pd_own::Device<ids::kCount> {
   Crossover lowX[2];
   Crossover highX[2];
   Detector detectors[kBands];
+  DcBlocker dcs[2];   // the compressed signal's output coupling (see kDynamicsDcHz)
   double lastLow = -1, lastHigh = -1;
   double lastAttack[kBands] = { -1, -1, -1 };
   double lastRelease[kBands] = { -1, -1, -1 };
@@ -60,6 +62,7 @@ struct Device : pd_own::Device<ids::kCount> {
     for (auto& x : lowX) x.init(sr);
     for (auto& x : highX) x.init(sr);
     for (auto& d : detectors) d.init(sr);
+    for (auto& d : dcs) { d.init(sr, kDynamicsDcHz); d.reset(); }
     lastLow = -1;
     lastHigh = -1;
     for (int b = 0; b < kBands; ++b) {
@@ -144,8 +147,8 @@ struct Device : pd_own::Device<ids::kCount> {
       }
       const double mix = ctl(ids::mix, i);
       const double outGain = dbToGain(ctl(ids::output, i));
-      outl[i] = static_cast<float>((l + (sumL - l) * mix) * outGain);
-      outr[i] = static_cast<float>((r + (sumR - r) * mix) * outGain);
+      outl[i] = static_cast<float>((l + (dcs[0].next(sumL) - l) * mix) * outGain);
+      outr[i] = static_cast<float>((r + (dcs[1].next(sumR) - r) * mix) * outGain);
     }
     for (int b = 0; b < kBands; ++b) {
       levelHistory[b].push(levels[b]);
@@ -155,6 +158,7 @@ struct Device : pd_own::Device<ids::kCount> {
     if (frames > 0 && !isPlayable(outl[frames - 1])) {
       for (auto& x : lowX) x.reset();
       for (auto& x : highX) x.reset();
+      for (auto& d : dcs) d.reset();
     }
     // Checked on their own: a NaN that is gone from the output by the end of the block can
     // still be sitting in a detector, and it stays there.

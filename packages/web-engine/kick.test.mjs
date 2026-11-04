@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { KICK, KICK_PRESETS, KickSynth, kickGateAt, kickDrawX, kickLevelAt } from './src/devices/kick.mjs';
+import { KICK, KICK_PRESETS, KickSynth, kickGateAt, kickDrawX, kickLevelAt, kickPitchY } from './src/devices/kick.mjs';
+import { parseShapePoints, sampleShapeTable } from '../pattern-core/src/shape.mjs';
 import { midiToHz } from './src/dsp/voice.mjs';
 import { fft } from './src/dsp/fft.mjs';
 
@@ -68,11 +69,17 @@ function harmonicDb(x, f, k, from, to) {
 
 const quiet = { click: 0, tone: 1 };
 
-test('the sweep settles on the note, by the end of its fixed curve', () => {
+/** A Pitch Env table as the engine sends it, from breakpoints (a level of `n` is on the note). */
+const pitchTable = (points) => Float32Array.from(sampleShapeTable(parseShapePoints(points), 256, true));
+/** A drawn curve that is the note the whole way: the hit at the pitch it is played on. */
+const onNote = { pitchenv: 1 };
+const onNoteShapes = [{ param: 'pitchenv', slot: 1, table: pitchTable('0,n 1,n') }];
+
+test('the fixed curve settles on f0, whatever note is played', () => {
   for (const note of [24, 29, 36, 45]) {
     const out = render({ ...quiet, decay: 1 }, { hits: [{ frame: 0, note, velocity: 1 }] });
     const settled = pitchBetween(out, 0.12, 0.3);
-    assert.ok(Math.abs(settled / midiToHz(note) - 1) < 0.01, `note ${note}: settled at ${settled.toFixed(2)} Hz`);
+    assert.ok(Math.abs(settled / midiToHz(29) - 1) < 0.01, `note ${note}: settled at ${settled.toFixed(2)} Hz`);
   }
 });
 
@@ -133,7 +140,7 @@ test('Decay is when the level reaches zero, and Decay Curve keeps the belly', ()
 
 test('Drive squares the body off, with the circuit\'s even harmonics', () => {
   const f = midiToHz(36);
-  const at = (drive) => render({ ...quiet, drive, decay: 4, dcurve: 1 }, { hits: [{ frame: 0, note: 36, velocity: 1 }] });
+  const at = (drive) => render({ ...quiet, ...onNote, drive, decay: 4, dcurve: 1 }, { shapes: onNoteShapes, hits: [{ frame: 0, note: 36, velocity: 1 }] });
   const clean = at(0);
   const hard = at(1);
   const fitted = at(0.32);
@@ -165,25 +172,54 @@ test('a hit plays out whatever its note length', () => {
 });
 
 test('velocity scales the hit', () => {
-  const loud = render({ ...quiet });
-  const soft = render({ ...quiet }, { hits: [{ frame: 0, note: 29, velocity: 0.5 }] });
+  // With no click and no sweep, a soft hit is the loud one quieter.
+  const loud = render({ ...quiet, sweep: 0 });
+  const soft = render({ ...quiet, sweep: 0 }, { hits: [{ frame: 0, note: 29, velocity: 0.5 }] });
   assert.ok(Math.abs(rmsOf(soft, 0, 0.3) / rmsOf(loud, 0, 0.3) - 0.5) < 1e-6);
 });
 
-test('a drawn curve is the pitch over time, Sweep deep, on a square-root time axis', () => {
-  // Half of Sweep up for the first 100 ms, then the note: two octaves at a Sweep of 48.
-  const table = Float32Array.from({ length: 256 }, (_, i) => (i / 255 < kickDrawX(0.1) ? 0.5 : 0));
+test('a soft hit is rounder and starts lower, and a drawn curve plays as drawn whatever the velocity', () => {
+  const at = (velocity) => ({ hits: [{ frame: 0, note: 29, velocity }] });
+  // The click is scaled a second time: half the velocity is about a quarter of the click.
+  const settings = { sweep: 0, drive: 0, tone: 1, click: 1, decay: 0.05 };
+  const clickOf = (velocity) => {
+    const x = render(settings, { ...at(velocity), frames: 4096 });
+    const body = render({ ...settings, click: 0 }, { ...at(velocity), frames: 4096 });
+    return rmsOf(x.map((v, i) => v - body[i]), 0, 0.005);
+  };
+  const ratio = clickOf(0.5) / clickOf(1);
+  assert.ok(ratio > 0.18 && ratio < 0.32, `click at half velocity ${ratio.toFixed(3)} of full`);
+  // The fixed curve sweeps less: at no velocity, KICK_SOFT_SWEEP less.
+  const start = (velocity) => 12 * Math.log2(pitchBetween(render({ ...quiet, sweep: 36 }, at(velocity)), 0.001, 0.015) / midiToHz(29));
+  assert.ok(start(0.3) < start(1) - 4, `soft hit started ${start(0.3).toFixed(1)} st up, loud ${start(1).toFixed(1)} st`);
+  // At full velocity, nothing has changed: Sweep is still how far the hit starts above f0.
+  assert.ok(start(1) > 28 && start(1) < 36);
+  // A drawn curve's pitches are its own.
+  const shapes = [{ param: 'pitchenv', slot: 1, table: pitchTable(`0,${kickPitchY(200)} 0.5,${kickPitchY(200)} 1,n`) }];
+  const drawn = (velocity) => pitchBetween(render({ ...quiet, pitchenv: 1, decay: 1 }, { shapes, ...at(velocity) }), 0.01, 0.15);
+  assert.ok(Math.abs(drawn(0.3) / drawn(1) - 1) < 1e-3);
+});
+
+test('a drawn curve is pitches over Length, on a linear time axis', () => {
+  // 200 Hz for the first 100 ms of the default 400 ms, then the note.
+  const y = kickPitchY(200);
+  const step = pitchTable(`0,${y} ${kickDrawX(0.1, 0.4) - 0.002},${y} ${kickDrawX(0.1, 0.4)},n 1,n`);
+  const shapes = [{ param: 'pitchenv', slot: 1, table: step }];
   for (const note of [29, 41]) {
-    const out = render({ ...quiet, decay: 1, pitchenv: 1, sweep: 48 }, { shapes: [{ param: 'pitchenv', slot: 1, table }], hits: [{ frame: 0, note, velocity: 1 }] });
+    const out = render({ ...quiet, decay: 1, pitchenv: 1 }, { shapes, hits: [{ frame: 0, note, velocity: 1 }] });
     const early = pitchBetween(out, 0.01, 0.09);
     const late = pitchBetween(out, 0.12, 0.3);
-    assert.ok(Math.abs(early / (4 * midiToHz(note)) - 1) < 0.02, `note ${note}: two octaves up early, at ${early.toFixed(1)} Hz`);
+    assert.ok(Math.abs(early / 200 - 1) < 0.01, `note ${note}: 200 Hz early, whatever the note, at ${early.toFixed(1)} Hz`);
     assert.ok(Math.abs(late / midiToHz(note) - 1) < 0.01, `note ${note}: on the note after 100 ms, at ${late.toFixed(1)} Hz`);
   }
-  // Sweep is the drawn curve's depth: at 24 the same drawing is one octave up.
-  const shallow = render({ ...quiet, decay: 1, pitchenv: 1, sweep: 24 }, { shapes: [{ param: 'pitchenv', slot: 1, table }] });
-  const early = pitchBetween(shallow, 0.01, 0.09);
-  assert.ok(Math.abs(early / (2 * midiToHz(29)) - 1) < 0.02, `an octave up at Sweep 24, at ${early.toFixed(1)} Hz`);
+  // Length stretches the curve: at 1600 ms the first pitch lasts 400 ms.
+  const long = render({ ...quiet, decay: 1, pitchenv: 1, length: 1600 }, { shapes });
+  assert.ok(Math.abs(pitchBetween(long, 0.12, 0.3) / 200 - 1) < 0.01, 'still 200 Hz at 300 ms');
+  // With no point on the note, the note changes nothing; nor does Sweep, which is the fixed curve's.
+  const fixedPitch = [{ param: 'pitchenv', slot: 1, table: pitchTable(`0,${kickPitchY(300)} 0.3,${kickPitchY(50)} 1,${kickPitchY(50)}`) }];
+  const hit = (note, sweep = 31) => render({ ...quiet, pitchenv: 1, sweep }, { shapes: fixedPitch, hits: [{ frame: 0, note, velocity: 1 }], frames: 8192 });
+  assert.deepEqual(hit(29), hit(41));
+  assert.deepEqual(hit(29, 0), hit(29, 48));
   // A slot with nothing drawn in it plays the fixed curve.
   assert.deepEqual(render({ ...quiet, pitchenv: 3 }), render({ ...quiet }));
 });
@@ -202,7 +238,7 @@ test('a drawn amp curve is the level over the hit, stretched over Decay', () => 
   assert.deepEqual(drawn(0), drawn(1));
   // Pitch Env and Amp Env each keep their own slot 1.
   const synth = new KickSynth(SR);
-  const flat = Float32Array.from({ length: 256 }, () => 0);
+  const flat = pitchTable('0,0.1 1,0.1');
   const both = render({ ...quiet, decay: 0.6, ampenv: 1, pitchenv: 1, sweep: 0 }, { synth, shapes: [{ param: 'pitchenv', slot: 1, table: flat }, { param: 'ampenv', slot: 1, table }] });
   assert.ok(rmsOf(both, 0.4, 0.5) < rmsOf(both, 0.1, 0.25) * 0.01, 'the amp curve was not overwritten by the pitch one');
 });
@@ -306,27 +342,36 @@ test('the Pitch Env picker heads the sweep picture, a graph labeled for the note
   const figs = panel.sections.flatMap((s) => s.figures);
   assert.deepEqual(figs.map((f) => [f.kind, (f.widgets ?? []).map((w) => w.id)]), [['hitpitch', ['pitchenv']], ['hitlevel', ['ampenv']]]);
 
+  // Hertz up, on the drawn curve's own log axis; the fixed curve over its first 400 ms.
   const [before] = buildFigures(KICK, {});
-  assert.equal(before.grid.y[0].label, '44 Hz f0', 'f0 before anything has played');
+  assert.deepEqual(before.grid.y.map((t) => t.label), ['50 Hz', '200 Hz', '1.0 kHz', '5.0 kHz']);
+  assert.ok(Math.abs(before.grid.y[0].at - kickPitchY(50)) < 1e-9);
+  // Time runs straight across, with no label crowding the one before.
+  assert.deepEqual(before.grid.x.map((t) => [t.label, t.at]), [['50 ms', 0.125], ['100 ms', 0.25], ['200 ms', 0.5], ['400 ms', 1]]);
+  assert.ok(Math.abs(before.tailHz / midiToHz(29) - 1) < 1e-3, 'the fixed curve settles on f0');
+  assert.equal(before.shapeAxes.noteName, 'f0', 'a point on the note is pictured at f0 before anything has played');
   const synth = new KickSynth(SR);
   render({}, { synth, hits: [{ frame: 0, note: 33, velocity: 1 }], frames: 1024 });
   const [after] = buildFigures(KICK, {}, { report: synth.report() });
-  assert.equal(after.grid.y[0].label, '55 Hz a0');
-  // The editor's axis is a drawn curve's own: Sweep at the top.
-  assert.equal(after.shapeAxes.grid.y.at(-1).at, 1);
-  assert.equal(after.shapeAxes.grid.y.at(-1).label, '330 Hz');
-  assert.deepEqual(after.grid.x.map((t) => t.label), ['10 ms', '25 ms', '50 ms', '100 ms', '200 ms', '400 ms']);
+  assert.equal(after.shapeAxes.noteName, 'a0');
+  assert.ok(Math.abs(after.tailHz / midiToHz(29) - 1) < 1e-3, 'and the fixed curve still settles on f0');
   // The fixed curve follows Sweep, and reads as the hit plays: starting just under it.
-  const peak = (sweep) => Math.max(...buildFigures(KICK, { sweep })[0].points.map((p) => p.y)) * 48;
+  const peak = (sweep) => 12 * Math.log2(buildFigures(KICK, { sweep })[0].startHz / midiToHz(29));
   assert.ok(peak(36) > peak(18) * 1.8 && peak(36) < 36, `peaks ${peak(18).toFixed(1)}, ${peak(36).toFixed(1)} st`);
-  // A drawn curve is drawn Sweep deep: turning Sweep down flattens it.
-  const ramp = Array.from({ length: 256 }, (_, i) => 1 - i / 255);
+  // A drawn curve is drawn as it plays, over Length; Sweep does nothing to it.
+  const ramp = sampleShapeTable(parseShapePoints('0,0.6 1,0.2'), 256, true);
   const shapes = { pitchenv: { 2: { name: 'down', points: ramp } } };
   const [drawn] = buildFigures(KICK, { pitchenv: 2, sweep: 48 }, { shapes });
   assert.equal(drawn.curveName, 'down');
-  assert.ok(Math.abs(drawn.points[96].y - (1 - 96 / 191)) < 0.01);
-  const [half] = buildFigures(KICK, { pitchenv: 2, sweep: 24 }, { shapes });
-  assert.ok(Math.abs(half.points[96].y - (1 - 96 / 191) / 2) < 0.01);
+  assert.ok(Math.abs(drawn.points[96].y - (0.6 - 0.4 * (96 / 191))) < 0.01);
+  assert.deepEqual(buildFigures(KICK, { pitchenv: 2, sweep: 0 }, { shapes })[0].points, drawn.points);
+  assert.deepEqual(buildFigures(KICK, { pitchenv: 2, length: 1000 }, { shapes })[0].grid.x.map((t) => t.label).at(-1), '1000 ms');
+  // A point on the note is drawn at the note last played.
+  const tail = sampleShapeTable(parseShapePoints('0,0.5 0.5,n 1,n'), 256, true);
+  const [onIt] = buildFigures(KICK, { pitchenv: 1 }, { shapes: { pitchenv: { 1: { name: 'tail', points: tail } } }, report: { note: 45 } });
+  assert.ok(Math.abs(onIt.tailHz / midiToHz(45) - 1) < 1e-3, `the tail at ${onIt.tailHz.toFixed(1)} Hz`);
+  // The body is drawn behind the curve, and dies away with the level.
+  assert.ok(Math.max(...drawn.wave.slice(0, 200).map(Math.abs)) > 0.5);
   // The editor is offered kick curves to start from, not LFO shapes.
   assert.deepEqual(Object.keys(drawn.presets), ['fixed', 'snap', 'glide', 'two-stage', 'linear']);
 });
@@ -356,6 +401,8 @@ test('controls that do nothing in a mode are not on the panel in it', async () =
   const ids = (values) => buildPanel(KICK, values).sections.flatMap((s) => s.widgets.map((w) => w.id));
   assert.ok(ids({}).includes('dcurve') && ids({}).includes('clicktone') && ids({}).includes('clickpitch'));
   assert.ok(!ids({ ampenv: 1 }).includes('dcurve'), 'Decay Curve goes with a drawn Amp Env');
+  assert.ok(ids({}).includes('sweep') && !ids({}).includes('length'), 'Sweep is the fixed curve\'s');
+  assert.ok(!ids({ pitchenv: 1 }).includes('sweep') && ids({ pitchenv: 1 }).includes('length'), 'Length is a drawn curve\'s');
   const sampled = ids({ clicksample: 1 });
   assert.ok(!sampled.includes('clicktone'), 'Click Tone goes with a click sample');
   // Click Pitch stays, read in semitones.
@@ -394,7 +441,7 @@ test('the presets set controls the Kick has, inside their ranges', () => {
 test('a high, driven note does not alias', () => {
   const note = 84;
   const f = midiToHz(note);
-  const x = render({ ...quiet, sweep: 0, drive: 1, decay: 4, dcurve: 1 }, { hits: [{ frame: 0, note, velocity: 1 }] });
+  const x = render({ ...quiet, ...onNote, drive: 1, decay: 4, dcurve: 1 }, { shapes: onNoteShapes, hits: [{ frame: 0, note, velocity: 1 }] });
   const N = 8192;
   const re = new Float64Array(N);
   const im = new Float64Array(N);

@@ -665,3 +665,8 @@ test('mutate is set from the menu without opening the row: written, changed, and
   assert.deepEqual(said('shiftreg(16, 0.05)'), { value: 0.05 });
   assert.deepEqual(said('shiftreg(16, "<0 0.1>")'), { driven: true });
 });
+
+test('punchcard draws a note moved by .octave() where it plays', () => {
+  const sig = core.note('c3 c3 c3').octave('0 1 -1');
+  assert.deepEqual(core.displayWindow({ kind: 'punchcard', sig }, 0, 1).events.map((e) => e[2]), [60, 72, 48]);
+});

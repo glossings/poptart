@@ -794,6 +794,7 @@ async function withShapes() {
     looksLikeShapeData: core.looksLikeShapeData,
     parseShapePoints: core.parseShapePoints,
     sampleShape: core.sampleShape,
+    sampleShapeTable: core.sampleShapeTable,
     lookupShape: (name) => defined.get(name) ?? null,
   };
   return { ...made, core, defined };

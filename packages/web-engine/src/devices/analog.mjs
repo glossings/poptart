@@ -19,11 +19,10 @@
 // middle C) and with the filter envelope (Env Amount, in semitones, either way); Velocity sets how
 // much a note's velocity scales that envelope, so a harder note opens it further.
 //
-// THE FILTER is a circuit model from dsp/analog.mjs, the same ones the Filter device's analog
-// modes run: Filter Type picks the model (ANALOG_MODELS, in Filter's order), Drive is the level
-// into it, Morph the response of the multimode ones. A voice talks to it only through
-// setModel, setCutoff, setResonance, setDrive, setMorph, process and reset; the model has its own
-// saturation and its own oversampling.
+// THE FILTER is the Filter device's own (dsp/filters.mjs's MultiFilter): Filter Type is any of its
+// modes, in its order - the classical shapes, the comb, allpass and formant, and the analog circuit
+// models - Drive is the level into a circuit, Morph the response of the multimode ones. A circuit
+// has its own saturation and its own oversampling.
 //
 // MONO. With Voices at one the synth is a monosynth: a note played while another is held slides
 // to it over Glide without starting either envelope again, and letting go of it slides back to the
@@ -38,8 +37,8 @@ import { defineDevice } from '../descriptor.mjs';
 import { at } from '../dsp/control.mjs';
 import { Adsr } from '../dsp/adsr.mjs';
 import { BlepLine } from '../dsp/blep.mjs';
-import { ANALOG_MODELS, ANALOG_MORPHING, AnalogFilter } from '../dsp/analog.mjs';
-import { FILTER_MODES } from '../dsp/filters.mjs';
+import { ANALOG_MORPHING } from '../dsp/analog.mjs';
+import { DRIVEN_MODES, FILTER_MODES, MultiFilter } from '../dsp/filters.mjs';
 import { midiToHz } from '../dsp/voice.mjs';
 
 /** The oscillator shapes, in the order the controls list them. */
@@ -71,17 +70,16 @@ const ANALOG_TWO_PI = 2 * Math.PI;
 
 const analogClamp01 = (x) => Math.min(1, Math.max(0, x));
 
-/** The Filter Type options: the circuit models, in the Filter device's order. */
-export const ANALOG_FILTER_TYPES = ANALOG_MODELS;
+/** The Filter Type options: every mode the Filter device has, in its order. */
+export const ANALOG_FILTER_TYPES = FILTER_MODES;
 
-/** A filter type as the Filter device's mode of the same circuit, for the panel's picture. */
+/** A filter type as the Filter device's mode, for the panel's picture: the same one. */
 export function analogResponse(type) {
-  const t = Math.min(ANALOG_MODELS.length - 1, Math.max(0, Math.round(type)));
-  return FILTER_MODES.indexOf(ANALOG_MODELS[t]);
+  return Math.min(FILTER_MODES.length - 1, Math.max(0, Math.round(type)));
 }
 
 /** A filter type's index by name, for the presets. */
-const ANALOG_TYPE = Object.freeze(Object.fromEntries(ANALOG_MODELS.map((name, i) => [name, i])));
+const ANALOG_TYPE = Object.freeze(Object.fromEntries(FILTER_MODES.map((name, i) => [name, i])));
 
 // --- the descriptor ---------------------------------------------------------------------------
 
@@ -132,12 +130,13 @@ export const ANALOG = defineDevice({
       description: 'A square an octave below osc 1.' },
     { id: 'noise', name: 'Noise', min: 0, max: 1, default: 0, group: ANALOG_MIXER },
 
-    { id: 'filter.type', name: 'Filter Type', default: 0, options: [...ANALOG_FILTER_TYPES], rate: 'k', group: ANALOG_FILTER_GROUP,
-      description: 'The circuit each voice plays through, as the Filter device\'s modes of the same names.' },
+    { id: 'filter.type', name: 'Filter Type', default: FILTER_MODES.indexOf('ladder'), options: [...ANALOG_FILTER_TYPES], rate: 'k', group: ANALOG_FILTER_GROUP,
+      description: 'The filter each voice plays through: any of the Filter device\'s modes.' },
     { id: 'cutoff', name: 'Cutoff', min: 20, max: 20000, default: 1500, unit: 'Hz', curve: 'exp', group: ANALOG_FILTER_GROUP,
       description: 'Where the filter sits for middle C with the envelope closed.' },
     { id: 'resonance', name: 'Resonance', min: 0, max: 1, default: 0.2, group: ANALOG_FILTER_GROUP },
     { id: 'drive', name: 'Drive', min: 1, max: 8, default: 1, unit: 'x', group: ANALOG_FILTER_GROUP,
+      active: { param: 'filter.type', is: [...DRIVEN_MODES] },
       description: 'Level into the circuit. Higher saturates its stages, and the resonance with them.' },
     { id: 'morph', name: 'Morph', min: 0, max: 1, default: 0, group: ANALOG_FILTER_GROUP,
       active: { param: 'filter.type', is: [...ANALOG_MORPHING] },
@@ -359,7 +358,7 @@ class AnalogVoice {
   constructor(sampleRate) {
     this.sampleRate = sampleRate;
     this.line = new BlepLine();
-    this.filter = new AnalogFilter(sampleRate);
+    this.filter = new MultiFilter(sampleRate);
     this.ampEnv = new Adsr(sampleRate);
     this.filterEnv = new Adsr(sampleRate);
     this.random = new AnalogRandom();
@@ -418,6 +417,16 @@ class AnalogVoice {
     this.target = note;
   }
 
+  /** A slide into `note` (see Sig#slide): as legato, and a voice letting go is taken back up. */
+  slideTo(note) {
+    this.slide(note);
+    if (this.releasing) {
+      this.releasing = false;
+      this.ampEnv.resume();
+      this.filterEnv.resume();
+    }
+  }
+
   noteOff() {
     this.releasing = true;
     this.ampEnv.gateOff();
@@ -429,7 +438,7 @@ class AnalogVoice {
     const p = s.values;
     const sr = this.sampleRate;
     const filter = this.filter;
-    filter.setModel(s.type);
+    const mode = s.type;
     const line = this.line;
     const shape1 = s.shape1;
     const shape2 = s.shape2;
@@ -495,11 +504,10 @@ class AnalogVoice {
       const v = at(p.velocity, j);
       const amount = at(p.envamount, j) * (1 - v + v * velocity);
       const semis = at(p.keytrack, j) * (note - ANALOG_TRACK_NOTE) + amount * fenv;
-      filter.setResonance(at(p.resonance, j));
-      filter.setDrive(at(p.drive, j));
-      filter.setMorph(at(p.morph, j));
-      filter.setCutoff(at(p.cutoff, j) * Math.pow(2, semis / 12));
-      y = filter.process(x);
+      filter.drive = at(p.drive, j);
+      filter.morph = at(p.morph, j);
+      filter.setCutoff(at(p.cutoff, j) * Math.pow(2, semis / 12), at(p.resonance, j), mode);
+      y = filter.next(x, mode);
 
       const out = y * this.ampEnv.next() * velocity * at(p.level, j) * ANALOG_VOICE_GAIN;
       outL[i] += out;
@@ -570,7 +578,7 @@ export class AnalogSynth {
     }
   }
 
-  queueNoteOn(note, velocity, offset = 0) { this.events.push({ at: Math.max(0, offset | 0), kind: 1, note, velocity }); }
+  queueNoteOn(note, velocity, offset = 0, slide = false) { this.events.push({ at: Math.max(0, offset | 0), kind: 1, note, velocity, slide }); }
   queueNoteOff(note, offset = 0) { this.events.push({ at: Math.max(0, offset | 0), kind: 0, note, velocity: 0 }); }
 
   allNotesOff() {
@@ -603,8 +611,29 @@ export class AnalogSynth {
     return free ?? oldestReleasing ?? oldest ?? this.voices[0];
   }
 
-  startNote(note, velocity) {
+  /** The voice a slide carries on: the one that started last, while it is still sounding. */
+  _slideVoice() {
+    let last = null;
+    for (let i = 0; i < this.voiceCount; i++) {
+      const v = this.voices[i];
+      if (v.active && (!last || v.age > last.age)) last = v;
+    }
+    return last;
+  }
+
+  startNote(note, velocity, slide = false) {
     this.seed = (this.seed * 1664525 + 1013904223) >>> 0;
+    const carried = slide ? this._slideVoice() : null;
+    if (carried) {
+      if (this.voiceCount === 1) {
+        if (this.held.length >= ANALOG_HELD) this.held.shift();
+        this.held.push(note);
+      }
+      carried.slideTo(note);
+      carried.holds = 1;
+      carried.age = this.clock++;
+      return;
+    }
     if (this.voiceCount === 1) {
       const voice = this.voices[0];
       const legato = this.held.length > 0 && voice.active && !voice.releasing;
@@ -666,7 +695,7 @@ export class AnalogSynth {
     s.shape1 = Math.min(last, Math.max(0, Math.round(analogEndOf(v['osc1.shape']))));
     s.shape2 = Math.min(last, Math.max(0, Math.round(analogEndOf(v['osc2.shape']))));
     s.sync = analogEndOf(v.sync) >= 0.5;
-    s.type = Math.min(ANALOG_MODELS.length - 1, Math.max(0, Math.round(analogEndOf(v['filter.type']))));
+    s.type = Math.min(FILTER_MODES.length - 1, Math.max(0, Math.round(analogEndOf(v['filter.type']))));
     const glide = analogEndOf(v.glide);
     s.glideK = glide > 0 ? 1 - Math.exp(-1 / (glide * this.sampleRate)) : 1;
     s.attack = analogEndOf(v['ampenv.attack']);
@@ -695,7 +724,7 @@ export class AnalogSynth {
     while (at0 < count) {
       while (next < events.length && events[next].at <= at0) {
         const e = events[next++];
-        if (e.kind === 1) this.startNote(e.note, e.velocity); else this.stopNote(e.note);
+        if (e.kind === 1) this.startNote(e.note, e.velocity, e.slide); else this.stopNote(e.note);
       }
       const until = next < events.length ? Math.min(count, events[next].at) : count;
       const n = until - at0;

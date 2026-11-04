@@ -179,6 +179,16 @@ export class WavetableVoice {
     this.ampEnv.gateOn(true);
   }
 
+  /** A slide into `note`: the pitch glides there over Glide, the envelopes carry on (see Sig#slide). */
+  slideTo(note) {
+    this.note = note;
+    this.targetHz = midiToHz(note);
+    if (this.releasing) {
+      this.releasing = false;
+      this.ampEnv.resume();
+    }
+  }
+
   noteOff() {
     this.releasing = true;
     this.ampEnv.gateOff();

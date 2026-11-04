@@ -4487,6 +4487,7 @@ function wireEngine() {
     looksLikeShapeData: patternCore.looksLikeShapeData,
     parseShapePoints: patternCore.parseShapePoints,
     sampleShape: patternCore.sampleShape,
+    sampleShapeTable: patternCore.sampleShapeTable,
     lookupShape: patternCore.lookupShape,
   };
   // The wrapper's own warnings (a word given to a plugin parameter) go where pattern warnings go.
@@ -4804,7 +4805,7 @@ function syncUserStringMethods() {
 const BUILDER_NAMES = ['Signal', 'n', 'note', 'mini', 's', 'se', 'sr', 'sp', 'say', 'synth', 'sine', 'saw', 'isaw', 'tri', 'square', 'rand', 'perlin', 'lfo', 'env', 'dur', 'midicc', 'midikeys', 'osc', 'macro', 'choose', 'cat', 'seq', 'irand', 'midi', 'audio', 'input', 'group', 'copy', 'pcopy', 'pianoroll', 'clips', 'auto',
   // Every control method also as a top-level control builder - speed("-1"), begin(0.5), clip(2) -
   // so a combinator can aim at one channel of a pattern it was handed: x.mul(speed("-1")).
-  'i', 'begin', 'end', 'loop', 'loopwrap', 'loopdir', 'speed', 'flip', 'stretch', 'fit', 'fitmode', 'slice', 'splice', 'splicemode', 'attack', 'decay', 'sustain', 'release', 'envscale', 'grain', 'vel', 'clip', 'nudge', 'swing', 'swinggrid', 'swingvel',
+  'i', 'begin', 'end', 'loop', 'loopwrap', 'loopdir', 'speed', 'flip', 'stretch', 'fit', 'fitmode', 'slice', 'splice', 'splicemode', 'attack', 'decay', 'sustain', 'release', 'envscale', 'grain', 'vel', 'clip', 'slide', 'octave', 'nudge', 'swing', 'swinggrid', 'swingvel',
   // The binops as top-level builders - a layer piece's own verb: .set(note(30), add(note(12)))
   // pins one voice and transposes the other.
   'add', 'sub', 'mul', 'div', 'mod', 'set',
@@ -4812,7 +4813,7 @@ const BUILDER_NAMES = ['Signal', 'n', 'note', 'mini', 's', 'se', 'sr', 'sp', 'sa
   'struct', 'hold', 'seg', 'segment', 'chord',
   // The editor's inline widgets: controls drawn in the code, and the displays of the master output
   // (a display ON a pattern is a method). See pattern-core's widgets.mjs.
-  'slider', 'knob', 'toggle', 'button', 'xy', 'steps', 'sliders', 'matrix', 'shiftreg', 'scope', 'spectrum', 'waveform', 'imager', 'meter', 'punchcard', 'chroma',
+  'slider', 'knob', 'toggle', 'button', 'xy', 'steps', 'sliders', 'matrix', 'shiftreg', 'acid', 'scope', 'spectrum', 'waveform', 'imager', 'meter', 'punchcard', 'chroma',
   // Pure music-theory helpers (not signal builders, but handy when writing your own): note-name
   // -> MIDI, scale-degree -> MIDI, and the raw {rootMidi, intervals} of a scale name. Exposed by
   // name so a custom `Signal.prototype.chord = ...` can call them. Real in the browser prebake too

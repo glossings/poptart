@@ -58,9 +58,11 @@ import { FormantSynth } from '../web-engine/src/devices/formant.mjs';
 import { AdditiveSynth } from '../web-engine/src/devices/additive.mjs';
 import { ANALOG, ANALOG_FILTER_TYPES, AnalogSynth } from '../web-engine/src/devices/analog.mjs';
 import { KickSynth } from '../web-engine/src/devices/kick.mjs';
+import { parseShapePoints, sampleShapeTable } from '../pattern-core/src/shape.mjs';
 import { HatSynth } from '../web-engine/src/devices/hat.mjs';
 import { DrumSynth } from '../web-engine/src/devices/drum.mjs';
 import { PluckSynth } from '../web-engine/src/devices/pluck.mjs';
+import { AcidSynth } from '../web-engine/src/devices/acid.mjs';
 import { LpgProcessor } from '../web-engine/src/devices/lpg.mjs';
 import { CrossoverProcessor } from '../web-engine/src/devices/crossover.mjs';
 import { FilterbankProcessor } from '../web-engine/src/devices/filterbank.mjs';
@@ -111,6 +113,7 @@ const PROCESSORS = {
   Hat: HatSynth,
   Drum: DrumSynth,
   Pluck: PluckSynth,
+  Acid: AcidSynth,
   LPG: LpgProcessor,
   Crossover: CrossoverProcessor,
   Filterbank: FilterbankProcessor,
@@ -213,7 +216,8 @@ function runNative(binary, { id, values, input, frames, notes = [], bpm = 120, k
   for (const one of samples) args.push('-S', `${one.param}:${one.slot}:${one.rate}:${one.channels ?? 1}:${one.frameLength ?? 0}:${one.file}`);
   for (const one of shapes) args.push('-H', `${one.param}:${one.slot}:${one.file}`);
   if (report) args.push('-R', report);
-  for (const n of notes) args.push('-n', `${n.frame}:${n.note}:${n.velocity}`);
+  // A note marked to slide is `:1` on the end, as /noteOn's third number says it.
+  for (const n of notes) args.push('-n', `${n.frame}:${n.note}:${n.velocity}${n.slide ? ':1' : ''}`);
   for (const one of moving) args.push('-A', `${one.param}:${one.file}`);
   args.push(...extra);
   const run = spawnSync(binary, args, { input: stdin, maxBuffer: 1 << 28 });
@@ -315,7 +319,7 @@ function runBrowserSynth(descriptor, { values, frames, notes, bpm, load = null, 
     // at the offset it is queued with.
     while (nextNote < notes.length && notes[nextNote].frame < at + n) {
       const one = notes[nextNote++];
-      if (one.velocity > 0) synth.queueNoteOn(one.note, one.velocity, one.frame - at);
+      if (one.velocity > 0) synth.queueNoteOn(one.note, one.velocity, one.frame - at, one.slide === true);
       else synth.queueNoteOff(one.note, one.frame - at);
     }
     left.fill(0);
@@ -481,6 +485,22 @@ const PINNED = {
     { voices: 1, glide: 0.03, drift: 1 },
     { voices: 1, glide: 0 },
     { voices: 2, glide: 0.05 },
+  ],
+  // Resonance at its top with every accent level, the square and a blend at both ends of its
+  // shape, the sweep's capacitor at both ends, the cutoff knob at both ends, and Drive.
+  Acid: [
+    { resonance: 1, accent: 1, envmod: 1, cutoff: 2394, sweep: 4 },
+    { resonance: 1, accent: 0, envmod: 0, cutoff: 314, decay: 2 },
+    { resonance: 0, accent: 1, sweep: 0.25, decay: 0.2 },
+    { waveform: 1, shape: -1, resonance: 0.8 },
+    { waveform: 1, shape: 1, tuning: 12 },
+    { waveform: 0.5, shape: 0.4, tuning: -12, drive: 1 },
+    { drive: 0.3, volume: 1, slide: 0.5 },
+    // Character: halfway, and all the way with the resonance at both ends and the accent stacking.
+    { character: 0.5, resonance: 0.7 },
+    { character: 1, resonance: 0, cutoff: 314 },
+    { character: 1, resonance: 1, accent: 1, envmod: 1, cutoff: 2394, sweep: 4 },
+    { character: 0.8, waveform: 1, resonance: 0.9, drive: 0.6 },
   ],
   // The ends of every part: the most sweep on the longest pulse, all-noise click, the most drive,
   // the softest tone with the thinnest tail, the shortest hit, a pure tick low and high, and a
@@ -890,6 +910,9 @@ const PATCHED = [
   { id: 'Spring', param: 'drive' },
   { id: 'Spring', param: 'shake' },
   { id: 'Pluck', param: 'level' },
+  { id: 'Acid', param: 'cutoff' },
+  { id: 'Acid', param: 'resonance' },
+  { id: 'Acid', param: 'character' },
 ];
 
 for (const { id, param } of PATCHED) {
@@ -1012,6 +1035,83 @@ test('Analog ends every note when Voices changes with notes held, the same on bo
   for (let i = BLOCK * 40 * 2; i < native.length; i++) tail = Math.max(tail, Math.abs(native[i]));
   assert.ok(tail < 1e-5, `Analog: still sounding (${tail}) after every note ended`);
 });
+
+// ---- a slide ------------------------------------------------------------------------------------
+//
+// A note marked to slide (pattern-core's Sig#slide) glides from the note that sounded last over the
+// synth's Glide and carries its envelopes on, overlapping or not, on every synth with a Glide. The
+// browser's side is spec'd in web-engine/slide.test.mjs; this holds the desktop's to it.
+
+const SLIDERS = ['FM', 'Wavetable', 'Formant', 'Additive', 'Analog', 'Acid'];
+const SLIDES = [
+  { what: 'sliding legato', notes: [
+    { frame: 0, note: 48, velocity: 0.9 },
+    { frame: BLOCK * 6 + 19, note: 55, velocity: 0.6, slide: true },
+    { frame: BLOCK * 8, note: 48, velocity: 0 },
+    { frame: BLOCK * 14 + 3, note: 55, velocity: 0 },
+  ] },
+  // The acid case: the note before has ended and is letting go, and the slide takes it back up.
+  { what: 'sliding into a note letting go', notes: [
+    { frame: 0, note: 48, velocity: 0.9 },
+    { frame: BLOCK * 6, note: 48, velocity: 0 },
+    { frame: BLOCK * 9 + 50, note: 53, velocity: 0.7, slide: true },
+    { frame: BLOCK * 16, note: 53, velocity: 0 },
+    { frame: BLOCK * 18 + 7, note: 60, velocity: 0.8, slide: true },
+    { frame: BLOCK * 22 + 90, note: 60, velocity: 0 },
+  ] },
+  { what: 'sliding with nothing sounding', notes: [
+    { frame: 77, note: 50, velocity: 0.9, slide: true },
+    { frame: BLOCK * 8, note: 50, velocity: 0 },
+  ] },
+  // The last note of the chord is the one carried on; a plain note beside a slide takes its own.
+  { what: 'sliding out of a chord', notes: [
+    { frame: 0, note: 48, velocity: 0.8 },
+    { frame: 0, note: 52, velocity: 0.8 },
+    { frame: 0, note: 55, velocity: 0.8 },
+    { frame: BLOCK * 5 + 33, note: 57, velocity: 0.7, slide: true },
+    { frame: BLOCK * 8, note: 60, velocity: 0.6 },
+    { frame: BLOCK * 8, note: 62, velocity: 0.6, slide: true },
+    { frame: BLOCK * 12, note: 48, velocity: 0 },
+    { frame: BLOCK * 12, note: 52, velocity: 0 },
+    { frame: BLOCK * 12, note: 55, velocity: 0 },
+    { frame: BLOCK * 12, note: 57, velocity: 0 },
+    { frame: BLOCK * 14, note: 60, velocity: 0 },
+    { frame: BLOCK * 14, note: 62, velocity: 0 },
+  ] },
+];
+
+for (const id of SLIDERS) {
+  test(`${id} slides a note the same on both engines`, { skip: compiler ? false : 'no clang++' }, () => {
+    const binary = buildHarness(devices);
+    const { device } = devices.find((d) => d.id === id);
+    const frames = BLOCK * 40;
+    const input = new Float32Array(frames * 2);
+    const at = (pin) => device.params.map((p) => (p.id in pin ? pin[p.id] : p.default));
+    const settings = [{ glide: 0.05 }, { glide: 0 }, { glide: 0.05, voices: 1 }, { glide: 0.02, voices: 2 }];
+    if (id === 'Wavetable') settings.push({ glide: 0.05, 'glide.mode': 1 }, { glide: 0, 'glide.mode': 1, voices: 1 });
+    for (const pin of settings) {
+      const values = at(pin);
+      for (const way of SLIDES) {
+        const what = `${way.what} at ${JSON.stringify(pin)}`;
+        const { rmsA } = compare(id, what,
+          runNative(binary, { id, values, input, frames, notes: way.notes }),
+          runBrowser(device, { values, input, frames, notes: way.notes, channels: 2 }));
+        assert.ok(rmsA > 1e-3, `${id} ${what}: nothing came out`);
+      }
+    }
+    // And the slide is heard: the same notes played plainly come out otherwise, but for a slide
+    // with nothing sounding, which is a plain note.
+    const values = at({ glide: 0.05 });
+    const plain = (notes) => notes.map(({ slide, ...n }) => n);
+    const differs = (a, b) => a.some((x, i) => Math.abs(x - b[i]) > 1e-3);
+    for (const way of SLIDES) {
+      const slid = runNative(binary, { id, values, input, frames, notes: way.notes });
+      const played = runNative(binary, { id, values, input, frames, notes: plain(way.notes) });
+      if (way.what === 'sliding with nothing sounding') assert.ok(!differs(slid, played), `${id}: a slide with nothing sounding is not a plain note`);
+      else assert.ok(differs(slid, played), `${id} ${way.what}: the slide made no difference`);
+    }
+  });
+}
 
 // ---- the Additive's partials, moved ------------------------------------------------------------
 //
@@ -1477,12 +1577,13 @@ test('the Kick plays a drawn pitch curve the same on both engines', { skip: comp
   const { device } = devices.find((d) => d.id === 'Kick');
   const pitchParam = device.params.findIndex((p) => p.id === 'pitchenv');
   const slot = device.params[pitchParam].options.length;
-  // A pitch that drops, bumps back up and settles on the note.
-  const sweep = Float32Array.from({ length: 256 }, (_, i) => Math.fround(Math.max(0, 0.7 * Math.exp(-i / 25) + 0.2 * Math.sin((Math.PI * i) / 200) * (i < 200))));
+  // A pitch that drops, bumps back up and settles on the note: the table the engine sends, the
+  // curve then each sample's share of the note (pattern-core's sampleShapeTable).
+  const sweep = Float32Array.from(sampleShapeTable(parseShapePoints('0,0.6 0.05,0.4,-2 0.12,0.45 0.3,n 1,n'), 256, true));
   const sweepFile = writeFile(path.join(WORK, 'Kick-sweep.f32'), sweep);
   const frames = BLOCK * 40;
   const notes = [{ frame: 9, note: 36, velocity: 1 }, { frame: BLOCK * 20 + 33, note: 41, velocity: 0.7 }];
-  for (const [what, change] of [['at the defaults', {}], ['short and driven', { decay: 0.06, drive: 1, dcurve: 0.2 }], ['shallow', { sweep: 7 }]]) {
+  for (const [what, change] of [['at the defaults', {}], ['short and driven', { decay: 0.06, drive: 1, dcurve: 0.2 }], ['stretched', { length: 1500 }]]) {
     const values = device.params.map((p, i) => (i === pitchParam ? slot : (p.id in change ? change[p.id] : p.default)));
     const native = runNative(binary, {
       id: 'Kick', values, input: new Float32Array(frames * 2), frames, notes,

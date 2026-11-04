@@ -32,7 +32,7 @@ import { SYNC_OPTIONS, isFree, syncedHz, syncedSeconds } from './dsp/sync.mjs';
 import { lfoValue } from './dsp/moddelay.mjs';
 import { lengthBeats } from './devices/looper.mjs';
 import { ADDITIVE_PARTIALS, aimPartials, nyquistFade, shapePartials } from './devices/additive.mjs';
-import { KICK_AMP_CURVES, KICK_DECAY_MAX, KICK_DRAW_SEC, KICK_FIGURE_NOTE, KICK_PITCH_CURVES, KICK_SWEEP_MAX_ST, KickSweep, kickDrawnAt, kickLevelAt, kickSweptHz } from './devices/kick.mjs';
+import { KICK_AMP_CURVES, KICK_DECAY_MAX, KICK_PITCH_CURVES, KICK_PITCH_HIGH_HZ, KICK_PITCH_LOW_HZ, KICK_SWEEP_MAX_ST, KICK_TAIL_NOTE, KickSweep, kickDrawnAt, kickDrawnPitchAt, kickLevelAt, kickPitchHz, kickPitchY, kickSweptHz } from './devices/kick.mjs';
 import { midiToHz } from './dsp/voice.mjs';
 import { Reverb } from './dsp/reverb.mjs';
 import { grainEchoCloud } from './devices/grainecho.mjs';
@@ -199,7 +199,7 @@ function figureData(descriptor, figure, values, opts) {
     case 'bands': return { ...common, ...bandsFigure(read, report) };
     case 'loop': return { ...common, ...loopFigure(read, report) };
     case 'partials': return { ...common, ...partialsFigure(descriptor, figure, read, sampleRate, { shapes: ownShapes, extras }) };
-    case 'hitpitch': return { ...common, ...hitPitchFigure(descriptor, figure, read, { shapes: ownShapes, extras, report }) };
+    case 'hitpitch': return { ...common, ...hitPitchFigure(descriptor, figure, read, { shapes: ownShapes, extras, report, allShapes: shapes }) };
     case 'hitlevel': return { ...common, ...hitLevelFigure(descriptor, figure, read, { shapes: ownShapes, extras }) };
     case 'modes': return { ...common, ...modesFigure(read) };
     default: return common;
@@ -794,7 +794,7 @@ function breakpointsOf(curve) {
 const HIT_POINTS = 192;
 
 /** Where the fixed curve is read for a copy of it to start a drawing from: dense where it moves. */
-const HIT_COPY_XS = [0, 0.04, 0.08, 0.12, 0.16, 0.2, 0.25, 0.3, 0.35, 0.4, 0.5, 0.7, 1];
+const HIT_COPY_XS = [0, 0.0016, 0.0064, 0.0144, 0.0256, 0.04, 0.0625, 0.09, 0.1225, 0.16, 0.25, 0.49, 1];
 
 /** A note's name the way poptart writes one: c3 is 60. */
 function noteName(note) {
@@ -809,64 +809,113 @@ const hzLabel = (hz) => (hz >= 1000 ? `${(hz / 1000).toFixed(1)} kHz` : `${Math.
 /** A curve read at `xs` as breakpoints, each held to 0..1. */
 const breakpointsAt = (xs, ys) => xs.map((x, i) => `${Math.round(x * 1000) / 1000},${Math.round(Math.min(1, Math.max(0, ys[i])) * 1000) / 1000}`).join(' ');
 
+/** Hertz the pitch axis is ruled at: the picture's few, and the editor's, which has room for more. */
+const HIT_PITCH_LINES = [50, 200, 1000, 5000];
+const HIT_EDITOR_PITCH_LINES = [30, 50, 100, 200, 500, 1000, 2000, 5000, 10000];
+/** Milliseconds the time axis is ruled at, as far as the curve goes. */
+const HIT_TIME_LINES = [10, 25, 50, 100, 200, 400, 1000, 2000];
+/** The least room between two time labels, or the first and the left edge, as a share of the width. */
+const HIT_TIME_GAP = 0.1;
+/** The time the fixed curve is drawn over: it has settled long before. */
+const HIT_FIXED_SEC = 0.4;
+/** Points along the body drawn behind the curve. */
+const HIT_WAVE_POINTS = 1600;
+
 /**
- * A drum hit's pitch over its first KICK_DRAW_SEC seconds, as the voice plays it: the fixed curve
- * stepped through the voice's own KickSweep at the Sweep and Click Length set, or the drawn curve
- * the Pitch Env control is on, Sweep deep. x is the square root of the time over the span, as a
- * drawn curve's is. The picture's y is the semitones above the note over KICK_SWEEP_MAX_ST, so
- * turning Sweep visibly deepens a drawn curve; the shape editor's y is a drawn curve's own, the
- * share of Sweep, labeled for the Sweep set. The axes are labeled in milliseconds and in hertz for
- * the note last played (f0 before any).
+ * A drum hit's pitch, as the voice plays it, on the axis a drawn curve is drawn on: x the time
+ * over the span (Length for a drawn curve, the fixed curve's first 400 ms), y the
+ * pitch from 20 Hz to 20 kHz on a log scale (kickPitchY). The fixed curve is stepped through the
+ * voice's own KickSweep at the Sweep and Click Length set; a drawn curve is read as the voice reads
+ * it, with its points on the note at the note last played (f0 before any). Behind it, the body the
+ * pitch makes: a sine through the level envelope, fixed or drawn, as the voice shapes it.
  */
-function hitPitchFigure(descriptor, figure, read, { shapes, extras, report }) {
+function hitPitchFigure(descriptor, figure, read, { shapes, extras, report, allShapes }) {
   const mode = Math.round(read('shape') ?? 0);
   const drawn = mode >= 1 ? shapes?.[mode] ?? null : null;
   const table = drawn?.points ?? null;
   const sweep = Math.min(KICK_SWEEP_MAX_ST, Math.max(0, read('sweep') ?? 0));
   const clickMs = read('clicklength') ?? 1;
-  const note = Number.isFinite(report?.note) ? report.note : KICK_FIGURE_NOTE;
-  const noteHz = midiToHz(note);
+  const length = Math.max(1, read('length') ?? 400) * 0.001;
+  const span = table ? length : HIT_FIXED_SEC;
+  const note = Number.isFinite(report?.note) ? report.note : KICK_TAIL_NOTE;
+  const noteY = kickPitchY(midiToHz(note));
   const names = descriptor.params.find((p) => p.id === figure.params.shape)?.options ?? [];
 
-  // The fixed curve in semitones, stepped at the nominal rate and read at each point's time.
-  const fixedAt = (xs) => {
+  // The fixed curve's level at each of `times` (seconds, rising), stepped at the nominal rate.
+  const fixedAt = (times) => {
     const steps = new KickSweep(NOMINAL_RATE);
     steps.start(Math.max(0, clickMs) * 0.001 * NOMINAL_RATE);
+    const tailHz = midiToHz(KICK_TAIL_NOTE);
     const out = [];
     let n = 0;
     let e = 0;
-    for (const x of xs) {
-      const until = Math.round(x * x * KICK_DRAW_SEC * NOMINAL_RATE);
+    for (const t of times) {
+      const until = Math.round(t * NOMINAL_RATE);
       while (n <= until) e = steps.next(n++);
-      out.push(12 * Math.log2(kickSweptHz(1, sweep, e)));
+      out.push(kickPitchY(kickSweptHz(tailHz, sweep, e)));
     }
     return out;
   };
+  // The level at each of `xs` along the span.
+  const levelsAt = (xs) => (table ? xs.map((x) => kickDrawnPitchAt(table, x, noteY)) : fixedAt(xs.map((x) => x * span)));
   const xs = Array.from({ length: HIT_POINTS }, (_, i) => i / (HIT_POINTS - 1));
-  const sts = table ? xs.map((x) => sweep * kickDrawnAt(table, x)) : fixedAt(xs);
-  const fixedShare = sweep > 0 ? fixedAt(HIT_COPY_XS).map((st) => st / sweep) : HIT_COPY_XS.map(() => 0);
+  const ys = levelsAt(xs);
 
-  const xTicks = [10, 25, 50, 100, 200, 400].map((ms) => ({ at: Math.sqrt(ms / 1000 / KICK_DRAW_SEC), label: `${ms} ms` }));
-  const hzAt = (st) => (st === 0 ? `${hzLabel(noteHz)} ${noteName(note)}` : hzLabel(noteHz * Math.pow(2, st / 12)));
-  const yTicks = [0, 12, 24, 36, 48].map((st) => ({ at: st / KICK_SWEEP_MAX_ST, label: hzAt(st) }));
-  // The editor's: the octaves under Sweep, and Sweep itself at the top.
-  const shareTicks = sweep > 0
-    ? [...[0, 12, 24, 36].filter((st) => st < sweep - 3).map((st) => ({ at: st / sweep, label: hzAt(st) })), { at: 1, label: hzAt(sweep) }]
-    : [{ at: 0, label: hzAt(0) }];
-  const fixed = breakpointsAt(HIT_COPY_XS, fixedShare);
+  // The body behind it: the phase run along the pitch, through the level envelope.
+  const decay = Math.max(1e-3, read('decay') ?? 1);
+  const ampMode = Math.round(read('ampenv') ?? 0);
+  const ampTable = ampMode >= 1 ? allShapes?.[figure.params.ampenv]?.[ampMode]?.points ?? null : null;
+  const dcurve = read('dcurve') ?? 0.5;
+  const levelOf = (t) => {
+    const x = t / decay;
+    if (x >= 1) return 0;
+    return ampTable ? Math.max(0, kickDrawnAt(ampTable, x)) : kickLevelAt(dcurve, x);
+  };
+  const waveXs = Array.from({ length: HIT_WAVE_POINTS }, (_, i) => i / (HIT_WAVE_POINTS - 1));
+  const waveHz = levelsAt(waveXs).map(kickPitchHz);
+  let phase = 0;
+  const wave = waveXs.map((x, i) => {
+    if (i > 0) {
+      const dt = (x - waveXs[i - 1]) * span;
+      phase += 0.5 * (waveHz[i] + waveHz[i - 1]) * dt;
+    }
+    return Math.round(-Math.sin(2 * Math.PI * phase) * levelOf(x * span) * 1000) / 1000;
+  });
+
+  const ms = span * 1000;
+  // Times along it, leaving out any that would crowd the one before.
+  const xTicks = [];
+  for (const t of HIT_TIME_LINES) {
+    const at = t / ms;
+    if (at <= 1 + 1e-6 && at - (xTicks.at(-1)?.at ?? 0) >= HIT_TIME_GAP) xTicks.push({ at, label: `${t} ms` });
+  }
+  const yTicks = (lines) => lines.map((hz) => ({ at: kickPitchY(hz), label: hzLabel(hz) }));
+  // The fixed curve as breakpoints, at the Length set, for a copy of it to start a drawing from.
+  const fixed = breakpointsAt(HIT_COPY_XS, fixedAt(HIT_COPY_XS.map((x) => x * length)));
   return {
     shape: mode,
     note,
-    noteHz,
-    startHz: noteHz * Math.pow(2, (sts.length ? Math.max(...sts) : 0) / 12),
-    points: xs.map((x, i) => ({ x, y: sts[i] / KICK_SWEEP_MAX_ST })),
+    // Where the hit starts: the top of it, since the fixed curve charges up over the click first.
+    startHz: kickPitchHz(Math.max(...ys)),
+    tailHz: kickPitchHz(ys[ys.length - 1]),
+    points: xs.map((x, i) => ({ x, y: ys[i] })),
+    wave,
     data: drawn?.data ?? drawn?.name ?? extras?.[figure.params.shape]?.[mode] ?? null,
     shapeParam: figure.params.shape,
     curveName: curveNameOf(names, mode, drawn),
-    grid: { x: xTicks, y: yTicks },
-    // A graph with real units on both axes for the shape editor, in a drawn curve's own space.
-    // The editor prints its times along the top, where the first would sit on Sweep's label.
-    shapeAxes: { x: 'time', y: 'pitch', grid: { x: xTicks.slice(1), y: shareTicks } },
+    grid: { x: xTicks, y: yTicks(HIT_PITCH_LINES) },
+    // A graph in real units for the shape editor, on the same axes: a point on the note is drawn
+    // at `noteY`, the note last played, with the note named; the body is drawn behind the curve.
+    // The editor prints its times along the top.
+    shapeAxes: {
+      x: 'time',
+      y: 'pitch',
+      grid: { x: xTicks, y: yTicks(HIT_EDITOR_PITCH_LINES) },
+      pitch: { lowHz: KICK_PITCH_LOW_HZ, highHz: KICK_PITCH_HIGH_HZ },
+      noteY,
+      noteName: noteName(note),
+      wave,
+    },
     // The fixed curve as breakpoints, for a copy of it to start a drawing from.
     builtIns: Object.fromEntries(names.map((name) => [name, fixed])),
     // What the shape editor offers to start a drawing from.

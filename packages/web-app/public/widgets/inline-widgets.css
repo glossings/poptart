@@ -196,6 +196,134 @@
   padding-right: 4px;
 }
 
+/* acid(): a head of the new-line button and its sliders, then the steps, numbered, with a row each for
+   accents, long gates and octaves under them - every cell a step wide. */
+.iw-acid,
+.CodeMirror-widget .iw-acid {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 3px;
+}
+/* The head spans the rows under it, its sliders sharing that width. */
+.iw-acid-head {
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
+  min-width: 100%;
+  line-height: 14px;
+}
+.CodeMirror-widget .iw-acid-box {
+  flex: 1 1 0;
+  min-width: max-content;
+  cursor: pointer;
+  padding: 2px 6px;
+  font-size: 11px;
+  line-height: 14px;
+  white-space: pre;
+}
+.iw-acid-box .pr-box-fill {
+  left: 0;
+  background: color-mix(in srgb, var(--accent) 38%, transparent);
+}
+.iw-acid-line {
+  display: inline-flex;
+  align-items: center;
+}
+.iw-acid-label {
+  flex: none;
+  width: 7ch;
+  font-family: var(--mono);
+  font-size: 9px;
+  line-height: 10px;
+  color: var(--text-dim);
+}
+.iw-acid-grid {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.iw-acid-notes,
+.iw-acid-row {
+  display: inline-flex;
+  gap: 2px;
+}
+.iw-acid-notes .iw-cell,
+.iw-acid-row .iw-cell {
+  width: var(--iw-bar-w);
+}
+.iw-acid-notes .iw-cell.beat,
+.iw-acid-row .iw-cell.beat {
+  margin-left: calc(var(--iw-bar-w) / 2);
+}
+/* A step's bar: its value, filled from the foot of the cell. */
+.iw-acid-notes .iw-cell {
+  position: relative;
+  height: 40px;
+  overflow: hidden;
+  cursor: ns-resize;
+}
+.iw-acid-fill {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: color-mix(in srgb, var(--accent) 70%, var(--bg-raised));
+  pointer-events: none;
+}
+.iw-acid-notes .iw-cell.on {
+  background: var(--bg);
+}
+/* A tied step goes on from the step before: its bar drawn fainter, as part of that note. */
+.iw-acid-notes .iw-cell.tie .iw-acid-fill {
+  background: color-mix(in srgb, var(--accent) 35%, var(--bg-raised));
+}
+.iw-acid-row .iw-cell {
+  height: 10px;
+}
+/* The ruler: a track of faint steps, and the loop over it as one bar with its ends to drag. */
+.iw-acid-ruler {
+  position: relative;
+}
+.iw-acid-ruler .iw-cell {
+  height: 14px;
+  opacity: 0.5;
+  pointer-events: none;
+}
+.iw-acid-loopbar {
+  position: absolute;
+  top: 0;
+  height: 14px;
+  box-sizing: border-box;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--accent) 45%, var(--bg-raised));
+  border: 1px solid var(--accent);
+  border-left-width: 3px;
+  border-right-width: 3px;
+  pointer-events: none;
+  z-index: 1;
+}
+/* Steps outside the loop are kept, and drawn faint. */
+.iw-acid-notes .iw-cell.out,
+.iw-acid-row .iw-cell.out {
+  opacity: 0.3;
+}
+/* Under a step that is off, the rows wait for it. */
+.iw-acid-row .iw-cell.idle {
+  opacity: 0.35;
+}
+/* The octave row: up is filled, twice up filled with a line across it, down filled at its foot. */
+.iw-acid-row .iw-cell.two {
+  background: linear-gradient(to bottom, var(--accent) 0 35%, var(--bg) 35% 55%, var(--accent) 55%);
+}
+.iw-acid-row .iw-cell.down {
+  background: linear-gradient(to top, var(--accent) 0 40%, var(--bg) 40%);
+  border-color: var(--accent);
+}
+.CodeMirror-widget .iw-acid-roll {
+  line-height: 14px;
+  font-size: 10px;
+}
+
 /* ------------------------------------------------------------- blocks, under a call's line */
 
 .iw-row {

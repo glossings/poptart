@@ -47,6 +47,8 @@ class DeviceMidiProxy {
 
   noteOn(chan, note, veloc = 64) { this.owner.sendMsg('/noteOn', f32(note), f32(veloc / 127)); }
   noteOnMsg(chan, note, veloc = 64) { return this.owner.msgFor('/noteOn', f32(note), f32(veloc / 127)); }
+  /** A note marked to slide (pattern-core's Sig#slide): /noteOn's third number. */
+  noteSlide(chan, note, veloc = 64) { this.owner.sendMsg('/noteOn', f32(note), f32(veloc / 127), f32(1)); }
   noteOff(chan, note) { this.owner.sendMsg('/noteOff', f32(note)); }
   noteOffMsg(chan, note) { return this.owner.msgFor('/noteOff', f32(note)); }
   allNotesOff() { this.owner.sendMsg('/allNotesOff'); }

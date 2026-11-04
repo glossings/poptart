@@ -14,7 +14,8 @@ import { codeMask } from './labels.mjs';
 import { formatCtl } from './samplerctl.mjs';
 
 /** What each setting is when the call leaves it out - env() reads these, see signal.mjs. */
-export const ENV_DEFAULTS = Object.freeze({ attack: 0.01, decay: 0.1, sustain: 0.7, release: 0.2, curve: -4 });
+// `min` and `max` are where it moves between, as .range() after it sets them.
+export const ENV_DEFAULTS = Object.freeze({ attack: 0.01, decay: 0.1, sustain: 0.7, release: 0.2, curve: -4, min: 0, max: 1 });
 
 /** The settings the editor draws and writes, in the order it writes new ones. */
 export const ENV_KEYS = Object.freeze(Object.keys(ENV_DEFAULTS));

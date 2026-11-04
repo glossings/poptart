@@ -266,6 +266,12 @@ function defineParam(deviceId, spec, seen) {
   // hit on the same sample as the change is struck with the new value and not part way to it.
   const latch = spec.latch ?? false;
   if (typeof latch !== 'boolean') fail(deviceId, `param "${id}": latch is true or false`);
+  // Whether a drawn curve this control takes is played against the note: a point written `n`
+  // lands on the note each hit is played on (a Kick's Pitch Env). The engine hands such a curve
+  // over as two tables rather than one - see pattern-core's sampleShapeTable.
+  const follow = spec.follow ?? false;
+  if (typeof follow !== 'boolean') fail(deviceId, `param "${id}": follow is true or false`);
+  if (follow && takes !== 'shape') fail(deviceId, `param "${id}": only a control that takes a curve can follow the note`);
 
   if (seen.has(normalizeKey(id))) fail(deviceId, `duplicate param id "${id}"`);
   if (seen.has(normalizeKey(name))) fail(deviceId, `param name "${name}" collides with another param's id or name`);
@@ -297,6 +303,7 @@ function defineParam(deviceId, spec, seen) {
     amp,
     saved,
     latch,
+    follow,
     group: String(spec.group ?? '').trim() || null,
     description: String(spec.description ?? '').trim() || null,
   });
@@ -887,6 +894,30 @@ function formatValue(param, value, extras = null, values = null) {
   return param.unit ? `${text} ${param.unit}` : text;
 }
 
+/**
+ * The most characters `formatValue` can ever print for this parameter, across its whole range,
+ * its second reading and every option. A readout reserves this much room up front, so "34 Hz"
+ * becoming "1000 Hz" under an envelope never widens it and never shoves its neighbors.
+ * Digits only ever add as a value moves away from zero, so the two ends of the range are the
+ * widest numbers there are; an open count can pass its knob's reach, so it is given a digit more.
+ */
+function widestText(param, extras = null) {
+  const fixed = (lo, hi, decimals, unit) => {
+    const at = (v) => v.toFixed(decimals).length;
+    return Math.max(at(lo), at(hi)) + (unit ? unit.length + 1 : 0);
+  };
+  if (param.options) {
+    const labels = [...param.options, ...Object.values(extras ?? {}), ...(param.open ? ['empty'] : [])];
+    return Math.max(0, ...labels.filter((s) => typeof s === 'string').map((s) => s.length));
+  }
+  if (param.ui === 'toggle') return 3;
+  const hi = param.open ? param.max * 10 : param.max;
+  let widest = fixed(param.min, hi, decimalsFor(param), param.unit);
+  const alt = param.alt;
+  if (alt) widest = Math.max(widest, fixed(alt.min, alt.max, decimalsFor({ decimals: null, step: null, min: alt.min, max: alt.max }), alt.unit));
+  return widest;
+}
+
 // ---- src/dsp/control.mjs -----------------------------------------
 // Reading a control inside a block.
 //
@@ -1008,7 +1039,12 @@ const ANALOG_OTA_COMPENSATION = 0.5;
 /** How much of the bass the diode ladder's input puts back. Some, not all: the loss is the sound. */
 const ANALOG_DIODE_COMPENSATION = 0.25;
 
-/** The coupling highpass in the diode ladder's feedback, in Hz: the resonance thins at the bottom. */
+/**
+ * The diode ladder's coupling highpass, in Hz: the resonance thins at the bottom. It is taken as
+ * what that highpass passes at the cutoff - the resonance lives there - rather than run inside the
+ * loop: in the loop it let the bass, and the DC the curves make of a bright wave, escape the
+ * feedback entirely, where they stood 20 dB over the note and pushed the stages into their curves.
+ */
 const ANALOG_DIODE_FEEDBACK_HZ = 40;
 
 /** The Sallen-Key's feedback clipper: how hard it bites (larger clips sooner). */
@@ -1157,9 +1193,8 @@ class AnalogFilter {
     this.spec = ANALOG_SPECS.ladder;
     this.s = new Float64Array(4);          // the capacitors
     this.v = new Float64Array(6);          // where each curve's input was a sample ago
-    this.fb = 0;                           // the diode ladder's feedback highpass
-    this.fbG = 0;
-    this.dcX = 0;                          // the CMOS model's output DC blocker
+    this.thin = 1;                         // the diode ladder's resonance at this cutoff, 0..1
+    this.dcX = 0;                          // the output DC blocker
     this.dcY = 0;
     this.dcR = Math.max(0, 1 - (2 * Math.PI * ANALOG_DC_HZ) / sampleRate);
     this.upA = new AnalogHalfband(ANALOG_HALFBAND_A);
@@ -1185,7 +1220,6 @@ class AnalogFilter {
   reset() {
     this.s.fill(0);
     this.v.fill(0);
-    this.fb = 0;
     this.dcX = 0;
     this.dcY = 0;
     this.upA.reset();
@@ -1205,8 +1239,6 @@ class AnalogFilter {
     this.four = this.spec.oversample === 4;
     this.rate = this.sampleRate * this.spec.oversample;
     this.morphs = ANALOG_MORPHING.includes(this.name);
-    const hp = Math.tan((Math.PI * ANALOG_DIODE_FEEDBACK_HZ) / this.rate);
-    this.fbG = hp / (1 + hp);
     this.reset();
     this.setCutoff(this.cutoff);
     this.setResonance(this.resonance);
@@ -1221,6 +1253,8 @@ class AnalogFilter {
     if (this.structure === ANALOG_DIODE) wc /= ANALOG_DIODE_TUNE;
     this.wc = wc;
     this.g = wc;
+    // The diode ladder's resonance, thinned at low cutoffs (see ANALOG_DIODE_FEEDBACK_HZ).
+    this.thin = this.structure === ANALOG_DIODE ? f / Math.hypot(f, ANALOG_DIODE_FEEDBACK_HZ) : 1;
   }
 
   setResonance(resonance) {
@@ -1264,6 +1298,7 @@ class AnalogFilter {
     this.wc = other.wc;
     this.g = other.g;
     this.k = other.k;
+    this.thin = other.thin;
     this.wl = other.wl;
     this.wb = other.wb;
     this.wh = other.wh;
@@ -1294,7 +1329,10 @@ class AnalogFilter {
       yb = this._step(b);
     }
     let y = 0.5 * (this.downA.path(yb, 0) + this.downA.path(ya, 1)) * h;
-    if (this.name === 'cmos') {
+    // Every model's curves make DC of a bright wave driven into them (a saw through any of them,
+    // more the harder it is driven and the more lopsided the stages), which the circuits' output
+    // coupling takes off. Left in, it stood over the note as a huge low end.
+    {
       const out = y - this.dcX + this.dcR * this.dcY;
       this.dcX = y;
       this.dcY = out;
@@ -1302,7 +1340,6 @@ class AnalogFilter {
     }
     const s = this.s;
     for (let i = 0; i < 4; i++) if (s[i] > -ANALOG_FLUSH && s[i] < ANALOG_FLUSH) s[i] = 0;
-    if (this.fb > -ANALOG_FLUSH && this.fb < ANALOG_FLUSH) this.fb = 0;
     return y;
   }
 
@@ -1408,10 +1445,9 @@ class AnalogFilter {
     const b1 = (s[0] + g * e2 * b2) / d1;
     const A = a4 * a3 * a2 * a1;
     const B = a4 * (a3 * (a2 * b1 + b2) + b3) + b4;
-    // The highpass in the loop is (1 - G)(y4 - its state), affine in y4 like everything else.
-    const hp = 1 - this.fbG;
-    const drive = x * (1 + ANALOG_DIODE_COMPENSATION * k);
-    const u = (drive - k * hp * (B - this.fb)) / (1 + k * hp * A);
+    const kt = k * this.thin;
+    const drive = x * (1 + ANALOG_DIODE_COMPENSATION * kt);
+    const u = (drive - kt * B) / (1 + kt * A);
     const y1 = a1 * u + b1;
     const y2 = a2 * y1 + b2;
     const y3 = a3 * y2 + b3;
@@ -1420,8 +1456,6 @@ class AnalogFilter {
     s[1] = 2 * y2 - s[1];
     s[2] = 2 * y3 - s[2];
     s[3] = 2 * y4 - s[3];
-    const step = (y4 - this.fb) * this.fbG;
-    this.fb = this.fb + 2 * step;
     v[0] = u; v[1] = y1; v[2] = y2; v[3] = y3; v[4] = y4;
     return y4;
   }
@@ -1518,20 +1552,15 @@ class AnalogFilter {
         return analogDiv(num, den);
       }
       case ANALOG_DIODE: {
-        const k = Math.min(this.k, onset * 0.985);
+        const k = Math.min(this.k * this.thin, onset * 0.985);
         // From the top down, as the solver does, with each capacitor's (s + coupling).
-        const sj = { re: 0, im: w };
         const a4 = analogDiv({ re: 2, im: 0 }, { re: 2, im: w });
         const a3 = analogDiv({ re: 1, im: 0 }, { re: 2 - a4.re, im: w - a4.im });
         const a2 = analogDiv({ re: 1, im: 0 }, { re: 2 - a3.re, im: w - a3.im });
         const a1 = analogDiv({ re: 1, im: 0 }, { re: 2 - a2.re, im: w - a2.im });
         const A = analogMul(analogMul(a4, a3), analogMul(a2, a1));
-        // The coupling highpass, s / (s + its corner in stage-corner units).
-        const corner = this.fbG / (1 - this.fbG) / this.wc;
-        const hpf = analogDiv(sj, { re: corner, im: w });
-        const loop = analogMul(A, hpf);
         const gain = 1 + ANALOG_DIODE_COMPENSATION * k;
-        return analogDiv({ re: A.re * gain, im: A.im * gain }, { re: 1 + k * loop.re, im: k * loop.im });
+        return analogDiv({ re: A.re * gain, im: A.im * gain }, { re: 1 + k * A.re, im: k * A.im });
       }
       case ANALOG_SALLEN_KEY: {
         const k = Math.min(this.k, onset * 0.985);
@@ -3676,10 +3705,11 @@ class DelayProcessor {
     this.sampleRate = sampleRate;
     this.lines = [new DelayLine(Math.ceil(sampleRate * DELAY_MAX_SEC) + 4), new DelayLine(Math.ceil(sampleRate * DELAY_MAX_SEC) + 4)];
     this.tones = [new OnePole(sampleRate), new OnePole(sampleRate)];
-    // And a DC blocker after the Tone: what goes round the loop is AC-coupled, as a tape or an
-    // analog delay's is. Without it an offset - or the sub a chain in the loop adds - is fed back
-    // with everything else, and at a Feedback near one (more so with a chain that adds gain) it
-    // builds pass on pass until it is all the headroom there is, and the echoes are lost under it.
+    // And a DC blocker after the Tone and the clip: what goes round the loop is AC-coupled, as a
+    // tape or an analog delay's is. Without it an offset - or the sub a chain in the loop adds, or
+    // the DC the clip makes of a lopsided repeat - is fed back with everything else, and at a
+    // Feedback near one (more so with a chain that adds gain) it builds pass on pass until it is
+    // all the headroom there is, and the echoes are lost under it.
     this.dcs = [new DcBlocker(sampleRate), new DcBlocker(sampleRate)];
     this.length = [0, 0];       // the delay each channel is actually at, in samples
     this.bpm = 120;
@@ -3735,8 +3765,8 @@ class DelayProcessor {
       const readR = lineR.readLinear(lenR);
       // Ping-pong feeds each side's repeat into the other line; a plain delay feeds it back
       // into its own. The input enters on the left in ping-pong, so the first repeat is right.
-      const fedL = clipTail(this.dcs[0].next(toneL.next(pingpong ? readR : readL)) * fb);
-      const fedR = clipTail(this.dcs[1].next(toneR.next(pingpong ? readL : readR)) * fb);
+      const fedL = this.dcs[0].next(clipTail(toneL.next(pingpong ? readR : readL) * fb));
+      const fedR = this.dcs[1].next(clipTail(toneR.next(pingpong ? readL : readR) * fb));
       if (pingpong) {
         lineL.write((dryL + dryR) * 0.5 + fedL);
         lineR.write(fedR);
@@ -3796,8 +3826,8 @@ class DelayProcessor {
       const readR = lineR.readLinear(lenR);
       const retL = backL ? backL[i] : 0;
       const retR = backR ? backR[i] : 0;
-      const fedL = clipTail(this.dcs[0].next(toneL.next(pingpong ? retR : retL)) * fb);
-      const fedR = clipTail(this.dcs[1].next(toneR.next(pingpong ? retL : retR)) * fb);
+      const fedL = this.dcs[0].next(clipTail(toneL.next(pingpong ? retR : retL) * fb));
+      const fedR = this.dcs[1].next(clipTail(toneR.next(pingpong ? retL : retR) * fb));
       if (pingpong) {
         lineL.write((dryL + dryR) * 0.5 + fedL);
         lineR.write(fedR);
@@ -3892,6 +3922,13 @@ class History {
 // signal can move the threshold.
 
 
+/**
+ * The corner of the blocker on what a compressor's gain changes, in Hz. A fast gain moves within
+ * a cycle, and a gain that moves with a lopsided wave makes DC of it, as a real one's does before
+ * its output coupling takes it off.
+ */
+const DYNAMICS_DC_HZ = 8;
+
 /** Starting points for the preset menu: each the defaults with these controls changed. */
 const COMPRESSOR_PRESETS = Object.freeze({
   glue: { threshold: -28, ratio: 2, attack: 30, release: 300, makeup: 2 },
@@ -3977,6 +4014,8 @@ class Detector {
 class CompressorProcessor {
   constructor(sampleRate) {
     this.detector = new Detector(sampleRate);
+    // The compressed signal's output coupling.
+    this.dcs = [new DcBlocker(sampleRate, DYNAMICS_DC_HZ), new DcBlocker(sampleRate, DYNAMICS_DC_HZ)];
     this.lastAttack = -1;
     this.lastRelease = -1;
     this.reduction = 0;      // the last gain reduction in dB, for the panel's curve
@@ -4014,12 +4053,13 @@ class CompressorProcessor {
       reduction = Math.min(reduction, gr);
       const g = dbToGain(gr + at(params.makeup, i));
       const mix = at(params.mix, i);
-      outL[i] = l + (l * g - l) * mix;
-      if (outR !== outL) outR[i] = r + (r * g - r) * mix;
+      outL[i] = l + (this.dcs[0].next(l * g) - l) * mix;
+      if (outR !== outL) outR[i] = r + (this.dcs[1].next(r * g) - r) * mix;
     }
     // A NaN compares false against the envelope and is then added into it, and from there on
     // every sample's gain is NaN: the detector starts again from silence instead.
     if (!Number.isFinite(this.detector.env)) this.detector.reset();
+    if (!Number.isFinite(outL[count - 1])) for (const d of this.dcs) d.reset();
     this.reduction = reduction;
     this.level = loudest;
     this.levels.push(loudest);
@@ -4567,6 +4607,15 @@ class EqProcessor {
 
 const MOD_TWO_PI = Math.PI * 2;
 
+/**
+ * The corner of the blocker on what the feedback's curve adds, in Hz: low, because round a loop
+ * of nearly one its turn in phase is heard well above it, on the bass the feedback lifts.
+ */
+const MOD_LOOP_DC_HZ = 2;
+
+/** The corner of the output's coupling of the chorus and the flanger, in Hz. */
+const MOD_DC_HZ = 8;
+
 /** A sine or triangle LFO in 0..1, with a phase that can be offset per channel. */
 function lfoValue(phase, shape) {
   const p = phase - Math.floor(phase);
@@ -4581,10 +4630,12 @@ class ModDelay {
     this.lines = [new DelayLine(this.max), new DelayLine(this.max)];
     this.phase = 0;
     this.smoothed = [0, 0];
+    this.dcs = [new DcBlocker(sampleRate, MOD_LOOP_DC_HZ), new DcBlocker(sampleRate, MOD_LOOP_DC_HZ)];
   }
 
   reset() {
     for (const l of this.lines) l.reset();
+    for (const d of this.dcs) d.reset();
     this.smoothed = [0, 0];
   }
 
@@ -4614,9 +4665,13 @@ class ModDelay {
     wetL /= voices;
     wetR /= voices;
     // The feedback comes from the first read, soft-limited so a flanger at full resonance rings
-    // rather than runs away.
-    const fbL = Math.tanh(wetL * feedback);
-    const fbR = Math.tanh(wetR * feedback);
+    // rather than runs away. The curve makes DC of a lopsided wave, and round a loop of nearly one
+    // that DC builds up into a large offset; what the curve adds is AC-coupled, so it cannot,
+    // while the feedback itself keeps its bass.
+    const uL = wetL * feedback;
+    const uR = wetR * feedback;
+    const fbL = uL + this.dcs[0].next(Math.tanh(uL) - uL);
+    const fbR = uR + this.dcs[1].next(Math.tanh(uR) - uR);
     this.lines[0].write(inL + fbL);
     this.lines[1].write(inR + fbR);
     out[0] = wetL;
@@ -4685,6 +4740,7 @@ class ChorusProcessor {
   constructor(sampleRate) {
     this.delay = new ModDelay(sampleRate, 0.08);
     this.bpm = 120;
+    this.outs = [new DcBlocker(sampleRate, MOD_DC_HZ), new DcBlocker(sampleRate, MOD_DC_HZ)];
     this.wet = [0, 0];
   }
 
@@ -4712,10 +4768,12 @@ class ChorusProcessor {
         voices,
       });
       const mix = at(params.mix, i);
-      outL[i] = l + (wet[0] - l) * mix;
-      if (outR !== outL) outR[i] = r + (wet[1] - r) * mix;
+      // The output's coupling, on the mixed signal so the dry and the wet turn together: a fast sweep
+      // mixes what goes round at its own rate down to DC, which the feedback then builds on.
+      outL[i] = this.outs[0].next(l + (wet[0] - l) * mix);
+      if (outR !== outL) outR[i] = this.outs[1].next(r + (wet[1] - r) * mix);
     }
-    if (!Number.isFinite(outL[count - 1])) this.delay.reset();
+    if (!Number.isFinite(outL[count - 1])) { this.delay.reset(); for (const d of this.outs) d.reset(); }
   }
 
   /** Where the LFO is, so the picture's playhead follows the sound. */
@@ -4782,6 +4840,7 @@ class FlangerProcessor {
   constructor(sampleRate) {
     this.delay = new ModDelay(sampleRate, 0.03);
     this.bpm = 120;
+    this.outs = [new DcBlocker(sampleRate, MOD_DC_HZ), new DcBlocker(sampleRate, MOD_DC_HZ)];
     this.wet = [0, 0];
   }
 
@@ -4807,10 +4866,12 @@ class FlangerProcessor {
         shape,
       });
       const mix = at(params.mix, i);
-      outL[i] = l + (wet[0] - l) * mix;
-      if (outR !== outL) outR[i] = r + (wet[1] - r) * mix;
+      // The output's coupling, on the mixed signal so the dry and the wet turn together: a fast sweep
+      // mixes what goes round at its own rate down to DC, which the feedback then builds on.
+      outL[i] = this.outs[0].next(l + (wet[0] - l) * mix);
+      if (outR !== outL) outR[i] = this.outs[1].next(r + (wet[1] - r) * mix);
     }
-    if (!Number.isFinite(outL[count - 1])) this.delay.reset();
+    if (!Number.isFinite(outL[count - 1])) { this.delay.reset(); for (const d of this.outs) d.reset(); }
   }
 
   /** Where the LFO is, so the picture's playhead follows the sound. */
@@ -4829,6 +4890,15 @@ class FlangerProcessor {
 
 
 const MAX_STAGES = 12;
+
+/**
+ * The corner of the blocker on what the feedback's curve adds, in Hz: low, because round a loop
+ * of nearly one its turn in phase is heard well above it, on the bass the feedback lifts.
+ */
+const PHASER_LOOP_DC_HZ = 2;
+
+/** The corner of the output's coupling, in Hz. */
+const PHASER_DC_HZ = 8;
 
 /** Starting points for the preset menu: each the defaults with these controls changed. */
 const PHASER_PRESETS = Object.freeze({
@@ -4881,14 +4951,16 @@ const PHASER = defineDevice({
   presets: PHASER_PRESETS,
 });
 
-/** One channel's chain of first-order allpasses and its feedback sample. */
+/** One channel's chain of first-order allpasses, its feedback sample and its output's coupling. */
 class Chain {
-  constructor() {
+  constructor(sampleRate) {
     this.z = new Float64Array(MAX_STAGES);
     this.fb = 0;
+    this.dc = new DcBlocker(sampleRate, PHASER_LOOP_DC_HZ);
+    this.out = new DcBlocker(sampleRate, PHASER_DC_HZ);
   }
 
-  reset() { this.z.fill(0); this.fb = 0; }
+  reset() { this.z.fill(0); this.fb = 0; this.dc.reset(); this.out.reset(); }
 
   /** Runs a sample through `stages` allpasses with coefficient `a`. */
   next(x, stages, a, feedback) {
@@ -4898,7 +4970,10 @@ class Chain {
       this.z[s] = v + a * y;
       v = y;
     }
-    this.fb = Math.tanh(v);
+    // The allpasses pass DC, so DC the curve makes of a lopsided wave goes round the loop and,
+    // with the feedback near one, builds up into a large offset. What the curve adds is
+    // AC-coupled, so it cannot, while the feedback itself keeps its bass.
+    this.fb = v + this.dc.next(Math.tanh(v) - v);
     return v;
   }
 }
@@ -4906,7 +4981,7 @@ class Chain {
 class PhaserProcessor {
   constructor(sampleRate) {
     this.sampleRate = sampleRate;
-    this.chains = [new Chain(), new Chain()];
+    this.chains = [new Chain(sampleRate), new Chain(sampleRate)];
     this.phase = 0;
     this.bpm = 120;
   }
@@ -4939,8 +5014,10 @@ class PhaserProcessor {
       const r = inR ? inR[i] : 0;
       const wetL = this.chains[0].next(l, stages, aL, feedback);
       const wetR = this.chains[1].next(r, stages, aR, feedback);
-      outL[i] = l + (wetL - l) * mix;
-      if (outR !== outL) outR[i] = r + (wetR - r) * mix;
+      // The output's coupling, on the mixed signal so the dry and the wet turn together: a fast sweep
+      // mixes what goes round at its own rate down to DC, which the feedback then builds on.
+      outL[i] = this.chains[0].out.next(l + (wetL - l) * mix);
+      if (outR !== outL) outR[i] = this.chains[1].out.next(r + (wetR - r) * mix);
     }
     if (!Number.isFinite(outL[count - 1])) for (const c of this.chains) c.reset();
   }
@@ -5506,6 +5583,17 @@ class Adsr {
     this.stagePos = 0;
   }
 
+  /**
+   * A note slid into while this one was letting go: the release stops where it is and the level
+   * goes back to the sustain over the decay, with no new attack - the slide carries the note on.
+   */
+  resume() {
+    if (this.stage !== STAGE.RELEASE) return;
+    this.stageFrom = this.value;
+    this.stage = STAGE.DECAY;
+    this.stagePos = 0;
+  }
+
   /** Releases a note from wherever the envelope currently is. */
   gateOff() {
     if (this.stage === STAGE.IDLE) return;
@@ -5873,6 +5961,9 @@ const OVERDRIVE = defineDevice({
 
 const OVERDRIVE_PROBES = 64;
 
+/** The corner of the output coupling, in Hz. */
+const OVERDRIVE_DC_HZ = 8;
+
 /**
  * The makeup for a drive (linear) and a dynamics setting: the probe's level over its level once
  * lifted and driven. The detector sits near a sine's peak, so the probe is lifted as its peak.
@@ -5900,9 +5991,10 @@ class DriveChannel {
     this.tone = new OnePole(sampleRate);
     this.detector = new Detector(sampleRate);
     this.detector.setTimes(5, 80);
+    this.dc = new DcBlocker(sampleRate, OVERDRIVE_DC_HZ);
   }
 
-  reset() { this.hp.reset(); this.lp.reset(); this.tone.reset(); this.detector.reset(); }
+  reset() { this.hp.reset(); this.lp.reset(); this.tone.reset(); this.detector.reset(); this.dc.reset(); }
 }
 
 class OverdriveProcessor {
@@ -5948,7 +6040,10 @@ class OverdriveProcessor {
         const lift = dyn > 0 ? Math.pow(Math.max(1e-4, env) / 0.25, -0.7 * dyn) : 1;
         const drive = dbToGain(at(params.drive, i));
         const driven = Math.tanh(region * Math.min(lift, 16) * drive) * (makeupFrom + makeupStep * i);
-        const wet = c.tone.next(driven) + rest;
+        // The curve makes DC of a lopsided region (and the lift, moving within a cycle, more),
+        // which the output coupling takes off. On the whole wet signal rather than the region
+        // alone, so the region is not turned in phase against what passes clean.
+        const wet = c.dc.next(c.tone.next(driven) + rest);
         const mix = at(params.mix, i);
         out[i] = x + (wet - x) * mix;
       }
@@ -6054,6 +6149,8 @@ class MultibandProcessor {
     this.lowX = [new Crossover(sampleRate), new Crossover(sampleRate)];
     this.highX = [new Crossover(sampleRate), new Crossover(sampleRate)];
     this.detectors = BANDS.map(() => new Detector(sampleRate));
+    // The compressed signal's output coupling (see DYNAMICS_DC_HZ).
+    this.dcs = [new DcBlocker(sampleRate, DYNAMICS_DC_HZ), new DcBlocker(sampleRate, DYNAMICS_DC_HZ)];
     this.split = [new Float64Array(2), new Float64Array(2)];
     this.bands = [new Float64Array(3), new Float64Array(3)];
     this.last = { low: -1, high: -1, attack: [-1, -1, -1], release: [-1, -1, -1] };
@@ -6136,8 +6233,8 @@ class MultibandProcessor {
       }
       const mix = at(params.mix, i);
       const out = dbToGain(at(params.output, i));
-      outL[i] = (l + (sumL - l) * mix) * out;
-      if (outR !== outL) outR[i] = (r + (sumR - r) * mix) * out;
+      outL[i] = (l + (this.dcs[0].next(sumL) - l) * mix) * out;
+      if (outR !== outL) outR[i] = (r + (this.dcs[1].next(sumR) - r) * mix) * out;
     }
     for (let b = 0; b < 3; b++) {
       this.levelHistory[b].push(this.levels[b]);
@@ -6146,6 +6243,7 @@ class MultibandProcessor {
     this.blockSec = (count / this.sampleRate) * DYNAMICS_BLOCKS_PER_ENTRY;
     if (!Number.isFinite(outL[count - 1])) {
       for (const x of [...this.lowX, ...this.highX]) x.reset();
+      for (const d of this.dcs) d.reset();
     }
     // Checked on their own: a NaN that is gone from the output by the end of the block can
     // still be sitting in a detector, and it stays there.

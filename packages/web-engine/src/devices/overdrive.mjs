@@ -12,7 +12,7 @@
 import { defineDevice } from '../descriptor.mjs';
 import { at, dbToGain } from '../dsp/control.mjs';
 import { BIQUAD_TYPES, Biquad } from '../dsp/biquad.mjs';
-import { OnePole } from '../dsp/filters.mjs';
+import { DcBlocker, OnePole } from '../dsp/filters.mjs';
 import { AUTO_GAIN_LEVEL } from '../dsp/shapers.mjs';
 import { Detector } from './compressor.mjs';
 
@@ -63,6 +63,9 @@ export const OVERDRIVE = defineDevice({
 
 const OVERDRIVE_PROBES = 64;
 
+/** The corner of the output coupling, in Hz. */
+const OVERDRIVE_DC_HZ = 8;
+
 /**
  * The makeup for a drive (linear) and a dynamics setting: the probe's level over its level once
  * lifted and driven. The detector sits near a sine's peak, so the probe is lifted as its peak.
@@ -90,9 +93,10 @@ class DriveChannel {
     this.tone = new OnePole(sampleRate);
     this.detector = new Detector(sampleRate);
     this.detector.setTimes(5, 80);
+    this.dc = new DcBlocker(sampleRate, OVERDRIVE_DC_HZ);
   }
 
-  reset() { this.hp.reset(); this.lp.reset(); this.tone.reset(); this.detector.reset(); }
+  reset() { this.hp.reset(); this.lp.reset(); this.tone.reset(); this.detector.reset(); this.dc.reset(); }
 }
 
 export class OverdriveProcessor {
@@ -138,7 +142,10 @@ export class OverdriveProcessor {
         const lift = dyn > 0 ? Math.pow(Math.max(1e-4, env) / 0.25, -0.7 * dyn) : 1;
         const drive = dbToGain(at(params.drive, i));
         const driven = Math.tanh(region * Math.min(lift, 16) * drive) * (makeupFrom + makeupStep * i);
-        const wet = c.tone.next(driven) + rest;
+        // The curve makes DC of a lopsided region (and the lift, moving within a cycle, more),
+        // which the output coupling takes off. On the whole wet signal rather than the region
+        // alone, so the region is not turned in phase against what passes clean.
+        const wet = c.dc.next(c.tone.next(driven) + rest);
         const mix = at(params.mix, i);
         out[i] = x + (wet - x) * mix;
       }

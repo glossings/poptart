@@ -22,6 +22,7 @@ import { KICK, KickSynth } from '../devices/kick.mjs';
 import { HAT, HatSynth } from '../devices/hat.mjs';
 import { DRUM, DrumSynth } from '../devices/drum.mjs';
 import { PLUCK, PluckSynth } from '../devices/pluck.mjs';
+import { ACID, AcidSynth } from '../devices/acid.mjs';
 import { sharedBuiltInTables } from '../dsp/tables.mjs';
 import { Reporter, bendOf, isDispose, offsetInBlock, parameterDescriptorsFor, realParams } from './shared.mjs';
 
@@ -82,7 +83,7 @@ class SynthProcessor extends AudioWorkletProcessor {
     for (const event of this.pending) {
       const offset = offsetInBlock(event.time, currentFrame, sampleRate, blockSize);
       if (offset >= blockSize) { keep.push(event); continue; }
-      if (event.kind === 'noteOn') this.synth.queueNoteOn(event.note, event.velocity, offset);
+      if (event.kind === 'noteOn') this.synth.queueNoteOn(event.note, event.velocity, offset, event.slide === true);
       else this.synth.queueNoteOff(event.note, offset);
     }
     this.pending = keep;
@@ -124,6 +125,7 @@ const SYNTHS = [
   [HAT, () => new HatSynth(sampleRate)],
   [DRUM, () => new DrumSynth(sampleRate)],
   [PLUCK, () => new PluckSynth(sampleRate)],
+  [ACID, () => new AcidSynth(sampleRate)],
 ];
 
 for (const [descriptor, make] of SYNTHS) {

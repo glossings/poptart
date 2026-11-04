@@ -21,7 +21,10 @@ constexpr double kSweepSec = 0.073;
 constexpr double kSweepKnee = 0.66;
 constexpr double kSweepHoldSec = 0.003;
 constexpr double kChargeSec = 0.0005;
-constexpr double kDrawSec = 0.4;
+constexpr double kPitchLowHz = 20;
+constexpr double kPitchHighHz = 20000;
+constexpr double kTailNote = 29;
+constexpr double kSoftSweep = 0.3;
 constexpr double kDriveMin = 0.1;
 constexpr double kDriveMax = 6;
 constexpr double kCurveKneeMin = 0.02;
@@ -49,7 +52,9 @@ constexpr int kFirstSampleSlots = 4;
 
 inline double kickDrive(double drive) { return kDriveMin + (kDriveMax - kDriveMin) * clamp(drive, 0.0, 1.0); }
 inline double kickCurveKnee(double curve) { return kCurveKneeMin * std::pow(kCurveKneeMax / kCurveKneeMin, clamp(curve, 0.0, 1.0)); }
-inline double kickDrawX(double seconds) { return std::sqrt(std::fmax(0.0, seconds) / kDrawSec); }
+inline double kickDrawX(double seconds, double span) { return std::fmax(0.0, seconds) / span; }
+inline double kickPitchHz(double y) { return kPitchLowHz * std::pow(kPitchHighHz / kPitchLowHz, y); }
+inline double kickPitchY(double hz) { return std::log(std::fmax(1e-9, hz) / kPitchLowHz) / std::log(kPitchHighHz / kPitchLowHz); }
 inline double kickSweptHz(double hz, double st, double e) { return hz * (1 + (std::pow(2.0, st / 12) - 1) * e); }
 
 /** A drawn curve, read at `t` - linear between the points the engine sampled. */
@@ -59,6 +64,22 @@ inline double drawnAt(const float* table, int n, double t) {
   const double a = table[i];
   const double b = table[i + 1 < n ? i + 1 : n - 1];
   return a + (b - a) * (x - i);
+}
+
+/**
+ * A drawn pitch curve's level `x` of the way along it, for a note whose level is `noteY`: the
+ * curve with its points on the note at 0, then each sample's share of the note (kick.mjs's
+ * kickDrawnPitchAt). Held at its end past 1.
+ */
+inline double drawnPitchAt(const float* table, int length, double x, double noteY) {
+  const int half = length >> 1;
+  const double pos = clamp(x, 0.0, 1.0) * (half - 1);
+  const int i = static_cast<int>(std::floor(pos));
+  const int k = i + 1 < half ? i + 1 : half - 1;
+  const double f = pos - i;
+  const double base = table[i] + (static_cast<double>(table[k]) - table[i]) * f;
+  const double share = table[half + i] + (static_cast<double>(table[half + k]) - table[half + i]) * f;
+  return base + share * noteY;
 }
 
 /** The trigger pulse at sample `n` of a hit whose pulse ends at `edge` samples, both edges band-limited. */
@@ -76,7 +97,8 @@ inline double gateAt(long long n, double edge) {
   return g;
 }
 
-struct Drawn { float table[kShapePoints]; int length = 0; };
+/** A drawn curve: a Pitch Env's is twice the points, its second half each sample's share of the note. */
+struct Drawn { float table[2 * kShapePoints]; int length = 0; };
 
 /** One loaded click: mono frames at the file's own rate, owned by the host. */
 struct Sample {
@@ -119,7 +141,10 @@ struct Voice {
   bool active = false;
   long long n = 0;
   double note = 0;
+  double noteY = 0;
+  double span = 0.4;
   double velocity = 1;
+  double sweepScale = 1;
   long long age = 0;
   double phase = 0, edge = 0, env = 1;
   const Drawn* pitchTable = nullptr;
@@ -138,7 +163,7 @@ struct Voice {
 
   void reset() {
     active = false;
-    n = 0; note = 0; velocity = 1;
+    n = 0; note = 0; noteY = 0; span = 0.4; velocity = 1; sweepScale = 1;
     phase = 0; edge = 0;
     pitchTable = nullptr;
     ampTable = nullptr;
@@ -155,24 +180,31 @@ struct Voice {
   }
 
   void noteOn(double nn, double vel, unsigned int seed, double clickMs, const Drawn* pt, const Drawn* at,
-              const Sample* file, double sweepSt) {
+              const Sample* file, double sweepSt, double lengthMs) {
     const long long keepAge = age;
     reset();
     age = keepAge;
     active = true;
     note = nn;
     velocity = vel;
+    sweepScale = 1 - kSoftSweep * (1 - clamp(vel, 0.0, 1.0));
     state = seed ? seed : 1u;
     edge = std::fmax(0.0, clickMs) * 0.001 * sampleRate;
     sweep.start(edge);
     pitchTable = pt;
     ampTable = at;
+    noteY = kickPitchY(midiToHz(nn));
+    span = std::fmax(1.0, lengthMs) * 0.001;
     if (file) {
       const double sr = sampleRate;
       sample = file;
       sstep = file->sampleRate / sr;
-      const double st = clamp(sweepSt, 0.0, kSweepMaxSt);
-      floorHz = midiToHz(nn) * std::pow(2.0, st / 12);
+      if (pt) {
+        floorHz = kickPitchHz(drawnPitchAt(pt->table, pt->length, 0, noteY));
+      } else {
+        const double st = clamp(sweepSt, 0.0, kSweepMaxSt) * sweepScale;
+        floorHz = midiToHz(kTailNote) * std::pow(2.0, st / 12);
+      }
     }
   }
 
@@ -211,13 +243,12 @@ struct Voice {
       const long long nn = n;
       const double nd = static_cast<double>(nn);
 
-      const double noteHz = midiToHz(note + bend);
-      const double st = clamp(c.ctl(ids::sweep, i), 0.0, kSweepMaxSt);
       double hz;
       if (pitchTable) {
-        hz = noteHz * std::pow(2.0, (st * drawnAt(pitchTable->table, pitchTable->length, kickDrawX(nd / sr))) / 12);
+        hz = kickPitchHz(drawnPitchAt(pitchTable->table, pitchTable->length, kickDrawX(nd / sr, span), noteY)) * std::pow(2.0, bend / 12);
       } else {
-        hz = kickSweptHz(noteHz, st, sweep.next(nd));
+        const double st = clamp(c.ctl(ids::sweep, i), 0.0, kSweepMaxSt) * sweepScale;
+        hz = kickSweptHz(midiToHz(kTailNote + bend), st, sweep.next(nd));
       }
       hz = std::fmin(0.49 * sr, hz);
 
@@ -293,7 +324,7 @@ struct Voice {
         lastLp = lpHz;
       }
       clp += kClick * (y - clp);
-      const double click = c.ctl(ids::click, i) * clp;
+      const double click = c.ctl(ids::click, i) * velocity * clp;
 
       const double ratio = hz / sr;
       const double room = clamp((kDriveNone - ratio) / (kDriveNone - kDriveFull), 0.0, 1.0);
@@ -378,7 +409,7 @@ struct Device : Base {
     Pool<Drawn>* pool = param == ids::pitchenv ? &pitchShapes : (param == ids::ampenv ? &ampShapes : nullptr);
     if (!pool || slot < 0 || !table || count <= 0) return true;
     if (slot >= pool->size()) { pool->ask(slot + 1); return false; }
-    const int n = count < kShapePoints ? count : kShapePoints;
+    const int n = count < 2 * kShapePoints ? count : 2 * kShapePoints;
     Drawn& one = (*pool)[slot];
     std::memcpy(one.table, table, sizeof(float) * static_cast<size_t>(n));
     one.length = n;
@@ -393,7 +424,7 @@ struct Device : Base {
     return true;
   }
 
-  /** The note last played, for the picture of the sweep (kick.mjs's report). */
+  /** The note last played, for the picture of a drawn curve (kick.mjs's report). */
   int pd_report(float* out, int capacity) {
     if (!played || capacity < 1) return 0;
     out[0] = static_cast<float>(lastNote);
@@ -432,7 +463,7 @@ struct Device : Base {
     for (auto& v : voices) if (&v != voice) v.chokeOff();
     seed = static_cast<unsigned int>(seed * 1664525u + 1013904223u);
     voice->noteOn(note, velocity, seed, p[ids::clicklength], drawn(ids::pitchenv, pitchShapes), drawn(ids::ampenv, ampShapes),
-                  clickFile(), p[ids::sweep]);
+                  clickFile(), p[ids::sweep], p[ids::length]);
     voice->age = clock++;
     lastNote = note;
     played = true;

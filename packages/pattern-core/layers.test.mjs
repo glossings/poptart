@@ -7,7 +7,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { note, n, s, mini, vel, clip, speed, add, sub, mul, set, setPatternWarn, midi, channelAt, Scheduler } from './src/index.mjs';
+import { note, n, s, mini, vel, clip, speed, add, sub, mul, set, setPatternWarn, midi, channelAt, Scheduler, setGlobalScale } from './src/index.mjs';
 import { stepLocs } from './src/mini.mjs';
 
 const steps = (sig, cycle = 0) => sig.stepsForCycle(cycle);
@@ -297,4 +297,26 @@ test('add(a, b) at the head says only its first argument is used', () => {
     setPatternWarn(null);
   }
   assert.ok(said.some((m) => /only its first argument/.test(m)));
+});
+
+test('a note operand on a pattern of degrees is semitones: the degrees become notes in the key first', () => {
+  setGlobalScale('c major');
+  try {
+    assert.deepEqual(values(n('0 2 4').add(note(12))), [72, 76, 79]);
+    assert.equal(n('0 2 4').add(note(12)).pitchKind, 'note');
+    // A degree operand stays in degrees, and a plain number is a degree on a degree pattern.
+    assert.deepEqual(values(n('0 2 4').add(n(1))), [1, 3, 5]);
+    assert.deepEqual(values(n('0 2 4').add(7)), [7, 9, 11]);
+  } finally {
+    setGlobalScale(null);
+  }
+});
+
+test('the scheduler plays .octave() as whole octaves on the finished pitch, and passes .slide() to the engine', () => {
+  const ons = play(note('c3 c3 c3 c3').octave('0 1 -1 2').slide('0 1 0 0'))('noteOn');
+  assert.deepEqual(ons.map((c) => c.args[1]), [60, 72, 48, 84]);
+  assert.deepEqual(ons.map((c) => c.args[4]?.slide === true), [false, true, false, false]);
+  // The note off names the same note the on played.
+  const offs = play(note('c3').octave(1))('noteOff');
+  assert.deepEqual(offs.map((c) => c.args[1]), [72]);
 });

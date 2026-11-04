@@ -23,11 +23,11 @@
  * language, and the difference is the whole reason this list is written out.
  */
 export const BUILDER_NAMES = Object.freeze(['Signal', 'n', 'note', 'mini', 's', 'se', 'sr', 'sp', 'say', 'synth', 'sine', 'saw', 'isaw', 'tri', 'square', 'rand', 'perlin', 'lfo', 'env', 'dur', 'midicc', 'midikeys', 'osc', 'macro', 'choose', 'cat', 'seq', 'irand', 'midi', 'audio', 'input', 'group', 'copy', 'pcopy', 'pianoroll', 'clips', 'auto',
-  'i', 'begin', 'end', 'loop', 'loopwrap', 'loopdir', 'speed', 'flip', 'stretch', 'fit', 'fitmode', 'slice', 'splice', 'splicemode', 'attack', 'decay', 'sustain', 'release', 'envscale', 'grain', 'vel', 'clip', 'nudge', 'swing', 'swinggrid', 'swingvel',
+  'i', 'begin', 'end', 'loop', 'loopwrap', 'loopdir', 'speed', 'flip', 'stretch', 'fit', 'fitmode', 'slice', 'splice', 'splicemode', 'attack', 'decay', 'sustain', 'release', 'envscale', 'grain', 'vel', 'clip', 'slide', 'octave', 'nudge', 'swing', 'swinggrid', 'swingvel',
   'add', 'sub', 'mul', 'div', 'mod', 'set',
   // Structure-giving transforms at the head of a chain, on the default note: struct("1 ~ 1 1").s("bd").
   'struct', 'hold', 'seg', 'segment', 'chord',
-  'slider', 'knob', 'toggle', 'button', 'xy', 'steps', 'sliders', 'matrix', 'shiftreg', 'scope', 'spectrum', 'waveform', 'imager', 'meter', 'punchcard', 'chroma',
+  'slider', 'knob', 'toggle', 'button', 'xy', 'steps', 'sliders', 'matrix', 'shiftreg', 'acid', 'scope', 'spectrum', 'waveform', 'imager', 'meter', 'punchcard', 'chroma',
   'noteToMidi', 'degreeToMidi', 'parseScaleName']);
 
 /** Builders the editor writes and nobody types: the calls behind a drawn roll, a shape, a pack. */

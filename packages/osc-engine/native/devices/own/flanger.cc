@@ -4,6 +4,7 @@
 // ranges and in nothing else, which is why they share a delay line (own/dsp/moddelay.h).
 
 #include "own/pd-own.h"
+#include "own/dsp/filters.h"
 #include "own/dsp/moddelay.h"
 #include "own/dsp/sync.h"
 #include "pd-own-ids.h"
@@ -15,11 +16,13 @@ using namespace pd_own;
 
 struct Device : pd_own::Device<ids::kCount> {
   ModDelay<4096> delay;          // 30 ms at 96 kHz
+  DcBlocker outs[2];   // the output's coupling
   double bpm = 120;
 
   void pd_init(double sr) {
     sampleRate = sr;
     delay.init(sr, 0.03);
+    for (auto& d : outs) { d.init(sr, kModDcHz); d.reset(); }
     bpm = 120;
   }
 
@@ -50,10 +53,15 @@ struct Device : pd_own::Device<ids::kCount> {
       const double feedback = ctl(ids::feedback, i);
       delay.next(l, r, wet, baseSec, depthSec, rateHz, spread, feedback, shape, 1);
       const double mix = ctl(ids::mix, i);
-      outl[i] = static_cast<float>(l + (wet[0] - l) * mix);
-      outr[i] = static_cast<float>(r + (wet[1] - r) * mix);
+      // The output's coupling, on the mixed signal so the dry and the wet turn together: a fast sweep
+      // mixes what goes round at its own rate down to DC, which the feedback then builds on.
+      outl[i] = static_cast<float>(outs[0].next(l + (wet[0] - l) * mix));
+      outr[i] = static_cast<float>(outs[1].next(r + (wet[1] - r) * mix));
     }
-    if (frames > 0 && !isPlayable(outl[frames - 1])) delay.reset();
+    if (frames > 0 && !isPlayable(outl[frames - 1])) {
+      delay.reset();
+      for (auto& d : outs) d.reset();
+    }
   }
 };
 

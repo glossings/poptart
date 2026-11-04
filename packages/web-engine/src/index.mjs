@@ -44,6 +44,7 @@ export { GRANULAR, GranularSynth } from './devices/granular.mjs';
 export { ADDITIVE, AdditiveSynth } from './devices/additive.mjs';
 export { ANALOG, AnalogSynth } from './devices/analog.mjs';
 export { PLUCK, PluckSynth } from './devices/pluck.mjs';
+export { ACID, AcidSynth } from './devices/acid.mjs';
 export { sharedBuiltInTables, buildMipmaps } from './dsp/tables.mjs';
 export { DISTORT, DistortProcessor } from './devices/distort.mjs';
 export { REVERB, ReverbProcessor } from './devices/reverb.mjs';

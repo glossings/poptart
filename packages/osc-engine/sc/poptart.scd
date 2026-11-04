@@ -4471,13 +4471,22 @@ noteKey = { |ctl, note|
 OSCdef(\poptartNoteOn, { |msg|
     var key = msg[1].asSymbol, note = msg[2].asFloat;
     var veloc = msg[3].asFloat, latency = msg[4].asFloat;
+    // A fifth number, nonzero, marks the note to slide (pattern-core's Sig#slide): a device of
+    // ours glides into it, a plugin plays it plainly.
+    var slide = (msg[5] ? 0).asFloat != 0;
     var track = tracks[key];
     var ctl = if (track.isKindOf(Event)) { track[\controllers][0] };
     var fire;
     if (ctl.notNil) {
         fire = { |lat|
             bundleNow.(lat, {
-                if (slotLive.(track, 0)) { ctl.midi.noteOn(0, noteKey.(ctl, note), (veloc * 127).round.asInteger) };
+                if (slotLive.(track, 0)) {
+                    if (slide and: { ctl.midi.class.name == \PoptartDeviceMIDIProxy }) {
+                        ctl.midi.noteSlide(0, noteKey.(ctl, note), (veloc * 127).round.asInteger)
+                    } {
+                        ctl.midi.noteOn(0, noteKey.(ctl, note), (veloc * 127).round.asInteger)
+                    };
+                };
                 // `vel` is for a velocity latch (poptart_vel); an envelope has no such control.
                 track[\envs].do { |e| e[\synth].set(\gate, 1, \t_retrig, 1, \vel, veloc) };
                 // note-synced lfo() shapes: reset/replay on every note onset - and this is where a

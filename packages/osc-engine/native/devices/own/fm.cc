@@ -172,6 +172,16 @@ struct FmVoice {
     for (auto& e : envs) e.gateOn(true);
   }
 
+  /** A slide into `n`: the pitch glides there over Glide, the envelopes carry on (see Sig#slide). */
+  void slideTo(double n) {
+    note = n;
+    targetHz = midiToHz(n);
+    if (releasing) {
+      releasing = false;
+      for (auto& e : envs) e.resume();
+    }
+  }
+
   void noteOff() {
     releasing = true;
     for (auto& e : envs) e.gateOff();
@@ -261,7 +271,7 @@ struct Device : pd_own::Device<ids::kCount, 2> {
   // Notes come with their offset into the block (pd-device.h's noteOnAt), because the matrix
   // ramps across the whole block: the block is cut at each note here, as the browser's process
   // cuts it, with the ramp read at the sample's place in the WHOLE block.
-  struct Event { int at; int kind; double note; double velocity; };
+  struct Event { int at; int kind; double note; double velocity; bool slide; };
   Event events[64];
   int eventCount = 0;
 
@@ -279,7 +289,11 @@ struct Device : pd_own::Device<ids::kCount, 2> {
   void pd_note_off(float note) { pd_note_off_at(note, 0); }
 
   void pd_note_on_at(float note, float velocity, int offset) {
-    if (eventCount < 64) events[eventCount++] = { offset > 0 ? offset : 0, 1, note, velocity };
+    if (eventCount < 64) events[eventCount++] = { offset > 0 ? offset : 0, 1, note, velocity, false };
+  }
+  void pd_note_slide(float note, float velocity) { pd_note_slide_at(note, velocity, 0); }
+  void pd_note_slide_at(float note, float velocity, int offset) {
+    if (eventCount < 64) events[eventCount++] = { offset > 0 ? offset : 0, 1, note, velocity, true };
   }
 
   void pd_note_off_at(float note, int offset) {
@@ -289,7 +303,7 @@ struct Device : pd_own::Device<ids::kCount, 2> {
       for (auto& v : voices) if (v.active()) v.noteOff();
       return;
     }
-    if (eventCount < 64) events[eventCount++] = { offset > 0 ? offset : 0, 0, note, 0 };
+    if (eventCount < 64) events[eventCount++] = { offset > 0 ? offset : 0, 0, note, 0, false };
   }
 
   void pd_bend(float semitones) { params.bend = isPlayable(semitones) ? semitones : 0.0; }
@@ -360,7 +374,23 @@ struct Device : pd_own::Device<ids::kCount, 2> {
     return &voices[0];
   }
 
-  void startNote(double note, double velocity) {
+  /** The voice a slide carries on: the one that started last, while it is still sounding. */
+  FmVoice* slideVoice() {
+    FmVoice* last = nullptr;
+    for (int i = 0; i < voiceCount; ++i) {
+      FmVoice& v = voices[i];
+      if (v.active() && (!last || v.age > last->age)) last = &v;
+    }
+    return last;
+  }
+
+  void startNote(double note, double velocity, bool slide = false) {
+    FmVoice* carried = slide ? slideVoice() : nullptr;
+    if (carried) {
+      carried->slideTo(note);
+      carried->age = clock++;
+      return;
+    }
     FmVoice* voice = allocate(note);
     const double from = voice->active() && voice->note >= 0 ? midiToHz(voice->note) : -1;
     voice->age = clock++;
@@ -391,7 +421,7 @@ struct Device : pd_own::Device<ids::kCount, 2> {
     while (at < frames) {
       while (next < eventCount && events[next].at <= at) {
         const Event& e = events[next++];
-        if (e.kind == 1) startNote(e.note, e.velocity);
+        if (e.kind == 1) startNote(e.note, e.velocity, e.slide);
         else stopNote(e.note);
       }
       const int until = next < eventCount && events[next].at < frames ? events[next].at : frames;

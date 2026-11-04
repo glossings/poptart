@@ -136,6 +136,16 @@ struct Voice {
     env.gateOn(true);
   }
 
+  /** A slide into `n`: the pitch glides there over Glide, the envelope carries on (see Sig#slide). */
+  void slideTo(double n) {
+    note = n;
+    targetHz = midiToHz(n);
+    if (releasing) {
+      releasing = false;
+      env.resume();
+    }
+  }
+
   void noteOff() {
     releasing = true;
     env.gateOff();
@@ -277,7 +287,7 @@ struct Device : Base {
   Pool<Voice> voices;
   int voiceCount = 8;
   long long clock = 0;
-  struct Event { int kind; double note; double velocity; };
+  struct Event { int kind; double note; double velocity; bool slide; };
   Event events[64];
   int eventCount = 0;
   Stage2x stageA, stageB;
@@ -298,7 +308,11 @@ struct Device : Base {
   }
 
   void pd_note_on(float note, float velocity) {
-    if (eventCount < 64) events[eventCount++] = { 1, note, velocity };
+    if (eventCount < 64) events[eventCount++] = { 1, note, velocity, false };
+  }
+
+  void pd_note_slide(float note, float velocity) {
+    if (eventCount < 64) events[eventCount++] = { 1, note, velocity, true };
   }
 
   void pd_note_off(float note) {
@@ -310,7 +324,7 @@ struct Device : Base {
       }
       return;
     }
-    if (eventCount < 64) events[eventCount++] = { 0, note, 0 };
+    if (eventCount < 64) events[eventCount++] = { 0, note, 0, false };
   }
 
   void pd_bend(float semitones) { params.bend = isPlayable(semitones) ? semitones : 0.0; }
@@ -357,7 +371,24 @@ struct Device : Base {
     return &voices[0];
   }
 
-  void startNote(double note, double velocity) {
+  /** The voice a slide carries on: the one that started last, while it is still sounding. */
+  Voice* slideVoice() {
+    Voice* last = nullptr;
+    for (int i = 0; i < voiceCount; ++i) {
+      Voice& v = voices[i];
+      if (v.active() && (!last || v.age > last->age)) last = &v;
+    }
+    return last;
+  }
+
+  void startNote(double note, double velocity, bool slide = false) {
+    Voice* carried = slide ? slideVoice() : nullptr;
+    if (carried) {
+      carried->slideTo(note);
+      carried->holds = 1;
+      carried->age = clock++;
+      return;
+    }
     Voice* voice = allocate(note);
     const int holds = voice->active() && voice->note == note && !voice->releasing ? voice->holds + 1 : 1;
     const double from = voice->active() && voice->note >= 0 ? midiToHz(voice->note) : -1;
@@ -378,7 +409,7 @@ struct Device : Base {
   void pd_process(int frames) {
     readParams();
     for (int i = 0; i < eventCount; ++i) {
-      if (events[i].kind == 1) startNote(events[i].note, events[i].velocity);
+      if (events[i].kind == 1) startNote(events[i].note, events[i].velocity, events[i].slide);
       else stopNote(events[i].note);
     }
     eventCount = 0;

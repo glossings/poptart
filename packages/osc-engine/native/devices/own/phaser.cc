@@ -4,6 +4,7 @@
 // so it covers the same musical range wherever the center is put.
 
 #include "own/pd-own.h"
+#include "own/dsp/filters.h"
 #include "own/dsp/moddelay.h"
 #include "own/dsp/sync.h"
 #include "pd-own-ids.h"
@@ -15,6 +16,15 @@ using namespace pd_own;
 
 constexpr int kMaxStages = 12;
 
+/**
+ * The corner of the blocker on what the feedback's curve adds, in Hz: low, because round a loop
+ * of nearly one its turn in phase is heard well above it, on the bass the feedback lifts.
+ */
+constexpr double kPhaserLoopDcHz = 2.0;
+
+/** The corner of the output's coupling, in Hz. */
+constexpr double kPhaserDcHz = 8.0;
+
 /** The first-order allpass coefficient whose phase turns through a quarter cycle at `hz`. */
 inline double coefficient(double hz, double sampleRate) {
   const double f = clamp(hz, 10.0, sampleRate * 0.45);
@@ -22,14 +32,18 @@ inline double coefficient(double hz, double sampleRate) {
   return (1 - t) / (1 + t);
 }
 
-/** One channel's chain of allpasses and its feedback sample. */
+/** One channel's chain of allpasses, its feedback sample and its output's coupling. */
 struct Chain {
   double z[kMaxStages] = { 0 };
   double fb = 0;
+  DcBlocker dc;
+  DcBlocker out;
 
   void reset() {
     for (double& v : z) v = 0;
     fb = 0;
+    dc.reset();
+    out.reset();
   }
 
   double next(double x, int stages, double a, double feedback) {
@@ -39,7 +53,9 @@ struct Chain {
       z[s] = v + a * y;
       v = y;
     }
-    fb = std::tanh(v);
+    // The allpasses pass DC; what the curve adds is AC-coupled, so the DC it makes of a lopsided
+    // wave cannot build up round the loop, while the feedback itself keeps its bass.
+    fb = v + dc.next(std::tanh(v) - v);
     return v;
   }
 };
@@ -51,7 +67,7 @@ struct Device : pd_own::Device<ids::kCount> {
 
   void pd_init(double sr) {
     sampleRate = sr;
-    for (auto& c : chains) c.reset();
+    for (auto& c : chains) { c.dc.init(sr, kPhaserLoopDcHz); c.out.init(sr, kPhaserDcHz); c.reset(); }
     phase = 0;
     bpm = 120;
   }
@@ -89,8 +105,10 @@ struct Device : pd_own::Device<ids::kCount> {
       const double r = inr[i];
       const double wetL = chains[0].next(l, stages, aL, feedback);
       const double wetR = chains[1].next(r, stages, aR, feedback);
-      outl[i] = static_cast<float>(l + (wetL - l) * mix);
-      outr[i] = static_cast<float>(r + (wetR - r) * mix);
+      // The output's coupling, on the mixed signal so the dry and the wet turn together: a fast sweep
+      // mixes what goes round at its own rate down to DC, which the feedback then builds on.
+      outl[i] = static_cast<float>(chains[0].out.next(l + (wetL - l) * mix));
+      outr[i] = static_cast<float>(chains[1].out.next(r + (wetR - r) * mix));
     }
     if (frames > 0 && !isPlayable(outl[frames - 1])) for (auto& c : chains) c.reset();
   }

@@ -8,7 +8,7 @@
 // The layout rule is the descriptor's own `group` field, in declaration order, and its `panel`
 // hint says which sections sit beside one another. Nothing here invents sections.
 
-import { argToValue, clampParam, decimalsFor, formatValue, isToggle, normalize, paramGroups, valueToArg } from './descriptor.mjs';
+import { argToValue, clampParam, decimalsFor, formatValue, isToggle, normalize, paramGroups, valueToArg, widestText } from './descriptor.mjs';
 import { buildFigures, subsumedParams } from './figures.mjs';
 
 /** How wide a device window is when its descriptor does not say. */
@@ -81,6 +81,8 @@ export function buildPanel(descriptor, values = {}, modulated = new Map(), opts 
         value,
         position: normalize(p, value),
         text: formatValue(p, value, loaded, values),
+        // The most characters `text` can ever be (see widestText): the room its readout keeps.
+        widest: widestText(p, loaded),
         // A second reading of the knob, which the editor writes values in that unit back with.
         alt: p.alt ? { unit: p.alt.unit, min: p.alt.min, max: p.alt.max, decimals: decimalsFor({ decimals: null, step: null, min: p.alt.min, max: p.alt.max }) } : null,
         unit: p.unit,

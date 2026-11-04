@@ -719,8 +719,8 @@ test('a parameter something else is driving is reported, by what is driving it',
   engine.setParamEnv('t1', 2, 'Mix', { shape: 'sine', rateHz: 1, min: 0, max: 1 });
 
   const driven = engine.drivenParams('t1', 1);
-  assert.deepEqual([...driven], [['drive', 'an lfo']], 'named by the id, whatever spelling the pattern used');
-  assert.deepEqual([...engine.drivenParams('t1', 2)], [['mix', 'an envelope']], 'and a slot reports only its own');
+  assert.deepEqual([...driven], [['drive', 'lfo']], 'named by the id, whatever spelling the pattern used');
+  assert.deepEqual([...engine.drivenParams('t1', 2)], [['mix', 'env']], 'and a slot reports only its own');
 
   // The panel draws a driven control read-only for exactly this reason: the engine will not set it.
   engine.setParam('t1', 1, 'Drive', 0.25, 0);
@@ -752,7 +752,7 @@ test('a parameter an expression drives reads as driven too', () => {
   engine.createTrack('t1');
   engine.loadInstrument('t1', 'Wavetable');
   engine.setParamExpr('t1', 0, 'Osc 1 Phase', patched('mod'));
-  assert.deepEqual([...engine.drivenParams('t1', 0)], [['osc1.phase', 'a combination of signals']]);
+  assert.deepEqual([...engine.drivenParams('t1', 0)], [['osc1.phase', 'expr']]);
 });
 
 test('a named pack arrives from the scheduler as sp:<id> and is looked up by its bare id', () => {

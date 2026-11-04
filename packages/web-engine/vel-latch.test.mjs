@@ -37,7 +37,7 @@ test('each note-on sets the velocity at its own time, in the range, and a note-o
   engine.noteOn('t1', 62, 1, 1.5);
   engine.noteOff('t1', 62, 1.9);
   assert.deepEqual(sets(cutoff, from), [[0.4, 1], [0.6, 1.5]]);
-  assert.equal(engine.drivenParams('t1', 1).get('cutoff'), 'velocity');
+  assert.equal(engine.drivenParams('t1', 1).get('cutoff'), 'vel');
 });
 
 test('a chord\'s last note-on wins, as on the desktop', () => {
@@ -65,7 +65,7 @@ test('a new range rewrites the value now and the note-ons still to come', () => 
 test('an env() and a vel on one parameter are not each other', () => {
   const { engine, cutoff } = velTrack();
   engine.setParamEnv('t1', 1, 'Cutoff', { attack: 0.1, decay: 0.1, sustain: 0.5, release: 0.2, min: 0, max: 1 });
-  assert.equal(engine.drivenParams('t1', 1).get('cutoff'), 'an envelope');
+  assert.equal(engine.drivenParams('t1', 1).get('cutoff'), 'env');
   const from = cutoff.calls.length;
   engine.noteOn('t1', 60, 0.5, 1);
   assert.ok(cutoff.calls.slice(from).some((c) => c.kind !== 'set'), 'the envelope ramps');

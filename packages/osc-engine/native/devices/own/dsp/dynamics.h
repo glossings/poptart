@@ -12,6 +12,13 @@
 
 namespace pd_own {
 
+/**
+ * The corner of the blocker on a compressor's compressed signal, in Hz. A fast gain moves within
+ * a cycle, and a gain that moves with a lopsided wave makes DC of it, as a real one's does before
+ * its output coupling takes it off.
+ */
+constexpr double kDynamicsDcHz = 8.0;
+
 /** A linear level in decibels, floored so silence is a number. */
 inline double dbOf(double x) { return 20.0 * std::log10(std::fmax(1e-9, x)); }
 

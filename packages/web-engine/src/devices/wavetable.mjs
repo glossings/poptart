@@ -342,8 +342,8 @@ export class WavetableSynth {
    * or late by up to a block and the groove walks. The engine converts an absolute time into an
    * offset; the synth splits its block wherever one falls.
    */
-  queueNoteOn(note, velocity, offset = 0) {
-    this.events.push({ at: Math.max(0, offset | 0), kind: 1, note, velocity });
+  queueNoteOn(note, velocity, offset = 0, slide = false) {
+    this.events.push({ at: Math.max(0, offset | 0), kind: 1, note, velocity, slide });
   }
 
   queueNoteOff(note, offset = 0) {
@@ -422,7 +422,24 @@ export class WavetableSynth {
     return free ?? oldestReleasing ?? oldest ?? this.voices[0];
   }
 
-  startNote(note, velocity) {
+  /** The voice a slide carries on: the one that started last, while it is still sounding. */
+  _slideVoice() {
+    let last = null;
+    for (let i = 0; i < this.voiceCount; i++) {
+      const v = this.voices[i];
+      if (v.active && (!last || v.age > last.age)) last = v;
+    }
+    return last;
+  }
+
+  startNote(note, velocity, slide = false) {
+    const carried = slide ? this._slideVoice() : null;
+    if (carried) {
+      carried.slideTo(note);
+      carried.holds = 1;
+      carried.age = this.clock++;
+      return;
+    }
     const voice = this.allocate(note);
     // Glide slides from whatever this voice was last playing, which is how a monophonic lead
     // with one voice glides between its notes.
@@ -445,6 +462,12 @@ export class WavetableSynth {
    * rest, each sliding from the nearest pitch nobody in the set has claimed.
    */
   startNotes(ons) {
+    // A slide carries the voice that sounded last on, whatever the glide mode.
+    if (ons.some((e) => e.slide)) {
+      for (const e of ons) if (e.slide) this.startNote(e.note, e.velocity, true);
+      ons = ons.filter((e) => !e.slide);
+      if (!ons.length) return;
+    }
     if (this.params.glideMode < 0.5) {
       for (const e of ons) this.startNote(e.note, e.velocity);
       return;

@@ -488,6 +488,11 @@ PoptartDeviceMIDIProxy {
         owner.sendMsg('/noteOn', note.asFloat, (veloc / 127).asFloat);
     }
 
+    // A note marked to slide (pattern-core's Sig#slide): /noteOn's third number.
+    noteSlide { |chan, note, veloc = 64|
+        owner.sendMsg('/noteOn', note.asFloat, (veloc / 127).asFloat, 1.0);
+    }
+
     noteOff { |chan, note, veloc = 64|
         owner.sendMsg('/noteOff', note.asFloat);
     }

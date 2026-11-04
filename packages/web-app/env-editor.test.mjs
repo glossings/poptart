@@ -78,12 +78,13 @@ function fakeCm(text) {
 function panelOn(ed, code) {
   const evals = [];
   const names = ['envModDescriptor', 'envModCall', 'envModRead', 'envModValues', 'envModFixedText', 'envModFigureData',
-    'envModSend', 'envModPreview', 'envModRepaint', 'envModCommit'];
-  const api = new Function('envctlMod', 'deckEvalSoon', 'closeEnvModEditor', 'ed', 'mods', `
+    'envModSend', 'envModPreview', 'envModWriteLive', 'envModRepaint', 'envModCommit'];
+  const api = new Function('envctlMod', 'deckEvalSoon', 'closeEnvModEditor', 'evalEditor', 'ed', 'mods', `
     let envModCM = ed;
     let envModWriting = false;
     const envModEvalSoon = { timer: null, ed: null };
     const ENV_MOD_EVAL_DEBOUNCE_MS = 0;
+    const ENV_MOD_LIVE_MS = 0;
     ${grabStatement('ENV_MOD_FIELDS')}
     ${names.map(grab).join('\n')}
     let envModState = null;
@@ -98,7 +99,7 @@ function panelOn(ed, code) {
       values: envModValues,
       state: () => envModState,
     };
-  `)(envctl, (slot, which) => evals.push(which), () => {}, ed, { buildFigures, denormalize });
+  `)(envctl, (slot, which) => evals.push(which), () => {}, (which) => evals.push(which), ed, { buildFigures, denormalize });
   return { ...api, evals, start: code.indexOf('env(') };
 }
 
@@ -109,14 +110,15 @@ for (const deck of ['a', 'b']) {
     const other = fakeCm(code);
     const panel = panelOn(ed, code);
     panel.open(panel.start);
-    // A frame of the drag is drawn but not written...
+    // A frame of the drag is written as it moves, so it is heard while the hand is on it...
     panel.send({ id: 'release', value: 0.75 }, false);
-    assert.equal(ed.text, code);
+    const moved = 'lead: note("c3").gain(env({ attack: 0.01, retrigger: true, release: 0.75 }))';
+    assert.equal(ed.text, moved);
     assert.equal(panel.values().release, 0.75);
-    // ...and the end of it is.
+    // ...and the end of it leaves it there, and is heard.
     panel.send({ id: 'release', value: 0.75 }, true);
-    assert.equal(ed.text, 'lead: note("c3").gain(env({ attack: 0.01, retrigger: true, release: 0.75 }))');
-    assert.deepEqual(panel.evals, [ed], 'the deck the call is in is the one re-evaluated');
+    assert.equal(ed.text, moved);
+    assert.ok(panel.evals.length && panel.evals.every((x) => x === ed), 'the deck the call is in is the one re-evaluated');
     assert.equal(other.text, code, 'and nothing else is touched');
     assert.equal(panel.state().draft, null);
   });

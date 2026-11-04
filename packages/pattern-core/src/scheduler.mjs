@@ -2202,13 +2202,18 @@ export class Scheduler {
       } else {
         // Not rounded: a fractional note is a microtone, and an instrument that can play one
         // should get it. Whatever speaks MIDI rounds on its own side (see the OSC engine).
-        const midiNote = Number(step.value);
+        // Whole octaves on top of whatever the chain made of the pitch (see Sig#octave).
+        const octaves = Math.round(Number(channelAt('octave', step, this.pattern.noteChannels, gridSec, this.transport.cps, songStart)) || 0);
+        const midiNote = Number(step.value) + 12 * octaves;
         const vel = velocity ?? 1.0; // unset velocity on a synth note is full
         if (logAt) {
           this._logEvent(logAt[0], logAt[1], formatNoteEvent(midiNote, vel));
         }
         if (vel <= 0) continue;
-        this.engine.noteOn(this.trackId, midiNote, Math.min(1, vel), onsetSec - comp);
+        // A note marked to slide (see Sig#slide) says so; an engine that can't slide plays it plainly.
+        const slide = Number(channelAt('slide', step, this.pattern.noteChannels, gridSec, this.transport.cps, songStart)) > 0;
+        if (slide) this.engine.noteOn(this.trackId, midiNote, Math.min(1, vel), onsetSec - comp, { slide: true });
+        else this.engine.noteOn(this.trackId, midiNote, Math.min(1, vel), onsetSec - comp);
         this.engine.noteOff(this.trackId, midiNote, Math.max(onsetSec + 0.001, offsetSec - NOTE_OFF_EARLY_SEC) - comp);
       }
     }

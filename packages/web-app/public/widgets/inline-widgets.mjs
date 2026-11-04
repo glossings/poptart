@@ -102,6 +102,9 @@ export function createInlineWidgets({
   let liveNow = {}; // plot at -> value right now
   const dataWin = { from: 0, to: 0, fetching: false };
   const FOLDED = new Set(calls.FOLDED_WIDGETS ?? ['steps', 'sliders', 'matrix']);
+  // The seed and knobs each acid() line was thrown by, by the line's text: a fold is built again
+  // whenever the buffer is evaluated, and its knobs have to keep moving the line they made.
+  const acidSeeds = new Map(); // text -> { seed, knobs }
 
   // ---------------------------------------------------------------------------- the code side
 
@@ -792,7 +795,10 @@ export function createInlineWidgets({
         root.classList.toggle('iw-played', !!played);
         fill.style.left = '0';
         fill.style.width = `${t * 100}%`;
-        val.textContent = calls.formatNumber(shown.value, decimals);
+        // Fixed decimals, padded to the wider end of the range, so the number holds still in its
+        // box while it is dragged or played (the code keeps its own short spelling).
+        const fixed = (v) => Number(v).toFixed(decimals);
+        val.textContent = fixed(shown.value).padStart(Math.max(fixed(s.min).length, fixed(s.max).length), ' ');
         root.title = `${s.min} - ${s.max}`;
       };
       return root;
@@ -1270,6 +1276,333 @@ export function createInlineWidgets({
         adoptRow(w);
         tick(pos, running);
       };
+      return root;
+    },
+
+    // An acid() line (see pattern-core's acid.mjs): a row of bars, one per step, with
+    // a row each for accents, long gates and octaves under it, and a head of the button that throws
+    // a new line and the knobs it throws by. The knobs are the widget's own, not the code's.
+    acid(w) {
+      const root = el('span', 'iw-acid');
+      const head = el('span', 'iw-acid-head');
+      const grid = el('span', 'iw-acid-grid');
+      const ruler = el('span', 'iw-acid-row iw-acid-ruler');
+      const notes = el('span', 'iw-acid-notes');
+      const accents = el('span', 'iw-acid-row');
+      const gates = el('span', 'iw-acid-row');
+      const octaves = el('span', 'iw-acid-row');
+      const roll = el('button', 'small iw-acid-roll');
+      roll.type = 'button';
+      roll.textContent = 'new';
+      roll.title = 'a new line';
+      head.append(roll);
+      // Each row with its name before it.
+      for (const [rowEl, name] of [[ruler, 'loop'], [notes, 'step'], [accents, 'accent'], [gates, 'gate'], [octaves, 'octave']]) {
+        const line = el('span', 'iw-acid-line');
+        const label = el('span', 'iw-acid-label');
+        label.textContent = name;
+        line.append(label, rowEl);
+        grid.append(line);
+      }
+      root.append(head, grid);
+      let rulerEls = [];
+      let noteEls = [];
+      let accentEls = [];
+      let gateEls = [];
+      let octaveEls = [];
+      const kept = new Map(); // step -> what it played before it was turned off
+      const state = () => {
+        const at = locate(w);
+        const a = at?.pos[0];
+        const src = calls.rowSource(a?.text);
+        if (src.form === 'text') {
+          const lead = a.text.length - a.text.trimStart().length;
+          return { text: src.text, abs: at.base + a.from + lead + src.from, write: (next) => writeLiteral(w, next) };
+        }
+        const n = src.form === 'count' ? src.count : calls.ACID_DEFAULT_STEPS;
+        const thrown = keyEntryOf(w)?.entry?.value;
+        const text = typeof thrown === 'string' && calls.parseAcidRow(thrown).length === n ? thrown : Array.from({ length: n }, () => '.').join(' ');
+        return { text, abs: -1, write: (next) => holdingFold(w, () => writeArgs(w, [[0, quoteRow(next)]])) };
+      };
+      // The seed and knobs the line was thrown by, kept by its text: a fold is built again whenever
+      // the buffer is evaluated, and the knobs have to keep moving the line they made.
+      const defaults = () => Object.fromEntries(calls.ACID_KNOBS.map((k) => [k.key, k.default]));
+      const thrownBy = (text) => acidSeeds.get(text) ?? { seed: null, knobs: defaults() };
+      const write = (next, by = thrownBy(state().text)) => {
+        const s = state();
+        // The knobs are kept even when they leave the line as it was, so they show where they are.
+        acidSeeds.set(next, by);
+        w.dirty = true;
+        if (next === s.text) return;
+        s.write(next);
+        push(w, next);
+        w.dirty = true;
+      };
+      // A line's loop marks, put back around the same steps after it is thrown again.
+      const keepLoop = (was, next) => {
+        if (!/(^|\s)\|(\s|$)/.test(was)) return next;
+        const { from, to } = calls.acidLoop(was);
+        return calls.setAcidLoop(next, from, to);
+      };
+      const rethrow = (seed, knobs) => {
+        const text = state().text;
+        const n = calls.parseAcidRow(text).length || calls.ACID_DEFAULT_STEPS;
+        write(keepLoop(text, calls.throwAcidRow(n, knobs, seed)), { seed, knobs });
+      };
+      // The ruler, as the piano roll's loop bar: the loop drawn as one bar, dragged by its body to
+      // move it and by either end to stretch it; a drag off it draws a new one. Only the hand's
+      // sideways place counts once it has started, so it can wander off the row.
+      const loopBar = el('span', 'iw-acid-loopbar');
+      ruler.append(loopBar);
+      const EDGE_PX = 6;
+      // The loop's bar, from its first step's left edge to its last step's right; none when the
+      // whole line loops. Placed again every frame it is drawn, since it is measured from the steps
+      // and they have no place until the widget is on the page.
+      let loopAt = null;
+      const placeBar = () => {
+        loopBar.hidden = !loopAt;
+        if (!loopAt) return;
+        const first = rulerEls[loopAt.from];
+        const last = rulerEls[loopAt.to - 1];
+        const left = `${first.offsetLeft}px`;
+        const width = `${last.offsetLeft + last.offsetWidth - first.offsetLeft}px`;
+        if (loopBar.style.left !== left) loopBar.style.left = left;
+        if (loopBar.style.width !== width) loopBar.style.width = width;
+      };
+      // The step under x: past either end, the end step; in a beat gap, the nearer side.
+      const stepAt = (x) => {
+        let best = 0;
+        let bestD = Infinity;
+        rulerEls.forEach((c, i) => {
+          const r = c.getBoundingClientRect();
+          const d = x < r.left ? r.left - x : x > r.right ? x - r.right : 0;
+          if (d < bestD) { bestD = d; best = i; }
+        });
+        return best;
+      };
+      // What a press at x takes hold of: an end of the loop, its body, or nothing (a new loop).
+      const holdAt = (x) => {
+        const loop = calls.acidLoop(state().text);
+        const n = rulerEls.length;
+        if (!n || (loop.from === 0 && loop.to === n)) return 'new';
+        const left = rulerEls[loop.from].getBoundingClientRect().left;
+        const right = rulerEls[loop.to - 1].getBoundingClientRect().right;
+        if (Math.abs(x - left) <= EDGE_PX) return 'from';
+        if (Math.abs(x - right) <= EDGE_PX) return 'to';
+        return x > left && x < right ? 'move' : 'new';
+      };
+      let grip = null;
+      const loopTo = (e) => {
+        if (!grip) return;
+        const n = rulerEls.length;
+        const i = stepAt(e.clientX);
+        const text = state().text;
+        let from;
+        let to;
+        if (grip.kind === 'new') [from, to] = [Math.min(grip.anchor, i), Math.max(grip.anchor, i) + 1];
+        else if (grip.kind === 'from') [from, to] = [Math.min(i, grip.to - 1), grip.to];
+        else if (grip.kind === 'to') [from, to] = [grip.from, Math.max(i + 1, grip.from + 1)];
+        else {
+          const len = grip.to - grip.from;
+          from = Math.max(0, Math.min(n - len, grip.from + i - grip.at));
+          to = from + len;
+        }
+        write(calls.setAcidLoop(text, from, to));
+      };
+      onDrag(ruler, {
+        down: (e) => {
+          if (!rulerEls.length) return false;
+          const loop = calls.acidLoop(state().text);
+          const kind = holdAt(e.clientX);
+          grip = { kind, anchor: stepAt(e.clientX), at: stepAt(e.clientX), from: loop.from, to: loop.to };
+          ruler.classList.add('dragging');
+          if (kind === 'new') loopTo(e);
+          return true;
+        },
+        move: loopTo,
+        up: () => {
+          grip = null;
+          ruler.classList.remove('dragging');
+        },
+      });
+      // The pointer says what a press would take hold of.
+      ruler.addEventListener('pointermove', (e) => {
+        if (grip) return;
+        const kind = holdAt(e.clientX);
+        ruler.style.cursor = kind === 'move' ? 'grab' : kind === 'new' ? 'crosshair' : 'ew-resize';
+      });
+      w.randomize = () => rethrow(calls.newAcidSeed(), thrownBy(state().text).knobs);
+      onDrag(roll, { down: () => { w.randomize(); return false; } });
+      w.mutate = async (p) => {
+        const s = state();
+        const by = thrownBy(s.text);
+        const { text: next, edits } = calls.mutateAcidRow(s.text, p, by.knobs);
+        if (!edits.length || !writeQuietly(rowEdits(w, s, next, edits), s.abs < 0 ? w : null)) return;
+        acidSeeds.set(next, by);
+        push(w, next);
+        w.dirty = true;
+      };
+      // The sliders: the value where the hand is across the box, from a press anywhere in it and on
+      // through a drag. `set(v, seed)` is what a value does; the seed is the line's, held for the drag.
+      const slider = (spec, set) => {
+        const box = el('span', 'pr-box-slider iw-acid-box');
+        const fill = el('span', 'pr-box-fill');
+        const val = el('span', 'pr-box-val');
+        box.append(fill, val);
+        head.append(box);
+        // The drag is measured against the box as it was pressed, and the line as it was: the box
+        // can change size under the hand (more steps, a wider widget), and a value dragged past
+        // and back gives back what was there.
+        let held = null;
+        const setAt = (e) => {
+          const r = held.rect;
+          const t = Math.min(1, Math.max(0, (e.clientX - r.left) / Math.max(1, r.width)));
+          const v = spec.min + t * (spec.max - spec.min);
+          set(spec.step ? Math.round(v) : v, held.seed, held.text);
+        };
+        onDrag(box, {
+          down: (e) => {
+            const text = state().text;
+            held = { rect: box.getBoundingClientRect(), text, seed: thrownBy(text).seed ?? calls.newAcidSeed() };
+            box.classList.add('dragging');
+            setAt(e);
+            return true;
+          },
+          move: (e) => { if (held) setAt(e); },
+          up: () => {
+            held = null;
+            box.classList.remove('dragging');
+          },
+        });
+        return { k: spec, fill, val };
+      };
+      // The knobs: moving one throws the line again from its seed, so the line follows it.
+      const knobEls = calls.ACID_KNOBS.map((k) => slider(k, (v, seed) => {
+        rethrow(seed, { ...thrownBy(state().text).knobs, [k.key]: calls.acidKnob(k.key, v) });
+      }));
+      const change = (i, what) => {
+        const s = state();
+        const st = calls.parseAcidRow(s.text)[i];
+        if (!st) return;
+        if (st.kind === 'on') kept.set(i, st);
+        write(calls.setAcidStep(s.text, i, typeof what === 'function' ? what(st) : what));
+      };
+      // A step's bar: dragged, its height is where the hand is; clicked, the step is turned off or
+      // on. The drag is measured against the row as it was pressed.
+      let drag = null;
+      const valueAt = (e) => Math.min(1, Math.max(0, 1 - (e.clientY - drag.rect.top) / Math.max(1, drag.rect.height)));
+      onDrag(notes, {
+        down: (e) => {
+          const i = cellIndex(e.target, notes);
+          if (!calls.parseAcidRow(state().text)[i]) return false;
+          drag = { i, y: e.clientY, rect: noteEls[i].getBoundingClientRect(), moved: false };
+          return true;
+        },
+        move: (e) => {
+          if (!drag) return;
+          if (!drag.moved && Math.abs(e.clientY - drag.y) < 3) return;
+          drag.moved = true;
+          change(drag.i, { value: valueAt(e) });
+        },
+        up: () => {
+          if (drag && !drag.moved) change(drag.i, (st) => (st.kind === 'on' ? '.' : { ...(kept.get(drag.i) ?? {}) }));
+          drag = null;
+        },
+      });
+      // The rows under the notes: a click switches an accent or a long gate, and steps the octave
+      // up, up again, down and back; a drag across paints the first cell's new state.
+      const OCTAVE_NEXT = { 0: 1, 1: 2, 2: -1, '-1': 0 };
+      const rowOf = { accent: (st) => st.accent, long: (st) => st.long, octave: (st) => st.octave };
+      for (const [rowEl, key] of [[accents, 'accent'], [gates, 'long'], [octaves, 'octave']]) {
+        let paint = null;
+        onDrag(rowEl, {
+          down: (e) => {
+            const i = cellIndex(e.target, rowEl);
+            const st = calls.parseAcidRow(state().text)[i];
+            if (!st) return false;
+            const now = st.kind === 'on' ? rowOf[key](st) : key === 'octave' ? 0 : false;
+            paint = key === 'octave' ? OCTAVE_NEXT[now] : !now;
+            change(i, { [key]: paint });
+            return true;
+          },
+          move: (e) => {
+            if (paint === null) return;
+            const i = cellIndex(doc.elementFromPoint?.(e.clientX, e.clientY), rowEl);
+            const st = calls.parseAcidRow(state().text)[i];
+            if (st && (st.kind !== 'on' || rowOf[key](st) !== paint)) change(i, { [key]: paint });
+          },
+          up: () => { paint = null; },
+        });
+      }
+      const sizeTo = (b) => root.style.setProperty('--iw-bar-w', `${b.width}px`);
+      addGrip(w, root, { box: true, current: () => boxOf(w), preview: sizeTo });
+      w.render = () => {
+        const s = state();
+        const steps = calls.parseAcidRow(s.text);
+        sizeTo(boxOf(w));
+        if (steps.length !== noteEls.length) {
+          for (const r of [notes, accents, gates, octaves]) r.textContent = '';
+          ruler.replaceChildren(loopBar);
+          const cell = (parent, i) => {
+            const c = el('span', 'iw-cell');
+            c.dataset.c = String(i);
+            if (M.beatStart(i, steps.length)) c.classList.add('beat');
+            parent.append(c);
+            return c;
+          };
+          rulerEls = steps.map((_, i) => cell(ruler, i));
+          noteEls = steps.map((_, i) => {
+            const c = cell(notes, i);
+            c.append(el('span', 'iw-acid-fill'));
+            return c;
+          });
+          accentEls = steps.map((_, i) => cell(accents, i));
+          gateEls = steps.map((_, i) => cell(gates, i));
+          octaveEls = steps.map((_, i) => cell(octaves, i));
+        }
+        const by = thrownBy(s.text);
+        const shown = (k, v) => {
+          const { fill, val } = knobEls[calls.ACID_KNOBS.indexOf(k)];
+          fill.style.width = `${((v - k.min) / (k.max - k.min)) * 100}%`;
+          // Fixed width, so the box holds still while it is dragged.
+          val.textContent = `${k.key} ${k.step ? String(v).padStart(String(k.max).length, ' ') : v.toFixed(2)}`;
+        };
+        for (const k of calls.ACID_KNOBS) shown(k, by.knobs[k.key] ?? k.default);
+        const loop = calls.acidLoop(s.text);
+        const whole = loop.from === 0 && loop.to === steps.length;
+        loopAt = whole || !rulerEls.length ? null : loop;
+        placeBar();
+        steps.forEach((st, i) => {
+          const on = st.kind === 'on';
+          const tied = on && i > 0 && steps[i - 1].kind === 'on' && steps[i - 1].long && steps[i - 1].value === st.value && steps[i - 1].octave === st.octave;
+          // 0 plays, so it keeps a sliver of bar: an empty step is one that is off.
+          noteEls[i].firstChild.style.height = !on ? '0' : st.value === 0 ? '2px' : `${st.value * 100}%`;
+          noteEls[i].classList.toggle('on', on);
+          noteEls[i].classList.toggle('tie', tied);
+          const inLoop = i >= loop.from && i < loop.to;
+          rulerEls[i].title = `step ${i + 1}${inLoop ? ': loops' : ''}`;
+          for (const c of [noteEls[i], accentEls[i], gateEls[i], octaveEls[i]]) c.classList.toggle('out', !inLoop);
+          noteEls[i].title = `step ${i + 1}: ${on ? st.value : 'off'}`;
+          for (const c of [accentEls[i], gateEls[i], octaveEls[i]]) c.classList.toggle('idle', !on);
+          accentEls[i].classList.toggle('on', on && st.accent);
+          accentEls[i].title = `step ${i + 1}: ${st.accent ? 'accent' : 'no accent'}`;
+          gateEls[i].classList.toggle('on', on && st.long);
+          gateEls[i].title = `step ${i + 1}: ${st.long ? 'long' : 'short'}`;
+          octaveEls[i].classList.toggle('on', on && st.octave > 0);
+          octaveEls[i].classList.toggle('two', on && st.octave === 2);
+          octaveEls[i].classList.toggle('down', on && st.octave < 0);
+          octaveEls[i].title = `step ${i + 1}: ${st.octave > 0 ? `up ${st.octave}` : st.octave < 0 ? 'down 1' : 'no octave'}`;
+        });
+      };
+      w.tick = (pos, running) => {
+        adoptRow(w);
+        placeBar();
+        const spans = running ? litWithin(w) : [];
+        if (!spans.length) return lightCells(w, noteEls, []);
+        const s = state();
+        lightCells(w, noteEls, M.litCells(spans, s.abs, calls.parseAcidRow(s.text)));
+      };
+      w.lit = '';
       return root;
     },
 
@@ -2259,9 +2592,14 @@ export function createInlineWidgets({
     if (!k || k.adopted || typeof thrown !== 'string') return;
     k.adopted = true;
     const src = calls.rowSource(locate(w)?.pos[0]?.text);
-    const count = src.form === 'count' ? src.count : src.form === 'none' ? calls.DEFAULT_CELL_COUNT : null;
-    if (count === null || calls.parseCells(thrown).length !== count) return;
+    const none = w.kind === 'acid' ? calls.ACID_DEFAULT_STEPS : calls.DEFAULT_CELL_COUNT;
+    const count = src.form === 'count' ? src.count : src.form === 'none' ? none : null;
+    const thrownCount = w.kind === 'acid' ? calls.parseAcidRow(thrown).length : calls.parseCells(thrown).length;
+    if (count === null || thrownCount !== count) return;
     if (!writeQuietly(argEdits(w, [[0, quoteRow(thrown)]]), w)) return;
+    if (w.kind === 'acid' && Number.isFinite(k.entry.seed)) {
+      acidSeeds.set(thrown, { seed: k.entry.seed, knobs: Object.fromEntries(calls.ACID_KNOBS.map((o) => [o.key, o.default])) });
+    }
     push(w, thrown);
     w.dirty = true;
   }

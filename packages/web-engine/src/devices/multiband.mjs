@@ -10,8 +10,9 @@
 import { defineDevice } from '../descriptor.mjs';
 import { at, dbToGain } from '../dsp/control.mjs';
 import { Crossover } from '../dsp/biquad.mjs';
+import { DcBlocker } from '../dsp/filters.mjs';
 import { DYNAMICS_BLOCKS_PER_ENTRY, History } from '../dsp/history.mjs';
-import { Detector, dbOf, gainComputer } from './compressor.mjs';
+import { DYNAMICS_DC_HZ, Detector, dbOf, gainComputer } from './compressor.mjs';
 
 const BANDS = ['Low', 'Mid', 'High'];
 
@@ -98,6 +99,8 @@ export class MultibandProcessor {
     this.lowX = [new Crossover(sampleRate), new Crossover(sampleRate)];
     this.highX = [new Crossover(sampleRate), new Crossover(sampleRate)];
     this.detectors = BANDS.map(() => new Detector(sampleRate));
+    // The compressed signal's output coupling (see DYNAMICS_DC_HZ).
+    this.dcs = [new DcBlocker(sampleRate, DYNAMICS_DC_HZ), new DcBlocker(sampleRate, DYNAMICS_DC_HZ)];
     this.split = [new Float64Array(2), new Float64Array(2)];
     this.bands = [new Float64Array(3), new Float64Array(3)];
     this.last = { low: -1, high: -1, attack: [-1, -1, -1], release: [-1, -1, -1] };
@@ -180,8 +183,8 @@ export class MultibandProcessor {
       }
       const mix = at(params.mix, i);
       const out = dbToGain(at(params.output, i));
-      outL[i] = (l + (sumL - l) * mix) * out;
-      if (outR !== outL) outR[i] = (r + (sumR - r) * mix) * out;
+      outL[i] = (l + (this.dcs[0].next(sumL) - l) * mix) * out;
+      if (outR !== outL) outR[i] = (r + (this.dcs[1].next(sumR) - r) * mix) * out;
     }
     for (let b = 0; b < 3; b++) {
       this.levelHistory[b].push(this.levels[b]);
@@ -190,6 +193,7 @@ export class MultibandProcessor {
     this.blockSec = (count / this.sampleRate) * DYNAMICS_BLOCKS_PER_ENTRY;
     if (!Number.isFinite(outL[count - 1])) {
       for (const x of [...this.lowX, ...this.highX]) x.reset();
+      for (const d of this.dcs) d.reset();
     }
     // Checked on their own: a NaN that is gone from the output by the end of the block can
     // still be sitting in a detector, and it stays there.

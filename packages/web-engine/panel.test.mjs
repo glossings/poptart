@@ -230,3 +230,21 @@ test('a device that names a control nobody has, or a value it cannot take, is re
     /which is not one of its values/,
   );
 });
+
+test("a readout's room is the widest text its control can print, so a moving value never widens it", () => {
+  const widgets = buildPanel(device, {}).sections.flatMap((s) => s.widgets);
+  const by = (id) => widgets.find((w) => w.id === id);
+  // A frequency from 200 Hz to 18 kHz reserves "18000 Hz" even while it reads "200 Hz".
+  assert.equal(by('tone').widest, '18000 Hz'.length);
+  // A menu, its longest option; a switch, "off".
+  assert.equal(by('mode').widest, 'soft'.length);
+  assert.equal(by('autogain').widest, 3);
+  // Every value the control can take fits in that room.
+  for (const w of widgets) {
+    for (const t of [0, 0.25, 0.5, 0.999, 1]) {
+      const at = valueFromPosition(device, w.id, t);
+      const text = buildPanel(device, { [w.id]: at.value ?? at }).sections.flatMap((s) => s.widgets).find((x) => x.id === w.id).text;
+      assert.ok(text.length <= w.widest, `${w.id} at ${t}: "${text}" is wider than ${w.widest}`);
+    }
+  }
+});

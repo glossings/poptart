@@ -336,11 +336,14 @@ class DirectPath {
   }
 
   // The messages that play a note on a device: MIDI for a plugin, the device's own for ours.
-  // Mirrors noteKey + VSTPluginMIDIProxy / PoptartDeviceMIDIProxy in sc/.
-  static noteMessage(s, note, vel127, isOn) {
+  // Mirrors noteKey + VSTPluginMIDIProxy / PoptartDeviceMIDIProxy in sc/. A note marked to slide
+  // (pattern-core's Sig#slide) is a third number on a device's /noteOn; a plugin plays it plainly.
+  static noteMessage(s, note, vel127, isOn, slide = false) {
     if (s.native) {
+      const on = [i32(s.node), i32(s.index), str('/noteOn'), f32(note), f32(vel127 / 127)];
+      if (slide) on.push(f32(1));
       return isOn
-        ? { address: '/u_cmd', args: [i32(s.node), i32(s.index), str('/noteOn'), f32(note), f32(vel127 / 127)] }
+        ? { address: '/u_cmd', args: on }
         : { address: '/u_cmd', args: [i32(s.node), i32(s.index), str('/noteOff'), f32(note)] };
     }
     const key = Math.round(note);
@@ -370,7 +373,7 @@ class DirectPath {
    * A note on a track's device slot (0 = the instrument, see poptartNoteOn; >0 = noteOnSlot, which
    * leaves the held count and the modulators alone). False = send it the old way.
    */
-  noteOn(trackId, slot, note, velocity, targetTime) {
+  noteOn(trackId, slot, note, velocity, targetTime, slide = false) {
     if (!this.ready) return this._ok(false);
     const tr = this.tracks.get(trackId);
     if (!tr?.known) return this._ok(false);
@@ -379,7 +382,7 @@ class DirectPath {
     if (slot === 0 && (tr.swapPending || tr.shapesSent > tr.shapesHandled || tr.staged)) return this._ok(false);
     let vel127 = Math.round(velocity * 127);
     if (slot !== 0) vel127 = Math.min(127, Math.max(1, vel127));
-    const msgs = [DirectPath.noteMessage(s, note, vel127, true)];
+    const msgs = [DirectPath.noteMessage(s, note, vel127, true, slide)];
     if (slot === 0) {
       msgs.push(...this._onsetMods(tr, velocity));
       tr.held += 1;

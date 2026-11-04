@@ -142,7 +142,7 @@ struct AnalogFilter {
   AnalogSpec spec = kAnalogSpecs[0];
   double s[4] = { 0, 0, 0, 0 };
   double v[6] = { 0, 0, 0, 0, 0, 0 };
-  double fb = 0, fbG = 0;
+  double thin = 1;  // the diode ladder's resonance at this cutoff, 0..1 (see kAnalogDiodeFeedbackHz)
   double dcX = 0, dcY = 0, dcR = 0;
   AnalogHalfband<8> upA, downA;
   AnalogHalfband<4> upB, downB;
@@ -170,7 +170,6 @@ struct AnalogFilter {
   void reset() {
     for (double& x : s) x = 0;
     for (double& x : v) x = 0;
-    fb = 0;
     dcX = 0;
     dcY = 0;
     upA.reset();
@@ -186,8 +185,6 @@ struct AnalogFilter {
     spec = kAnalogSpecs[m];
     four = spec.oversample == 4;
     rate = sampleRate * spec.oversample;
-    const double hp = std::tan((M_PI * kAnalogDiodeFeedbackHz) / rate);
-    fbG = hp / (1 + hp);
     reset();
     setCutoff(cutoff);
     setResonance(resonance);
@@ -202,6 +199,7 @@ struct AnalogFilter {
     if (spec.structure == kAnalogDiodeLadder) w /= kAnalogDiodeTune;
     wc = w;
     g = w;
+    thin = spec.structure == kAnalogDiodeLadder ? f / std::hypot(f, kAnalogDiodeFeedbackHz) : 1;
   }
 
   void setResonance(double r0) {
@@ -238,6 +236,7 @@ struct AnalogFilter {
     wc = o.wc;
     g = o.g;
     k = o.k;
+    thin = o.thin;
     wl = o.wl;
     wb = o.wb;
     wh = o.wh;
@@ -265,14 +264,16 @@ struct AnalogFilter {
       yb = step(b);
     }
     double y = 0.5 * (downA.path(yb, 0) + downA.path(ya, 1)) * h;
-    if (model == kAnalogCmos) {
+    // Every model's curves make DC of a bright wave driven into them (a saw through any of them,
+    // more the harder it is driven and the more lopsided the stages), which the circuits' output
+    // coupling takes off. Left in, it stood over the note as a huge low end.
+    {
       const double out = y - dcX + dcR * dcY;
       dcX = y;
       dcY = out;
       y = out;
     }
     for (double& x0 : s) if (x0 > -kAnalogFlush && x0 < kAnalogFlush) x0 = 0;
-    if (fb > -kAnalogFlush && fb < kAnalogFlush) fb = 0;
     return y;
   }
 
@@ -330,7 +331,7 @@ struct AnalogFilter {
     return y4;
   }
 
-  /** The diode ladder, solved from the top down, its feedback through a coupling highpass. */
+  /** The diode ladder, solved from the top down, its resonance thinned at low cutoffs. */
   double diode(double x) {
     const double e1 = analogClipGain(v[0] - v[1]);
     const double e2 = analogClipGain(v[1] - v[2]);
@@ -350,9 +351,9 @@ struct AnalogFilter {
     const double b1 = (s[0] + g * e2 * b2) / d1;
     const double A = a4 * a3 * a2 * a1;
     const double B = a4 * (a3 * (a2 * b1 + b2) + b3) + b4;
-    const double hp = 1 - fbG;
-    const double in = x * (1 + kAnalogDiodeCompensation * k);
-    const double u = (in - k * hp * (B - fb)) / (1 + k * hp * A);
+    const double kt = k * thin;
+    const double in = x * (1 + kAnalogDiodeCompensation * kt);
+    const double u = (in - kt * B) / (1 + kt * A);
     const double y1 = a1 * u + b1;
     const double y2 = a2 * y1 + b2;
     const double y3 = a3 * y2 + b3;
@@ -361,8 +362,6 @@ struct AnalogFilter {
     s[1] = 2 * y2 - s[1];
     s[2] = 2 * y3 - s[2];
     s[3] = 2 * y4 - s[3];
-    const double st = (y4 - fb) * fbG;
-    fb = fb + 2 * st;
     v[0] = u; v[1] = y1; v[2] = y2; v[3] = y3; v[4] = y4;
     return y4;
   }

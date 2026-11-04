@@ -119,6 +119,12 @@ struct PdAny {
   virtual bool takesNoteOffsets() { return false; }
   virtual void noteOnAt(float note, float velocity, int offset) { (void)offset; noteOn(note, velocity); }
   virtual void noteOffAt(float note, int offset) { (void)offset; noteOff(note); }
+  /**
+   * A note marked to slide (pattern-core's Sig#slide): it glides from the note that sounded last
+   * and that note's envelopes carry on. A device with nothing to slide plays it as a plain note.
+   */
+  virtual void noteSlide(float note, float velocity) { noteOn(note, velocity); }
+  virtual void noteSlideAt(float note, float velocity, int offset) { noteOnAt(note, velocity, offset); }
   virtual void bend(float semitones) { (void)semitones; }
   /**
    * The tempo, and where the transport is - in seconds since the beat the engine last anchored.
@@ -290,6 +296,18 @@ template <class Device>
 struct PdTakesNoteOffsets<Device, decltype(std::declval<Device&>().pd_note_on_at(0.f, 0.f, 0))>
     : std::true_type {};
 
+/** Whether a device slides a note (pd_note_slide, pd_note_slide_at) rather than playing it plainly. */
+template <class Device, class = void>
+struct PdTakesSlides : std::false_type {};
+template <class Device>
+struct PdTakesSlides<Device, decltype(std::declval<Device&>().pd_note_slide(0.f, 0.f))>
+    : std::true_type {};
+template <class Device, class = void>
+struct PdTakesSlideOffsets : std::false_type {};
+template <class Device>
+struct PdTakesSlideOffsets<Device, decltype(std::declval<Device&>().pd_note_slide_at(0.f, 0.f, 0))>
+    : std::true_type {};
+
 /** Whether a device asks to be told what is routed into its slot's key input. */
 template <class Device, class = void>
 struct PdTakesKeyPatched : std::false_type {};
@@ -402,6 +420,14 @@ struct PdAdapter : PdAny {
   void noteOffAt(float note, int offset) override {
     if constexpr (PdTakesNoteOffsets<Device>::value) d.pd_note_off_at(note, offset);
     else noteOff(note);
+  }
+  void noteSlide(float note, float velocity) override {
+    if constexpr (PdTakesSlides<Device>::value) d.pd_note_slide(note, velocity);
+    else noteOn(note, velocity);
+  }
+  void noteSlideAt(float note, float velocity, int offset) override {
+    if constexpr (PdTakesSlideOffsets<Device>::value) d.pd_note_slide_at(note, velocity, offset);
+    else noteOnAt(note, velocity, offset);
   }
   void bend(float semitones) override {
     if constexpr (PdTakesBend<Device>::value) d.pd_bend(semitones);

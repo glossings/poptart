@@ -21,6 +21,7 @@ import { Sig, mini, channelAt, soundingEnd, timeShift, warnPattern, noteLiveRead
 import { CURVES } from './curves.mjs';
 import { songSteps } from './arrange.mjs';
 import { notePress, forgetPresses } from './triggers.mjs';
+import { ACID_DEFAULT_STEPS, ACID_ACCENT_VEL, ACID_PLAIN_VEL, throwAcidRow, newAcidSeed, parseAcidRow, acidNotes, acidLoop } from './acid.mjs';
 import {
   INPUT_WIDGETS, DISPLAY_WIDGETS, AUDIO_DISPLAYS, INPUT_SIZES, DISPLAY_SIZES, WIDGET_BOXES,
   parseCells, cellCount, restRow, middleRow, randomRow, DEFAULT_CELL_COUNT, MUTATE_OPTION, DEVIATION_OPTION,
@@ -39,6 +40,7 @@ const lits = new Map();
 const optionSigs = new Map();
 // The keys that are button()s: a change of their value is a press or a release (see triggers.mjs).
 const buttonKeys = new Set();
+
 let currentDeck = 'a';
 let registry = null; // { inputs, views } for the evaluation in progress, else null
 let generation = 0; // counts evaluations, so what one built can tell itself from the last one's
@@ -321,6 +323,7 @@ export function _input(loc, kind, ...all) {
     case 'sliders': return slidersWidget(where, args);
     case 'matrix': return matrixWidget(where, args);
     case 'shiftreg': return shiftregWidget(where, args);
+    case 'acid': return acidWidget(where, args);
     default: throw new Error(`[widgets] no input widget called ${kind}`);
   }
 }
@@ -354,6 +357,7 @@ const ROW_OPTIONS = {
   steps: [MUTATE_OPTION],
   matrix: [MUTATE_OPTION],
   shiftreg: [MUTATE_OPTION],
+  acid: [MUTATE_OPTION],
   sliders: [MUTATE_OPTION, DEVIATION_OPTION],
 };
 
@@ -747,6 +751,67 @@ export function shiftreg(...all) {
   return shiftregWidget(null, splitArgs('shiftreg', all).args);
 }
 
+// A line of steps (see acid.mjs): each a value from 0 to 1, with an octave, an accent and a gate -
+// a pattern of the values like sliders()'s, scaled after it with .range(). The rest rides on each
+// note as its note controls: the accent as vel, the gate as clip, a slide as slide and the octave
+// as octave, which a transform of the values leaves alone. Written as a count (or nothing), the row
+// is thrown and the editor writes it into the call. Its one option, mutate, is sliders()'s.
+function acidWidget(where, [cells]) {
+  // The seed a row written as a count is thrown from goes to the editor, so its knobs move that row.
+  const thrownSeed = newAcidSeed();
+  const text = cells === undefined ? throwAcidRow(ACID_DEFAULT_STEPS, {}, thrownSeed) : rowOf('acid', cells, (n) => throwAcidRow(n, {}, thrownSeed), 'acid("0 0! . 0.25 0~ 0.5") or acid(16)');
+  let read = () => text;
+  let litAt = () => -1;
+  if (where) {
+    const key = seed(where.at, text, where.lit);
+    register({ input: true, kind: 'acid', at: where.at, value: text, seed: thrownSeed, opts: where.opts ?? {} });
+    read = () => values.get(key) ?? text;
+    litAt = () => litOf(key);
+  }
+  let lastText = null;
+  let lastBase = null;
+  let steps = [];
+  const current = () => {
+    const t = read();
+    const base = litAt();
+    if (t !== lastText || base !== lastBase) {
+      lastText = t;
+      lastBase = base;
+      // Only the steps between the loop marks play, spread over the cycle.
+      const row = parseAcidRow(t);
+      const { from, to } = acidLoop(t);
+      const n = to - from || 1;
+      steps = acidNotes(row.slice(from, to)).map((nt) => {
+        const step = { start: nt.index / n, end: (nt.index + nt.length) / n, value: nt.value };
+        if (nt.slide) step.slide = 1; // see Sig#slide
+        // Every note says how hard it is played and how long it sounds for.
+        step.vel = nt.accent ? ACID_ACCENT_VEL : ACID_PLAIN_VEL;
+        step.clip = nt.gate;
+        if (nt.octave) step.octave = nt.octave; // see Sig#octave
+        if (base >= 0) step.loc = [base + row[nt.index + from].from, base + row[nt.index + from].to];
+        return step;
+      });
+    }
+    return steps;
+  };
+  const stepsForCycle = () => current().map((st) => ({ ...st }));
+  const sample = (t, cps, pos) => {
+    const p = pos ?? t * cps;
+    const phase = p - Math.floor(p);
+    const hit = current().find((st) => phase >= st.start && phase < st.end);
+    return hit ? hit.value : null;
+  };
+  const sig = new Sig(sample, { stepsForCycle });
+  sig.sameEveryCycle = true;
+  if (where) sig.widgetLive = true;
+  return sig;
+}
+
+/** `acid("0 0! . 0.25 0~ 0.5'")` or `acid(16)` - an acid line drawn in the code: values 0 to 1, with accents, long gates, slides and octaves. */
+export function acid(...all) {
+  return acidWidget(null, splitArgs('acid', all).args);
+}
+
 // ---------------------------------------------------------------------------------------------
 // Display widgets
 // ---------------------------------------------------------------------------------------------
@@ -913,10 +978,12 @@ function eventsIn(sig, from, count, clock) {
       const start = offset + s.start + timeShift(s, sig.noteChannels, at, 1, at, sig.groove);
       const end = offset + soundingEnd(s, sig.noteChannels, at, 1, at);
       const vel = Number(channelAt('vel', s, sig.noteChannels, at, 1, at));
+      // A note moved by whole octaves (see Sig#octave) is drawn where it plays.
+      const shift = 12 * (Math.round(Number(channelAt('octave', s, sig.noteChannels, at, 1, at))) || 0);
       const values = Array.isArray(s.value) ? s.value : [s.value];
       for (const v of values) {
         if (v == null || (typeof v !== 'number' && typeof v !== 'string')) continue;
-        out.push([round(start), round(Math.max(start, end)), round(v), Number.isFinite(vel) ? round(vel) : 1]);
+        out.push([round(start), round(Math.max(start, end)), round(typeof v === 'number' ? v + shift : v), Number.isFinite(vel) ? round(vel) : 1]);
       }
     }
   }

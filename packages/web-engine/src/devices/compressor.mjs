@@ -9,7 +9,15 @@
 
 import { defineDevice } from '../descriptor.mjs';
 import { at, dbToGain } from '../dsp/control.mjs';
+import { DcBlocker } from '../dsp/filters.mjs';
 import { DYNAMICS_BLOCKS_PER_ENTRY, History } from '../dsp/history.mjs';
+
+/**
+ * The corner of the blocker on what a compressor's gain changes, in Hz. A fast gain moves within
+ * a cycle, and a gain that moves with a lopsided wave makes DC of it, as a real one's does before
+ * its output coupling takes it off.
+ */
+export const DYNAMICS_DC_HZ = 8;
 
 /** Starting points for the preset menu: each the defaults with these controls changed. */
 export const COMPRESSOR_PRESETS = Object.freeze({
@@ -96,6 +104,8 @@ export class Detector {
 export class CompressorProcessor {
   constructor(sampleRate) {
     this.detector = new Detector(sampleRate);
+    // The compressed signal's output coupling.
+    this.dcs = [new DcBlocker(sampleRate, DYNAMICS_DC_HZ), new DcBlocker(sampleRate, DYNAMICS_DC_HZ)];
     this.lastAttack = -1;
     this.lastRelease = -1;
     this.reduction = 0;      // the last gain reduction in dB, for the panel's curve
@@ -133,12 +143,13 @@ export class CompressorProcessor {
       reduction = Math.min(reduction, gr);
       const g = dbToGain(gr + at(params.makeup, i));
       const mix = at(params.mix, i);
-      outL[i] = l + (l * g - l) * mix;
-      if (outR !== outL) outR[i] = r + (r * g - r) * mix;
+      outL[i] = l + (this.dcs[0].next(l * g) - l) * mix;
+      if (outR !== outL) outR[i] = r + (this.dcs[1].next(r * g) - r) * mix;
     }
     // A NaN compares false against the envelope and is then added into it, and from there on
     // every sample's gain is NaN: the detector starts again from silence instead.
     if (!Number.isFinite(this.detector.env)) this.detector.reset();
+    if (!Number.isFinite(outL[count - 1])) for (const d of this.dcs) d.reset();
     this.reduction = reduction;
     this.level = loudest;
     this.levels.push(loudest);

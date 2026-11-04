@@ -74,6 +74,7 @@ ctl.map(1, 42);
 ctl.unmap(1);
 ctl.midi.noteOn(0, 60, 127);
 ctl.midi.noteOn(0, 48, 64);
+ctl.midi.noteSlide(0, 55, 127);
 ctl.midi.noteOff(0, 60, 0);
 ctl.midi.allNotesOff(0);
 ctl.get(1, { |v| ("GOT<" ++ v ++ ">").postln });
@@ -148,6 +149,8 @@ test('the device controller resolves controls, sends unit commands and round-tri
   // device is one instrument, not sixteen.
   assert.ok(sent.includes(`/u_cmd 1000 ${index} /noteOn 60.0 1.0`), `no full-velocity note in ${JSON.stringify(sent)}`);
   assert.ok(sent.some((m) => m.startsWith(`/u_cmd 1000 ${index} /noteOn 48.0 0.50`)), `no half-velocity note in ${JSON.stringify(sent)}`);
+  // A note marked to slide is /noteOn's third number.
+  assert.ok(sent.includes(`/u_cmd 1000 ${index} /noteOn 55.0 1.0 1.0`), `no sliding note in ${JSON.stringify(sent)}`);
   assert.ok(sent.includes(`/u_cmd 1000 ${index} /noteOff 60.0`), `no note off in ${JSON.stringify(sent)}`);
   assert.ok(sent.includes(`/u_cmd 1000 ${index} /allNotesOff`), `no all-notes-off in ${JSON.stringify(sent)}`);
 

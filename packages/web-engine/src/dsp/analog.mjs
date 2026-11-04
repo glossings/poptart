@@ -95,7 +95,12 @@ const ANALOG_OTA_COMPENSATION = 0.5;
 /** How much of the bass the diode ladder's input puts back. Some, not all: the loss is the sound. */
 const ANALOG_DIODE_COMPENSATION = 0.25;
 
-/** The coupling highpass in the diode ladder's feedback, in Hz: the resonance thins at the bottom. */
+/**
+ * The diode ladder's coupling highpass, in Hz: the resonance thins at the bottom. It is taken as
+ * what that highpass passes at the cutoff - the resonance lives there - rather than run inside the
+ * loop: in the loop it let the bass, and the DC the curves make of a bright wave, escape the
+ * feedback entirely, where they stood 20 dB over the note and pushed the stages into their curves.
+ */
 const ANALOG_DIODE_FEEDBACK_HZ = 40;
 
 /** The Sallen-Key's feedback clipper: how hard it bites (larger clips sooner). */
@@ -190,16 +195,16 @@ function analogSlewGain(x) {
  * keep what the first stage passes, so four coefficients and a transition of 0.12 do: 77 dB
  * down where anything would fold back under the base rate's Nyquist.
  */
-const ANALOG_HALFBAND_A = Object.freeze([
+export const ANALOG_HALFBAND_A = Object.freeze([
   0.040633460924193260, 0.15050512902267460, 0.30075705599187408, 0.46077450496145061,
   0.60952431489618830, 0.73850384111885725, 0.84922381039206607, 0.94974278370500020,
 ]);
-const ANALOG_HALFBAND_B = Object.freeze([
+export const ANALOG_HALFBAND_B = Object.freeze([
   0.070765948976184462, 0.25785307851345257, 0.51316757474879282, 0.81731735441713682,
 ]);
 
 /** One direction of a half-band: the even coefficients on one path, the odd on the other. */
-class AnalogHalfband {
+export class AnalogHalfband {
   constructor(coefficients) {
     this.c = coefficients;
     this.half = coefficients.length / 2;
@@ -244,9 +249,8 @@ export class AnalogFilter {
     this.spec = ANALOG_SPECS.ladder;
     this.s = new Float64Array(4);          // the capacitors
     this.v = new Float64Array(6);          // where each curve's input was a sample ago
-    this.fb = 0;                           // the diode ladder's feedback highpass
-    this.fbG = 0;
-    this.dcX = 0;                          // the CMOS model's output DC blocker
+    this.thin = 1;                         // the diode ladder's resonance at this cutoff, 0..1
+    this.dcX = 0;                          // the output DC blocker
     this.dcY = 0;
     this.dcR = Math.max(0, 1 - (2 * Math.PI * ANALOG_DC_HZ) / sampleRate);
     this.upA = new AnalogHalfband(ANALOG_HALFBAND_A);
@@ -272,7 +276,6 @@ export class AnalogFilter {
   reset() {
     this.s.fill(0);
     this.v.fill(0);
-    this.fb = 0;
     this.dcX = 0;
     this.dcY = 0;
     this.upA.reset();
@@ -292,8 +295,6 @@ export class AnalogFilter {
     this.four = this.spec.oversample === 4;
     this.rate = this.sampleRate * this.spec.oversample;
     this.morphs = ANALOG_MORPHING.includes(this.name);
-    const hp = Math.tan((Math.PI * ANALOG_DIODE_FEEDBACK_HZ) / this.rate);
-    this.fbG = hp / (1 + hp);
     this.reset();
     this.setCutoff(this.cutoff);
     this.setResonance(this.resonance);
@@ -308,6 +309,8 @@ export class AnalogFilter {
     if (this.structure === ANALOG_DIODE) wc /= ANALOG_DIODE_TUNE;
     this.wc = wc;
     this.g = wc;
+    // The diode ladder's resonance, thinned at low cutoffs (see ANALOG_DIODE_FEEDBACK_HZ).
+    this.thin = this.structure === ANALOG_DIODE ? f / Math.hypot(f, ANALOG_DIODE_FEEDBACK_HZ) : 1;
   }
 
   setResonance(resonance) {
@@ -351,6 +354,7 @@ export class AnalogFilter {
     this.wc = other.wc;
     this.g = other.g;
     this.k = other.k;
+    this.thin = other.thin;
     this.wl = other.wl;
     this.wb = other.wb;
     this.wh = other.wh;
@@ -381,7 +385,10 @@ export class AnalogFilter {
       yb = this._step(b);
     }
     let y = 0.5 * (this.downA.path(yb, 0) + this.downA.path(ya, 1)) * h;
-    if (this.name === 'cmos') {
+    // Every model's curves make DC of a bright wave driven into them (a saw through any of them,
+    // more the harder it is driven and the more lopsided the stages), which the circuits' output
+    // coupling takes off. Left in, it stood over the note as a huge low end.
+    {
       const out = y - this.dcX + this.dcR * this.dcY;
       this.dcX = y;
       this.dcY = out;
@@ -389,7 +396,6 @@ export class AnalogFilter {
     }
     const s = this.s;
     for (let i = 0; i < 4; i++) if (s[i] > -ANALOG_FLUSH && s[i] < ANALOG_FLUSH) s[i] = 0;
-    if (this.fb > -ANALOG_FLUSH && this.fb < ANALOG_FLUSH) this.fb = 0;
     return y;
   }
 
@@ -495,10 +501,9 @@ export class AnalogFilter {
     const b1 = (s[0] + g * e2 * b2) / d1;
     const A = a4 * a3 * a2 * a1;
     const B = a4 * (a3 * (a2 * b1 + b2) + b3) + b4;
-    // The highpass in the loop is (1 - G)(y4 - its state), affine in y4 like everything else.
-    const hp = 1 - this.fbG;
-    const drive = x * (1 + ANALOG_DIODE_COMPENSATION * k);
-    const u = (drive - k * hp * (B - this.fb)) / (1 + k * hp * A);
+    const kt = k * this.thin;
+    const drive = x * (1 + ANALOG_DIODE_COMPENSATION * kt);
+    const u = (drive - kt * B) / (1 + kt * A);
     const y1 = a1 * u + b1;
     const y2 = a2 * y1 + b2;
     const y3 = a3 * y2 + b3;
@@ -507,8 +512,6 @@ export class AnalogFilter {
     s[1] = 2 * y2 - s[1];
     s[2] = 2 * y3 - s[2];
     s[3] = 2 * y4 - s[3];
-    const step = (y4 - this.fb) * this.fbG;
-    this.fb = this.fb + 2 * step;
     v[0] = u; v[1] = y1; v[2] = y2; v[3] = y3; v[4] = y4;
     return y4;
   }
@@ -605,20 +608,15 @@ export class AnalogFilter {
         return analogDiv(num, den);
       }
       case ANALOG_DIODE: {
-        const k = Math.min(this.k, onset * 0.985);
+        const k = Math.min(this.k * this.thin, onset * 0.985);
         // From the top down, as the solver does, with each capacitor's (s + coupling).
-        const sj = { re: 0, im: w };
         const a4 = analogDiv({ re: 2, im: 0 }, { re: 2, im: w });
         const a3 = analogDiv({ re: 1, im: 0 }, { re: 2 - a4.re, im: w - a4.im });
         const a2 = analogDiv({ re: 1, im: 0 }, { re: 2 - a3.re, im: w - a3.im });
         const a1 = analogDiv({ re: 1, im: 0 }, { re: 2 - a2.re, im: w - a2.im });
         const A = analogMul(analogMul(a4, a3), analogMul(a2, a1));
-        // The coupling highpass, s / (s + its corner in stage-corner units).
-        const corner = this.fbG / (1 - this.fbG) / this.wc;
-        const hpf = analogDiv(sj, { re: corner, im: w });
-        const loop = analogMul(A, hpf);
         const gain = 1 + ANALOG_DIODE_COMPENSATION * k;
-        return analogDiv({ re: A.re * gain, im: A.im * gain }, { re: 1 + k * loop.re, im: k * loop.im });
+        return analogDiv({ re: A.re * gain, im: A.im * gain }, { re: 1 + k * A.re, im: k * A.im });
       }
       case ANALOG_SALLEN_KEY: {
         const k = Math.min(this.k, onset * 0.985);

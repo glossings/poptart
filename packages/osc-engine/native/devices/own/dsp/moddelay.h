@@ -7,10 +7,20 @@
 
 #include <cmath>
 
+#include "own/dsp/filters.h"
 #include "own/dsp/reverb.h"
 #include "own/pd-own.h"
 
 namespace pd_own {
+
+/**
+ * The corner of the blocker on what the feedback's curve adds, in Hz: low, because round a loop
+ * of nearly one its turn in phase is heard well above it, on the bass the feedback lifts.
+ */
+constexpr double kModLoopDcHz = 2.0;
+
+/** The corner of the output's coupling of the chorus and the flanger, in Hz. */
+constexpr double kModDcHz = 8.0;
 
 /** A sine or triangle LFO in 0..1, with a phase that can be offset per channel. */
 inline double lfoValue(double phase, int shape) {
@@ -29,15 +39,20 @@ struct ModDelay {
   int max = 0;
   DelayLine<Capacity> lines[2];
   double phase = 0;
+  DcBlocker dcs[2];
 
   void init(double sr, double maxSec) {
     sampleRate = sr;
     max = static_cast<int>(std::ceil(sr * maxSec)) + 4;
     for (auto& l : lines) l.init(max);
+    for (auto& d : dcs) { d.init(sr, kModLoopDcHz); d.reset(); }
     phase = 0;
   }
 
-  void reset() { for (auto& l : lines) l.reset(); }
+  void reset() {
+    for (auto& l : lines) l.reset();
+    for (auto& d : dcs) d.reset();
+  }
 
   /**
    * One sample for both channels. `spread` (0..1) is how far the right channel's LFO sits behind
@@ -62,9 +77,12 @@ struct ModDelay {
     wetL /= voices;
     wetR /= voices;
     // The feedback comes from the first read, soft-limited so a flanger at full resonance rings
-    // rather than runs away.
-    lines[0].write(inl + std::tanh(wetL * feedback));
-    lines[1].write(inr + std::tanh(wetR * feedback));
+    // rather than runs away. What the curve adds is AC-coupled, so the DC it makes of a lopsided
+    // wave cannot build up round the loop, while the feedback itself keeps its bass.
+    const double uL = wetL * feedback;
+    const double uR = wetR * feedback;
+    lines[0].write(inl + uL + dcs[0].next(std::tanh(uL) - uL));
+    lines[1].write(inr + uR + dcs[1].next(std::tanh(uR) - uR));
     out[0] = wetL;
     out[1] = wetR;
   }

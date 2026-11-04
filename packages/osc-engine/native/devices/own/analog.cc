@@ -14,6 +14,7 @@
 #include "own/dsp/adsr.h"
 #include "own/dsp/blep.h"
 #include "own/dsp/analog.h"
+#include "own/dsp/filters.h"
 #include "pd-own-ids.h"
 
 #include <cmath>
@@ -43,8 +44,8 @@ constexpr double kTwoPi = 2 * 3.141592653589793;
 
 inline double clamp01(double x) { return std::fmin(1.0, std::fmax(0.0, x)); }
 
-/** The Filter Type options: the circuit models, in analog.h's order. */
-constexpr int kFilterTypes = kAnalogModelCount;
+/** The Filter Type options: every mode the Filter device has, in filters.h's order. */
+constexpr int kFilterTypes = kFilterModeCount;
 
 // --- the voice --------------------------------------------------------------------------------
 
@@ -125,7 +126,7 @@ using Base = pd_own::Device<ids::kCount, 2>;
 struct Voice {
   double sampleRate = 48000.0;
   BlepLine line;
-  AnalogFilter filter;
+  MultiFilter filter;
   Adsr ampEnv;
   Adsr filterEnv;
   AnalogRandom random;
@@ -186,6 +187,16 @@ struct Voice {
     target = n;
   }
 
+  /** A slide into `n` (see Sig#slide): as legato, and a voice letting go is taken back up. */
+  void slideTo(double n) {
+    slide(n);
+    if (releasing) {
+      releasing = false;
+      ampEnv.resume();
+      filterEnv.resume();
+    }
+  }
+
   void noteOff() {
     releasing = true;
     ampEnv.gateOff();
@@ -194,7 +205,7 @@ struct Voice {
 
   void process(float* outL, float* outR, int count, int offset, const Shared& s, const Base& c) {
     const double sr = sampleRate;
-    filter.setModel(s.type);
+    const int mode = s.type;
     const int shape1 = s.shape1;
     const int shape2 = s.shape2;
     const bool sync = s.sync;
@@ -257,11 +268,10 @@ struct Voice {
         const double v = c.ctl(ids::velocity, j);
         const double amount = c.ctl(ids::envamount, j) * (1 - v + v * vel);
         const double semis = c.ctl(ids::keytrack, j) * (nt - kTrackNote) + amount * fenv;
-        filter.setResonance(c.ctl(ids::resonance, j));
         filter.setDrive(c.ctl(ids::drive, j));
         filter.setMorph(c.ctl(ids::morph, j));
-        filter.setCutoff(c.ctl(ids::cutoff, j) * std::pow(2.0, semis / 12));
-        y = filter.process(x);
+        filter.setCutoff(c.ctl(ids::cutoff, j) * std::pow(2.0, semis / 12), c.ctl(ids::resonance, j), mode);
+        y = filter.next(x, mode);
 
         const double out = y * ampEnv.next() * vel * c.ctl(ids::level, j) * kVoiceGain;
         // Summed in double and rounded once, as `outL[i] += out` on a Float32Array is.
@@ -284,7 +294,7 @@ struct Device : Base {
   int voiceCount = 8;
   long long clock = 0;
   unsigned int seed = 1;
-  struct Event { int at; int kind; double note; double velocity; };
+  struct Event { int at; int kind; double note; double velocity; bool slide; };
   Event events[64];
   int eventCount = 0;
   double held[kHeld];
@@ -308,7 +318,11 @@ struct Device : Base {
   void pd_note_off(float note) { pd_note_off_at(note, 0); }
 
   void pd_note_on_at(float note, float velocity, int offset) {
-    if (eventCount < 64) events[eventCount++] = { offset > 0 ? offset : 0, 1, note, velocity };
+    if (eventCount < 64) events[eventCount++] = { offset > 0 ? offset : 0, 1, note, velocity, false };
+  }
+  void pd_note_slide(float note, float velocity) { pd_note_slide_at(note, velocity, 0); }
+  void pd_note_slide_at(float note, float velocity, int offset) {
+    if (eventCount < 64) events[eventCount++] = { offset > 0 ? offset : 0, 1, note, velocity, true };
   }
 
   void pd_note_off_at(float note, int offset) {
@@ -322,7 +336,7 @@ struct Device : Base {
       }
       return;
     }
-    if (eventCount < 64) events[eventCount++] = { offset > 0 ? offset : 0, 0, note, 0 };
+    if (eventCount < 64) events[eventCount++] = { offset > 0 ? offset : 0, 0, note, 0, false };
   }
 
   void pd_bend(float semitones) { shared.bend = isPlayable(semitones) ? semitones : 0.0; }
@@ -388,8 +402,32 @@ struct Device : Base {
     return &voices[0];
   }
 
-  void startNote(double note, double velocity) {
+  /** The voice a slide carries on: the one that started last, while it is still sounding. */
+  Voice* slideVoice() {
+    Voice* last = nullptr;
+    for (int i = 0; i < voiceCount; ++i) {
+      Voice& v = voices[i];
+      if (v.active() && (!last || v.age > last->age)) last = &v;
+    }
+    return last;
+  }
+
+  void startNote(double note, double velocity, bool slide = false) {
     seed = static_cast<unsigned int>(seed * 1664525u + 1013904223u);
+    Voice* carried = slide ? slideVoice() : nullptr;
+    if (carried) {
+      if (voiceCount == 1) {
+        if (heldCount >= kHeld) {
+          for (int i = 1; i < heldCount; ++i) held[i - 1] = held[i];
+          --heldCount;
+        }
+        held[heldCount++] = note;
+      }
+      carried->slideTo(note);
+      carried->holds = 1;
+      carried->age = clock++;
+      return;
+    }
     if (voiceCount == 1) {
       Voice& voice = voices[0];
       const bool legato = heldCount > 0 && voice.active() && !voice.releasing;
@@ -463,7 +501,7 @@ struct Device : Base {
     while (at < frames) {
       while (next < eventCount && events[next].at <= at) {
         const Event& e = events[next++];
-        if (e.kind == 1) startNote(e.note, e.velocity);
+        if (e.kind == 1) startNote(e.note, e.velocity, e.slide);
         else stopNote(e.note);
       }
       const int until = next < eventCount && events[next].at < frames ? events[next].at : frames;

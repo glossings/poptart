@@ -104,6 +104,17 @@ export class Adsr {
     this.stagePos = 0;
   }
 
+  /**
+   * A note slid into while this one was letting go: the release stops where it is and the level
+   * goes back to the sustain over the decay, with no new attack - the slide carries the note on.
+   */
+  resume() {
+    if (this.stage !== STAGE.RELEASE) return;
+    this.stageFrom = this.value;
+    this.stage = STAGE.DECAY;
+    this.stagePos = 0;
+  }
+
   /** Releases a note from wherever the envelope currently is. */
   gateOff() {
     if (this.stage === STAGE.IDLE) return;

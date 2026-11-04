@@ -86,10 +86,11 @@ export class DelayProcessor {
     this.sampleRate = sampleRate;
     this.lines = [new DelayLine(Math.ceil(sampleRate * DELAY_MAX_SEC) + 4), new DelayLine(Math.ceil(sampleRate * DELAY_MAX_SEC) + 4)];
     this.tones = [new OnePole(sampleRate), new OnePole(sampleRate)];
-    // And a DC blocker after the Tone: what goes round the loop is AC-coupled, as a tape or an
-    // analog delay's is. Without it an offset - or the sub a chain in the loop adds - is fed back
-    // with everything else, and at a Feedback near one (more so with a chain that adds gain) it
-    // builds pass on pass until it is all the headroom there is, and the echoes are lost under it.
+    // And a DC blocker after the Tone and the clip: what goes round the loop is AC-coupled, as a
+    // tape or an analog delay's is. Without it an offset - or the sub a chain in the loop adds, or
+    // the DC the clip makes of a lopsided repeat - is fed back with everything else, and at a
+    // Feedback near one (more so with a chain that adds gain) it builds pass on pass until it is
+    // all the headroom there is, and the echoes are lost under it.
     this.dcs = [new DcBlocker(sampleRate), new DcBlocker(sampleRate)];
     this.length = [0, 0];       // the delay each channel is actually at, in samples
     this.bpm = 120;
@@ -145,8 +146,8 @@ export class DelayProcessor {
       const readR = lineR.readLinear(lenR);
       // Ping-pong feeds each side's repeat into the other line; a plain delay feeds it back
       // into its own. The input enters on the left in ping-pong, so the first repeat is right.
-      const fedL = clipTail(this.dcs[0].next(toneL.next(pingpong ? readR : readL)) * fb);
-      const fedR = clipTail(this.dcs[1].next(toneR.next(pingpong ? readL : readR)) * fb);
+      const fedL = this.dcs[0].next(clipTail(toneL.next(pingpong ? readR : readL) * fb));
+      const fedR = this.dcs[1].next(clipTail(toneR.next(pingpong ? readL : readR) * fb));
       if (pingpong) {
         lineL.write((dryL + dryR) * 0.5 + fedL);
         lineR.write(fedR);
@@ -206,8 +207,8 @@ export class DelayProcessor {
       const readR = lineR.readLinear(lenR);
       const retL = backL ? backL[i] : 0;
       const retR = backR ? backR[i] : 0;
-      const fedL = clipTail(this.dcs[0].next(toneL.next(pingpong ? retR : retL)) * fb);
-      const fedR = clipTail(this.dcs[1].next(toneR.next(pingpong ? retL : retR)) * fb);
+      const fedL = this.dcs[0].next(clipTail(toneL.next(pingpong ? retR : retL) * fb));
+      const fedR = this.dcs[1].next(clipTail(toneR.next(pingpong ? retL : retR) * fb));
       if (pingpong) {
         lineL.write((dryL + dryR) * 0.5 + fedL);
         lineR.write(fedR);

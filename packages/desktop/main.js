@@ -438,6 +438,9 @@ async function boot() {
   const dataFolder = describeHome();
   desktopLog.note(`data folder: ${dataFolder.dir}${PORTABLE.dir ? ' (portable: found beside the app)' : dataFolder.why ? ` (${dataFolder.why})` : ''}`);
   if (PORTABLE.declined) desktopLog.note(PORTABLE.declined);
+  // Run from source (`npm run desktop`) the dock shows Electron's own icon: the packaged app's
+  // comes from its bundle, which an unpackaged run has none of. Same picture, set by hand.
+  if (!app.isPackaged && process.platform === 'darwin') app.dock?.setIcon(path.join(__dirname, 'build', 'icon.png'));
   // The machine stays awake for as long as poptart is open. macOS only holds off idle sleep while
   // audio is actually playing, so a pause between songs - or a long stretch of writing - could
   // put it to sleep under a running engine, and an audio server does not come back from that

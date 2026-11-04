@@ -113,12 +113,18 @@ function install(E) {
     const note = Number(msg[2]);
     const veloc = Number(msg[3]);
     const latency = Number(msg[4]);
+    // A fifth number, nonzero, marks the note to slide (pattern-core's Sig#slide): a device of
+    // ours glides into it, a plugin plays it plainly.
+    const slide = Number(msg[5] ?? 0) !== 0;
     const track = E.tracks.get(key);
     const ctl = E.isTrack(track) ? track.controllers.get(0) : null;
     if (ctl == null) return;
     const fire = (lat) => {
       E.bundleNow(lat, () => {
-        if (E.slotLive(track, 0)) ctl.midi.noteOn(0, E.noteKey(ctl, note), Math.round(veloc * 127));
+        if (E.slotLive(track, 0)) {
+          if (slide && isDeviceMidi(ctl)) ctl.midi.noteSlide(0, E.noteKey(ctl, note), Math.round(veloc * 127));
+          else ctl.midi.noteOn(0, E.noteKey(ctl, note), Math.round(veloc * 127));
+        }
         // `vel` is for a velocity latch (poptart_vel); an envelope has no such control.
         for (const e of track.envs.values()) e.synth?.set('gate', 1, 't_retrig', 1, 'vel', veloc);
         // Note-synced lfo() shapes reset on every onset - and a patterned shape's swap happens

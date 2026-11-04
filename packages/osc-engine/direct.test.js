@@ -123,6 +123,23 @@ test('one of poptart\'s own devices gets the note as written', () => {
   assert.ok(Math.abs(on.args[4] - 64 / 127) < 1e-6, 'velocity is quantized to 1/127 as the MIDI proxy does');
 });
 
+test('a sliding note is a third number on a device\'s /noteOn, and a plain note on a plugin', () => {
+  const { d, sent } = rig();
+  populate(d, { native: true });
+  d.noteOn('kick', 0, 55, 0.5, 1000.15, true);
+  const on = flat(sent[0])[0];
+  assert.deepStrictEqual(on.args.slice(0, 3), [1003, 2, '/noteOn']);
+  assert.strictEqual(on.args.length, 6);
+  assert.strictEqual(on.args[5], 1, 'the slide');
+  assert.strictEqual(flat(sent[0]).length, 3, 'the modulators retrigger as for any note');
+  d.noteOn('kick', 0, 55, 0.5, 1000.2);
+  assert.strictEqual(flat(sent[1])[0].args.length, 5, 'a plain note says nothing of a slide');
+  const plugin = rig();
+  populate(plugin.d);
+  plugin.d.noteOn('kick', 0, 55, 0.5, 1000.15, true);
+  assert.deepStrictEqual([...flat(plugin.sent[0])[0].args[3]], [0x90, 55, 64], 'a plugin plays it plainly');
+});
+
 test('a slot note leaves the modulators alone and clips its velocity', () => {
   const { d, sent } = rig();
   populate(d);
@@ -265,6 +282,33 @@ test('the engine sends a note direct when it can and through sclang when it cann
   engine._directOn = false;
   engine.noteOn('kick', 60, 1, engine.getTime() + 0.15);
   assert.deepStrictEqual(viaLang.slice(1), ['/poptart/noteOn'], 'POPTART_DIRECT=0 is the old path throughout');
+  engine._direct.stop();
+});
+
+test('the engine hands a slide on to the device both ways, and plays it plainly to MIDI', () => {
+  const engine = new OscEngine();
+  const viaLang = [];
+  const direct = [];
+  engine._port = {
+    send: (p) => viaLang.push([p.address, ...p.args.map((a) => a.value)]),
+    sendRaw: (bytes) => direct.push(osc.readPacket(bytes, { metadata: false })),
+  };
+  const fanned = [];
+  engine._fanoutMidi = (...a) => fanned.push(a);
+  // Through sclang: a fifth number, 1, for poptartNoteOn; the 4-argument call is unchanged.
+  engine.noteOn('kick', 60, 1, engine.getTime() + 0.15, { slide: true });
+  engine.noteOn('kick', 62, 1, engine.getTime() + 0.15);
+  engine.noteOn('kick', 64, 1, engine.getTime() + 0.15, { slide: false });
+  assert.deepStrictEqual(viaLang.map((m) => [m[0], m.length]), [['/poptart/noteOn', 6], ['/poptart/noteOn', 5], ['/poptart/noteOn', 5]]);
+  assert.strictEqual(viaLang[0][5], 1);
+  // The MIDI fan-out is MIDI: the note, nothing about a slide.
+  assert.deepStrictEqual(fanned.map((a) => a.length), [5, 5, 5]);
+  // Direct, to one of poptart's own devices.
+  populate(engine._direct, { native: true });
+  engine.noteOn('kick', 60, 1, engine.getTime() + 0.15, { slide: true });
+  const on = flat(direct[0])[0];
+  assert.strictEqual(on.args[2], '/noteOn');
+  assert.strictEqual(on.args[5], 1);
   engine._direct.stop();
 });
 

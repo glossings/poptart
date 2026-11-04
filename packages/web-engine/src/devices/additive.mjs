@@ -249,6 +249,16 @@ class AdditiveVoice {
     this.env.gateOn(true);
   }
 
+  /** A slide into `note`: the pitch glides there over Glide, the envelopes carry on (see Sig#slide). */
+  slideTo(note) {
+    this.note = note;
+    this.targetHz = midiToHz(note);
+    if (this.releasing) {
+      this.releasing = false;
+      this.env.resume();
+    }
+  }
+
   noteOff() {
     this.releasing = true;
     this.env.gateOff();
@@ -384,7 +394,7 @@ export class AdditiveSynth {
     p.bendRatioA = p.bendRatio;
   }
 
-  queueNoteOn(note, velocity, offset = 0) { this.events.push({ at: Math.max(0, offset | 0), kind: 1, note, velocity }); }
+  queueNoteOn(note, velocity, offset = 0, slide = false) { this.events.push({ at: Math.max(0, offset | 0), kind: 1, note, velocity, slide }); }
   queueNoteOff(note, offset = 0) { this.events.push({ at: Math.max(0, offset | 0), kind: 0, note, velocity: 0 }); }
 
   allNotesOff() {
@@ -416,7 +426,24 @@ export class AdditiveSynth {
     return free ?? oldestReleasing ?? oldest ?? this.voices[0];
   }
 
-  startNote(note, velocity) {
+  /** The voice a slide carries on: the one that started last, while it is still sounding. */
+  _slideVoice() {
+    let last = null;
+    for (let i = 0; i < this.voiceCount; i++) {
+      const v = this.voices[i];
+      if (v.active && (!last || v.age > last.age)) last = v;
+    }
+    return last;
+  }
+
+  startNote(note, velocity, slide = false) {
+    const carried = slide ? this._slideVoice() : null;
+    if (carried) {
+      carried.slideTo(note);
+      carried.holds = 1;
+      carried.age = this.clock++;
+      return;
+    }
     const voice = this.allocate(note);
     // Glide slides from whatever this voice was last playing.
     const from = voice.active && voice.note >= 0 ? midiToHz(voice.note) : null;
@@ -474,7 +501,7 @@ export class AdditiveSynth {
     while (at < count) {
       while (next < events.length && events[next].at <= at) {
         const e = events[next++];
-        if (e.kind === 1) this.startNote(e.note, e.velocity); else this.stopNote(e.note);
+        if (e.kind === 1) this.startNote(e.note, e.velocity, e.slide); else this.stopNote(e.note);
       }
       const until = next < events.length ? Math.min(count, events[next].at) : count;
       const n = until - at;

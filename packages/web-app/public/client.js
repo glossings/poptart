@@ -1095,6 +1095,19 @@ const RESTORE_KEY = 'poptart.restoreBuffer';
 // Restored alongside it, so a reload doesn't quietly cut the buffer loose from its file and turn
 // the next save into a naming prompt.
 const DOC_NAME_KEY = 'poptart.docName';
+// The session last worked in, and the saved pattern it was, kept across launches: opening the app
+// with nothing else to show (no reload, no link) goes back to it rather than to the default.
+const LAST_SESSION_KEY = 'poptart.lastSession';
+
+function rememberLastSession() {
+  if (EMBEDDED) return;
+  // (also reached while this file is still loading, before the session exists - the catch has it)
+  try {
+    localStorage.setItem(LAST_SESSION_KEY, JSON.stringify({ id: wipSessionId, name: currentSavedName }));
+  } catch {
+    // not kept - the next launch opens the default, and the session is still in the files tab
+  }
+}
 
 function saveRestoreBuffer(code) {
   // An embedded example shares the guide tab's sessionStorage with every other example on the page.
@@ -1118,6 +1131,7 @@ function setCurrentSavedName(name) {
   }
   updateDocTitle(cm.getValue());
   markCurrentFileRow();
+  rememberLastSession();
   // With no name field on screen, the button is where "which file does save write to?" gets
   // answered when the files tab isn't open.
   const saveBtn = document.getElementById('fileSaveBtn');
@@ -1343,6 +1357,29 @@ queueMicrotask(async () => {
   }
 });
 
+// The session last worked in, opened as itself - or nothing, leaving the default, when there is
+// none or it has gone (expired, deleted, emptied).
+async function reopenLastSession() {
+  if (EMBEDDED) return;
+  let last = null;
+  try {
+    last = JSON.parse(localStorage.getItem(LAST_SESSION_KEY) || 'null');
+  } catch {
+    return;
+  }
+  if (!last?.id) return;
+  try {
+    const { code } = await api('POST', '/api/patterns/wip/load', { id: last.id });
+    if (typeof code !== 'string' || !code.trim()) return;
+    // The default snippet was never worked on, so it is left without a session file of its own.
+    wipLastSent = cm.getValue();
+    await openInEditor(code, last.name ?? null, last.id);
+    saveRestoreBuffer(code);
+  } catch {
+    // gone: the default it is
+  }
+}
+
 // The buffer this tab opens with. Everything that can put code in the editor before the user sees
 // it happens in here, so the pane can be held blank until it returns.
 async function openingBuffer() {
@@ -1357,7 +1394,10 @@ async function openingBuffer() {
     }
   }
   updateDocTitle(cm.getValue());
-  if (!location.hash) return;
+  if (!location.hash) {
+    await reopenLastSession();
+    return;
+  }
   let code = null;
   try {
     code = await loadCodeFromHash();
@@ -1853,7 +1893,7 @@ onEveryDeck((ed) => ed.on('changes', (_, changes) => {
   if (changes.some((c) => c.origin === 'undo' || c.origin === 'redo')) refoldAll(ed);
   // A steps(), sliders(), matrix() or shiftreg() pasted or dropped in is drawn at once, as it was where it was
   // copied from, rather than sitting as text until the next evaluation.
-  else if (changes.some((c) => (c.origin === 'paste' || c.origin === 'drop') && /\b(?:steps|sliders|matrix|shiftreg)\s*\(/.test(c.text.join('\n')))) refoldAll(ed);
+  else if (changes.some((c) => (c.origin === 'paste' || c.origin === 'drop') && /\b(?:steps|sliders|matrix|shiftreg|acid)\s*\(/.test(c.text.join('\n')))) refoldAll(ed);
   // A gesture that writes an option into a folded control - mutate from the menu, a size from a
   // drag - lands inside the fold; the fold then has to shrink to the cells so the option shows as
   // code, and grow back over the call when the option is taken out.
@@ -3078,6 +3118,7 @@ async function saveWip() {
   wipLastSent = code;
   try {
     await api('POST', '/api/patterns/wip/save', { id, code });
+    if (id === wipSessionId) rememberLastSession();
     const row = wipRowKey(code);
     if (row !== wipListedRow) {
       wipListedRow = row;
@@ -4430,7 +4471,8 @@ function deviceNumber(widget, { onDrag, onCommit, register }) {
   const digits = widget.decimals ?? 3;
   const paint = (text) => {
     if (box.querySelector('input')) return;
-    box.textContent = text ?? `${value.toFixed(digits)}${widget.unit ? ` ${widget.unit}` : ''}`;
+    // Padded to the widest it can print, so the digits hold still as the value crosses a power of ten.
+    box.textContent = readoutPad(text ?? `${value.toFixed(digits)}${widget.unit ? ` ${widget.unit}` : ''}`, widget.widest);
   };
   paint(widget.text);
   // Never while a gesture is running - see the knob, and for the same reason.
@@ -4764,6 +4806,10 @@ function devicePresetPicker(trackLabel, slot, panel) {
   name.readOnly = true;
   const btn = make('button', 'small', '▾');
   btn.title = 'pick a preset';
+  const prev = make('button', 'small', '‹');
+  prev.title = 'previous preset';
+  const next = make('button', 'small', '›');
+  next.title = 'next preset';
   const box = make('div', 'def-picker hidden');
   const search = make('input');
   search.type = 'text';
@@ -4771,7 +4817,7 @@ function devicePresetPicker(trackLabel, slot, panel) {
   search.placeholder = 'search, or type a new name';
   const list = make('div', 'def-pick-list');
   box.append(search, list);
-  wrap.append(title, name, btn, box);
+  wrap.append(title, prev, name, next, btn, box);
 
   const now = () => devicePresetNow(host.getValue(), label, slot);
   // The plugin name the code calls this device by, which is what its presets are filed under.
@@ -4826,6 +4872,18 @@ function devicePresetPicker(trackLabel, slot, panel) {
     refocus: () => {},
   });
 
+  // The presets either side of the one the code has the slot on, in the list's order, round from
+  // the last to the first; from none, the first (or the last, going back).
+  const step = (dir) => {
+    if (now().driven) return;
+    const ids = [...new Set(reg.allIds().filter((r) => !r.none).map((r) => r.id))];
+    if (!ids.length) return;
+    const at = ids.indexOf(now().name ?? '');
+    choose(ids[at < 0 ? (dir > 0 ? 0 : ids.length - 1) : (at + dir + ids.length) % ids.length]);
+  };
+  prev.addEventListener('click', () => step(-1));
+  next.addEventListener('click', () => step(1));
+
   btn.addEventListener('click', () => {
     if (head.isOpen()) { closeDeviceShapeList(); return; }
     closeDeviceShapeList();
@@ -4858,7 +4916,7 @@ function devicePresetPicker(trackLabel, slot, panel) {
     name.value = driven;
     name.title = `driven by .preset("${driven}")`;
     wrap.classList.add('driven');
-    btn.disabled = true;
+    btn.disabled = prev.disabled = next.disabled = true;
   } else {
     name.value = on ?? NONE;
     name.title = on ? `${on}${shipped.has(on) ? ' - built in' : ''}` : 'no preset';
@@ -4875,8 +4933,11 @@ function deviceShapePicker(trackLabel, slot, widget, showValue) {
   const isBuiltIn = (id) => builtIns.includes(id);
   const say = (text, err = false) => logLine(`${trackLabel}: ${text}`, err);
   const figure = () => figureShapeOf(widget.id);
-  // The axes a device's curve is drawn on, and the curves it offers to start a drawing from.
-  const axesOptions = () => (figure()?.shapeAxes ? { axes: figure().shapeAxes, presets: figure().presets ?? null } : {});
+  // The axes a device's curve is drawn on, and the curves it offers to start a drawing from; and
+  // where to read them again, since the picture behind the curve changes with every edit.
+  const axesOptions = () => (figure()?.shapeAxes
+    ? { axes: figure().shapeAxes, presets: figure().presets ?? null, axesFrom: () => figureShapeOf(widget.id)?.shapeAxes ?? null }
+    : {});
 
   const make = (tag, cls, text) => {
     const el = document.createElement(tag);
@@ -5150,6 +5211,15 @@ function figurePad(text, width) {
   return String(text).padStart(width, '\u2007');
 }
 
+/**
+ * A device control's value padded to the most characters it can print (see widestText). Plain
+ * spaces, in a mono face under `white-space: pre`, so each is exactly one digit wide whichever font
+ * the stack lands on - a figure space falls back to another face's width where the mono one lacks it.
+ */
+function readoutPad(text, width) {
+  return String(text).padStart(width ?? 0, ' ');
+}
+
 /** A time in the unit it reads best in - the envelope readout spans microseconds to seconds. */
 function figureSeconds(s) {
   if (s < 0.0005) return figurePad('0.0 ms', 8);
@@ -5174,6 +5244,8 @@ const AUDIO_EXT_RE = /\.(wav|wave|aiff?|flac|mp3|ogg|oga|opus|m4a)$/i;
 function deviceFigure(trackLabel, slot, figure) {
   const { cell, entry } = figureCell(figure, figureSender(trackLabel, slot), trackLabel, slot);
   deviceFigureEls.set(figure.id, entry);
+  // A rebuilt panel is a new picture, which the shape editor draws behind its curve too.
+  if (figure.shapeAxes) lfoRefreshAxes();
   return cell;
 }
 
@@ -5271,6 +5343,8 @@ function figureCell(figure, send, trackLabel = null, slot = null) {
       // A curve picker on the same device follows what the picture says it is on (see
       // deviceShapePicker): the picture is refreshed from the device, so the name is never stale.
       if (next.shapeParam) deviceShapeFollowers.get(next.shapeParam)?.();
+      // So does the shape editor, when it is drawing this figure's curve over this figure's axes.
+      if (next.shapeAxes) lfoRefreshAxes();
     },
     paint,
     // Where a meter on this figure has got to. A device reports the deepest gain reduction of
@@ -6377,7 +6451,8 @@ const FIGURE_DRAWERS = {
     // The length of the file, and how many grains are in the air - neither of which is on a
     // knob. The position is, so it is not repeated here; a device with no grains says nothing
     // about them.
-    const held = f.grains ? ` · ${figurePad(f.grains.length, 2)} grains` : '';
+    // The grain count's room is kept before any grains are reported, so it appearing moves nothing.
+    const held = f.grains ? ` · ${figurePad(f.grains.length, 2)} grains` : figurePad('', 12);
     return `${figurePad(`${f.seconds.toFixed(2)} s`, 8)}${held}`;
   },
 
@@ -7081,12 +7156,14 @@ const FIGURE_DRAWERS = {
 
   /**
    * A drum hit's pitch over time, as a graph: milliseconds across (on the square-root axis the
-   * curve is drawn on, so the first few are wide) and hertz up, labeled for the note last played.
+   * curve is drawn on, so the first few are wide) and hertz up on a log axis, with the body the
+   * pitch makes drawn faintly behind it.
    */
   hitpitch(ctx, w, h, f, c) {
+    if (f.wave) figureHitWave(ctx, w, h, f.wave, c);
     figureHitGraph(ctx, w, h, f, c);
-    // Where the hit starts and the note it settles on.
-    return `${figureHz(f.startHz)} → ${figureHz(f.noteHz)}`;
+    // Where the hit starts and where it settles.
+    return `${figureHz(f.startHz)} → ${figureHz(f.tailHz)}`;
   },
 
   /**
@@ -7098,6 +7175,24 @@ const FIGURE_DRAWERS = {
     return '';
   },
 };
+
+/** The body a hit's pitch makes, -1..1 across the whole height, faint: drawn behind its pitch curve. */
+function figureHitWave(ctx, w, h, wave, c, { x0 = 0, y0 = 0 } = {}) {
+  ctx.save();
+  ctx.strokeStyle = c.accent;
+  ctx.globalAlpha = 0.22;
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  const n = wave.length;
+  for (let i = 0; i < n; i++) {
+    const x = x0 + (i / (n - 1)) * w;
+    const y = y0 + h / 2 - wave[i] * (h / 2) * 0.92;
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+  ctx.restore();
+}
 
 /** A drum hit's curve over its gridlines: the picture both hit figures draw. */
 function figureHitGraph(ctx, w, h, f, c) {
@@ -7356,10 +7451,29 @@ function deviceWidget(trackLabel, slot, widget, { bare = false } = {}) {
   const isList = widget.takes === 'list' || widget.takes === 'scale';
   const readout = document.createElement('div');
   readout.className = 'device-widget-value';
-  // Set by the code alone: nothing reports it moving, so what it is set to goes beside the name.
-  readout.textContent = widget.modulatedBy === 'code' ? `code \u00b7 ${widget.text}` : widget.modulatedBy ?? widget.text;
+  // The readout is as wide as the widest thing it can ever print, from the first frame: the value
+  // padded to the most characters the parameter's text can run to (see widestText), on a line of
+  // its own under the name of whatever drives it, and that line there from the start whether or
+  // not a reading has arrived yet. An envelope on a cutoff takes it from "34 Hz" to "1000 Hz" on
+  // every hit, and a readout that grew with it wrapped onto another line and moved every control
+  // and picture below it.
+  const driven = !!widget.modulatedBy && widget.widget !== 'toggle' && widget.widget !== 'button';
+  let valueEl = readout;
+  if (driven) {
+    const by = document.createElement('div');
+    by.className = 'device-widget-driver';
+    by.textContent = widget.modulatedBy;
+    valueEl = document.createElement('div');
+    readout.append(by, valueEl);
+  }
+  if (!isList) valueEl.style.minWidth = `${widget.widest ?? 0}ch`;
+  const valueText = (text) => readoutPad(text, widget.widest);
+  // Set by the code alone: nothing reports it moving, so what it is set to is printed under it.
+  // Driven by something live: the reading lands in the room kept for it on the next poll.
+  if (driven) valueEl.textContent = valueText(widget.modulatedBy === 'code' ? widget.text : '');
+  else readout.textContent = widget.modulatedBy ?? valueText(widget.text);
   /** Where this control's value is printed, whichever element that is. */
-  let showValue = (text) => { readout.textContent = text; };
+  let showValue = (text) => { valueEl.textContent = valueText(text); };
 
   // One request at a time, the latest value winning - the same rule every streamed control in
   // here follows. A drag fires far faster than a round trip, and what matters is that the last
@@ -7426,7 +7540,7 @@ function deviceWidget(trackLabel, slot, widget, { bare = false } = {}) {
     // readout prints where the modulator has it, rather than sitting where it was set.
     deviceLiveEls.set(widget.id, (live) => {
       setPosition(live.position);
-      readout.textContent = `${widget.modulatedBy} · ${live.text}`;
+      valueEl.textContent = valueText(live.text);
     });
   } else if (isShape) {
     // The same picker the lfo panel heads itself with (see deviceShapePicker): the device's own
@@ -7537,7 +7651,7 @@ function deviceWidget(trackLabel, slot, widget, { bare = false } = {}) {
       register: (fn) => { setPosition = (_position, value, text) => fn(value, text); },
     });
     // The box prints its own value, so the answer lands there rather than on a second line.
-    showValue = (text) => { if (!box.querySelector('input')) box.textContent = text; };
+    showValue = (text) => { if (!box.querySelector('input')) box.textContent = readoutPad(text, widget.widest); };
     cell.appendChild(box);
   } else if (widget.widget === 'button') {
     // Momentary: held down is 1, let go is 0, the way a pad on a controller is. Neither end is a
@@ -7585,6 +7699,8 @@ function deviceWidget(trackLabel, slot, widget, { bare = false } = {}) {
     showValue(res.text);
   });
 
+  // A readout left blank on purpose (a menu's, a switch's) keeps the row's height, not a width.
+  if (readout.textContent === '') valueEl.style.minWidth = '';
   // A menu of shapes shows its choice, so a readout under it would say it twice.
   if (!isNumber && !isFile && !isShape) cell.appendChild(readout);
   return cell;
@@ -8155,7 +8271,7 @@ function lfoUseInCall(id) {
 function lfoCarry() {
   const parts = lfoCallParts();
   // A device's curve has no call behind it, but keeps the device's axes and presets.
-  if (!parts) return lfoState?.axes ? { options: { axes: lfoState.axes, presets: lfoState.presets ?? null } } : {};
+  if (!parts) return lfoState?.axes ? { options: { axes: lfoState.axes, presets: lfoState.presets ?? null, axesFrom: lfoState.axesFrom ?? null } } : {};
   const { rate, rateHz, ratePattern, mode, phase, glide, smooth } = parseLfoCall(parts.opts);
   return { callSource: lfoState.callSource, loopCycles: lfoState.loopCycles ?? null, options: { rate, rateHz, ratePattern, mode, phase, glide, callSmooth: smooth } };
 }
@@ -8585,6 +8701,23 @@ function canvasToLfo(px, py) {
   };
 }
 
+/**
+ * What a point on a drum hit's pitch curve reads as: its hertz, the nearest note and how far off
+ * it, in cents - or, on the note, the note it is pictured at.
+ */
+function lfoPitchLabel(p) {
+  const { lowHz, highHz } = lfoState.axes.pitch;
+  const names = ['c', 'c#', 'd', 'd#', 'e', 'f', 'f#', 'g', 'g#', 'a', 'a#', 'b'];
+  if (p.follow) return `on the note (${lfoState.axes.noteName ?? ''})`;
+  const hz = lowHz * Math.pow(highHz / lowHz, p.y);
+  const midi = 69 + 12 * Math.log2(hz / 440);
+  const n = Math.round(midi);
+  const cents = Math.round((midi - n) * 100);
+  const name = `${names[((n % 12) + 12) % 12]}${Math.floor(n / 12) - 2}`;
+  const amount = hz >= 1000 ? `${(hz / 1000).toFixed(2)} kHz` : `${hz.toFixed(hz < 100 ? 2 : 1)} Hz`;
+  return `${amount} ${name} (${cents > 0 ? '+' : ''}${cents} cents)`;
+}
+
 // The track whose notes gate this shape: the region containing the lfo() call the panel was opened
 // through (or the inline lfo() itself). Null for a definition opened straight from the picker -
 // a _shape(...) on its own belongs to no track, and several calls may be playing it at once.
@@ -8717,6 +8850,14 @@ function lfoPlayheadLoop() {
   lfoRaf = requestAnimationFrame(lfoPlayheadLoop);
 }
 
+/** Redraws a device's curve in the shape editor over its device's latest axes - the body behind a Kick's pitch, say. */
+function lfoRefreshAxes() {
+  const live = lfoState?.axesFrom?.();
+  if (!live || live === lfoState.axes) return;
+  lfoState.axes = live;
+  drawLfoShape();
+}
+
 function drawLfoShape() {
   if (!lfoState || !shapeMod) return;
   const css = getComputedStyle(document.documentElement);
@@ -8799,6 +8940,13 @@ function drawLfoShape() {
     ctx.fillText(`\u2191 ${lfoState.axes.y}`, W / 2 + 6, LFO_PAD + 4);
   }
 
+  // A drum hit's curve: the body its pitch makes, faintly, behind everything drawn on top.
+  if (lfoState.axes?.wave) {
+    figureHitWave(ctx, W - 2 * LFO_PAD, H - 2 * LFO_PAD, lfoState.axes.wave, { accent: col('--accent') }, { x0: LFO_PAD, y0: LFO_PAD });
+  }
+  // A point on the note sits at the note last played: its level in the code is the note, not a number.
+  if (lfoState.axes?.noteY != null) for (const p of lfoState.points) if (p.follow) p.y = lfoState.axes.noteY;
+
   // The marked span, across the whole height: what cmd-D, cmd-C and loop act on.
   const span = lfoSpanNow();
   if (span) {
@@ -8874,7 +9022,33 @@ function drawLfoShape() {
     curve(lfoState.points, 0, 1);
   }
 
-  lfoState.points.forEach((p, i) => dot(p, lfoSel.has(i) ? col('--accent') : col('--bg-panel')));
+  lfoState.points.forEach((p, i) => {
+    if (!p.follow) { dot(p, lfoSel.has(i) ? col('--accent') : col('--bg-panel')); return; }
+    // On the note: its own color, filled when selected, as the others are.
+    const { px, py } = lfoToCanvas(p);
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(px, py, 4.5, 0, 2 * Math.PI);
+    ctx.fillStyle = lfoSel.has(i) ? col('--warn') : col('--bg-panel');
+    ctx.fill();
+    ctx.strokeStyle = col('--warn');
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+    ctx.restore();
+  });
+
+  // A pitch curve's point in hand: the pitch it is at, to the cent, or the note it is on.
+  if (lfoState.axes?.pitch && lfoDrag?.kind === 'point' && lfoDrag.index != null && lfoState.points[lfoDrag.index]) {
+    const p = lfoState.points[lfoDrag.index];
+    const { px, py } = lfoToCanvas(p);
+    ctx.save();
+    ctx.font = '11px sans-serif';
+    ctx.fillStyle = col('--text');
+    ctx.textBaseline = 'bottom';
+    ctx.textAlign = px > W / 2 ? 'right' : 'left';
+    ctx.fillText(lfoPitchLabel(p), px + (px > W / 2 ? -8 : 8), py - 6);
+    ctx.restore();
+  }
 
   if (lfoDrag?.kind === 'marquee' && lfoDrag.moved) {
     const { from, to } = lfoDrag;
@@ -9124,7 +9298,7 @@ function initLfoCanvas() {
     max: 1,
     step: 0.01,
     home: 0,
-    fmt: (v) => String(Number(v.toFixed(2))),
+    fmt: (v) => v.toFixed(2),
     onInput: (v) => {
       if (!lfoState) return;
       heard ??= lfoPlayed(lfoState.points);
@@ -9399,15 +9573,33 @@ function initLfoCanvas() {
 
   lfoCanvas.addEventListener('contextmenu', (e) => {
     e.preventDefault();
-    if (!lfoState || !lfoSpanNow()) return;
+    if (!lfoState) return;
+    // On a point of a curve played against a note (a Kick's pitch): whether it follows the note.
+    const { px, py } = canvasPos(e);
+    const pointIdx = lfoState.axes?.noteY != null ? hitPoint(px, py) : null;
+    const items = [];
+    if (pointIdx != null) {
+      const p = lfoState.points[pointIdx];
+      items.push([`${p.follow ? '\u2713 ' : ''}follow the note`, () => lfoToggleFollow(pointIdx)]);
+    }
+    if (lfoSpanNow()) {
+      if (!lfoState.axes) items.push(['loop this span', () => lfoLoopSpan(lfoMenuAlt)]);
+      items.push(['simplify', () => lfoSimplifySpan()]);
+    }
+    if (!items.length) return;
     lfoMenu.style.zIndex = String(++panelFrontZ); // over the panel, whichever is in front
-    openCtxMenu(lfoMenu, e.clientX, e.clientY, {
-      items: lfoState.axes
-        ? [['simplify', () => lfoSimplifySpan()]]
-        : [['loop this span', () => lfoLoopSpan(lfoMenuAlt)], ['simplify', () => lfoSimplifySpan()]],
-      after: () => lfoCanvas.focus({ preventScroll: true }),
-    });
+    openCtxMenu(lfoMenu, e.clientX, e.clientY, { items, after: () => lfoCanvas.focus({ preventScroll: true }) });
   });
+  /** Puts a point on the note, or takes it off where it is pictured now. */
+  const lfoToggleFollow = (i) => {
+    const p = lfoState?.points[i];
+    if (!p) return;
+    if (p.follow) delete p.follow;
+    else p.follow = true;
+    lfoPreset.value = '';
+    writeLfoCall();
+    drawLfoShape();
+  };
   lfoMenu.addEventListener('pointerdown', (e) => { lfoMenuAlt = e.altKey; }, true);
   document.addEventListener('pointerdown', (e) => { if (!lfoMenu.contains(e.target)) lfoMenu.classList.add('hidden'); }, true);
   document.addEventListener('keydown', (e) => {
@@ -9555,6 +9747,25 @@ const presetHead = makeNamePicker({
   // run of gestures, not a single one.
   refocus: () => presetSearch.focus(),
 });
+
+// The presets either side of the one the panel is on, in the list's order, round from the last to
+// the first: put into the call the panel looks through, as a click on the row's "use" does, or just
+// opened when there is no call.
+function presetStep(dir) {
+  const sc = presetTarget()?.plugin ?? presetState?.scope ?? null;
+  const ids = [...new Set(presetDefs.allIds(sc, presetCM.getValue()).map((r) => r.id))];
+  if (!ids.length) return;
+  // Counted from the name the call says now - a preset the device comes with has nothing here for
+  // the panel to open, so the panel may still be showing the one before it.
+  const span = presetState?.source?.find();
+  const named = span ? presetCM.getRange(span.from, span.to) : presetState?.id;
+  const at = ids.indexOf(named ?? '');
+  const id = ids[at < 0 ? (dir > 0 ? 0 : ids.length - 1) : (at + dir + ids.length) % ids.length];
+  if (presetState?.source) presetUseInCall(id, sc);
+  else openPresetById(id, presetCarry(), sc);
+}
+document.getElementById('presetPrev').addEventListener('click', () => presetStep(-1));
+document.getElementById('presetNext').addEventListener('click', () => presetStep(1));
 
 // Puts `id` into the `.preset(...)` the panel is looking through, replacing whatever it names now,
 // and follows it there. This is the panel's other half: opening a row shapes that preset, this one
@@ -11561,7 +11772,7 @@ function initGroovePanel() {
     max: GROOVE_MAX_DEPTH,
     step: 0.01,
     home: 1, // as drawn - what a double-click goes back to
-    fmt: (v) => String(Number(v.toFixed(2))),
+    fmt: (v) => v.toFixed(2),
     onInput: () => {
       if (!grooveState) return;
       grooveState.depth = grooveDepthSlider.get();
@@ -11577,7 +11788,7 @@ function initGroovePanel() {
     max: GROOVE_MAX_DEPTH,
     step: 0.01,
     home: 1,
-    fmt: (v) => String(Number(v.toFixed(2))),
+    fmt: (v) => v.toFixed(2),
     onInput: () => {
       if (!grooveState) return;
       grooveState.velDepth = grooveVelSlider.get();
@@ -13829,7 +14040,9 @@ function prMakeBoxSlider(el, { min, max, step, home = 0, center = false, fmt, on
   let value = quant(home);
 
   const paint = () => {
-    label.textContent = fmt(value);
+    // Padded to the wider end of the range, so a sign or a digit coming and going does not
+    // re-center the number in its box.
+    label.textContent = figurePad(fmt(value), Math.max(fmt(min).length, fmt(max).length));
     const u = (value - min) / (max - min); // where the value sits across the box, 0..1
     const base = center ? (0 - min) / (max - min) : 0; // ...and where its fill grows from
     fill.style.left = `${Math.min(u, base) * 100}%`;
@@ -16032,7 +16245,10 @@ function drawBendOverlay(ctx, col, m) {
       ctx.font = '10px ui-monospace, SFMono-Regular, Menlo, monospace';
       ctx.textAlign = 'left';
       ctx.textBaseline = 'middle'; // set outright, like the value lane's readout - canvas text state carries over
-      ctx.fillText(`${p.y > 0 ? '+' : ''}${Math.round(p.y * 100) / 100}`,
+      // Fixed decimals and a sign slot always taken (a figure space at zero), so the digits hold
+      // still beside the point as it is dragged.
+      const bend = p.y.toFixed(2);
+      ctx.fillText(/^-?0\.00$/.test(bend) ? '\u20070.00' : p.y > 0 ? `+${bend}` : bend,
         Math.min(W - 32, x + 8), Math.max(gridTop + 10, Math.min(gridTop + gridH - 4, y - 8)));
     }
   });
@@ -16290,7 +16506,15 @@ function prOpenHarmonyParams(at, { title, params, make, reroll = false }) {
       input.min = p.min; input.max = p.max; input.step = p.step ?? (p.type === 'int' ? 1 : 0.01);
       input.value = p.value;
       const readout = document.createElement('output');
-      const show = () => { readout.textContent = p.fmt ? p.fmt(values[p.key]) : Number.isInteger(p.step ?? (p.type === 'int' ? 1 : 0)) ? String(values[p.key]) : Number(values[p.key]).toFixed(2).replace(/\.?0+$/, ''); };
+      // Fixed decimals (the step's own), and a readout as wide as the widest value the slider can
+      // reach, so neither the number nor the popover around it moves as it is dragged.
+      const step = p.step ?? (p.type === 'int' ? 1 : 0.01);
+      const decimals = Number.isInteger(step) ? 0 : Math.min(3, (String(step).split('.')[1] ?? '').length);
+      const fmt = p.fmt ?? ((v) => Number(v).toFixed(decimals));
+      let widest = 0;
+      for (let i = 0, n = Math.min(400, Math.floor((p.max - p.min) / step)); i <= n; i++) widest = Math.max(widest, fmt(i === n && Number.isFinite(p.max) ? p.max : p.min + i * step).length);
+      readout.style.minWidth = `${widest}ch`;
+      const show = () => { readout.textContent = fmt(values[p.key]); };
       input.addEventListener('input', () => {
         const v = Number(input.value);
         values[p.key] = p.type === 'int' ? Math.round(v) : v;
@@ -16439,7 +16663,7 @@ function prHarmonyTransformItems(items, targets, scale, at) {
             if (!p) return; // 'none' names the custom mix - picking it moves nothing
             prApplyPreset(v, rows, { ...p, offset: 0 });
           } },
-        { key: 'range', label: 'range', title: "the walk's room in octaves, centered on the selection's middle", type: 'range', min: 0.25, max: 3, step: 0.25, value: Math.min(3, Math.max(1, Math.round((degSpan / size) * 4) / 4)), fmt: (x) => `${x} oct` },
+        { key: 'range', label: 'range', title: "the walk's room in octaves, centered on the selection's middle", type: 'range', min: 0.25, max: 3, step: 0.25, value: Math.min(3, Math.max(1, Math.round((degSpan / size) * 4) / 4)), fmt: (x) => `${x.toFixed(2)} oct` },
         { key: 'offset', label: 'offset', title: 'the whole window up or down, in scale steps - double-click for 0', type: 'range', min: -14, max: 14, step: 1, value: 0, reset: 0 },
         { key: 'shape', label: 'same shape', title: "how faithfully the new line follows the original's ups and downs", type: 'range', min: 0, max: 1, step: 0.02, value: 0, onChange: unpreset },
         { key: 'keep', label: 'same notes', title: 'the share of notes kept exactly as they were', type: 'range', min: 0, max: 1, step: 0.02, value: 0, onChange: unpreset },
@@ -17453,7 +17677,8 @@ function drawValueLane(ctx, col, m) {
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
     ctx.fillStyle = col('--text');
-    ctx.fillText(String(Math.round(prLaneVal(dragNt, key) * 1000) / 1000), Math.max(PR_GUTTER + 3, x + 7), Math.min(laneTop + laneH - 6, Math.max(laneTop + 7, y - 9)));
+    // Fixed decimals, and a sign slot kept, so the number does not change width as it is dragged.
+    ctx.fillText(figurePad(prLaneVal(dragNt, key).toFixed(3), 6), Math.max(PR_GUTTER + 3, x + 7), Math.min(laneTop + laneH - 6, Math.max(laneTop + 7, y - 9)));
   }
 
   // gutter: the channel on show; clicking it flips to the other one
@@ -18854,7 +19079,7 @@ function initPianorollEditor() {
     max: 0.5,
     step: 0.01,
     center: true, // straight sits in the middle: the fill says which side of it you're on
-    fmt: (v) => (v ? v.toFixed(2) : '0'),
+    fmt: (v) => v.toFixed(2),
     onInput: () => prSetSwing(true),
     onCommit: () => prSetSwing(false),
   });
@@ -18921,7 +19146,7 @@ function initPianorollEditor() {
     max: 2,
     step: 0.01,
     home: 1, // as drawn - what a double-click goes back to
-    fmt: (v) => String(Number(v.toFixed(2))),
+    fmt: (v) => v.toFixed(2),
     onInput: () => {
       if (!prState?.groove) return;
       const v = prAccentsSlider.get();
@@ -19692,11 +19917,12 @@ function updateRecButton() {
   }
   const pos = currentCyclePos();
   if (pos < recState.startCycle) {
-    say(`in ${Math.max(0, recState.startCycle - pos).toFixed(1)}`);
+    say(`in ${figurePad(Math.max(0, recState.startCycle - pos).toFixed(1), 4)}`);
     recBtn.classList.add('rec-armed');
     recBtn.classList.remove('rec-live');
   } else {
-    say(`${Math.min(recState.cycles, pos - recState.startCycle).toFixed(1)}/${recState.cycles}`);
+    // Padded to the take's own length, so 9.9 becoming 10.0 does not widen the count.
+    say(`${figurePad(Math.min(recState.cycles, pos - recState.startCycle).toFixed(1), String(recState.cycles).length + 2)}/${recState.cycles}`);
     recBtn.classList.add('rec-live');
     recBtn.classList.remove('rec-armed');
   }
@@ -20363,11 +20589,12 @@ function updateRecordButton() {
   }
   const pos = currentCyclePos();
   if (pos < trackRecState.startCycle) {
-    recordGo.textContent = `● in ${Math.max(0, trackRecState.startCycle - pos).toFixed(1)}`;
+    recordGo.textContent = `● in ${figurePad(Math.max(0, trackRecState.startCycle - pos).toFixed(1), 4)}`;
     recordGo.classList.add('rec-armed');
     recordGo.classList.remove('rec-live');
   } else {
-    recordGo.textContent = `● ${Math.min(trackRecState.cycles, pos - trackRecState.startCycle).toFixed(1)}/${trackRecState.cycles}`;
+    // Padded to the take's own length, so 9.9 becoming 10.0 does not widen the count.
+    recordGo.textContent = `● ${figurePad(Math.min(trackRecState.cycles, pos - trackRecState.startCycle).toFixed(1), String(trackRecState.cycles).length + 2)}/${trackRecState.cycles}`;
     recordGo.classList.add('rec-live');
     recordGo.classList.remove('rec-armed');
   }
@@ -20801,10 +21028,14 @@ function mixerColorFor(label) {
   return trackColor('a', label);
 }
 
+// Padded to one width, with a sign on every reading but zero (a figure space there), so the
+// number holds still under the fader as it is dragged or automated.
 function mixerFmtDb(gain) {
-  if (gain <= 0) return '-∞ dB';
+  if (gain <= 0) return `${figurePad('-∞', 6)} dB`;
   const db = 20 * Math.log10(gain);
-  return `${db > 0 ? '+' : ''}${db.toFixed(1)} dB`;
+  const text = db.toFixed(1);
+  const signed = /^-?0\.0$/.test(text) ? `\u20070.0` : db > 0 ? `+${text}` : text;
+  return `${figurePad(signed, 6)} dB`;
 }
 
 // The two knobs under each fader, in signal order (width happens before pan on the channel
@@ -20845,7 +21076,7 @@ const MIXER_KNOBS = [
 // the whole decision, and it is the thing you drag.
 function updateMixerBassBtn(strip) {
   const on = strip.bassmono > 0;
-  strip.bassBtn.textContent = on ? `▽ ${strip.bassmono}` : '▽ mono';
+  strip.bassBtn.textContent = on ? `▽ ${figurePad(strip.bassmono, 3)}` : '▽ mono'; // 20 to 500: three digits' room
   strip.bassBtn.classList.toggle('on-bass', on);
   strip.bassBtn.title = on
     ? `bass mono: everything below ${strip.bassmono} Hz is centered, the width above it is kept. `
@@ -21297,7 +21528,7 @@ function buildMixerStrip(label) {
     const { spec, canvas, valueEl } = knob;
     const set = (value) => {
       knob.value = Math.round(value * 100) / 100;
-      valueEl.textContent = spec.format(knob.value);
+      valueEl.textContent = figurePad(spec.format(knob.value), 4); // "C" to "R100", "0%" to "400%": one width
       mixerDragValue(strip, spec.name, knob.value);
     };
     canvas.addEventListener('pointerdown', (e) => {
@@ -21609,7 +21840,7 @@ function syncMixerFromCode() {
       const read = mixctlMod.readTrim(code, strip.label, knob.spec.name, undefined, ctx);
       if (!knob.drag && !strip.writeTimer[knob.spec.name]) {
         knob.value = read.value;
-        knob.valueEl.textContent = knob.spec.format(read.value);
+        knob.valueEl.textContent = figurePad(knob.spec.format(read.value), 4);
       }
       knob.canvas.classList.toggle('mixer-patterned', read.patterned);
       knob.canvas.title = read.patterned ? knob.spec.patternedTitle : knob.spec.title;
@@ -26167,7 +26398,8 @@ function packRenderTransport() {
   packPlayName.textContent = packPlayer.name;
   packPlayName.title = packPlayer.abs ?? '';
   packPlayHead.style.width = d ? `${(pos / d) * 100}%` : '0%';
-  packPlayTime.textContent = d ? `${pos.toFixed(2)} / ${d.toFixed(2)}s` : '';
+  // The position padded to the length's width, so it never grows a digit while it plays.
+  packPlayTime.textContent = d ? `${figurePad(pos.toFixed(2), d.toFixed(2).length)} / ${d.toFixed(2)}s` : '';
 }
 
 // The rows that ARE the playing file light up, in both lists, without redrawing them.
@@ -28210,7 +28442,9 @@ function sliceRender() {
   const others = sliceOtherCount();
   const also = others ? ` · ${others} other sample${others === 1 ? '' : 's'} in this set` : '';
   sliceCountEl.textContent = (marks.length
-    ? `${marks.length} slice${marks.length === 1 ? '' : 's'} · selected ${sliceState.sel}`
+    // Counts padded to three digits and the plural kept one width, so re-slicing while the
+    // sensitivity is dragged moves no letter of the line.
+    ? `${figurePad(marks.length, 3)} slice${marks.length === 1 ? '\u2007' : 's'} · selected ${figurePad(sliceState.sel, 3)}`
     : 'no markers — this sample chops on its own transients') + also;
 }
 
@@ -28936,12 +29170,14 @@ const ENV_MOD_EVAL_DEBOUNCE_MS = 150; // the shape editor's: a setting is heard 
 // never negative and a sustain is a level, but nothing caps how long a stage runs or how hard a
 // curve bends. A time drags on the device envelope knobs' own curve (wavetable.mjs's `seconds`).
 const ENV_MOD_FIELDS = [
-  { id: 'attack', min: 0, max: Infinity, step: 0.001, decimals: 3, unit: 's', sweep: { max: 10, exp: 3 }, description: 'Seconds from silence to full level.' },
-  { id: 'decay', min: 0, max: Infinity, step: 0.001, decimals: 3, unit: 's', sweep: { max: 10, exp: 3 }, description: 'Seconds from full level down to the sustain level.' },
-  { id: 'sustain', min: 0, max: 1, step: 0.01, decimals: 2, description: 'The level held while the note is down, from 0 to 1.' },
-  { id: 'release', min: 0, max: Infinity, step: 0.001, decimals: 3, unit: 's', sweep: { max: 10, exp: 3 }, description: 'Seconds from the sustain level to silence once the note ends.' },
-  { id: 'curve', min: -Infinity, max: Infinity, step: 0.1, decimals: 1,
+  { id: 'attack', min: 0, max: Infinity, step: 0.001, decimals: 3, unit: 's', widest: 8, sweep: { max: 10, exp: 3 }, description: 'Seconds from silence to full level.' },
+  { id: 'decay', min: 0, max: Infinity, step: 0.001, decimals: 3, unit: 's', widest: 8, sweep: { max: 10, exp: 3 }, description: 'Seconds from full level down to the sustain level.' },
+  { id: 'sustain', min: 0, max: 1, step: 0.01, decimals: 2, widest: 4, description: 'The level held while the note is down, from 0 to 1.' },
+  { id: 'release', min: 0, max: Infinity, step: 0.001, decimals: 3, unit: 's', widest: 8, sweep: { max: 10, exp: 3 }, description: 'Seconds from the sustain level to silence once the note ends.' },
+  { id: 'curve', min: -Infinity, max: Infinity, step: 0.1, decimals: 1, widest: 4,
     description: 'Shapes every stage. Zero is a straight line; negative moves fast and levels off, positive holds back and then rushes.' },
+  { id: 'min', min: -Infinity, max: Infinity, step: 0.01, decimals: 2, widest: 8, description: 'Where it sits at silence: the bottom of its range.' },
+  { id: 'max', min: -Infinity, max: Infinity, step: 0.01, decimals: 2, widest: 8, description: 'Where it reaches at full level: the top of its range.' },
 ];
 
 // { at, mods, read, draft, entry, setters } - the call on screen. `at` is a bookmark on its name,
@@ -28975,6 +29211,8 @@ function envModDescriptor() {
       { id: 'sustain', min: 0, max: 1, default: d.sustain },
       { id: 'release', min: 0, max: Infinity, default: d.release },
       { id: 'curve', min: -8, max: 8, step: 0.1, default: d.curve },
+      { id: 'min', min: -Infinity, max: Infinity, default: d.min },
+      { id: 'max', min: -Infinity, max: Infinity, default: d.max },
     ],
     figures: [{
       id: 'envmod',
@@ -29166,11 +29404,40 @@ function envModSend(body, commit) {
   else envModPreview(set);
 }
 
-/** A gesture in progress: drawn and printed, not yet written. */
+/**
+ * A gesture in progress: drawn and printed, and written into the call as it moves, so it is heard
+ * while the hand is still on it - evaluated at most every ENV_MOD_LIVE_MS rather than once let go.
+ */
 function envModPreview(set) {
   if (!envModState) return;
   envModState.draft = { ...(envModState.draft ?? {}), ...set };
   envModRepaint();
+  envModWriteLive();
+}
+
+const ENV_MOD_LIVE_MS = 120;
+
+function envModWriteLive() {
+  const st = envModState;
+  const found = envModCall();
+  if (!st || !found) return;
+  const { edits } = envctlMod.envCallEdits(found.code, found.call, st.draft);
+  if (!edits.length) return;
+  envModWriting = true;
+  try {
+    // One undo step for the whole gesture: the moves merge under one origin.
+    envModCM.operation(() => {
+      for (const e of edits) envModCM.replaceRange(e.text, envModCM.posFromIndex(e.from), envModCM.posFromIndex(e.to), '+envmod');
+    });
+  } finally {
+    envModWriting = false;
+  }
+  st.liveWritten = true;
+  if (st.liveTimer) return;
+  st.liveTimer = setTimeout(() => {
+    st.liveTimer = null;
+    evalEditor(envModCM);
+  }, ENV_MOD_LIVE_MS);
 }
 
 function envModRepaint() {
@@ -29197,11 +29464,14 @@ function envModCommit(set) {
   } finally {
     envModWriting = false; // never leave it latched: the panel would stop following the code
   }
+  const live = envModState.liveWritten;
   envModState.draft = null;
   envModState.span = null;
+  envModState.liveWritten = false;
   if (!envModRead()) return;
   envModRepaint();
-  if (edits.length) deckEvalSoon(envModEvalSoon, envModCM, ENV_MOD_EVAL_DEBOUNCE_MS);
+  // Written while the hand moved, the last value may not have been evaluated yet.
+  if (edits.length || live) deckEvalSoon(envModEvalSoon, envModCM, ENV_MOD_EVAL_DEBOUNCE_MS);
 }
 
 // The code moved under the panel - a typed edit, an undo - so the panel follows it. Not mid-gesture:
@@ -30172,9 +30442,11 @@ function envRender() {
 }
 
 /** A time as the readout says it: 5ms, 240ms, 1.25s. */
+// Fixed decimals and one width ("  5.0ms", "240.0ms", "  1.25s"), so dragging a handle never
+// shoves the rest of the line along.
 function envTimeText(sec) {
-  if (sec < 1) return `${Number((sec * 1000).toPrecision(3))}ms`;
-  return `${Number(sec.toPrecision(3))}s`;
+  if (sec < 1) return figurePad(`${(sec * 1000).toFixed(1)}ms`, 7);
+  return figurePad(`${sec.toFixed(2)}s`, 7);
 }
 
 function envSyncFoot() {
@@ -30182,8 +30454,9 @@ function envSyncFoot() {
   const { ctl } = envState;
   const v = envValues();
   const time = (name) => (ctl[name].patterned ? ctl[name].text : envTimeText(v[name]));
-  const level = ctl.sustain.patterned ? ctl.sustain.text : String(Number(v.sustain.toFixed(2)));
-  const scale = ctl.envscale.patterned ? ` · ×${ctl.envscale.text}` : ctl.envscale.value !== 1 ? ` · ×${ctl.envscale.value}` : '';
+  const level = ctl.sustain.patterned ? ctl.sustain.text : v.sustain.toFixed(2);
+  // The scale clause's room is kept when there is none to print, so it coming and going moves nothing.
+  const scale = ctl.envscale.patterned ? ` · ×${ctl.envscale.text}` : ctl.envscale.value !== 1 ? ` · ×${figurePad(Number(ctl.envscale.value).toFixed(2), 4)}` : figurePad('', 8);
   envReadout.textContent = `A ${time('attack')} · D ${time('decay')} · S ${level} · R ${time('release')}${scale}`;
   const looping = v.loop > 0.5;
   envLoopBtn.classList.toggle('on', looping);
@@ -33019,7 +33292,7 @@ function deckHeadRender(state) {
       // the shared clock, which is what its patterns run at - so a pattern deck finally has a
       // bpm on screen, slider and all.
       const read = document.getElementById(`mixTempoRead${U}`);
-      read.textContent = dt.bpm != null ? `${dt.bpm.toFixed(1)}` : '—';
+      read.textContent = figurePad(dt.bpm != null ? dt.bpm.toFixed(1) : '—', 5); // "128.0": one width
       read.title = dt.bpm != null
         ? `deck ${U} is running at ${dt.bpm.toFixed(2)} bpm${songPanes[d].song ? '' : ' (the shared clock)'}`
         : `deck ${U} has no tempo to show`;
@@ -33057,7 +33330,9 @@ function deckHeadRender(state) {
 // beside it moves as the value does.
 function deckTempoPctShow(deck, pct) {
   const el = document.getElementById(`mixTempoPct${deck.toUpperCase()}`);
-  if (el) el.textContent = `${pct > 0 ? '+' : ''}${pct.toFixed(1)}%`;
+  // Signed, zero included (a figure space), and padded to "+50.0%", so the digits hold still.
+  const text = pct.toFixed(1);
+  if (el) el.textContent = `${figurePad(/^-?0\.0$/.test(text) ? '\u20070.0' : pct > 0 ? `+${text}` : text, 5)}%`;
 }
 
 // --- the song decks' waveform panes (songs phase 3; one per deck since deck A learned files) ---
@@ -33077,9 +33352,17 @@ function deckTempoPctShow(deck, pct) {
 // and leaves its buffer strictly alone - that buffer is your autosaved wip, not a card.
 
 function songFmt(sec, tenths = false) {
-  const m = Math.floor(sec / 60);
-  const s = sec - m * 60;
-  return tenths ? `${m}:${(s < 10 ? '0' : '') + s.toFixed(1)}` : `${m}:${String(Math.floor(s)).padStart(2, '0')}`;
+  // Rounded before it is split, so 59.96 s reads 1:00.0 rather than 0:60.0, and 9.96 s 0:10.0
+  // rather than a 0:010.0 one character wider.
+  const t = tenths ? Math.round(sec * 10) / 10 : Math.floor(sec);
+  const m = Math.floor(t / 60);
+  const s = t - m * 60;
+  return tenths ? `${m}:${s.toFixed(1).padStart(4, '0')}` : `${m}:${String(s).padStart(2, '0')}`;
+}
+
+/** "elapsed / length", the elapsed part padded to the length's width so it never grows a digit. */
+function songFmtPlayed(pos, dur) {
+  return `${figurePad(songFmt(pos, true), songFmt(dur, true).length)} / ${songFmt(dur)}`;
 }
 
 /** Backing-store size synced to CSS size x devicePixelRatio; true when it just changed. */
@@ -33401,7 +33684,7 @@ function makeSongPane(deck) {
     drawDetail();
     drawOverview();
     const dur = wave?.seconds ?? P.mirror?.duration ?? 0;
-    timeEl.textContent = dur ? `${songFmt(P.playheadNow(), true)} / ${songFmt(dur)}` : '';
+    timeEl.textContent = dur ? songFmtPlayed(P.playheadNow(), dur) : '';
     const grid = P.mirror?.bpm > 0 ? 60 / P.mirror.bpm : 0;
     const phrase = grid ? deckPhraseLabel((P.playheadNow() - (P.mirror.anchorSec ?? 0)) / grid) : '';
     if (phraseEl.textContent !== phrase) phraseEl.textContent = phrase;
@@ -34921,9 +35204,18 @@ function masterPeakFeed(m, peak, now = performance.now()) {
     m.holdAt = now;
   }
 }
+/**
+ * A meter's held peak as its readout prints it: one width from silence to over, a sign on every
+ * reading but zero (a figure space there), so the digits hold still as the level moves.
+ */
+function meterDbText(db) {
+  if (db <= -55) return figurePad('-∞', 5);
+  const text = db.toFixed(1);
+  return figurePad(/^-?0\.0$/.test(text) ? '\u20070.0' : db > 0 ? `+${text}` : text, 5);
+}
 function masterPeakPaint(m, now = performance.now()) {
   if (now - m.holdAt > MASTER_HOLD_MS * 2) m.hold = -90; // the feed went quiet (engine down, desk closed)
-  const text = m.hold <= -55 ? '-∞' : `${m.hold > 0 ? '+' : ''}${m.hold.toFixed(1)}`;
+  const text = meterDbText(m.hold);
   if (m.db.textContent !== text) m.db.textContent = text;
   m.el.classList.toggle('over', now - m.overAt < MASTER_OVER_MS);
 }
@@ -34950,7 +35242,7 @@ for (const deck of ['a', 'b']) {
   const readout = document.createElement('span');
   readout.className = 'mix-meter-db';
   readout.id = `mixMeterDb${deck.toUpperCase()}`;
-  readout.textContent = '-∞';
+  readout.textContent = meterDbText(-90);
   meterCol.append(canvas, readout);
 }
 
@@ -35023,7 +35315,7 @@ function mixMeterPaint(deck, dtSec) {
     g.fillText(db > 0 ? `+${db}` : String(db), tickX, yOf(db));
   }
 
-  readout.textContent = d.hold <= -55 ? '-∞' : d.hold.toFixed(1);
+  readout.textContent = meterDbText(d.hold);
   readout.classList.toggle('over', d.hold > -3);
 }
 
@@ -37714,7 +38006,10 @@ function orgRenderCount(shown) {
   const total = orgSourceRows().length;
   const where = orgEl.querySelector('#orgCount');
   const narrowed = orgQuery || orgFiltOn();
-  where.textContent = narrowed && shown !== total ? `${shown} of ${total}` : `${total}`;
+  // As wide as "757 of 757" whether or not a search is narrowing it, and the count padded to the
+  // total's digits, so typing in the search box never moves the filter button beside it.
+  where.style.minWidth = `${`${total} of ${total}`.length}ch`;
+  where.textContent = narrowed && shown !== total ? `${figurePad(shown, String(total).length)} of ${total}` : `${total}`;
 }
 
 function orgRowTitle(row) {
@@ -38047,13 +38342,17 @@ function orgRenderBar() {
       // A pass that is standing aside for the decks says so: the same "0 of 757" forever reads
       // as broken otherwise, which is exactly how it was reported.
       const held = libAnalyzing.waiting;
-      measure.textContent = `${held ? 'waiting' : 'stop'} · ${libAnalyzing.done}/${libAnalyzing.total}`;
+      // One width for the whole pass: the done count padded to the total's digits, and room for
+      // "waiting" when it says "stop", so the buttons after it hold still as tracks are measured.
+      measure.style.minWidth = `calc(${`waiting · ${libAnalyzing.total}/${libAnalyzing.total}`.length}ch + 18px)`;
+      measure.textContent = `${held ? 'waiting' : 'stop'} · ${figurePad(libAnalyzing.done, String(libAnalyzing.total).length)}/${libAnalyzing.total}`;
       measure.title = held
         ? `holding back while ${held} — it picks up again on its own. click to stop`
         : `measuring tempo and key${libAnalyzing.now ? `: ${pathBasename(libAnalyzing.now)}` : ''} — click to stop`;
       measure.classList.toggle('org-waiting', !!held);
     } else {
       measure.classList.remove('org-waiting');
+      measure.style.minWidth = '';
       measure.textContent = picked.length ? `measure ${picked.length > 1 ? picked.length : ''}`.trimEnd() : 'measure';
       measure.title = picked.length
         ? 'measure tempo and key for the selection'
@@ -39462,7 +39761,7 @@ function orgRenderTransport() {
   nameEl.textContent = orgPlayer.name;
   nameEl.title = orgPlayer.abs ?? '';
   orgEl.querySelector('#orgPlayHead').style.width = d ? `${(pos / d) * 100}%` : '0%';
-  orgEl.querySelector('#orgPlayTime').textContent = d ? `${songFmt(pos, true)} / ${songFmt(d)}` : '';
+  orgEl.querySelector('#orgPlayTime').textContent = d ? songFmtPlayed(pos, d) : '';
 }
 
 /** The row that IS the playing file lights up without a redraw. */
@@ -40264,10 +40563,12 @@ function openEditorMenu(ed, e) {
   // over it again - the one way into the call behind a control that clicks play.
   const widgetHit = selected ? null : widgetFoldAt(ed, e);
   if (widgetHit) {
-    const shown = widgetHit.kind === 'sliders' ? 'bars' : 'cells';
+    const shown = widgetHit.kind === 'sliders' ? 'bars' : widgetHit.kind === 'acid' ? 'steps' : 'cells';
+    const these = `these ${shown}`;
+    const as = shown;
     items.unshift(widgetHit.folded
-      ? ['edit as text', () => unfoldWidget(ed, widgetHit), `the ${widgetHit.kind}() call behind these ${shown}`]
-      : [`show as ${shown}`, () => refoldWidget(ed, widgetHit), `draw this ${widgetHit.kind}() call as ${shown} again`]);
+      ? ['edit as text', () => unfoldWidget(ed, widgetHit), `the ${widgetHit.kind}() call behind ${these}`]
+      : [`show as ${shown}`, () => refoldWidget(ed, widgetHit), `draw this ${widgetHit.kind}() call as ${as} again`]);
     // The drawn control thrown again: it rewrites the text behind the cells, as a click does.
     const fold = widgetHit.folded ? widgetHit.mark?.poptartWidget : null;
     if (fold?.randomize) {
@@ -40276,6 +40577,7 @@ function openEditorMenu(ed, e) {
         sliders: 'every bar at a new height',
         matrix: "each row's hits somewhere else",
         shiftreg: 'as many hits as now, somewhere else',
+        acid: 'a new line',
       }[widgetHit.kind];
       items.unshift(['randomize', () => { fold.randomize(); ed.focus(); }, what]);
     }
@@ -41163,7 +41465,10 @@ function replayDraw() {
   ctx.fillStyle = accent;
   ctx.fillRect(Math.round(x(v.t)) - 1, 0, 2, h);
   const first = v.entries[0].at;
-  replayTimeEl.textContent = `${replayClockOf(v.t)} · ${replayElapsed(v.t - first)} · ${v.i + 1}/${v.entries.length}`;
+  // Each part padded to the widest it reaches over this night, so the readout is one width all
+  // night and the timeline beside it is never resized under the playhead.
+  const total = v.entries[v.entries.length - 1].at - first;
+  replayTimeEl.textContent = `${replayClockOf(v.t)} · ${figurePad(replayElapsed(v.t - first), replayElapsed(total).length)} · ${figurePad(v.i + 1, String(v.entries.length).length)}/${v.entries.length}`;
 }
 
 /** Night-ms -> x for a timeline `w` wide (a night under a minute is drawn a minute long). */
@@ -42726,7 +43031,9 @@ function arReflectSnap() {
   const opt = [...arSnapSelect.options].find((o) => o.value === 'auto');
   if (!opt) return;
   const n = arSnapAuto();
-  const text = `auto · ${n === 1 ? 'bar' : `1/${n}`}`;
+  // Padded to the longest division auto can land on, so zooming never resizes the menu.
+  const longest = Math.max(...AR_SNAPS.map((d) => (d === 1 ? 'bar' : `1/${d}`).length));
+  const text = `auto · ${figurePad(n === 1 ? 'bar' : `1/${n}`, longest)}`;
   if (opt.textContent !== text) opt.textContent = text;
 }
 

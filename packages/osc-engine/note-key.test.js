@@ -9,6 +9,7 @@ const { test } = require('node:test');
 const assert = require('node:assert');
 const { fakeEngine } = require('./test-support/fake-engine');
 const { DeviceController } = require('./server/device');
+const { Synth } = require('./server/objects');
 
 const SECTIONS = ['tracks', 'routing', 'loads', 'ids', 'notes'];
 
@@ -38,4 +39,26 @@ test('a note whose end has passed is dropped when the next one is filed', () => 
   E.markSounding(track, 0, 60, E.elapsed() - 1);
   E.markSounding(track, 0, 62, Infinity);
   assert.deepStrictEqual([...track.sounding.get(0).keys()], [62]);
+});
+
+test('a sliding note reaches one of poptart\'s own devices as /noteOn\'s third number, and a plugin plainly', () => {
+  const { E, S, sent } = fakeEngine({ sections: SECTIONS });
+  const head = Synth.basicNew('poptart_head', S, 4321);
+  const plugin = [];
+  const track = (ctl) => ({
+    key: null, head, nodes: new Map(), loaded: new Map([[0, 'x']]), controllers: new Map([[0, ctl]]),
+    envs: new Map(), lfos: new Map(), held: 0, sounding: new Map(),
+  });
+  E.tracks.set('dev', track(new DeviceController(S, head, 10)));
+  E.tracks.set('vst', track({ midi: { noteOn: (...a) => plugin.push(a), noteSlide: () => plugin.push('slide') } }));
+  E.dispatch('/poptart/noteOn', ['dev', 55, 0.5, 0, 1]);
+  E.dispatch('/poptart/noteOn', ['dev', 57, 0.5, 0]);
+  E.dispatch('/poptart/noteOn', ['vst', 55, 0.5, 0, 1]);
+  const ons = sent.filter((m) => m[0] === '/u_cmd' && m[3] === '/noteOn');
+  assert.strictEqual(ons.length, 2);
+  assert.deepStrictEqual(ons[0].slice(1, 4), [4321, 10, '/noteOn']);
+  assert.strictEqual(ons[0].length, 7, 'the slide is a third number');
+  assert.strictEqual(ons[0][6], 1);
+  assert.strictEqual(ons[1].length, 6, 'a plain note has none');
+  assert.deepStrictEqual(plugin, [[0, 55, 64]], 'a plugin plays the slide as a plain note');
 });

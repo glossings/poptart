@@ -105,8 +105,8 @@ struct Device : pd_own::Device<ids::kCount, 4, 4> {
       const double readR = lines[1].readLinear(lenR);
       // Ping-pong feeds each side's repeat into the other line; a plain delay feeds it back into
       // its own. The input enters on the left in ping-pong, so the first repeat is right.
-      const double fedL = clipTail(dcs[0].next(tones[0].next(pingpong ? readR : readL)) * fb);
-      const double fedR = clipTail(dcs[1].next(tones[1].next(pingpong ? readL : readR)) * fb);
+      const double fedL = dcs[0].next(clipTail(tones[0].next(pingpong ? readR : readL) * fb));
+      const double fedR = dcs[1].next(clipTail(tones[1].next(pingpong ? readL : readR) * fb));
       if (pingpong) {
         lines[0].write((dryL + dryR) * 0.5 + fedL);
         lines[1].write(fedR);
@@ -166,8 +166,8 @@ struct Device : pd_own::Device<ids::kCount, 4, 4> {
       const double readR = lines[1].readLinear(lenR);
       const double retL = backl[i];
       const double retR = backr[i];
-      const double fedL = clipTail(dcs[0].next(tones[0].next(pingpong ? retR : retL)) * fb);
-      const double fedR = clipTail(dcs[1].next(tones[1].next(pingpong ? retL : retR)) * fb);
+      const double fedL = dcs[0].next(clipTail(tones[0].next(pingpong ? retR : retL) * fb));
+      const double fedR = dcs[1].next(clipTail(tones[1].next(pingpong ? retL : retR) * fb));
       if (pingpong) {
         lines[0].write((dryL + dryR) * 0.5 + fedL);
         lines[1].write(fedR);

@@ -143,6 +143,16 @@ struct Voice {
     ampEnv.gateOn(true);
   }
 
+  /** A slide into `n`: the pitch glides there over Glide, the envelope carries on (see Sig#slide). */
+  void slideTo(double n) {
+    note = n;
+    targetHz = midiToHz(n);
+    if (releasing) {
+      releasing = false;
+      ampEnv.resume();
+    }
+  }
+
   void noteOff() {
     releasing = true;
     ampEnv.gateOff();
@@ -286,7 +296,7 @@ struct Device : Base {
   unsigned claimSerial = 0;
   long long clock = 0;       // bumped per note, so "oldest" has a meaning
   unsigned int seed = 1;
-  struct Event { int kind; double note; double velocity; };
+  struct Event { int kind; double note; double velocity; bool slide; };
   Event events[64];
   int eventCount = 0;
 
@@ -328,7 +338,11 @@ struct Device : Base {
   }
 
   void pd_note_on(float note, float velocity) {
-    if (eventCount < 64) events[eventCount++] = { 1, note, velocity };
+    if (eventCount < 64) events[eventCount++] = { 1, note, velocity, false };
+  }
+
+  void pd_note_slide(float note, float velocity) {
+    if (eventCount < 64) events[eventCount++] = { 1, note, velocity, true };
   }
 
   void pd_note_off(float note) {
@@ -340,7 +354,7 @@ struct Device : Base {
       }
       return;
     }
-    if (eventCount < 64) events[eventCount++] = { 0, note, 0 };
+    if (eventCount < 64) events[eventCount++] = { 0, note, 0, false };
   }
 
   void pd_bend(float semitones) { params.bend = isPlayable(semitones) ? semitones : 0.0; }
@@ -496,7 +510,24 @@ struct Device : Base {
     return &voices[0];
   }
 
-  void startNote(double note, double velocity) {
+  /** The voice a slide carries on: the one that started last, while it is still sounding. */
+  Voice* slideVoice() {
+    Voice* last = nullptr;
+    for (int i = 0; i < voiceCount; ++i) {
+      Voice& v = voices[i];
+      if (v.active() && (!last || v.age > last->age)) last = &v;
+    }
+    return last;
+  }
+
+  void startNote(double note, double velocity, bool slide = false) {
+    Voice* carried = slide ? slideVoice() : nullptr;
+    if (carried) {
+      carried->slideTo(note);
+      carried->holds = 1;
+      carried->age = clock++;
+      return;
+    }
     Voice* voice = allocate(note);
     // Glide slides from whatever this voice was last playing, which is how a monophonic lead
     // with one voice glides between its notes.
@@ -521,6 +552,17 @@ struct Device : Base {
    * WavetableSynth#startNotes, step for step.
    */
   void startNotes(int from, int to) {
+    // A slide carries the voice that sounded last on, whatever the glide mode; the rest of the
+    // set closes up behind it, in order.
+    bool anySlide = false;
+    for (int i = from; i < to; ++i) if (events[i].slide) { anySlide = true; break; }
+    if (anySlide) {
+      for (int i = from; i < to; ++i) if (events[i].slide) startNote(events[i].note, events[i].velocity, true);
+      int kept = from;
+      for (int i = from; i < to; ++i) if (!events[i].slide) events[kept++] = events[i];
+      to = kept;
+      if (to == from) return;
+    }
     if (params.glideMode < 1) {
       for (int i = from; i < to; ++i) startNote(events[i].note, events[i].velocity);
       return;

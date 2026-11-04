@@ -732,8 +732,8 @@ export class WebAudioEngine {
    * start of the block it lands in, which is what keeps a part from walking against the grid by
    * up to a block - so the conversion happens here, once, rather than in every device.
    */
-  noteOn(trackId, note, velocity, atTime) {
-    this._playNote(trackId, note, velocity, atTime);
+  noteOn(trackId, note, velocity, atTime, opts = undefined) {
+    this._playNote(trackId, note, velocity, atTime, opts?.slide === true);
     // Then onward, to every track and effect this one's notes are routed into.
     if (this.midiRoutes.size) this.midiRoutes.noteEdge(trackId, note, velocity, atTime, true);
   }
@@ -750,9 +750,10 @@ export class WebAudioEngine {
    * closes when the last one ends, so a chord does not start releasing at its first note-off.
    * The note-gated lfo() shapes restart on every note.
    */
-  _playNote(trackId, note, velocity, atTime) {
+  _playNote(trackId, note, velocity, atTime, slide = false) {
     const source = this.tracks.get(trackId)?.source;
-    if (source?.node?.port) source.node.port.postMessage({ kind: 'noteOn', note, velocity, time: atTime });
+    // A slide (see pattern-core's Sig#slide) goes to the synth with its note.
+    if (source?.node?.port) source.node.port.postMessage(slide ? { kind: 'noteOn', note, velocity, time: atTime, slide: true } : { kind: 'noteOn', note, velocity, time: atTime });
     this._markSounding(trackId, 0, note, Infinity);
     this._gateOn(trackId, velocity, atTime);
   }
@@ -1276,8 +1277,8 @@ export class WebAudioEngine {
   /** Samples `points` into a table and hands it to the device's slot `index` for `param`. */
   _postShapeTable(filled, param, index, name, data, points) {
     const reader = this.shapeReader;
-    const table = new Float32Array(SHAPE_POINTS);
-    for (let i = 0; i < SHAPE_POINTS; i++) table[i] = reader.sampleShape(points, i / (SHAPE_POINTS - 1));
+    // A curve played against a note (a Kick's Pitch Env) is twice as long: see sampleShapeTable.
+    const table = Float32Array.from(reader.sampleShapeTable(points, SHAPE_POINTS, !!param.follow));
     // By control, then slot: two curve controls on one device each have a slot 1.
     ((filled.shapes ??= {})[param.id] ??= {})[index] = { name, data, points: [...table] };
     const built = filled.built;
@@ -1550,13 +1551,13 @@ export class WebAudioEngine {
   }
 
   setParamLFO(trackId, slot, name, ir) {
-    this._setModulator(trackId, slot, name, ir, (target) => new LfoConnection(this.ctx, target, ir), 'an lfo', 'setParamLFO');
+    this._setModulator(trackId, slot, name, ir, (target) => new LfoConnection(this.ctx, target, ir), 'lfo', 'setParamLFO');
   }
 
   setParamEnv(trackId, slot, name, ir) {
     // `ir.latch` is the bare `vel`: the note's velocity, held, rather than an ADSR.
-    if (ir?.latch) this._setModulator(trackId, slot, name, ir, (target) => new LatchConnection(this.ctx, target, ir), 'velocity', 'setParamEnv');
-    else this._setModulator(trackId, slot, name, ir, (target) => new EnvConnection(this.ctx, target, ir), 'an envelope', 'setParamEnv');
+    if (ir?.latch) this._setModulator(trackId, slot, name, ir, (target) => new LatchConnection(this.ctx, target, ir), 'vel', 'setParamEnv');
+    else this._setModulator(trackId, slot, name, ir, (target) => new EnvConnection(this.ctx, target, ir), 'env', 'setParamEnv');
   }
 
   setParamCC(trackId, slot, name, ir) {
@@ -1568,7 +1569,7 @@ export class WebAudioEngine {
       if (seen != null) conn.feed(seen);
       this.onMidiWanted?.();
       return conn;
-    }, 'a midi control', 'setParamCC');
+    }, 'cc', 'setParamCC');
   }
 
   setParamOSC(trackId, slot, name, ir) {
@@ -1578,7 +1579,7 @@ export class WebAudioEngine {
       const seen = this.feedSeen.get(`osc|${ir.osc}|${ir.index ?? 0}`);
       if (seen != null) conn.feed(seen);
       return conn;
-    }, 'an osc message', 'setParamOSC');
+    }, 'osc', 'setParamOSC');
   }
 
   /** The latest 0..1 of a cc on a device named by a fragment (channel null = any), or undefined. */
@@ -2578,7 +2579,7 @@ export class WebAudioEngine {
       if (found) out.set(found.id, what);
     };
     for (const [key, conn] of this.modulators.get(trackId) ?? []) record(key, conn.kind ?? 'a modulator');
-    for (const [key, rec] of this.exprs.get(trackId) ?? []) if (rec.json != null) record(key, 'a combination of signals');
+    for (const [key, rec] of this.exprs.get(trackId) ?? []) if (rec.json != null) record(key, 'expr');
     return out;
   }
 

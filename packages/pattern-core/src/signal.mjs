@@ -1384,6 +1384,34 @@ export class Sig {
   }
 
   /**
+   * Slides into each note marked 1: `.slide("0 0 1 0")`. A sliding note glides from the note before
+   * it over the synth's Glide time and its envelopes carry on rather than starting again - a 303's
+   * slide - whether or not the two notes overlap. Read per onset, like .clip().
+   */
+  slide(value) {
+    if (!this.stepsForCycle && !this.ctl) {
+      throw new Error('[signal] .slide() needs a step pattern, e.g. n("0 3 5").slide("0 1 0")');
+    }
+    const sig = toSignal(value);
+    const stepsForCycle = crossMerge(this.stepsForCycle, sig, stampField('slide'));
+    return this._keepCtl(this._clone({ noteChannels: { ...this.noteChannels, slide: sig }, stepsForCycle }));
+  }
+
+  /**
+   * Moves each note by whole octaves when it is played: `.octave("0 1 0 -1")`. Read per onset like
+   * .clip(), and added as 12 semitones at the end, so whatever the chain did to the pitch first -
+   * .range(), .sc(), arithmetic - the octave is an octave.
+   */
+  octave(value) {
+    if (!this.stepsForCycle && !this.ctl) {
+      throw new Error('[signal] .octave() needs a step pattern, e.g. n("0 3 5").octave("0 1 0")');
+    }
+    const sig = toSignal(value);
+    const stepsForCycle = crossMerge(this.stepsForCycle, sig, stampField('octave'));
+    return this._keepCtl(this._clone({ noteChannels: { ...this.noteChannels, octave: sig }, stepsForCycle }));
+  }
+
+  /**
    * Legato: every note rings until the next one starts. The gaps between notes close, and a note
    * that ran past the next onset stops there, so what comes out has neither gaps nor overlaps -
    * the way the legato command on a clip works in a DAW. Notes that start together (a chord) all
@@ -2267,6 +2295,12 @@ export class Sig {
    * the same way; the comparisons return 1/0 rather than a pitch, so they stay on _binop as-is.
    */
   _arith(op, xs, fn, linear) {
+    // A NOTE operand on a pattern of degrees - `n("0 2 4").add(note(12))` - is semitones: the
+    // degrees become notes in the key first (the setscale() one, as .sc() reads it), then the
+    // operation happens on those, so .add(note(12)) is an octave whatever the scale.
+    if (this.pitchKind === 'degree' && !this._holdsNotes() && xs.some((x) => x instanceof Sig && x.pitchKind === 'note' && !x.ctl)) {
+      return this.sc()._arith(op, xs, fn, linear);
+    }
     // Several operands, or one that carries configuration or a verb of its own, are LAYERS (see
     // _layers). A bare value or a bare control is the one-operand arithmetic below. .set() has no
     // one-operand arithmetic to speak of - replacing values IS the one-layer edit - so everything
@@ -7246,6 +7280,10 @@ const SAMPLER_CONTROLS = {
 const NOTE_CONTROLS = {
   vel: { key: 'vel', unset: 1 },
   clip: { key: 'clip', unset: 1 },
+  // 1 on a note: it glides from the note before over the synth's Glide, its envelopes carrying on.
+  slide: { key: 'slide', unset: 0 },
+  // Octaves up (or down) the note plays, added as 12 semitones each when it is played.
+  octave: { key: 'octave', unset: 0 },
   nudge: { key: 'nudge', unset: 0 },
   swing: { key: 'swing', unset: 0 },
   swinggrid: { key: 'swinggrid', unset: DEFAULT_SWING_GRID },
@@ -7388,6 +7426,10 @@ function callableSig(fn, sig) {
 }
 /** Duration multiplier as an operand - the top-level form of `.clip()`. */
 export const clip = controlBuilder('clip');
+/** Slides into a note: 1 glides from the note before with the envelopes carrying on - the top-level form of `.slide()`. */
+export const slide = controlBuilder('slide');
+/** Moves a note by whole octaves when it is played - the top-level form of `.octave()`. */
+export const octave = controlBuilder('octave');
 /** Per-event time offset as an operand - the top-level form of `.nudge()`. */
 export const nudge = controlBuilder('nudge');
 /** Swing amount as an operand - the top-level form of `.swing()`'s first argument. */
@@ -9564,8 +9606,8 @@ export function sampleEnvIR(ir, pos, cps = 1) {
 }
 
 /**
- * `env({ attack: 0.03, decay: 0.3, sustain: 0.2, release: 0.15, curve: -4 }).range(300, 6000)` -
- * times in seconds, sustain 0..1. `curve` shapes every segment (SuperCollider convention:
+ * `env({ attack: 0.03, decay: 0.3, sustain: 0.2, release: 0.15, curve: -4, min: 300, max: 6000 })` -
+ * times in seconds, sustain 0..1, and the range it moves over (the same as .range(300, 6000) after it). `curve` shapes every segment (SuperCollider convention:
  * negative = exponential-ish scoop, 0 = linear, positive = bulge); also settable via .curve(c).
  * Every note restarts the attack; `retrigger: false` restarts it only on the first of a run that
  * overlaps.
@@ -9576,7 +9618,9 @@ export function env(opts = {}, followOpts) {
   if (opts == null || typeof opts !== 'object') opts = {};
   const d = ENV_DEFAULTS; // the env() editor draws a missing setting at the same value (envctl.mjs)
   const { attack = d.attack, decay = d.decay, sustain = d.sustain, release = d.release, curve = d.curve, retrigger = ENV_FLAGS.retrigger } = opts;
-  return withEnvIR({ attack, decay, sustain, release, curve, retrigger: retrigger !== false, min: 0, max: 1 });
+  const min = opts.min ?? d.min;
+  const max = opts.max ?? d.max;
+  return withEnvIR({ attack, decay, sustain, release, curve, retrigger: retrigger !== false, min: typeof min === 'number' ? min : toBound(min), max: typeof max === 'number' ? max : toBound(max) });
 }
 
 // ---------------------------------------------------------------------------------------------

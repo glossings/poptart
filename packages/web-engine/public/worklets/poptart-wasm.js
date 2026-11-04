@@ -266,6 +266,12 @@ function defineParam(deviceId, spec, seen) {
   // hit on the same sample as the change is struck with the new value and not part way to it.
   const latch = spec.latch ?? false;
   if (typeof latch !== 'boolean') fail(deviceId, `param "${id}": latch is true or false`);
+  // Whether a drawn curve this control takes is played against the note: a point written `n`
+  // lands on the note each hit is played on (a Kick's Pitch Env). The engine hands such a curve
+  // over as two tables rather than one - see pattern-core's sampleShapeTable.
+  const follow = spec.follow ?? false;
+  if (typeof follow !== 'boolean') fail(deviceId, `param "${id}": follow is true or false`);
+  if (follow && takes !== 'shape') fail(deviceId, `param "${id}": only a control that takes a curve can follow the note`);
 
   if (seen.has(normalizeKey(id))) fail(deviceId, `duplicate param id "${id}"`);
   if (seen.has(normalizeKey(name))) fail(deviceId, `param name "${name}" collides with another param's id or name`);
@@ -297,6 +303,7 @@ function defineParam(deviceId, spec, seen) {
     amp,
     saved,
     latch,
+    follow,
     group: String(spec.group ?? '').trim() || null,
     description: String(spec.description ?? '').trim() || null,
   });
@@ -885,6 +892,30 @@ function formatValue(param, value, extras = null, values = null) {
   // Trailing zeros kept on purpose - stripping them is the same width problem again.
   const text = v.toFixed(decimalsFor(param));
   return param.unit ? `${text} ${param.unit}` : text;
+}
+
+/**
+ * The most characters `formatValue` can ever print for this parameter, across its whole range,
+ * its second reading and every option. A readout reserves this much room up front, so "34 Hz"
+ * becoming "1000 Hz" under an envelope never widens it and never shoves its neighbors.
+ * Digits only ever add as a value moves away from zero, so the two ends of the range are the
+ * widest numbers there are; an open count can pass its knob's reach, so it is given a digit more.
+ */
+function widestText(param, extras = null) {
+  const fixed = (lo, hi, decimals, unit) => {
+    const at = (v) => v.toFixed(decimals).length;
+    return Math.max(at(lo), at(hi)) + (unit ? unit.length + 1 : 0);
+  };
+  if (param.options) {
+    const labels = [...param.options, ...Object.values(extras ?? {}), ...(param.open ? ['empty'] : [])];
+    return Math.max(0, ...labels.filter((s) => typeof s === 'string').map((s) => s.length));
+  }
+  if (param.ui === 'toggle') return 3;
+  const hi = param.open ? param.max * 10 : param.max;
+  let widest = fixed(param.min, hi, decimalsFor(param), param.unit);
+  const alt = param.alt;
+  if (alt) widest = Math.max(widest, fixed(alt.min, alt.max, decimalsFor({ decimals: null, step: null, min: alt.min, max: alt.max }), alt.unit));
+  return widest;
 }
 
 // ---- src/devices/airwindows.mjs ----------------------------------

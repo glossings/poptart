@@ -122,7 +122,7 @@ test('audio times an lfo is a VCA: the lfo drives the input it is aimed at', () 
   const input = rec().inputs.get(1);
   assert.equal(lfo.target, input.offset, "the lfo's target is the constant feeding input 1");
   assert.ok(input.links.some((l) => l.target === rec().node && l.input === 1));
-  assert.equal(engine.drivenParams('lead', 0).get('osc1.phase'), 'a combination of signals');
+  assert.equal(engine.drivenParams('lead', 0).get('osc1.phase'), 'expr');
 });
 
 test('env times lfo: both modulators feed inputs, and the envelope is gated by the notes', () => {

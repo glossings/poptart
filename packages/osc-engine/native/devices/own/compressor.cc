@@ -8,6 +8,7 @@
 
 #include "own/pd-own.h"
 #include "own/dsp/dynamics.h"
+#include "own/dsp/filters.h"
 #include "own/dsp/history.h"
 #include "pd-own-ids.h"
 
@@ -18,6 +19,7 @@ using namespace pd_own;
 
 struct Device : pd_own::Device<ids::kCount, 4> {
   Detector detector;
+  DcBlocker dcs[2];   // the compressed signal's output coupling (see kDynamicsDcHz)
   double lastAttack = -1, lastRelease = -1;
   bool keyed = false;
   // The last block's loudest level and deepest reduction, in decibels, and the rings of both.
@@ -27,6 +29,7 @@ struct Device : pd_own::Device<ids::kCount, 4> {
   void pd_init(double sr) {
     sampleRate = sr;
     detector.init(sr);
+    for (auto& d : dcs) { d.init(sr, kDynamicsDcHz); d.reset(); }
     lastAttack = -1;
     lastRelease = -1;
     level = -120;
@@ -82,12 +85,13 @@ struct Device : pd_own::Device<ids::kCount, 4> {
       deepest = std::fmin(deepest, gr);
       const double g = dbToGain(gr + ctl(ids::makeup, i));
       const double mix = ctl(ids::mix, i);
-      outl[i] = static_cast<float>(l + (l * g - l) * mix);
-      outr[i] = static_cast<float>(r + (r * g - r) * mix);
+      outl[i] = static_cast<float>(l + (dcs[0].next(l * g) - l) * mix);
+      outr[i] = static_cast<float>(r + (dcs[1].next(r * g) - r) * mix);
     }
     // A NaN compares false against the envelope and is then added into it, and from there on
     // every sample's gain is NaN: the detector starts again from silence instead.
     if (!isPlayable(detector.env)) detector.reset();
+    if (frames > 0 && !isPlayable(outl[frames - 1])) for (auto& d : dcs) d.reset();
     reduction = deepest;
     level = loudest;
     levels.push(loudest);

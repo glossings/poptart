@@ -645,7 +645,7 @@
         <div class="mix-center">
           <label class="mix-swap-label" title="swap mode: gating a stem in throws the other deck's same-named stem out (and back out brings it back) - the phase-continuous stem swap. Also flips the crossfader to the hold-through-center curve (both decks full at center, gates decide)">
             <input id="mixSwap" type="checkbox" /> swap</label>
-          <span id="mixMaster" class="master-peak" title="master: the peak of everything this song puts out, all outputs summed, in dB against full scale. Red means the sum went over full scale and would distort as one stereo mix"><span class="master-peak-light"></span><span id="mixMasterDb" class="mix-meter-db">-∞</span></span>
+          <span id="mixMaster" class="master-peak" title="master: the peak of everything this song puts out, all outputs summed, in dB against full scale. Red means the sum went over full scale and would distort as one stereo mix"><span class="master-peak-light"></span><span id="mixMasterDb" class="mix-meter-db">&#8199;&#8199;&#8199;-∞</span></span>
           <div class="xf-scale">
             <input id="crossfader" class="dj-fader" type="range" min="-1" max="1" step="0.01" value="0"
               title="crossfader - constant power (each deck ~-3 dB at center, energy stays level); with swap on it holds both decks full through center instead" />
@@ -723,7 +723,9 @@
       <div class="preset-panel-head">
         <span id="presetTitle">preset</span>
         <div id="presetPickWrap" class="def-pick-wrap hidden">preset
+          <button id="presetPrev" class="small" title="previous preset">‹</button>
           <input id="presetName" class="def-name" type="text" spellcheck="false" title="preset name" />
+          <button id="presetNext" class="small" title="next preset">›</button>
         </div>
         <span id="presetHeld" class="preset-held hidden">pattern held</span>
         <span class="spacer"></span>
@@ -1372,7 +1374,7 @@
           <button id="mixerViewBtn" class="small mixer-view-btn"
             title="color-coded per track, or the summed master alone">by track</button>
           <span class="spacer"></span>
-          <span id="mixerMaster" class="master-peak" title="master: the peak of everything this song puts out, all outputs summed, in dB against full scale. Red means the sum went over full scale and would distort as one stereo mix"><span class="master-peak-light"></span><span id="mixerMasterDb" class="mix-meter-db">-∞</span></span>
+          <span id="mixerMaster" class="master-peak" title="master: the peak of everything this song puts out, all outputs summed, in dB against full scale. Red means the sum went over full scale and would distort as one stereo mix"><span class="master-peak-light"></span><span id="mixerMasterDb" class="mix-meter-db">&#8199;&#8199;&#8199;-∞</span></span>
           <button id="mixerClose" class="small">✕</button>
         </div>
         <div class="mixer-plots">

@@ -109,6 +109,7 @@ test('devices on a real server: the controller surface, the live report and a pr
         ctl.unmap(1);
         ctl.midi.noteOn(0, 60, 127);
         ctl.midi.noteOn(0, 48, 64);
+        ctl.midi.noteSlide(0, 55, 127);
         ctl.midi.noteOff(0, 60, 0);
         ctl.midi.allNotesOff(0);
         const at = [synth.nodeID, headIndex];
@@ -122,6 +123,7 @@ test('devices on a real server: the controller surface, the live report and a pr
         // MIDI's 0..127 arrives as 0..1 and the channel is dropped: a device is one instrument.
         assert.ok(has('/noteOn', 60, 1), `no full-velocity note in ${JSON.stringify(sent)}`);
         assert.ok(has('/noteOn', 48, 64 / 127), `no half-velocity note in ${JSON.stringify(sent)}`);
+        assert.ok(has('/noteOn', 55, 1, 1), `no sliding note in ${JSON.stringify(sent)}`);
         assert.ok(has('/noteOff', 60), `no note off in ${JSON.stringify(sent)}`);
         assert.ok(has('/allNotesOff'), `no all-notes-off in ${JSON.stringify(sent)}`);
         // A set is answered from the controller, the authority on these controls.

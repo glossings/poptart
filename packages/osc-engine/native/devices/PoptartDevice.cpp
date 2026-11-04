@@ -13,7 +13,7 @@
 //
 //   inputs:  [bend (kr), numMain, main0..., numSidechain, sidechain0...]
 //   outputs: numChannels audio channels
-//   unit commands: /open /close /set /map /mapa /unmap /noteOn /noteOff /allNotesOff
+//   unit commands: /open /close /set /map /mapa /unmap /noteOn (note vel [slide]) /noteOff /allNotesOff
 //                  /sample /shape /report /sidechain /noteRoute /running /transport /loopLatency
 //
 // which is what lets sc/poptart.scd treat a native device and a plugin as the same kind of thing
@@ -480,6 +480,8 @@ struct PoptartDevice : public SCUnit {
      */
     void noteOn(float note, float velocity) { queueNote(1, note, velocity); }
     void noteOff(float note) { queueNote(0, note, 0.f); }
+    /** A note marked to slide (PdAny::noteSlide): kind 2, otherwise a note on like any other. */
+    void noteSlide(float note, float velocity) { queueNote(2, note, velocity); }
 
     /**
      * A note at its place in the coming block (World's mSampleOffset, which a command performed
@@ -499,6 +501,7 @@ struct PoptartDevice : public SCUnit {
         if (mNoteCount >= mNoteRoom && !growNotes()) {
             // No real-time memory left to hold it in: it plays at the start of the block.
             if (kind == 1) mDevice->noteOn(note, velocity);
+            else if (kind == 2) mDevice->noteSlide(note, velocity);
             else mDevice->noteOff(note);
             return;
         }
@@ -705,6 +708,7 @@ private:
                     const NoteEvent& e = mNotes[nextNote++];
                     const int offset = e.offset > at ? e.offset - at : 0;
                     if (e.kind == 1) device->noteOnAt(e.note, e.velocity, offset);
+                    else if (e.kind == 2) device->noteSlideAt(e.note, e.velocity, offset);
                     else device->noteOffAt(e.note, offset);
                 }
             } else {
@@ -712,6 +716,7 @@ private:
                 while (nextNote < mNoteCount && mNotes[nextNote].offset <= at) {
                     const NoteEvent& e = mNotes[nextNote++];
                     if (e.kind == 1) device->noteOn(e.note, e.velocity);
+                    else if (e.kind == 2) device->noteSlide(e.note, e.velocity);
                     else device->noteOff(e.note);
                 }
                 if (nextNote < mNoteCount && mNotes[nextNote].offset < at + n) n = mNotes[nextNote].offset - at;
@@ -773,6 +778,7 @@ private:
         for (; nextNote < mNoteCount; ++nextNote) {
             const NoteEvent& e = mNotes[nextNote];
             if (e.kind == 1) device->noteOn(e.note, e.velocity);
+            else if (e.kind == 2) device->noteSlide(e.note, e.velocity);
             else device->noteOff(e.note);
         }
         mNoteCount = 0;
@@ -1353,7 +1359,11 @@ void cmdNoteOn(Unit* unit, sc_msg_iter* args) {
     PoptartDevice* self = (PoptartDevice*)unit;
     const float note = args->getf(-1.f);
     const float velocity = args->getf(1.f);
-    if (note >= 0.f) self->noteOn(note, velocity);
+    // A third number, nonzero, marks the note to slide (pattern-core's Sig#slide).
+    const bool slide = args->getf(0.f) != 0.f;
+    if (note < 0.f) return;
+    if (slide) self->noteSlide(note, velocity);
+    else self->noteOn(note, velocity);
 }
 
 void cmdNoteOff(Unit* unit, sc_msg_iter* args) {

@@ -73,6 +73,7 @@ import { KICK } from '../../src/devices/kick.mjs';
 import { HAT } from '../../src/devices/hat.mjs';
 import { DRUM } from '../../src/devices/drum.mjs';
 import { PLUCK } from '../../src/devices/pluck.mjs';
+import { ACID } from '../../src/devices/acid.mjs';
 import { LPG } from '../../src/devices/lpg.mjs';
 import { FILTERBANK } from '../../src/devices/filterbank.mjs';
 import { RESONATOR } from '../../src/devices/resonator.mjs';
@@ -167,6 +168,7 @@ const OWN = [
   { descriptor: HAT, source: 'hat.cc' },
   { descriptor: DRUM, source: 'drum.cc' },
   { descriptor: PLUCK, source: 'pluck.cc' },
+  { descriptor: ACID, source: 'acid.cc' },
   { descriptor: LPG, source: 'lpg.cc' },
   { descriptor: FILTERBANK, source: 'filterbank.cc' },
   { descriptor: RESONATOR, source: 'resonator.cc' },
@@ -493,6 +495,8 @@ export function catalogJson(devices, internal = INTERNAL_IDS) {
       // slot past the control's own options (see the sample path in osc-engine's index.js, which
       // fills those slots the way the browser's engine does).
       ...(p.takes ? { takes: p.takes } : {}),
+      // A drawn curve played against the note, which the engine sends as two tables (descriptor.mjs).
+      ...(p.follow ? { follow: true } : {}),
       // A control with no top (descriptor.mjs's open controls), and the range an open count had
       // before it was one, which an old 0..1 position on it still means.
       ...(p.open ? { open: true } : {}),

@@ -19,6 +19,9 @@ using namespace pd_own;
 
 constexpr int kProbes = 64;
 
+/** The corner of the output coupling, in Hz. */
+constexpr double kOverdriveDcHz = 8.0;
+
 /** The makeup for a drive (linear) and a dynamics setting (see overdriveMakeup in the browser's). */
 inline double makeupFor(double drive, double dyn, double probe = kAutoGainLevel) {
   const double lift = std::fmin(dyn > 0 ? std::pow(std::fmax(1e-4, probe) / 0.25, -0.7 * dyn) : 1.0, 16.0);
@@ -38,6 +41,7 @@ struct DriveChannel {
   Biquad lp;
   OnePole tone;
   Detector detector;
+  DcBlocker dc;
 
   void init(double sr) {
     hp = Biquad();
@@ -45,9 +49,11 @@ struct DriveChannel {
     tone.init(sr);
     detector.init(sr);
     detector.setTimes(5, 80);
+    dc.init(sr, kOverdriveDcHz);
+    dc.reset();
   }
 
-  void reset() { hp.reset(); lp.reset(); tone.reset(); detector.reset(); }
+  void reset() { hp.reset(); lp.reset(); tone.reset(); detector.reset(); dc.reset(); }
 };
 
 struct Device : pd_own::Device<ids::kCount> {
@@ -99,7 +105,9 @@ struct Device : pd_own::Device<ids::kCount> {
         const double lift = dyn > 0 ? std::pow(std::fmax(1e-4, env) / 0.25, -0.7 * dyn) : 1.0;
         const double drive = dbToGain(ctl(ids::drive, i));
         const double driven = std::tanh(region * std::fmin(lift, 16.0) * drive) * (makeupFrom + makeupStep * i);
-        const double wet = c.tone.next(driven) + rest;
+        // The curve makes DC of a lopsided region, which the output coupling takes off. On the
+        // whole wet signal, so the region is not turned in phase against what passes clean.
+        const double wet = c.dc.next(c.tone.next(driven) + rest);
         const double mix = ctl(ids::mix, i);
         out[i] = static_cast<float>(x + (wet - x) * mix);
       }

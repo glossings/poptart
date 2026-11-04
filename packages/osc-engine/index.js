@@ -2345,9 +2345,11 @@ class OscEngine {
   // degree), and the track's own instrument gets them that way: poptart's devices play them
   // exactly, and sclang rounds for a plugin (see noteKey in poptart.scd). The MIDI fan-out - other
   // tracks' routes, MIDI outputs - is MIDI, so it takes the nearest key. On and off are sent the
-  // same way, so a device matches an off to its on exactly.
-  noteOn(trackId, note, velocity, targetTime) {
-    this._note(trackId, 0, note, velocity, targetTime, true);
+  // same way, so a device matches an off to its on exactly. `opts.slide` marks a note to slide
+  // (pattern-core's Sig#slide): poptart's own devices glide into it with their envelopes carried
+  // on; a plugin and the MIDI fan-out play it as a plain note.
+  noteOn(trackId, note, velocity, targetTime, opts = undefined) {
+    this._note(trackId, 0, note, velocity, targetTime, true, opts?.slide === true);
     this._fanoutMidi(trackId, Math.round(note), velocity, targetTime, true);
   }
   noteOff(trackId, note, targetTime) {
@@ -2358,13 +2360,14 @@ class OscEngine {
    * One note edge on a track's slot: straight to scsynth when the direct path has what it needs,
    * through sclang's handlers otherwise (0 = the instrument, see poptartNoteOn; >0 = noteOnSlot).
    */
-  _note(trackId, slot, note, velocity, targetTime, isOn) {
+  _note(trackId, slot, note, velocity, targetTime, isOn, slide = false) {
     if (this._directOn && (isOn
-      ? this._direct.noteOn(trackId, slot, note, velocity, targetTime)
+      ? this._direct.noteOn(trackId, slot, note, velocity, targetTime, slide)
       : this._direct.noteOff(trackId, slot, note, targetTime))) return;
     const latency = this._latency(targetTime);
     if (slot === 0) {
-      if (isOn) this._send('/poptart/noteOn', [trackId, note, velocity, latency]);
+      // A slide is a fifth number, 1, which poptartNoteOn hands on to a device of ours.
+      if (isOn) this._send('/poptart/noteOn', slide ? [trackId, note, velocity, latency, 1] : [trackId, note, velocity, latency]);
       else this._send('/poptart/noteOff', [trackId, note, latency]);
     } else if (isOn) {
       this._send('/poptart/noteOnSlot', [trackId, slot, note, velocity, latency]);
@@ -2692,8 +2695,8 @@ class OscEngine {
 
   /** The curve as the device reads it: SHAPE_POINTS samples of it, evenly spaced, sent outright. */
   _sendDeviceShape(trackId, slotIndex, device, control, index, points, held, label) {
-    const table = new Array(SHAPE_POINTS);
-    for (let i = 0; i < SHAPE_POINTS; i++) table[i] = this.shapeReader.sampleShape(points, i / (SHAPE_POINTS - 1));
+    // A curve played against a note (a Kick's Pitch Env) is twice as long: see sampleShapeTable.
+    const table = this.shapeReader.sampleShapeTable(points, SHAPE_POINTS, !!control.follow);
     // Kept for the window's picture of the curve, which reads the same table the device does.
     (held.tables ??= {})[index] = { name: label, data: label, points: table };
     const paramIndex = device.params.findIndex((p) => p.id === control.id);

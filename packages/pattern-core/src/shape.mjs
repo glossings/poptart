@@ -7,6 +7,8 @@
 //   y - level, 0..1 (rescaled by .range() like any LFO)
 //   c - optional curvature of the segment LEAVING this point (SC convention: 0 = linear,
 //       negative = fast-then-slow, positive = slow-then-fast); omitted when 0.
+//   y may be `n` instead of a level: the point sits on the note being played. Only a curve a
+//   device plays against a note reads it that way (a Kick's Pitch Env); anywhere else it is 0.
 
 // Is this string DRAWN DATA (a breakpoint list) rather than something to read? The editor folds
 // an lfo()'s first argument out of the way because a hand-drawn shape is a wall of numbers nobody
@@ -16,7 +18,7 @@
 export function looksLikeShapeData(str) {
   const tokens = String(str).trim().split(/\s+/);
   if (!tokens[0]) return false;
-  return tokens.every((t) => /^-?\d*\.?\d+,-?\d*\.?\d+(,-?\d*\.?\d+)?$/.test(t));
+  return tokens.every((t) => /^-?\d*\.?\d+,(-?\d*\.?\d+|n)(,-?\d*\.?\d+)?$/.test(t));
 }
 
 export function parseShapePoints(str) {
@@ -28,9 +30,12 @@ export function parseShapePoints(str) {
     .trim()
     .split(/\s+/)
     .map((tok) => {
-      const [x, y, c = 0] = tok.split(',').map(Number);
+      const parts = tok.split(',');
+      // `n` for the level: the point is on the played note (see sampleShapeTable).
+      const follow = parts[1] === 'n';
+      const [x, y, c = 0] = parts.map((v, i) => (i === 1 && follow ? 0 : Number(v)));
       if (![x, y, c].every(Number.isFinite)) throw new Error(`[shape] bad breakpoint "${tok}" (want "x,y" or "x,y,c")`);
-      return { x: clamp01(x), y: clamp01(y), c };
+      return follow ? { x: clamp01(x), y: 0, c, follow: true } : { x: clamp01(x), y: clamp01(y), c };
     });
   if (points.length < 2) throw new Error('[shape] a shape needs at least 2 breakpoints');
   for (let i = 1; i < points.length; i++) {
@@ -44,7 +49,33 @@ export function parseShapePoints(str) {
 
 export function serializeShapePoints(points) {
   const fmt = (v) => String(Math.round(v * 1000) / 1000);
-  return points.map((p) => (p.c ? `${fmt(p.x)},${fmt(p.y)},${fmt(p.c)}` : `${fmt(p.x)},${fmt(p.y)}`)).join(' ');
+  return points.map((p) => {
+    const y = p.follow ? 'n' : fmt(p.y);
+    return p.c ? `${fmt(p.x)},${y},${fmt(p.c)}` : `${fmt(p.x)},${y}`;
+  }).join(' ');
+}
+
+/** Whether any of a curve's points sits on the played note rather than at a level of its own. */
+export function shapeFollows(points) {
+  return points.some((p) => p.follow);
+}
+
+/**
+ * A curve as the table a device reads, `n` evenly spaced samples of it. For a control whose curve
+ * plays against a note (`follow`), twice that: the curve with every point that is on the note at
+ * 0, then how much of the note's level each sample takes. A segment is affine in its ends, so the
+ * level at any sample is `first[i] + second[i] * note`, whatever note is played - which is how a
+ * point on the note lands exactly on it while the points around it stay where they were drawn.
+ */
+export function sampleShapeTable(points, n, follow = false) {
+  const out = new Array(follow ? 2 * n : n);
+  const base = follow ? points.map((p) => (p.follow ? { ...p, y: 0 } : p)) : points;
+  for (let i = 0; i < n; i++) out[i] = sampleShape(base, i / (n - 1));
+  if (follow) {
+    const share = points.map((p) => ({ ...p, y: p.follow ? 1 : 0 }));
+    for (let i = 0; i < n; i++) out[n + i] = sampleShape(share, i / (n - 1));
+  }
+  return out;
 }
 
 /** One segment's interpolation - SuperCollider's numeric-curve formula. */

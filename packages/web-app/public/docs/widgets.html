@@ -105,6 +105,7 @@ pad: note("&lt;c3 eb3 g3 bb2&gt;").synth("Wavetable")
           <tr><td><code>sliders("0.2 0.8", min, max)</code></td><td>a bar per step, each its own value</td></tr>
           <tr><td><code>matrix({ bd: "x...", sd: "..x." })</code></td><td>a grid with a row per name; a cell plays its row's name</td></tr>
           <tr><td><code>shiftreg("x . x x . . x .")</code></td><td>a row of cells read as a shift register: a value from 0 to 1 on every step (see <a href="#mutate">below</a>)</td></tr>
+          <tr><td><code>acid(16)</code></td><td>bars with accents, long gates, slides and octaves (see <a href="#acid">below</a>)</td></tr>
           <tr><td><code>steps(8)</code> · <code>sliders(8)</code> · <code>matrix({ bd: 8, sd: 8 })</code></td><td>that many empty steps, bars halfway up, or empty rows, to click into</td></tr>
         </table>
         <p>
@@ -193,6 +194,30 @@ bass: n(shiftreg("x . x x . . x . x x . . . x . x", 0.05).range(0, 7).floor())
         <p>
           <code>.bits(n)</code> reads any pattern with steps the same way, <code>n</code> steps wide (8 when it
           is left out): a step is a 1 when an event starts in it that is not a rest, 0 or false.
+        </p>
+        <h2 id="acid">Acid lines</h2>
+        <p>
+          <code>acid()</code> is a row of bars like <code>sliders()</code>, a value from 0 to 1 per
+          step, with a row each under it for accents, long gates and octaves. It plays the values, so
+          scale it with <code>.range()</code> after it like any other signal. The rest rides on each
+          note and goes through whatever the chain does to the values: an accented note plays at full
+          velocity, the rest at 0.7; an octave mark plays the note 12 semitones up or down. A note
+          sounds for half its step; a long gate holds it into the next, which ties it on when the next
+          value is the same and slides into it (see <code>.slide()</code>) when it is not.
+        </p>
+        <pre data-run><code>setbpm(126)
+kick: s("bd*4").postgain(0.45)
+acid: acid(16).range("F1", "F3").round().synth("Acid").preset("squelch")</code></pre>
+        <p>
+          <code>acid(16)</code> throws a line of that many steps and writes it into the call. The
+          <strong>new</strong> button throws another, by three sliders that move the line as they are
+          dragged: <strong>density</strong>, the chance a step plays; <strong>gravity</strong>, the
+          chance a step is 0; and <strong>notes</strong>, how many different values it uses. A drag
+          along the <strong>loop</strong> ruler picks the steps that play. Drag a bar to set it, and click it to turn the step off or
+          on. In the code, a step is its value with marks after it: <code>'</code> an octave up
+          (<code>''</code> two), <code>,</code> one down, <code>!</code> an accent and <code>~</code> a
+          long gate; <code>.</code> rests, and two <code>|</code> mark the loop.
+          <code>mutate</code> throws steps again every cycle, from the values the line already has.
         </p>
         <h2 id="triggers">A button as a rhythm</h2>
         <p>

@@ -13,8 +13,10 @@
 /** Calls that are drawn as a control and return a signal of what the control is set to. */
 // The curve a knob() or slider() turns on, shared with the editor that draws it.
 export { CURVES, positionOnCurve, valueOnCurve } from './curves.mjs';
+// acid()'s row and the randomize that throws it, which the editor runs with the same code.
+export { ACID_KNOBS, ACID_DEFAULT_STEPS, acidLoop, setAcidLoop, acidKnob, throwAcidRow, newAcidSeed, parseAcidRow, acidNotes, mutateAcidRow, setAcidStep, acidToken } from './acid.mjs';
 
-export const INPUT_WIDGETS = Object.freeze(['slider', 'knob', 'toggle', 'button', 'xy', 'steps', 'sliders', 'matrix', 'shiftreg']);
+export const INPUT_WIDGETS = Object.freeze(['slider', 'knob', 'toggle', 'button', 'xy', 'steps', 'sliders', 'matrix', 'shiftreg', 'acid']);
 
 /** Calls that draw what a pattern is doing - its sound, or its events and values. */
 export const DISPLAY_WIDGETS = Object.freeze(['scope', 'spectrum', 'waveform', 'imager', 'meter', 'punchcard', 'plot', 'chroma']);
@@ -23,13 +25,13 @@ export const DISPLAY_WIDGETS = Object.freeze(['scope', 'spectrum', 'waveform', '
 export const AUDIO_DISPLAYS = Object.freeze(['scope', 'spectrum', 'waveform', 'imager', 'meter']);
 
 /** Input widgets whose first argument is the control's DATA, written out as plain text rather than mini notation. */
-export const RAW_TEXT_WIDGETS = Object.freeze(['steps', 'sliders', 'matrix', 'shiftreg']);
+export const RAW_TEXT_WIDGETS = Object.freeze(['steps', 'sliders', 'matrix', 'shiftreg', 'acid']);
 
 /**
  * The input widgets the editor draws IN PLACE of their call: the text folds away under the control
  * (it stays in the buffer, and is still what is evaluated), and right-clicking the control opens it.
  */
-export const FOLDED_WIDGETS = Object.freeze(['steps', 'sliders', 'matrix', 'shiftreg']);
+export const FOLDED_WIDGETS = Object.freeze(['steps', 'sliders', 'matrix', 'shiftreg', 'acid']);
 
 /**
  * Every input widget's size, in CSS pixels: what it is drawn at unless its call says `{ size }`,
@@ -49,6 +51,7 @@ export const INPUT_SIZES = Object.freeze({
   sliders: Object.freeze({ size: 64, min: 24, max: 240 }),
   matrix: Object.freeze({ size: 16, min: 8, max: 48 }),
   shiftreg: Object.freeze({ size: 16, min: 8, max: 48 }),
+  acid: Object.freeze({ size: 64, min: 24, max: 240 }),
 });
 
 /**
@@ -85,6 +88,8 @@ export const WIDGET_BOXES = Object.freeze({
   steps: Object.freeze({ width: INPUT_SIZES.steps, height: INPUT_SIZES.steps, lone: 'both' }),
   matrix: Object.freeze({ width: INPUT_SIZES.matrix, height: INPUT_SIZES.matrix, lone: 'both' }),
   shiftreg: Object.freeze({ width: INPUT_SIZES.shiftreg, height: INPUT_SIZES.shiftreg, lone: 'both' }),
+  // A bar's width and height, as sliders()'s.
+  acid: Object.freeze({ width: side(16, 6, 48), height: INPUT_SIZES.acid, lone: 'height' }),
   sliders: Object.freeze({ width: side(16, 6, 48), height: INPUT_SIZES.sliders, lone: 'height' }),
   meter: Object.freeze({ width: side(48, 6, 480), height: side(12, 6, 240), lone: null }),
   scope: Object.freeze({ width: DISPLAY_WIDTH, height: displayHeight('scope'), lone: 'height' }),
