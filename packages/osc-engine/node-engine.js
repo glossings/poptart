@@ -48,7 +48,7 @@ async function startNodeEngine(self, sampleRate, bufferSize, { MIX_BAND_FREQS, c
     console.warn(`[poptart] killed leftover engine processes from an earlier run: ${reaped.join(', ')}`);
   }
   const ext = ensurePoptartExtension({ extensionsDir: loc.extensionsDir });
-  if (ext.skipped) console.warn(`[poptart] keylock pitch shifter not installed (${ext.skipped}); decks fall back to the SOLA keylock`); // eslint-disable-line no-console
+  if (ext.skipped) console.warn(`[poptart] keylock UGen not installed (${ext.skipped}); decks fall back to the SOLA keylock`); // eslint-disable-line no-console
   const dev = ensureDeviceExtension({ extensionsDir: loc.extensionsDir });
   if (dev.skipped) console.warn(`[poptart] poptart's own devices not installed (${dev.skipped}); synth("Plaits") and the other built-in devices will not sound`); // eslint-disable-line no-console
 

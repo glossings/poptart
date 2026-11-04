@@ -23,16 +23,31 @@ import { buildRouting, loopLatencies } from './routing.mjs';
 export const SUPPORTED_CHANNELS = Object.freeze(['gain', 'postgain', 'pan', 'dry', 'mon', 'width', 'bassmono', 'bend', 'bendrange', 'out', 'grainsize', 'grainrate', 'grainpan', 'grainpos',
   'trim', 'eqlo', 'eqmid', 'eqhi', 'djf', 'djres', 'fader', 'deck', 'cue', 'mdeck']);
 
+/** The resonance's default, the desktop's djResDefault: damping 0.5, Q 2. */
+export const DJ_RES_DEFAULT = 0.25;
 /**
  * The DJ stage's controls at rest (see the stage in Track): unity trim, bands, fader and deck
- * gain, the filter at its center detent with no resonance, no cue send. A track sounds exactly as
- * it would without the stage until a mix session touches one - the desktop's DJ_NEUTRAL.
+ * gain, the filter at its center detent (off) with its resonance at the default, no cue send. A
+ * track sounds exactly as it would without the stage until a mix session touches one - the
+ * desktop's DJ_NEUTRAL.
  */
-export const DJ_NEUTRAL = Object.freeze({ trim: 1, eqlo: 1, eqmid: 1, eqhi: 1, djf: 0, djres: 0, fader: 1, deck: 1, cue: 0 });
+export const DJ_NEUTRAL = Object.freeze({ trim: 1, eqlo: 1, eqmid: 1, eqhi: 1, djf: 0, djres: DJ_RES_DEFAULT, fader: 1, deck: 1, cue: 0 });
 
-/** The isolator's crossovers, the desktop's djIsolator: Linkwitz-Riley at 250 Hz and 2.5 kHz. */
-const DJ_XO_LOW = 250;
-const DJ_XO_HIGH = 2500;
+/** The isolator's crossovers, the desktop's djIsolator: Linkwitz-Riley at 280 Hz and 4600 Hz. */
+const DJ_XO_LOW = 280;
+const DJ_XO_HIGH = 4600;
+/**
+ * An EQ band's knob law, the desktop's djIsolator `gain`: a knob position 0..2 (1 = center) to the
+ * band's gain. On a 0..255 knob (position = value * 127.5): linear amplitude from a kill at 0 to
+ * unity at 124, the bottom 10 steps on a squared curve; exactly unity from 124 to 130; linear from
+ * unity at 130 to +6 dB (10^0.3) at 255. Controller, on-screen knobs and code all set the
+ * position, so all get this law.
+ */
+export function djEqGain(v) {
+  const p = Math.min(2, Math.max(0, v)) * 127.5;
+  const b = Math.min(p, 124);
+  return Math.min(b / 124, (b * b) / 1240) + Math.max(p - 130, 0) * ((10 ** 0.3 - 1) / 125);
+}
 /**
  * A second-order Butterworth's Q, as a Web Audio lowpass or highpass takes it - in decibels,
  * not as the linear 1/sqrt(2) a cookbook writes, so -3.01 dB. Two in a row are the fourth-order
@@ -48,6 +63,46 @@ const DJ_GLIDE_SEC = 0.08;
 const DJ_FILTER_GLIDE_SEC = 0.15;
 /** How long the EQ and the filter take to cross in and out of the path at exact neutral. */
 const DJ_XFADE_SEC = 0.05;
+/** The filter knob's flat center: |djf| up to this is no filter at all. */
+const DJ_FILTER_CENTER = 0.016;
+
+/**
+ * The one-knob filter's settings, the desktop's djFilterCoefs: for the knob `v` (-1..1), the
+ * resonance `res` (0..1) and the sample rate, the lowpass and highpass cutoffs in Hz, their
+ * dampings (1/Q) and the output gain. The two are 2-pole filters in series.
+ *
+ * Past the flat center, x runs 0..1 to the end: the lowpass at 100 + 25000(1 - x)^3 Hz (100 Hz
+ * full left), the highpass at 20 + 8200x^3 Hz (8.2 kHz full right), each parked open (25.1 kHz,
+ * 20 Hz) while the other side is in use. Those are an analog design's cutoffs, taken through the
+ * bilinear transform without prewarping (tan(pi f / sr) = pi fc / sr), so the parked lowpass
+ * lands below Nyquist at any sample rate.
+ *
+ * Resonance: damping 0.5 + 0.5(1 - res/0.25)^2 up to res 0.25 (Q 1 at res 0, Q 2 at 0.25, the
+ * default DJ_RES_DEFAULT), then 0.5 - 0.46(res - 0.25)/0.75 (Q 25 at res 1). The highpass's
+ * damping is held at 2 clip((250 - hpHz)/180, 0, 1)^3 (Q 0.5 at 70 Hz and below, no floor from
+ * 250 Hz up), so a low highpass never booms - the one resting at 20 Hz on the lowpass side included. The lowpass
+ * resting open on the highpass side is a Butterworth (damping sqrt 2), with no peak. Below
+ * damping 0.5 the output is scaled by 2 x the smaller damping, which holds the resonant peak near
+ * +6 dB.
+ */
+export function djFilterCoefs(v, res, sampleRate) {
+  const lpX = Math.min(1, Math.max(0, (-v - DJ_FILTER_CENTER) / (1 - DJ_FILTER_CENTER)));
+  const hpX = Math.min(1, Math.max(0, (v - DJ_FILTER_CENTER) / (1 - DJ_FILTER_CENTER)));
+  const lpHz = 100 + 25000 * (1 - lpX) ** 3;
+  const hpHz = 20 + 8200 * hpX ** 3;
+  const damping = 0.5 + 0.5 * (1 - Math.min(res * 4, 1)) ** 2 - Math.max(res - 0.25, 0) * (0.46 / 0.75);
+  const hold = 2 * Math.min(1, Math.max(0, (250 - hpHz) / 180)) ** 3;
+  const lpDamping = v > 0 ? Math.SQRT2 : damping;
+  const hpDamping = Math.max(damping, hold);
+  const warp = Math.PI / sampleRate;
+  return {
+    lpHz: Math.atan(lpHz * warp) / warp,
+    hpHz: Math.atan(hpHz * warp) / warp,
+    lpDamping,
+    hpDamping,
+    gain: Math.min(1, Math.min(lpDamping, hpDamping) * 2),
+  };
+}
 
 /**
  * The strip's constant-power pan, the desktop's law: a sine/cosine pair referenced to the CENTER,
@@ -949,13 +1004,13 @@ export class Track {
   }
 
   /**
-   * The three-band isolator, the desktop's djIsolator: a Linkwitz-Riley tree (250 Hz, then
-   * 2.5 kHz on the upper half, with the low band through the 2.5 kHz pair's all-pass so the three
+   * The three-band isolator, the desktop's djIsolator: a Linkwitz-Riley tree (280 Hz, then
+   * 4600 Hz on the upper half, with the low band through the 4600 Hz pair's all-pass so the three
    * carry the same phase and sum flat). 0 on a band is a true kill and nothing boosts its
    * neighbors. Flat but phase-shifted, so at exact neutral it is crossfaded out of the path.
    */
   _djEq(atTime, now, g) {
-    const { eqlo, eqmid, eqhi } = this.dj;
+    const [eqlo, eqmid, eqhi] = [this.dj.eqlo, this.dj.eqmid, this.dj.eqhi].map(djEqGain);
     const on = (Math.abs(eqlo - 1) + Math.abs(eqmid - 1) + Math.abs(eqhi - 1)) > 0.001;
     if (!this.djEq && !on) return;
     if (!this.djEq) this.djEq = this._djEqBuild();
@@ -1007,25 +1062,23 @@ export class Track {
   }
 
   /**
-   * The one-knob filter: `djf` 0 is untouched, negative sweeps a low-pass down from 18 kHz toward
-   * 20 Hz, positive a high-pass up from 20 Hz toward 18 kHz, both exponential. `djres` is its
-   * resonance, a control of its own (neutral 0, a plain two-pole). Crossfaded out at the center.
+   * The one-knob filter: `djf` 0 is untouched, negative sweeps a low-pass down, positive a
+   * high-pass up (see djFilterCoefs). `djres` is its resonance, a control of its own (neutral 0,
+   * a plain two-pole). Crossfaded out at the center.
    */
   _djFilter(atTime, now, g) {
     const v = this.dj.djf;
-    const on = Math.abs(v) > 0.005;
+    const on = Math.abs(v) > DJ_FILTER_CENTER;
     if (!this.djFilter && !on) return;
     if (!this.djFilter) this.djFilter = this._djFilterBuild();
     const f = this.djFilter;
-    const lpHz = Math.min(18000, Math.max(20, 18000 * 900 ** Math.min(0, v)));
-    const hpHz = Math.min(18000, Math.max(20, 20 * 900 ** Math.max(0, v)));
-    // rq is 1/Q: 1 is a flat two-pole, 0.38 about +8 dB at the corner. In decibels for Web Audio.
-    const rq = 1 - 0.62 * this.dj.djres;
-    const qDb = Math.max(0, -20 * Math.log10(rq));
+    const { lpHz, hpHz, lpDamping, hpDamping, gain } = djFilterCoefs(v, this.dj.djres, this.ctx.sampleRate);
+    // Web Audio takes a lowpass's or highpass's Q in decibels: 20 log10(1 / damping).
     glideFrequency(f.lp.frequency, lpHz, atTime, now, g ?? DJ_FILTER_GLIDE_SEC);
     glideFrequency(f.hp.frequency, hpHz, atTime, now, g ?? DJ_FILTER_GLIDE_SEC);
-    rampParam(f.lp.Q, qDb, atTime, now, g ?? DJ_GLIDE_SEC);
-    rampParam(f.hp.Q, qDb, atTime, now, g ?? DJ_GLIDE_SEC);
+    rampParam(f.lp.Q, -20 * Math.log10(lpDamping), atTime, now, g ?? DJ_GLIDE_SEC);
+    rampParam(f.hp.Q, -20 * Math.log10(hpDamping), atTime, now, g ?? DJ_GLIDE_SEC);
+    rampParam(f.peak.gain, gain, atTime, now, g ?? DJ_GLIDE_SEC);
     rampParam(f.wet.gain, on ? 1 : 0, atTime, now, DJ_XFADE_SEC);
     rampParam(f.dry.gain, on ? 0 : 1, atTime, now, DJ_XFADE_SEC);
   }
@@ -1033,13 +1086,17 @@ export class Track {
   _djFilterBuild() {
     const ctx = this.ctx;
     const lp = ctx.createBiquadFilter();
+    const open = djFilterCoefs(0, 0, ctx.sampleRate);
     lp.type = 'lowpass';
-    lp.frequency.value = 18000;
+    lp.frequency.value = open.lpHz;
     lp.Q.value = 0;
     const hp = ctx.createBiquadFilter();
     hp.type = 'highpass';
-    hp.frequency.value = 20;
+    hp.frequency.value = open.hpHz;
     hp.Q.value = 0;
+    // The resonance's level compensation (djFilterCoefs' gain).
+    const peak = ctx.createGain();
+    peak.gain.value = 1;
     const wet = ctx.createGain();
     wet.gain.value = 0;
     const dry = ctx.createGain();
@@ -1047,11 +1104,12 @@ export class Track {
     try { this.djMid.disconnect(this.djLive); } catch { /* not connected */ }
     this.djMid.connect(lp);
     lp.connect(hp);
-    hp.connect(wet);
+    hp.connect(peak);
+    peak.connect(wet);
     wet.connect(this.djLive);
     this.djMid.connect(dry);
     dry.connect(this.djLive);
-    return { lp, hp, wet, dry, nodes: [lp, hp, wet, dry] };
+    return { lp, hp, peak, wet, dry, nodes: [lp, hp, peak, wet, dry] };
   }
 
   /**

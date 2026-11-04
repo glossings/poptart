@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import { FakeAudioContext, fakeWorkletFor } from './fake-context.mjs';
 import { catalog } from './src/catalog.mjs';
 import { WebAudioEngine } from './src/engine/web-audio-engine.mjs';
-import { DJ_NEUTRAL, SUPPORTED_CHANNELS } from './src/engine/track.mjs';
+import { DJ_NEUTRAL, DJ_RES_DEFAULT, SUPPORTED_CHANNELS, djEqGain, djFilterCoefs } from './src/engine/track.mjs';
 import { bandShare } from './src/engine/desk-audio.mjs';
 
 function makeEngine({ channels = 2 } = {}) {
@@ -58,7 +58,7 @@ test('moving a band builds the isolator and crossfades it in; back at neutral it
   const biquads = eq.nodes.filter((n) => n.kind === 'biquad');
   assert.equal(biquads.length, 12);
   assert.ok(biquads.every((b) => Math.abs(b.Q.value - 20 * Math.log10(Math.SQRT1_2)) < 1e-9), 'Butterworth Q, in decibels');
-  assert.deepEqual([...new Set(biquads.map((b) => b.frequency.value))].sort((a, b) => a - b), [250, 2500]);
+  assert.deepEqual([...new Set(biquads.map((b) => b.frequency.value))].sort((a, b) => a - b), [280, 4600]);
   assert.ok(eq.lo.gain.landedOn(0), 'the low band is killed');
   assert.ok(eq.wet.gain.landedOn(1) && eq.dry.gain.landedOn(0), 'the isolator is in the path');
   assert.ok(track.djTrim.reaches(eq.lo) && eq.wet.reaches(track.djLive));
@@ -66,26 +66,127 @@ test('moving a band builds the isolator and crossfades it in; back at neutral it
   assert.ok(eq.wet.gain.rampedTo(0) && eq.dry.gain.rampedTo(1), 'neutral again: out of the path');
 });
 
-test('the filter sweeps a low-pass one way and a high-pass the other, with its resonance apart', () => {
+test('an EQ band follows the knob law: a squared bottom, linear amplitude, a flat center, +6 dB at the top', () => {
+  const at = (step) => djEqGain(step / 127.5); // a 0..255 knob step
+  assert.equal(at(0), 0);
+  assert.ok(Math.abs(at(5) - 25 / 1240) < 1e-12, 'squared over the bottom 10 steps');
+  assert.ok(Math.abs(at(10) - 10 / 124) < 1e-12, 'meets the line at 10');
+  assert.ok(Math.abs(at(62) - 0.5) < 1e-12, 'linear amplitude from there');
+  for (const step of [124, 125, 127.5, 129, 130]) assert.equal(at(step), 1, `exactly unity at ${step}`);
+  assert.ok(at(123) < 1 && at(131) > 1, 'the flat zone ends at 124 and 130');
+  assert.ok(Math.abs(at(255) - 10 ** 0.3) < 1e-12, '+6 dB at the top');
+  assert.equal(djEqGain(3), 10 ** 0.3, 'held to the knob');
+  assert.equal(djEqGain(-1), 0);
+});
+
+test('a band moved inside the flat zone keeps the isolator out of the path; past it, in', () => {
   const { engine } = makeEngine();
   const track = engine.createTrack('t');
-  engine.setParam('t', -1, 'djf', 0, 0);
-  engine.setParam('t', -1, 'djf', -1, 0);
-  const f = track.djFilter;
-  assert.ok(f);
+  engine.setParam('t', -1, 'eqlo', 1, 0);
+  engine.setParam('t', -1, 'eqlo', 125 / 127.5, 0);
+  engine.setParam('t', -1, 'eqhi', 129 / 127.5, 0);
+  assert.equal(track.djEq, null, 'flat: nothing built');
+  engine.setParam('t', -1, 'eqlo', 0.5, 0);
+  assert.ok(track.djEq.lo.gain.landedOn(djEqGain(0.5)), 'the band lands on the law\'s gain, not the knob');
+  assert.ok(track.djEq.hi.gain.landedOn(1));
+});
+
+// A Web Audio lowpass's or highpass's gain at `hz`, from the specification's biquad (its Q in
+// decibels) - the same cookbook filter the desktop's BLowPass/BHiPass are.
+function biquadGain(type, hz, fc, qDb, sr = 48000) {
+  const w0 = (2 * Math.PI * fc) / sr;
+  const alpha = Math.sin(w0) / (2 * 10 ** (qDb / 20));
+  const cw = Math.cos(w0);
+  const b = type === 'lowpass' ? [(1 - cw) / 2, 1 - cw, (1 - cw) / 2] : [(1 + cw) / 2, -(1 + cw), (1 + cw) / 2];
+  const a = [1 + alpha, -2 * cw, 1 - alpha];
+  const w = (2 * Math.PI * hz) / sr;
+  const resp = (c) => [c[0] + c[1] * Math.cos(w) + c[2] * Math.cos(2 * w), -(c[1] * Math.sin(w) + c[2] * Math.sin(2 * w))];
+  const [nr, ni] = resp(b);
+  const [dr, di] = resp(a);
+  return Math.hypot(nr, ni) / Math.hypot(dr, di);
+}
+const db = (g) => 20 * Math.log10(g);
+// The cutoff an analog fc lands on through the bilinear transform without prewarping, at 48 kHz.
+const unwarped = (fc, sr = 48000) => (sr / Math.PI) * Math.atan((Math.PI * fc) / sr);
+
+test('the filter knob: 100 Hz full left, 8.2 kHz full right, cubic between, a flat center', () => {
+  const { engine } = makeEngine();
+  const track = engine.createTrack('t');
   const lastValue = (param) => param.calls.filter((c) => c.kind !== 'hold' && c.kind !== 'cancel').at(-1)?.value;
-  assert.equal(Math.round(lastValue(f.lp.frequency)), 20, 'all the way down closes to 20 Hz');
-  assert.equal(Math.round(lastValue(f.hp.frequency)), 20, 'the high-pass stays open');
-  engine.setParam('t', -1, 'djf', 1, 0);
-  assert.equal(Math.round(lastValue(f.lp.frequency)), 18000);
-  assert.equal(Math.round(lastValue(f.hp.frequency)), 18000);
-  // Resonance: rq 1 - 0.62 x res, as a Web Audio Q in decibels. None is a plain two-pole (0 dB).
-  assert.equal(lastValue(f.lp.Q), 0);
-  engine.setParam('t', -1, 'djres', 1, 0);
-  assert.ok(Math.abs(lastValue(f.lp.Q) - -20 * Math.log10(0.38)) < 1e-9);
-  assert.ok(f.wet.gain.landedOn(1));
+  const at = (djf) => {
+    engine.setParam('t', -1, 'djf', djf, 0);
+    const f = track.djFilter;
+    return { lp: lastValue(f.lp.frequency), hp: lastValue(f.hp.frequency), q: lastValue(f.lp.Q), hq: lastValue(f.hp.Q), f };
+  };
+  engine.setParam('t', -1, 'djres', 0, 0); // a plain two-pole, so the corners read cleanly
   engine.setParam('t', -1, 'djf', 0, 0);
-  assert.ok(f.wet.gain.rampedTo(0) && f.dry.gain.rampedTo(1), 'the center detent takes it out');
+  engine.setParam('t', -1, 'djf', 0.015, 0);
+  assert.equal(track.djFilter, null, 'inside the flat center nothing is built');
+  const near = (a, b, tol, what) => assert.ok(Math.abs(a - b) <= tol, `${what}: ${a} vs ${b}`);
+  // [knob, lowpass Hz, highpass Hz], from 100 + 25000(1 - x)^3 and 20 + 8200x^3,
+  // x = (|djf| - 0.016) / 0.984.
+  for (const [djf, lp, hp] of [[-1, 100, 20], [-0.5, 100 + 25000 * (1 - 0.484 / 0.984) ** 3, 20],
+    [-0.017, 100 + 25000 * (1 - 0.001 / 0.984) ** 3, 20], [0.5, 25100, 20 + 8200 * (0.484 / 0.984) ** 3], [1, 25100, 8220]]) {
+    const got = at(djf);
+    near(got.lp, unwarped(lp), 1e-6, `lowpass at ${djf}`);
+    near(got.hp, unwarped(hp), 1e-6, `highpass at ${djf}`);
+  }
+  // Measured off the filter itself: full left, the 100 Hz lowpass passes 50 Hz and takes 1 kHz
+  // down by its 12 dB an octave; full right, the highpass (~7.5 kHz here) the same the other way.
+  let got = at(-1);
+  near(db(biquadGain('lowpass', 100, got.lp, got.q)), 0, 0.05, 'a res-0 lowpass is unity at its corner');
+  near(db(biquadGain('lowpass', 1000, got.lp, got.q)), -40, 0.5, 'full left, 1 kHz is ~3.3 octaves past the corner');
+  got = at(1);
+  near(got.hp, 7540, 5, 'full right, the highpass lands at ~7.5 kHz at 48 kHz');
+  near(db(biquadGain('highpass', 1000, got.hp, got.hq)), -36.5, 0.5, 'full right, 1 kHz is ~2.9 octaves below the corner');
+  near(got.hq, 0, 1e-5, 'resonance 0 is a plain two-pole, Q 1 (0 dB)');
+  engine.setParam('t', -1, 'djf', 0, 0);
+  assert.ok(track.djFilter.wet.gain.rampedTo(0) && track.djFilter.dry.gain.rampedTo(1), 'the center takes it out');
+});
+
+test('the resonance is its own control, and its peak is held near +6 dB', () => {
+  const { engine } = makeEngine();
+  const track = engine.createTrack('t');
+  const lastValue = (param) => param.calls.filter((c) => c.kind !== 'hold' && c.kind !== 'cancel').at(-1)?.value;
+  assert.equal(track.dj.djres, DJ_RES_DEFAULT, 'an untouched resonance is the default');
+  engine.setParam('t', -1, 'djf', 0, 0);
+  engine.setParam('t', -1, 'djf', -0.5, 0);
+  const f = track.djFilter;
+  assert.ok(Math.abs(lastValue(f.lp.Q) - db(2)) < 1e-6, `the default is res 0.25, Q 2 (${lastValue(f.lp.Q)} dB)`);
+  engine.setParam('t', -1, 'djres', 0, 0);
+  assert.ok(Math.abs(lastValue(f.lp.Q)) < 1e-5, `none is a plain two-pole (Q ${lastValue(f.lp.Q)} dB)`);
+  assert.equal(lastValue(f.peak.gain), 1, 'and needs no compensation');
+  // [res, damping]: 0.5 + 0.5(1 - res/0.25)^2 up to 0.25, then 0.5 - 0.46(res - 0.25)/0.75.
+  for (const [res, damping] of [[0, 1], [0.125, 0.5 + 0.5 * 0.25], [0.25, 0.5],
+    [0.5, 0.5 - (0.46 * 0.25) / 0.75], [1, 0.04]]) {
+    engine.setParam('t', -1, 'djres', res, 0);
+    assert.ok(Math.abs(lastValue(f.lp.Q) - db(1 / damping)) < 1e-3, `res ${res}: Q ${lastValue(f.lp.Q)} dB`);
+    assert.ok(Math.abs(lastValue(f.hp.Q) - db(0.5)) < 1e-9, 'the highpass resting at 20 Hz stays at Q 0.5');
+  }
+  // At full resonance (Q 25): the corner alone would be +29 dB; with the compensation, +6.
+  const lp = lastValue(f.lp.frequency);
+  const peak = db(biquadGain('lowpass', lp, lp, lastValue(f.lp.Q)) * lastValue(f.peak.gain));
+  assert.ok(Math.abs(peak - 6.02) < 0.05, `the resonant peak is held at +6 dB (${peak})`);
+  // A low highpass with the resonance up holds a damping of 2 (Q 0.5): no boom.
+  const fc = 20 + 8200 * 0.1346 ** 3; // ~40 Hz
+  engine.setParam('t', -1, 'djf', 0.016 + 0.984 * 0.1346, 0);
+  assert.ok(Math.abs(lastValue(f.hp.frequency) - fc) < 0.1);
+  assert.ok(Math.abs(lastValue(f.hp.Q) - db(0.5)) < 1e-9, `a 40 Hz highpass is held at Q 0.5 (${lastValue(f.hp.Q)} dB)`);
+  assert.ok(Math.abs(lastValue(f.lp.Q) - db(Math.SQRT1_2)) < 1e-9, 'the lowpass resting open is a Butterworth');
+  const top = lastValue(f.lp.frequency);
+  assert.ok(db(biquadGain('lowpass', top, top, lastValue(f.lp.Q))) < -2.9, 'with no peak at the top');
+  assert.ok(db(biquadGain('highpass', fc, fc, lastValue(f.hp.Q))) < -5.9);
+  // ...and lets go by 250 Hz.
+  engine.setParam('t', -1, 'djf', 0.016 + 0.984 * ((250 - 20) / 8200) ** (1 / 3) + 0.01, 0);
+  assert.ok(Math.abs(lastValue(f.hp.Q) - db(1 / 0.04)) < 1e-3, 'past 250 Hz the resonance is its own');
+  assert.ok(f.wet.gain.landedOn(1));
+});
+
+test('the filter settings, at the other common sample rate', () => {
+  const c = djFilterCoefs(-1, 0, 44100);
+  assert.ok(Math.abs(c.lpHz - unwarped(100, 44100)) < 1e-9);
+  assert.ok(Math.abs(djFilterCoefs(0.5, 0, 44100).lpHz - unwarped(25100, 44100)) < 1e-9);
+  assert.ok(djFilterCoefs(0.5, 0, 44100).lpHz < 22050, 'the parked lowpass is below Nyquist');
 });
 
 test('the fader gates the direct path and the sends; the deck gain only the direct path', () => {

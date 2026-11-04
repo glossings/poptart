@@ -100,10 +100,28 @@ test('an authored slice set plays its marks for the file it names', () => {
   assert.ok(near(src.started.offset, 2) && near(src.started.duration, 1));
 });
 
-test('a stretch plays through the warp voice: one worklet, a pointer over the window, at the rate', () => {
+test('a stretch plays through the clean voice by default: one worklet, the window, the pitch at the speed', () => {
   const { engine } = rig();
   const before = engine.ctx.created.length;
-  const info = engine.playSample('t1', 'kit', { stretch: 2, begin: 0, end: 0.25 }, 0, 10);
+  const info = engine.playSample('t1', 'kit', { stretch: 2, speed: -1.5, begin: 0, end: 0.25, loop: 0 }, 0, 10);
+  assert.equal(info.stretchMode, 'clean');
+  const made = engine.ctx.created.slice(before);
+  assert.equal(made.filter((n) => n.kind === 'bufferSource').length, 0);
+  const voices = made.filter((n) => n.processorName === 'poptart-grains');
+  assert.equal(voices.length, 1);
+  const o = voices[0].options.processorOptions;
+  assert.equal(o.mode, 'clean');
+  assert.equal(o.speed, -1.5, 'signed: the pitch and the direction');
+  assert.equal(o.fileRate, 4000);
+  assert.deepEqual([o.begin, o.end01, o.loop], [0, 0.25, false]);
+  assert.ok(Math.abs(o.durSec - info.durSec) < 1e-9 && Math.abs(info.durSec - (1 * 2) / 1.5) < 1e-9, 'the window takes the event\'s own time');
+});
+
+test('a stretch plays through the warp voice under stretchmode grain: one worklet, a pointer over the window, at the rate', () => {
+  const { engine } = rig();
+  const before = engine.ctx.created.length;
+  const info = engine.playSample('t1', 'kit', { stretch: 2, stretchMode: 1, begin: 0, end: 0.25 }, 0, 10);
+  assert.equal(info.stretchMode, 'grain');
   assert.equal(info.stretch, 2);
   const made = engine.ctx.created.slice(before);
   assert.equal(made.filter((n) => n.kind === 'bufferSource').length, 0, 'no node per grain');

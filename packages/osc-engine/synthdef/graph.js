@@ -357,7 +357,7 @@ class NoOutUGen extends UGen {
 const UNARY = {
   neg: 0, not: 1, abs: 5, ceil: 8, floor: 9, frac: 10, sign: 11, squared: 12, cubed: 13, sqrt: 14,
   exp: 15, reciprocal: 16, midicps: 17, cpsmidi: 18, midiratio: 19, ratiomidi: 20, dbamp: 21,
-  ampdb: 22, log: 25, log2: 26, log10: 27, sin: 28, cos: 29, tan: 30, tanh: 36,
+  ampdb: 22, log: 25, log2: 26, log10: 27, sin: 28, cos: 29, tan: 30, atan: 33, tanh: 36,
 };
 const BINARY = {
   '+': 0, '-': 1, '*': 2, div: 3, '/': 4, mod: 5, '==': 6, '!=': 7, '<': 8, '>': 9, '<=': 10,
@@ -649,6 +649,7 @@ function foldUnary(op, a) {
     case 'floor': return Math.floor(a);
     case 'sign': return a > 0 ? 1 : a < 0 ? -1 : 0;
     case 'squared': return a * a;
+    case 'cubed': return a * a * a;
     case 'sqrt': return Math.sqrt(a);
     case 'exp': return Math.exp(a);
     case 'reciprocal': return 1 / a;
@@ -656,6 +657,7 @@ function foldUnary(op, a) {
     case 'log': return Math.log(a);
     case 'sin': return Math.sin(a);
     case 'cos': return Math.cos(a);
+    case 'atan': return Math.atan(a);
     default: throw new Error(`no numeric folding for '${op}'`);
   }
 }
@@ -702,11 +704,13 @@ const neg = (a) => unop('neg', a);
 const abs = (a) => unop('abs', a);
 const sign = (a) => unop('sign', a);
 const squared = (a) => unop('squared', a);
+const cubed = (a) => unop('cubed', a);
 const sqrt = (a) => unop('sqrt', a);
 const exp = (a) => unop('exp', a);
 const log = (a) => unop('log', a);
 const sin = (a) => unop('sin', a);
 const cos = (a) => unop('cos', a);
+const atan = (a) => unop('atan', a);
 const reciprocal = (a) => unop('reciprocal', a);
 const midiratio = (a) => unop('midiratio', a);
 const floor = (a) => unop('floor', a);
@@ -1042,6 +1046,6 @@ module.exports = {
   UnaryOpUGen, BinaryOpUGen, MulAdd, Sum3, Sum4, Control, TrigControl, AudioControl,
   SynthDef, Ref, scgf, rateOf, isNum, isUGen, building: () => building,
   add, sub, mul, div, mod, min, max, pow, round, absdif, gt, ge, lt, le, eq, ne,
-  neg, abs, sign, squared, sqrt, exp, log, sin, cos, reciprocal, midiratio, floor, ceil,
+  neg, abs, sign, squared, cubed, sqrt, exp, log, sin, cos, atan, reciprocal, midiratio, floor, ceil,
   binop, unop, sum, dup,
 };

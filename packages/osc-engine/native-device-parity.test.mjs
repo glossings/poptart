@@ -71,6 +71,7 @@ import { SpringProcessor } from '../web-engine/src/devices/spring.mjs';
 import { parseScaleName } from '../pattern-core/src/notes.mjs';
 import { IR_NAMES, bufferFromChannels, synthesizeImpulse } from '../web-engine/src/devices/builtins.mjs';
 import { Biquad, BIQUAD_TYPES } from '../web-engine/src/dsp/biquad.mjs';
+import { KeylockPlayer, KeylockVoice } from '../web-engine/src/dsp/keylock.mjs';
 import { SPECTRUM_BAND_FREQS } from '../web-engine/src/engine/analysis.mjs';
 import { readReport } from './native-devices.js';
 
@@ -2153,4 +2154,184 @@ test('EQ reports its output spectrum in the browser\'s bands', { skip: compiler 
   for (let i = (frames - 4096) * 2; i < out.length; i++) peak = Math.max(peak, Math.abs(out[i]));
   const expected = 20 * Math.log10(0.3 * peak * 0.42 * 0.5);
   assert.ok(Math.abs(loudest.db - expected) < 1, `the tone read ${loudest.db} dB against ${expected}`);
+});
+
+// ---- the decks' keylock, which is not a device ------------------------------------------------
+//
+// The keylock is a song reader rather than an effect - it reads the song itself, at the deck's
+// rate - so it has its own harness: own/keylock-harness.cc, around own/dsp/keylock.h, against
+// web-engine/src/dsp/keylock.mjs. The same song and the same script of blocks: rates held and
+// ramped, a run backwards, starts and seeks (one landing inside another's crossfade, so three
+// positions sound at once), blocks of odd lengths - and the song again far over the ceiling.
+
+/** A song-like signal: a bass line, a chord, hits every 250 ms and a stereo difference. */
+function keylockSong(frames, channels, seed) {
+  const next = rng(seed);
+  const song = new Float32Array(frames * channels);
+  for (let i = 0; i < frames; i++) {
+    const t = i / SAMPLE_RATE;
+    const bass = 0.3 * Math.sin(2 * Math.PI * (55 + 27.5 * Math.floor(t * 2) % 55) * t);
+    const chord = 0.1 * (Math.sin(2 * Math.PI * 440 * t) + Math.sin(2 * Math.PI * 554.37 * t) + Math.sin(2 * Math.PI * 3520 * t));
+    const k = i % (SAMPLE_RATE / 4);
+    const hit = k < 1500 ? (next() * 2 - 1) * Math.exp(-k / 250) * 0.5 : 0;
+    song[i * channels] = Math.fround(bass + chord + hit);
+    if (channels > 1) song[i * channels + 1] = Math.fround(bass + 0.8 * chord - hit * 0.7);
+  }
+  return song;
+}
+
+/** The blocks: [frames, rate, op (0 none, 1 start, 2 seek), pos]. */
+function keylockScript() {
+  const sr = SAMPLE_RATE;
+  const blocks = [];
+  for (let b = 0; b < 1400; b++) {
+    const n = b % 7 === 3 ? 37 : 64;
+    const rate = b < 300 ? 0.94 : b < 700 ? 0.94 + 0.14 * (b - 300) / 400 : b < 900 ? 1 : b < 1100 ? -0.97 : 1.06;
+    let op = 0;
+    let pos = 0;
+    if (b === 0) { op = 1; pos = sr * 0.5; }
+    if (b === 250) { op = 2; pos = sr * 2.25 + 0.37; }
+    if (b === 252) { op = 2; pos = sr * 3.1; }
+    if (b === 600) { op = 1; pos = sr * 1.7; }
+    if (b === 1000) { op = 2; pos = sr * 4.2; }
+    blocks.push([n, rate, op, pos]);
+  }
+  return blocks;
+}
+
+async function compileKeylockHarness() {
+  fs.mkdirSync(WORK, { recursive: true });
+  const binary = path.join(WORK, exeName('keylock-harness'));
+  const src = path.join(NATIVE_DIR, 'own', 'keylock-harness.cc');
+  const header = path.join(NATIVE_DIR, 'own', 'dsp', 'keylock.h');
+  if (fs.existsSync(binary) && fs.statSync(binary).mtimeMs > Math.max(fs.statSync(src).mtimeMs, fs.statSync(header).mtimeMs)) return binary;
+  const target = targetFlags().filter((f) => f !== '-fPIC');
+  const link = process.platform === 'win32' ? linkFlags({ out: binary }).filter((f) => !['-shared', '-Wl,/noimplib'].includes(f)) : ['-o', binary];
+  await execFileAsync(cxx(), [...DSP_FLAGS, ...target, '-I', NATIVE_DIR, src, ...link]);
+  return binary;
+}
+
+test('the keylock plays a song the same on both engines', { skip: compiler ? false : 'no clang++' }, async () => {
+  const binary = await compileKeylockHarness();
+  const frames = SAMPLE_RATE * 6;
+  const fade = Math.round(0.005 * SAMPLE_RATE);
+  const blocks = keylockScript();
+  const script = path.join(WORK, 'keylock-script.txt');
+  fs.writeFileSync(script, `${blocks.map((b) => b.join(' ')).join('\n')}\n`);
+  const total = blocks.reduce((a, b) => a + b[0], 0);
+  // The song at the output's rate, and a 44.1 kHz song on a 48 kHz output (read interpolated).
+  // Last, the song three times as loud, which the ceiling holds at -0.1 dBFS on both.
+  for (const [channels, brs, loud] of [[2, 1, 1], [1, 1, 1], [2, 44100 / 48000, 1], [2, 1, 3]]) {
+    const song = keylockSong(frames, channels, 5 + channels);
+    if (loud !== 1) for (let i = 0; i < song.length; i++) song[i] = Math.fround(song[i] * loud);
+    const planes = Array.from({ length: channels }, (_, c) => Float32Array.from({ length: frames }, (_, i) => song[i * channels + c]));
+    const run = spawnSync(binary, [String(SAMPLE_RATE), String(channels), String(fade), String(frames), String(brs), script], { input: Buffer.from(song.buffer), maxBuffer: 1 << 28 });
+    assert.equal(run.status, 0, `the keylock harness failed - ${run.stderr?.toString()}`);
+    const mine = new Float32Array(total * channels);
+    for (let i = 0; i < mine.length; i++) mine[i] = run.stdout.readFloatLE(i * 4);
+    const player = new KeylockPlayer(SAMPLE_RATE, channels, fade);
+    player.setSource(planes, frames, 1, brs);
+    const theirs = new Float32Array(total * channels);
+    let at = 0;
+    for (const [n, rate, op, pos] of blocks) {
+      if (op === 1) player.start(pos);
+      else if (op === 2) player.seek(pos);
+      const out = Array.from({ length: channels }, () => new Float64Array(n));
+      player.process(out, n, rate);
+      for (let s = 0; s < n; s++) for (let c = 0; c < channels; c++) theirs[(at + s) * channels + c] = out[c][s];
+      at += n;
+    }
+    let worst = 0;
+    let worstAt = -1;
+    let energy = 0;
+    for (let i = 0; i < mine.length; i++) {
+      assert.ok(Number.isFinite(mine[i]), `the compiled keylock put out ${mine[i]} at ${i}`);
+      const d = Math.abs(mine[i] - theirs[i]);
+      if (d > worst) { worst = d; worstAt = i; }
+      energy += theirs[i] * theirs[i];
+    }
+    assert.ok(Math.sqrt(energy / theirs.length) > 0.05, 'the keylock put out next to nothing');
+    let peak = 0;
+    for (let i = 0; i < mine.length; i++) peak = Math.max(peak, Math.abs(mine[i]));
+    assert.ok(peak <= Math.fround(0.989), `the compiled keylock peaked at ${peak}, over the ceiling`);
+    if (loud !== 1) assert.ok(peak > 0.98, `the compiled keylock peaked at only ${peak}: the loud song was not loud`);
+    assert.ok(worst < 1e-4, `${channels} channel(s) at a buffer rate scale of ${brs}, ${loud}x as loud: the two engines disagree by `
+      + `${worst.toExponential(2)} at sample ${worstAt} - compare web-engine/src/dsp/keylock.mjs with native/devices/own/dsp/keylock.h`);
+  }
+});
+
+// ---- the sampler's stretch, the keylock's stretcher over a window --------------------------------
+//
+// own/keylock-voice-harness.cc around own/dsp/keylock.h's KeylockVoice, against keylock.mjs's: each
+// run starts a voice and plays it in blocks of odd lengths, the pitch moving under it as a bend
+// would - a one-shot forwards and one backwards, tight window loops wrapping and bouncing (10 and
+// 30 ms, so corners fall mid-block and inside each other's crossfades), and a loop round the whole
+// file entered near its end.
+
+async function compileKeylockVoiceHarness() {
+  fs.mkdirSync(WORK, { recursive: true });
+  const binary = path.join(WORK, exeName('keylock-voice-harness'));
+  const src = path.join(NATIVE_DIR, 'own', 'keylock-voice-harness.cc');
+  const header = path.join(NATIVE_DIR, 'own', 'dsp', 'keylock.h');
+  if (fs.existsSync(binary) && fs.statSync(binary).mtimeMs > Math.max(fs.statSync(src).mtimeMs, fs.statSync(header).mtimeMs)) return binary;
+  const target = targetFlags().filter((f) => f !== '-fPIC');
+  const link = process.platform === 'win32' ? linkFlags({ out: binary }).filter((f) => !['-shared', '-Wl,/noimplib'].includes(f)) : ['-o', binary];
+  await execFileAsync(cxx(), [...DSP_FLAGS, ...target, '-I', NATIVE_DIR, src, ...link]);
+  return binary;
+}
+
+test('the sampler stretch plays a window the same on both engines', { skip: compiler ? false : 'no clang++' }, async () => {
+  const binary = await compileKeylockVoiceHarness();
+  const sr = SAMPLE_RATE;
+  const frames = sr * 3;
+  // [pos, rate, loop, lo, hi, pingpong], each run 300 blocks.
+  const runs = [
+    [sr * 0.5, 0.6, 0, 0, 0, 0],
+    [sr * 2.4, -1.3, 0, 0, 0, 0],
+    [sr * 1.0, 0.5, 1, sr * 1.0, sr * 1.01, 0],
+    [sr * 1.53, -0.8, 1, sr * 1.5, sr * 1.53, 1],
+    [sr * 2.9, 1.7, 1, 0, frames, 0],
+  ];
+  const blocks = [];
+  for (const run of runs) {
+    for (let b = 0; b < 300; b++) {
+      const n = b % 5 === 2 ? 37 : 64;
+      const pitch = b < 100 ? 1 : 1 + 0.25 * Math.sin(b / 30);
+      blocks.push(b === 0 ? [n, pitch, 1, ...run] : [n, pitch, 0, 0, 0, 0, 0, 0, 0]);
+    }
+  }
+  const script = path.join(WORK, 'keylock-voice-script.txt');
+  fs.writeFileSync(script, `${blocks.map((b) => b.join(' ')).join('\n')}\n`);
+  const total = blocks.reduce((a, b) => a + b[0], 0);
+  for (const [channels, brs] of [[2, 1], [1, 1], [2, 44100 / 48000]]) {
+    const file = keylockSong(frames, channels, 9 + channels);
+    const planes = Array.from({ length: channels }, (_, c) => Float32Array.from({ length: frames }, (_, i) => file[i * channels + c]));
+    const run = spawnSync(binary, [String(sr), String(channels), String(frames), String(brs), script], { input: Buffer.from(file.buffer), maxBuffer: 1 << 28 });
+    assert.equal(run.status, 0, `the voice harness failed - ${run.stderr?.toString()}`);
+    const mine = new Float32Array(total * channels);
+    for (let i = 0; i < mine.length; i++) mine[i] = run.stdout.readFloatLE(i * 4);
+    const voice = new KeylockVoice(sr, channels);
+    voice.setSource(planes, frames, 1, brs);
+    const theirs = new Float32Array(total * channels);
+    let at = 0;
+    for (const [n, pitch, start, pos, rate, loop, lo, hi, pingpong] of blocks) {
+      if (start) voice.start({ pos, rate, loop: !!loop, lo, hi, pingpong: !!pingpong });
+      const out = Array.from({ length: channels }, () => new Float64Array(n));
+      voice.process(out, n, pitch);
+      for (let s = 0; s < n; s++) for (let c = 0; c < channels; c++) theirs[(at + s) * channels + c] = out[c][s];
+      at += n;
+    }
+    let worst = 0;
+    let worstAt = -1;
+    let energy = 0;
+    for (let i = 0; i < mine.length; i++) {
+      assert.ok(Number.isFinite(mine[i]), `the compiled voice put out ${mine[i]} at ${i}`);
+      const d = Math.abs(mine[i] - theirs[i]);
+      if (d > worst) { worst = d; worstAt = i; }
+      energy += theirs[i] * theirs[i];
+    }
+    assert.ok(Math.sqrt(energy / theirs.length) > 0.05, 'the voice put out next to nothing');
+    assert.ok(worst < 1e-4, `${channels} channel(s) at a buffer rate scale of ${brs}: the two engines disagree by `
+      + `${worst.toExponential(2)} at sample ${worstAt} - compare KeylockVoice in web-engine/src/dsp/keylock.mjs and native/devices/own/dsp/keylock.h`);
+  }
 });

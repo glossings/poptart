@@ -54,7 +54,7 @@ function run(dir, specs) {
 var srv = Server(\\poptartRouteProbe, NetAddr("127.0.0.1", 57998));
 var server = srv, routeNowhere = 1000000, silentBus = (index: 7), unityGainBus = (index: 3);
 var nodeOwns = { |id, what| };
-var routeApply, routeFree, slotNode, ensureFxNode, routeKrNode, channelTarget, channelDefault;
+var routeApply, routeFree, slotNode, ensureFxNode, routeKrNode, channelTarget, channelDefault, djResDefault;
 var sendInput, repointSends, stripPost = { |track| (index: 77) };
 var djNode = { |track| track[\\synth] }, bassMonoNode = { |track| track[\\synth] };
 var chanIn, cueOffset, buildFxDef, buildXoverDef, trackDef, track, sent = List.new, specs, ids;
@@ -73,6 +73,7 @@ ${lift('slotNode')}
 ${lift('ensureFxNode')}
 ${lift('routeKrNode')}
 ${lift('channelTarget')}
+${fs.readFileSync(SCD, 'utf8').match(/^djResDefault = \{.*\};$/m)[0]}
 ${lift('channelDefault')}
 trackDef = (fx: buildFxDef.(), xover: buildXoverDef.());
 track = (synth: Synth.basicNew(\\poptart_track_shared, srv, 5000), head: Synth.basicNew(\\poptart_head, srv, 4999),

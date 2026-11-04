@@ -1,6 +1,6 @@
 // How poptart's scsynth extensions are compiled and linked on each platform scsynth runs on.
 //
-// Shared by the device build (native.mjs), the keylock build (osc-engine/native/rubberband/
+// Shared by the device build (native.mjs), the keylock build (osc-engine/native/keylock/
 // build.mjs) and the device parity test, which has to compile its harness the way the shipped
 // extension is compiled or it tests something nobody runs.
 //

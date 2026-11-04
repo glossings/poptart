@@ -9,7 +9,7 @@
 //   writeDefsDir(dir, defs)       .scsyndef files + defs.json (each def's meta)
 //   writeConfigDir(config)        the same for one engine configuration
 //
-// options: {numOutputBusChannels, cueOffset, nativeDevices, spectrum, pitchShift} - see
+// options: {numOutputBusChannels, cueOffset, nativeDevices, spectrum, keylock} - see
 // defs.js resolveOptions for the defaults.
 
 const D = require('./defs.js');
@@ -29,7 +29,7 @@ function mixDefsFor(freqs, options = {}) {
 /**
  * The defs for one configuration, written out: <outDir>/<name>.scsyndef per def and
  * <outDir>/defs.json. config: {outDir, numOutputBusChannels, cueOffset, mixFreqs, only} as
- * the engine has it, plus {nativeDevices, spectrum, pitchShift} for the extensions sclang
+ * the engine has it, plus {nativeDevices, spectrum, keylock} for the extensions sclang
  * would have found installed. Returns the defs.json object.
  */
 function writeConfigDir(config) {

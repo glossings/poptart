@@ -7,8 +7,8 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const {
-  syncRate, syncOctave, effectiveRate, bendStep, snapToGrid, alignToGrid, gridPhase, servoTrim,
-  NUDGE_PCT, BEND_SENS, BEND_MAX, BEND_ATTACK_SEC, RATE_MIN, RATE_MAX, BEATS_PER_CYCLE,
+  syncRate, syncOctave, effectiveRate, bendStep, bendForSpeed, snapToGrid, alignToGrid, gridPhase, servoTrim,
+  NUDGE_PCT, JOG_TICKS_PER_REV, PLATTER_REV_PER_SEC, BEND_MAX, RATE_MIN, RATE_MAX, BEATS_PER_CYCLE,
 } = require('./song-sync');
 
 test('syncRate: master over native, clamped, null without a native tempo', () => {
@@ -41,38 +41,57 @@ test('effectiveRate: ±4% while a nudge is held, exactly the base otherwise', ()
   assert.equal(effectiveRate(1.1, 1), 1.1 * (1 + NUDGE_PCT));
 });
 
-test('effectiveRate: the platter bend rides on top of the base and the nudge', () => {
+test('effectiveRate: the platter bend is added to the tempo ratio, inside the tempo range', () => {
   assert.equal(effectiveRate(1, 0, 0.02), 1.02);
   assert.equal(effectiveRate(1, 1, 0.02), 1 + NUDGE_PCT + 0.02);
-  assert.equal(effectiveRate(2, 0, -0.01), 2 * 0.99);
+  assert.equal(effectiveRate(2, 0, -0.01), 1.99, 'added, not multiplied: 2 - 0.01, not 2 x 0.99');
   assert.equal(effectiveRate(1, 0, NaN), 1, 'a bend that is not a number is no bend');
+  // The deck's tempo range holds the bend: ±6% at 1.04 leaves room for +2%.
+  assert.ok(Math.abs(effectiveRate(1.04, 0, 0.1, 6) - 1.06) < 1e-12);
+  assert.ok(Math.abs(effectiveRate(1.04, 0, -0.42, 6) - 0.94) < 1e-12);
+  // A base already outside the range (synced far from its own tempo) is never moved by it.
+  assert.equal(effectiveRate(1.2, 0, 0.05, 6), 1.2);
+  assert.ok(Math.abs(effectiveRate(1.2, 0, -0.05, 6) - 1.15) < 1e-12);
+  assert.equal(effectiveRate(1.2, 0, 0, 6), 1.2, 'no bend, no clamp');
 });
 
-test('bendStep: turning bends with the tick rate, resting eases home, never past the cap', () => {
-  // A steady light turn (2 ticks per 30ms flush) settles toward its proportional target.
-  let b = 0;
-  for (let i = 0; i < 40; i++) b = bendStep(b, 2, 0.03);
-  const target = (2 / 0.03) * BEND_SENS;
-  assert.ok(Math.abs(b - target) < target * 0.05, `settles on ticks/sec x sens (${b} vs ${target})`);
-  assert.ok(b > 0.01 && b < 0.02, 'a patient correcting turn is nudge-sized');
-  // Backward turns bend down the same way.
-  assert.ok(bendStep(0, -2, 0.03) < 0);
-  // A spin is not a seek: however fast the wheel, the bend stops at the cap.
-  for (let i = 0; i < 40; i++) b = bendStep(b, 500, 0.03);
-  assert.ok(Math.abs(b - BEND_MAX) < 1e-12, `caps at BEND_MAX (${b})`);
-  // Hands off: the bend decays toward 0 and snaps to exactly 0 at the end - the deck is BACK
-  // on its base rate, not forever a hair off it.
-  for (let i = 0; i < 100; i++) b = bendStep(b, 0, 0.03);
-  assert.equal(b, 0);
-  // One resting step alone only eases - the release is a fade, not a cliff.
-  const eased = bendStep(BEND_MAX, 0, 0.03);
-  assert.ok(eased > 0 && eased < BEND_MAX);
+test('bendForSpeed: 3% per record speed past half of it, capped at 42%', () => {
+  assert.equal(bendForSpeed(0.5), 0, 'half record speed and slower does not bend');
+  assert.equal(bendForSpeed(-0.4), 0);
+  assert.ok(Math.abs(bendForSpeed(0.51) - 0.0153) < 1e-12, 'past it, it does');
+  assert.ok(Math.abs(bendForSpeed(1) - 0.03) < 1e-12, 'record speed bends 3%');
+  assert.ok(Math.abs(bendForSpeed(-2) + 0.06) < 1e-12, 'backward the same way');
+  assert.equal(bendForSpeed(14), BEND_MAX);
+  assert.equal(bendForSpeed(100), 0.42);
+  assert.equal(bendForSpeed(NaN), 0);
+});
+
+test('bendStep: the wheel speed as a record speed, each batch spread over two flushes', () => {
+  const dt = 0.03;
+  // A steady turn at record speed: 33 1/3 rpm, the default 2048 ticks a revolution.
+  const revs = PLATTER_REV_PER_SEC * dt;
+  assert.ok(Math.abs(Math.round(revs * JOG_TICKS_PER_REV) - 34) <= 1, 'about 34 ticks a flush');
+  let st = bendStep(0, revs, dt);
+  assert.ok(Math.abs(st.bend) < 1e-12, 'the first flush hears half the turn: v 0.5, no bend yet');
+  st = bendStep(st.carry, revs, dt);
+  assert.ok(Math.abs(st.bend - 0.03) < 1e-12, `then the whole of it: 3% (${st.bend})`);
+  // Jittery batches (34, 0, 68, 34 ticks) read as the steady speed they average to.
+  const ticks = [34, 0, 68, 34, 34].map((t) => t / JOG_TICKS_PER_REV);
+  const bends = [];
+  let carry = 0;
+  for (const t of ticks) { st = bendStep(carry, t, dt); carry = st.carry; bends.push(st.bend); }
+  assert.ok(bends.slice(2).every((b) => b > 0.02 && b < 0.07), `steady after the first (${bends})`);
+  // Hands off: one flush carries the held-over half, the next has nothing - the base rate.
+  st = bendStep(carry, 0, dt);
+  st = bendStep(st.carry, 0, dt);
+  assert.deepEqual(st, { bend: 0, carry: 0 });
+  // A slow correcting drag (a quarter turn a second) is under half record speed: no bend.
+  assert.equal(bendStep(0.25 * dt / 2, 0.25 * dt, dt).bend, 0);
+  // A spin is capped.
+  assert.equal(bendStep(1, 2, dt).bend, BEND_MAX);
   // Degenerate inputs stay harmless.
-  assert.equal(bendStep(NaN, 0, 0.03), 0);
-  assert.equal(bendStep(0.05, 2, 0), 0.05, 'a zero-length step moves nothing');
-  // The attack answers the hand: one step most of the way to a new target within ~50ms.
-  const first = bendStep(0, 2, BEND_ATTACK_SEC);
-  assert.ok(first > ((2 / BEND_ATTACK_SEC) * BEND_SENS) * 0.95);
+  assert.deepEqual(bendStep(NaN, NaN, dt), { bend: 0, carry: 0 });
+  assert.equal(bendStep(0, 1, 0).bend, 0, 'a zero-length step bends nothing');
 });
 
 test('snapToGrid: nearest gridpoint from the anchor, always inside the file', () => {
@@ -128,4 +147,26 @@ test('servoTrim: deadband, gentle proportional trim, hard-resync escape', () => 
   assert.ok(Math.abs(err) < 0.05, `error should shrink under the servo, got ${err}`);
   assert.equal(servoTrim(0.3), null, 'past the hard threshold: adopt, do not chase');
   assert.equal(servoTrim(NaN), 0);
+});
+
+test('loopWrap: the end inside the loop; past it, the next lap point from the start', () => {
+  const { loopWrap } = require('./song-sync');
+  assert.deepEqual(loopWrap(4.5, 4, 5, 0.5), { atSec: 5, toSec: 4 }, 'inside: at the end, to the start');
+  assert.deepEqual(loopWrap(5, 4, 5, 0.5), { atSec: 5, toSec: 4 }, 'on the end is still inside');
+  assert.deepEqual(loopWrap(3, 4, 5, 0.5), { atSec: 5, toSec: 4 }, 'before the start plays into it');
+  assert.deepEqual(loopWrap(5.3, 4, 5, 0.5), { atSec: 6, toSec: 4 }, 'past the end: two laps on');
+  assert.deepEqual(loopWrap(7.9, 4, 5, 0.5), { atSec: 8, toSec: 4 }, 'however far past');
+  const now = loopWrap(5.01, 4, 5, 0.5); // a 32nd of a beat at 120 bpm is 15.6 ms
+  assert.equal(now.atSec, 5.01, 'just past a lap point: at once');
+  assert.ok(Math.abs(now.toSec - 4.01) < 1e-12, 'landing as far into the loop, so the phase holds');
+  assert.deepEqual(loopWrap(5.02, 4, 5, 0.5), { atSec: 6, toSec: 4 }, 'beyond the slack it waits');
+  assert.deepEqual(loopWrap(6, 4, 5, 0.5), { atSec: 6, toSec: 4 }, 'exactly on a lap point');
+});
+
+test('ticksPerRevForDevice: a known port name gives its resolution, anything else the default', () => {
+  const { ticksPerRevForDevice } = require('./song-sync.js');
+  assert.equal(ticksPerRevForDevice('DDJ-FLX4'), 720);
+  assert.equal(ticksPerRevForDevice('DDJ-FLX4 MIDI 1'), 720);
+  assert.equal(ticksPerRevForDevice('Some Other Controller'), JOG_TICKS_PER_REV);
+  assert.equal(ticksPerRevForDevice(undefined), JOG_TICKS_PER_REV);
 });

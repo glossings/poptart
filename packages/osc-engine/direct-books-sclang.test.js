@@ -41,7 +41,7 @@ var nodeGoneSaid = IdentitySet.new, deadNodes = IdentitySet.new;
 var bundleNow = { |latency, func| func.value };
 var slotNode = { |track, slot| track[\\synth] };
 var maxVoices = 2, liveVoices = List.new, voiceBorn, voiceDone, voiceCapSaidAt = 0;
-var markSounding, noteKey, hushTrack, slotLive, channelDefault, tellRamp, heldBy;
+var markSounding, noteKey, hushTrack, slotLive, channelDefault, djResDefault, tellRamp, heldBy;
 var nodeAddr = (sendMsg: { |self ...m| ("TOLD<" ++ m.join(",") ++ ">").postln });
 server.addr = (addr: 1, isLocal: true, hostname: "127.0.0.1", ip: "127.0.0.1", port: 57999,
     sendMsg: { |self ...msg| ("SENT<" ++ msg.join(",") ++ ">").postln },
@@ -50,6 +50,7 @@ ${closure('voiceBorn')}
 ${closure('markSounding')}
 ${closure('noteKey')}
 ${closure('hushTrack')}
+${src().match(/^djResDefault = \{.*\};$/m)[0]}
 ${closure('channelDefault')}
 ${closure('tellRamp')}
 ${closure('heldBy')}

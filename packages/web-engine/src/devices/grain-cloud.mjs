@@ -13,6 +13,8 @@
 // The files are held once per audio thread (GRAIN_FILES), not once per voice: the first voice of a
 // file brings its samples, and every later one names it.
 
+import { KeylockVoice } from '../dsp/keylock.mjs';
+
 const GRAIN_FILES = new Map(); // id -> { channels: Float32Array[], frames }
 
 /** Takes a file in, or lets one go: `{ id, channels }` or `{ drop: [ids] }`. */
@@ -208,6 +210,9 @@ function grainParam(param, i) {
 const WARP_SIZE_SEC = 0.1;
 const WARP_OVERLAPS = 8;
 const WARP_SIZE_RAND = 0.1;
+// The desktop's level for these eight grains (see poptart.scd): sqrt(8 / (3 * 8)) for grains that
+// add at unrelated phases, times 1.13 fitted to real files.
+const WARP_LEVEL = 0.65;
 
 function warpRead(data, frames, phase) {
   const i = Math.floor(phase);
@@ -274,7 +279,7 @@ export class WarpCloud {
     const stereo = file.channels.length > 1;
     const outs = stereo ? [outL, outR] : [outL];
     while (this.channels.length < outs.length) this.channels.push({ next: 1, grains: [] });
-    const level = 2 / WARP_OVERLAPS;
+    const level = WARP_LEVEL;
     for (let n = 0; n < outs.length; n++) {
       const out = outs[n];
       const data = file.channels[n];
@@ -318,5 +323,115 @@ export class WarpCloud {
     // A mono file is heard in both sides, as the desktop's toStereo has it.
     if (!stereo) outR.set(outL);
     return !this.done;
+  }
+}
+
+// The clean stretch voice (.stretch() under .stretchmode("clean"), the default): the desktop's
+// poptart_sample_clean_* defs, which read the window through PoptartStretch - the same
+// KeylockVoice (dsp/keylock.mjs), so the two engines play one algorithm. The playhead crosses
+// begin..end in the event's own time and the pitch is the speed's, times the bend; a negative speed
+// reads the audio backwards. A loop crossfades its corners over 5 ms, as a deck's loop does.
+//
+// A stretcher is a few hundred kilobytes of rings and tables, and voices come and go with every
+// event: so they are pooled per audio thread, by rate and channel count, taken as a voice starts
+// and handed back when it ends - only a voice past the most ever sounding at once allocates.
+
+const STRETCH_POOL = new Map(); // `${sampleRate}:${channels}` -> KeylockVoice[]
+
+function takeStretcher(sampleRate, channels) {
+  const free = STRETCH_POOL.get(`${sampleRate}:${channels}`);
+  return free?.pop() ?? new KeylockVoice(sampleRate, channels);
+}
+
+function giveStretcher(sampleRate, channels, voice) {
+  const key = `${sampleRate}:${channels}`;
+  if (!STRETCH_POOL.has(key)) STRETCH_POOL.set(key, []);
+  STRETCH_POOL.get(key).push(voice);
+}
+
+export class StretchCloud {
+  /**
+   * @param options `file`, `start`/`end` (context seconds), `speed` (signed: |speed| is the pitch,
+   *                its sign the direction), `fileRate` (the file's sample rate), `begin`/`end01`,
+   *                `durSec`, and for a loop `loop`, `loopLo`, `loopHi`, `loopEntry`, `pingpong`
+   */
+  constructor(sampleRate, options = {}) {
+    this.sampleRate = sampleRate;
+    this.o = options;
+    this.file = options.file ?? null;
+    this.startFrame = Math.round((Number(options.start) || 0) * sampleRate);
+    this.endFrame = Number.isFinite(options.end) ? Math.round(options.end * sampleRate) : Infinity;
+    this.voice = null;
+    this.rows = null;
+    this.done = false;
+  }
+
+  end(time) {
+    const frame = Math.round(time * this.sampleRate);
+    if (frame < this.endFrame) this.endFrame = frame;
+  }
+
+  /** The stretcher, started on the file the first time there is one to read. */
+  _start(file) {
+    const o = this.o;
+    const sr = this.sampleRate;
+    const nc = Math.min(2, file.channels.length);
+    const frames = file.frames;
+    const fileRate = Number(o.fileRate) || sr;
+    const begin = Number(o.begin) || 0;
+    const end01 = o.end01 ?? 1;
+    const back = o.speed < 0;
+    // File seconds per second: the window over the event's own time, signed as the speed is.
+    const rate = (((end01 - begin) * (frames / fileRate)) / Math.max(Number(o.durSec) || 0, 1e-6)) * (back ? -1 : 1);
+    const voice = takeStretcher(sr, nc);
+    voice.setSource(file.channels.slice(0, nc), frames, 1, fileRate / sr);
+    if (o.loop) {
+      const lo = (o.loopLo ?? 0) * frames;
+      const hi = Math.max(lo + 1, (o.loopHi ?? 1) * frames);
+      const from = Math.min(hi, Math.max(lo, (o.loopEntry ?? 0) * frames));
+      voice.start({ pos: from, rate, loop: true, lo, hi, pingpong: !!o.pingpong });
+    } else {
+      const startF = begin * frames;
+      const endF = Math.max(begin * frames, end01 * frames - 1);
+      voice.start({ pos: back ? endF : startF, rate });
+    }
+    this.voice = voice;
+    this.channels = nc;
+  }
+
+  _release() {
+    if (this.voice) giveStretcher(this.sampleRate, this.channels, this.voice);
+    this.voice = null;
+  }
+
+  process(outL, outR, frames, frameNow, params) {
+    outL.fill(0);
+    outR.fill(0);
+    if (this.done) {
+      this._release();
+      return false;
+    }
+    const file = GRAIN_FILES.get(this.file);
+    if (frameNow >= this.endFrame) {
+      this.done = true;
+      this._release();
+      return false;
+    }
+    if (!file || frameNow + frames <= this.startFrame) return true;
+    if (!this.voice) this._start(file);
+    const from = Math.max(0, this.startFrame - frameNow);
+    const n = Math.min(frames, this.endFrame - frameNow) - from;
+    if (n <= 0) return true;
+    if (!this.rows || this.rows[0].length < n) this.rows = [new Float64Array(frames), new Float64Array(frames)];
+    // The bend once a block, as the desktop's control-rate pitch has it.
+    const pitch = Math.abs(this.o.speed) * 2 ** ((grainParam(params.detune, 0) || 0) / 1200);
+    this.voice.process(this.rows, n, pitch);
+    const [l, r] = this.rows;
+    const right = this.channels > 1 ? r : l;
+    for (let i = 0; i < n; i++) {
+      outL[from + i] = l[i];
+      outR[from + i] = right[i];
+    }
+    return true;
   }
 }

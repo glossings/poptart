@@ -465,6 +465,26 @@ test('speed multiplies on top of a splice - double speed fills half the event, e
   assert.ok(Math.abs(args[ARG.dur] - 0.125) < 1e-9, 'stretch mode shortens the same way');
 });
 
+// .stretchmode(): which voice a stretched event plays through, sent as the message's last argument
+// (0 clean - the keylock's stretcher - by default, 1 grain), rounded and wrapped like the other modes.
+test('stretchmode picks the clean voice by default and the grain one on 1, and passes the stretch alone', () => {
+  const { engine, sent } = engineWithFile(4.8);
+  const last = () => sent.at(-1).args.at(-1);
+  let info = engine.playSample('t1', 'breaks', { stretch: 2, secPerCycle: 2 }, 0, 1);
+  assert.strictEqual(last(), 0);
+  assert.strictEqual(info.stretchMode, 'clean');
+  info = engine.playSample('t1', 'breaks', { stretch: 2, stretchMode: 1, speed: 1.5, secPerCycle: 2 }, 0, 1);
+  assert.strictEqual(last(), 1);
+  assert.strictEqual(info.stretchMode, 'grain');
+  const args = sent.at(-1).args;
+  assert.strictEqual(args[ARG.speed], 1.5, 'speed is still the pitch');
+  assert.ok(Math.abs(args[ARG.dur] - (4.8 * 2) / 1.5) < 1e-9, 'and the stretch the length, either mode');
+  for (const [v, want] of [[2, 0], [3, 1], [0.7, 1], [-1, 1], [NaN, 0]]) {
+    engine.playSample('t1', 'breaks', { stretch: 2, stretchMode: v, secPerCycle: 2 }, 0, 1);
+    assert.strictEqual(last(), want, `stretchMode ${v}`);
+  }
+});
+
 test('a fit stands down while splice is on - the per-event rate wins', () => {
   const { engine, sent } = engineWithFile(4.8);
   engine.playSample('t1', 'breaks', { slice: 1, slices: [0, 0.25, 0.5], splice: 1, fit: 4, secPerCycle: 2 }, 0, 0.25);

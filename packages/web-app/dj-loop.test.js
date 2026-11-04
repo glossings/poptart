@@ -127,14 +127,41 @@ test('a scale that is neither half nor double is refused rather than guessed at'
 
 // --- where the window falls, on a deck holding a file -------------------------------------------
 
-test('a song deck loops in beats of its OWN tempo, from the beat it is in', () => {
-  // 128bpm: a beat is 0.46875s, a bar 1.875s. The playhead is 10.1s in - a little past a beat.
+test('a song deck loops in beats of its OWN tempo, from the beat nearest the playhead', () => {
+  // 128bpm: a beat is 0.46875s, a bar 1.875s. The playhead is 10.1s in - 0.55 of a beat past
+  // beat 21, so in that beat's second half.
   const m = rig({ song: { bpm: 128, pos: 10.1 } });
   const got = m.deckLoopApply('a', { on: true });
   const beat = 60 / 128;
-  assert.ok(Math.abs(got.from - Math.floor(10.1 / beat) * beat) < 1e-9, 'it starts at the beat, not at the finger');
-  assert.ok(got.from <= 10.1 && got.from > 10.1 - beat, 'the beat it is IN, not the next one');
+  assert.ok(Math.abs(got.from - 22 * beat) < 1e-9, 'it starts at the beat, not at the finger');
+  assert.ok(got.from > 10.1 && got.from < 10.1 + beat / 2, 'the next beat, ahead of the playhead');
   assert.ok(Math.abs((got.to - got.from) - 16 * beat) < 1e-9, 'four bars of the RECORD');
+});
+
+test('pressed in a beat\'s first half, the loop starts at the beat behind the playhead', () => {
+  const beat = 0.5; // 120bpm
+  for (const [pos, want] of [[4.0, 4.0], [4.1, 4.0], [4.24, 4.0], [4.25, 4.5], [4.3, 4.5], [4.49, 4.5]]) {
+    const m = rig({ song: { bpm: 120, pos } });
+    const got = m.deckLoopApply('a', { on: true, beats: 4 });
+    assert.ok(Math.abs(got.from - want) < 1e-9, `pressed at ${pos}: from ${got.from}, not ${want}`);
+    assert.ok(Math.abs(got.from - pos) <= beat / 2 + 1e-9, 'never more than half a beat from the finger');
+    assert.ok(Math.abs(got.to - (want + 4 * beat)) < 1e-9);
+  }
+});
+
+test('a loop shorter than a beat snaps on its own length, so the playhead is never past its end', () => {
+  // 120bpm, a quarter-beat loop is 0.125s. Pressed 0.2s into a beat: the nearest beat is behind,
+  // and a quarter-beat loop from there would already be over - the deck would jump back at once.
+  for (const [pos, want] of [[4.2, 4.25], [4.18, 4.125], [4.05, 4.0], [4.07, 4.125]]) {
+    const m = rig({ song: { bpm: 120, pos } });
+    const got = m.deckLoopApply('a', { on: true, beats: 0.25 });
+    assert.ok(Math.abs(got.from - want) < 1e-9, `pressed at ${pos}: from ${got.from}, not ${want}`);
+    assert.ok(Math.abs((got.to - got.from) - 0.125) < 1e-9);
+    assert.ok(pos < got.to, `pressed at ${pos}, the loop [${got.from}, ${got.to}) is already over`);
+  }
+  // A half-beat loop on the half-beat grid; a beat or longer on the beat grid.
+  assert.equal(rig({ song: { bpm: 120, pos: 4.2 } }).deckLoopApply('a', { on: true, beats: 0.5 }).from, 4.25);
+  assert.equal(rig({ song: { bpm: 120, pos: 4.2 } }).deckLoopApply('a', { on: true, beats: 1 }).from, 4.0);
 });
 
 test('the beatgrid anchor is what the beats are counted from', () => {
@@ -143,7 +170,7 @@ test('the beatgrid anchor is what the beats are counted from', () => {
   const got = m.deckLoopApply('a', { on: true });
   const beat = 0.5;
   assert.ok(Math.abs(((got.from - 0.2) / beat) % 1) < 1e-9, `${got.from} is off the anchored grid`);
-  assert.ok(got.from <= 5.05);
+  assert.ok(Math.abs(got.from - 5.2) < 1e-9, 'the anchored beat nearest 5.05');
 });
 
 test('quantize off takes the playhead exactly, as it does everywhere else', () => {
@@ -232,6 +259,39 @@ test('the length outlives the loop, so the next press is the length you left it 
   assert.equal(m.deckLoopApply('a', { on: true }).beats, 8);
 });
 
+test('a livecoded deck starts its loop on the beat nearest the playhead, as a song deck does', () => {
+  // A beat is a quarter cycle. [cycle pressed at, loop start].
+  for (const [cycle, want] of [[9.3, 9.25], [9.36, 9.25], [9.375, 9.5], [9.4, 9.5], [10, 10]]) {
+    const m = rig({ cycle, beats: 4 });
+    const got = m.deckLoopApply('a', { on: true });
+    assert.ok(Math.abs(got.from - want) < 1e-9, `pressed at ${cycle}: from ${got.from}, not ${want}`);
+    assert.ok(Math.abs(got.to - (want + 1)) < 1e-9);
+  }
+});
+
+test('a livecoded loop that starts at the next beat is played into, and wraps only at its end', () => {
+  const m = rig({ cycle: 9.4, beats: 1 }); // the next beat is 9.5, the loop [9.5, 9.75)
+  const got = m.deckLoopApply('a', { on: true });
+  assert.deepEqual([got.from, got.to], [9.5, 9.75]);
+  const clock = m.arrangeClocks.a;
+  assert.ok(Math.abs(clock.posAt(9.4) - 9.4) < 1e-9, 'no jump at the press');
+  assert.ok(Math.abs(clock.posAt(9.6) - 9.6) < 1e-9, 'into the loop');
+  assert.ok(Math.abs(clock.posAt(9.74) - 9.74) < 1e-9);
+  assert.ok(Math.abs(clock.posAt(9.8) - 9.55) < 1e-9, 'round at its end, back to its start');
+});
+
+test('a livecoded loop shorter than a beat snaps on its own length', () => {
+  // A quarter-beat loop is 1/16 cycle: it starts on the sixteenth nearest the playhead, behind or
+  // ahead, never on a beat it would already have played past.
+  const cases = [[9.2, 9.1875], [9.29, 9.3125], [9.26, 9.25]];
+  for (const [cycle, want] of cases) {
+    const m = rig({ cycle, beats: 0.25 });
+    const got = m.deckLoopApply('a', { on: true });
+    assert.ok(Math.abs(got.from - want) < 1e-9, `pressed at ${cycle}: from ${got.from}, not ${want}`);
+    assert.ok(cycle < got.to, `pressed at ${cycle}, the loop [${got.from}, ${got.to}) is already over`);
+  }
+});
+
 // --- what the deck head writes on the label ------------------------------------------------------
 
 test('a length reads as the bars or beats a musician would count', () => {
@@ -298,4 +358,51 @@ test('a song deck is unaffected - its loop is in seconds of the record', () => {
   const m = rig({ song: { bpm: 120, pos: 10 }, beats: 16 });
   const got = m.deckLoopApply('a', { on: true });
   assert.equal(got.to - got.from, 8, 'four bars at 120bpm is eight seconds, whatever an arrangement does');
+});
+
+// --- the wrap, when a loop is halved behind the playhead ---------------------------------------
+
+test('halving a loop the playhead has already left wraps at the next lap point, in phase', () => {
+  // The desktop's real songArmLoopTimer against a fake engine clock and fake timers. 120 bpm,
+  // a loop over 4..6 s halved to 4..5 s with the playhead at 5.3 s: the next point in phase with
+  // the loop's start is 6 s, so the seek back to 4 s is stamped 0.7 s on - not now, mid-beat.
+  const timers = [];
+  const seeks = [];
+  let clock = 100;
+  const s = { playing: true, rate: 1, posSec: 5.3, startSec: 100, loop: { from: 4, to: 5 } };
+  // eslint-disable-next-line no-new-func
+  const arm = new Function('songDecks', 'engine', 'songSync', 'deckLoopBeatLen', 'songPlayheadSec',
+    'engineTrack', 'songArmTimers', 'mixNotify', 'setTimeout', 'clearTimeout', `
+    ${grabConst('SONG_KEYS')}
+    ${grabConst('SONG_LOOP_LEAD_SEC')}
+    ${grabFn('songArmLoopTimer')}
+    return songArmLoopTimer;
+  `)(
+    { a: s },
+    { getTime: () => clock, songSeek: (track, pos, at) => seeks.push({ pos, at }) },
+    require('./song-sync'),
+    () => 0.5,
+    (deck, at) => s.posSec + ((at ?? clock) - s.startSec) * s.rate,
+    (key) => key,
+    () => {},
+    () => {},
+    (fn, ms) => { timers.push({ fn, ms }); return timers.length; },
+    () => {},
+  );
+  arm('a');
+  assert.equal(timers.length, 1);
+  assert.ok(Math.abs(timers[0].ms - (0.7 - 0.08) * 1000) < 1e-6, 'sent a lead ahead of the lap point');
+  timers[0].fn();
+  assert.deepEqual(seeks.map((x) => x.pos), [4], 'back to the loop\'s start');
+  assert.ok(Math.abs(seeks[0].at - 100.7) < 1e-9, `stamped for the 6 s lap point (got ${seeks[0].at})`);
+
+  // Within a 32nd of a beat after a lap point it wraps at once, landing as far into the loop.
+  timers.length = 0;
+  seeks.length = 0;
+  s.posSec = 5.01;
+  s.startSec = clock;
+  arm('a');
+  assert.equal(timers[0].ms, 0);
+  timers[0].fn();
+  assert.ok(Math.abs(seeks[0].pos - 4.01) < 1e-9 && seeks[0].at === clock, JSON.stringify(seeks[0]));
 });

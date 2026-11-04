@@ -1,6 +1,6 @@
 # Poptart
 
-Poptart is like a livecoding environment, a CDJ, and a DAW had a baby.
+Poptart is like a livecoding environment, DJ decks, and a DAW had a baby.
 
 If you want to try it out now, check out [poptart.glossing.dev](https://poptart.glossing.dev). It has arrangements, piano rolls, a mixer, and native synths and effects.
 

@@ -225,7 +225,7 @@ that file, including when doctor itself cannot run.
     download, more to get wrong. Unconfirmed: that notarization accepts the first route
     (nested code signed by another team), and how much of `Frameworks` sclang itself needs.
   - poptart's own helpers (`native/bin/poptart-audio`, `native/link/bin/poptart-link`,
-    `native/rubberband/bin/PoptartPitchShift.scx`) are universal binaries with ad-hoc
+    `native/keylock/bin/PoptartKeylock.scx`) are universal binaries with ad-hoc
     signatures today; the release build has to sign them with the Developer ID.
 - **SuperCollider's Dock icon cannot be suppressed with the official binaries.** sclang is a Qt
   application living inside `SuperCollider.app`, so macOS registers it as a foreground app from

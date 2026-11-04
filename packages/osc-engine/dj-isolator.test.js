@@ -19,17 +19,27 @@ const { renderNRT, ugen, G } = require('./test-support/nrt');
 const SinOsc = ugen('SinOsc', [440, 0]);
 const SR = 48000;
 
-const FREQS = [40, 60, 80, 120, 250, 1000, 2500, 5000, 10000];
-// [label, lo, mid, hi]
+const FREQS = [40, 60, 80, 120, 280, 1000, 2500, 4600, 10000, 18000];
+// [label, lo, mid, hi] - knob positions, 0..2 (127.5 steps of a 0..255 knob each)
 const SETTINGS = [
   ['neutral', 1, 1, 1],
   ['lowkill', 0, 1, 1],
   ['lowhalf', 0.5, 1, 1],
   ['lowboost', 2, 1, 1],
+  ['lowbottom', 8 / 127.5, 1, 1],
   ['midkill', 1, 0, 1],
   ['highkill', 1, 1, 0],
-  ['nearneutral', 0.99, 1, 1],
+  ['nearneutral', 0.96, 1, 1],
+  ['flatbelow', 124.5 / 127.5, 1, 1],
+  ['flatabove', 129.5 / 127.5, 1, 129.5 / 127.5],
 ];
+// The knob law the isolator applies, in dB: linear amplitude, a squared curve over the bottom 10
+// of 255 steps, unity from 124 to 130, +6 dB (10^0.3) at 255.
+const lawDb = (v) => {
+  const p = v * 127.5;
+  const b = Math.min(p, 124);
+  return 20 * Math.log10(Math.min(b / 124, b * b / 1240) + Math.max(p - 130, 0) * ((10 ** 0.3 - 1) / 125));
+};
 
 function render() {
   const probe = new G.SynthDef('iso_probe', { out: 0, freq: 100, lo: 1, mid: 1, hi: 1 }, (c) => {
@@ -64,8 +74,11 @@ test('the DJ EQ kills what it kills, and never boosts what it was not asked to',
     const at = (label, f) => level[label][f];
     const show = (label) => FREQS.map((f) => `${f}:${at(label, f).toFixed(1)}`).join(' ');
 
-    // Neutral is the input, untouched (crossfaded out - bit-exact in fact, but RMS is the check).
-    for (const f of FREQS) assert.ok(Math.abs(at('neutral', f)) < 0.01, `neutral is not flat: ${show('neutral')}`);
+    // Neutral is the input, untouched (crossfaded out - bit-exact in fact, but RMS is the check),
+    // and so is a knob anywhere in the flat zone around center.
+    for (const label of ['neutral', 'flatbelow', 'flatabove']) {
+      for (const f of FREQS) assert.ok(Math.abs(at(label, f)) < 0.01, `${label} is not flat: ${show(label)}`);
+    }
     // Just off neutral the crossover tree is in, and it is flat too - the LR4 bands sum back.
     for (const f of FREQS) {
       if (f >= 1000) assert.ok(Math.abs(at('nearneutral', f)) < 0.2, `the crossover tree is not flat: ${show('nearneutral')}`);
@@ -76,16 +89,20 @@ test('the DJ EQ kills what it kills, and never boosts what it was not asked to',
     assert.ok(at('lowkill', 60) < -40, `low kill leaves 60 Hz at ${at('lowkill', 60).toFixed(1)} dB`);
     assert.ok(at('lowkill', 80) < -30, `low kill leaves 80 Hz at ${at('lowkill', 80).toFixed(1)} dB`);
     assert.ok(at('lowkill', 120) < -20, `low kill leaves 120 Hz at ${at('lowkill', 120).toFixed(1)} dB`);
-    for (const f of [1000, 2500, 5000, 10000]) assert.ok(Math.abs(at('lowkill', f)) < 0.3, `low kill moved ${f} Hz: ${show('lowkill')}`);
+    for (const f of [1000, 2500, 4600, 10000]) assert.ok(Math.abs(at('lowkill', f)) < 0.3, `low kill moved ${f} Hz: ${show('lowkill')}`);
 
-    // Half and double are -6 / +6 dB down in the band.
-    assert.ok(Math.abs(at('lowhalf', 40) + 6.02) < 0.3, `low at 0.5 is not -6 dB at 40 Hz: ${show('lowhalf')}`);
-    assert.ok(Math.abs(at('lowboost', 40) - 6.02) < 0.3, `low at 2 is not +6 dB at 40 Hz: ${show('lowboost')}`);
+    // In the band, the level is the knob law's: half the knob, the top, the squared bottom.
+    for (const [label, v] of [['lowhalf', 0.5], ['lowboost', 2], ['lowbottom', 8 / 127.5]]) {
+      assert.ok(Math.abs(at(label, 40) - lawDb(v)) < 0.1, `low at ${v} is not ${lawDb(v).toFixed(2)} dB at 40 Hz: ${show(label)}`);
+    }
 
     // Mid and high kills.
     assert.ok(at('midkill', 1000) < -25, `mid kill leaves 1 kHz at ${at('midkill', 1000).toFixed(1)} dB`);
-    assert.ok(at('highkill', 10000) < -40, `high kill leaves 10 kHz at ${at('highkill', 10000).toFixed(1)} dB`);
-    assert.ok(at('highkill', 5000) < -20, `high kill leaves 5 kHz at ${at('highkill', 5000).toFixed(1)} dB`);
+    assert.ok(at('highkill', 18000) < -40, `high kill leaves 18 kHz at ${at('highkill', 18000).toFixed(1)} dB`);
+    assert.ok(at('highkill', 10000) < -25, `high kill leaves 10 kHz at ${at('highkill', 10000).toFixed(1)} dB`);
+    // The crossovers: each band is -6 dB at its edge (an LR4 pair crosses there in phase).
+    assert.ok(Math.abs(at('lowkill', 280) + 6.02) < 0.5, `low kill is not -6 dB at 280 Hz: ${show('lowkill')}`);
+    assert.ok(Math.abs(at('highkill', 4600) + 6.02) < 0.5, `high kill is not -6 dB at 4600 Hz: ${show('highkill')}`);
 
     // The bug this replaced: cutting a band boosted its neighbors by up to +4 dB. With every gain
     // at or under 1, no frequency may come out louder than it went in; with low at 2, nothing may

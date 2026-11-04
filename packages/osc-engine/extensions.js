@@ -3,7 +3,7 @@
 // Keeps poptart's own SuperCollider extensions installed in the user's SC Extensions folder,
 // which is the one place BOTH halves of the engine look: sclang compiles the class files from
 // there and scsynth loads the .scx files from there. There are two, independent of each other:
-// the PoptartPitchShift UGen behind the decks' keylock (native/rubberband/), and PoptartDevice,
+// the PoptartKeylock UGen behind the decks' keylock (native/keylock/), and PoptartDevice,
 // which hosts poptart's own synths and effects (native/devices/ - the same devices the browser
 // build plays). Either can be present without the other: each is a prebuilt binary, and a
 // platform nobody has built one on simply does without that half. Run before sclang is spawned (sclang compiles its class library at
@@ -27,7 +27,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
-const SOURCE_DIR = path.join(__dirname, 'native', 'rubberband');
+const SOURCE_DIR = path.join(__dirname, 'native', 'keylock');
 const DEVICES_DIR = path.join(__dirname, 'native', 'devices');
 
 /** A plugin's file name on a platform: scsynth loads .so on Linux and .scx everywhere else. */
@@ -41,25 +41,31 @@ function binSubdir(platform = process.platform, arch = process.arch) {
 }
 
 /** One extension on one platform: the names it installs under, and where each comes from. */
-function extensionLayout({ dir, base, classFile }, platform = process.platform, arch = process.arch) {
+function extensionLayout({ dir, base, classFile, retired = [] }, platform = process.platform, arch = process.arch) {
   const binary = pluginFile(base, platform);
   const binDir = path.join(dir, 'bin', binSubdir(platform, arch));
   return {
     binary,
+    retired,
     files: [binary, classFile],
     sources: { [binary]: path.join(binDir, binary), [classFile]: path.join(dir, classFile) },
     from: path.relative(__dirname, binDir).split(path.sep).join('/'),
   };
 }
 
-const PITCH_SHIFT = { dir: SOURCE_DIR, base: 'PoptartPitchShift', classFile: 'PoptartPitchShift.sc' };
+// The keylock's files replace the pitch shifter it was before, which an earlier version installed
+// beside them: those are taken out when the keylock goes in.
+const KEYLOCK = {
+  dir: SOURCE_DIR, base: 'PoptartKeylock', classFile: 'PoptartKeylock.sc',
+  retired: ['PoptartPitchShift.scx', 'PoptartPitchShift.so', 'PoptartPitchShift.sc'],
+};
 const DEVICES = { dir: DEVICES_DIR, base: 'PoptartDevices', classFile: 'PoptartDevice.sc' };
 
-const pitchShiftLayout = (platform, arch) => extensionLayout(PITCH_SHIFT, platform, arch);
+const keylockLayout = (platform, arch) => extensionLayout(KEYLOCK, platform, arch);
 const deviceLayout = (platform, arch) => extensionLayout(DEVICES, platform, arch);
 
 // This machine's, which is what every caller but the tests wants.
-const { files: FILES, sources: SOURCES } = pitchShiftLayout();
+const { files: FILES } = keylockLayout();
 const { files: DEVICE_FILES, sources: DEVICE_SOURCES } = deviceLayout();
 /** The device plugin this checkout has for this machine (tests hand its folder to scsynth). */
 const DEVICE_BINARY = DEVICE_SOURCES[DEVICE_FILES[0]];
@@ -129,8 +135,8 @@ function sameContent(a, b) {
 /**
  * Install or refresh one extension. Returns what happened, for the boot log:
  *   { installed: [names copied], upToDate: [names already current], skipped: reason|null }
- * Never throws - a failure here must not stop the engine booting (it costs keylock's pitch
- * shifter, or poptart's own devices, and nothing else), so problems come back in `skipped` for
+ * Never throws - a failure here must not stop the engine booting (it costs the keylock UGen,
+ * or poptart's own devices, and nothing else), so problems come back in `skipped` for
  * the caller to log.
  *
  * @param {object} [opts]
@@ -138,14 +144,15 @@ function sameContent(a, b) {
  * @param {Record<string,string>} [opts.sources] - override the source files (tests).
  * @param {string} [opts.platform] - override process.platform (tests).
  * @param {string} [opts.arch] - override process.arch (tests).
- * @param {string[]} [opts.files] - which names to install (defaults to the pitch shifter's).
+ * @param {string[]} [opts.files] - which names to install (defaults to the keylock's).
  * @param {string} [opts.binary] - the name among them whose platform decides the whole group.
  * @param {string} [opts.from] - where they come from, for the message when they are missing.
  */
 function ensurePoptartExtension({
   extensionsDir = userExtensionsDir(), platform = process.platform, arch = process.arch,
-  layout = pitchShiftLayout(platform, arch),
+  layout = keylockLayout(platform, arch),
   sources = layout.sources, files = layout.files, binary = layout.binary, from = layout.from,
+  retired = layout.retired ?? [],
 } = {}) {
   const result = { installed: [], upToDate: [], skipped: null };
   const missing = files.filter((f) => !sources[f] || !fs.existsSync(sources[f]));
@@ -186,6 +193,7 @@ function ensurePoptartExtension({
       fs.renameSync(tmp, target);
       result.installed.push(f);
     }
+    for (const f of retired) fs.rmSync(path.join(dest, f), { force: true });
   } catch (err) {
     result.skipped = `could not install into ${dest}: ${err.message}`;
   }
@@ -195,7 +203,7 @@ function ensurePoptartExtension({
 /**
  * The same, for the device extension (native/devices/): poptart's own synths and effects.
  *
- * Separate from the pitch shifter rather than one list of four files, because the two are built
+ * Separate from the keylock rather than one list of four files, because the two are built
  * by different scripts and one can be present where the other is not - and a missing or
  * wrong-platform binary takes down only its own half. Which is what the whole-group platform
  * check is for: a class file that compiles beside an .scx scsynth cannot load would leave
@@ -214,7 +222,7 @@ module.exports = {
   pluginFile,
   binSubdir,
   binaryPlatform,
-  pitchShiftLayout,
+  keylockLayout,
   deviceLayout,
   EXTENSION_FILES: FILES,
   DEVICE_EXTENSION_FILES: DEVICE_FILES,

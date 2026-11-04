@@ -70,9 +70,9 @@ const EXPRS = [
 ];
 const MIX = Array.from({ length: 96 }, (_, i) => Math.round(30 * (17000 / 30) ** (i / 95)));
 const CONFIGS = [
-  { key: 'all', numOutputBusChannels: 2, cueOffset: null, nativeDevices: true, spectrum: true, pitchShift: true, mixFreqs: MIX, exprs: EXPRS },
-  { key: 'none', numOutputBusChannels: 6, cueOffset: 2, nativeDevices: false, spectrum: false, pitchShift: false, mixFreqs: MIX, exprs: [] },
-  { key: 'cue', numOutputBusChannels: 8, cueOffset: 4, nativeDevices: true, spectrum: true, pitchShift: true, mixFreqs: [200, 2000, 8000], exprs: [] },
+  { key: 'all', numOutputBusChannels: 2, cueOffset: null, nativeDevices: true, spectrum: true, keylock: true, mixFreqs: MIX, exprs: EXPRS },
+  { key: 'none', numOutputBusChannels: 6, cueOffset: 2, nativeDevices: false, spectrum: false, keylock: false, mixFreqs: MIX, exprs: [] },
+  { key: 'cue', numOutputBusChannels: 8, cueOffset: 4, nativeDevices: true, spectrum: true, keylock: true, mixFreqs: [200, 2000, 8000], exprs: [] },
 ];
 
 // Trees of one shape share a def (the same name), so each name is compared once.
@@ -197,7 +197,7 @@ test('scsynth loads every def from loadMessages (batched /d_recv and /d_load) an
   const plugins = [
     path.join(path.dirname(scsynth), 'plugins'),
     path.join(ENGINE, 'native', 'devices', 'bin'),
-    path.join(ENGINE, 'native', 'rubberband', 'bin'),
+    path.join(ENGINE, 'native', 'keylock', 'bin'),
     path.join(userExtensionsDir(), 'VSTPlugin', 'plugins'),
   ].filter((p) => fs.existsSync(p));
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'poptart-synthdef-nrt-'));

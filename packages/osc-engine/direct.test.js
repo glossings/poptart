@@ -205,6 +205,29 @@ test('a sample voice is the same synth, in the voices group, with its gate-off a
   d.stop();
 });
 
+test('a stretched sample voice is the clean def unless stretchMode asks for the grain one', () => {
+  const { d, sent } = rig();
+  populate(d);
+  const v = {
+    bufnum: 7, channels: 1, begin: 0, end: 1, loop: 0, rate: 1, stretch: 2, dur: 2,
+    onsetSec: 1000.15, offsetSec: 1001, amp: 1, cut: 0, atk: 0, dec: 0, sus: 1, rel: 0.05,
+    loopLo: 0, loopHi: 1, entry: 0, pingpong: 0,
+  };
+  sent.length = 0;
+  assert.ok(d.playSample('kick', v));
+  assert.strictEqual(flat(sent[0])[0].args[0], 'poptart_sample_clean_1');
+  sent.length = 0;
+  assert.ok(d.playSample('kick', { ...v, stretchMode: 1, loop: 1 }));
+  assert.strictEqual(flat(sent[0])[0].args[0], 'poptart_sample_warp_loop_1');
+  sent.length = 0;
+  assert.ok(d.playSample('kick', { ...v, stretchMode: 0, loop: 1, channels: 2 }));
+  assert.strictEqual(flat(sent[0])[0].args[0], 'poptart_sample_clean_loop_2');
+  sent.length = 0;
+  assert.ok(d.playSample('kick', { ...v, stretch: 1, stretchMode: 1 }));
+  assert.strictEqual(flat(sent[0])[0].args[0], 'poptart_sample_1', 'an unstretched event is the plain voice, whatever the mode');
+  d.stop();
+});
+
 test('the node ids wrap inside the block Node was given', () => {
   const { d } = rig();
   d.handle(msg('server', 57110, 100, 102, 48000, 0, 80));

@@ -59,6 +59,8 @@ const LPF = simple('LPF', Filter, [0, 440]);
 const HPF = simple('HPF', Filter, [0, 440]);
 const RLPF = simple('RLPF', Filter, [0, 440, 1]);
 const RHPF = simple('RHPF', Filter, [0, 440, 1]);
+const BLowPass = simple('BLowPass', Filter, [0, 1200, 1]);
+const BHiPass = simple('BHiPass', Filter, [0, 1200, 1]);
 const BPF = simple('BPF', Filter, [0, 440, 1]);
 const Line = simple('Line', UGen, [0, 1, 1, 0]); // start, end, dur, doneAction
 const K2A = simple('K2A', PureUGen, [0], ['ar']);
@@ -140,6 +142,7 @@ const bufInfo = (name) => ({ [name]: class extends BufInfoUGenBase {} })[name];
 const BufFrames = bufInfo('BufFrames');
 const BufRateScale = bufInfo('BufRateScale');
 const BufSampleRate = bufInfo('BufSampleRate');
+const BufDur = bufInfo('BufDur');
 
 const PlayBuf = channelsFirst('PlayBuf', MultiOutUGen, [0, 1, 1, 0, 0, 0]);
 const BufRd = channelsFirst('BufRd', MultiOutUGen, [0, 0, 1, 2]);
@@ -414,15 +417,26 @@ class PoptartDevice extends MultiOutUGen {
   }
 }
 
-// PoptartPitchShift.ar(input, ratio, window) -> input.size channels and the delay.
-class PoptartPitchShift extends MultiOutUGen {
-  static ar(input, ratio = 1, window = 0) {
-    const ins = asArray(input);
-    return this.multiNewList(['audio', ins.length, ratio, window, ...ins]);
+// PoptartKeylock.ar(numChannels, bufnum, rate, trigger, startPos) - native/keylock/PoptartKeylock.sc
+class PoptartKeylock extends MultiOutUGen {
+  static ar(numChannels = 2, bufnum = 0, rate = 1, trigger = 1, startPos = 0) {
+    return this.multiNew('audio', numChannels, bufnum, rate, trigger, startPos);
   }
   init(n, ...inputs) {
     this.inputs = inputs;
-    return this.initOutputs(n + 1, this.rate);
+    return this.initOutputs(n, this.rate);
+  }
+}
+
+// PoptartStretch.ar(numChannels, bufnum, rate, pitch, startPos, loop, loopLo, loopHi, pingpong) -
+// native/keylock/PoptartKeylock.sc
+class PoptartStretch extends MultiOutUGen {
+  static ar(numChannels = 2, bufnum = 0, rate = 1, pitch = 1, startPos = 0, loop = 0, loopLo = 0, loopHi = 0, pingpong = 0) {
+    return this.multiNew('audio', numChannels, bufnum, rate, pitch, startPos, loop, loopLo, loopHi, pingpong);
+  }
+  init(n, ...inputs) {
+    this.inputs = inputs;
+    return this.initOutputs(n, this.rate);
   }
 }
 
@@ -464,10 +478,10 @@ function wrap(x, lo = 0, hi = 1) {
 
 module.exports = {
   Impulse, Sweep, Phasor, LFDNoise0, LFDNoise3, Latch, Gate, Trig1, PulseCount, ToggleFF, Peak,
-  RunningMax, RunningSum, OnePole, LPF, HPF, RLPF, RHPF, BPF, Line, K2A, A2K, Convolution2, Clip,
+  RunningMax, RunningSum, OnePole, LPF, HPF, RLPF, RHPF, BLowPass, BHiPass, BPF, Line, K2A, A2K, Convolution2, Clip,
   Wrap, Delay1, DelayN, Lag, LagUD, Ramp, VarLag, Select, SampleRate, SampleDur, ControlRate, ControlDur,
-  BlockSize, NumOutputBuses, BufFrames, BufRateScale, BufSampleRate, PlayBuf, BufRd, Warp1,
+  BlockSize, NumOutputBuses, BufFrames, BufRateScale, BufSampleRate, BufDur, PlayBuf, BufRd, Warp1,
   GrainBuf, DC, Silent, In, InFeedback, LocalIn, Out, ReplaceOut, OffsetOut, LocalOut, BufWr,
   DiskOut, LocalBuf, EnvGen, Env, LinXFade2, Balance2, SendReply, SendPeakRMS, SoundIn, Mix,
-  VSTPlugin, PoptartDevice, PoptartPitchShift, PoptartSpectrum, FFT, lag, clip, wrap, Ref,
+  VSTPlugin, PoptartDevice, PoptartKeylock, PoptartStretch, PoptartSpectrum, FFT, lag, clip, wrap, Ref,
 };

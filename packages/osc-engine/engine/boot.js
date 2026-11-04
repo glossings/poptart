@@ -1,7 +1,7 @@
 'use strict';
 
 // Brings the engine up on a booted scsynth: the sections, the shared buses and groups, the master
-// meter, the pressure gauge, the keylock probe, and the ready - poptart.scd's waitForBoot block.
+// meter, the pressure gauge, and the ready - poptart.scd's waitForBoot block.
 
 const { Engine } = require('./core');
 const { Synth, Group, Bus } = require('../server/objects');
@@ -66,19 +66,6 @@ function watchStalls(E) {
   });
 }
 
-/** The keylock pitch shifter's latency, measured once (see rbProbeDef in synthdef/defs.js). */
-function probeKeylock(E) {
-  if (!E.defs.has('poptart_rbprobe')) return;
-  const S = E.S;
-  const probe = Synth.basicNew('poptart_rbprobe', S);
-  S.once('/poptart/rbDelay', (a) => a[0] === probe.nodeID, (a) => {
-    E.rbDelay = Number(a[2]);
-    E.tell('/poptart/ids/rbDelay', E.rbDelay);
-    E.post(`poptart: keylock pitch shifter delay ${Math.trunc(E.rbDelay)} samples`);
-  });
-  S.send(probe.newMsg(null, [], 'addToHead'));
-}
-
 /**
  * The engine on `server` (booted, defs loaded). Resolves once it has said /poptart/ready.
  * `sections` limits which parts are installed (tests).
@@ -104,9 +91,8 @@ async function startEngine({ server, config, tell, output, defs, vst = null, dev
   watchStatus(E);
   watchStalls(E);
   E.post('poptart: server booted, ready');
-  probeKeylock(E);
   // Node allocates every id itself now, so there is no separate block: lo = hi = 0 says so.
-  E.tell('/poptart/ids/server', E.scsynthPort, 0, 0, S.sampleRate ?? E.sampleRate, E.rbDelay, E.openWaitMax + E.coldWaitMax);
+  E.tell('/poptart/ids/server', E.scsynthPort, 0, 0, S.sampleRate ?? E.sampleRate, E.openWaitMax + E.coldWaitMax);
   E.tell('/poptart/ready', S.pid ?? -1);
   if (scan && typeof E.runScan === 'function') {
     E.runScan(() => E.post(`poptart: initial plugin search done (${E.vst?.pluginCount?.() ?? 0} plugins)`));

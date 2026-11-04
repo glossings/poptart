@@ -93,7 +93,7 @@ class DirectPath {
     this._tell = tell;
     this._now = now;
     this._warn = warn;
-    this.server = null; // { port, nodeLo, nodeHi, sampleRate, rbDelay, loadFailsafe }
+    this.server = null; // { port, nodeLo, nodeHi, sampleRate, loadFailsafe }
     this._nextNode = 0;
     this.tracks = new Map(); // trackId -> mirror (see _track)
     this.dead = new Set(); // node ids the server said it does not have
@@ -144,12 +144,9 @@ class DirectPath {
       case 'server':
         this.server = {
           port: Number(a[0]), nodeLo: Number(a[1]), nodeHi: Number(a[2]),
-          sampleRate: Number(a[3]), rbDelay: Number(a[4]) || 0, loadFailsafe: Number(a[5]) || 0,
+          sampleRate: Number(a[3]), loadFailsafe: Number(a[4]) || 0,
         };
         if (!(this._nextNode >= this.server.nodeLo && this._nextNode <= this.server.nodeHi)) this._nextNode = this.server.nodeLo;
-        break;
-      case 'rbDelay':
-        if (this.server) this.server.rbDelay = Number(a[0]) || 0;
         break;
       case 'track': {
         const tr = t();
@@ -419,7 +416,7 @@ class DirectPath {
     if (!tr?.known || !(tr.voices > 0) || !Number.isInteger(v.bufnum)) return this._ok(false);
     const warp = Math.abs(v.stretch - 1) > 1e-4;
     const loop = v.loop === 1;
-    const defName = `poptart_sample_${warp ? 'warp_' : ''}${loop ? 'loop_' : ''}${v.channels}`;
+    const defName = `poptart_sample_${warp ? (v.stretchMode === 1 ? 'warp_' : 'clean_') : ''}${loop ? 'loop_' : ''}${v.channels}`;
     const gated = loop || v.cut === 1;
     const node = this._allocNode();
     const args = [
@@ -518,24 +515,20 @@ class DirectPath {
     const now = this._now();
     const latency = Math.max(0, targetTime - now);
     const sr = this.server.sampleRate;
-    const rbLat = warp ? this.server.rbDelay / sr : 0;
-    const spawnAt = Math.max(0, latency - rbLat);
-    const seekSec = posSec - (latency - spawnAt) * rate;
-    const handover = Math.max(latency, spawnAt + rbLat);
-    const frame = Math.min(Math.max(0, song.frames - 1), Math.max(0, seekSec * (song.sampleRate || sr)));
+    const frame = Math.min(Math.max(0, song.frames - 1), Math.max(0, posSec * (song.sampleRate || sr)));
     const defName = `${warp ? 'poptart_songwarp_' : 'poptart_song_'}${song.channels}`;
-    if (song.node > 0) this._sendAt(this._songAt(song, now + handover), [{ address: '/n_set', args: [i32(song.node), str('gate'), i32(0)] }]);
+    if (song.node > 0) this._sendAt(this._songAt(song, now + latency), [{ address: '/n_set', args: [i32(song.node), str('gate'), i32(0)] }]);
     const node = this._allocNode();
     song.node = node;
     song.viaLang = false;
-    song.spawnUntil = now + spawnAt;
-    this._sendAt(now + spawnAt, [{
+    song.spawnUntil = now + latency;
+    this._sendAt(now + latency, [{
       address: '/s_new',
       args: [str(defName), i32(node), i32(0), i32(tr.group),
         str('out'), i32(tr.inBus), str('buf'), i32(song.bufnum), str('rate'), f32(rate), str('run'), i32(1),
-        str('t_seek'), i32(1), str('seekFrame'), f32(frame), str('delay'), f32(warp ? this.server.rbDelay : 0)],
+        str('t_seek'), i32(1), str('seekFrame'), f32(frame)],
     }]);
-    this._tell('/poptart/direct/song', [trackId, node, defName, spawnAt]);
+    this._tell('/poptart/direct/song', [trackId, node, defName, latency]);
     return this._ok(true);
   }
 

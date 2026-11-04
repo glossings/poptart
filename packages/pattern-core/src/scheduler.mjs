@@ -289,7 +289,7 @@ function formatSampleEvent(pack, cfg, info, eventCycles) {
     const fitLen = res.fitCycles ?? cfg.fit;
     bits.push(`fit=${typeof fitLen === 'number' ? `${num(fitLen)}c` : fitLen}${mode('fitMode') === 'stretch' ? '+stretch' : ''}`);
   }
-  if (stretch !== 1) bits.push(`stretch=${num(stretch)}`);
+  if (stretch !== 1) bits.push(`stretch=${num(stretch)}${mode('stretchMode') === 'grain' ? '+grain' : ''}`);
   // Size and rate as the voice STARTS with them; both are live controls and may move under it.
   if (res.grain ?? ((cfg.grain ?? 0) > 0.5)) {
     bits.push(`grain=${num(res.grainSize ?? cfg.grainSize ?? CHANNEL_DEFAULTS.grainsize)}s@${num(res.grainRate ?? cfg.grainRate ?? CHANNEL_DEFAULTS.grainrate)}hz`);
@@ -2488,7 +2488,7 @@ export class Scheduler {
     const merged = step.cfg;
     const deferred = [];
     // vel is not here - it's a note channel (see _velAt), read the same way as on a synth track.
-    for (const key of ['index', 'begin', 'end', 'loop', 'loopWrap', 'loopDir', 'speed', 'flip', 'stretch', 'fitMode',
+    for (const key of ['index', 'begin', 'end', 'loop', 'loopWrap', 'loopDir', 'speed', 'flip', 'stretch', 'stretchMode', 'fitMode',
       'slice', 'splice', 'spliceMode', 'note', 'attack', 'decay', 'sustain', 'release', 'envScale', 'grain']) {
       // A control that reads the sample's length (.play() - see withSampleLength) has no value
       // until the engine knows which file plays: it is read again there, with that length, through
@@ -2521,7 +2521,7 @@ export class Scheduler {
     // .loopwrap()/.loopdir()/.splicemode() carry mode NUMBERS rather than amounts, so whatever
     // the channel produced picks a mode by rounding and wrapping (see loopModeAt) - that's what
     // lets a continuous signal drive them. Done here so the engine and the .log() line agree.
-    for (const key of ['loopWrap', 'loopDir', 'spliceMode', 'fitMode']) {
+    for (const key of ['loopWrap', 'loopDir', 'spliceMode', 'fitMode', 'stretchMode']) {
       if (cfg[key] !== undefined) cfg[key] = loopModeAt(key, cfg[key]);
     }
     // The slice SET is the odd one out: its value is a positions array (or a map of them, keyed by

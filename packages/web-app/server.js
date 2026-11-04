@@ -220,7 +220,7 @@ function noteProtoOwnership(deck) {
 // ---------------------------------------------------------------------------------------------
 // djf is the filter's cutoff (its center detent is 0); djres is that filter's resonance
 // AMOUNT, deliberately a control of its own - see the DJ stage in sc/poptart.scd.
-const DJ_NEUTRAL = { trim: 1, eqlo: 1, eqmid: 1, eqhi: 1, djf: 0, djres: 0, fader: 1, deck: 1, cue: 0 };
+const DJ_NEUTRAL = { trim: 1, eqlo: 1, eqmid: 1, eqhi: 1, djf: 0, djres: require('@poptart/osc-engine/synthdef/defs').DJ_RES_DEFAULT, fader: 1, deck: 1, cue: 0 };
 const mixState = {
   // Dj mode, as the CLIENT reports it (POST /api/mix/dj): the mixer is open and the decks are
   // being played as decks. While it is on the clock belongs to the DESK - whichever deck took
@@ -554,12 +554,15 @@ function songArmLoopTimer(deck) {
   if (!s.playing || !s.loop || !(s.rate > 0) || !engine) return;
   const now = engine.getTime();
   const begin = Math.max(now, s.startSec); // a quantized start may not have begun yet
-  const left = Math.max(0, (begin - now) + (s.loop.to - songPlayheadSec(deck, begin)) / s.rate);
+  const pos = songPlayheadSec(deck, begin);
+  // Past the end (a halved loop) it waits for the next lap point - see song-sync.js's loopWrap.
+  const wrap = songSync.loopWrap(pos, s.loop.from, s.loop.to, deckLoopBeatLen(deck));
+  const left = Math.max(0, (begin - now) + (wrap.atSec - pos) / s.rate);
   const wrapAt = now + left;
   s.loopTimer = setTimeout(() => {
     s.loopTimer = null;
     if (!s.playing || !s.loop || !engine) return;
-    const to = s.loop.from;
+    const to = wrap.toSec;
     try {
       engine.songSeek(engineTrack(SONG_KEYS[deck]), to, wrapAt);
     } catch { /* engine between restarts */ }
@@ -670,7 +673,7 @@ function songSendRate(deck) {
 function songApplyRate(deck) {
   const s = songDecks[deck];
   if (!s) return;
-  const eff = songSync.effectiveRate(songBaseRate(deck), s.nudge, s.bend ?? 0);
+  const eff = songSync.effectiveRate(songBaseRate(deck), s.nudge, s.bend ?? 0, mixState.deckTempo[deck].range);
   if (eff === s.rate) return;
   if (s.playing && engine && engine.getTime() >= s.startSec) {
     const now = engine.getTime();
@@ -1001,25 +1004,26 @@ function songScrub(deck, deltaSec) {
   }, SONG_SCRUB_FLUSH_MS);
 }
 
-// The platter as a PITCH BEND (the `bend` MIDI target): a light wheel turn while the deck plays
-// bends the rate with the turn and eases back to base when the hand rests - the beatmatch
-// correction gesture, where scrub is the needle drop. Ticks are batched like the scrub's; the
-// rate math (proportional target, attack, release) is song-sync.js's bendStep, and the flush
-// keeps ticking until the bend has died away so the release is heard without further input.
+// The platter as a PITCH BEND (the `bend` MIDI target): a wheel turn while the deck plays bends
+// the rate with the wheel's speed and lets go when the hand rests - the beatmatch correction
+// gesture, where scrub is the needle drop. Turns are batched like the scrub's, as revolutions
+// (the binding's ticksPerRev); the rate math (record-speed bend, each batch spread over two
+// flushes) is song-sync.js's bendStep, and the flush keeps ticking until the bend is gone.
 // The playhead model rides the bent rate (songApplyRate rebases on every step), so the phase a
 // bend moved STAYS moved - on a synced deck that is the whole point, and the drift servo, which
 // only measures engine-vs-model, has nothing to pull back.
 const SONG_BEND_FLUSH_MS = 30;
 const songBendState = {
-  a: { ticks: 0, timer: null, last: 0 },
-  b: { ticks: 0, timer: null, last: 0 },
+  a: { revs: 0, carry: 0, timer: null, last: 0 },
+  b: { revs: 0, carry: 0, timer: null, last: 0 },
 };
 
-/** One relative platter message's worth of bend (`ticks` signed, 64-centered cc convention). */
-function songBend(deck, ticks) {
+/** One relative platter message's worth of bend: `ticks` signed (64-centered cc convention), of
+ *  `ticksPerRev` to a revolution. */
+function songBend(deck, ticks, ticksPerRev = songSync.JOG_TICKS_PER_REV) {
   const st = songBendState[deck];
   if (!songDecks[deck] && !deckRunning(deck)) return; // an empty deck's platter should feel like nothing
-  st.ticks += ticks || 0;
+  st.revs += (ticks || 0) / ticksPerRev;
   if (st.timer) return;
   st.last = Date.now();
   st.timer = setInterval(() => {
@@ -1028,15 +1032,18 @@ function songBend(deck, ticks) {
     const now = Date.now();
     const dt = Math.max(0.001, (now - st.last) / 1000);
     st.last = now;
-    const t = st.ticks;
-    st.ticks = 0;
+    const revs = st.revs;
+    st.revs = 0;
     if (!s) {
       clearInterval(st.timer);
       st.timer = null;
+      st.carry = 0;
       return;
     }
-    s.bend = songSync.bendStep(s.bend ?? 0, t, dt);
-    if (!t && s.bend === 0) {
+    const step = songSync.bendStep(st.carry, revs, dt);
+    st.carry = step.carry;
+    s.bend = step.bend;
+    if (!revs && !step.carry && !step.bend) {
       clearInterval(st.timer);
       st.timer = null;
     }
@@ -1432,7 +1439,7 @@ function deckClockApply(deck) {
   const file = !!songDecks[deck]; // a deck holding a file keeps its rate on the song; its clock is the room's
   clock.setFreeMult(deckTempoMult(deck));
   clock.setSync(file || deckLiveSynced(deck));
-  clock.setBend(file ? 0 : songSync.effectiveRate(1, st.nudge, st.bend) - 1);
+  clock.setBend(file ? 0 : songSync.effectiveRate(1, st.nudge, st.bend, mixState.deckTempo[deck].range) - 1);
 }
 
 /** Let go of the platter: what a deck's stop, a load onto it and leaving dj mode all do. */
@@ -1568,16 +1575,23 @@ function deckLoopWindow(deck, beats) {
     if (!(bpm > 0)) return null; // no grid, no beats to count
     const beatSec = 60 / bpm;
     const pos = songPlayheadSec(deck);
+    // Quantized, the start is the grid point NEAREST the playhead: pressed in a beat's first half
+    // it is the beat behind, in its second half the next beat, which the deck plays into before
+    // the loop begins. A loop shorter than a beat snaps on its own length, so the playhead is
+    // inside the loop or ahead of it, never past its end.
+    const unit = Math.min(beatSec, beats * beatSec);
     const from = s.quantize === false
       ? pos
-      : s.anchorSec + Math.floor((pos - s.anchorSec) / beatSec) * beatSec;
+      : s.anchorSec + Math.round((pos - s.anchorSec) / unit) * unit;
     return { from: Math.max(0, from), to: Math.max(0, from) + beats * beatSec };
   }
   const clock = arrangeClocks[deck];
   if (!clock || !transport || !engine) return null;
   const beatCyc = 1 / songSync.BEATS_PER_CYCLE;
   const pos = clock.posAt(clockOf(deck).cycleAt(engine.getTime()));
-  return deckLoopFit(deck, Math.max(0, Math.floor(pos / beatCyc) * beatCyc), beats * beatCyc);
+  // The grid point nearest the playhead, as on a song deck: the deck plays into a start ahead.
+  const unit = Math.min(beatCyc, beats * beatCyc);
+  return deckLoopFit(deck, Math.max(0, Math.round(pos / unit) * unit), beats * beatCyc);
 }
 
 /**
@@ -2136,7 +2150,7 @@ function mixMidiLearnable(target, kind, value) {
 function mixMidiValue(target, v01) {
   const ctl = target === 'xf' ? 'xf' : target.slice(2);
   if (ctl === 'xf' || ctl === 'djf') return v01 * 2 - 1;
-  if (ctl === 'fader' || ctl === 'djres') return v01; // one-sided 0..1, neutral at the bottom
+  if (ctl === 'fader' || ctl === 'djres') return v01; // one-sided 0..1, bottom to top
   return v01 * 2; // trim and the EQ bands: 0..2, unity at center
 }
 
@@ -2159,6 +2173,14 @@ function mixMidiValue(target, v01) {
 // revolution covers about a minute, so a five-minute track is five turns.
 const SONG_SCRUB_TICK_SEC = 0.003;
 const SONG_SEARCH_TICK_SEC = 0.1;
+
+// The platter's resolution in pitch-bend mode: a binding's own `ticksPerRev`, for a wheel that
+// sends some other number of ticks to a turn, else the resolution song-sync.js knows for the
+// binding's MIDI port (its `device`), else JOG_TICKS_PER_REV.
+function mixMidiTicksPerRev(target) {
+  const n = Number(settings.mixMidi?.[target]?.ticksPerRev);
+  return n > 0 ? n : songSync.ticksPerRevForDevice(settings.mixMidi?.[target]?.device);
+}
 function mixMidiScrubDelta(v01, tickSec = SONG_SCRUB_TICK_SEC) {
   return (Math.round(v01 * 127) - 64) * tickSec;
 }
@@ -2376,7 +2398,7 @@ function mixMidiApply(target, value) {
   if (name === 'bend') {
     // The platter's pitch-bend mode: the same relative 64-centered convention as scrub, into
     // the bend gesture instead of a seek (see songBend).
-    songBend(deck, Math.round(value * 127) - 64);
+    songBend(deck, Math.round(value * 127) - 64, mixMidiTicksPerRev(target));
     return;
   }
   if (name === 'tempo') {
@@ -4805,7 +4827,7 @@ function syncUserStringMethods() {
 const BUILDER_NAMES = ['Signal', 'n', 'note', 'mini', 's', 'se', 'sr', 'sp', 'say', 'synth', 'sine', 'saw', 'isaw', 'tri', 'square', 'rand', 'perlin', 'lfo', 'env', 'dur', 'midicc', 'midikeys', 'osc', 'macro', 'choose', 'cat', 'seq', 'irand', 'midi', 'audio', 'input', 'group', 'copy', 'pcopy', 'pianoroll', 'clips', 'auto',
   // Every control method also as a top-level control builder - speed("-1"), begin(0.5), clip(2) -
   // so a combinator can aim at one channel of a pattern it was handed: x.mul(speed("-1")).
-  'i', 'begin', 'end', 'loop', 'loopwrap', 'loopdir', 'speed', 'flip', 'stretch', 'fit', 'fitmode', 'slice', 'splice', 'splicemode', 'attack', 'decay', 'sustain', 'release', 'envscale', 'grain', 'vel', 'clip', 'slide', 'octave', 'nudge', 'swing', 'swinggrid', 'swingvel',
+  'i', 'begin', 'end', 'loop', 'loopwrap', 'loopdir', 'speed', 'flip', 'stretch', 'stretchmode', 'fit', 'fitmode', 'slice', 'splice', 'splicemode', 'attack', 'decay', 'sustain', 'release', 'att', 'dec', 'sus', 'rel', 'envscale', 'grain', 'vel', 'clip', 'slide', 'octave', 'nudge', 'swing', 'swinggrid', 'swingvel',
   // The binops as top-level builders - a layer piece's own verb: .set(note(30), add(note(12)))
   // pins one voice and transposes the other.
   'add', 'sub', 'mul', 'div', 'mod', 'set',
@@ -10431,7 +10453,7 @@ const routes = {
   // Edit a song's musical facts (songs phase 4) - all of them user-editable, always: the tags
   // are a convenience, not an authority. Body: { deck, bpm? (20..400, or null to clear - which
   // also drops sync), key?, anchorSec? (the beatgrid's downbeat anchor, clamped to the file),
-  // sync? (rate-lock to the master clock; needs a bpm), keylock? (Rubber Band pitch-shift player -
+  // sync? (rate-lock to the master clock; needs a bpm), keylock? (the time-stretching player -
   // rate moves time, not pitch; toggling mid-song is a declicked player swap at the playhead) }.
   'POST /api/song/meta': async (body) => {
     const deck = body.deck === 'b' ? 'b' : 'a';

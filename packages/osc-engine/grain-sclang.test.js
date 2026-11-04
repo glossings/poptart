@@ -108,11 +108,12 @@ var playChannels = 2, cueOffset = nil, routeNowhere = 1000000;
 var bendPollHz = ${/var bendPollHz = (\d+)/.exec(SRC)[1]};
 var deckMeterBus = Bus.control(server, 4);
 var trackDefName = { |key| ("poptart_track_" ++ key).asSymbol };
-var chanIn, buildHeadDef, djIsolator, channelDefault, def;
+var chanIn, buildHeadDef, djIsolator, channelDefault, djResDefault, def;
 server.options.numOutputBusChannels = 2;
 ${extract('djIsolator')}
 ${extract('chanIn')}
 ${extract('buildHeadDef')}
+${SRC.match(/^djResDefault = \{.*\};$/m)[0]}
 ${extract('channelDefault')}
 def = buildHeadDef.();
 ("BUILT<" ++ def.isKindOf(SynthDef) ++ ">").postln;

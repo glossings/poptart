@@ -155,8 +155,8 @@ struct LoadedSampleNode {
  * opens of the same slot overlap, and a single scratch area shared between them would have the
  * second overwriting what the first was still building - a device leaked, or installed twice.
  *
- * Allocated with `new` on the audio thread, as native/rubberband/PoptartPitchShift.cpp allocates
- * its shifter: it is a hundred bytes, once per device change, and it buys the ordinary thread
+ * Allocated with `new` on the audio thread, as native/keylock/PoptartKeylock.cpp allocates
+ * its stretcher: it is a hundred bytes, once per device change, and it buys the ordinary thread
  * safety of the system allocator for a pointer three threads pass between. The allocation that
  * actually matters - the device, which for Cloud Seed is tens of megabytes - happens in stage 2,
  * where it belongs.
@@ -241,7 +241,7 @@ struct PoptartDevice : public SCUnit {
         // non-realtime command that may outlive the World during a server quit, and a device
         // leaked at quit is a worse trade than a free. It is a free of memory already
         // untouched - no DSP, no page faults - and this is the same choice
-        // native/rubberband/PoptartPitchShift.cpp makes for its shifter.
+        // native/keylock/PoptartKeylock.cpp makes for its stretcher.
         //
         // UNLESS a work round is still running on it, on the other thread: then it is left to the
         // round, whose last stage deletes it (WorkJob). If that stage finished between the two

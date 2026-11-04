@@ -18,33 +18,56 @@ const BEATS_PER_CYCLE = 4;
 // Momentary nudge: the classic platter push/drag, ±4% while held.
 const NUDGE_PCT = 0.04;
 
-// Platter pitch-bend (the `bend` MIDI target): a light wheel turn while the deck plays bends the
-// rate in proportion to how fast the wheel is turning, and the deck eases back to its base rate
-// when the hand stops - the standard beatmatch-correction gesture. The playhead model rides the
-// bent rate (songApplyRate rebases on every change), so what a bend leaves behind is exactly the
-// phase it moved - the correction sticks, synced or not, and the drift servo has nothing to undo.
-//   SENS   - rate offset per (tick/second): a patient quarter-turn-a-second (~150 ticks/s on the
-//            usual ~600-tick platter) bends ~3%, about nudge-sized.
-//   MAX    - the bend's cap either way, just above nudge territory; a spin is not a seek.
-//   ATTACK - seconds for the bend to reach a new target; short enough to answer the hand,
-//            long enough that the 30ms message batches read as one motion.
-//   RELEASE- seconds for the bend to die away once the wheel rests.
-const BEND_SENS = 0.0002;
-const BEND_MAX = 0.08;
-const BEND_ATTACK_SEC = 0.05;
-const BEND_RELEASE_SEC = 0.12;
+// Platter pitch-bend (the `bend` MIDI target): a wheel turn while the deck plays bends the rate
+// with how fast the wheel is turning, and the deck is back on its base rate the moment the hand
+// stops - the beatmatch-correction gesture. The playhead model rides the bent rate
+// (songApplyRate rebases on every change), so what a bend leaves behind is exactly the phase it
+// moved - the correction sticks, synced or not, and the drift servo has nothing to undo.
+//
+// The wheel's speed is read as a record's: v is its revolutions a second over a 33 1/3 rpm
+// platter's, so v 1 is the record's own speed. A turn slower than half that (BEND_MIN_SPEED)
+// does not bend; past it the bend is 3% per v (BEND_PER_SPEED), up to 42% (BEND_MAX) - added to
+// the tempo ratio, not multiplied with it (see effectiveRate). A revolution is the controller's
+// own number of ticks: a binding's `ticksPerRev`, else its port's entry in JOG_TICKS_BY_DEVICE,
+// else JOG_TICKS_PER_REV.
+const JOG_TICKS_PER_REV = 2048;
+
+// Known platter resolutions by MIDI input port name: the first entry whose `match` is found in
+// the port name (case-insensitive) gives the ticks a revolution sends. A binding keeps the port
+// name it was learned on, so a re-learn finds the same entry. Add controllers here.
+const JOG_TICKS_BY_DEVICE = [
+  { match: 'ddj-flx4', ticksPerRev: 720 },
+];
+
+/** Ticks per revolution for a MIDI input port name: a table match, else JOG_TICKS_PER_REV. */
+function ticksPerRevForDevice(device) {
+  const name = typeof device === 'string' ? device.toLowerCase() : '';
+  const hit = name && JOG_TICKS_BY_DEVICE.find((d) => name.includes(d.match));
+  return hit ? hit.ticksPerRev : JOG_TICKS_PER_REV;
+}
+const PLATTER_REV_PER_SEC = 100 / 3 / 60;
+const BEND_MIN_SPEED = 0.5;
+const BEND_PER_SPEED = 0.03;
+const BEND_MAX = 0.42;
+
+/** The bend (a rate offset) for a platter speed `v` (1 = record speed, signed). */
+function bendForSpeed(v) {
+  if (!Number.isFinite(v) || Math.abs(v) <= BEND_MIN_SPEED) return 0;
+  return Math.sign(v) * Math.min(BEND_MAX, BEND_PER_SPEED * Math.abs(v));
+}
 
 /**
- * One bend step: where the bend offset stands after `dtSec` in which the wheel moved `ticks`
- * (signed; 0 = resting). Toward the tick-rate's target while turning, exponentially home to 0
- * at rest. Pure, so the flush timer's cadence is all the server owns.
+ * One flush of the platter: `revs` revolutions turned (signed) in the `dtSec` since the last
+ * flush, and `carry`, the half of the last flush's turn held over for this one - each turn is
+ * spread over two flushes, so the speed reads steadily from batches whose tick counts jitter.
+ * Returns the bend and the carry for the next flush. Pure, so the flush timer's cadence is all
+ * the caller owns; both are 0 once the wheel has rested a whole flush.
  */
-function bendStep(bend, ticks, dtSec) {
-  const b = Number.isFinite(bend) ? bend : 0;
-  if (!(dtSec > 0)) return b;
-  if (!ticks) return Math.abs(b) < 1e-4 ? 0 : b * Math.exp(-dtSec / BEND_RELEASE_SEC);
-  const target = Math.min(BEND_MAX, Math.max(-BEND_MAX, (ticks / dtSec) * BEND_SENS));
-  return b + (target - b) * Math.min(1, dtSec / BEND_ATTACK_SEC);
+function bendStep(carry, revs, dtSec) {
+  const held = Number.isFinite(carry) ? carry : 0;
+  const half = (Number.isFinite(revs) ? revs : 0) / 2;
+  if (!(dtSec > 0)) return { bend: 0, carry: held + half };
+  return { bend: bendForSpeed((held + half) / dtSec / PLATTER_REV_PER_SEC), carry: half };
 }
 
 // Drift servo: |err| below the deadband is measurement noise (the report quantizes to control
@@ -86,9 +109,16 @@ function syncRate(masterBpm, nativeBpm, mult = 'auto') {
   return Math.min(RATE_MAX, Math.max(RATE_MIN, (masterBpm * syncOctave(masterBpm, nativeBpm, mult)) / nativeBpm));
 }
 
-/** The playing rate: base with the momentary nudge (hold = -1 | 0 | 1) and the platter bend applied. */
-function effectiveRate(baseRate, nudgeHold = 0, bend = 0) {
-  return baseRate * (1 + NUDGE_PCT * Math.sign(nudgeHold || 0) + (Number.isFinite(bend) ? bend : 0));
+/**
+ * The playing rate: base with the momentary nudge (hold = -1 | 0 | 1) applied and the platter
+ * bend added. A bend stays inside the deck's tempo range (±rangePct% around 1) - but never moves
+ * a base that is already outside it (a synced deck far from its own tempo), only stops there.
+ */
+function effectiveRate(baseRate, nudgeHold = 0, bend = 0, rangePct = Infinity) {
+  const nudged = baseRate * (1 + NUDGE_PCT * Math.sign(nudgeHold || 0));
+  if (!Number.isFinite(bend) || bend === 0) return nudged;
+  const r = Number.isFinite(rangePct) && rangePct > 0 ? rangePct / 100 : Infinity;
+  return Math.min(Math.max(nudged, 1 + r), Math.max(Math.min(nudged, 1 - r), nudged + bend));
 }
 
 /**
@@ -161,9 +191,32 @@ function servoTrim(errSec) {
   return -Math.min(SERVO_MAX, Math.max(-SERVO_MAX, errSec / SERVO_CLOSE_SEC));
 }
 
+// How far past a lap point a playhead may be and still wrap at once: a 32nd of a beat.
+const LOOP_WRAP_SLACK_BEATS = 1 / 32;
+
+/**
+ * Where a song deck's loop next wraps: { atSec, toSec } - the playhead position (song seconds)
+ * at which to seek, and where to seek to.
+ *
+ * Inside the loop that is its end, back to its start. A playhead already PAST the end (a loop
+ * halved after the playhead left its new first half) waits for the next lap point - the start
+ * plus a whole number of loop lengths - so the jump lands in phase with the loop instead of
+ * mid-beat. Within LOOP_WRAP_SLACK_BEATS after a lap point it wraps at once, landing that far
+ * into the loop so the phase still holds.
+ */
+function loopWrap(posSec, from, to, beatSec) {
+  const span = to - from;
+  if (!(span > 0) || !(posSec > to)) return { atSec: to, toSec: from };
+  let laps = Math.floor((posSec - from) / span);
+  let past = posSec - (from + laps * span);
+  if (span - past < 1e-9) { laps += 1; past = 0; } // on a lap point, to rounding
+  if (past <= LOOP_WRAP_SLACK_BEATS * (beatSec > 0 ? beatSec : 0)) return { atSec: posSec, toSec: from + past };
+  return { atSec: from + (laps + 1) * span, toSec: from };
+}
+
 const exported = {
-  syncRate, syncOctave, effectiveRate, bendStep, snapToGrid, alignToGrid, gridPhase, servoTrim,
-  NUDGE_PCT, BEND_SENS, BEND_MAX, BEND_ATTACK_SEC, BEND_RELEASE_SEC,
+  syncRate, syncOctave, effectiveRate, bendStep, bendForSpeed, snapToGrid, alignToGrid, gridPhase, servoTrim, loopWrap,
+  NUDGE_PCT, JOG_TICKS_PER_REV, JOG_TICKS_BY_DEVICE, ticksPerRevForDevice, PLATTER_REV_PER_SEC, BEND_MIN_SPEED, BEND_PER_SPEED, BEND_MAX,
   RATE_MIN, RATE_MAX, SERVO_HARD_SEC, BEATS_PER_CYCLE,
 };
 

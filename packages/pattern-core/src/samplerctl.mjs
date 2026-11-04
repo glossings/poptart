@@ -33,6 +33,9 @@ export const SAMPLER_CTL_DEFAULTS = {
   stretch: 1,
 };
 
+// The short names of the envelope stages, read as the stages they stand for.
+const SHORT_NAMES = { att: 'attack', dec: 'decay', sus: 'sustain', rel: 'release' };
+
 // Controls whose bare call means 1 (`.loop()` loops) - an empty argument list is a value for these.
 const BARE_IS_ONE = new Set(['loop', 'loopwrap', 'loopdir']);
 
@@ -117,9 +120,10 @@ function locate(code, label, ctx) {
   const block = blocks.find((b) => b.label === label);
   if (!block) return null;
   const isCode = ownCode(mask, block);
-  const names = [...Object.keys(SAMPLER_CTL_DEFAULTS), 'adsr', 'fit'];
+  const names = [...Object.keys(SAMPLER_CTL_DEFAULTS), ...Object.keys(SHORT_NAMES), 'adsr', 'fit'];
   const found = {};
-  for (const call of callsIn(code, isCode, block, names)) {
+  for (const raw of callsIn(code, isCode, block, names)) {
+    const call = SHORT_NAMES[raw.name] ? { ...raw, name: SHORT_NAMES[raw.name] } : raw;
     const args = argSpans(code, isCode, call.open, call.close);
     if (call.name === 'adsr') {
       ENVELOPE_STAGES.forEach((stage, k) => {

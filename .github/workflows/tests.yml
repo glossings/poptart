@@ -15,7 +15,7 @@
 # run, so the last step fails the job if any test skipped for want of sclang or scsynth.
 #
 # poptart's own scsynth extensions - its devices (PoptartDevices) and the decks' keylock
-# (PoptartPitchShift) - are committed for macOS only. On Windows the test job builds them first,
+# (PoptartKeylock) - are committed for macOS only. On Windows the test job builds them first,
 # with the runner's LLVM, so the engine suite tests the build this commit would ship (release.yml
 # builds them the same way for the installer). Linux has no app, but SuperCollider runs there, so
 # the `extensions-linux` job builds them too and proves them through a real scsynth. Neither
@@ -100,7 +100,7 @@ jobs:
         run: |
           clang++ --version
           node packages/web-engine/build/devices/native.mjs
-          node packages/osc-engine/native/rubberband/build.mjs
+          node packages/osc-engine/native/keylock/build.mjs
           sh packages/osc-engine/native/check-plugins.sh
           git diff --exit-code packages/osc-engine/native/devices/devices.json
 
@@ -228,7 +228,7 @@ jobs:
         run: |
           clang++ --version
           node packages/web-engine/build/devices/native.mjs
-          node packages/osc-engine/native/rubberband/build.mjs
+          node packages/osc-engine/native/keylock/build.mjs
           sh packages/osc-engine/native/check-plugins.sh
           git diff --exit-code packages/osc-engine/native/devices/devices.json
       # Where the distribution's scsynth looks without being told (~/.local/share/SuperCollider/

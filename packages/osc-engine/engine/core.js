@@ -126,7 +126,6 @@ class Engine {
     this.grainMaxOverlap = 128;
     this.bendPollHz = 100;
     this.bendTracks = new Map();
-    this.rbDelay = 0;
     // Made at boot (see boot()): the shared buses and groups every track uses.
     this.silentBus = null;
     this.trashBus = null;

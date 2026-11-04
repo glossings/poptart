@@ -157,7 +157,7 @@ What changed in each release, newest first.
 
 ## 0.1.0 - 2026-09-22
 
-First release. Poptart is like a livecoding environment, a CDJ, and a DAW had a baby.
+First release. Poptart is like a livecoding environment, DJ decks, and a DAW had a baby.
 
 - **Your real VST plugins** as instruments and effects, with their knobs addressed by name and
   modulated live from inside the audio engine via hand-drawn LFOs and envelopes.

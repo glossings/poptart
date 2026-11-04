@@ -54,9 +54,9 @@ const TRACKED = [
   'packages/osc-engine/native/build.sh',
   'packages/osc-engine/native/helper.swift',
   'packages/osc-engine/native/bin/helper',
-  'packages/osc-engine/native/rubberband/Shift.cpp',
-  'packages/osc-engine/native/rubberband/Shift.sc',
-  'packages/osc-engine/native/rubberband/bin/Shift.scx',
+  'packages/osc-engine/native/keylock/Shift.cpp',
+  'packages/osc-engine/native/keylock/Shift.sc',
+  'packages/osc-engine/native/keylock/bin/Shift.scx',
   'packages/pattern-core/package.json',
   'packages/pattern-core/src/index.mjs',
   'packages/web-engine/package.json',
@@ -160,10 +160,10 @@ test('tests, launcher-only files and native sources stay behind; built helpers s
   assert.ok(!has('packages/desktop/build'));
   assert.ok(!has('node_modules/@poptart/osc-engine/native/build.sh'));
   assert.ok(!has('node_modules/@poptart/osc-engine/native/helper.swift'));
-  assert.ok(!has('node_modules/@poptart/osc-engine/native/rubberband/Shift.cpp'));
+  assert.ok(!has('node_modules/@poptart/osc-engine/native/keylock/Shift.cpp'));
   assert.ok(has('node_modules/@poptart/osc-engine/native/bin/helper'));
-  assert.ok(has('node_modules/@poptart/osc-engine/native/rubberband/bin/Shift.scx'));
-  assert.ok(has('node_modules/@poptart/osc-engine/native/rubberband/Shift.sc'), 'the class file is installed beside the .scx');
+  assert.ok(has('node_modules/@poptart/osc-engine/native/keylock/bin/Shift.scx'));
+  assert.ok(has('node_modules/@poptart/osc-engine/native/keylock/Shift.sc'), 'the class file is installed beside the .scx');
 });
 
 test('every file the shell requires is on the list of files staged from this folder', () => {
@@ -296,29 +296,29 @@ test('the Windows and Linux extensions CI built ship beside the committed macOS 
   const root = fakeRepo();
   // Ignored by git, so in neither listing: what CI's build step leaves in the checkout.
   write(root, 'packages/osc-engine/native/devices/bin/win32-x64/PoptartDevices.scx', 'MZ devices');
-  write(root, 'packages/osc-engine/native/rubberband/bin/win32-x64/PoptartPitchShift.scx', 'MZ keylock');
-  write(root, 'packages/osc-engine/native/rubberband/bin/linux-x64/PoptartPitchShift.so', 'ELF keylock');
-  write(root, 'packages/osc-engine/native/rubberband/bin/not-a-platform/junk', 'left behind');
+  write(root, 'packages/osc-engine/native/keylock/bin/win32-x64/PoptartKeylock.scx', 'MZ keylock');
+  write(root, 'packages/osc-engine/native/keylock/bin/linux-x64/PoptartKeylock.so', 'ELF keylock');
+  write(root, 'packages/osc-engine/native/keylock/bin/not-a-platform/junk', 'left behind');
   const { has, result } = run(root, { requireBuilt: true, platform: 'win32', arch: 'x64' });
   assert.ok(has('node_modules/@poptart/osc-engine/native/devices/bin/win32-x64/PoptartDevices.scx'));
-  assert.ok(has('node_modules/@poptart/osc-engine/native/rubberband/bin/win32-x64/PoptartPitchShift.scx'));
-  assert.ok(has('node_modules/@poptart/osc-engine/native/rubberband/bin/linux-x64/PoptartPitchShift.so'));
-  assert.ok(!has('node_modules/@poptart/osc-engine/native/rubberband/bin/not-a-platform/junk'));
+  assert.ok(has('node_modules/@poptart/osc-engine/native/keylock/bin/win32-x64/PoptartKeylock.scx'));
+  assert.ok(has('node_modules/@poptart/osc-engine/native/keylock/bin/linux-x64/PoptartKeylock.so'));
+  assert.ok(!has('node_modules/@poptart/osc-engine/native/keylock/bin/not-a-platform/junk'));
   // The committed macOS build is where it always was.
-  assert.ok(has('node_modules/@poptart/osc-engine/native/rubberband/bin/Shift.scx'));
+  assert.ok(has('node_modules/@poptart/osc-engine/native/keylock/bin/Shift.scx'));
   assert.strictEqual(result.built.length, 3);
   assert.deepStrictEqual(result.untracked, []);
 });
 
 test('a Windows build that must carry the extensions stops when one was not built; a Mac build does not', () => {
   const root = fakeRepo();
-  write(root, 'packages/osc-engine/native/rubberband/bin/win32-x64/PoptartPitchShift.scx', 'MZ keylock');
+  write(root, 'packages/osc-engine/native/keylock/bin/win32-x64/PoptartKeylock.scx', 'MZ keylock');
   assert.throws(
     () => run(root, { requireBuilt: true, platform: 'win32', arch: 'x64' }),
     /native\/devices\/bin\/win32-x64\/PoptartDevices\.scx is not there/,
   );
   // Not asked to: stages what there is, as a developer's `npm run pack` does.
-  assert.ok(run(root, { platform: 'win32', arch: 'x64' }).has('node_modules/@poptart/osc-engine/native/rubberband/bin/win32-x64/PoptartPitchShift.scx'));
+  assert.ok(run(root, { platform: 'win32', arch: 'x64' }).has('node_modules/@poptart/osc-engine/native/keylock/bin/win32-x64/PoptartKeylock.scx'));
   // macOS's are committed and staged from git, so there is nothing to require.
   assert.doesNotThrow(() => run(root, { requireBuilt: true, platform: 'darwin', arch: 'arm64' }));
 });

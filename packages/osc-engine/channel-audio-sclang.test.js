@@ -44,7 +44,7 @@ const at = (name) => SCENARIOS.indexOf(name) * 4;
 function harness(dir, osc) {
   const lifted = liftedSource();
   let text = `${lifted.functions}\n${lifted.boot}\n`.replaceAll('\\PoptartDevice.asClass', 'nil')
-    .replaceAll('\\PoptartSpectrum.asClass', 'nil').replaceAll('\\PoptartPitchShift.asClass', 'nil');
+    .replaceAll('\\PoptartSpectrum.asClass', 'nil').replaceAll('\\PoptartKeylock.asClass', 'nil');
   text = text.replace(/\}\)\.add;/g, '}) !? { |d| defs.add(d) };');
   let node = 2000;
   let abus = 512;
@@ -169,7 +169,7 @@ var cueOffset = nil;
 var lfoDefName = { |shape, audio| ("poptart_lfo_" ++ shape ++ if (audio) { "_ar" } { "" }).asSymbol };
 var trackDefName = { |key| ("poptart_track_" ++ key).asSymbol };
 var bendPollHz = 100, grainMaxOverlap = 128, mixBandFreqs;
-var chanIn, djIsolator, buildHeadDef, buildFxDef, buildXoverDef, buildTrackDef, buildDjDef, buildTapDef, buildBassMonoDef;
+var chanIn, djIsolator, djFilterCoefs, djResDefault, buildHeadDef, buildFxDef, buildXoverDef, buildTrackDef, buildDjDef, buildTapDef, buildBassMonoDef;
 var buildMixDef, mixBank, exprSynthDef, viewTap = ();
 var defs = List.new, dir = ${JSON.stringify(dir)};
 ${text}

@@ -23,7 +23,7 @@
  * language, and the difference is the whole reason this list is written out.
  */
 export const BUILDER_NAMES = Object.freeze(['Signal', 'n', 'note', 'mini', 's', 'se', 'sr', 'sp', 'say', 'synth', 'sine', 'saw', 'isaw', 'tri', 'square', 'rand', 'perlin', 'lfo', 'env', 'dur', 'midicc', 'midikeys', 'osc', 'macro', 'choose', 'cat', 'seq', 'irand', 'midi', 'audio', 'input', 'group', 'copy', 'pcopy', 'pianoroll', 'clips', 'auto',
-  'i', 'begin', 'end', 'loop', 'loopwrap', 'loopdir', 'speed', 'flip', 'stretch', 'fit', 'fitmode', 'slice', 'splice', 'splicemode', 'attack', 'decay', 'sustain', 'release', 'envscale', 'grain', 'vel', 'clip', 'slide', 'octave', 'nudge', 'swing', 'swinggrid', 'swingvel',
+  'i', 'begin', 'end', 'loop', 'loopwrap', 'loopdir', 'speed', 'flip', 'stretch', 'stretchmode', 'fit', 'fitmode', 'slice', 'splice', 'splicemode', 'attack', 'decay', 'sustain', 'release', 'att', 'dec', 'sus', 'rel', 'envscale', 'grain', 'vel', 'clip', 'slide', 'octave', 'nudge', 'swing', 'swinggrid', 'swingvel',
   'add', 'sub', 'mul', 'div', 'mod', 'set',
   // Structure-giving transforms at the head of a chain, on the default note: struct("1 ~ 1 1").s("bd").
   'struct', 'hold', 'seg', 'segment', 'chord',

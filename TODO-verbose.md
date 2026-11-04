@@ -192,50 +192,12 @@ entry here when its TODO.md line goes.
 [ ] LUFS metering in the ctrl+g console — short-term and integrated, alongside the existing
     stereo/spectral views.
 
-[ ] Keylock on Linux/Windows: the decks' keylock is the PoptartPitchShift UGen (Rubber Band Live
-    Shifter, packages/osc-engine/native/rubberband/) and only the macOS universal .scx is built
-    and committed; elsewhere extensions.js finds no prebuilt, logs it at boot, and the def falls
-    back to the in-graph SOLA stretcher (works, audibly rougher on dense mixes). The code is
-    portable - the work is a build per platform, and it has to be built AND run on that platform
-    (no cross-compiling scsynth plugins), so each needs a machine or a CI job:
-    - Linux: a build.sh branch - g++ -shared -fPIC, drop -framework Accelerate and let
-      RubberBandSingle.cpp use its built-in FFT (it does so automatically off Apple), define
-      SC_LINUX instead of SC_DARWIN; one .scx per arch (x86_64, aarch64). extensions.js already
-      knows ~/.local/share/SuperCollider/Extensions. ~half a day with a box to test on.
-    - Windows: the .scx is a DLL from MSVC (mingw builds generally don't load in scsynth),
-      SC_WIN32 in the headers, Rubber Band's single-file build supports MSVC; Extensions path
-      is %LOCALAPPDATA%\SuperCollider\Extensions (extensions.js has it). A day-ish, mostly
-      toolchain; keep the .scx name so the class file is shared.
-    - both: keylock-sclang.test.js already branches on HAS-RB, so it verifies whichever path is
-      installed; add a build-matrix job that commits (or releases) the artifacts rather than
-      asking users for a compiler - see the header comment in build.sh for why. The same job
-      should build the poptart-link helper (see its own entry below), which needs the same
-      per-platform machines.
-
-[ ] Swap Rubber Band out of the keylock UGen for Signalsmith Stretch. Rubber Band is GPL (or a
-    paid license from Breakfast Quay), and it and Ableton Link are the only GPL code Poptart
-    itself compiles - everything else the app links is MIT, and SuperCollider runs as its own
-    process. Signalsmith Stretch is MIT, is already vendored and pinned for the browser build's
-    Shift device, and is a single header, so this is a bounded port of PoptartPitchShift: same
-    player, same delay probe (its latency differs, and the probe reports whatever it is), same
-    keylock-sclang.test.js. Link has no permissive stand-in; that one is a license from Ableton
-    or nothing.
-
-[ ] Keylock control lag - uniform-latency graph option: with key on, a deck's controls (nudge,
-    jog, cue jump, pause/resume) take effect ~60 ms after the gesture - the pitch shifter's
-    pipeline (~rbDelay, probed at boot). The beat grid and position report are already
-    compensated, so this is reaction time only, not an offset between decks, and it can't be
-    removed: any phase-vocoder keylock needs that look-ahead. What CAN change is the asymmetry:
-    today a keylocked deck reacts 60 ms slower than a repitched one, and toggling key changes
-    how a deck feels. The option, to try only if that asymmetry turns out to bother in a real
-    mix, is a uniform-latency processing graph - every song player carries the same pipeline
-    constant whether or not the shifter is in the path (the repitch def gets a DelayN of
-    ~rbDelay and the same early-spawn handling in songStart, so its grid and report stay
-    compensated exactly as the keylock player's are). Decks then match each other and key
-    becomes a pure sound change. The cost is real - the repitched deck gives up 60 ms of
-    responsiveness it didn't have to - which is why it isn't the default. Plausibly how
-    commercial DJ software ends up uniform (one fixed graph per deck), but that's a guess about
-    closed products, not a spec.
+[ ] Keylock on Linux/Windows: the decks' keylock is the PoptartKeylock UGen
+    (packages/osc-engine/native/keylock/), and only the macOS universal .scx is committed;
+    elsewhere extensions.js finds no prebuilt, logs it at boot, and the def falls back to the
+    in-graph SOLA stretcher (works, audibly rougher on dense mixes). The UGen is poptart's own code
+    and nothing else, built by native/keylock/build.mjs with the devices' toolchain; CI builds it
+    on Windows and Linux (tests.yml, release.yml) and check-plugins.sh checks what it built.
 
 [ ] Songs - deferred oddments: complete-mix with a song-ONLY deck b (the promote guard wants
     schedulers today); end-of-file stop is a Node-side timer (the Phasor would wrap and replay
@@ -309,7 +271,7 @@ entry here when its TODO.md line goes.
 
     The command is `.warp()` on a sampler chain, no argument: play this chain's files keylocked at
     the song tempo, against their own beatgrid. The engine half is machinery that exists - the song
-    deck already plays a long file at a tempo ratio through the PoptartPitchShift UGen, and
+    deck already plays a long file at a tempo ratio through the PoptartKeylock UGen, and
     song-detect.js's fitBeatGrid already gives a file its native tempo and downbeat. What is new is
     that the rate becomes a CURVE rather than one number: an envelope over the note, piecewise
     between the markers, so the audio between two of them is stretched by whatever it takes to get

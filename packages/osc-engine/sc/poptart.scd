@@ -184,6 +184,7 @@ var trackTempo = IdentityDictionary.new;
 var trackPlace = IdentityDictionary.new, trackBeats;
 var jsonEscape, toJson, replyOk, replyErr, pluginList, runScan, trackDefName, buildTrackDef, channelDefault;
 var djIsolator; // the DJ stage's 3-band EQ (see its definition above buildTrackDef)
+var djFilterCoefs, djResDefault; // the DJ filter's cutoffs, damping and gain, and its resonance's default (see buildDjDef)
 var buildHeadDef, buildFxDef, buildXoverDef, buildDjDef, buildTapDef, buildBassMonoDef; // the defs a track is made of (see sharedTrackDef)
 var chanIn, chanAudio, setChanAr; // a channel control read per sample when an audio-rate driver is on it (see chanIn)
 var djNode, stripTap, stripPost, bassMonoNode, trackPairs; // a track's optional stages (see djNode)
@@ -495,8 +496,15 @@ sharedTrackDef = {
 // big"), which every closure assigned at the top level counts toward. Nothing here runs yet.
 {
 // The DJ stage's 3-band isolator EQ (see the DJ stage in the track def): `in` split into
-// low / mid / high by a Linkwitz-Riley crossover tree at 250 Hz and 2.5 kHz, each band scaled by
-// its gain (0 = a kill, 1 = unity, 2 = +6 dB), summed back.
+// low / mid / high by a Linkwitz-Riley crossover tree at 280 Hz and 4600 Hz, each band scaled by
+// its gain, summed back.
+//
+// A band's control is a knob position, 0..2 (1 = center), and `gain` turns it into the band's
+// gain. On a 0..255 knob (position = value * 127.5): linear amplitude from a kill at 0 up
+// to unity at 124, with the bottom 10 steps on a squared curve (gain = p^2 / 1240, meeting the
+// line p / 124 at 10); exactly unity from 124 to 130, so a knob near center is flat; linear from
+// unity at 130 to +6 dB (10^0.3) at 255. The law lives here, in the engine, so a controller, the
+// on-screen knobs and code all get it.
 //
 // A TREE of LR4 crossovers, not a subtraction. The earlier isolator pulled the low and high
 // bands out with filters and took the mid as `in - low - high`, which sums back exactly at
@@ -507,17 +515,22 @@ sharedTrackDef = {
 //
 // An LR4 low/high pair (two cascaded 2-pole Butterworths each) sums to an all-pass, so the
 // bands rebuild the input at flat magnitude and a band at 0 is gone. The low band also runs
-// through the 2.5 kHz crossover's all-pass (its LR4 pair, summed), so the three bands carry the
-// same phase and sum flat. At 0: 50 Hz -56 dB, 80 Hz -40 dB; nothing boosts anywhere.
+// through the 4600 Hz crossover's all-pass (its LR4 pair, summed), so the three bands carry the
+// same phase and sum flat. Low at 0: 40 Hz -68 dB, 80 Hz -44 dB; nothing boosts anywhere.
 //
 // Flat, but phase-shifted, so at exact neutral the EQ is crossfaded OUT and an untouched track
 // is bit-exact. The 50ms crossfade dips around the crossovers for its duration, on the first
 // touch and on a reset.
-djIsolator = { |in, lo, mid, hi|
+djIsolator = { |in, loKnob, midKnob, hiKnob|
+    var gain = { |v|
+        var p = v * 127.5, b = p.min(124);
+        (b / 124).min(b * b / 1240) + ((p - 130).max(0) * (10 ** 0.3 - 1 / 125))
+    };
+    var lo = gain.(loKnob), mid = gain.(midKnob), hi = gain.(hiKnob);
     var xo = { |sig, f| [LPF.ar(LPF.ar(sig, f), f), HPF.ar(HPF.ar(sig, f), f)] };
-    var split = xo.(in, 250);
-    var upper = xo.(split[1], 2500);
-    var low = xo.(split[0], 2500).sum; // the 2.5 kHz all-pass, to keep the low in phase
+    var split = xo.(in, 280);
+    var upper = xo.(split[1], 4600);
+    var low = xo.(split[0], 4600).sum; // the 4600 Hz all-pass, to keep the low in phase
     var wet = (low * lo) + (upper[0] * mid) + (upper[1] * hi);
     var on = ((lo - 1).abs + (mid - 1).abs + (hi - 1).abs) > 0.001;
     LinXFade2.ar(in, wet, (on * 2 - 1).lag(0.05));
@@ -805,13 +818,45 @@ buildTrackDef = { |key|
 // DJ FX unit's send and the direct output after them - made the first time any of it is touched
 // (see djNode), and from then on the track's direct output instead of the strip's.
 //
-// The filter: one knob (djf), negative a lowpass closing toward 20 Hz, positive a highpass opening
-// toward 18 kHz, centered off - crossfaded in only away from center so an untouched knob is
-// bit-exact. Resonance is its own control (djres). The DJ FX unit's insert is a send taken here,
-// after trim/EQ/filter and pre-fader, with the direct path turned down by the same amount - the
-// whole channel through the unit at 1, untouched at 0.
+// The filter: one knob (djf), negative a lowpass, positive a highpass, centered off - crossfaded
+// in only away from center so an untouched knob is bit-exact (see djFilterCoefs). Resonance is
+// its own control (djres). The DJ FX unit's insert is a send taken here, after trim/EQ/filter and
+// pre-fader, with the direct path turned down by the same amount - the whole channel through the
+// unit at 1, untouched at 0.
+//
+// The filter's settings, [lowpass Hz, highpass Hz, lowpass damping, highpass damping (1/Q), output gain], for
+// the knob djv (-1..1), the resonance res (0..1) and the sample rate sr - numbers in, numbers out,
+// or UGens in, UGens out. The two are 2-pole filters in series.
+//
+// The knob's center, |djv| <= 0.016, is flat. Past it, x runs 0..1 to the end: the lowpass at
+// 100 + 25000(1 - x)^3 Hz (100 Hz full left), the highpass at 20 + 8200x^3 Hz (8.2 kHz full
+// right), each parked open (25.1 kHz, 20 Hz) while the other side is in use. Those cutoffs are an
+// analog design's, taken through the bilinear transform without prewarping (tan(pi f / sr) =
+// pi fc / sr), so the parked lowpass lands below Nyquist at any sample rate.
+//
+// Resonance: damping 0.5 + 0.5(1 - res/0.25)^2 up to res 0.25 (Q 1 at res 0, Q 2 at 0.25), then
+// 0.5 - 0.46(res - 0.25)/0.75 (Q 25 at res 1). The highpass's damping is held at
+// 2 clip((250 - hpHz)/180, 0, 1)^3 (Q 0.5 at 70 Hz and below, no floor from 250 Hz up), so
+// a low highpass never booms - the one resting at 20 Hz on the lowpass side included. The
+// lowpass resting open on the highpass side is a Butterworth (damping sqrt 2), with no peak.
+// Below damping 0.5 the output is scaled by 2 x the smaller damping, which holds the resonant
+// peak near +6 dB.
+djFilterCoefs = { |djv, res, sr|
+    var lpX = ((djv.neg - 0.016) / 0.984).clip(0, 1);
+    var hpX = ((djv - 0.016) / 0.984).clip(0, 1);
+    var lpHz = 100 + (25000 * (1 - lpX).cubed);
+    var hpHz = 20 + (8200 * hpX.cubed);
+    var damp = 0.5 + (0.5 * (1 - (res * 4).min(1)).squared) - ((res - 0.25).max(0) * (0.46 / 0.75));
+    var hold = 2 * ((250 - hpHz) / 180).clip(0, 1).cubed;
+    var warp = pi / sr;
+    var lpDamp = damp + ((2.sqrt - damp) * djv.sign.max(0));
+    var hpDamp = damp.max(hold);
+    [(lpHz * warp).atan / warp, (hpHz * warp).atan / warp, lpDamp, hpDamp, (lpDamp.min(hpDamp) * 2).min(1)]
+};
+// The resonance's default: res 0.25, damping 0.5 (Q 2), on djFilterCoefs' mapping.
+djResDefault = { 0.25 };
 buildDjDef = {
-    SynthDef(\poptart_dj, { |in, ctl, trim = 1, eqlo = 1, eqmid = 1, eqhi = 1, djf = 0, djres = 0,
+    SynthDef(\poptart_dj, { |in, ctl, trim = 1, eqlo = 1, eqmid = 1, eqhi = 1, djf = 0,
         cue = 0, cueBus, mdeck = -1, meterBus, fxOut, fxSend = 0|
         var c = In.kr(ctl, 6);
         var faderAmt = c[0], mainAmt = c[1], deckAmt = c[2], out = c[4], pairs = c[5];
@@ -822,12 +867,11 @@ buildDjDef = {
         var live = djIsolator.(In.ar(in, 2) * trim.lag(0.08).clip(0, 4),
             eqlo.lag(0.08).clip(0, 2), eqmid.lag(0.08).clip(0, 2), eqhi.lag(0.08).clip(0, 2));
         var djv = djf.lag(0.15).clip(-1, 1);
-        var djLpf = (18000 * (900 ** djv.min(0))).clip(20, 18000); // -1 -> 20 Hz, 0 -> open
-        var djHpf = (20 * (900 ** djv.max(0))).clip(20, 18000); // 0 -> open, 1 -> 18 kHz
-        var djq = 1 - (0.62 * djres.lag(0.08).clip(0, 1));
-        var djWet = RHPF.ar(RLPF.ar(live, djLpf, djq), djHpf, djq);
+        // The resonance, defaulting to djResDefault (a control of its own: an arg's default is a literal).
+        var dj = djFilterCoefs.(djv, \djres.kr(djResDefault.()).lag(0.08).clip(0, 1), SampleRate.ir);
+        var djWet = BHiPass.ar(BLowPass.ar(live, dj[0], dj[2]), dj[1], dj[3]) * dj[4];
         var fxAmt = fxSend.lag(0.08).clip(0, 1);
-        live = LinXFade2.ar(live, djWet, ((djv.abs > 0.005) * 2 - 1).lag(0.05));
+        live = LinXFade2.ar(live, djWet, ((djv.abs > 0.016) * 2 - 1).lag(0.05));
         // The cue: on the cue switch, and in full while the track is monitored.
         Out.ar(cueBus, live * cue.max(1 - mainAmt).lag(0.05).clip(0, 1));
         Out.ar(meterBus + (mdeck.max(0) * 2), live * (mdeck > -0.5));
@@ -867,7 +911,7 @@ buildBassMonoDef = {
 
 // Neutral value a channel control (pseudo-slot -1) snaps back to when its modulator is cleared:
 // unity gain in and out, center pan, first output pair - and for the DJ stage, unity
-// trim/bands/fader/deck (djf's neutral is 0, the filter's center detent; djres's is 0, no resonance).
+// trim/bands/fader/deck (djf's neutral is 0, the filter's center detent; djres's is djResDefault, Q 2).
 channelDefault = { |name|
     // bendrange is the one control whose neutral is neither 0 nor 1: it is how many semitones a
     // full MIDI pitch bend is worth, so clearing a modulator off it has to leave the 2 nearly every
@@ -883,6 +927,7 @@ channelDefault = { |name|
     { name == "bendrange" } { 2 }
     { name == "grainsize" } { 0.08 }
     { name == "grainrate" } { 20 }
+    { name == "djres" } { djResDefault.() }
     // A branch's level is unity until something sets it (a branch pan falls through to 0,
     // center, below), and a crossover rests at 1 kHz, as a position on its control (route.mjs).
     { name.asString.findRegexp("^rl[0-9]+$").notEmpty } { 1 }
@@ -2586,13 +2631,20 @@ server.waitForBoot {
     // conflicting doneActions. All write to the track's private input bus (see buildTrackDef).
     // begin/end are normalized 0..1 positions; rate is signed (negative = reversed); dur is the
     // precomputed natural length in seconds (Node does that math - it knows file duration, fit
-    // and stretch). Plain defs repitch via BufRd index speed; warp defs (stretch != 1) keep
-    // pitch and time independent via Warp1 granulation - at the same level as the plain ones,
-    // which takes an explicit correction: Warp1 sums `overlaps` Hann-windowed copies, and Hann
-    // overlap-added at hop = window/overlaps adds up to overlaps/2, so at 8 overlaps a warp def
-    // ran 4x (+12 dB) hotter than the plain def beside it (fixed 2026-08-26 - patterns that had
-    // a .gain() on a .stretch() to tame it will want it taken back off). `2 / overlaps` is that
-    // factor exactly back off. These keep windowRandRatio at 0.1, unlike the keylock player
+    // and stretch). Plain defs repitch via BufRd index speed; stretched ones (stretch != 1) keep
+    // pitch and time independent - the clean defs (the default) through the keylock's stretcher,
+    // the warp defs (.stretchmode("grain")) via Warp1 granulation - at the same level as the plain ones,
+    // which takes an explicit correction: Warp1 sums `overlaps` Hann-windowed copies. Copies that
+    // add in phase (DC, the lowest bass) total overlaps/2, which `2 / overlaps` would undo, but
+    // on real material they add at unrelated phases and total sqrt(3 * overlaps / 8) instead,
+    // so that factor left the voice 7 to 12 dB under the plain def (measured 2026-11-04 on a
+    // mixed track, a bass, a pad and two vocals, stretched 0.5 to 4: -8.3 dB A-weighted on
+    // average, +-2 dB between files and stretch ratios; tonal material swings most, a stretch
+    // near 1 is the one place the copies stay in phase and it plays about 8 dB hotter than
+    // that). The level is 0.65 at 8 overlaps: sqrt(8 / (3 * overlaps)) for the unrelated phases,
+    // times 1.13 fitted to those files (A-weighted mean within 0.1 dB of the plain def's). A
+    // grain shorter than a sample (a one-shot under 100 ms) is not covered: its level follows
+    // how much of a window it fills. These keep windowRandRatio at 0.1, unlike the keylock player
     // below: their grains are pitch-shifted (freqScale is the rate), so they do not line up the
     // way a transparent keylock's do, and a little scatter is what keeps a stretch from combing. atk/dec/rel are the amplitude ADSR times
     // in seconds, already scaled by .envscale() on the Node side; sus is a 0..1 level. All default to
@@ -2742,54 +2794,105 @@ server.waitForBoot {
             var env = EnvGen.ar(Env.adsr(atkS, decS, sus, relS), gate, doneAction: 2);
             OffsetOut.ar(out, toStereo.(sig) * env * amp);
         }).add;
-        SynthDef(("poptart_sample_warp_" ++ nc).asSymbol, { |out, buf, begin = 0, end = 1, rate = 1, dur = 1, gate = 1, amp = 1, atk = 0, dec = 0, sus = 1, rel = 0, bend = 0|
-            var overlaps = 8;
-            var from = Select.kr(rate < 0, [begin, end]);
-            var to = Select.kr(rate < 0, [end, begin]);
-            // Here bend goes on the freqScale and NOT on the pointer, which is the whole point of a
-            // warp voice: the grains are resampled while the playhead keeps its own pace, so a
-            // stretched sample bends in pitch alone and still ends where the event ends.
-            var sig = Warp1.ar(nc, buf, Line.kr(from, to, dur), rate.abs * bend.midiratio, 0.1, -1, overlaps, 0.1, 2)
-                * (2 / overlaps);
-            // atk/dec/rel are seconds, so an attack longer than the note never reaches 1 before it
-            // ends. A gate held open for exactly dur runs attack->decay->sustain across playback,
-            // then releases when the region ends; a cut event (gate->0 early) releases sooner. Tiny
-            // floors keep the fade-in/out declicked. Audio rate like the one-shot's, but with no
-            // edge case: every grain here fades in under its own window wherever it is cut from,
-            // so the floor is the same half millisecond everywhere.
-            var atkS = max(0.0005, atk), decS = max(0, dec), relS = max(0.015, rel);
-            var noteGate = gate * (Line.kr(0, 1, dur) < 1);
-            var env = EnvGen.ar(Env.adsr(atkS, decS, sus, relS), noteGate, doneAction: 2);
-            OffsetOut.ar(out, toStereo.(sig) * env * amp);
-        }).add;
-        // Timestretched loop - same loopLo/loopHi/entry/pingpong contract as the plain loop above,
-        // on Warp1's normalized 0..1 pointer. The warp defs are exempt from the float32 precision
-        // treatment: a normalized pointer's resolution is ~a frame on even a 10M-frame file, and it
-        // only places grain STARTS - 46ms Hann grains with deliberate random scatter, whose own
-        // read phase Warp1 keeps internally - so a frame of pointer round-off never reaches the ear. The step comes from the begin..end window and its
-        // play time, which cancel down to "normalized units per second" - independent of where the
-        // loop bounds are, so a file-wrapping loop still moves at the rate .speed()/.fit() asked for.
-        SynthDef(("poptart_sample_warp_loop_" ++ nc).asSymbol, { |out, buf, begin = 0, end = 1, rate = 1, dur = 1, gate = 1, amp = 1, atk = 0, dec = 0, sus = 1, rel = 0, loopLo = 0, loopHi = 1, entry = 0, pingpong = 0, bend = 0|
-            var overlaps = 8;
-            var span = max(0.001, end - begin);
-            var step = (span / max(0.001, dur)) * rate.sign / ControlRate.ir;
-            var lo = loopLo, hi = max(loopLo + 0.001, loopHi);
-            var loopSpan = hi - lo;
-            var from = entry.clip(lo, hi);
-            // Same as the plain loop: resetPos never fires, so entry is added in and wrapped.
-            var walk = (Phasor.kr(0, step, 0, loopSpan, 0) + (from - lo)) % loopSpan;
-            var bounceFrom = Select.kr(rate < 0, [from - lo, (2 * loopSpan) - (from - lo)]);
-            var bouncePh = (Phasor.kr(0, step.abs, 0, 2 * loopSpan, 0) + bounceFrom) % (2 * loopSpan);
-            var bounced = lo + loopSpan - absdif(bouncePh, loopSpan);
-            var ptr = Select.kr(pingpong, [lo + walk, bounced]);
-            // freqScale again, not the pointer: the loop keeps its length and bends in pitch.
-            var sig = Warp1.ar(nc, buf, ptr, rate.abs * bend.midiratio, 0.1, -1, overlaps, 0.1, 2) * (2 / overlaps);
-            // atk/dec/rel are seconds; sustain is held until the loop's gate-off, then released.
-            // Audio rate, and the windowed voices' half-millisecond floor (see the warp def above).
-            var atkS = max(0.0005, atk), decS = max(0, dec), relS = max(0.015, rel);
-            var env = EnvGen.ar(Env.adsr(atkS, decS, sus, relS), gate, doneAction: 2);
-            OffsetOut.ar(out, toStereo.(sig) * env * amp);
-        }).add;
+        // The grain voices (.stretchmode("grain")), under the warp_ names - and, on an engine
+        // without the keylock extension (PoptartStretch ships in it), under the clean_ names too,
+        // so "clean" plays as "grain" there, as a deck's keylock falls back to its SOLA player.
+        (if (\PoptartStretch.asClass.notNil) { ["warp_"] } { ["warp_", "clean_"] }).do { |kind|
+            SynthDef(("poptart_sample_" ++ kind ++ nc).asSymbol, { |out, buf, begin = 0, end = 1, rate = 1, dur = 1, gate = 1, amp = 1, atk = 0, dec = 0, sus = 1, rel = 0, bend = 0|
+                var overlaps = 8;
+                var from = Select.kr(rate < 0, [begin, end]);
+                var to = Select.kr(rate < 0, [end, begin]);
+                // Here bend goes on the freqScale and NOT on the pointer, which is the whole point of a
+                // warp voice: the grains are resampled while the playhead keeps its own pace, so a
+                // stretched sample bends in pitch alone and still ends where the event ends.
+                var sig = Warp1.ar(nc, buf, Line.kr(from, to, dur), rate.abs * bend.midiratio, 0.1, -1, overlaps, 0.1, 2)
+                    * 0.65;
+                // atk/dec/rel are seconds, so an attack longer than the note never reaches 1 before it
+                // ends. A gate held open for exactly dur runs attack->decay->sustain across playback,
+                // then releases when the region ends; a cut event (gate->0 early) releases sooner. Tiny
+                // floors keep the fade-in/out declicked. Audio rate like the one-shot's, but with no
+                // edge case: every grain here fades in under its own window wherever it is cut from,
+                // so the floor is the same half millisecond everywhere.
+                var atkS = max(0.0005, atk), decS = max(0, dec), relS = max(0.015, rel);
+                var noteGate = gate * (Line.kr(0, 1, dur) < 1);
+                var env = EnvGen.ar(Env.adsr(atkS, decS, sus, relS), noteGate, doneAction: 2);
+                OffsetOut.ar(out, toStereo.(sig) * env * amp);
+            }).add;
+            // Timestretched loop - same loopLo/loopHi/entry/pingpong contract as the plain loop above,
+            // on Warp1's normalized 0..1 pointer. The warp defs are exempt from the float32 precision
+            // treatment: a normalized pointer's resolution is ~a frame on even a 10M-frame file, and it
+            // only places grain STARTS - 46ms Hann grains with deliberate random scatter, whose own
+            // read phase Warp1 keeps internally - so a frame of pointer round-off never reaches the ear. The step comes from the begin..end window and its
+            // play time, which cancel down to "normalized units per second" - independent of where the
+            // loop bounds are, so a file-wrapping loop still moves at the rate .speed()/.fit() asked for.
+            SynthDef(("poptart_sample_" ++ kind ++ "loop_" ++ nc).asSymbol, { |out, buf, begin = 0, end = 1, rate = 1, dur = 1, gate = 1, amp = 1, atk = 0, dec = 0, sus = 1, rel = 0, loopLo = 0, loopHi = 1, entry = 0, pingpong = 0, bend = 0|
+                var overlaps = 8;
+                var span = max(0.001, end - begin);
+                var step = (span / max(0.001, dur)) * rate.sign / ControlRate.ir;
+                var lo = loopLo, hi = max(loopLo + 0.001, loopHi);
+                var loopSpan = hi - lo;
+                var from = entry.clip(lo, hi);
+                // Same as the plain loop: resetPos never fires, so entry is added in and wrapped.
+                var walk = (Phasor.kr(0, step, 0, loopSpan, 0) + (from - lo)) % loopSpan;
+                var bounceFrom = Select.kr(rate < 0, [from - lo, (2 * loopSpan) - (from - lo)]);
+                var bouncePh = (Phasor.kr(0, step.abs, 0, 2 * loopSpan, 0) + bounceFrom) % (2 * loopSpan);
+                var bounced = lo + loopSpan - absdif(bouncePh, loopSpan);
+                var ptr = Select.kr(pingpong, [lo + walk, bounced]);
+                // freqScale again, not the pointer: the loop keeps its length and bends in pitch.
+                var sig = Warp1.ar(nc, buf, ptr, rate.abs * bend.midiratio, 0.1, -1, overlaps, 0.1, 2) * 0.65;
+                // atk/dec/rel are seconds; sustain is held until the loop's gate-off, then released.
+                // Audio rate, and the windowed voices' half-millisecond floor (see the warp def above).
+                var atkS = max(0.0005, atk), decS = max(0, dec), relS = max(0.015, rel);
+                var env = EnvGen.ar(Env.adsr(atkS, decS, sus, relS), gate, doneAction: 2);
+                OffsetOut.ar(out, toStereo.(sig) * env * amp);
+            }).add;
+        };
+        // The clean voices (.stretchmode("clean"), the default): the window read through
+        // PoptartStretch, the DJ keylock's two-band stretcher (native/keylock - a phase vocoder
+        // below 1.9 kHz, WSOLA above it). The same contract as the warp defs: the playhead
+        // crosses begin..end in `dur` (so file seconds per second is the window over dur, signed
+        // as `rate` is), and |rate| is the pitch, times the bend, which is read live - a stretched
+        // sample bends in pitch alone and still ends where the event ends. Unlike Warp1, which
+        // plays every grain forwards whichever way its pointer walks, a negative rate reads the
+        // audio itself backwards, as the plain voice does. The stretcher reads the buffer itself
+        // and keeps its playhead in a double, so there is no pointer precision to lose on a long
+        // file, and it adds no latency. No level correction: it plays at the file's own level, as
+        // the plain voice does (above -0.1 dBFS its ceiling holds the peaks a stretch grows).
+        //
+        // The envelope and floors are the plain one-shot's, the attack's included: the stretcher
+        // starts at full level on the file's own audio, so a read from the file's first frame comes
+        // out as recorded and one from mid-waveform takes the half-millisecond declick. Past the
+        // window's end, under the release, it reads on as PlayBuf does.
+        if (\PoptartStretch.asClass.notNil) {
+            SynthDef(("poptart_sample_clean_" ++ nc).asSymbol, { |out, buf, begin = 0, end = 1, rate = 1, dur = 1, gate = 1, amp = 1, atk = 0, dec = 0, sus = 1, rel = 0, bend = 0|
+                var frames = BufFrames.ir(buf);
+                var startF = begin * frames, endF = max(begin * frames, (end * frames) - 1);
+                var from = Select.kr(rate < 0, [startF, endF]);
+                var speed = ((end - begin) * BufDur.ir(buf) / max(dur, 1e-6)) * Select.kr(rate < 0, [1, -1]);
+                var sig = \PoptartStretch.asClass.ar(nc, buf, speed, rate.abs * bend.midiratio, from, 0, 0, 0, 0);
+                var atEdge = ((from < 1) + (from > (frames - 2))).min(1);
+                var atkS = max((1 - atEdge) * 0.0005, atk), decS = max(0, dec), relS = max(0.015, rel);
+                var noteGate = gate * (Line.kr(0, 1, dur) < 1);
+                var env = EnvGen.ar(Env.adsr(atkS, decS, sus, relS), noteGate, doneAction: 2);
+                OffsetOut.ar(out, toStereo.(sig) * env * amp);
+            }).add;
+            // The loop: loopLo..loopHi entered at `entry` (Node's, as for the other loop defs), at
+            // the pace the window and dur give - so a file-wrapping loop moves at the rate
+            // .speed()/.fit() asked for. Each corner is the DJ deck loop's: the playhead jumps and
+            // the position it leaves fades out under the new one over 5 ms, on its sample; a
+            // ping-pong bounce turns the new position round at the edge.
+            SynthDef(("poptart_sample_clean_loop_" ++ nc).asSymbol, { |out, buf, begin = 0, end = 1, rate = 1, dur = 1, gate = 1, amp = 1, atk = 0, dec = 0, sus = 1, rel = 0, loopLo = 0, loopHi = 1, entry = 0, pingpong = 0, bend = 0|
+                var frames = BufFrames.ir(buf);
+                var lo = loopLo * frames, hi = max(lo + 1, loopHi * frames);
+                var from = (entry * frames).clip(lo, hi);
+                var speed = ((end - begin) * BufDur.ir(buf) / max(dur, 1e-6)) * Select.kr(rate < 0, [1, -1]);
+                var sig = \PoptartStretch.asClass.ar(nc, buf, speed, rate.abs * bend.midiratio, from, 1, lo, hi, pingpong);
+                var atEdge = ((from < 1) + (from > (frames - 2))).min(1);
+                var atkS = max((1 - atEdge) * 0.0005, atk), decS = max(0, dec), relS = max(0.015, rel);
+                var env = EnvGen.ar(Env.adsr(atkS, decS, sus, relS), gate, doneAction: 2);
+                OffsetOut.ar(out, toStereo.(sig) * env * amp);
+            }).add;
+        };
         // Granular voice (Sig#grain): the file read as a stream of short overlapping grains cut
         // from around a position, instead of one pass from it. One synth per event like the defs
         // above, so the ADSR here is the envelope of the whole cloud and the gate is the event's -
@@ -2857,7 +2960,10 @@ server.waitForBoot {
         // crossfader, cue, meters) applies to a real song exactly as to a pattern track. One
         // persistent synth per deck rather than per-event voices: it pauses (run), seeks
         // (t_seek/seekFrame - a reset position applies only on a trigger, so spawning mid-song
-        // passes t_seek: 1 with the entry frame), and dies on gate for a declicked stop. `run`
+        // passes t_seek: 1 with the entry frame), and dies on gate for a declicked stop. A seek -
+        // a cue jump or a loop's wrap - is a crossfade: two reads take turns, the new one fading
+        // in over 5 ms as the old one fades out, linearly, which is the browser's song reader's
+        // SONG_FADE_SEC. `run`
         // is lagged, so pause/resume is a tiny turntable-style slew instead of a click. PlayBuf
         // with loop 0 falls silent at EOF - Node schedules a pause at the song's end before that
         // (see server.js's song end timer; a self-gate is a deferred oddment).
@@ -2877,12 +2983,25 @@ server.waitForBoot {
             // such number out there. PlayBuf keeps its phase in a double inside the UGen, so the
             // step stays exact wherever in the file it is. (The one-shot sampler def above was the
             // same bug, found first - 2026-08-29.)
-            var sig = PlayBuf.ar(nc, buf, step, t_seek, seekFrame, loop: 0);
+            //
+            // Each seek flips which of the two reads is the new one and restarts the fade; at the
+            // spawn both start on the entry frame, so the first fade is between two copies of
+            // one read.
+            var flip = ToggleFF.kr(t_seek);
+            // Over a whole number of samples, as the browser counts it: round(5 ms) of them.
+            var sr = SampleRate.ir;
+            var fade = Sweep.ar(t_seek, sr / (0.005 * sr).round).min(1);
+            // Select, not arithmetic on `flip`: a control-rate factor is ramped across its block,
+            // which would fade the old read out in one block.
+            var gainA = Select.ar(flip, [1 - fade, fade]);
+            var sig = (PlayBuf.ar(nc, buf, step, t_seek * flip, seekFrame, loop: 0) * gainA)
+                + (PlayBuf.ar(nc, buf, step, t_seek * (1 - flip), seekFrame, loop: 0) * (1 - gainA));
             // ...and the Phasor stays, but only to REPORT the playhead below. Nothing reads audio
             // through it, so its float32 output costs at most a frame of accuracy (23us) on a
             // number the drift servo compares against Node's own model with a deadband.
             var idx = Phasor.ar(t_seek, step, 0, BufFrames.ir(buf), seekFrame);
-            var env = EnvGen.kr(Env.asr(0.005, 1, 0.05), gate, doneAction: 2);
+            // Linear, as the browser's start (SONG_FADE_SEC) and stop (SONG_RELEASE_SEC) are.
+            var env = EnvGen.kr(Env.asr(0.005, 1, 0.05, \lin), gate, doneAction: 2);
             // Position report for the drift servo (songs phase 4): the actual playhead in song
             // seconds, on the sample clock. sclang tags it with the track key and forwards it
             // to Node (see the songStart OSCdef), which compares against its own model and
@@ -2894,36 +3013,26 @@ server.waitForBoot {
         // the two are interchangeable and toggling keylock is a declicked player swap via
         // songStart. Two implementations, chosen at boot:
         //
-        //  - PoptartPitchShift (native/rubberband/, installed into the user's SC Extensions by
-        //    extensions.js): the repitched read goes through a Rubber Band Live Shifter at
-        //    1/rate, putting the pitch back - phase-vocoder quality, the way commercial "master
-        //    tempo" keylocks work. The shifter has a fixed pipeline delay (`delay`, in samples;
-        //    sclang measures it once at boot with a probe synth and passes it in), and the deck
-        //    hides it: the pointer runs `delay` samples AHEAD of what is heard - applied at seeks
-        //    only, so a rate change never jumps it - and songStart spawns this player `delay`
-        //    early with its pointer set back by as much, so the first real sample lands on time.
-        //    `run` follows the same pipeline: pausing mutes once the last real audio is out,
-        //    resuming unmutes once the first is - no lost tail, no held-sample DC.
+        //  - PoptartKeylock (native/keylock/, installed into the user's SC Extensions by
+        //    extensions.js): the song read at `rate` with its pitch held, by the same two-band
+        //    stretcher the browser runs (a phase vocoder below 1.9 kHz, WSOLA above it - see
+        //    web-engine/src/dsp/keylock.mjs). It reads the buffer itself and owns its playhead,
+        //    so it adds no latency: what is heard is where the Phasor says, as with the repitch
+        //    player. A seek crossfades over 5 ms inside the UGen, as the browser's does.
         //  - the in-graph SOLA player below, for an engine without the extension. A time-domain
         //    stretcher, audibly rougher on dense mixes, but it needs nothing installed.
-        if (\PoptartPitchShift.asClass.notNil) {
-            SynthDef(("poptart_songwarp_" ++ nc).asSymbol, { |out, buf, rate = 1, run = 1, amp = 1, gate = 1, t_seek = 0, seekFrame = 0, delay = 0, window = 0|
+        if (\PoptartKeylock.asClass.notNil) {
+            SynthDef(("poptart_songwarp_" ++ nc).asSymbol, { |out, buf, rate = 1, run = 1, amp = 1, gate = 1, t_seek = 0, seekFrame = 0|
                 var brs = BufRateScale.ir(buf), frames = BufFrames.ir(buf), bufSr = BufSampleRate.ir(buf);
                 var rateL = rate.lag(0.05), runL = run.lag(0.02);
                 var step = rateL * brs * runL;
-                var start = seekFrame + (delay * rate * brs);
-                // PlayBuf for the read and a Phasor for the position, exactly as the repitch player
-                // above does it, and for the same reason - a BufRd phase is float32 and cannot hold
-                // a fractional frame past ~190s into a 44.1k file.
-                var dry = PlayBuf.ar(nc, buf, step, t_seek, start, loop: 0);
-                var idx = Phasor.ar(t_seek, step, 0, frames, start);
-                var sh = \PoptartPitchShift.asClass.ar(dry, 1 / rateL.max(0.01), window);
-                var sig = sh.keep(nc);
-                var heard = idx - (delay * rateL * brs);
-                var runOut = DelayN.kr(run, 0.5, delay / SampleRate.ir).lag(0.02);
-                var env = EnvGen.kr(Env.asr(0.005, 1, 0.05), gate, doneAction: 2);
-                SendReply.kr(Impulse.kr(2), '/poptart/songPos', A2K.kr(heard) / bufSr);
-                Out.ar(out, toStereo.(sig) * env * amp.lag(0.02) * runOut);
+                var sig = \PoptartKeylock.asClass.ar(nc, buf, rateL * runL, t_seek, seekFrame);
+                // The position, as the repitch player reports it.
+                var idx = Phasor.ar(t_seek, step, 0, frames, seekFrame);
+                var env = EnvGen.kr(Env.asr(0.005, 1, 0.05, \lin), gate, doneAction: 2);
+                SendReply.kr(Impulse.kr(2), '/poptart/songPos', A2K.kr(idx) / bufSr);
+                // A paused keylock would hold its last moment as a drone: `run` mutes it as it stops.
+                Out.ar(out, toStereo.(sig) * env * amp.lag(0.02) * runL);
             }).add;
         } {
             // Keylock variant (songs phase 4): same controls and reports as the repitch player, so
@@ -3057,7 +3166,7 @@ server.waitForBoot {
                 };
                 var sig = reader.(wrap * ((1 - sel) + first), 1) + reader.(wrap * sel, 0);
                 var lpOut = OnePole.ar(mono.(sig), lpCoef);
-                var env = EnvGen.kr(Env.asr(0.005, 1, 0.05), gate, doneAction: 2);
+                var env = EnvGen.kr(Env.asr(0.005, 1, 0.05, \lin), gate, doneAction: 2);
                 BufWr.ar(lpOut, ring, hop - 1 - count, 1);
                 LocalOut.ar(lpOut);
                 SendReply.kr(Impulse.kr(2), '/poptart/songPos', A2K.kr(idx) / bufSr);
@@ -3281,30 +3390,13 @@ server.waitForBoot {
     // scsynth's pid rides along with the ready: node spawned US, not scsynth, so this is its only
     // handle on the process that actually holds the audio device and scsynth's UDP port. It uses
     // it to clean up after a stack that didn't shut down properly - see osc-engine/orphans.js.
-    // The keylock pitch shifter's pipeline delay (samples), measured once here: it is fixed for
-    // a sample rate but only the plugin knows it, so a throwaway synth reports it and every
-    // keylocked songStart passes it to the player. 0 without the extension (SOLA fallback).
-    ~rbDelay = 0;
-    if (\PoptartPitchShift.asClass.notNil) {
-        var probe = SynthDef(\poptart_rbprobe, {
-            var sh = \PoptartPitchShift.asClass.ar(Silent.ar(2), 1, 0);
-            SendReply.kr(Impulse.kr(0), '/poptart/rbDelay', A2K.kr(sh[2]));
-            Line.kr(0, 1, 0.05, doneAction: 2);
-        });
-        OSCFunc({ |m|
-            ~rbDelay = m[3].asFloat;
-            nodeAddr.sendMsg("/poptart/ids/rbDelay", ~rbDelay);
-            ("poptart: keylock pitch shifter delay " ++ ~rbDelay.asInteger ++ " samples").postln;
-        }, '/poptart/rbDelay', server.addr).oneShot;
-        probe.add(completionMsg: Synth.basicNew(\poptart_rbprobe, server).newMsg);
-    };
     // Node creates per-note voices itself (the direct path), from a block of node ids this
     // client's allocator never reaches: NodeIDAllocator keeps client N inside (N << 26) + 0..0x03FFFFFF.
     {
         var block = if (server.clientID == 31) { 30 } { 31 };
         var lo = (block << 26) + 1000;
         nodeAddr.sendMsg("/poptart/ids/server", scsynthPort, lo, (block << 26) + 0x03FFFFFF,
-            server.sampleRate ? sampleRate, ~rbDelay ? 0, openWaitMax + coldWaitMax);
+            server.sampleRate ? sampleRate, openWaitMax + coldWaitMax);
     }.value;
     nodeAddr.sendMsg("/poptart/ready", server.pid ? -1);
     // Populate the plugin dict in the background so .synth("Name") can resolve names. Cached
@@ -6265,6 +6357,8 @@ OSCdef(\poptartPlaySample, { |msg|
     var grain = (msg[22] ? 0).asInteger;
     var grainSize = (msg[23] ? 0.08).asFloat, grainRate = (msg[24] ? 20).asFloat, grainPan = (msg[25] ? 0).asFloat;
     var posLive = (msg[26] ? 0).asInteger, windowJson = (msg[27] ? "").asString;
+    // How a stretched event is stretched (Sig#stretchmode): 0 the clean_ defs, 1 the warp_ ones.
+    var grainStretch = (msg[28] ? 0).asInteger == 1;
     var arrived = Main.elapsedTime;
     var args, spawn;
     var track = tracks[key];
@@ -6279,7 +6373,7 @@ OSCdef(\poptartPlaySample, { |msg|
         defName = if (sides.notNil) {
             ("poptart_sample_grain_" ++ if (buf.numChannels == 1) { 1 } { 2 }).asSymbol
         } {
-            ("poptart_sample_" ++ (if (warp) { "warp_" } { "" })
+            ("poptart_sample_" ++ (if (warp) { if (grainStretch) { "warp_" } { "clean_" } } { "" })
                 ++ (if (loop == 1) { "loop_" } { "" }) ++ buf.numChannels).asSymbol
         };
         heldBy.(track, 1);
@@ -6429,26 +6523,16 @@ OSCdef(\poptartSongStart, { |msg|
     if (track.isKindOf(Event) and: { song.notNil }) {
         var buf = song[\buf];
         var defName = ((if (warp > 0) { "poptart_songwarp_" } { "poptart_song_" }) ++ buf.numChannels).asSymbol;
-        // The keylock player has a pipeline delay (~rbDelay, see the boot probe): it is spawned
-        // that much EARLY with its pointer set back by as much, so its first real sample lands
-        // at the start. When the start is closer than that (a keylock toggle is "now"), it
-        // spawns now and the old player instead holds on for the difference - the handover
-        // then happens on time, a pipeline later. The repitch player has no delay: spawnAt is
-        // the start and the handover is immediate, as before.
-        var rbLat = if (warp > 0) { (~rbDelay ? 0) / server.sampleRate } { 0 };
-        var spawnAt = max(0, latency - rbLat);
-        var seekSec = posSec - ((latency - spawnAt) * rate);
-        var handover = max(latency, spawnAt + rbLat);
-        var frame = (seekSec * (buf.sampleRate ? server.sampleRate)).clip(0, max(0, (buf.numFrames ? 1) - 1));
-        // The old player releases AT THE HANDOVER (clamped past its own spawn - it may itself
-        // still be a pending quantized start): released, not freed, so it fades under the new one.
-        song[\synth] !? { |s| bundleNow.(songLat.(song, handover), { s.set(\gate, 0) }) };
+        var frame = (posSec * (buf.sampleRate ? server.sampleRate)).clip(0, max(0, (buf.numFrames ? 1) - 1));
+        // The old player releases at the start (clamped past its own spawn - it may itself still
+        // be a pending quantized start): released, not freed, so it fades under the new one.
+        song[\synth] !? { |s| bundleNow.(songLat.(song, latency), { s.set(\gate, 0) }) };
         song[\posFunc] !? { |f| f.free };
-        song[\spawnUntil] = Main.elapsedTime + spawnAt;
-        bundleNow.(spawnAt, {
+        song[\spawnUntil] = Main.elapsedTime + latency;
+        bundleNow.(latency, {
             song[\synth] = Synth(defName,
                 [\out, track[\inBus].index, \buf, buf, \rate, rate, \run, 1,
-                 \t_seek, 1, \seekFrame, frame, \delay, if (warp > 0) { ~rbDelay ? 0 } { 0 }],
+                 \t_seek, 1, \seekFrame, frame],
                 target: track[\group], addAction: \addToHead);
         });
         // The player's position reports answer to sclang; forward them to Node tagged with the

@@ -1,11 +1,12 @@
 'use strict';
 
-// The keylock song player the engine boots with (synthdef/): the Rubber Band pitch shifter
-// (PoptartPitchShift, native/rubberband/) when that extension is installed, the in-graph SOLA
-// stretcher otherwise. Both channel counts build in this configuration, and rendered offline
-// through a real scsynth the player keeps every test tone's pitch and level at 5% faster - what the
-// Warp1 player it replaced could not do (-32 dB at 500 Hz at that rate) - and, with the pitch
-// shifter, its delay compensation lands the audio where the pointer says.
+// The keylock song player the engine boots with (synthdef/): the PoptartKeylock UGen
+// (native/keylock/) when that extension is installed, the in-graph SOLA stretcher otherwise.
+// Both channel counts build in this configuration, and rendered offline through a real scsynth
+// the player lands its audio where the pointer says, with no latency, and keeps every test tone's
+// pitch and level at 5% faster - what the Warp1 player before both could not do (-32 dB at 500 Hz
+// at that rate). With the UGen, the render is the browser's song reader's, sample for sample:
+// a keylocked start, a seek crossfading and a pause going quiet.
 //
 // Skipped, not failed, where scsynth cannot run.
 
@@ -14,9 +15,8 @@ const assert = require('node:assert');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { renderNRT, G } = require('./test-support/nrt');
+const { renderNRT } = require('./test-support/nrt');
 const synthdef = require('./synthdef');
-const U = require('./synthdef/ugens');
 const { writeWav } = require('./wav.js');
 const { locateServer } = require('./server/locate');
 const { extensionFlags } = require('./server/defs');
@@ -78,18 +78,11 @@ function alignLag(out, src) {
 
 test('keylock player builds, keeps pitch and level at rate 1.05, and lands its audio on time', (t) => {
   const flags = extensionFlags(locateServer().extensionsDir);
-  const hasRb = !!flags.pitchShift;
+  const hasUGen = !!flags.keylock;
   const defs = synthdef.defsFor(flags);
   const warp = (nc) => defs.find((d) => d.name === `poptart_songwarp_${nc}`)?.def;
   assert.ok(warp(1), 'the mono keylock def did not build');
   assert.ok(warp(2), 'the stereo keylock def did not build');
-  // With the pitch shifter a probe reports its delay on channel 2 of the rate-1 render, and the
-  // player is spawned with delay 0, so the audio is expected exactly that late. Without it (SOLA)
-  // the probe is a silent stand-in and the delay is 0.
-  const probe = new G.SynthDef('keylock_probe', {}, () => {
-    const d = hasRb ? U.PoptartPitchShift.ar(U.Silent.ar(2), 1, 0)[2] : U.DC.ar(0);
-    U.Out.ar(2, G.mul(d, 0.0001));
-  });
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'poptart-keylock-'));
   try {
     const src = toneMix(6);
@@ -97,11 +90,9 @@ test('keylock player builds, keeps pitch and level at rate 1.05, and lands its a
     writeWav(wavPath, { sampleRate: SR, channels: 1, data: src });
     const render = (rate) => renderNRT([
       [0, ['/d_recv', warp(1)]],
-      [0, ['/d_recv', probe]],
       [0, ['/b_allocRead', 0, wavPath]],
       [0.05, ['/s_new', 'poptart_songwarp_1', 1000, 0, 0, 'out', 0, 'buf', 0, 'rate', rate, 't_seek', 1, 'seekFrame', 0]],
-      [0.05, ['/s_new', 'keylock_probe', 1001, 0, 0]],
-    ], { sampleRate: SR, duration: 4.0, outChannels: 3 });
+    ], { sampleRate: SR, duration: 4.0, outChannels: 2 });
     const A = render(1.0);
     if (!A.data) { t.skip(A.why); return; }
     const B = render(1.05);
@@ -113,14 +104,12 @@ test('keylock player builds, keeps pitch and level at rate 1.05, and lands its a
     return ch;
   };
 
-  // Rate 1: the render is the source, `delay` samples after the spawn at block 2176 (the
-  // 0.05 s bundle rounded down to a block). SOLA reconstructs it bit-exact; the pitch shifter
-  // resynthesizes, so it only has to be well below audibility.
+  // Rate 1: the render is the source, from the spawn at block 2176 (the 0.05 s bundle rounded
+  // down to a block) - neither player is late. SOLA reconstructs it bit-exact, and so does the
+  // UGen's stretcher at rate 1, to rounding.
   const a = channel(A, 0);
-  const delay = Math.round(channel(A, 2)[SR] / 0.0001);
-  assert.ok(hasRb ? delay > 0 : delay === 0, `probe reported delay ${delay} with pitch shifter ${hasRb ? 'present' : 'absent'}`);
   const lag = alignLag(a, src);
-  assert.ok(Math.abs(lag - (2176 + delay)) <= 1, `keylock audio landed at ${lag}, expected ${2176 + delay} (start 2176 + delay ${delay})`);
+  assert.strictEqual(lag, 2176, `keylock audio landed at ${lag}, expected 2176 (${hasUGen ? 'PoptartKeylock' : 'SOLA'})`);
   let err = 0;
   let pow = 0;
   for (let i = SR; i < 3 * SR; i++) {
@@ -128,7 +117,7 @@ test('keylock player builds, keeps pitch and level at rate 1.05, and lands its a
     pow += src[i] ** 2;
   }
   const residualDb = 10 * Math.log10(err / pow);
-  assert.ok(residualDb < (hasRb ? -30 : -40), `keylock at rate 1 is not transparent: residual ${residualDb.toFixed(1)} dB (lag ${lag})`);
+  assert.ok(residualDb < -40, `keylock at rate 1 is not transparent: residual ${residualDb.toFixed(1)} dB (lag ${lag})`);
 
   // Rate 1.05: every tone at its own pitch, within 2 dB of the source.
   const b = channel(B, 0);
@@ -140,6 +129,73 @@ test('keylock player builds, keeps pitch and level at rate 1.05, and lands its a
     assert.strictEqual(got.hz, want.hz, `${f} Hz moved to ${got.hz} Hz under keylock at rate 1.05`);
     assert.ok(Math.abs(got.dB - want.dB) < 2, `${f} Hz is ${(got.dB - want.dB).toFixed(1)} dB off under keylock at rate 1.05`);
   }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// The browser's song reader, keylocked, over the same song and the same moments - what the UGen
+// has to sound like. Its frames are the render's from the spawn's block on.
+async function browserKeylock(song, events, frames) {
+  const { SongReader } = await import('../web-engine/src/devices/song-reader.mjs');
+  const reader = new SongReader(SR);
+  const planes = [Int16Array.from(song, (v) => Math.round(v * 32768))];
+  reader.receive({ kind: 'load', planes, frames: song.length });
+  for (const e of events) reader.receive(e);
+  const out = new Float32Array(frames);
+  const l = new Float32Array(64);
+  const r = new Float32Array(64);
+  for (let at = 0; at < frames; at += 64) {
+    reader.process(l, r, 64, at);
+    out.set(l.subarray(0, Math.min(64, frames - at)), at);
+  }
+  return { out, planes };
+}
+
+test('the keylock UGen plays what the browser does: a start, a seek crossfading, a pause', async (t) => {
+  const flags = extensionFlags(locateServer().extensionsDir);
+  if (!flags.keylock) { t.skip('PoptartKeylock is not installed'); return; }
+  const defs = synthdef.defsFor(flags);
+  const warp = defs.find((d) => d.name === 'poptart_songwarp_1').def;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'poptart-keylock-'));
+  try {
+    // 16-bit values, so the browser's planes hold exactly what the buffer does.
+    const src = toneMix(8).map((v) => Math.round(v * 16384) / 32768);
+    const wavPath = path.join(dir, 'tones.wav');
+    writeWav(wavPath, { sampleRate: SR, channels: 1, data: src });
+    // A rate a float32 control holds exactly, so both sides run the same playhead. The seek and
+    // the pause land on block boundaries, where scsynth applies them.
+    const rate = 0.9375;
+    const start = 2176;
+    const seekAt = 64 * 1000;
+    const pauseAt = 64 * 2000;
+    const r = renderNRT([
+      [0, ['/d_recv', warp]],
+      [0, ['/b_allocRead', 0, wavPath]],
+      [start / SR, ['/s_new', 'poptart_songwarp_1', 1000, 0, 0, 'out', 0, 'buf', 0, 'rate', rate, 't_seek', 1, 'seekFrame', SR]],
+      [seekAt / SR, ['/n_set', 1000, 't_seek', 1, 'seekFrame', 5 * SR]],
+      [pauseAt / SR, ['/n_set', 1000, 'run', 0]],
+    ], { sampleRate: SR, duration: 3.5, outChannels: 2 });
+    if (!r.data) { t.skip(r.why); return; }
+    const desk = new Float32Array(r.frames);
+    for (let i = 0; i < r.frames; i++) desk[i] = r.at(0, i);
+    const { out: web } = await browserKeylock(src, [
+      { kind: 'start', pos: 1, rate, time: start / SR, keylock: true },
+      { kind: 'seek', pos: 5, time: seekAt / SR },
+    ], pauseAt);
+    // Past the start's fade (the desktop's envelope is a control-rate ramp, the browser's per
+    // sample), every sample to the pause, the seek's crossfade included.
+    let worst = 0;
+    let worstAt = -1;
+    for (let i = start + 512; i < pauseAt; i++) {
+      const d = Math.abs(desk[i] - web[i]);
+      if (d > worst) { worst = d; worstAt = i; }
+    }
+    assert.ok(worst < 1e-4, `desktop and browser keylocks differ by ${worst.toExponential(2)} at frame ${worstAt} (seek at ${seekAt})`);
+    // The pause mutes as it stops: nothing held, nothing droning.
+    let after = 0;
+    for (let i = pauseAt + Math.round(0.2 * SR); i < r.frames; i++) after = Math.max(after, Math.abs(desk[i]));
+    assert.ok(after < 1e-3, `a paused keylock still sounds at ${after}`);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

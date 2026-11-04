@@ -72,7 +72,7 @@ test('numbers fold and degenerate operations vanish', () => {
 });
 
 test('every fixed def builds, under a name scsynth takes, for each option set', () => {
-  for (const options of [{}, { nativeDevices: false, pitchShift: false, spectrum: false }, { cueOffset: 2, numOutputBusChannels: 6 }]) {
+  for (const options of [{}, { nativeDevices: false, keylock: false, spectrum: false }, { cueOffset: 2, numOutputBusChannels: 6 }]) {
     const defs = S.defsFor(options);
     assert.strictEqual(new Set(defs.map((d) => d.name)).size, defs.length);
     for (const d of defs) {
@@ -80,7 +80,6 @@ test('every fixed def builds, under a name scsynth takes, for each option set', 
       assert.strictEqual(decodeScgf(d.bytes)[0].name, d.name);
     }
     assert.strictEqual(defs.some((d) => d.name === 'poptart_headphones'), options.cueOffset != null);
-    assert.strictEqual(defs.some((d) => d.name === 'poptart_rbprobe'), options.pitchShift !== false);
   }
 });
 

@@ -38,10 +38,10 @@ async function trackOf(E, key) {
 }
 
 test('the song players build mono and stereo, plain and keylocked', () => {
-  for (const pitchShift of [true, false]) {
-    const names = synthdef.defsFor({ ...extensionFlags(locateServer().extensionsDir), pitchShift }).map((d) => d.name);
+  for (const keylock of [true, false]) {
+    const names = synthdef.defsFor({ ...extensionFlags(locateServer().extensionsDir), keylock }).map((d) => d.name);
     for (const n of ['poptart_song_1', 'poptart_song_2', 'poptart_songwarp_1', 'poptart_songwarp_2']) {
-      assert.ok(names.includes(n), `${n} is missing (pitch shifter ${pitchShift ? 'on' : 'off'})`);
+      assert.ok(names.includes(n), `${n} is missing (keylock UGen ${keylock ? 'on' : 'off'})`);
     }
   }
 });
@@ -100,7 +100,7 @@ test('a deck loads, plays, pauses, seeks, stops and frees its song', async (t) =
     assert.ok(peakOf(cap) < 1e-4, `stopped: peak ${peakOf(cap)}`);
     assert.ok(E.songs.get('deck')?.buf, 'the buffer went with the stop');
 
-    // Keylocked: the shifter's player, on the same buffer, reporting its heard position.
+    // Keylocked: the keylock's player, on the same buffer, reporting its position.
     const before = told.length;
     E.dispatch('/poptart/songStart', ['deck', 1, 1, 0.1, 1]);
     await wait(0.4);

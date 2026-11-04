@@ -75,16 +75,6 @@ The native helpers under `packages/osc-engine/native/` are built from the source
 build script beside each. The macOS binaries are committed; the Windows builds of the two
 scsynth extensions are made by the release workflow and ship inside the Windows app.
 
-### Rubber Band Library 4.0.0
-
-Copyright Particular Programs Ltd.
-https://breakfastquay.com/rubberband/
-
-Used for the PoptartPitchShift scsynth extension, which is the DJ keylock.
-
-License: GNU General Public License, version 2 or later (see [LICENSES/GPL-2.0.txt](LICENSES/GPL-2.0.txt)).
-Poptart as a whole is distributed under the AGPL v3, which is compatible with it.
-
 ### Ableton Link 3.1.5
 
 Copyright Ableton AG, Berlin.

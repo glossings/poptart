@@ -121,7 +121,7 @@ jobs:
         run: |
           clang++ --version
           node packages/web-engine/build/devices/native.mjs
-          node packages/osc-engine/native/rubberband/build.mjs
+          node packages/osc-engine/native/keylock/build.mjs
           sh packages/osc-engine/native/check-plugins.sh
           git diff --exit-code packages/osc-engine/native/devices/devices.json
           echo "POPTART_REQUIRE_EXTENSIONS=1" >> "$GITHUB_ENV"

@@ -87,3 +87,10 @@ test('numbers are written short', () => {
   assert.equal(formatCtl(0.000049), '0');
   assert.equal(formatCtl(2), '2');
 });
+
+test('the short names are read and edited as the stages they stand for', () => {
+  const code = 'x: s("a").att(0.2).rel(0.5)';
+  assert.equal(readSamplerControls(code, 'x').attack.value, 0.2);
+  assert.equal(readSamplerControls(code, 'x').release.value, 0.5);
+  assert.equal(set(code, 'x', { attack: 0.3 }), 'x: s("a").att(0.3).rel(0.5)');
+});

@@ -27,7 +27,7 @@ const { writeWav, readWavRaw } = require('./wav.js');
 const { locateServer } = require('./server/locate');
 const { extensionFlags } = require('./server/defs');
 
-// The SOLA keylock is the def built without the pitch-shifter extension.
+// The SOLA keylock is the def built without the keylock extension.
 const bootDef = (name, extra = {}) => synthdef.defsFor({ ...extensionFlags(locateServer().extensionsDir), ...extra })
   .find((x) => x.name === name).def;
 
@@ -231,7 +231,7 @@ test('loop voices and the SOLA keylock track the playhead exactly past the cliff
       if (!c.r.data) { t.skip(c.r.why); return; }
     }
     const sola = renderNRT([
-      [0, ['/d_recv', bootDef('poptart_songwarp_1', { pitchShift: false })]],
+      [0, ['/d_recv', bootDef('poptart_songwarp_1', { keylock: false })]],
       [0, ['/b_allocRead', 0, toneLong]],
       [0.05, ['/s_new', 'poptart_songwarp_1', 1000, 0, 0, 'out', 0, 'buf', 0, 'rate', 1.0, 't_seek', 1, 'seekFrame', START_FRAME]],
     ], { sampleRate: RENDER_SR, duration: 1.45, outChannels: 2 });

@@ -14,10 +14,8 @@
 //   - The engine runs on the audio context's clock, which is also the clock everything is
 //     scheduled on - so there is no drift between the song players and the model of them, and
 //     none of the desktop's drift servo.
-//   - The player is told when each change is HEARD (see web-engine's song-player.mjs). A deck
-//     with keylock on is heard the shifter's latency after its player reads, so a change made
-//     "now" lands that lead later there, and none later with keylock off. The model here is kept
-//     in heard time, and timed events are sent the most that lead can be early.
+//   - The player is told when each change is HEARD (see web-engine's song-player.mjs), keylock on
+//     or off - neither read is late - and the model here is kept in heard time.
 //   - A song comes from the music folder chosen in the settings (music-folder.mjs), decoded by
 //     the browser, and is analyzed - its waveform, its beatgrid and its key - on a worker
 //     (song-worker.mjs) with the same maths the desktop's analysis worker runs.
@@ -25,6 +23,12 @@
 //     knobs, the regions default, the FX chains, and a beatgrid anchor placed by hand.
 //
 // Link is a desktop helper and stays one: its routes answer that it is off.
+
+// The filter resonance's default, from the browser engine's own mapping (the page serves
+// web-engine/src beside web/, so this resolves to /web-engine/src there as it does in the repo).
+// The DJ filter's resonance at rest: web-engine's track.mjs DJ_RES_DEFAULT (Q 2). The page loads the
+// engine at boot (boot.mjs), so the desk can't import it; web-desk.test.mjs holds the two equal.
+export const DJ_RES_DEFAULT = 0.25;
 
 const DECKS = ['a', 'b'];
 const deckOfKey = (key) => (String(key).includes(':') ? String(key).slice(0, String(key).indexOf(':')) : 'a');
@@ -36,7 +40,7 @@ const DEFAULT_BPM = 120;
 
 // djf is the filter's cutoff (its center detent is 0); djres is that filter's resonance
 // AMOUNT, deliberately a control of its own - see the DJ stage in web-engine's track.mjs.
-export const DJ_NEUTRAL = Object.freeze({ trim: 1, eqlo: 1, eqmid: 1, eqhi: 1, djf: 0, djres: 0, fader: 1, deck: 1, cue: 0 });
+export const DJ_NEUTRAL = Object.freeze({ trim: 1, eqlo: 1, eqmid: 1, eqhi: 1, djf: 0, djres: DJ_RES_DEFAULT, fader: 1, deck: 1, cue: 0 });
 
 /** The song decks' fixed keys. '#' cannot appear in a block label, so they never collide. */
 export const SONG_KEYS = Object.freeze({ a: '#song', b: 'b:#song' });
@@ -100,8 +104,6 @@ class Unsupported extends Error {
 export function createDesk({ patternCore, engine, transport, songSync, linkSync, store = null, songs = null, blockEvaluator = null, library = null, writeSet = null, parseMeta = null, midi = null, log = () => {} }) {
   let evaluator = null;
   const now = () => engine.getTime();
-  // The most a song is ever late: how far ahead a timed event is sent (see the header).
-  const LAT = Number(engine.songLatency) || 0;
 
   // ---------------------------------------------------------------------------------------------
   // The desk's state. EPHEMERAL by design, as on the desktop: none of it is written into song
@@ -321,15 +323,13 @@ export function createDesk({ patternCore, engine, transport, songSync, linkSync,
     return Math.min(Math.max(0, pos), s.duration);
   }
 
-  /** The soonest a change to a deck's song can be heard - and `heard`, held to it. */
-  const leadOf = (deck) => Number(engine.songLead?.(trackIdOf(SONG_KEYS[deck]))) || 0;
-  const heardNow = (deck) => now() + leadOf(deck);
-  const heardAt = (deck, heard) => Math.max(heardNow(deck), heard);
+  /** `heard`, held to now: the soonest a change to a deck's song can be heard. */
+  const heardAt = (deck, heard) => Math.max(now(), heard);
 
   function songPause(deck, posSec = null) {
     const s = songDecks[deck];
     if (!s?.playing) return;
-    const at = heardNow(deck);
+    const at = now();
     try { engine.songPause(trackIdOf(SONG_KEYS[deck]), at); } catch { /* torn down */ }
     // Where the halt is heard - a pause pressed now lands the deck's lead later.
     songMarkPaused(deck, posSec ?? songPlayheadSec(deck, at));
@@ -373,8 +373,7 @@ export function createDesk({ patternCore, engine, transport, songSync, linkSync,
     const t = now();
     const begin = Math.max(t, s.startSec);
     const endAt = begin + (s.duration - songPlayheadSec(deck, begin)) / s.rate;
-    // Sent ahead of the release by the most a deck's lead can be, so it is never late.
-    const sendIn = endAt - SONG_RELEASE_SEC - LAT - SONG_SEND_AHEAD_SEC - t;
+    const sendIn = endAt - SONG_RELEASE_SEC - SONG_SEND_AHEAD_SEC - t;
     s.endTimer = setTimeout(() => {
       s.endTimer = null;
       songEndOfFile(deck, endAt);
@@ -395,11 +394,14 @@ export function createDesk({ patternCore, engine, transport, songSync, linkSync,
     if (!s.playing || !s.loop || !(s.rate > 0)) return;
     const t = now();
     const begin = Math.max(t, s.startSec);
-    const wrapAt = begin + Math.max(0, (s.loop.to - songPlayheadSec(deck, begin)) / s.rate);
+    const pos = songPlayheadSec(deck, begin);
+    // Past the end (a halved loop) it waits for the next lap point - see song-sync.js's loopWrap.
+    const wrap = songSync.loopWrap(pos, s.loop.from, s.loop.to, deckLoopBeatLen(deck));
+    const wrapAt = begin + Math.max(0, (wrap.atSec - pos) / s.rate);
     s.loopTimer = setTimeout(() => {
       s.loopTimer = null;
       if (!s.playing || !s.loop) return;
-      const to = s.loop.from;
+      const to = wrap.toSec;
       try { engine.songSeek(trackIdOf(SONG_KEYS[deck]), to, heardAt(deck, wrapAt)); } catch { /* torn down */ }
       s.loopApplyTimer = setTimeout(() => {
         s.loopApplyTimer = null;
@@ -410,7 +412,7 @@ export function createDesk({ patternCore, engine, transport, songSync, linkSync,
         songArmTimers(deck);
         mixNotify();
       }, Math.max(0, (wrapAt - now()) * 1000));
-    }, Math.max(0, (wrapAt - LAT - SONG_SEND_AHEAD_SEC - t) * 1000));
+    }, Math.max(0, (wrapAt - SONG_SEND_AHEAD_SEC - t) * 1000));
   }
 
   /** Is anything besides this deck's song sounding? What a start has to lock onto. */
@@ -455,11 +457,11 @@ export function createDesk({ patternCore, engine, transport, songSync, linkSync,
   function songApplyRate(deck) {
     const s = songDecks[deck];
     if (!s) return;
-    const eff = songSync.effectiveRate(songBaseRate(deck), s.nudge, s.bend ?? 0);
+    const eff = songSync.effectiveRate(songBaseRate(deck), s.nudge, s.bend ?? 0, mixState.deckTempo[deck].range);
     if (eff === s.rate) return;
     const tid = trackIdOf(SONG_KEYS[deck]);
-    if (s.playing && heardNow(deck) >= s.startSec) {
-      const at = heardNow(deck);
+    if (s.playing && now() >= s.startSec) {
+      const at = now();
       s.posSec = songPlayheadSec(deck, at);
       s.startSec = at;
       s.rateBefore = s.rate;
@@ -496,7 +498,7 @@ export function createDesk({ patternCore, engine, transport, songSync, linkSync,
   /** A seek on a playing deck: heard as soon as the deck's lead allows. */
   function songSeekPlaying(deck, to) {
     const s = songDecks[deck];
-    const at = heardNow(deck);
+    const at = now();
     try { engine.songSeek(trackIdOf(SONG_KEYS[deck]), to, at); } catch { /* torn down */ }
     s.posSec = to;
     s.startSec = at;
@@ -841,7 +843,7 @@ export function createDesk({ patternCore, engine, transport, songSync, linkSync,
     const file = !!songDecks[deck];
     clock.setFreeMult(deckTempoMult(deck));
     clock.setSync(file || deckLiveSynced(deck));
-    clock.setBend(file ? 0 : songSync.effectiveRate(1, st.nudge, st.bend) - 1);
+    clock.setBend(file ? 0 : songSync.effectiveRate(1, st.nudge, st.bend, mixState.deckTempo[deck].range) - 1);
   }
 
   function deckLiveRelease(deck) {
@@ -925,16 +927,23 @@ export function createDesk({ patternCore, engine, transport, songSync, linkSync,
       if (!(bpm > 0)) return null;
       const beatSec = 60 / bpm;
       const pos = songPlayheadSec(deck);
+      // Quantized, the start is the grid point NEAREST the playhead: pressed in a beat's first half
+      // it is the beat behind, in its second half the next beat, which the deck plays into before
+      // the loop begins. A loop shorter than a beat snaps on its own length, so the playhead is
+      // inside the loop or ahead of it, never past its end.
+      const unit = Math.min(beatSec, beats * beatSec);
       const from = s.quantize === false
         ? pos
-        : s.anchorSec + Math.floor((pos - s.anchorSec) / beatSec) * beatSec;
+        : s.anchorSec + Math.round((pos - s.anchorSec) / unit) * unit;
       return { from: Math.max(0, from), to: Math.max(0, from) + beats * beatSec };
     }
     const clock = arrangeClockOf(deck);
     if (!clock) return null;
     const beatCyc = 1 / songSync.BEATS_PER_CYCLE;
     const pos = clock.posAt(clockOf(deck).cycleAt(now()));
-    return deckLoopFit(deck, Math.max(0, Math.floor(pos / beatCyc) * beatCyc), beats * beatCyc);
+    // The grid point nearest the playhead, as on a song deck: the deck plays into a start ahead.
+    const unit = Math.min(beatCyc, beats * beatCyc);
+    return deckLoopFit(deck, Math.max(0, Math.round(pos / unit) * unit), beats * beatCyc);
   }
 
   function deckLoopFit(deck, from, span) {
@@ -1522,25 +1531,26 @@ export function createDesk({ patternCore, engine, transport, songSync, linkSync,
     }, SONG_SCRUB_FLUSH_MS);
   }
 
-  // The platter as a PITCH BEND (the `bend` MIDI target): a light wheel turn while the deck plays
-  // bends the rate with the turn and eases back to base when the hand rests - the beatmatch
-  // correction gesture, where scrub is the needle drop. Ticks are batched like the scrub's; the
-  // rate math (proportional target, attack, release) is song-sync.js's bendStep, and the flush
-  // keeps ticking until the bend has died away so the release is heard without further input.
+  // The platter as a PITCH BEND (the `bend` MIDI target): a wheel turn while the deck plays bends
+  // the rate with the wheel's speed and lets go when the hand rests - the beatmatch correction
+  // gesture, where scrub is the needle drop. Turns are batched like the scrub's, as revolutions
+  // (the binding's ticksPerRev); the rate math (record-speed bend, each batch spread over two
+  // flushes) is song-sync.js's bendStep, and the flush keeps ticking until the bend is gone.
   // The playhead model rides the bent rate (songApplyRate rebases on every step), so the phase a
   // bend moved STAYS moved - on a synced deck that is the whole point, and the drift servo, which
   // only measures engine-vs-model, has nothing to pull back.
   const SONG_BEND_FLUSH_MS = 30;
   const songBendState = {
-    a: { ticks: 0, timer: null, last: 0 },
-    b: { ticks: 0, timer: null, last: 0 },
+    a: { revs: 0, carry: 0, timer: null, last: 0 },
+    b: { revs: 0, carry: 0, timer: null, last: 0 },
   };
 
-  /** One relative platter message's worth of bend (`ticks` signed, 64-centered cc convention). */
-  function songBend(deck, ticks) {
+  /** One relative platter message's worth of bend: `ticks` signed (64-centered cc convention), of
+   *  `ticksPerRev` to a revolution. */
+  function songBend(deck, ticks, ticksPerRev = songSync.JOG_TICKS_PER_REV) {
     const st = songBendState[deck];
     if (!songDecks[deck] && !deckRunning(deck)) return; // an empty deck's platter should feel like nothing
-    st.ticks += ticks || 0;
+    st.revs += (ticks || 0) / ticksPerRev;
     if (st.timer) return;
     st.last = Date.now();
     st.timer = setInterval(() => {
@@ -1549,15 +1559,18 @@ export function createDesk({ patternCore, engine, transport, songSync, linkSync,
       const now = Date.now();
       const dt = Math.max(0.001, (now - st.last) / 1000);
       st.last = now;
-      const t = st.ticks;
-      st.ticks = 0;
+      const revs = st.revs;
+      st.revs = 0;
       if (!s) {
         clearInterval(st.timer);
         st.timer = null;
+        st.carry = 0;
         return;
       }
-      s.bend = songSync.bendStep(s.bend ?? 0, t, dt);
-      if (!t && s.bend === 0) {
+      const step = songSync.bendStep(st.carry, revs, dt);
+      st.carry = step.carry;
+      s.bend = step.bend;
+      if (!revs && !step.carry && !step.bend) {
         clearInterval(st.timer);
         st.timer = null;
       }
@@ -1878,7 +1891,7 @@ export function createDesk({ patternCore, engine, transport, songSync, linkSync,
   function mixMidiValue(target, v01) {
     const ctl = target === 'xf' ? 'xf' : target.slice(2);
     if (ctl === 'xf' || ctl === 'djf') return v01 * 2 - 1;
-    if (ctl === 'fader' || ctl === 'djres') return v01; // one-sided 0..1, neutral at the bottom
+    if (ctl === 'fader' || ctl === 'djres') return v01; // one-sided 0..1, bottom to top
     return v01 * 2; // trim and the EQ bands: 0..2, unity at center
   }
 
@@ -1901,6 +1914,14 @@ export function createDesk({ patternCore, engine, transport, songSync, linkSync,
   // revolution covers about a minute, so a five-minute track is five turns.
   const SONG_SCRUB_TICK_SEC = 0.003;
   const SONG_SEARCH_TICK_SEC = 0.1;
+
+  // The platter's resolution in pitch-bend mode: a binding's own `ticksPerRev`, for a wheel that
+  // sends some other number of ticks to a turn, else the resolution song-sync.js knows for the
+  // binding's MIDI port (its `device`), else JOG_TICKS_PER_REV.
+  function mixMidiTicksPerRev(target) {
+    const n = Number(midiSettings.map[target]?.ticksPerRev);
+    return n > 0 ? n : songSync.ticksPerRevForDevice(midiSettings.map[target]?.device);
+  }
   function mixMidiScrubDelta(v01, tickSec = SONG_SCRUB_TICK_SEC) {
     return (Math.round(v01 * 127) - 64) * tickSec;
   }
@@ -2118,7 +2139,7 @@ export function createDesk({ patternCore, engine, transport, songSync, linkSync,
     if (name === 'bend') {
       // The platter's pitch-bend mode: the same relative 64-centered convention as scrub, into
       // the bend gesture instead of a seek (see songBend).
-      songBend(deck, Math.round(value * 127) - 64);
+      songBend(deck, Math.round(value * 127) - 64, mixMidiTicksPerRev(target));
       return;
     }
     if (name === 'tempo') {

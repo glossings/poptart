@@ -16,7 +16,7 @@ const { pluginFile } = require('../extensions');
 function extensionFlags(extensionsDir) {
   const has = (f) => !!extensionsDir && fs.existsSync(path.join(extensionsDir, 'poptart', f));
   const devices = has(pluginFile('PoptartDevices'));
-  return { nativeDevices: devices, spectrum: devices, pitchShift: has(pluginFile('PoptartPitchShift')) };
+  return { nativeDevices: devices, spectrum: devices, keylock: has(pluginFile('PoptartKeylock')) };
 }
 
 /** Every def an engine with these settings loads at boot: [{name, bytes, meta, def}]. */

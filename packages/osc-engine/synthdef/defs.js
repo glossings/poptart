@@ -10,16 +10,16 @@ const U = require('./ugens.js');
 
 const {
   SynthDef, add, sub, mul, div, mod, min, max, pow, round, absdif, gt, ge, lt, le, neg, abs, sign,
-  squared, sqrt, exp, sin, cos, reciprocal, midiratio, sum, dup,
+  squared, cubed, sqrt, exp, sin, cos, atan, reciprocal, midiratio, sum, dup,
 } = G;
 const {
   Impulse, Sweep, Phasor, LFDNoise0, LFDNoise3, Latch, Gate, Trig1, PulseCount, ToggleFF, Peak,
-  RunningMax, RunningSum, OnePole, LPF, HPF, RLPF, RHPF, BPF, Line, K2A, A2K, Convolution2,
+  RunningMax, RunningSum, OnePole, LPF, HPF, RLPF, RHPF, BLowPass, BHiPass, BPF, Line, K2A, A2K, Convolution2,
   Delay1, DelayN, VarLag, Select, SampleRate, SampleDur, ControlRate, ControlDur, BlockSize,
-  BufFrames, BufRateScale, BufSampleRate, PlayBuf, BufRd, Warp1, GrainBuf, DC, Silent, In,
+  BufFrames, BufRateScale, BufSampleRate, BufDur, PlayBuf, BufRd, Warp1, GrainBuf, DC, Silent, In,
   InFeedback, LocalIn, Out, ReplaceOut, OffsetOut, LocalOut, BufWr, DiskOut, LocalBuf, EnvGen, Env,
   LinXFade2, Balance2, SendReply, SendPeakRMS, SoundIn, Mix, VSTPlugin, PoptartDevice,
-  PoptartPitchShift, PoptartSpectrum, FFT, lag, clip, wrap, Ref,
+  PoptartKeylock, PoptartStretch, PoptartSpectrum, FFT, lag, clip, wrap, Ref,
 } = U;
 
 const TWO_PI = 2 * Math.PI;
@@ -33,8 +33,8 @@ function resolveOptions(o = {}) {
     // The PoptartDevice extension (native/devices) - PoptartDevice and PoptartSpectrum.
     nativeDevices: o.nativeDevices ?? true,
     spectrum: o.spectrum ?? o.nativeDevices ?? true,
-    // The PoptartPitchShift extension (native/rubberband).
-    pitchShift: o.pitchShift ?? true,
+    // The PoptartKeylock extension (native/keylock).
+    keylock: o.keylock ?? true,
     bendPollHz: o.bendPollHz ?? 100,
     grainMaxOverlap: o.grainMaxOverlap ?? 128,
   };
@@ -42,11 +42,21 @@ function resolveOptions(o = {}) {
 
 // --- a track's defs (sharedTrackDef) ----------------------------------------------------------
 
-function djIsolator(input, lo, mid, hi) {
+// A DJ EQ band's knob law, poptart.scd's djIsolator `gain`: knob position 0..2 -> band gain.
+function djIsolatorGain(v) {
+  const p = mul(v, 127.5);
+  const b = min(p, 124);
+  return add(min(div(b, 124), div(mul(b, b), 1240)), mul(max(sub(p, 130), 0), (10 ** 0.3 - 1) / 125));
+}
+
+function djIsolator(input, loKnob, midKnob, hiKnob) {
+  const lo = djIsolatorGain(loKnob);
+  const mid = djIsolatorGain(midKnob);
+  const hi = djIsolatorGain(hiKnob);
   const xo = (sig, f) => [LPF.ar(LPF.ar(sig, f), f), HPF.ar(HPF.ar(sig, f), f)];
-  const split = xo(input, 250);
-  const upper = xo(split[1], 2500);
-  const low = sum(xo(split[0], 2500));
+  const split = xo(input, 280);
+  const upper = xo(split[1], 4600);
+  const low = sum(xo(split[0], 4600));
   const wet = add(add(mul(low, lo), mul(upper[0], mid)), mul(upper[1], hi));
   const on = gt(add(add(abs(sub(lo, 1)), abs(sub(mid, 1))), abs(sub(hi, 1))), 0.001);
   return LinXFade2.ar(input, wet, lag(sub(mul(on, 2), 1), 0.05));
@@ -151,9 +161,27 @@ function stripDef() {
   });
 }
 
+/** poptart.scd's djResDefault: the resonance at damping 0.5 (Q 2). */
+const DJ_RES_DEFAULT = 0.25;
+
+// poptart.scd's djFilterCoefs: the DJ filter's [lowpass Hz, highpass Hz, lowpass damping, highpass damping, output gain]
+// for the knob djv (-1..1), the resonance res (0..1) and the sample rate sr (see there).
+function djFilterCoefs(djv, res, sr) {
+  const lpX = clip(div(sub(neg(djv), 0.016), 0.984), 0, 1);
+  const hpX = clip(div(sub(djv, 0.016), 0.984), 0, 1);
+  const lpHz = add(100, mul(25000, cubed(sub(1, lpX))));
+  const hpHz = add(20, mul(8200, cubed(hpX)));
+  const damp = sub(add(0.5, mul(0.5, squared(sub(1, min(mul(res, 4), 1))))), mul(max(sub(res, 0.25), 0), 0.46 / 0.75));
+  const hold = mul(2, cubed(clip(div(sub(250, hpHz), 180), 0, 1)));
+  const warp = div(Math.PI, sr);
+  const lpDamp = add(damp, mul(sub(SQRT2, damp), max(sign(djv), 0)));
+  const hpDamp = max(damp, hold);
+  return [div(atan(mul(lpHz, warp)), warp), div(atan(mul(hpHz, warp)), warp), lpDamp, hpDamp, min(mul(min(lpDamp, hpDamp), 2), 1)];
+}
+
 function djDef() {
   return new SynthDef('poptart_dj', {
-    in: 0, ctl: 0, trim: 1, eqlo: 1, eqmid: 1, eqhi: 1, djf: 0, djres: 0,
+    in: 0, ctl: 0, trim: 1, eqlo: 1, eqmid: 1, eqhi: 1, djf: 0,
     cue: 0, cueBus: 0, mdeck: -1, meterBus: 0, fxOut: 0, fxSend: 0,
   }, (c, def) => {
     const k = In.kr(c.ctl, 6);
@@ -163,12 +191,10 @@ function djDef() {
     let live = djIsolator(mul(In.ar(c.in, 2), clip(lag(c.trim, 0.08), 0, 4)),
       clip(lag(c.eqlo, 0.08), 0, 2), clip(lag(c.eqmid, 0.08), 0, 2), clip(lag(c.eqhi, 0.08), 0, 2));
     const djv = clip(lag(c.djf, 0.15), -1, 1);
-    const djLpf = clip(mul(18000, pow(900, min(djv, 0))), 20, 18000);
-    const djHpf = clip(mul(20, pow(900, max(djv, 0))), 20, 18000);
-    const djq = sub(1, mul(0.62, clip(lag(c.djres, 0.08), 0, 1)));
-    const djWet = RHPF.ar(RLPF.ar(live, djLpf, djq), djHpf, djq);
+    const dj = djFilterCoefs(djv, clip(lag(def.namedKr('djres', DJ_RES_DEFAULT), 0.08), 0, 1), SampleRate.ir());
+    const djWet = mul(BHiPass.ar(BLowPass.ar(live, dj[0], dj[2]), dj[1], dj[3]), dj[4]);
     const fxAmt = clip(lag(c.fxSend, 0.08), 0, 1);
-    live = LinXFade2.ar(live, djWet, lag(sub(mul(gt(abs(djv), 0.005), 2), 1), 0.05));
+    live = LinXFade2.ar(live, djWet, lag(sub(mul(gt(abs(djv), 0.016), 2), 1), 0.05));
     Out.ar(c.cueBus, mul(live, clip(lag(max(c.cue, sub(1, mainAmt)), 0.05), 0, 1)));
     Out.ar(add(c.meterBus, mul(max(c.mdeck, 0), 2)), mul(live, gt(c.mdeck, -0.5)));
     Out.ar(c.fxOut, mul(mul(mul(live, fxAmt), faderAmt), mainAmt));
@@ -352,40 +378,77 @@ function samplerDefs(nc, o) {
     OffsetOut.ar(c.out, mul(mul(toStereo(sig), env), c.amp));
   }));
 
-  defs.push(new SynthDef(`poptart_sample_warp_${nc}`, { ...voiceParams(), bend: 0 }, (c) => {
-    const overlaps = 8;
-    const from = Select.kr(lt(c.rate, 0), [c.begin, c.end]);
-    const to = Select.kr(lt(c.rate, 0), [c.end, c.begin]);
-    const sig = mul(Warp1.ar(nc, c.buf, Line.kr(from, to, c.dur), mul(abs(c.rate), midiratio(c.bend)), 0.1, -1, overlaps, 0.1, 2),
-      2 / overlaps);
-    const atkS = max(0.0005, c.atk);
-    const decS = max(0, c.dec);
-    const relS = max(0.015, c.rel);
-    const noteGate = mul(c.gate, lt(Line.kr(0, 1, c.dur), 1));
-    const env = EnvGen.ar(releaseEnv(atkS, decS, c.sus, relS), noteGate, 1, 0, 1, DONE_FREE);
-    OffsetOut.ar(c.out, mul(mul(toStereo(sig), env), c.amp));
-  }));
+  // The grain voices, and under the clean names too without the keylock extension (see poptart.scd).
+  for (const kind of o.keylock ? ['warp_'] : ['warp_', 'clean_']) {
+    defs.push(new SynthDef(`poptart_sample_${kind}${nc}`, { ...voiceParams(), bend: 0 }, (c) => {
+      const overlaps = 8;
+      const from = Select.kr(lt(c.rate, 0), [c.begin, c.end]);
+      const to = Select.kr(lt(c.rate, 0), [c.end, c.begin]);
+      const sig = mul(Warp1.ar(nc, c.buf, Line.kr(from, to, c.dur), mul(abs(c.rate), midiratio(c.bend)), 0.1, -1, overlaps, 0.1, 2),
+        0.65);
+      const atkS = max(0.0005, c.atk);
+      const decS = max(0, c.dec);
+      const relS = max(0.015, c.rel);
+      const noteGate = mul(c.gate, lt(Line.kr(0, 1, c.dur), 1));
+      const env = EnvGen.ar(releaseEnv(atkS, decS, c.sus, relS), noteGate, 1, 0, 1, DONE_FREE);
+      OffsetOut.ar(c.out, mul(mul(toStereo(sig), env), c.amp));
+    }));
 
-  defs.push(new SynthDef(`poptart_sample_warp_loop_${nc}`, { ...voiceParams(), ...loopParams(), bend: 0 }, (c) => {
-    const overlaps = 8;
-    const span = max(0.001, sub(c.end, c.begin));
-    const step = div(mul(div(span, max(0.001, c.dur)), sign(c.rate)), ControlRate.ir());
-    const lo = c.loopLo;
-    const hi = max(add(c.loopLo, 0.001), c.loopHi);
-    const loopSpan = sub(hi, lo);
-    const from = clip(c.entry, lo, hi);
-    const walk = mod(add(Phasor.kr(0, step, 0, loopSpan, 0), sub(from, lo)), loopSpan);
-    const bounceFrom = Select.kr(lt(c.rate, 0), [sub(from, lo), sub(mul(2, loopSpan), sub(from, lo))]);
-    const bouncePh = mod(add(Phasor.kr(0, abs(step), 0, mul(2, loopSpan), 0), bounceFrom), mul(2, loopSpan));
-    const bounced = sub(add(lo, loopSpan), absdif(bouncePh, loopSpan));
-    const ptr = Select.kr(c.pingpong, [add(lo, walk), bounced]);
-    const sig = mul(Warp1.ar(nc, c.buf, ptr, mul(abs(c.rate), midiratio(c.bend)), 0.1, -1, overlaps, 0.1, 2), 2 / overlaps);
-    const atkS = max(0.0005, c.atk);
-    const decS = max(0, c.dec);
-    const relS = max(0.015, c.rel);
-    const env = EnvGen.ar(releaseEnv(atkS, decS, c.sus, relS), c.gate, 1, 0, 1, DONE_FREE);
-    OffsetOut.ar(c.out, mul(mul(toStereo(sig), env), c.amp));
-  }));
+    defs.push(new SynthDef(`poptart_sample_${kind}loop_${nc}`, { ...voiceParams(), ...loopParams(), bend: 0 }, (c) => {
+      const overlaps = 8;
+      const span = max(0.001, sub(c.end, c.begin));
+      const step = div(mul(div(span, max(0.001, c.dur)), sign(c.rate)), ControlRate.ir());
+      const lo = c.loopLo;
+      const hi = max(add(c.loopLo, 0.001), c.loopHi);
+      const loopSpan = sub(hi, lo);
+      const from = clip(c.entry, lo, hi);
+      const walk = mod(add(Phasor.kr(0, step, 0, loopSpan, 0), sub(from, lo)), loopSpan);
+      const bounceFrom = Select.kr(lt(c.rate, 0), [sub(from, lo), sub(mul(2, loopSpan), sub(from, lo))]);
+      const bouncePh = mod(add(Phasor.kr(0, abs(step), 0, mul(2, loopSpan), 0), bounceFrom), mul(2, loopSpan));
+      const bounced = sub(add(lo, loopSpan), absdif(bouncePh, loopSpan));
+      const ptr = Select.kr(c.pingpong, [add(lo, walk), bounced]);
+      const sig = mul(Warp1.ar(nc, c.buf, ptr, mul(abs(c.rate), midiratio(c.bend)), 0.1, -1, overlaps, 0.1, 2), 0.65);
+      const atkS = max(0.0005, c.atk);
+      const decS = max(0, c.dec);
+      const relS = max(0.015, c.rel);
+      const env = EnvGen.ar(releaseEnv(atkS, decS, c.sus, relS), c.gate, 1, 0, 1, DONE_FREE);
+      OffsetOut.ar(c.out, mul(mul(toStereo(sig), env), c.amp));
+    }));
+  }
+
+  // The clean voices (the default stretch): the keylock's stretcher through PoptartStretch.
+  if (o.keylock) {
+    defs.push(new SynthDef(`poptart_sample_clean_${nc}`, { ...voiceParams(), bend: 0 }, (c) => {
+      const frames = BufFrames.ir(c.buf);
+      const startF = mul(c.begin, frames);
+      const endF = max(mul(c.begin, frames), sub(mul(c.end, frames), 1));
+      const from = Select.kr(lt(c.rate, 0), [startF, endF]);
+      const speed = mul(div(mul(sub(c.end, c.begin), BufDur.ir(c.buf)), max(c.dur, 1e-6)), Select.kr(lt(c.rate, 0), [1, -1]));
+      const sig = PoptartStretch.ar(nc, c.buf, speed, mul(abs(c.rate), midiratio(c.bend)), from, 0, 0, 0, 0);
+      const atEdge = min(add(lt(from, 1), gt(from, sub(frames, 2))), 1);
+      const atkS = max(mul(sub(1, atEdge), 0.0005), c.atk);
+      const decS = max(0, c.dec);
+      const relS = max(0.015, c.rel);
+      const noteGate = mul(c.gate, lt(Line.kr(0, 1, c.dur), 1));
+      const env = EnvGen.ar(releaseEnv(atkS, decS, c.sus, relS), noteGate, 1, 0, 1, DONE_FREE);
+      OffsetOut.ar(c.out, mul(mul(toStereo(sig), env), c.amp));
+    }));
+
+    defs.push(new SynthDef(`poptart_sample_clean_loop_${nc}`, { ...voiceParams(), ...loopParams(), bend: 0 }, (c) => {
+      const frames = BufFrames.ir(c.buf);
+      const lo = mul(c.loopLo, frames);
+      const hi = max(add(lo, 1), mul(c.loopHi, frames));
+      const from = clip(mul(c.entry, frames), lo, hi);
+      const speed = mul(div(mul(sub(c.end, c.begin), BufDur.ir(c.buf)), max(c.dur, 1e-6)), Select.kr(lt(c.rate, 0), [1, -1]));
+      const sig = PoptartStretch.ar(nc, c.buf, speed, mul(abs(c.rate), midiratio(c.bend)), from, 1, lo, hi, c.pingpong);
+      const atEdge = min(add(lt(from, 1), gt(from, sub(frames, 2))), 1);
+      const atkS = max(mul(sub(1, atEdge), 0.0005), c.atk);
+      const decS = max(0, c.dec);
+      const relS = max(0.015, c.rel);
+      const env = EnvGen.ar(releaseEnv(atkS, decS, c.sus, relS), c.gate, 1, 0, 1, DONE_FREE);
+      OffsetOut.ar(c.out, mul(mul(toStereo(sig), env), c.amp));
+    }));
+  }
 
   defs.push(new SynthDef(`poptart_sample_grain_${nc}`, {
     out: 0, bufL: 0, bufR: 0, begin: 0, rate: 1, gate: 1, amp: 1,
@@ -418,20 +481,25 @@ function samplerDefs(nc, o) {
 
   defs.push(new SynthDef(`poptart_song_${nc}`, { out: 0, buf: 0, rate: 1, run: 1, amp: 1, gate: 1, t_seek: 0, seekFrame: 0 }, (c) => {
     const step = mul(mul(lag(c.rate, 0.05), BufRateScale.ir(c.buf)), lag(c.run, 0.02));
-    const sig = PlayBuf.ar(nc, c.buf, step, c.t_seek, c.seekFrame, 0);
+    const flip = ToggleFF.kr(c.t_seek);
+    const sr = SampleRate.ir();
+    const fade = min(Sweep.ar(c.t_seek, div(sr, round(mul(0.005, sr)))), 1);
+    const gainA = Select.ar(flip, [sub(1, fade), fade]);
+    const sig = add(mul(PlayBuf.ar(nc, c.buf, step, mul(c.t_seek, flip), c.seekFrame, 0), gainA),
+      mul(PlayBuf.ar(nc, c.buf, step, mul(c.t_seek, sub(1, flip)), c.seekFrame, 0), sub(1, gainA)));
     const idx = Phasor.ar(c.t_seek, step, 0, BufFrames.ir(c.buf), c.seekFrame);
-    const env = EnvGen.kr(Env.asr(0.005, 1, 0.05), c.gate, 1, 0, 1, DONE_FREE);
+    const env = EnvGen.kr(Env.asr(0.005, 1, 0.05, 'lin'), c.gate, 1, 0, 1, DONE_FREE);
     SendReply.kr(Impulse.kr(2), '/poptart/songPos', div(A2K.kr(idx), BufSampleRate.ir(c.buf)));
     Out.ar(c.out, mul(mul(toStereo(sig), env), lag(c.amp, 0.02)));
   }));
 
-  defs.push(o.pitchShift ? songWarpDef(nc, toStereo) : songWarpFallbackDef(nc, toStereo));
+  defs.push(o.keylock ? songWarpDef(nc, toStereo) : songWarpFallbackDef(nc, toStereo));
   return defs;
 }
 
 function songWarpDef(nc, toStereo) {
   return new SynthDef(`poptart_songwarp_${nc}`, {
-    out: 0, buf: 0, rate: 1, run: 1, amp: 1, gate: 1, t_seek: 0, seekFrame: 0, delay: 0, window: 0,
+    out: 0, buf: 0, rate: 1, run: 1, amp: 1, gate: 1, t_seek: 0, seekFrame: 0,
   }, (c) => {
     const brs = BufRateScale.ir(c.buf);
     const frames = BufFrames.ir(c.buf);
@@ -439,20 +507,15 @@ function songWarpDef(nc, toStereo) {
     const rateL = lag(c.rate, 0.05);
     const runL = lag(c.run, 0.02);
     const step = mul(mul(rateL, brs), runL);
-    const start = add(c.seekFrame, mul(mul(c.delay, c.rate), brs));
-    const dry = PlayBuf.ar(nc, c.buf, step, c.t_seek, start, 0);
-    const idx = Phasor.ar(c.t_seek, step, 0, frames, start);
-    const sh = PoptartPitchShift.ar(dry, div(1, max(rateL, 0.01)), c.window);
-    const sig = sh.slice(0, nc);
-    const heard = sub(idx, mul(mul(c.delay, rateL), brs));
-    const runOut = lag(DelayN.kr(c.run, 0.5, div(c.delay, SampleRate.ir())), 0.02);
-    const env = EnvGen.kr(Env.asr(0.005, 1, 0.05), c.gate, 1, 0, 1, DONE_FREE);
-    SendReply.kr(Impulse.kr(2), '/poptart/songPos', div(A2K.kr(heard), bufSr));
-    Out.ar(c.out, mul(mul(mul(toStereo(sig), env), lag(c.amp, 0.02)), runOut));
+    const sig = PoptartKeylock.ar(nc, c.buf, mul(rateL, runL), c.t_seek, c.seekFrame);
+    const idx = Phasor.ar(c.t_seek, step, 0, frames, c.seekFrame);
+    const env = EnvGen.kr(Env.asr(0.005, 1, 0.05, 'lin'), c.gate, 1, 0, 1, DONE_FREE);
+    SendReply.kr(Impulse.kr(2), '/poptart/songPos', div(A2K.kr(idx), bufSr));
+    Out.ar(c.out, mul(mul(mul(toStereo(sig), env), lag(c.amp, 0.02)), runL));
   });
 }
 
-// The keylock player built from stock UGens, for an engine without PoptartPitchShift.
+// The keylock player built from stock UGens, for an engine without PoptartKeylock.
 function songWarpFallbackDef(nc, toStereo) {
   return new SynthDef(`poptart_songwarp_${nc}`, {
     out: 0, buf: 0, rate: 1, run: 1, amp: 1, gate: 1, t_seek: 0, seekFrame: 0,
@@ -503,7 +566,7 @@ function songWarpFallbackDef(nc, toStereo) {
     };
     const sig = add(reader(mul(wrapT, add(sub(1, selT), first)), 1), reader(mul(wrapT, selT), 0));
     const lpOut = OnePole.ar(mono(sig), lpCoef);
-    const env = EnvGen.kr(Env.asr(0.005, 1, 0.05), c.gate, 1, 0, 1, DONE_FREE);
+    const env = EnvGen.kr(Env.asr(0.005, 1, 0.05, 'lin'), c.gate, 1, 0, 1, DONE_FREE);
     BufWr.ar(lpOut, ring, sub(hop - 1, count), 1);
     LocalOut.ar(lpOut);
     SendReply.kr(Impulse.kr(2), '/poptart/songPos', div(A2K.kr(idx), bufSr));
@@ -584,7 +647,7 @@ function ioDefs(o) {
   return defs;
 }
 
-/** The defs poptart.scd sends at boot, in its order (without the keylock probe). */
+/** The defs poptart.scd sends at boot, in its order. */
 function bootDefs(options) {
   const o = resolveOptions(options);
   const defs = [];
@@ -594,17 +657,6 @@ function bootDefs(options) {
   for (const nc of [1, 2]) defs.push(...samplerDefs(nc, o));
   defs.push(...ioDefs(o));
   return defs;
-}
-
-/** The one-shot def that reports the keylock shifter's delay (null without PoptartPitchShift). */
-function rbProbeDef(options) {
-  const o = resolveOptions(options);
-  if (!o.pitchShift) return null;
-  return new SynthDef('poptart_rbprobe', {}, () => {
-    const sh = PoptartPitchShift.ar(Silent.ar(2), 1, 0);
-    SendReply.kr(Impulse.kr(0), '/poptart/rbDelay', A2K.kr(sh[2]));
-    Line.kr(0, 1, 0.05, DONE_FREE);
-  });
 }
 
 // --- the mixer's analysis (buildMixDef) -------------------------------------------------------
@@ -654,13 +706,14 @@ function viewTapDefs() {
   return [tap, fft];
 }
 
-/** Every def known before anything plays: the track's, the boot set, the keylock probe and the view taps'. */
+/** Every def known before anything plays: the track's, the boot set and the view taps'. */
 function fixedDefs(options) {
-  const probe = rbProbeDef(options);
-  return [...trackDefs(options), ...bootDefs(options), ...(probe ? [probe] : []), ...viewTapDefs()];
+  return [...trackDefs(options), ...bootDefs(options), ...viewTapDefs()];
 }
 
 module.exports = {
-  resolveOptions, trackDefs, bootDefs, rbProbeDef, mixDefs, viewTapDefs, fixedDefs, lfoDefName, LFO_SHAPES,
+  resolveOptions, trackDefs, bootDefs, mixDefs, viewTapDefs, fixedDefs, lfoDefName, LFO_SHAPES,
   djIsolator,
+  djIsolatorGain,
+  DJ_RES_DEFAULT,
 };

@@ -1,12 +1,12 @@
 'use strict';
 
-// The keylock song player in sc/poptart.scd. There are two: the Rubber Band pitch shifter
-// (PoptartPitchShift, native/rubberband/) when that extension is installed, and the in-graph
-// SOLA stretcher otherwise. This checks that (1) the whole if/else builds a def for both channel
-// counts in whichever configuration this sclang has, and (2) rendered offline through a real
-// scsynth, the player keeps every test tone's pitch and level at 5% faster - which is precisely
-// what the Warp1 player it replaced could not do (-32 dB at 500 Hz at that rate) - and, with
-// the pitch shifter, that its delay compensation lands the audio where the pointer says.
+// The keylock song player in sc/poptart.scd. There are two: the PoptartKeylock UGen
+// (native/keylock/) when that extension is installed, and the in-graph SOLA stretcher
+// otherwise. This checks that (1) the whole if/else builds a def for both channel counts in
+// whichever configuration this sclang has, and (2) rendered offline through a real scsynth, the
+// player lands its audio where the pointer says, with no latency, and keeps every test tone's
+// pitch and level at 5% faster - which is precisely what the Warp1 player before both could not
+// do (-32 dB at 500 Hz at that rate).
 //
 // Like songs-sclang.test.js: the source is lifted out of the shipped file, run in a real sclang,
 // and skipped (not failed) where sclang or scsynth can't run.
@@ -34,7 +34,7 @@ const TONES = [
 // alone build the graphs, and the block's value is then the def the branch chose.
 function extractWarpChoice() {
   const src = fs.readFileSync(SCD, 'utf8');
-  const m = src.match(/^        if \(\\PoptartPitchShift\.asClass\.notNil\) \{[\s\S]*?^        \};$/m);
+  const m = src.match(/^        if \(\\PoptartKeylock\.asClass\.notNil\) \{[\s\S]*?^        \};$/m);
   assert.ok(m, 'could not find the keylock def choice in sc/poptart.scd');
   const defs = m[0].match(/SynthDef\(\("poptart_songwarp_" \+\+ nc\)/g);
   assert.strictEqual(defs?.length, 2, 'expected both keylock defs inside the choice');
@@ -93,34 +93,25 @@ function runSclang(dir, wavPath) {
   const scsynth = path.join(path.dirname(sclang), 'scsynth');
   const outA = path.join(dir, 'rate1.wav');
   const outB = path.join(dir, 'rate105.wav');
-  // With the pitch shifter: a probe reports its delay on channel 2 of the rate-1 render, and
-  // the player is spawned with delay 0, so the audio is expected exactly that late. Without it
-  // (SOLA) the probe is a silent stand-in and the delay is 0.
   const script = `(
-var toStereo, defs, render, hasRb, probe, pending = 2;
+var toStereo, defs, render, hasUGen, pending = 2;
 ${fs.existsSync(scsynth) ? `Score.program = ${JSON.stringify(scsynth)}.quote;` : ''}
-hasRb = \\PoptartPitchShift.asClass.notNil;
-("HAS-RB<" ++ hasRb ++ ">").postln;
+hasUGen = \\PoptartKeylock.asClass.notNil;
+("HAS-UGEN<" ++ hasUGen ++ ">").postln;
 defs = [1, 2].collect { |nc|
     toStereo = { |sig| if (nc == 1) { sig ! 2 } { sig } };
     ${extractWarpChoice()};
 };
 defs.do { |def| ("WARPDEF-OK<" ++ def.name ++ ">").postln };
-probe = SynthDef(\\keylock_probe, {
-    var d = if (hasRb) { \\PoptartPitchShift.asClass.ar(Silent.ar(2), 1, 0)[2] } { DC.ar(0) };
-    Out.ar(2, d * 0.0001);
-});
 render = { |rate, outPath|
     var score = [
         [0.0, ["/d_recv", defs[0].asBytes]],
-        [0.0, ["/d_recv", probe.asBytes]],
         [0.0, ["/b_allocRead", 0, ${JSON.stringify(wavPath)}]],
         [0.05, ["/s_new", "poptart_songwarp_1", 1000, 0, 0, "out", 0, "buf", 0, "rate", rate, "t_seek", 1, "seekFrame", 0]],
-        [0.05, ["/s_new", "keylock_probe", 1001, 0, 0]],
         [4.0, ["/c_set", 0, 0]]
     ];
     Score.recordNRT(score, outPath ++ ".osc", outPath, sampleRate: ${SR}, headerFormat: "WAV",
-        sampleFormat: "float", options: ServerOptions.new.numOutputBusChannels_(3), duration: 4.0,
+        sampleFormat: "float", options: ServerOptions.new.numOutputBusChannels_(2), duration: 4.0,
         action: { pending = pending - 1; if (pending == 0) { "RENDER-DONE".postln; 0.exit } });
 };
 render.(1.0, ${JSON.stringify(outA)});
@@ -155,7 +146,7 @@ test('keylock player builds, keeps pitch and level at rate 1.05, and lands its a
     t.skip(`scsynth could not render offline here:\n${out.trim().split('\n').slice(-5).join('\n')}`);
     return;
   }
-  const hasRb = /^HAS-RB<true>$/m.test(out);
+  const hasUGen = /^HAS-UGEN<true>$/m.test(out);
 
   const channel = (p, k) => {
     const wav = readWavRaw(p);
@@ -165,14 +156,12 @@ test('keylock player builds, keeps pitch and level at rate 1.05, and lands its a
     return ch;
   };
 
-  // Rate 1: the render is the source, `delay` samples after the spawn at block 2176 (the
-  // 0.05 s bundle rounded down to a block). SOLA reconstructs it bit-exact; the pitch shifter
-  // resynthesizes, so it only has to be well below audibility.
+  // Rate 1: the render is the source, from the spawn at block 2176 (the 0.05 s bundle rounded
+  // down to a block) - neither player is late. SOLA reconstructs it bit-exact, and so does the
+  // UGen's stretcher at rate 1, to rounding.
   const a = channel(outA, 0);
-  const delay = Math.round(channel(outA, 2)[SR] / 0.0001);
-  assert.ok(hasRb ? delay > 0 : delay === 0, `probe reported delay ${delay} with pitch shifter ${hasRb ? 'present' : 'absent'}`);
   const lag = alignLag(a, src);
-  assert.ok(Math.abs(lag - (2176 + delay)) <= 1, `keylock audio landed at ${lag}, expected ${2176 + delay} (start 2176 + delay ${delay})`);
+  assert.strictEqual(lag, 2176, `keylock audio landed at ${lag}, expected 2176 (${hasUGen ? 'PoptartKeylock' : 'SOLA'})`);
   let err = 0;
   let pow = 0;
   for (let i = SR; i < 3 * SR; i++) {
@@ -180,7 +169,7 @@ test('keylock player builds, keeps pitch and level at rate 1.05, and lands its a
     pow += src[i] ** 2;
   }
   const residualDb = 10 * Math.log10(err / pow);
-  assert.ok(residualDb < (hasRb ? -30 : -40), `keylock at rate 1 is not transparent: residual ${residualDb.toFixed(1)} dB (lag ${lag})`);
+  assert.ok(residualDb < -40, `keylock at rate 1 is not transparent: residual ${residualDb.toFixed(1)} dB (lag ${lag})`);
 
   // Rate 1.05: every tone at its own pitch, within 2 dB of the source.
   const b = channel(outB, 0);

@@ -166,7 +166,7 @@ The concrete engine implementation the scheduler drives. Bridges Node and audio.
 - `synthdef/` — **SynthDefs without sclang**: a Node port of sclang's SynthDef construction
   (controls from the argument list, the MulAdd/Sum3/Sum4/neg rewrites, dead-code elimination,
   constant numbering, the depth-first sort) and an SCgf version 2 writer. `graph.js` is the
-  builder, `ugens.js` the UGen classes poptart uses (VSTPlugin, PoptartDevice, PoptartPitchShift
+  builder, `ugens.js` the UGen classes poptart uses (VSTPlugin, PoptartDevice, PoptartKeylock
   and PoptartSpectrum included), `defs.js` every def `sc/poptart.scd` builds, written in the order
   sclang evaluates them, `expr.js` the param-expression defs (one per tree shape, named from a hash
   of the shape, constants as controls `c<j>`, input buses as `k<i>`/`a<i>`). The API is
@@ -645,13 +645,12 @@ built tree.
   of the desk and talks to Web MIDI. What differs, and why:
   - **One clock.** The song players run on the audio context, the clock everything is scheduled
     on, so there is no drift between a player and the model of it and none of the desktop's servo.
-  - **Heard time.** Keylock is the ported Signalsmith Stretch (Shift's pitch half): the repitched
-    read shifted back by the same interval, as the desktop does with Rubber Band. The shifter is
-    0.12 s late, so the plain path is delayed by exactly as much and every song is heard that long
-    after its player reads it. Keylock is then a crossfade between two aligned paths, and the
-    desk keeps its playhead model in HEARD time and sends each event to the player that much
-    early (a rate change is rebased where it will be heard). Starts and loop wraps are already
-    timestamped ahead, so only the momentary gestures (a nudge, a fader) answer 0.12 s later.
+  - **Heard time.** Keylock is the song reader's own: the song read through `dsp/keylock.mjs`
+    (a phase vocoder below 1.9 kHz, WSOLA above it), the same stretcher the desktop's
+    PoptartKeylock UGen runs. It reads the song itself and adds no latency, so a deck is heard
+    when its player reads, keylock on or off, and switching is a crossfade between the two reads
+    at the playhead. The desk keeps its playhead model in heard time; starts and loop wraps are
+    timestamped ahead.
   - **Memory.** A browser cannot decode a compressed file in pieces (WebCodecs decodes frames,
     not files, so it would need a demuxer per container), and a decoded ten-minute stereo song is
     ~230 MB of floats. So a song is decoded whole, once, packed to 16-bit planes in slices with the

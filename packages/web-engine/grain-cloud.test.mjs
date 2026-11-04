@@ -4,7 +4,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { GrainCloud, WarpCloud, grainFileHeld, grainFiles } from './src/devices/grain-cloud.mjs';
+import { GrainCloud, StretchCloud, WarpCloud, grainFileHeld, grainFiles } from './src/devices/grain-cloud.mjs';
+import { KeylockVoice } from './src/dsp/keylock.mjs';
 
 const SR = 48000;
 const BLOCK = 128;
@@ -171,11 +172,26 @@ test('the warp lays Warp1\'s grains: 100 ms Hann, eight overlapping, from the fi
   // random 0.5 is no change in size: 4800-frame grains, a new one every 600.
   const cloud = warp({ file: file(ones()) });
   const { l, r } = play(cloud, 4800, { detune: 0 });
-  assert.ok(Math.abs(l[0] - (Math.sin(Math.PI / 4800) ** 2) * 0.25) < 1e-9, 'one grain, under its window, at 2/8');
-  // Once eight overlap, a constant file sums to eight Hann bells: 4 at 2/8 = 1.
+  assert.ok(Math.abs(l[0] - (Math.sin(Math.PI / 4800) ** 2) * 0.65) < 1e-9, 'one grain, under its window, at the warp level');
+  // Once eight overlap, a constant file sums to eight Hann bells: 4 at 0.65.
   const settled = play(cloud, 4800, { detune: 0 }, 4800);
-  assert.ok(Math.abs(settled.l[1000] - 1) < 0.01, `${settled.l[1000]}`);
+  assert.ok(Math.abs(settled.l[1000] - 2.6) < 0.01, `${settled.l[1000]}`);
   assert.equal(r[100], l[100], 'a mono file in both sides');
+});
+
+test('the warp plays broadband material at the plain level, stretched or not', () => {
+  // Grains of a stretched signal add at unrelated phases, so 2 / overlaps (exact for DC) left the
+  // voice about 8 dB under; the warp level is fitted to real files, and noise sits within a dB.
+  let seed = 7;
+  const noise = Float32Array.from({ length: SR * 3 }, () => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 2147483648 - 1; });
+  const rms = (x, from, to) => Math.sqrt(x.slice(from, to).reduce((a, v) => a + v * v, 0) / (to - from));
+  const ref = rms(noise, 0, noise.length);
+  for (const stretch of [0.5, 2, 4]) {
+    const durSec = 3 * stretch;
+    const { l } = play(warp({ file: file(noise), durSec }), Math.round(durSec * SR), { detune: 0 });
+    const level = 20 * Math.log10(rms(l, SR / 4, l.length - SR / 4) / ref);
+    assert.ok(Math.abs(level) < 1.5, `stretch ${stretch} plays ${level.toFixed(2)} dB from the plain level`);
+  }
 });
 
 test('each warp grain is up to a tenth longer or shorter, at random', () => {
@@ -219,4 +235,80 @@ test('the warp ends where it is told to', () => {
   const { l } = play(cloud, 4800, { detune: 0 });
   assert.ok(l.slice(2400).every((v) => v === 0));
   assert.equal(cloud.done, true);
+});
+
+// --- the clean stretch voice --------------------------------------------------------------------
+
+const sine = (f, n = SR * 2) => Float32Array.from({ length: n }, (_, i) => 0.5 * Math.sin((2 * Math.PI * f * i) / SR));
+
+/** The shared core, played straight: what the voice must put out from its first sample. */
+function core(channels, { pos, rate, loop = false, lo = 0, hi = 0, pingpong = false }, frames, pitch) {
+  const v = new KeylockVoice(SR, channels.length);
+  v.setSource(channels, channels[0].length, 1, 1);
+  v.start({ pos, rate, loop, lo, hi, pingpong });
+  const out = Array.from({ length: channels.length }, () => new Float64Array(frames));
+  for (let at = 0; at < frames; at += BLOCK) {
+    const n = Math.min(BLOCK, frames - at);
+    const rows = out.map((o) => o.subarray(at, at + n));
+    v.process(rows, n, pitch);
+  }
+  return out;
+}
+
+test('the clean voice is the keylock\'s core from its start sample, the window over the event\'s time', () => {
+  const data = sine(440);
+  const id = file(data);
+  // Half a second of the file over a second: rate 0.5, starting 50 frames into a block.
+  const start = (BLOCK * 3 + 50) / SR;
+  const cloud = new StretchCloud(SR, { file: id, begin: 0.25, end01: 0.5, durSec: 1, speed: 1, fileRate: SR, start, end: 2 });
+  const { l, r } = play(cloud, BLOCK * 40, { detune: 0 });
+  const want = core([data], { pos: 0.25 * data.length, rate: 0.5 }, BLOCK * 40 - (BLOCK * 3 + 50), 1)[0];
+  assert.ok(l.subarray(0, BLOCK * 3 + 50).every((v) => v === 0), 'nothing before its start');
+  let worst = 0;
+  for (let i = 0; i < want.length; i++) worst = Math.max(worst, Math.abs(l[BLOCK * 3 + 50 + i] - want[i]));
+  assert.ok(worst < 1e-6, `off the core by ${worst}`);
+  assert.deepEqual(r, l, 'a mono file in both sides');
+});
+
+test('the clean voice transposes by its speed and the bend, and plays backwards from the window\'s end', () => {
+  const data = sine(300);
+  const id = file(data);
+  const frames = BLOCK * 30;
+  // Speed 1.5 over a stretch of 2 (the window takes 2 / 1.5 of its length), bent up 100 cents.
+  const cloud = new StretchCloud(SR, { file: id, begin: 0.1, end01: 0.4, durSec: (0.6 * 2) / 1.5, speed: -1.5, fileRate: SR, start: 0, end: 5 });
+  const { l } = play(cloud, frames, { detune: 100 });
+  const frames01 = data.length;
+  const rate = -(0.3 * (frames01 / SR)) / ((0.6 * 2) / 1.5);
+  const want = core([data], { pos: Math.max(0.1 * frames01, 0.4 * frames01 - 1), rate }, frames, 1.5 * 2 ** (100 / 1200))[0];
+  let worst = 0;
+  for (let i = 0; i < frames; i++) worst = Math.max(worst, Math.abs(l[i] - want[i]));
+  assert.ok(worst < 1e-6, `off the core by ${worst}`);
+});
+
+test('a clean loop runs round its window on the core\'s corners, and a stereo file keeps its sides', () => {
+  const left = sine(220);
+  const right = sine(550);
+  const id = file(left, right);
+  const n = left.length;
+  const o = { file: id, begin: 0.3, end01: 0.305, durSec: 0.02, speed: 1, fileRate: SR, start: 0, end: 5, loop: true, loopLo: 0.3, loopHi: 0.305, loopEntry: 0.3, pingpong: 1 };
+  const { l, r } = play(new StretchCloud(SR, o), BLOCK * 30, { detune: 0 });
+  const rate = (0.005 * (n / SR)) / 0.02;
+  const [wl, wr] = core([left, right], { pos: 0.3 * n, rate, loop: true, lo: 0.3 * n, hi: 0.305 * n, pingpong: true }, BLOCK * 30, 1);
+  let worst = 0;
+  for (let i = 0; i < BLOCK * 30; i++) worst = Math.max(worst, Math.abs(l[i] - wl[i]), Math.abs(r[i] - wr[i]));
+  assert.ok(worst < 1e-6, `off the core by ${worst}`);
+});
+
+test('the clean voice ends where it is told to, and the next one plays as if its stretcher were new', () => {
+  const data = sine(440);
+  const id = file(data);
+  const o = { file: id, begin: 0.25, end01: 0.5, durSec: 1, speed: 1, fileRate: SR, start: 0 };
+  const first = new StretchCloud(SR, { ...o, end: 0.05 });
+  const { l } = play(first, 4800, { detune: 0 });
+  assert.ok(l.slice(2400).every((v) => v === 0));
+  play(first, BLOCK, { detune: 0 }, 4800);
+  assert.equal(first.done, true);
+  // Its stretcher went back to the pool, and the next voice takes it: the same output as the first.
+  const again = play(new StretchCloud(SR, { ...o, end: 5 }), 2400, { detune: 0 });
+  assert.deepEqual(again.l, l.slice(0, 2400));
 });

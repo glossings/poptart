@@ -26,13 +26,11 @@ function liftedSource() {
   const from = lines.findIndex((l) => /^\s*\[\\sine, \\tri, \\saw/.test(l));
   const to = lines.findIndex((l, i) => i > from && l.includes('SynthDef(\\poptart_xokr'));
   if (from < 0 || to < 0) throw new Error('could not find the boot defs in sc/poptart.scd');
-  const probe = lift(src, /SynthDef\(\\poptart_rbprobe, \{[\s\S]*?\n\s*\}\)/, 'poptart_rbprobe');
   const view = lift(src, /^viewTap\[\\buildDefs\] = \{[\s\S]*?^\};$/m, 'viewTap[\\buildDefs]');
   return {
-    functions: [...['chanIn', 'djIsolator', 'buildHeadDef', 'buildFxDef', 'buildXoverDef', 'buildTrackDef', 'buildDjDef',
+    functions: [...['chanIn', 'djIsolator', 'djFilterCoefs', 'djResDefault', 'buildHeadDef', 'buildFxDef', 'buildXoverDef', 'buildTrackDef', 'buildDjDef',
       'buildTapDef', 'buildBassMonoDef', 'buildMixDef', 'mixBank', 'exprSynthDef'].map(fn), view].join('\n'),
     boot: lines.slice(from, to + 1).join('\n'),
-    probe,
   };
 }
 
@@ -40,14 +38,15 @@ const sym = (s) => `'${s}'`;
 
 /**
  * One sclang function body per config. A config: {key, numOutputBusChannels, cueOffset,
- * nativeDevices, spectrum, pitchShift, mixFreqs, exprs: [{name, tree, outKind, rates}]}.
+ * nativeDevices, spectrum, keylock, mixFreqs, exprs: [{name, tree, outKind, rates}]}.
  * Extensions a config leaves out are taken away by rewriting `\Class.asClass` to nil.
  */
 function configBlock(cfg, lifted, outDir) {
-  let text = `${lifted.functions}\n${lifted.boot}\nif (\\PoptartPitchShift.asClass.notNil) { defs.add(${lifted.probe}) };\n`;
+  let text = `${lifted.functions}\n${lifted.boot}\n`;
   if (!cfg.nativeDevices) text = text.replaceAll('\\PoptartDevice.asClass', 'nil');
   if (!cfg.spectrum) text = text.replaceAll('\\PoptartSpectrum.asClass', 'nil');
-  if (!cfg.pitchShift) text = text.replaceAll('\\PoptartPitchShift.asClass', 'nil');
+  // PoptartStretch ships in the keylock's extension.
+  if (!cfg.keylock) text = text.replaceAll('\\PoptartKeylock.asClass', 'nil').replaceAll('\\PoptartStretch.asClass', 'nil');
   // every `}).add;` of the lifted source lands in `defs` instead of on a server
   text = text.replace(/\}\)\.add;/g, '}) !? { |d| defs.add(d) };');
   const exprs = (cfg.exprs ?? []).map((e) => `[${sym(e.name)}, ${JSON.stringify(JSON.stringify(e.tree))}, ${sym(e.outKind)}, ${e.rates ? `[${e.rates.map((r) => `\\${r}`).join(', ')}]` : 'nil'}]`);
@@ -59,7 +58,7 @@ var cueOffset = ${cfg.cueOffset ?? 'nil'};
 var lfoDefName = { |shape, audio| ("poptart_lfo_" ++ shape ++ if (audio) { "_ar" } { "" }).asSymbol };
 var trackDefName = { |key| ("poptart_track_" ++ key).asSymbol };
 var bendPollHz = 100, grainMaxOverlap = 128, mixBandFreqs;
-var chanIn, djIsolator, buildHeadDef, buildFxDef, buildXoverDef, buildTrackDef, buildDjDef, buildTapDef, buildBassMonoDef;
+var chanIn, djIsolator, djFilterCoefs, djResDefault, buildHeadDef, buildFxDef, buildXoverDef, buildTrackDef, buildDjDef, buildTapDef, buildBassMonoDef;
 var buildMixDef, mixBank, exprSynthDef, viewTap = ();
 var defs = List.new, dir = ${JSON.stringify(dir)};
 ${text}
@@ -81,8 +80,8 @@ defs.do { |d|
 
 function sclangConf(dir, extensionsDir) {
   const file = path.join(dir, 'sclang_conf.yaml');
-  const include = [path.join(ENGINE, 'native', 'devices'), path.join(ENGINE, 'native', 'rubberband')];
-  const exclude = [path.join(extensionsDir, 'poptart'), path.join(extensionsDir, 'PoptartDevice.sc'), path.join(extensionsDir, 'PoptartPitchShift.sc')];
+  const include = [path.join(ENGINE, 'native', 'devices'), path.join(ENGINE, 'native', 'keylock')];
+  const exclude = [path.join(extensionsDir, 'poptart'), path.join(extensionsDir, 'PoptartDevice.sc'), path.join(extensionsDir, 'PoptartKeylock.sc')];
   fs.writeFileSync(file, `includePaths:\n${include.map((p) => `  - ${p}\n`).join('')}excludePaths:\n${exclude.map((p) => `  - ${p}\n`).join('')}`);
   return file;
 }

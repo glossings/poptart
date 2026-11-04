@@ -35,7 +35,7 @@ import { isSliceGrid, assumedFitNote } from '../../../osc-engine/slice-grid-core
 import { EnvConnection, FeedConnection, LatchConnection, LfoConnection } from './modulators.mjs';
 import { GRAIN_CHANNEL_FIELDS, SUPPORTED_CHANNELS, Track, rampParam } from './track.mjs';
 import { DeskAudio } from './desk-audio.mjs';
-import { SONG_LATENCY_SEC, SongPlayer } from './song-player.mjs';
+import { SongPlayer } from './song-player.mjs';
 import { RouteGraph } from './route-graph.mjs';
 
 const keyOf = (slot, name) => `${slot}:${name}`;
@@ -2776,13 +2776,15 @@ export class WebAudioEngine {
       durSec: plan.durSec, cut: plan.cut, amp: plan.amp, fileSec: plan.fileSec,
       attack: plan.attack, decay: plan.decay, release: plan.release,
       loopWrap: plan.windowed ? 'window' : 'file', loopDir: plan.pingpong ? 'pingpong' : 'forward',
+      stretchMode: plan.stretchMode ? 'grain' : 'clean',
     };
 
     // .grain(): a cloud of grains read from the file, in place of the file played through.
     if (plan.grain) return { ...info, ...this._playGrains(track, buffer, cfg, plan, offsetSec) };
-    // .stretch() other than one: the window played at its own pace with the pitch held.
+    // .stretch() other than one: the window played at its own pace with the pitch held - by the
+    // keylock's stretcher, or by grains under .stretchmode("grain").
     if (plan.stretch !== 1) {
-      this._playWarp(track, buffer, plan);
+      this._playWarp(track, buffer, plan, plan.stretchMode === 1 ? 'warp' : 'clean');
       return info;
     }
     // A recording cut as a held note carries a sustain loop: honored when nothing else asked for a
@@ -2876,19 +2878,22 @@ export class WebAudioEngine {
   }
 
   /**
-   * .stretch(): the desktop's warp voice - Warp1's 100 ms Hann grains, eight overlapping, each a
-   * tenth longer or shorter at random, along a pointer that walks the window (or loops it) at the
-   * event's own pace while each grain plays at the rate. So the pitch is the rate's and the length
-   * is the stretch's, as on the desktop. Laid on the audio thread (see devices/grain-cloud.mjs).
+   * .stretch(), in either of the desktop's voices (see devices/grain-cloud.mjs), on the audio
+   * thread. `mode` 'clean' is the poptart_sample_clean_ defs: the window read through the keylock's
+   * stretcher (StretchCloud). 'warp' is the warp defs: Warp1's 100 ms Hann grains, eight
+   * overlapping, each a tenth longer or shorter at random, along a pointer that walks the window
+   * (or loops it) at the event's own pace while each grain plays at the rate (WarpCloud). Either
+   * way the pitch is the rate's and the length is the stretch's, as on the desktop.
    */
-  _playWarp(track, buffer, plan) {
+  _playWarp(track, buffer, plan, mode = 'warp') {
     const start = Math.max(this.getTime(), plan.onsetSec);
     const gateEnd = plan.loop || plan.cut ? Math.max(start, plan.offsetSec) : start + plan.durSec;
     const amp = this.ctx.createGain();
     const end = this._envelope(amp, plan, start, gateEnd);
     this._cloudVoice(track, amp, start, plan, {
       ...this._grainFile(buffer),
-      mode: 'warp',
+      mode,
+      fileRate: buffer.sampleRate,
       rate: Math.abs(plan.speed) * (buffer.sampleRate / this.ctx.sampleRate),
       speed: plan.speed,
       begin: plan.begin,
@@ -2981,16 +2986,6 @@ export class WebAudioEngine {
 
   // -- songs on a DJ deck ----------------------------------------------------------------------
 
-  /** The most a song is ever late: how far ahead a timed change has to be sent (see song-player.mjs). */
-  get songLatency() {
-    return SONG_LATENCY_SEC;
-  }
-
-  /** How soon from now a change to this track's song can be heard: 0 unless keylock is on. */
-  songLead(trackId) {
-    return this.songs.get(trackId)?.lead ?? 0;
-  }
-
   _song(trackId) {
     let player = this.songs.get(trackId);
     if (!player) {
@@ -3010,7 +3005,7 @@ export class WebAudioEngine {
     return { sampleRate: this.ctx.sampleRate, frames, channels: planes.length };
   }
 
-  // Every time is when the change is heard, no sooner than songLead from now.
+  // Every time is when the change is heard.
   songStart(trackId, pos, rate, at, keylock = false) { this._song(trackId).start(pos, rate, at, keylock); }
   songRate(trackId, rate, at) { this.songs.get(trackId)?.setRate(rate, at); }
   songSeek(trackId, pos, at) { this.songs.get(trackId)?.seek(pos, at); }

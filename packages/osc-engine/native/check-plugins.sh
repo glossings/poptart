@@ -19,7 +19,7 @@ for tool in $([ "$folder" = win32-x64 ] && echo llvm-objdump || echo nm readelf)
 done
 
 status=0
-for f in "$here/devices/bin/$folder/PoptartDevices.$suffix" "$here/rubberband/bin/$folder/PoptartPitchShift.$suffix"; do
+for f in "$here/devices/bin/$folder/PoptartDevices.$suffix" "$here/keylock/bin/$folder/PoptartKeylock.$suffix"; do
   if [ ! -f "$f" ]; then
     echo "::error title=Extension not built::$f is not there"
     status=1

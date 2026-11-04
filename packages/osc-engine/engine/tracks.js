@@ -19,6 +19,7 @@
 // chain group, so the whole track is one pass through a block with no delay anywhere.
 
 const { Synth, Group, Bus } = require('../server/objects');
+const { DJ_RES_DEFAULT } = require('../synthdef/defs');
 
 const HEAD_NAMES = ['gain', 'bend', 'bendrange', 'grainpos', 'grainsize', 'grainrate', 'grainpan'];
 const DJ_NAMES = ['trim', 'eqlo', 'eqmid', 'eqhi', 'djf', 'djres', 'cue', 'mdeck'];
@@ -53,7 +54,7 @@ function install(E) {
 
   // Neutral value a channel control (pseudo-slot -1) snaps back to when its modulator is cleared:
   // unity gain in and out, center pan, first output pair - and for the DJ stage, unity
-  // trim/bands/fader/deck (djf's neutral is 0, djres's is 0).
+  // trim/bands/fader/deck (djf's neutral is 0; djres's is the filter's default resonance, Q 2).
   // bendrange's neutral is 2 (DEFAULT_BEND_RANGE in signal.mjs); wetN is unity; grainsize and
   // grainrate are the granular voice's defaults (CHANNEL_DEFAULTS in signal.mjs). A branch level is
   // unity, and a crossover rests at 1 kHz as a position on its control (route.mjs).
@@ -62,6 +63,7 @@ function install(E) {
     if (n === 'bendrange') return 2;
     if (n === 'grainsize') return 0.08;
     if (n === 'grainrate') return 20;
+    if (n === 'djres') return DJ_RES_DEFAULT;
     if (/^rl[0-9]+$/.test(n)) return 1;
     if (/^xo[0-9]+$/.test(n)) return (1000 - 20) / (20000 - 20);
     if (['gain', 'postgain', 'out', 'dry', 'width', 'trim', 'fader', 'deck', 'eqlo', 'eqmid', 'eqhi'].includes(n)

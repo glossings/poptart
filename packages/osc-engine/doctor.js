@@ -116,7 +116,7 @@ const PROBE_SCD = `
 "DOCTOR userConfigDir: %".format(Platform.userConfigDir).postln;
 "DOCTOR startup.scd present: %".format(File.exists(Platform.userConfigDir +/+ "startup.scd")).postln;
 "DOCTOR VSTPlugin class: %".format(\\VSTPlugin.asClass).postln;
-"DOCTOR PoptartPitchShift class: %".format(\\PoptartPitchShift.asClass).postln;
+"DOCTOR PoptartKeylock class: %".format(\\PoptartKeylock.asClass).postln;
 "DOCTOR classes compiled: %".format(Object.allSubclasses.size).postln;
 0.exit;
 `;

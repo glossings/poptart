@@ -7,7 +7,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { s, note, sine, splice, begin, setPatternWarn } from './src/signal.mjs';
+import { s, note, sine, splice, begin, stretchmode, setPatternWarn, SAMPLER_CONTROL_NAMES } from './src/signal.mjs';
 import { Scheduler, setEventLogger } from './src/scheduler.mjs';
 
 // Engine that plays nothing and answers playSample with whatever `resolve` says the numbers came
@@ -266,6 +266,29 @@ test('.fit() takes its mode in either place, and fitmode is a channel like splic
   assert.equal(cfgOf(s('vox').fit('<2 4>')).fit, 2, 'a mini string is still a length');
   assert.equal(cfgOf(s('vox').fit().fitmode()).fitMode, 1, 'bare means the non-default');
   assert.equal(cfgOf(s('vox').fit().fitmode(1.7)).fitMode, 0, 'rounds and wraps');
+});
+
+// .stretchmode(): how a stretch is made - "clean" (0, the default) or "grain" (1) - a channel like
+// the other modes, per event.
+test('stretchmode takes its names or a number, rounds and wraps, and rides each event', () => {
+  assert.equal(cfgOf(s('vox').stretch(2)).stretchMode, undefined, 'no mode set - the engine plays it clean');
+  assert.equal(cfgOf(s('vox').stretch(2).stretchmode('grain')).stretchMode, 1);
+  assert.equal(cfgOf(s('vox').stretch(2).stretchmode('clean')).stretchMode, 0);
+  assert.equal(cfgOf(s('vox').stretch(2).stretchmode(' Grain ')).stretchMode, 1, 'names as fitmode takes them');
+  assert.equal(cfgOf(s('vox').stretch(2).stretchmode()).stretchMode, 1, 'bare means the non-default');
+  assert.equal(cfgOf(s('vox').stretch(2).stretchmode(2.6)).stretchMode, 1, 'rounds and wraps');
+  assert.equal(cfgOf(s('vox').stretchmode('grain').stretch(2)).stretchMode, 1, 'written before the stretch');
+  assert.equal(cfgOf(stretchmode('grain').s('vox').stretch(2)).stretchMode, 1, 'the top-level builder, at the head');
+  assert.ok(SAMPLER_CONTROL_NAMES.includes('stretchmode'));
+  const modes = cfgsOver(s('vox').fit('stretch').stretchmode('<0 1>'), 0, 4).map(([, cfg]) => cfg.stretchMode);
+  assert.deepEqual(modes, [0, 1, 0, 1], 'patterned, one mode per event');
+});
+
+test('the log line names a grain stretch, and a clean one is just the stretch', () => {
+  const [clean] = linesOf(s('vox').stretch(2).log());
+  assert.match(clean, /stretch=2(?!\+)/);
+  const [grain] = linesOf(s('vox').stretch(2).stretchmode('grain').log());
+  assert.match(grain, /stretch=2\+grain/);
 });
 
 // Every sampler event from cycle `from` up to `to`, as [onset cycle, cfg].

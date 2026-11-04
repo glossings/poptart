@@ -84,22 +84,15 @@ function install(E) {
     const buf = song.buf;
     const defName = `${warp > 0 ? 'poptart_songwarp_' : 'poptart_song_'}${buf.numChannels}`;
     const sr = S.sampleRate ?? E.sampleRate;
-    // The keylock player has a pipeline delay (rbDelay): it spawns that much EARLY with its pointer
-    // set back as far, so its first real sample lands at the start. When the start is closer than
-    // that, it spawns now and the old player holds on for the difference.
-    const rbLat = warp > 0 ? (E.rbDelay ?? 0) / sr : 0;
-    const spawnAt = Math.max(0, latency - rbLat);
-    const seekSec = posSec - ((latency - spawnAt) * rate);
-    const handover = Math.max(latency, spawnAt + rbLat);
-    const frame = Math.min(Math.max(seekSec * (buf.sampleRate ?? sr), 0), Math.max(0, (buf.numFrames ?? 1) - 1));
-    // The old player releases AT THE HANDOVER (clamped past its own spawn), fading under the new one.
-    if (song.synth) { const s = song.synth; E.bundleNow(E.songLat(song, handover), () => s.set('gate', 0)); }
+    const frame = Math.min(Math.max(posSec * (buf.sampleRate ?? sr), 0), Math.max(0, (buf.numFrames ?? 1) - 1));
+    // The old player releases at the start (clamped past its own spawn), fading under the new one.
+    if (song.synth) { const s = song.synth; E.bundleNow(E.songLat(song, latency), () => s.set('gate', 0)); }
     E.freePosFunc(song);
-    song.spawnUntil = E.elapsed() + spawnAt;
-    E.bundleNow(spawnAt, () => {
+    song.spawnUntil = E.elapsed() + latency;
+    E.bundleNow(latency, () => {
       song.synth = Synth.new(S, defName,
         ['out', track.inBus.index, 'buf', buf, 'rate', rate, 'run', 1,
-          't_seek', 1, 'seekFrame', frame, 'delay', warp > 0 ? (E.rbDelay ?? 0) : 0],
+          't_seek', 1, 'seekFrame', frame],
         track.group, 'addToHead');
     });
     song.posFunc = E.songPosFunc(key, song.synth.nodeID);

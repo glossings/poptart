@@ -61,10 +61,10 @@ const extractSongDef = () =>
   extractDef(/^        SynthDef\(\("poptart_song_" \+\+ nc\)\.asSymbol, \{[\s\S]*?^        \}\)\.add;$/m, 'song player');
 const extractLoopDef = () =>
   extractDef(/^        SynthDef\(\("poptart_sample_loop_" \+\+ nc\)\.asSymbol, \{[\s\S]*?^        \}\)\.add;$/m, 'loop voice');
-// The SOLA keylock is told apart from the pitch-shifter variant by its exact argument list (the
-// shifter's ends `..., delay = 0, window = 0`); renamed so it can build beside the installed one.
+// The SOLA keylock is told apart from the UGen variant (the same argument list) by its first line,
+// `var kLen = 512`; renamed so it can build beside the installed one.
 const extractSolaDef = () =>
-  extractDef(/^            SynthDef\(\("poptart_songwarp_" \+\+ nc\)\.asSymbol, \{ \|out, buf, rate = 1, run = 1, amp = 1, gate = 1, t_seek = 0, seekFrame = 0\|[\s\S]*?^            \}\)\.add;$/m, 'SOLA keylock')
+  extractDef(/^            SynthDef\(\("poptart_songwarp_" \+\+ nc\)\.asSymbol, \{ \|[^|]*\|\n\s*var kLen = 512[\s\S]*?^            \}\)\.add;$/m, 'SOLA keylock')
     .replace('"poptart_songwarp_"', '"test_sola_"');
 
 function toneFile(filePath) {

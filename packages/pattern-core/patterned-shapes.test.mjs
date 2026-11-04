@@ -229,6 +229,18 @@ test('a name nothing defines warns and plays the default rather than throwing', 
   assert.deepEqual(points, lfoPoints(lfo('triangle').lfoIR), 'it plays the default shape');
 });
 
+test('combining named lfos does not look their shapes up at build time', () => {
+  clearRolls('buffer');
+  const seen = [];
+  setPatternWarn((m) => seen.push(m));
+  try {
+    withLfo(lfo('later').mul(lfo('later2')));
+    _shape('later', '0,0 1,1');
+    _shape('later2', '0,1 1,0');
+  } finally { setPatternWarn(null); }
+  assert.deepEqual(seen, [], 'the definitions below the pattern still count');
+});
+
 test('malformed breakpoints still report as breakpoints, not as a missing name', () => {
   // At BUILD time, though the lookup of a name is deferred: data is wrong where it is written, and
   // a bad breakpoint surfacing later would surface from inside a scheduler tick (see lfoShapes).

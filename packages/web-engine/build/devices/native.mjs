@@ -374,7 +374,7 @@ async function scHeaders() {
   const root = path.join(deps, `supercollider-Version-${SC_VERSION}`);
   if (fs.existsSync(path.join(root, 'include', 'plugin_interface'))) return root;
   // The sibling extension keeps its own copy; use it rather than fetching a second one.
-  const sibling = path.join(repoRoot, 'packages', 'osc-engine', 'native', 'rubberband', '.deps',
+  const sibling = path.join(repoRoot, 'packages', 'osc-engine', 'native', 'keylock', '.deps',
     `supercollider-Version-${SC_VERSION}`);
   if (fs.existsSync(path.join(sibling, 'include', 'plugin_interface'))) return sibling;
 

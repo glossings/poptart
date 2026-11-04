@@ -138,7 +138,7 @@ test('notes and parameter changes land on their sample with sclang busy, and did
     const [sr, dcBuf, recBuf, clientID] = ready;
     const block = clientID === 31 ? 30 : 31;
     // What sclang tells the engine (see tellTrack in sc/poptart.scd): two "tracks" on the default group.
-    d.handle({ address: '/poptart/ids/server', args: [SCSYNTH_PORT, block * 2 ** 26 + 1000, block * 2 ** 26 + 0x03FFFFFF, sr, 0, 80] });
+    d.handle({ address: '/poptart/ids/server', args: [SCSYNTH_PORT, block * 2 ** 26 + 1000, block * 2 ** 26 + 0x03FFFFFF, sr, 80] });
     d.handle({ address: '/poptart/ids/track', args: ['test', 1, 1, 64, 0, 0] });
     d.handle({ address: '/poptart/ids/track', args: ['ref', 1, 1, 66, 0, 0] });
 

@@ -66,7 +66,7 @@ const NATIVE_SOURCE = /\.(cpp|swift|sh|mjs)$/;
 // keylock, which is the bug this exists to fix.
 const BUILT = [
   { from: 'packages/osc-engine/native/devices/bin', plugin: 'PoptartDevices' },
-  { from: 'packages/osc-engine/native/rubberband/bin', plugin: 'PoptartPitchShift' },
+  { from: 'packages/osc-engine/native/keylock/bin', plugin: 'PoptartKeylock' },
 ];
 const BUILT_FOLDER = /^(win32|linux)-[A-Za-z0-9_]+$/;
 
@@ -197,7 +197,7 @@ function stageBuilt({ repoRoot, outDir, requireBuilt, platform, arch }) {
       const want = `${from}/${platform}-${arch}/${plugin}${platform === 'linux' ? '.so' : '.scx'}`;
       if (!staged.includes(want)) {
         throw new Error(`${want} is not there - build it first (node packages/web-engine/build/devices/native.mjs, `
-          + 'node packages/osc-engine/native/rubberband/build.mjs), or unset POPTART_REQUIRE_EXTENSIONS');
+          + 'node packages/osc-engine/native/keylock/build.mjs), or unset POPTART_REQUIRE_EXTENSIONS');
       }
     }
   }

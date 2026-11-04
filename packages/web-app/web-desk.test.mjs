@@ -13,7 +13,8 @@ import { catalog } from '../web-engine/src/catalog.mjs';
 import { WebAudioEngine } from '../web-engine/src/engine/web-audio-engine.mjs';
 import { createEvaluator } from './public/web/evaluate.mjs';
 import { createBlockEvaluator } from './public/web/block-eval.mjs';
-import { createDesk, DJ_NEUTRAL, SONG_KEYS } from './public/web/desk.mjs';
+import { createDesk, DJ_NEUTRAL, DJ_RES_DEFAULT, SONG_KEYS } from './public/web/desk.mjs';
+import { DJ_RES_DEFAULT as ENGINE_DJ_RES_DEFAULT, DJ_NEUTRAL as ENGINE_DJ_NEUTRAL } from '../web-engine/src/engine/track.mjs';
 import { memoryStore } from './public/web/kv.mjs';
 
 const require = createRequire(import.meta.url);
@@ -64,15 +65,13 @@ function fakeMidi() {
   };
 }
 
-function makeRig(facts = {}, { shift = false } = {}) {
+function makeRig(facts = {}) {
   const ctx = new FakeAudioContext({ sampleRate: SR });
   ctx.currentTime = 10;
   const engine = new WebAudioEngine(ctx, {
     registry: catalog,
     warn: () => {},
     AudioWorkletNode: fakeWorkletFor(catalog),
-    // The keylock's shifter, for the tests that switch it on.
-    deviceModules: shift ? new Map([['Shift', {}]]) : null,
   });
   const transport = new patternCore.Transport(() => engine.getTime(), { cps: 0.5, paused: true });
   const songs = fakeSongs(facts);
@@ -104,7 +103,11 @@ function makeRig(facts = {}, { shift = false } = {}) {
 
 const settle = () => new Promise((r) => setTimeout(r, 0));
 const playerMessages = (rig, deck) => rig.engine.songs.get(rig.evaluator.trackIds.get(SONG_KEYS[deck])).node.messages;
-const LAT = 0.12;
+
+test('the desk\'s controls at rest are the engine\'s: resonance default and every neutral', () => {
+  assert.equal(DJ_RES_DEFAULT, ENGINE_DJ_RES_DEFAULT);
+  assert.deepEqual({ ...DJ_NEUTRAL }, { ...ENGINE_DJ_NEUTRAL });
+});
 
 test('a song loads onto its deck\'s own track, born wearing the desk', async () => {
   const rig = makeRig({ '/music/a.wav': { bpm: 128, key: 'Am', seconds: 90 } });
@@ -157,7 +160,7 @@ test('a second synced song joins on the next bar line, at the rate that matches 
 
 test('a rate change is rebased where it is heard, so the playhead never jumps', async () => {
   for (const keylock of [false, true]) {
-    const rig = makeRig({ '/music/a.wav': { bpm: 120 } }, { shift: keylock });
+    const rig = makeRig({ '/music/a.wav': { bpm: 120 } });
     await rig.call('POST /api/song/load', { deck: 'a', path: '/music/a.wav' });
     await settle();
     await rig.call('POST /api/song/meta', { deck: 'a', sync: false, keylock });
@@ -167,8 +170,8 @@ test('a rate change is rebased where it is heard, so the playhead never jumps', 
     await rig.call('POST /api/mix/decktempo', { deck: 'a', frac: 1 }); // +6%
     const s = rig.desk.state().songDecks.a;
     assert.ok(Math.abs(s.rate - 1.06) < 1e-9);
-    // Keylock off adds nothing; on, the change is heard the shifter's latency on.
-    const lead = keylock ? LAT : 0;
+    // Neither read is late: keylock on or off, the change is heard now.
+    const lead = 0;
     const now = rig.ctx.currentTime;
     assert.ok(Math.abs(s.startSec - (now + lead)) < 1e-9, `rebased at the heard moment (keylock ${keylock})`);
     // Continuous across the change: the old rate until it is heard, the new one after.
@@ -334,11 +337,94 @@ test('the loop button holds the next beats of a song and resizes around where it
   await settle();
   await rig.call('POST /api/song/seek', { deck: 'a', pos: 4.3 });
   const on = await rig.call('POST /api/mix/loop', { deck: 'a', on: true, beats: 4 });
-  assert.deepEqual([on.from, on.to], [4, 6], 'from the beat the playhead is in, four beats at 120');
+  assert.deepEqual([on.from, on.to], [4.5, 6.5], 'from the beat nearest the playhead, four beats at 120');
   const bigger = await rig.call('POST /api/mix/loop', { deck: 'a', scale: 2 });
-  assert.deepEqual([bigger.from, bigger.to], [4, 8]);
+  assert.deepEqual([bigger.from, bigger.to], [4.5, 8.5]);
   const off = await rig.call('POST /api/mix/loop', { deck: 'a', on: false });
   assert.equal(off.on, false);
+  await rig.call('POST /api/song/seek', { deck: 'a', pos: 4.2 });
+  const behind = await rig.call('POST /api/mix/loop', { deck: 'a', on: true, beats: 4 });
+  assert.deepEqual([behind.from, behind.to], [4, 6], 'in a beat\'s first half, the beat behind');
+});
+
+test('a livecoded deck\'s loop starts on the beat nearest the playhead, and a start ahead is played into', async () => {
+  const rig = makeRig();
+  rig.evaluator.evaluate('kick: clips().s("bd")\n\n_arrange("kick,0,16")', { deck: 'a' });
+  const clock = rig.evaluator.arrangeClockOf('a');
+  const c = rig.transport.cycleAt(rig.engine.getTime());
+  clock.seek(c, 9.4); // a beat is a quarter cycle: 9.4 is past the middle of the beat at 9.25
+  const on = await rig.call('POST /api/mix/loop', { deck: 'a', on: true, beats: 1 });
+  assert.deepEqual([on.from, on.to], [9.5, 9.75], 'the next beat');
+  assert.ok(Math.abs(clock.posAt(c) - 9.4) < 1e-9, 'no jump at the press');
+  assert.ok(Math.abs(clock.posAt(c + 0.2) - 9.6) < 1e-9, 'into the loop');
+  assert.ok(Math.abs(clock.posAt(c + 0.4) - 9.55) < 1e-9, 'round at its end, back to its start');
+  await rig.call('POST /api/mix/loop', { deck: 'a', on: false });
+  clock.seek(c, 9.3);
+  const behind = await rig.call('POST /api/mix/loop', { deck: 'a', on: true, beats: 1 });
+  assert.deepEqual([behind.from, behind.to], [9.25, 9.5], 'in a beat\'s first half, the beat behind');
+  await rig.call('POST /api/mix/loop', { deck: 'a', on: false });
+  clock.seek(c, 9.29);
+  const short = await rig.call('POST /api/mix/loop', { deck: 'a', on: true, beats: 0.25 });
+  assert.deepEqual([short.from, short.to], [9.3125, 9.375], 'shorter than a beat: on its own length');
+});
+
+test('a loop that starts at the next beat is played into, and wraps only at its end', async (t) => {
+  const rig = makeRig({ '/music/a.wav': { bpm: 120, anchorSec: 0 } });
+  await rig.call('POST /api/song/load', { deck: 'a', path: '/music/a.wav' });
+  await settle();
+  await rig.call('POST /api/song/seek', { deck: 'a', pos: 4.3 });
+  await rig.call('POST /api/song/play', { deck: 'a' });
+  const start = playerMessages(rig, 'a').find((m) => m.kind === 'start');
+  const seeks = [];
+  const was = rig.engine.songSeek.bind(rig.engine);
+  rig.engine.songSeek = (tid, pos, at) => { seeks.push({ pos, at }); return was(tid, pos, at); };
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const on = await rig.call('POST /api/mix/loop', { deck: 'a', on: true, beats: 1 });
+  assert.deepEqual([on.from, on.to], [4.5, 5]);
+  assert.deepEqual(seeks, [], 'no jump at the press');
+  t.mock.timers.tick(600);
+  assert.deepEqual(seeks, [], 'nothing while the deck plays up to the loop and through it');
+  t.mock.timers.tick(200);
+  assert.equal(seeks.length, 1, 'the wrap is sent');
+  assert.equal(seeks[0].pos, 4.5, 'back to the loop\'s start');
+  assert.ok(Math.abs(seeks[0].at - (start.time + 0.7)) < 1e-9, `heard at the loop's end, 0.7s after 4.3: ${seeks[0].at - start.time}`);
+});
+
+test('halving a loop the playhead has already left waits for the next lap point to wrap', async () => {
+  // 120 bpm: a beat is 0.5 s. A 4-beat loop over 4..6 s, halved to 4..5 s with the playhead at
+  // 5.3 s - past the new end. The next point in phase with the loop's start is 6 s (two laps of
+  // the new length), so the wrap back to 4 s is heard 0.7 s later, not at once and mid-beat.
+  const rig = makeRig({ '/music/a.wav': { bpm: 120, anchorSec: 0 } });
+  await rig.call('POST /api/song/load', { deck: 'a', path: '/music/a.wav' });
+  await settle();
+  await rig.call('POST /api/song/meta', { deck: 'a', sync: false });
+  await rig.call('POST /api/song/play', { deck: 'a', now: true, pos: 4 });
+  const on = await rig.call('POST /api/mix/loop', { deck: 'a', on: true, beats: 4 });
+  assert.deepEqual([on.from, on.to], [4, 6]);
+  const seeks = [];
+  const was = rig.engine.songSeek.bind(rig.engine);
+  rig.engine.songSeek = (tid, pos, at) => { seeks.push({ pos, at }); return was(tid, pos, at); };
+  const playheadTo = (sec) => { // the playhead holds still until the start is heard, so step twice
+    for (let i = 0; i < 2; i++) rig.ctx.advance(sec - rig.desk.songPlayheadSec('a'));
+  };
+
+  playheadTo(5.3);
+  const t = rig.ctx.currentTime;
+  const half = await rig.call('POST /api/mix/loop', { deck: 'a', scale: 0.5 });
+  assert.deepEqual([half.from, half.to], [4, 5]);
+  await new Promise((r) => setTimeout(r, 800)); // the seek goes out a send-ahead early
+  assert.equal(seeks.length, 1);
+  assert.equal(seeks[0].pos, 4, 'back to the loop\'s start');
+  assert.ok(Math.abs(seeks[0].at - (t + 0.7)) < 1e-9, `heard at the 6 s lap point (got ${seeks[0].at - t} s on)`);
+
+  // Within a 32nd of a beat after a lap point it wraps at once, landing as far into the loop.
+  seeks.length = 0;
+  await rig.call('POST /api/mix/loop', { deck: 'a', scale: 2 });
+  playheadTo(5.01);
+  await rig.call('POST /api/mix/loop', { deck: 'a', scale: 0.5 });
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(seeks.length, 1);
+  assert.ok(Math.abs(seeks[0].pos - 4.01) < 1e-9, `phase kept (got ${seeks[0].pos})`);
 });
 
 test('keylock and quantize are the deck\'s facts; keylock moves the engine\'s path at once', async () => {
@@ -464,7 +550,7 @@ test('a pad plays a song deck, and a deck of code hears its press as the editor\
   close();
 });
 
-test('the platter bends a playing song, and the bend dies away when the hand rests', async () => {
+test('the platter bends a playing song, and lets go when the hand rests', async () => {
   const rig = makeRig({ '/music/a.wav': { bpm: 120 } });
   await rig.call('POST /api/song/load', { deck: 'a', path: '/music/a.wav' });
   await settle();
@@ -474,11 +560,13 @@ test('the platter bends a playing song, and the bend dies away when the hand res
   await settle();
   rig.desk.handleMidi('Ctl', cc(33, 64));
   await learning;
-  for (let i = 0; i < 4; i++) rig.desk.handleMidi('Ctl', cc(33, 70)); // a forward turn
-  await new Promise((r) => setTimeout(r, 70));
-  assert.ok(rig.desk.state().songDecks.a.rate > 1, 'turning forward speeds the deck up');
-  await new Promise((r) => setTimeout(r, 900));
-  assert.equal(rig.desk.state().songDecks.a.rate, 1, 'and it comes back to its rate');
+  // A forward turn of 120 ticks inside one flush - ~3.5x record speed at 2048 ticks a turn.
+  for (let i = 0; i < 20; i++) rig.desk.handleMidi('Ctl', cc(33, 70));
+  await new Promise((r) => setTimeout(r, 50));
+  const bent = rig.desk.state().songDecks.a.rate;
+  assert.ok(bent > 1.02 && bent < 1.12, `turning forward speeds the deck up (${bent})`);
+  await new Promise((r) => setTimeout(r, 200));
+  assert.equal(rig.desk.state().songDecks.a.rate, 1, 'and it is back on its rate');
 });
 
 test('a high-resolution tempo fader is read as one 14-bit control, plus at the bottom', async () => {

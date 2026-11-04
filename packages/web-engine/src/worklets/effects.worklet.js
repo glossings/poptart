@@ -37,7 +37,7 @@ import { CROSSOVER, CrossoverProcessor } from '../devices/crossover.mjs';
 import { RecorderTap } from '../devices/recorder.mjs';
 import { compileExpr, exprConsts, exprHasFollower, exprInputCount, renderExpr } from '../dsp/expr.mjs';
 import { SongReader } from '../devices/song-reader.mjs';
-import { GrainCloud, WarpCloud, grainFiles } from '../devices/grain-cloud.mjs';
+import { GrainCloud, StretchCloud, WarpCloud, grainFiles } from '../devices/grain-cloud.mjs';
 import { Reporter, isDispose, parameterDescriptorsFor, realParams } from './shared.mjs';
 
 class EffectProcessor extends AudioWorkletProcessor {
@@ -163,36 +163,24 @@ registerProcessor('poptart-recorder', class extends AudioWorkletProcessor {
   }
 });
 
-// The song player (see devices/song-reader.mjs): a DJ deck's decoded song under a playhead. Not an
-// effect either, and here for the same reason the recorder is. Output 0 is the song as heard;
-// output 1, only while keylock wants it, is the same song read a lead ahead, for the shifter.
+// The song player (see devices/song-reader.mjs): a DJ deck's decoded song under a playhead, plain
+// or keylocked. Not an effect either, and here for the same reason the recorder is.
 registerProcessor('poptart-song', class extends AudioWorkletProcessor {
   constructor(options) {
     super(options);
     this.alive = true;
     this.reader = new SongReader(sampleRate, (m) => this.port.postMessage(m));
-    this.ahead = null;
-    this.wantAhead = null;    // frames of lead to start the ahead read with, or 0 to end it
     this.port.onmessage = (event) => {
       const m = event.data;
       if (isDispose(m)) { this.alive = false; return; }
-      if (m?.kind === 'ahead') { this.wantAhead = m.on ? Math.max(1, Math.round(m.lead * sampleRate)) : 0; return; }
       this.reader.receive(m);
-      if (m?.kind !== 'query') this.ahead?.receive(m);
     };
   }
 
   process(_inputs, outputs) {
     if (!this.alive) return false;
-    if (this.wantAhead != null) {
-      if (this.wantAhead > 0 && !this.ahead) this.ahead = this.reader.aheadBy(this.wantAhead, currentFrame);
-      else if (this.wantAhead === 0) this.ahead = null;
-      this.wantAhead = null;
-    }
     const out = outputs[0] ?? [];
     if (out[0]) this.reader.process(out[0], out[1] ?? null, out[0].length, currentFrame);
-    const keyed = outputs[1] ?? [];
-    if (this.ahead && keyed[0]) this.ahead.process(keyed[0], keyed[1] ?? null, keyed[0].length, currentFrame);
     return true;
   }
 });
@@ -208,7 +196,7 @@ registerProcessor('poptart-grains', class extends AudioWorkletProcessor {
     super(options);
     const o = options?.processorOptions ?? {};
     grainFiles(o);
-    this.cloud = o.mode === 'warp' ? new WarpCloud(sampleRate, o) : new GrainCloud(sampleRate, o);
+    this.cloud = o.mode === 'warp' ? new WarpCloud(sampleRate, o) : o.mode === 'clean' ? new StretchCloud(sampleRate, o) : new GrainCloud(sampleRate, o);
     this.ended = false;
     this.port.onmessage = (event) => {
       const m = event.data;

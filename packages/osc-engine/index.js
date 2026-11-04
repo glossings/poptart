@@ -865,7 +865,7 @@ class OscEngine {
           // eslint-disable-next-line no-console
           console.warn(`[poptart] killed leftover engine processes from an earlier run: ${reaped.join(', ')}`);
         }
-        // poptart's own UGen (the keylock pitch shifter) must be in the SC Extensions folder
+        // poptart's own UGen (the keylock) must be in the SC Extensions folder
         // before sclang compiles its class library, which it does on the way up.
         // Decided from this.sclangPath - the binary actually about to be spawned - and not by
         // re-resolving: an explicit sclangPath passed to the constructor can differ from what
@@ -875,12 +875,12 @@ class OscEngine {
         });
         if (ext.skipped) {
           // eslint-disable-next-line no-console
-          console.warn(`[poptart] keylock pitch shifter not installed (${ext.skipped}); decks fall back to the SOLA keylock`);
+          console.warn(`[poptart] keylock UGen not installed (${ext.skipped}); decks fall back to the SOLA keylock`);
         } else if (ext.installed.length) {
           // eslint-disable-next-line no-console
           console.log(`[poptart] installed SC extension: ${ext.installed.join(', ')}`);
         }
-        // poptart's own synths and effects (native/devices/). Independent of the pitch shifter:
+        // poptart's own synths and effects (native/devices/). Independent of the keylock:
         // without it, `synth("Plaits")` warns in the engine log and that slot stays silent,
         // while everything else about the engine is unaffected.
         const devices = ensureDeviceExtension({
@@ -1483,7 +1483,7 @@ class OscEngine {
 
   /** Start (or restart) playback at posSec, at `rate` (1 = native). */
   songStart(trackId, posSec, rate = 1, targetTime = 0, warp = 0) {
-    // warp = 1 spawns the keylock player (Rubber Band pitch shifter, or SOLA without the extension) instead of the repitch one;
+    // warp = 1 spawns the keylock player (PoptartKeylock, or SOLA without the extension) instead of the repitch one;
     // restarting with the other flag at the current playhead is how keylock toggles mid-song.
     if (this._directOn && this._direct.songStart(trackId, posSec, rate, targetTime, warp ? 1 : 0)) return;
     this._direct.songStartedByLang(trackId);
@@ -2097,7 +2097,8 @@ class OscEngine {
    * slices (a hand-drawn set - start positions, or a map
    * of them keyed by file - which `slice` then indexes instead of the file's own transients),
    * note, vel, attack, decay, sustain, release (seconds, bar sustain), envScale (multiplies the three times),
-   * loopWrap (0 file | 1 window), loopDir (0 forward | 1 pingpong), secPerCycle }.
+   * loopWrap (0 file | 1 window), loopDir (0 forward | 1 pingpong), stretchMode (0 clean | 1 grain),
+   * secPerCycle }.
    * Resolves pack/index/slice/fit
    * down to the plain numbers the SC synth takes; `fit` becomes a speed multiplier so the
    * whole sample lasts exactly the target number of cycles, `note` a further multiplier that
@@ -2137,7 +2138,7 @@ class OscEngine {
     // .splice(): the begin..end window - usually a slice's - is fitted to ITS OWN event, so
     // "<0 1 2>*8" plays each chop as an 8th note whatever its natural length. Repitch (mode 0)
     // bends the rate the way .fit() would; stretch (mode 1) warps the length and holds the pitch
-    // (nonunity stretch routes to the granular defs below). Both are the same factor applied to a
+    // (nonunity stretch routes to the stretch defs below - see stretchMode). Both are the same factor applied to a
     // different control, so .speed()/.note()/.stretch() keep multiplying on top exactly as they
     // do unspliced - double speed fills half the event, .stretch(2) spans two of them.
     const spliced = (cfg.splice ?? 0) > 0.5 && eventSec > 1e-6;
@@ -2214,7 +2215,7 @@ class OscEngine {
       // the FULL file lasts the target number of cycles, and begin/end/slice then select a
       // window at that fixed rate. Basing it on the window instead would make a randomized
       // .begin() (s("breaks").fit().vel("1!16").begin(irand(16).div(16))) repitch every hit.
-      // .fitmode("stretch") reaches the same length by the warp voice instead, pitch held - the
+      // .fitmode("stretch") reaches the same length by the stretch voice instead, pitch held - the
       // same factor on the other control, as a splice does. A granular voice has no stretch to
       // apply it to and already sounds for its event, so there it leaves the pitch alone.
       if (mode(cfg.fitMode ?? 0, 2) === 1) {
@@ -2283,8 +2284,11 @@ class OscEngine {
     const grainRate = finite(cfg.grainRate, 20);
     const grainPan = finite(cfg.grainPan, 0);
     // A granular voice's buffers and window are made lazily sclang-side, so it stays on that path.
+    // How a stretched event is stretched (.stretchmode()): 0 "clean", the keylock's stretcher (the
+    // poptart_sample_clean_ defs), 1 "grain", Warp1's grains (the warp_ defs).
+    const stretchMode = mode(cfg.stretchMode ?? 0, 2);
     const direct = !grain && this._directOn && this._direct.playSample(trackId, {
-      bufnum: file.bufnum, channels: file.channels, begin, end, loop, rate: speed, stretch, dur: durSec,
+      bufnum: file.bufnum, channels: file.channels, begin, end, loop, rate: speed, stretch, stretchMode, dur: durSec,
       onsetSec, offsetSec, amp, cut, atk: env.attack, dec: env.decay, sus: cfg.sustain ?? 1, rel: env.release,
       loopLo, loopHi, entry: loopEntry, pingpong,
     });
@@ -2327,10 +2331,12 @@ class OscEngine {
       grainPan,
       grain && cfg.grainPosLive ? 1 : 0,
       grain && cfg.grainShape ? JSON.stringify(cfg.grainShape) : '',
+      stretchMode,
     ]);
     return {
       index: idx, begin, end, loop, speed, stretch, durSec, cut, amp, fileSec: file.duration, fitCycles, ...env,
       loopWrap: windowed ? 'window' : 'file', loopDir: pingpong ? 'pingpong' : 'forward',
+      stretchMode: stretchMode ? 'grain' : 'clean',
       ...(grain ? { grain: true, grainSize, grainRate } : {}),
     };
   }

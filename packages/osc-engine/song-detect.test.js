@@ -85,6 +85,46 @@ test('detectKey: a C major tonality reads as C', () => {
   assert.strictEqual(r.key, 'C');
 });
 
+test('detectKey: every key reads, whatever its tonic and wherever the track is tuned', () => {
+  // Triads of sawtooth tones (harmonics up to 4 kHz, so every pitch class's partials spread over
+  // the whole analysis range): a chroma that weights some pitch classes more than others reads
+  // most of these as a neighbor - binning linear FFT bins by nearest semitone got 4 of 24.
+  const NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+  const saws = (freqs, seconds) => {
+    const data = new Float32Array(Math.round(seconds * SR));
+    for (const f of freqs) {
+      const top = Math.floor(4000 / f);
+      for (let i = 0; i < data.length; i++) {
+        const th = (2 * Math.PI * f * i) / SR;
+        const c2 = 2 * Math.cos(th);
+        let prev = 0; // sin(0 * th)
+        let cur = Math.sin(th);
+        let acc = 0;
+        for (let h = 1; h <= top; h++) { // sin(h th) by the Chebyshev recurrence
+          acc += cur / h;
+          const next = c2 * cur - prev;
+          prev = cur;
+          cur = next;
+        }
+        data[i] += 0.1 * acc;
+      }
+    }
+    return data;
+  };
+  for (const a4 of [440, 445]) {
+    const missed = [];
+    for (let pc = 0; pc < 12; pc++) {
+      for (const minor of [false, true]) {
+        const root = (a4 * 2 ** ((pc - 9) / 12)) / 4;
+        const want = NAMES[pc] + (minor ? 'm' : '');
+        const r = detectKey(saws([root, 2 * root * 2 ** ((minor ? 3 : 4) / 12), 2 * root * 2 ** (7 / 12)], 6), SR);
+        if (r?.key !== want) missed.push(`${want} read as ${r?.key}`);
+      }
+    }
+    assert.ok(missed.length <= 2, `A=${a4}: ${missed.length} of 24 keys misread: ${missed.join(', ')}`);
+  }
+});
+
 test('detectKey: noise has no key', () => {
   const noise = new Float32Array(SR * 10);
   for (let i = 0; i < noise.length; i++) noise[i] = Math.random() * 2 - 1;
@@ -193,4 +233,92 @@ test('fitBeatGrid: snaps a near-integer tempo to the integer only when the audio
   assert.equal(g140.bpm, 140, `140 expected, got ${g140.bpm}`);
   const g1399 = fitBeatGrid(make(139.6), SR);
   assert.ok(Math.abs(g1399.bpm - 139.6) < 0.05, `a real 139.6 stays 139.6 (got ${g1399.bpm})`);
+});
+
+// The bar-pointer decoder on its own, fed activations whose beats and downbeats are known - as a
+// trained beat/downbeat network's output would be. A noisy activation with a spurious hit
+// between beats still decodes the beats and the bar.
+test('decodeBars: decodes beats and downbeats from activations, at any phase of the bar', () => {
+  const { decodeBars, observationsOf } = require('./song-detect-core.mjs');
+  const fps = 100;
+  const n = 6000; // a minute
+  const tau = 47; // ~127.7 bpm
+  const first = 13; // the first beat's frame
+  const downAt = 2; // the bar starts on the third beat
+  const beat = new Float32Array(n).fill(0.01);
+  const down = new Float32Array(n).fill(0.01);
+  const truth = [];
+  for (let k = 0; first + k * tau < n; k++) {
+    const t = first + k * tau;
+    truth.push(t);
+    if ((k - downAt) % 4 === 0) down[t] = 0.7;
+    else beat[t] = 0.7;
+    if (k % 3 === 0 && t + 30 < n) beat[t + 30] = 0.4; // an off-grid hit
+  }
+  const r = decodeBars(observationsOf(beat, down), { fps, minBpm: 70, maxBpm: 180, tempi: 60 });
+  assert.ok(Math.abs(r.beats.length - truth.length) <= 1, `${truth.length} beats expected, got ${r.beats.length}`);
+  for (let q = 0; q < r.beats.length; q++) {
+    const k = Math.round((r.beats[q] - first) / tau);
+    assert.ok(Math.abs(r.beats[q] - truth[k]) <= 1, `beat ${q} at ${r.beats[q]}, expected ${truth[k]}`);
+    assert.equal(r.beatInBar[q] === 0, (k - downAt) % 4 === 0, `beat ${k}: downbeat ${r.beatInBar[q] === 0}`);
+  }
+});
+
+/** A kick (decaying 55Hz thump with a click) at `at` seconds into `data`. */
+function addKick(data, at, amp = 0.8) {
+  const s = Math.round(at * SR);
+  for (let i = 0; i < 0.12 * SR && s + i < data.length; i++) {
+    const env = (1 - i / (0.12 * SR)) ** 2;
+    data[s + i] += amp * env * Math.sin((2 * Math.PI * 55 * i) / SR) + (i < 0.004 * SR ? amp * 0.5 * (Math.random() * 2 - 1) : 0);
+  }
+}
+/** A hat: a short burst of first-differenced (bright) noise. */
+function addHat(data, at, amp) {
+  const s = Math.round(at * SR);
+  let prev = 0;
+  for (let i = 0; i < 0.04 * SR && s + i < data.length; i++) {
+    const x = Math.random() * 2 - 1;
+    data[s + i] += amp * (x - prev) * (1 - i / (0.04 * SR)) ** 3;
+    prev = x;
+  }
+}
+
+// The commonest beat-phase error on club tracks: open hats on the off-beat, louder than anything
+// on the beat. The grid belongs on the kicks.
+test('fitBeatGrid: off-beat hats louder than the kick leave the grid on the kick', () => {
+  const { fitBeatGrid } = require('./song-detect');
+  const bpm = 132;
+  const beat = 60 / bpm;
+  const first = 0.43;
+  const data = new Float32Array(Math.round(60 * SR));
+  for (let k = 0; first + (k + 0.5) * beat < 60; k++) {
+    addKick(data, first + k * beat, 0.5);
+    addHat(data, first + (k + 0.5) * beat, 0.9);
+  }
+  const g = fitBeatGrid(data, SR);
+  assert.ok(g && Math.abs(g.bpm - bpm) < 0.05, `${bpm} expected, got ${g?.bpm}`);
+  const err = (((g.anchorSec - first) % beat) + beat) % beat;
+  assert.ok(Math.min(err, beat - err) < 0.02, `on the kick (${first} mod ${beat.toFixed(3)}) expected, got ${g.anchorSec.toFixed(3)}`);
+});
+
+// A 3:2 trap: a bassline stab every dotted quarter (three eighths) over a kick on every beat -
+// a period of 1.5 beats that lines up with the kick every other bar half. The tempo is the
+// kick's, and the grid sits on it.
+test('fitBeatGrid: a dotted-quarter figure over the kick does not pull the tempo to 3:2', () => {
+  const { fitBeatGrid } = require('./song-detect');
+  const bpm = 124;
+  const beat = 60 / bpm;
+  const first = 0.25;
+  const data = new Float32Array(Math.round(60 * SR));
+  for (let k = 0; first + k * beat < 60; k++) addKick(data, first + k * beat, 0.7);
+  for (let k = 0; first + k * 1.5 * beat < 60; k++) {
+    const s = Math.round((first + k * 1.5 * beat) * SR);
+    for (let i = 0; i < 0.15 * SR && s + i < data.length; i++) {
+      data[s + i] += 0.5 * (1 - i / (0.15 * SR)) * Math.sign(Math.sin((2 * Math.PI * 110 * i) / SR)); // a square stab
+    }
+  }
+  const g = fitBeatGrid(data, SR);
+  assert.ok(g && Math.abs(g.bpm - bpm) < 0.05, `${bpm} expected, got ${g?.bpm}`);
+  const err = (((g.anchorSec - first) % beat) + beat) % beat;
+  assert.ok(Math.min(err, beat - err) < 0.02, `on the kick (${first} mod ${beat.toFixed(3)}) expected, got ${g.anchorSec.toFixed(3)}`);
 });

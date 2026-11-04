@@ -93,9 +93,9 @@ const DEFAULT_CASES = [
   // The DJ stage's controls: unity everywhere, except the filter knob's center detent at 0.
   ['trim', '1'], ['eqlo', '1'], ['eqmid', '1'], ['eqhi', '1'],
   ['fader', '1'], ['deck', '1'], ['djf', '0'], ['cue', '0'],
-  // djres is the filter's resonance AMOUNT, and its neutral is 0 for the opposite reason the
-  // gains' is 1: clearing a modulator off it must land on a plain sweep, never full whistle.
-  ['djres', '0'],
+  // djres is the filter's resonance AMOUNT, and its neutral is the filter's default, Q 2 (res 0.25
+  // on the mapping): clearing a modulator off it lands where an untouched desk is, never a whistle.
+  ['djres', String(require('./synthdef/defs').DJ_RES_DEFAULT)],
   // And the pre-existing strip, unchanged.
   ['gain', '1'], ['postgain', '1'], ['out', '1'], ['dry', '1'], ['width', '1'], ['pan', '0'], ['bassmono', '0'],
   // The per-fx-slot dry/wet (Sig#wet): neutral is the plugin's own output, so clearing a
@@ -112,7 +112,7 @@ function runSclang() {
   const script = `(
 var numPairs = 2, key = "probe", routeNowhere = 1000000;
 var trackDefName = { |k| ("poptart_probe_" ++ k).asSymbol };
-var channelDefault, djIsolator, chanIn, buildDjDef, def;
+var channelDefault, djIsolator, djFilterCoefs, djResDefault, chanIn, buildDjDef, def;
 var destroyTrack, awaitTrack, stopMixTap, unwireAudio, sidechainBySource, releaseBus, tracks, reorderTracks;
 var tellRamp = { }, tellSlot = { }, tellMods = { }, tellTap = { }, shapesHandled = IdentityDictionary.new, nodeAddr = (sendMsg: { }); // the direct path's id handoff (see tellTrack in sc/poptart.scd) - inert here
 var paramRoutes, unwireParamRoute; // audio patched onto parameters, which destroyTrack unwires
@@ -134,6 +134,8 @@ var stateWaitMax = 0.3;
 var slotKey = { |k, slot| (k ++ "_" ++ slot).asSymbol };
 ${extractChannelDefault()}
 ${extractDjIsolator()}
+${fs.readFileSync(SCD, 'utf8').match(/^djFilterCoefs = \{[\s\S]*?^\};$/m)[0]}
+${fs.readFileSync(SCD, 'utf8').match(/^djResDefault = \{[\s\S]*?^\};$/m)[0]}
 ${fs.readFileSync(SCD, 'utf8').match(/^chanIn = \{[\s\S]*?^\};$/m)[0]}
 // Building the def runs the whole UGen graph function client-side - no server needed; this is
 // where an undeclared var, a bad arg default, or a misused UGen throws. Pasted directly (like
@@ -178,15 +180,11 @@ statePending[slotKey.(\\t, 0)] = (seq: 2, at: now - 0.2, cold: true);
 ("COLD-QUEUED-FAR<" ++ waitForLoad.(\\t, 0, now + 5, { fired.add(\\future) }) ++ ">").postln;
 clearPending.(slotKey.(\\t, 0), 2);
 ("COLD-FIRED<" ++ fired.join(",") ++ ">").postln;
-// The one-knob filter's cutoff mapping at its three cardinal positions.
-("MAP<lpf-closed>" ++ (18000 * (900 ** -1)).clip(20, 18000)).postln;
-("MAP<lpf-open>" ++ (18000 * (900 ** 0)).clip(20, 18000)).postln;
-("MAP<hpf-closed>" ++ (20 * (900 ** 1)).clip(20, 18000)).postln;
-// And the resonance control's rq mapping. rq is 1/Q, so it runs DOWNWARD from 1: the endpoint
-// that matters is res-off, which must be a flat 1 - a polarity slip there would make an
-// untouched desk resonant, which is exactly what the separate control exists to avoid.
-("RES<off>" ++ (1 - (0.62 * 0.clip(0, 1)))).postln;
-("RES<full>" ++ (1 - (0.62 * 1.clip(0, 1)))).postln;
+// The one-knob filter's settings (djFilterCoefs, run on numbers), at 48 kHz:
+// [lowpass Hz, highpass Hz, lowpass damping, highpass damping, gain].
+[["left", -1, 0], ["right", 1, 0], ["half", -0.5, 1], ["lowhp", 0.1485, 1]].do { |c|
+    ("COEFS<" ++ c[0] ++ ">" ++ djFilterCoefs.(c[1], c[2], 48000).collect { |v| v.round(0.001) }.join(",")).postln;
+};
 ${DEFAULT_CASES.map(([name]) => `("DEFAULT<${name}>" ++ channelDefault.(${JSON.stringify(name)})).postln;`).join('\n')}
 0.exit;
 )
@@ -204,7 +202,8 @@ ${DEFAULT_CASES.map(([name]) => `("DEFAULT<${name}>" ++ channelDefault.(${JSON.s
   }
 }
 
-test('the track SynthDef builds with the DJ stage, and its neutrals are really neutral', (t) => {
+test('the track SynthDef builds with the DJ stage, and its neutrals are really neutral', async (t) => {
+  const { djFilterCoefs: webCoefs } = await import('../web-engine/src/engine/track.mjs');
   const out = runSclang();
   if (!out.includes('Welcome to SuperCollider')) {
     t.skip(`sclang did not start here, so the def went unbuilt: ${out.trim().split('\n').pop() ?? 'no output'}`);
@@ -228,15 +227,19 @@ test('the track SynthDef builds with the DJ stage, and its neutrals are really n
   assert.match(out, /^COLD-QUEUED-STALE<true>$/m, 'a cold load must claim notes however late they run');
   assert.match(out, /^COLD-QUEUED-FAR<true>$/m, "a cold load's wait window must not expire while it opens");
   assert.match(out, /^COLD-FIRED<future>$/m, 'a cold release must drop the missed note and keep the future one');
-  assert.match(out, /^MAP<lpf-closed>20(\.0)?$/m, 'filter full-left should close the LPF to 20 Hz');
-  assert.match(out, /^MAP<lpf-open>18000(\.0)?$/m, 'filter at center should park the LPF open at 18 kHz');
-  assert.match(out, /^MAP<hpf-closed>18000(\.0)?$/m, 'filter full-right should close the HPF to 18 kHz');
-  assert.match(out, /^RES<off>1(\.0)?$/m, 'resonance at 0 must be rq 1 - a flat filter, no peak');
-  assert.match(out, /^RES<full>0\.38$/m, 'resonance at 1 must be rq 0.38 (Q ~2.6)');
+  // The same settings as the browser's djFilterCoefs gives, which is the one both engines are
+  // held to (web-engine/dj-stage.test.mjs measures it).
+  const coefs = (name) => out.match(new RegExp(`^COEFS<${name}>(.*)$`, 'm'))?.[1].split(',').map(Number);
+  const near = (got, want, what) => want.forEach((w, i) => assert.ok(Math.abs(got[i] - w) < 0.01 + Math.abs(w) * 1e-5, `${what}[${i}]: ${got[i]} vs ${w}`));
+  const web = (v, res) => { const c = webCoefs(v, res, 48000); return [c.lpHz, c.hpHz, c.lpDamping, c.hpDamping, c.gain]; };
+  near(coefs('left'), web(-1, 0), 'full left, no resonance (100 Hz lowpass, damping 1)');
+  near(coefs('right'), web(1, 0), 'full right (the 8.2 kHz highpass)');
+  near(coefs('half'), web(-0.5, 1), 'half left, full resonance (damping 0.04, gain 0.08)');
+  near(coefs('lowhp'), web(0.1485, 1), 'a 40 Hz highpass at full resonance holds damping 2');
   for (const [name, expected] of DEFAULT_CASES) {
     const m = out.match(new RegExp(`^DEFAULT<${name}>(.*)$`, 'm'));
     assert.ok(m, `sclang printed no channelDefault for "${name}"`);
-    assert.strictEqual(m[1].trim(), expected, `channelDefault("${name}")`);
+    assert.ok(Math.abs(Number(m[1].trim()) - Number(expected)) < 1e-9, `channelDefault("${name}"): ${m[1].trim()} vs ${expected}`);
   }
 });
 

@@ -45,7 +45,7 @@ test('notes and parameter changes land on their sample, direct and through the e
     await dc.query();
     // A high block of ids for the direct path, clear of the engine's allocator.
     const block = 31 * 2 ** 26;
-    d.handle({ address: '/poptart/ids/server', args: [S.options.port, block + 1000, block + 0x03FFFFFF, sr, 0, 80] });
+    d.handle({ address: '/poptart/ids/server', args: [S.options.port, block + 1000, block + 0x03FFFFFF, sr, 80] });
     d.handle({ address: '/poptart/ids/track', args: ['test', 1, 1, lanes.index, bend.index, 0] });
     d.handle({ address: '/poptart/ids/track', args: ['ref', 1, 1, lanes.index + 2, bend.index, 0] });
     // The engine's own path: a track as far as playSample reads one, and the buffer as a pack.

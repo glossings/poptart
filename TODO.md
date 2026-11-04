@@ -68,7 +68,6 @@ Delete an entry when it's done. Details: TODO-verbose.md.
 [ ] Build keylock on Linux/Windows
 [ ] Build Link on Linux/Windows
 [ ] Bonjour on Linux/Windows
-[ ] Swap Rubber Band for Signalsmith Stretch
 
 ## Web
 [ ] Zip export with audio

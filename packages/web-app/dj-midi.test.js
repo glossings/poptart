@@ -29,7 +29,7 @@ const CLIENT = fs.readFileSync(path.join(__dirname, 'public', 'client.js'), 'utf
 // server.js spawns an engine on require, so the dispatch is read out of the source and given its
 // own dependencies - the same trick mix-gate-all.test.js and highlight-grid.test.js use.
 const NAMES = ['mixMidiValue', 'mixMidiScrubDelta', 'mixMidiBrowseTicks', 'mixMidiApply',
-  'mixMidiDrive', 'mixMidiButton', 'clockHeldByDesk'];
+  'mixMidiDrive', 'mixMidiButton', 'clockHeldByDesk', 'mixMidiTicksPerRev'];
 const CONSTS = ['MIX_MIDI_KNOBS', 'MIX_MIDI_HOLD', 'MIX_MIDI_PRESS', 'MIX_MIDI_DECK_CTLS',
   'MIX_MIDI_BROWSE_PRESS', 'MIX_MIDI_BROWSE_KNOBS', 'MIX_MIDI_GLOBAL_PRESS',
   'MIX_MIDI_GLOBAL_HOLD', 'MIX_MIDI_FX_POS', 'MIX_MIDI_PHONES_KNOBS',
@@ -39,7 +39,7 @@ const DEPS = ['mixState', 'songDecks', 'songMasterDeck', 'mixMidiDown', 'applyMi
   'songScrub', 'songNudge', 'songCue', 'songTogglePlay', 'songSetMeta', 'songMultNext',
   'mixActionNotify', 'songBend', 'deckTempoApply', 'mixFxSet', 'mixFxStep',
   'setDeckLoops', 'deckLoopsOn', 'deckLoopApply', 'deckLoopLive', 'deckRunning',
-  'eventLogQueue', 'mixMidiLastErr'];
+  'eventLogQueue', 'mixMidiLastErr', 'settings', 'songSync'];
 
 function grabFn(name) {
   const at = SRC.indexOf(`function ${name}(`);
@@ -68,7 +68,7 @@ const makeMidi = new Function(...DEPS, `
  * A desk with `songs` loaded (deck letters), and a log of everything the dispatch reached for.
  * `master` is the deck holding the grid, `override` the tempo migration's held bpm.
  */
-function rig({ songs = ['a', 'b'], master = null, override = null, playing = true, phones = {}, fx = {}, loops = {}, running = [] } = {}) {
+function rig({ songs = ['a', 'b'], master = null, override = null, playing = true, phones = {}, fx = {}, loops = {}, running = [], bindings = {} } = {}) {
   const log = [];
   const mixState = {
     tempoOverride: override,
@@ -101,7 +101,7 @@ function rig({ songs = ['a', 'b'], master = null, override = null, playing = tru
     (deck, action, value) => log.push(value == null
       ? ['toClient', deck, action]
       : ['toClient', deck, action, value]),
-    (deck, ticks) => log.push(['bend', deck, ticks]),
+    (deck, ticks, ticksPerRev) => log.push(['bend', deck, ticks, ticksPerRev]),
     (deck, patch) => log.push(['tempo', deck, patch]),
     (patch) => log.push(['fx', patch]),
     // Stepping the chain list loads code off disk, so the real one is async and the dispatch
@@ -114,6 +114,8 @@ function rig({ songs = ['a', 'b'], master = null, override = null, playing = tru
     (deck) => running.includes(deck), // which decks have patterns playing to the clock
     said, // eventLogQueue - what the console would have been told
     new Map(), // mixMidiLastErr - "say it once" state, fresh per rig
+    { mixMidi: bindings }, // settings - the learned bindings
+    require('./song-sync.js'),
   );
   api.said = said;
   api.log = log;
@@ -287,7 +289,24 @@ test('bend speaks the platter convention: 64 still, either side signed ticks', (
   m.mixMidiApply('b:bend', 64 / 127);
   m.mixMidiApply('b:bend', 66 / 127);
   m.mixMidiApply('b:bend', 62 / 127);
-  assert.deepEqual(m.log, [['bend', 'b', 0], ['bend', 'b', 2], ['bend', 'b', -2]]);
+  assert.deepEqual(m.log, [['bend', 'b', 0, 2048], ['bend', 'b', 2, 2048], ['bend', 'b', -2, 2048]]);
+});
+
+test("bend reads a revolution as the binding's own ticksPerRev, when it has one", () => {
+  const m = rig({ bindings: { 'a:bend': { device: 'x', channel: 1, kind: 'cc', num: 33, ticksPerRev: 720 } } });
+  m.mixMidiApply('a:bend', 66 / 127);
+  m.mixMidiApply('b:bend', 66 / 127);
+  assert.deepEqual(m.log, [['bend', 'a', 2, 720], ['bend', 'b', 2, 2048]]);
+});
+
+test("bend reads a revolution from the port's known resolution; an explicit ticksPerRev wins", () => {
+  const m = rig({ bindings: {
+    'a:bend': { device: 'DDJ-FLX4 MIDI 1', channel: 1, kind: 'cc', num: 33 },
+    'b:bend': { device: 'DDJ-FLX4', channel: 1, kind: 'cc', num: 33, ticksPerRev: 1000 },
+  } });
+  m.mixMidiApply('a:bend', 66 / 127);
+  m.mixMidiApply('b:bend', 66 / 127);
+  assert.deepEqual(m.log, [['bend', 'a', 2, 720], ['bend', 'b', 2, 1000]]);
 });
 
 test('quant, regions and the range switch are press buttons on the deck', () => {

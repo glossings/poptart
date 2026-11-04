@@ -26,8 +26,8 @@ poptart-data/
 # Local userland hotkey repro - paste into ~/.poptart/prebake.js; not part of the repo
 packages/web-app/prebake.hotkeys.js
 
-# Rubber Band + SC headers fetched by native/rubberband/build.sh
-packages/osc-engine/native/rubberband/.deps/
+# SC headers fetched by native/keylock/build.mjs
+packages/osc-engine/native/keylock/.deps/
 
 # Ableton Link SDK + asio fetched by native/link/build.sh
 packages/osc-engine/native/link/.deps/
@@ -39,7 +39,7 @@ packages/osc-engine/native/devices/.deps/
 # them on its own runners (tests.yml, release.yml) and desktop/stage.js ships what is there. Only
 # the macOS builds, in bin/ itself, are committed.
 packages/osc-engine/native/devices/bin/*-*/
-packages/osc-engine/native/rubberband/bin/*-*/
+packages/osc-engine/native/keylock/bin/*-*/
 
 # The scratch area build/fetch-packs.mjs downloads upstream sample archives into. Hundreds of
 # megabytes of other people's audio, kept only long enough to take one file out of each.

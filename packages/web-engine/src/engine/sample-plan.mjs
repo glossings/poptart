@@ -106,7 +106,7 @@ export function planSample(file, cfg, onsetSec, offsetSec, opts = {}) {
   }
   if (fitCycles != null) {
     // Fit is a property of the whole file, so a randomized begin does not repitch every hit. By
-    // stretch, the same factor lands on the warp voice and the pitch holds; a granular voice has
+    // stretch, the same factor lands on the stretch voice and the pitch holds; a granular voice has
     // nothing to stretch, so there the pitch is simply left alone.
     if (mode(cfg.fitMode ?? 0, 2) === 1) {
       if (!grain) stretch *= fitCycles / measures;
@@ -135,8 +135,11 @@ export function planSample(file, cfg, onsetSec, offsetSec, opts = {}) {
   }
   const cut = grain || (!loop && durSec > eventSec + 0.005) ? 1 : 0;
   const env = envelopeSeconds(cfg);
+  // How a stretched event is stretched (.stretchmode()): 0 "clean", the keylock's stretcher, 1
+  // "grain", the Warp1 voice.
+  const stretchMode = mode(cfg.stretchMode ?? 0, 2);
   return {
-    begin, end, loop, speed, stretch, durSec, cut, amp, ...env,
+    begin, end, loop, speed, stretch, stretchMode, durSec, cut, amp, ...env,
     sustain: Number.isFinite(cfg.sustain) ? cfg.sustain : 1,
     loopLo, loopHi, loopEntry, pingpong, windowed,
     onsetSec: onset, offsetSec, grain, noSlices, gridAssumed,

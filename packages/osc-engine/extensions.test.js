@@ -12,7 +12,7 @@ const path = require('node:path');
 
 const {
   ensurePoptartExtension, ensureDeviceExtension, EXTENSION_FILES, sclangStartupFile,
-  pitchShiftLayout, deviceLayout, pluginFile, binSubdir, binaryPlatform,
+  keylockLayout, deviceLayout, pluginFile, binSubdir, binaryPlatform,
 } = require('./extensions.js');
 
 function fakeSources(dir, contents) {
@@ -45,18 +45,18 @@ test('refreshes only the file whose content changed', () => {
   const extensionsDir = path.join(tmp, 'Extensions');
   ensurePoptartExtension({ extensionsDir, sources });
 
-  fs.writeFileSync(sources['PoptartPitchShift.scx'], 'PoptartPitchShift.scx v2');
+  fs.writeFileSync(sources['PoptartKeylock.scx'], 'PoptartKeylock.scx v2');
   const r = ensurePoptartExtension({ extensionsDir, sources });
-  assert.deepStrictEqual(r.installed, ['PoptartPitchShift.scx']);
-  assert.deepStrictEqual(r.upToDate, ['PoptartPitchShift.sc']);
-  assert.strictEqual(fs.readFileSync(path.join(extensionsDir, 'poptart', 'PoptartPitchShift.scx'), 'utf8'), 'PoptartPitchShift.scx v2');
+  assert.deepStrictEqual(r.installed, ['PoptartKeylock.scx']);
+  assert.deepStrictEqual(r.upToDate, ['PoptartKeylock.sc']);
+  assert.strictEqual(fs.readFileSync(path.join(extensionsDir, 'poptart', 'PoptartKeylock.scx'), 'utf8'), 'PoptartKeylock.scx v2');
   assert.strictEqual(fs.readdirSync(path.join(extensionsDir, 'poptart')).filter((n) => n.includes('.tmp-')).length, 0, 'no temp files left behind');
 });
 
 test('skips (does not throw) when the prebuilt is missing or the destination is unwritable', () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'poptart-ext-'));
   const sources = fakeSources(tmp, {});
-  fs.unlinkSync(sources['PoptartPitchShift.scx']);
+  fs.unlinkSync(sources['PoptartKeylock.scx']);
   const noBuild = ensurePoptartExtension({ extensionsDir: path.join(tmp, 'Extensions'), sources });
   assert.deepStrictEqual(noBuild.installed, []);
   assert.match(noBuild.skipped, /no prebuilt extension/);
@@ -78,13 +78,13 @@ test('refuses a prebuilt for another platform and removes a copy installed earli
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'poptart-ext-'));
   // The macOS names, whatever this machine is: .scx on Windows too, so the same group of files
   // can be offered to both.
-  const files = ['PoptartPitchShift.scx', 'PoptartPitchShift.sc'];
+  const files = ['PoptartKeylock.scx', 'PoptartKeylock.sc'];
   const sources = {};
   for (const f of files) {
     sources[f] = path.join(tmp, `src-${f}`);
     fs.writeFileSync(sources[f], f.endsWith('.scx') ? MACH_O : `${f} v1`);
   }
-  const group = { files, sources, binary: 'PoptartPitchShift.scx', from: 'native/rubberband' };
+  const group = { files, sources, binary: 'PoptartKeylock.scx', from: 'native/keylock' };
   const extensionsDir = path.join(tmp, 'Extensions');
 
   // The platform it was built for: installed as usual.
@@ -112,14 +112,14 @@ test('each platform installs its own build, from its own folder, under the name 
     'PoptartDevices.scx': path.join(root, 'devices', 'bin', 'PoptartDevices.scx'),
     'PoptartDevice.sc': path.join(root, 'devices', 'PoptartDevice.sc'),
   });
-  assert.strictEqual(pitchShiftLayout('darwin', 'x64').sources['PoptartPitchShift.scx'], path.join(root, 'rubberband', 'bin', 'PoptartPitchShift.scx'));
+  assert.strictEqual(keylockLayout('darwin', 'x64').sources['PoptartKeylock.scx'], path.join(root, 'keylock', 'bin', 'PoptartKeylock.scx'));
   // Windows: a DLL named .scx, in bin/win32-x64/.
   assert.deepStrictEqual(deviceLayout('win32', 'x64').files, ['PoptartDevices.scx', 'PoptartDevice.sc']);
   assert.strictEqual(deviceLayout('win32', 'x64').sources['PoptartDevices.scx'], path.join(root, 'devices', 'bin', 'win32-x64', 'PoptartDevices.scx'));
-  assert.strictEqual(pitchShiftLayout('win32', 'x64').from, 'native/rubberband/bin/win32-x64');
+  assert.strictEqual(keylockLayout('win32', 'x64').from, 'native/keylock/bin/win32-x64');
   // Linux: .so, in bin/linux-x64/.
-  assert.deepStrictEqual(pitchShiftLayout('linux', 'x64').files, ['PoptartPitchShift.so', 'PoptartPitchShift.sc']);
-  assert.strictEqual(pitchShiftLayout('linux', 'x64').sources['PoptartPitchShift.so'], path.join(root, 'rubberband', 'bin', 'linux-x64', 'PoptartPitchShift.so'));
+  assert.deepStrictEqual(keylockLayout('linux', 'x64').files, ['PoptartKeylock.so', 'PoptartKeylock.sc']);
+  assert.strictEqual(keylockLayout('linux', 'x64').sources['PoptartKeylock.so'], path.join(root, 'keylock', 'bin', 'linux-x64', 'PoptartKeylock.so'));
   assert.strictEqual(pluginFile('PoptartDevices', 'linux'), 'PoptartDevices.so');
   assert.strictEqual(binSubdir('darwin', 'arm64'), '');
 });
@@ -168,7 +168,7 @@ test("the build writes each platform's plugin where the installer looks for it",
 
 test("this checkout's plugins, where there are any, are this platform's", () => {
   // What CI's Windows and Linux jobs build lands here; a mislabeled one would be refused at boot.
-  for (const layout of [deviceLayout(), pitchShiftLayout()]) {
+  for (const layout of [deviceLayout(), keylockLayout()]) {
     const file = layout.sources[layout.binary];
     if (!fs.existsSync(file)) continue;
     assert.strictEqual(binaryPlatform(file), process.platform, file);
@@ -191,4 +191,16 @@ test("sclang's startup file is found where each platform's SuperCollider keeps i
     sclangStartupFile({ platform: 'linux', env: {}, home: '/home/x' }),
     path.join('/home/x', '.config', 'SuperCollider', 'startup.scd'),
   );
+});
+
+test('installing the keylock takes out the pitch shifter an earlier version installed', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'poptart-ext-'));
+  const sources = fakeSources(tmp, {});
+  const extensionsDir = path.join(tmp, 'Extensions');
+  const dest = path.join(extensionsDir, 'poptart');
+  fs.mkdirSync(dest, { recursive: true });
+  for (const f of ['PoptartPitchShift.scx', 'PoptartPitchShift.sc', 'PoptartDevice.sc']) fs.writeFileSync(path.join(dest, f), 'old');
+  const r = ensurePoptartExtension({ extensionsDir, sources });
+  assert.strictEqual(r.skipped, null);
+  assert.deepStrictEqual(fs.readdirSync(dest).sort(), ['PoptartDevice.sc', ...EXTENSION_FILES].sort());
 });

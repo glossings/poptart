@@ -3735,8 +3735,19 @@ export class Sig {
    * A switch, not a rate, so any 0..1 signal drives it: .flip(rand()).
    */
   flip(v = 1) { return this._samplerOpt('flip', 'flip', toSignal(v)); }
-  /** Timestretch factor (2 = twice as long at the same pitch). Granular, so best on rhythmic material. */
+  /** Timestretch factor (2 = twice as long at the same pitch). How it stretches is .stretchmode(). */
   stretch(v) { return this._samplerOpt('stretch', 'stretch', toSignal(v)); }
+  /**
+   * How a stretched sample is stretched - .stretch(), and .fit()/.splice() in "stretch" mode - as a
+   * mode number (bare `.stretchmode()` means 1):
+   *
+   *   0 "clean" (default) - the two-band stretcher the DJ decks' keylock runs: a phase vocoder
+   *                         below 1.9 kHz, WSOLA above it.
+   *   1 "grain"           - overlapping 100 ms grains: a rougher sound that smears transients.
+   *
+   * Named like .fitmode()'s, and a channel like it: values round and wrap, so any signal drives it.
+   */
+  stretchmode(v = 1) { return this._samplerOpt('stretchmode', 'stretchMode', modeSignal('stretchMode', v)); }
   /**
    * Repitch so the whole sample lasts exactly `measures` cycles at the current tempo -
    * `.fit()` with no argument picks the nearest power of 2 of its natural length (2.4 measures
@@ -3756,8 +3767,7 @@ export class Sig {
    * How `.fit()` reaches its length, as a mode number (bare `.fitmode()` means 1):
    *
    *   0 "repitch" (default) - bend the playback rate; pitch follows.
-   *   1 "stretch"           - granular timestretch; pitch holds. Best on rhythmic material, like
-   *                           .stretch() itself.
+   *   1 "stretch"           - timestretch, as .stretch() does (see .stretchmode()); pitch holds.
    *
    * Named like .splicemode()'s, and a channel like it: values round and wrap, so any signal drives it.
    */
@@ -3767,7 +3777,7 @@ export class Sig {
   /**
    * `.slice()`, with each chop fitted to ITS OWN event: `.splice("<0 1 2>*8")` plays those three
    * slices as 8th notes whatever their natural lengths. How it fits is `.splicemode()` - repitch
-   * (the default: rate bends, pitch follows, a classic splice) or stretch (granular, pitch holds) -
+   * (the default: rate bends, pitch follows, a classic splice) or stretch (timestretched, pitch holds) -
    * and the mode can ride along as the second argument: `.splice("0 1 2 3", "stretch")`.
    *
    * It fits the WINDOW in force, so bare `.splice()` (no slice of its own) fits whatever
@@ -3786,8 +3796,8 @@ export class Sig {
    *
    *   0 "repitch" (default) - bend the playback rate so the chop lasts the event; pitch follows,
    *                           the way .fit() repitches - the classic splice.
-   *   1 "stretch"           - granular timestretch to the event's length; pitch holds. Best on
-   *                           rhythmic material, like .stretch() itself.
+   *   1 "stretch"           - timestretch to the event's length, as .stretch() does (see
+   *                           .stretchmode()); pitch holds.
    *
    * The mode names are accepted as strings, and it is a channel like .loopwrap(): values round to
    * the nearest mode and wrap, so any signal drives it - .splicemode("<0 1>").
@@ -3911,6 +3921,14 @@ export class Sig {
   sustain(v) { return this._samplerOpt('sustain', 'sustain', toSignal(v)); }
   /** Release time in seconds - the fade-out once the note ends. */
   release(v) { return this._samplerOpt('release', 'release', toSignal(v)); }
+  /** Short for .attack(). */
+  att(v) { return this.attack(v); }
+  /** Short for .decay(). */
+  dec(v) { return this.decay(v); }
+  /** Short for .sustain(). */
+  sus(v) { return this.sustain(v); }
+  /** Short for .release(). */
+  rel(v) { return this.release(v); }
   /** Multiplies attack, decay and release (not sustain): `.envscale(dur())` scales them by the note's length. */
   envscale(v) { return this._samplerOpt('envscale', 'envScale', toSignal(v)); }
   /** Set all four ADSR controls at once: .adsr(attack, decay, sustain, release). */
@@ -6390,6 +6408,7 @@ export const LOOP_MODES = {
   loopDir: ['forward', 'pingpong'],
   spliceMode: ['repitch', 'stretch'],
   fitMode: ['repitch', 'stretch'],
+  stretchMode: ['clean', 'grain'],
 };
 
 /** The index a mode name selects on a named-mode channel, or -1 for anything that isn't one. */
@@ -6789,6 +6808,9 @@ function constantOf(x) {
   if (typeof x === 'number') return Number.isFinite(x) ? x : null;
   if (!(x instanceof Sig)) return null;
   if (Number.isFinite(x.constVal)) return x.constVal;
+  // A native modulator is never a constant, and probing one would read a named lfo() shape at build
+  // time - before a _shape() further down the buffer has defined it.
+  if (isNativeMod(x)) return null;
   if (x.widgetLive || x.stepsForCycle || typeof x.sample !== 'function') return null;
   const reads = liveReads;
   const probed = probeConstant(x);
@@ -7258,6 +7280,7 @@ const SAMPLER_CONTROLS = {
   speed: { key: 'speed', unset: 1 },
   flip: { key: 'flip', unset: 0 },
   stretch: { key: 'stretch', unset: 1 },
+  stretchmode: { key: 'stretchMode', unset: 0 },
   fit: { key: 'fit', unset: 1 },
   fitmode: { key: 'fitMode', unset: 0 },
   slice: { key: 'slice', unset: 0 },
@@ -7389,6 +7412,12 @@ export const splicemode = (v = 1) => {
   out.ctl = 'splicemode';
   return out;
 };
+/** How a sample is stretched: 0 = clean (default), 1 = grain - the top-level form of `.stretchmode()`. */
+export const stretchmode = (v = 1) => {
+  const out = bareSig(modeSignal('stretchMode', v));
+  out.ctl = 'stretchmode';
+  return out;
+};
 /** How fit() reaches its length: 0 = repitch (default), 1 = stretch - the top-level form of `.fitmode()`. */
 export const fitmode = (v = 1) => {
   const out = bareSig(modeSignal('fitMode', v));
@@ -7403,6 +7432,14 @@ export const decay = controlBuilder('decay');
 export const sustain = controlBuilder('sustain');
 /** Release, in seconds - the top-level form of `.release()`. */
 export const release = controlBuilder('release');
+/** Short for attack(). */
+export const att = attack;
+/** Short for decay(). */
+export const dec = decay;
+/** Short for sustain(). */
+export const sus = sustain;
+/** Short for release(). */
+export const rel = release;
 /** Envelope time multiplier - the top-level form of `.envscale()`. */
 export const envscale = controlBuilder('envscale');
 /** Granular playback (over 0.5 = on) - the top-level form of `.grain()`. */

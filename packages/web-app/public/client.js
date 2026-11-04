@@ -2019,6 +2019,35 @@ function findChainCall(code, block, slot) {
   return { afterFirstArg: lit.end, closeParen, plugin: lit.content };
 }
 
+/**
+ * Where a new `.param(...)` for the device whose call closes at `closeParen` goes, and the text
+ * before it: on a line of its own, after the `.preset()` and `.param()` calls the device already
+ * has, indented as the chain's lines are. `{ at, lead }`, the call written as `${lead}.param(…)`.
+ */
+function paramInsertAt(code, closeParen) {
+  let at = closeParen + 1;
+  for (;;) {
+    const m = /^\s*\.\s*(?:param|preset)\s*\(/.exec(code.slice(at));
+    if (!m) break;
+    const close = matchParen(code, at + m[0].length - 1);
+    if (close < 0) break;
+    at = close + 1;
+  }
+  const lineStart = code.lastIndexOf('\n', at - 1) + 1;
+  const line = code.slice(lineStart, at);
+  const own = /^\s*/.exec(line)[0];
+  // A line that is itself part of the chain sets the indent; the line a chain starts on (`kick:
+  // note(…)`) has its continuation lines below it, or two spaces in from it.
+  let indent = `${own}  `;
+  if (line.trimStart().startsWith('.')) indent = own;
+  else {
+    const eol = code.indexOf('\n', at);
+    const next = eol < 0 ? null : /^\n([ \t]*)\./.exec(code.slice(eol));
+    if (next) indent = next[1];
+  }
+  return { at, lead: `\n${indent}` };
+}
+
 // First string literal in [from, to): its unescaped content and the index just past its closing
 // quote, or null. Used by conf's param upsert to read a .param("name", ...) call's name.
 function firstStringLiteral(code, from, to) {
@@ -2781,14 +2810,16 @@ function writeParamTake(ed, t) {
     logLine(`capture: ${t.name} on "${label}" is already set by code - left as it is`, true);
     return null;
   }
-  const anchor = existing ? existing.valueStart : findChainCall(code, block, t.slot)?.closeParen;
+  const chainCall = existing ? null : findChainCall(code, block, t.slot);
+  const insert = chainCall ? paramInsertAt(code, chainCall.closeParen) : null;
+  const anchor = existing ? existing.valueStart : insert?.at;
   if (anchor == null) return null;
   const range = { min: t.min, max: t.max, step: t.step ?? null, curve: t.curve ?? 'lin', curveExp: t.curveExp ?? null };
   const name = freeTakeName(ed, anchor, ['']);
   const widget = t.widget === 'toggle' ? `toggle(${t.value >= 0.5 ? 1 : 0})` : controlCallText('knob', formatInRange(t.value, range), range);
   const text = `${widget}.record({ cycles: ${t.cycles}, take: ${JSON.stringify(name)} })`;
   if (existing) ed.replaceRange(` ${text}`, ed.posFromIndex(existing.valueStart), ed.posFromIndex(existing.valueEnd));
-  else ed.replaceRange(`.param(${JSON.stringify(t.name)}, ${text})`, ed.posFromIndex(anchor + 1));
+  else ed.replaceRange(`${insert.lead}.param(${JSON.stringify(t.name)}, ${text})`, ed.posFromIndex(anchor));
   writeTakeShapes(ed, [name], t.shapes, t.cycles);
   return name;
 }
@@ -3033,7 +3064,8 @@ function upsertParam(trackId, slot, name, value) {
     logLine(`conf: couldn't find slot ${slot}'s call in "${trackLabel}" - re-evaluate and try again`, true);
     return;
   }
-  ed.replaceRange(`.param(${JSON.stringify(name)}, ${value})`, ed.posFromIndex(call.closeParen + 1));
+  const { at, lead } = paramInsertAt(code, call.closeParen);
+  ed.replaceRange(`${lead}.param(${JSON.stringify(name)}, ${value})`, ed.posFromIndex(at));
 }
 
 let hashTimer = null;
@@ -3669,6 +3701,92 @@ function renderHintRow(el, data, completion) {
   }
 }
 
+// How well `typed` names `key`, spaces and case aside: 0 it starts it, 1 it is in it, 2 its letters
+// come in order (`b1f` for "Band 1 Freq"), null not at all.
+function nameMatchTier(key, typed) {
+  const k = key.replace(/\s+/g, '').toLowerCase();
+  const q = typed.replace(/\s+/g, '').toLowerCase();
+  if (!q) return 0;
+  const at = k.indexOf(q);
+  if (at === 0) return 0;
+  if (at > 0) return 1;
+  let i = 0;
+  for (const ch of k) if (ch === q[i]) i++;
+  return i === q.length ? 2 : null;
+}
+
+// The controls of the device a `.` at the end of `textBefore` would reach - the one before it in
+// the chain, found the way paramHints finds it. Empty when that device is not loaded yet.
+function chainParamsBefore(editor, textBefore) {
+  const block = blockAtCursor(editor);
+  const sinceBlockStart = block
+    ? textBefore.slice(block.start, block.bodyStart) + (block.bodyEnd == null ? '' : textBefore.slice(block.bodyEnd))
+    : textBefore;
+  if (!/\b(?:synth|fx)\s*\(/.test(sinceBlockStart)) return { params: [], plugin: null };
+  const slot = slotsIn(sinceBlockStart);
+  const track = block ? blockTrackId(editor, block) : null;
+  const entry = chainSlots.find((s) => s.track === track && s.slot === slot);
+  return { params: entry?.params?.length ? withParamAddrs(entry.params) : [], plugin: entry?.plugin ?? null };
+}
+
+/**
+ * After a dot: the chain methods, and what can be typed by name rather than by call - a device
+ * (`.eq` → `.fx("EQ")`), one of its presets, a control of the device the line is on (`.cut` →
+ * `.param("Cutoff", )`, the caret where the value goes). Methods first, then the line's controls,
+ * then devices and their presets, each tier of match before the next.
+ */
+function dotHints(cur, typed, textBefore, editor) {
+  const rows = [];
+  const add = (tier, order, completion) => { if (tier != null) rows.push({ tier, order, completion }); };
+  for (const name of METHODS) {
+    const doc = lookupDoc(name, 'method');
+    const text = doc && doc.call === false ? name : `${name}(`;
+    add(nameMatchTier(name, typed) === 2 ? null : nameMatchTier(name, typed), 0, { text, displayText: text, doc, render: doc ? renderHintRow : undefined });
+  }
+  if (typed.length >= 2) {
+    const { params, plugin } = chainParamsBefore(editor, textBefore);
+    for (const p of params) {
+      const head = `param(${JSON.stringify(p.addr)}, `;
+      add(nameMatchTier(p.addr, typed), 1, {
+        text: `${head})`,
+        displayText: `${p.addr} · ${plugin ?? 'control'}`,
+        hint: (ed, data, c) => {
+          ed.replaceRange(c.text, data.from, data.to, 'complete');
+          ed.setCursor(CodeMirror.Pos(data.from.line, data.from.ch + head.length));
+        },
+      });
+    }
+    const code = editor.getValue();
+    for (const p of knownPlugins) {
+      const tier = nameMatchTier(p.name, typed);
+      if (tier == null || tier === 2) continue;
+      const kind = p.isInstrument ? 'synth' : 'fx';
+      const call = `${kind}(${JSON.stringify(p.name)})`;
+      add(tier, 2, { text: call, displayText: `${p.name} · ${kind}` });
+      // Its presets only where the name was typed from its start: a word inside a name is a
+      // guess, and a guess would bring every preset of every device that has the letters.
+      if (tier !== 0) continue;
+      const ids = [...new Set(presetDefs.allIds(p.name, code).map((r) => r.id))];
+      for (const id of ids) add(tier, 3, { text: `${call}.preset(${JSON.stringify(id)})`, displayText: `${p.name} · ${id}` });
+    }
+  }
+  rows.sort((a, b) => a.tier - b.tier || a.order - b.order);
+  return hintResult(cur, typed, rows.slice(0, 60).map((r) => r.completion));
+}
+
+// A bare word: the builders, then the sounds it names (`bd` → `s("bd")`).
+function bareWordHints(cur, typed) {
+  const result = wordHints(cur, typed, BUILDERS, 'builder');
+  if (typed.length < 2) return result;
+  if (!samplePacks) loadSamples().catch(() => {}); // ready for the next keystroke
+  for (const pack of samplePacks ?? []) {
+    if (nameMatchTier(pack.name, typed) !== 0) continue;
+    result.list.push({ text: `s(${JSON.stringify(pack.name)})`, displayText: `${pack.name} · sound` });
+    if (result.list.length >= 40) break;
+  }
+  return result;
+}
+
 // CodeMirror hands the hint source the editor asking for completions, so every branch below
 // reads (and completes into) whichever pane has focus - the main buffer or deck B's.
 function poptartHint(editor) {
@@ -3731,9 +3849,9 @@ function poptartHint(editor) {
   // the decimal point of a number being typed (`begin(0.3`), not a chain - offering the whole
   // method list there pops a menu over every float you type.
   m = before.match(/(\d?)\.([A-Za-z_]*)$/);
-  if (m && !m[1]) return wordHints(cur, m[2], METHODS, 'method');
+  if (m && !m[1]) return dotHints(cur, m[2], before, editor);
   m = before.match(/(?:^|[^.\w"'])([A-Za-z_]+)$/);
-  if (m) return wordHints(cur, m[1], BUILDERS, 'builder');
+  if (m) return bareWordHints(cur, m[1]);
 
   return { list: [], from: cur, to: cur };
 }
@@ -7412,6 +7530,69 @@ function setByCodeOnly(trackLabel, slot, widget) {
   return unitsMod.restateParamArg(call.text, restateTarget({ ...widget, arg }, widget)) == null;
 }
 
+const deviceMenuEl = document.getElementById('deviceMenu');
+
+/**
+ * What a right-click on a device window control offers: what moves it - an envelope, an LFO - or
+ * a control drawn in the code of the kind it is, each written as the value of its `.param()`.
+ * Empty for a control with nothing to offer (a menu of options, a file, a shape).
+ */
+function deviceControlItems(trackLabel, slot, widget) {
+  const put = (text, open) => () => writeDeviceControl(trackLabel, slot, widget, text, open);
+  if (widget.widget === 'button') return [['button', put('button()'), 'a button drawn in the code that fires it']];
+  if (widget.widget === 'toggle') {
+    return [['toggle', put(`toggle(${widget.value >= 0.5 ? 1 : 0})`), 'a switch drawn in the code']];
+  }
+  if (widget.options || widget.takes) return [];
+  const range = { min: widget.min, max: widget.max, step: widget.step ?? null, curve: widget.curve ?? 'lin', curveExp: null };
+  const now = formatInRange(widget.value, range);
+  // Bare numbers in a .param() are positions on the control's range: the envelope rises from
+  // where the control is set now to the top of it.
+  const from = Math.round((widget.position ?? 0) * 100) / 100;
+  return [
+    ['envelope', put(from > 0 && from < 1 ? `env({ min: ${from} })` : 'env()', 'env'), 'every note sweeps it, from where it is now to the top'],
+    ['LFO', put('lfo()', 'lfo'), 'a drawn shape moves it over its whole range'],
+    '-',
+    ['knob', put(controlCallText('knob', now, range)), 'a knob drawn in the code, over its range'],
+    ['slider', put(controlCallText('slider', now, range)), 'a slider drawn in the code, over its range'],
+  ];
+}
+
+/**
+ * `text` as the value of the control's `.param()` in its track's code: in place of a plain value
+ * already there, or a new call under the device's. One the code sets with something else - a
+ * pattern, a signal, another control - is left alone, and the console line about it goes there.
+ * `open` names the call whose editor opens on what was written (`lfo`, `env`).
+ */
+function writeDeviceControl(trackLabel, slot, widget, text, open = null) {
+  const { ed, label } = deckTrackParts(trackLabel);
+  if (!ed || !labelsMod) return;
+  const deck = String(trackLabel).startsWith('b:') ? 'b' : 'a';
+  const code = ed.getValue();
+  const block = blockForTrack(code, label);
+  if (!block) return;
+  const existing = codeParamCall(trackLabel, slot, widget);
+  let at;
+  if (existing) {
+    if (/[A-Za-z_$][\w$]*\s*\(/.test(existing.text)) {
+      logLine({ text: `${widget.name} on "${label}" is already set by code - left as it is`, level: 'warn', where: { deck, from: existing.start, to: existing.end } });
+      return;
+    }
+    ed.replaceRange(text, ed.posFromIndex(existing.start), ed.posFromIndex(existing.end));
+    at = existing.start;
+  } else {
+    const call = findChainCall(code, block, slot);
+    if (!call) return;
+    const { at: insertAt, lead } = paramInsertAt(code, call.closeParen);
+    const head = `${lead}.param(${JSON.stringify(widget.name)}, `;
+    ed.replaceRange(`${head}${text})`, ed.posFromIndex(insertAt));
+    at = insertAt + head.length;
+  }
+  refoldAll(ed);
+  evalEditor(ed);
+  if (open) openWidgetAt(ed.getValue(), at, ed);
+}
+
 /** One control: its name, the widget itself, and what it currently reads. */
 function deviceWidget(trackLabel, slot, widget, { bare = false } = {}) {
   const plain = !widget.modulatedBy && !widget.takes && widget.widget !== 'button';
@@ -7420,6 +7601,13 @@ function deviceWidget(trackLabel, slot, widget, { bare = false } = {}) {
   const cell = document.createElement('div');
   cell.className = bare ? 'device-widget device-widget-bare' : 'device-widget';
   if (widget.modulatedBy) cell.classList.add('driven');
+  // Asked on the click, so what it writes is where the control was last turned to.
+  if (deviceControlItems(trackLabel, slot, widget).length) {
+    cell.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      openCtxMenu(deviceMenuEl, e.clientX, e.clientY, { head: widget.name, items: deviceControlItems(trackLabel, slot, widget) });
+    });
+  }
 
   // A control drawn inside a figure's heading has the figure's own title beside it already, so
   // it carries no label of its own.
@@ -7493,6 +7681,7 @@ function deviceWidget(trackLabel, slot, widget, { bare = false } = {}) {
     api('POST', '/api/deviceParam', { trackId: trackLabel, slot, id: widget.id, commit: filed, ...body })
       .then((res) => {
         writeWindowParam(trackLabel, slot, res);
+        if (Number.isFinite(res.value)) widget = { ...widget, value: res.value, position: res.position ?? widget.position };
         showValue(res.text);
         // A knob and a figure can be two views of one parameter - the filter's cutoff is both -
         // so turning the knob redraws the picture.
@@ -30033,7 +30222,7 @@ const envSay = (msg, isError = false) => {
   envNote.classList.toggle('error', !!msg && isError);
 };
 
-const ENV_HANDLE_WORDS = new Set(['adsr', 'attack', 'decay', 'sustain', 'release', 'envscale', 'begin', 'end',
+const ENV_HANDLE_WORDS = new Set(['adsr', 'attack', 'decay', 'sustain', 'release', 'att', 'dec', 'sus', 'rel', 'envscale', 'begin', 'end',
   'loop', 'loopwrap', 'loopdir', 's', 'se', 'sr']);
 
 /**
@@ -32644,6 +32833,8 @@ let deckFileItems = new Map(); // deck picker option value ('file:<path>') -> it
 
 const mixStripEl = document.getElementById('mixStrip');
 const deckBPaneEl = document.getElementById('deckBPane');
+// The desk's controls at rest. djres's default is the engine's (the desk state's `neutral`, taken
+// from the first frame on - see mixSyncValues); 0 only draws the knob until that frame lands.
 const MIX_NEUTRAL = { trim: 1, eqlo: 1, eqmid: 1, eqhi: 1, djf: 0, djres: 0, fader: 1 };
 
 // One POST per ~50ms however fast the sliders stream: each control keeps only its latest value,
@@ -33959,7 +34150,7 @@ function makeSongPane(deck) {
   // The song's musical facts are server truth (tags at load, playlist item, edits here, phase 5
   // estimates) and ride every SSE frame; this row just renders them and posts edits back. bpm
   // feeds the desk's tempo migration; ⚓ drops the beatgrid anchor at the playhead; sync
-  // rate-locks to the master clock; keylock swaps the player for the pitch-shifting one; the
+  // rate-locks to the master clock; keylock swaps the player for the time-stretching one; the
   // nudge pair is the platter (±4% while held) and the jog pair steps a beat. All four platter
   // buttons are MIDI-learnable, same gesture as the desk knobs.
   //
@@ -35399,6 +35590,9 @@ function mixGlide(el, target) {
 // The sliders' side of a refresh, rebuilt-row-free - also run on a poll while the strip is
 // open, so a learned MIDI knob (which drives the server directly) moves the on-screen desk.
 function mixSyncValues(state) {
+  for (const ctl of Object.keys(MIX_NEUTRAL)) {
+    if (Number.isFinite(state.neutral?.[ctl])) MIX_NEUTRAL[ctl] = state.neutral[ctl];
+  }
   for (const deck of ['a', 'b']) {
     for (const ctl of MIX_DECK_CONTROLS) {
       const el = mixDeckCtl(deck, ctl);

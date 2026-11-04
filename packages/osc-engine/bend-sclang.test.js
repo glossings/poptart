@@ -38,7 +38,7 @@ function extract(name) {
  * so there is no line the end of one can be recognized by.
  */
 function synthDef(name) {
-  const at = SRC.search(new RegExp(`SynthDef\\(\\("${name}"`));
+  const at = SRC.indexOf(`SynthDef(("${name}`);
   assert.ok(at >= 0, `could not find the ${name} SynthDef in sc/poptart.scd`);
   let depth = 0;
   for (let i = at; i < SRC.length; i++) {
@@ -49,7 +49,14 @@ function synthDef(name) {
   return '';
 }
 
-const SAMPLE_DEFS = ['poptart_sample_', 'poptart_sample_loop_', 'poptart_sample_warp_', 'poptart_sample_warp_loop_'];
+// Each def's name, and how its SynthDef call starts in the source: the warp defs are built in a
+// loop over name prefixes (`kind`, which the harness sets to theirs).
+const SAMPLE_DEFS = [
+  ['poptart_sample_', 'poptart_sample_" ++ nc'],
+  ['poptart_sample_loop_', 'poptart_sample_loop_" ++ nc'],
+  ['poptart_sample_warp_', 'poptart_sample_" ++ kind ++ nc'],
+  ['poptart_sample_warp_loop_', 'poptart_sample_" ++ kind ++ "loop_" ++ nc'],
+];
 
 function runSclang(body) {
   // No server is booted. A SynthDef builds its UGen graph the moment it is constructed - .add is
@@ -83,7 +90,8 @@ var report = { |label, nc, def| ("DEF<" ++ label ++ ":" ++ nc ++ ":"
     ++ (def.allControlNames.detect({ |c| c.name == \\bend }) !? { |c| c.defaultValue } ? "none") ++ ">").postln };
 [1, 2].do { |nc|
     var toStereo = { |sig| if (nc == 1) { sig ! 2 } { sig } };
-${SAMPLE_DEFS.map((n) => `    report.(${JSON.stringify(n)}, nc, ${synthDef(n)});`).join('\n')}
+    var kind = "warp_";
+${SAMPLE_DEFS.map(([n, src]) => `    report.(${JSON.stringify(n)}, nc, ${synthDef(src)});`).join('\n')}
 };
 0.exit;
 )
@@ -92,7 +100,7 @@ ${SAMPLE_DEFS.map((n) => `    report.(${JSON.stringify(n)}, nc, ${synthDef(n)});
     t.skip(`sclang did not build the sample defs here: ${out.trim().split('\n').slice(-3).join(' | ') || 'no output'}`);
     return;
   }
-  for (const name of SAMPLE_DEFS) {
+  for (const [name] of SAMPLE_DEFS) {
     for (const nc of [1, 2]) {
       // Present on every voice, and resting at 0 - a def whose bend defaulted to anything else
       // would detune every unbent sample on the track.
