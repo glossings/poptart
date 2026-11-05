@@ -192,8 +192,8 @@ if (typeof document !== 'undefined') (function () {
   paintChordLabels();
 
   // ---- the chapter list and the pager ----------------------------------------------------------
-  // The page carries an empty <nav class="chapters"> so its column is there from the first paint;
-  // filled here, nothing moves.
+  // The page carries a <nav class="chapters"> so its column is there from the first paint (empty,
+  // or holding the chapter links the browser build writes in); filled here, nothing moves.
   let nav = document.querySelector('nav.chapters');
   if (!nav) {
     nav = document.createElement('nav');
@@ -267,6 +267,7 @@ if (typeof document !== 'undefined') (function () {
 
   const cards = document.querySelector('.cards');
   if (cards) {
+    cards.textContent = ''; // the browser build writes the cards into the page; these replace them
     CHAPTERS.slice(1).forEach((c, i) => {
       const a = document.createElement('a');
       a.href = href(c.file);

@@ -171,6 +171,95 @@ export function markDocsWeb(html) {
   return html.replace(anchor, '<html lang="en" class="web">');
 }
 
+// ---- search engines and link previews --------------------------------------------------------
+// Only this build's pages carry these: the desktop serves the same files from this machine, where
+// nothing crawls them.
+
+export const SITE = 'https://poptart.glossing.dev';
+export const APP_TITLE = 'poptart: livecode music in your browser';
+export const APP_DESCRIPTION = 'poptart is a livecoding music app in your browser: write short patterns and play them on built-in synths, samplers and effects, with an arrangement, piano rolls, a mixer and DJ decks. Nothing to install.';
+const PREVIEW_IMAGE = `${SITE}/docs/img/app.png`;
+
+/** The guide's chapters, in order, from the list docs.js builds its links from. */
+const chapters = () => require('./public/docs/docs.js').CHAPTERS;
+
+/** A guide page's address as the host serves it: no `.html`, the index at /docs/. */
+export const guideUrl = (file) => `${SITE}/docs/${file === 'index' ? '' : file}`;
+
+const escapeAttr = (s) => s.replace(/&(?!amp;|lt;|gt;|quot;)/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+
+/** The app page's head: its language, a title that says what it is, and a description. */
+export function markAppHead(html) {
+  if (html.includes('name="description"')) return html;
+  if (!/<html>/.test(html) || !/<title>poptart<\/title>/.test(html)) throw new Error('could not find the app page\'s <html> and <title> to mark');
+  return html
+    .replace('<html>', '<html lang="en">')
+    .replace('<title>poptart</title>', `<title>${escapeAttr(APP_TITLE)}</title>\n    <meta name="description" content="${escapeAttr(APP_DESCRIPTION)}" />`);
+}
+
+/**
+ * The page's address and its link preview, from its own title and description: the canonical URL
+ * (so `/docs/start` and `/docs/start.html` count as one page) and the Open Graph and card tags a
+ * chat or a social site reads to draw the preview.
+ */
+export function injectPreview(html, url) {
+  if (html.includes('rel="canonical"')) return html;
+  const title = /<title>([^<]*)<\/title>/.exec(html)?.[1];
+  const description = /<meta name="description" content="([^"]*)"/.exec(html)?.[1];
+  if (!title || !description) throw new Error(`the page at ${url} needs a <title> and a description`);
+  const anchor = '</head>';
+  if (!html.includes(anchor)) throw new Error('could not find the page head to put the preview in');
+  const tags = [
+    `<link rel="canonical" href="${url}" />`,
+    '<meta property="og:type" content="website" />',
+    '<meta property="og:site_name" content="poptart" />',
+    `<meta property="og:url" content="${url}" />`,
+    `<meta property="og:title" content="${title}" />`,
+    `<meta property="og:description" content="${description}" />`,
+    `<meta property="og:image" content="${PREVIEW_IMAGE}" />`,
+    '<meta property="og:image:width" content="1440" />',
+    '<meta property="og:image:height" content="900" />',
+    '<meta name="twitter:card" content="summary_large_image" />',
+  ];
+  return html.replace(anchor, `  ${tags.join('\n    ')}\n  ${anchor}`);
+}
+
+/**
+ * The guide's chapter list and the index's chapter cards, written into the page rather than left
+ * for docs.js to add, so a crawler that runs no script still finds every chapter. The markup is
+ * the one docs.js builds, which replaces it once it runs.
+ */
+export function fillGuideLinks(html, page) {
+  const list = chapters();
+  const navAnchor = '<nav class="chapters"></nav>';
+  if (!html.includes(navAnchor)) throw new Error(`could not find the empty chapter list in the guide's ${page} page`);
+  const links = list.map((c, i) => `<a class="chapter${c.file === page ? ' here' : ''}" href="${c.file === 'index' ? '/docs/' : `/docs/${c.file}.html`}"><span class="num">${i === 0 ? '' : i}</span><span>${escapeText(c.title)}</span></a>`);
+  html = html.replace(navAnchor, `<nav class="chapters"><a class="brand" href="/docs/"><span class="dot"></span> poptart</a><p class="tagline">the guide</p>${links.join('')}<a class="back" href="/">← back to poptart</a></nav>`);
+  const cardsAnchor = '<div class="cards"></div>';
+  if (html.includes(cardsAnchor)) {
+    const cards = list.slice(1).map((c, i) => `<a href="/docs/${c.file}.html"><span class="num">${i + 1}</span><span class="title">${escapeText(c.title)}</span><span class="blurb">${escapeText(c.blurb)}</span></a>`);
+    html = html.replace(cardsAnchor, `<div class="cards">${cards.join('')}</div>`);
+  }
+  return html;
+}
+
+/** Tells crawlers where the pages are and to leave the projector window alone. */
+export function robotsTxt() {
+  return ['User-agent: *', 'Disallow: /projector', '', `Sitemap: ${SITE}/sitemap.xml`, ''].join('\n');
+}
+
+/** Every page worth finding: the app and each chapter of the guide. */
+export function sitemapXml() {
+  const urls = [`${SITE}/`, ...chapters().map((c) => guideUrl(c.file))];
+  return [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">',
+    ...urls.map((u) => `  <url><loc>${u}</loc></url>`),
+    '</urlset>',
+    '',
+  ].join('\n');
+}
+
 export const WEB_SKETCH = [
   'kick: s("bd*4")',
   'hat: s("hh*8")',
@@ -222,14 +311,20 @@ export function build({ out = DIST, quiet = false } = {}) {
   fs.copyFileSync(path.join(here, 'pinned-defs.js'), path.join(out, 'web', 'pinned-defs.js'));
 
   const indexPath = path.join(out, 'index.html');
-  fs.writeFileSync(indexPath, replaceSketch(injectAnalytics(injectBoot(fs.readFileSync(indexPath, 'utf8')))));
+  const app = injectPreview(markAppHead(fs.readFileSync(indexPath, 'utf8')), `${SITE}/`);
+  fs.writeFileSync(indexPath, replaceSketch(injectAnalytics(injectBoot(app))));
 
-  // Every chapter of the guide, marked as this build's.
+  // Every chapter of the guide, marked as this build's, with its links and preview in the page.
   const docsDir = path.join(out, 'docs');
   for (const name of fs.readdirSync(docsDir).filter((f) => f.endsWith('.html'))) {
     const page = path.join(docsDir, name);
-    fs.writeFileSync(page, injectAnalytics(markDocsWeb(fs.readFileSync(page, 'utf8'))));
+    const file = name.replace(/\.html$/, '');
+    const html = fillGuideLinks(markDocsWeb(fs.readFileSync(page, 'utf8')), file);
+    fs.writeFileSync(page, injectAnalytics(injectPreview(html, guideUrl(file))));
   }
+
+  fs.writeFileSync(path.join(out, 'robots.txt'), robotsTxt());
+  fs.writeFileSync(path.join(out, 'sitemap.xml'), sitemapXml());
 
   log(`\nbuilt ${out} (${(total / 1e6).toFixed(1)} MB)`);
   return { out, bytes: total };

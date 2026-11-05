@@ -16,7 +16,10 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-import { build, injectAnalytics, injectBoot, markDocsWeb, replaceSketch, WEB_SKETCH } from './build-web.mjs';
+import { build, injectAnalytics, injectBoot, injectPreview, markDocsWeb, replaceSketch, SITE, WEB_SKETCH } from './build-web.mjs';
+import { createRequire } from 'node:module';
+
+const { CHAPTERS } = createRequire(import.meta.url)('./public/docs/docs.js');
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const out = fs.mkdtempSync(path.join(os.tmpdir(), 'poptart-web-build-'));
@@ -289,4 +292,44 @@ test('the guide is marked as the browser build\'s, once', () => {
   assert.match(marked, /<html lang="en" class="web">/);
   assert.equal(markDocsWeb(marked), marked);
   assert.throws(() => markDocsWeb('<p>no html tag</p>'), /<html>/);
+});
+
+test('every page a search engine can find has a description, a canonical address and a preview', () => {
+  const pages = [['index.html', `${SITE}/`], ...CHAPTERS.map((c) => [`docs/${c.file}.html`, `${SITE}/docs/${c.file === 'index' ? '' : c.file}`])];
+  for (const [file, url] of pages) {
+    const html = fs.readFileSync(path.join(out, file), 'utf8');
+    assert.match(html, /<html lang="en"/, `${file} names its language`);
+    assert.match(html, /<meta name="description" content="[^"]{40,}"/, `${file} has a description`);
+    assert.ok(html.includes(`<link rel="canonical" href="${url}" />`), `${file} names ${url} as its address`);
+    assert.ok(html.includes(`<meta property="og:url" content="${url}" />`), `${file} has a link preview`);
+    assert.ok(files.has('docs/img/app.png'), 'the preview image ships');
+  }
+  assert.match(fs.readFileSync(path.join(out, 'index.html'), 'utf8'), /<title>poptart: livecode music in your browser<\/title>/);
+});
+
+test('every chapter is linked from every guide page without running a script', () => {
+  for (const c of CHAPTERS) {
+    const html = fs.readFileSync(path.join(out, 'docs', `${c.file}.html`), 'utf8');
+    const nav = html.slice(html.indexOf('<nav class="chapters">'), html.indexOf('</nav>'));
+    for (const d of CHAPTERS) assert.ok(nav.includes(`href="${d.file === 'index' ? '/docs/' : `/docs/${d.file}.html`}"`), `${c.file} links ${d.file}`);
+    assert.equal((nav.match(/ here"/g) ?? []).length, 1, `${c.file} marks itself as the one being read`);
+  }
+  const index = fs.readFileSync(path.join(out, 'docs', 'index.html'), 'utf8');
+  assert.equal((index.match(/<span class="blurb">/g) ?? []).length, CHAPTERS.length - 1, 'the index has a card per chapter');
+});
+
+test('the sitemap lists every page, and robots.txt points to it and away from the projector', () => {
+  const sitemap = fs.readFileSync(path.join(out, 'sitemap.xml'), 'utf8');
+  assert.equal((sitemap.match(/<loc>/g) ?? []).length, CHAPTERS.length + 1);
+  assert.ok(sitemap.includes(`<loc>${SITE}/docs/start</loc>`));
+  const robots = fs.readFileSync(path.join(out, 'robots.txt'), 'utf8');
+  assert.match(robots, /Disallow: \/projector/);
+  assert.ok(robots.includes(`Sitemap: ${SITE}/sitemap.xml`));
+});
+
+test('a preview is added once, and a page with nothing to preview is refused', () => {
+  const page = '<head><title>t</title><meta name="description" content="d" /></head>';
+  const once = injectPreview(page, `${SITE}/`);
+  assert.equal(injectPreview(once, `${SITE}/`), once);
+  assert.throws(() => injectPreview('<head><title>t</title></head>', `${SITE}/`), /description/);
 });
