@@ -3757,17 +3757,20 @@ function dotHints(cur, typed, textBefore, editor) {
       });
     }
     const code = editor.getValue();
+    const allPresets = presetDefs.allIds(null, code);
     for (const p of knownPlugins) {
       const tier = nameMatchTier(p.name, typed);
-      if (tier == null || tier === 2) continue;
       const kind = p.isInstrument ? 'synth' : 'fx';
       const call = `${kind}(${JSON.stringify(p.name)})`;
-      add(tier, 2, { text: call, displayText: `${p.name} · ${kind}` });
-      // Its presets only where the name was typed from its start: a word inside a name is a
-      // guess, and a guess would bring every preset of every device that has the letters.
-      if (tier !== 0) continue;
-      const ids = [...new Set(presetDefs.allIds(p.name, code).map((r) => r.id))];
-      for (const id of ids) add(tier, 3, { text: `${call}.preset(${JSON.stringify(id)})`, displayText: `${p.name} · ${id}` });
+      if (tier === 0 || tier === 1) add(tier, 2, { text: call, displayText: `${p.name} · ${kind}` });
+      // Every preset where the device's name was typed from its start (`.dru`); otherwise the
+      // presets whose own name has what was typed (`.sna` → brightsnare). A device matched only
+      // somewhere inside its name brings none: a guess would bring every preset that has the letters.
+      const ids = [...new Set(allPresets.filter((r) => r.scope === p.name || (tier === 0 && !r.scope)).map((r) => r.id))];
+      for (const id of ids) {
+        const idTier = tier === 0 ? 0 : nameMatchTier(id, typed);
+        if (idTier === 0 || idTier === 1) add(idTier, 3, { text: `${call}.preset(${JSON.stringify(id)})`, displayText: `${p.name} · ${id}` });
+      }
     }
   }
   rows.sort((a, b) => a.tier - b.tier || a.order - b.order);

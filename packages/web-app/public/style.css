@@ -5739,6 +5739,11 @@ body.mix-on #deckBPane {
 *::-webkit-scrollbar-track {
   background: transparent;
 }
+/* CodeMirror's square where its two scrollbars meet is stock white. */
+.CodeMirror-scrollbar-filler,
+.CodeMirror-gutter-filler {
+  background: transparent;
+}
 /* The deck B editor sizes by flex (the global .CodeMirror height:100% overflowed the pane past
    its header, which is what put a stray scrollbar on the pane itself). */
 #deckBPane .CodeMirror {
