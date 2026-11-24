@@ -4522,6 +4522,11 @@ function wireEngine() {
     eventLogQueue.push({ level: 'warn', text });
     if (eventLogQueue.length > EVENT_LOG_MAX) eventLogQueue.splice(0, eventLogQueue.length - EVENT_LOG_MAX);
   };
+  // The engine's lines for the player that aren't warnings (which MIDI input a midi() found).
+  engine.post = (text) => {
+    eventLogQueue.push(text);
+    if (eventLogQueue.length > EVENT_LOG_MAX) eventLogQueue.splice(0, eventLogQueue.length - EVENT_LOG_MAX);
+  };
   // audio("kick")/.midi("kick") reference other tracks by label inside engine-call arguments;
   // the wrapper turns those into engine track ids on the way down (see MappedEngine._trackRef).
   // A reference from inside a deck resolves within that deck first - deck b's audio("kick")
@@ -8496,6 +8501,11 @@ const routes = {
     let scheduleFrom = clockOf(deck).cycleAt(engine.getTime());
     const starting = active.length > 0 && body.start !== false && transport.paused;
     const toStart = [];
+
+    // Every label gets its engine id before any pattern is set: a midi("kick") source resolves
+    // "kick" as a track only if kick has an id (see MappedEngine._midiSourceRef), and a block
+    // further down the buffer would otherwise be taken for a MIDI device on its first eval.
+    for (const b of active) claimEngineTrack(keyOf(b));
 
     for (const b of active) {
       const key = keyOf(b);

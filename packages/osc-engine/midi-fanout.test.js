@@ -287,3 +287,22 @@ test('re-evaling a deferred route keeps sounding notes resolvable', () => {
   const offs = notes(sent).filter(([addr]) => addr === '/poptart/noteOff');
   assert.deepStrictEqual(offs.map(([, , n]) => n), [67]);
 });
+
+test('a midi() source changed between a device and a track takes the old route down', () => {
+  const { e, sent } = engine();
+  e.setInputSource('sub', 'midi', 'dev:IAC');
+  const route = sent.find((m) => m.addr === '/poptart/midiRoute');
+  assert.deepStrictEqual(route.args, ['sub', 'IAC', 0, '', 0, 0, 'midi'], 'named as the midi() call for the console');
+  e.setInputSource('sub', 'midi', 'kick'); // now a track: the device route goes
+  assert.ok(sent.some((m) => m.addr === '/poptart/clearMidiRoute' && m.args[0] === 'sub'));
+  e._fanoutMidiSample('kick', 1, 1, 1.25);
+  assert.strictEqual(notes(sent).filter(([addr]) => addr === '/poptart/noteOn').length, 1);
+  sent.length = 0;
+  e.setInputSource('sub', 'midi', 'dev:IAC'); // and back: the track route goes
+  e._fanoutMidiSample('kick', 1, 2, 2.25);
+  assert.strictEqual(notes(sent).length, 0);
+  // A re-eval of the same kind sends no teardown.
+  sent.length = 0;
+  e.setInputSource('sub', 'midi', 'dev:IAC');
+  assert.ok(!sent.some((m) => m.addr === '/poptart/clearMidiRoute'));
+});

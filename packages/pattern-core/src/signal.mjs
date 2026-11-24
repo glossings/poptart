@@ -9704,7 +9704,7 @@ function assertMidiDevice(builder, device) {
  */
 export function midicc(device) {
   assertMidiDevice('midicc', device);
-  registerMidiDevice(device);
+  registerMidiDevice(device, 'midicc');
   return (...args) => {
     if (args.length === 0) return new Sig(() => null, { ccLearn: { device } });
     const [cc, channel = null] = args;
@@ -9778,7 +9778,7 @@ export function fxknob(index) {
  */
 export function midikeys(device) {
   assertMidiDevice('midikeys', device);
-  registerMidiDevice(device);
+  registerMidiDevice(device, 'midikeys');
   return (channel = null) => {
     if (channel != null && !(channel >= 1 && channel <= 16)) {
       throw new Error('[signal] midikeys: channel must be 1..16 (omit it to listen on all channels)');

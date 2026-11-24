@@ -531,9 +531,30 @@ export function createHost({
   engine.onLiveNote = (trackId, note, vel, isOn) => liveNotes.edge(labelOf(trackId), note, vel, isOn);
   // A pattern named a MIDI device: ask for access now (the browser's prompt, once).
   engine.onMidiWanted = () => {
-    midi?.enable().catch((err) => { if (!midiRefused) { midiRefused = true; console.warn(`[poptart] ${err.message}`); } });
+    midi?.enable().then(reportMidiNames, (err) => { if (!midiRefused) { midiRefused = true; console.warn(`[poptart] ${err.message}`); } });
   };
   let midiRefused = false;
+  // Which input each MIDI device name in the code found, said in the console once per call and
+  // name - or that it found none, and what is connected - as the desktop engine says when it
+  // binds. Without it a wired controller and a misspelled one look the same until something sounds.
+  const midiNamesSaid = new Set();
+  const midiLines = [];
+  async function reportMidiNames() {
+    if (!midi?.enabled) return;
+    const wanted = [
+      ...(engine.midiRoutes?.deviceCalls?.() ?? []),
+      ...(patternCore.midiDeviceCalls?.() ?? []).filter((w) => w.call === 'midicc'),
+    ].filter((w) => !midiNamesSaid.has(`${w.call}|${w.device}`));
+    if (!wanted.length) return;
+    const names = await midi.inputs();
+    for (const { call, device } of wanted) {
+      midiNamesSaid.add(`${call}|${device}`);
+      const hit = names.find((n) => n.toLowerCase().includes(device.toLowerCase()));
+      midiLines.push(hit
+        ? `${call}("${device}"): ${hit}`
+        : { level: 'warn', text: `${call}("${device}"): no MIDI input matches - connected: ${names.join(', ') || 'none'}` });
+    }
+  }
   // Keys the computer keyboard has down, per label, so a stop can let them go.
   const kbHeld = new Map();
 
@@ -628,6 +649,7 @@ export function createHost({
       // A midicc() read in the pattern itself (not bound to a parameter) wants MIDI too, and only
       // the language knows it was written.
       if (midi && !midi.enabled && patternCore.midiInUse?.()) engine.onMidiWanted?.();
+      reportMidiNames().catch(() => {});
       return result;
     },
 
@@ -1060,7 +1082,7 @@ export function createHost({
       const shown = body?.panel ? evaluator.trackIds.get(String(body.panel.trackId)) ?? String(body.panel.trackId) : null;
       const panelProgram = shown != null ? engine.programCount?.(shown, Number(body.panel.slot ?? 0)) ?? null : null;
       return {
-        edits, logs: drainNotes(), pending: 0, holds, panelProgram, motionTakes: patternCore.takeMotionTakes?.() ?? [],
+        edits, logs: [...drainNotes(), ...midiLines.splice(0)], pending: 0, holds, panelProgram, motionTakes: patternCore.takeMotionTakes?.() ?? [],
         ccLearns: patternCore.takeMidiLearns(), ccWaiting: patternCore.midiLearnWaiting(),
         // `params`: moves made in a plugin's own window, which this build has no plugins to make.
         params: [],

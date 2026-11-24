@@ -593,6 +593,11 @@ export function createEvaluator({ patternCore, engine, transport, prebakeDefs = 
     const starting = active.length > 0 && start !== false && transport.paused;
     const toStart = [];
 
+    // Every label gets its engine id before any pattern is set: a midi("kick") source resolves
+    // "kick" as a track only if kick has an id (see the engine's setInputSource), and a block
+    // further down the buffer would otherwise be taken for a MIDI device on its first eval.
+    for (const b of active) claimTrack(keyOf(b));
+
     for (const b of active) {
       const key = keyOf(b);
       const tid = claimTrack(key);

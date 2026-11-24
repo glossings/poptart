@@ -21,9 +21,19 @@ const deviceStates = new Map();
 // engine boots with MIDI off - most sessions never touch it). Monotonic on purpose: once MIDI
 // is on, deleting the code from the buffer costs nothing.
 const requestedDevices = new Set();
+// The same, by the call that asked: "call|pattern". What the browser host names in the console
+// once it has MIDI access (which input each midicc() name found) - the desktop engine says it
+// when it binds.
+const requestedCalls = new Map();
 
-export function registerMidiDevice(devicePattern) {
+export function registerMidiDevice(devicePattern, call = null) {
   requestedDevices.add(String(devicePattern));
+  if (call) requestedCalls.set(`${call}|${devicePattern}`, { call, device: String(devicePattern) });
+}
+
+/** Every { call, device } a midicc()/midikeys() call has asked for this session. */
+export function midiDeviceCalls() {
+  return [...requestedCalls.values()];
 }
 
 export function midiInUse() {

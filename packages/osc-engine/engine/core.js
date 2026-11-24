@@ -98,6 +98,7 @@ class Engine {
     this.trackDefState = null;
     this.midiInitialized = false;
     this.midiWarned = new Set();
+    this.midiAnnounced = new Set(); // "call|device" whose input the console has named
     this.oscInitialized = false;
     this.clockOut = null;
     this.clockOutName = null;

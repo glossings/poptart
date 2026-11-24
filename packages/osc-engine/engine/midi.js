@@ -189,12 +189,27 @@ function install(E) {
     return src ?? null;
   };
 
+  // A line for the editor's console, which is where the player is looking - E.post/E.warn only
+  // reach the engine log (see OscEngine's /poptart/userLine).
+  E.userLine = (level, text) => E.tell('/poptart/userLine', level, text);
+
   E.midiWarnMissing = (context, device) => {
     if (!E.midiWarned.has(String(device))) {
       E.midiWarned.add(String(device));
+      const connected = E.midiIO.sources().map(fullName).join(', ');
       E.warn(`poptart: ${context}: no MIDI source matching '${device}' - connected: `
-        + `${E.midiIO.sources().map(fullName).join(', ')}. Plug it in and re-evaluate.`);
+        + `${connected}. Plug it in and re-evaluate.`);
+      E.userLine('warn', `${context}("${device}"): no MIDI input matches - connected: ${connected || 'none'}`);
     }
+  };
+
+  // The first time a call's device name finds its input, the console says which input that is:
+  // the one sign, short of a sound, that a controller is wired. Once per call and name.
+  E.midiAnnounce = (call, device, src) => {
+    const key = `${call}|${device}`;
+    if (E.midiAnnounced.has(key)) return;
+    E.midiAnnounced.add(key);
+    E.userLine('info', `${call}("${device}"): ${fullName(src)}`);
   };
 
   // Node asks for MIDI explicitly when a pattern's only MIDI use is Tier-1.
@@ -233,6 +248,7 @@ function install(E) {
       const index = target.index;
       const src = await E.midiSourceFor(device);
       if (src == null) { E.midiWarnMissing('midicc', device); return; }
+      E.midiAnnounce('midicc', device, src);
       const binding = `${device}|${cc}|${channel}`;
       const ccKey = `slot${slot}_${paramName}`;
       const defKey = `poptart_cc_${key}_${ccKey}`;
@@ -309,6 +325,8 @@ function install(E) {
     // DEFER mode (a dynamic pitch-op chain): forward each raw note edge to Node and play nothing
     // here - Node answers with /poptart/noteOn|noteOff. Bend, touch and CC still pass straight through.
     const defer = msg.length > 6 ? Math.trunc(msg[6]) > 0 : false;
+    // Which call asked, for the console: midi("...") as a track source, or midikeys("...").
+    const call = msg.length > 7 ? String(msg[7]) : 'midikeys';
     E.fork(async () => {
       const track = E.builtTrack(key) ?? await E.awaitTrack(key);
       // .scale(): each note snapped to the nearest of the scale's pitch classes, ties downward (in the worker).
@@ -316,7 +334,8 @@ function install(E) {
       if (track == null) { E.warn(`poptart: midiRoute: no track ${key}`); return; }
       await E.midiEnable();
       const src = await E.midiSourceFor(device);
-      if (src == null) { E.midiWarnMissing('midikeys', device); return; }
+      if (src == null) { E.midiWarnMissing(call, device); return; }
+      E.midiAnnounce(call, device, src);
       const uid = src.uid;
       const chanArg = channel > 0 ? channel - 1 : null;
       const kOn = `poptart_mk_on_${key}`;

@@ -198,8 +198,8 @@ var destroyTrack, buildTrack;
 var slotKey, slotLive, waitForLoad, flushNotes, clearPending;
 var hushTrack, clearMidiRoute, markSounding, noteKey;
 var beginSelfLoad, endSelfLoad, selfLoading;
-var midiInitialized = false, midiWarned = IdentitySet.new;
-var midiEnable, midiNameForUid, midiSourceFor, midiWarnMissing, midiRefreshSources, midiConnected;
+var midiInitialized = false, midiWarned = IdentitySet.new, midiAnnounced = IdentitySet.new;
+var midiEnable, midiNameForUid, midiSourceFor, midiWarnMissing, midiAnnounce, midiRefreshSources, midiConnected;
 var midiCCSeen = Dictionary.new, midiSawCC, midiLatestCC;
 var oscInitialized = false, oscEnable, oscSeen = Dictionary.new;
 // The host transport's mirror (see hostClockSync) and what hangs off it: MIDI clock out.
@@ -2374,11 +2374,25 @@ midiSourceFor = { |pattern|
     src;
 };
 midiWarnMissing = { |context, device|
+    var connected;
     if (midiWarned.includes(device.asSymbol).not) {
         midiWarned.add(device.asSymbol);
+        connected = MIDIClient.sources.collect({ |s| s.device.asString ++ " " ++ s.name.asString }).join(", ");
         ("poptart: " ++ context ++ ": no MIDI source matching '" ++ device ++ "' - connected: "
-            ++ MIDIClient.sources.collect({ |s| s.device.asString ++ " " ++ s.name.asString }).join(", ")
-            ++ ". Plug it in and re-evaluate.").warn;
+            ++ connected ++ ". Plug it in and re-evaluate.").warn;
+        // The post window is the engine log; the player reads the editor's console (see
+        // OscEngine's /poptart/userLine).
+        nodeAddr.sendMsg("/poptart/userLine", "warn", context ++ "(\"" ++ device ++ "\"): no MIDI input matches - connected: "
+            ++ (if (connected.isEmpty) { "none" } { connected }));
+    };
+};
+// The first time a call's device name finds its input, the console says which input that is:
+// the one sign, short of a sound, that a controller is wired. Once per call and name.
+midiAnnounce = { |call, device, src|
+    var key = (call ++ "|" ++ device).asSymbol;
+    if (midiAnnounced.includes(key).not) {
+        midiAnnounced.add(key);
+        nodeAddr.sendMsg("/poptart/userLine", "info", call ++ "(\"" ++ device ++ "\"): " ++ src.device.asString ++ " " ++ src.name.asString);
     };
 };
 }.value;
@@ -5637,6 +5651,7 @@ OSCdef(\poptartSetParamCC, { |msg|
                     if (src.isNil) {
                         midiWarnMissing.("midicc", device);
                     } {
+                        midiAnnounce.("midicc", device, src);
                         binding = device ++ "|" ++ cc ++ "|" ++ channel;
                         ccKey = ("slot" ++ slot ++ "_" ++ paramName).asSymbol;
                         defKey = ("poptart_cc_" ++ key ++ "_" ++ ccKey).asSymbol;
@@ -5824,6 +5839,8 @@ OSCdef(\poptartMidiRoute, { |msg|
     // and CC still pass straight through to the instrument; polytouch follows the raw pitch,
     // which a remapped note won't match - acceptable for how rare pressure-per-key is.
     var defer = if (msg.size > 6) { msg[6].asInteger > 0 } { false };
+    // Which call asked, for the console: midi("...") as a track source, or midikeys("...").
+    var call = if (msg.size > 7) { msg[7].asString } { "midikeys" };
     fork {
         var track = awaitTrack.(key);
         var src, uid, chanArg, kOn, kOff, kBend, kTouch, kPoly, kCc, scalePcs, quantize, sounding;
@@ -5848,7 +5865,8 @@ OSCdef(\poptartMidiRoute, { |msg|
         if (track.isNil) { ("poptart: midiRoute: no track " ++ key).warn } {
             midiEnable.();
             src = midiSourceFor.(device);
-            if (src.isNil) { midiWarnMissing.("midikeys", device) } {
+            if (src.isNil) { midiWarnMissing.(call, device) } {
+                midiAnnounce.(call, device, src);
                 uid = src.uid;
                 chanArg = if (channel > 0) { channel - 1 };
                 kOn = ("poptart_mk_on_" ++ key).asSymbol;

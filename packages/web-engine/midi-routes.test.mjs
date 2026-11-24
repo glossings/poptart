@@ -205,6 +205,21 @@ test('a device plays the track that names it by a fragment of its name, on its c
   assert.deepEqual(warnings, []);
 });
 
+test('midi("name") with no track of that name plays from the MIDI input it names', () => {
+  const { engine, warnings } = makeEngine();
+  engine.loadInstrument('cube', 'Wavetable');
+  // A label the host has given an id but whose track is not built yet is still a track.
+  engine.setTrackResolver((label) => (label === 'later' ? '#9' : label));
+  engine.setInputSource('cube', 'midi', 'IAC', 0, null, null, 0, null);
+  engine.midiIn('IAC Driver Bus 1', 'on', 1, 63, 0.8, 1);
+  assert.deepEqual(notes(instrumentOf(engine, 'cube')).map((m) => [m.kind, m.note]), [['noteOn', 63]]);
+  assert.deepEqual(engine.midiRoutes.deviceCalls(), [{ call: 'midi', device: 'IAC' }]);
+  engine.setInputSource('cube', 'midi', 'later', 0, null, null, 0, null);
+  assert.equal(engine.midiRoutes.routes.find((r) => r.targetTrackId === 'cube').name, 'later', 'a known label stays a track');
+  assert.deepEqual(engine.midiRoutes.deviceCalls(), []);
+  assert.deepEqual(warnings, []);
+});
+
 test('a key struck twice before it comes up releases the first strike', () => {
   const { engine } = makeEngine();
   engine.loadInstrument('keys', 'Wavetable');

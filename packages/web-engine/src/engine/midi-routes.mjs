@@ -55,11 +55,11 @@ export class MidiRoutes {
   get size() { return this.routes.length; }
 
   /** Sets the route into (target, slot), replacing whatever fed it before. */
-  add(name, targetTrackId, slot, { note = null, transpose = 0, pcs = null, noteMap = null, channel = 0 } = {}) {
+  add(name, targetTrackId, slot, { note = null, transpose = 0, pcs = null, noteMap = null, channel = 0, call = null } = {}) {
     // The held table is kept across the replacement on purpose: notes sounding through the old
     // route still need their offs to find what they played.
     this.routes = this.routes.filter((r) => !(r.targetTrackId === targetTrackId && r.slot === slot));
-    this.routes.push({ name: String(name), targetTrackId, slot, note, transpose: transpose ?? 0, pcs: pcs ?? null, noteMap: noteMap ?? null, channel: Math.max(0, Math.round(Number(channel) || 0)) });
+    this.routes.push({ name: String(name), targetTrackId, slot, note, transpose: transpose ?? 0, pcs: pcs ?? null, noteMap: noteMap ?? null, channel: Math.max(0, Math.round(Number(channel) || 0)), call });
   }
 
   /** Whether any route listens to a MIDI device - the host asks for MIDI access only then. */
@@ -68,6 +68,12 @@ export class MidiRoutes {
   /** The device-name fragments the routes are listening for, as written. */
   devicePatterns() {
     return [...new Set(this.routes.filter((r) => r.name.startsWith('dev:')).map((r) => r.name.slice(4)))];
+  }
+
+  /** The device routes as the call that asked wrote them - { call, device } - for the console's
+   * word on which input each name found (see the web host's reportMidiNames). */
+  deviceCalls() {
+    return this.routes.filter((r) => r.call && r.name.startsWith('dev:')).map((r) => ({ call: r.call, device: r.name.slice(4) }));
   }
 
   /** Whether a device route listens to this device on this channel. */

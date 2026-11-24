@@ -128,6 +128,18 @@ class MappedEngine {
     return id;
   }
 
+  // A midi("name") track source: a track when some track has that label (track-first), and
+  // otherwise a MIDI input - `midi("KeyStep")` with no track called KeyStep is the keyboard. The
+  // engine only takes a device on its explicit "dev:" form, so a bare name no track answers to
+  // is sent as one; left bare it would wait for a track that never comes, silently.
+  _midiSourceRef(name, from) {
+    const ref = this._trackRef(name, from);
+    if (!this.resolveTrack || name == null) return ref;
+    const str = String(name);
+    if (str.startsWith('dev:') || str.startsWith('track:') || str.startsWith('bus:')) return ref;
+    return ref === str ? `dev:${str}` : ref;
+  }
+
   // Called on every eval, per track, with [instrument, ...fxChain]; also reload mapping files
   // so editing a mapping JSON mid-session takes effect on the next eval, livecoding-style.
   setChain(trackId, chain) {
@@ -343,7 +355,10 @@ class MappedEngine {
   // parameter mapping involved, but the scheduler feature-detects each of these (typeof
   // engine.X === 'function'), so they must exist on the wrapper to be reached - and the ones
   // that carry a routing name translate track references on the way down (see _trackRef).
-  setInputSource(trackId, io, name, ...a) { return this.engine.setInputSource(trackId, io, this._trackRef(name, trackId, io === 'audio'), ...a); }
+  setInputSource(trackId, io, name, ...a) {
+    const ref = io === 'midi' ? this._midiSourceRef(name, trackId) : this._trackRef(name, trackId, io === 'audio');
+    return this.engine.setInputSource(trackId, io, ref, ...a);
+  }
   clearInputSource(...a) { return this.engine.clearInputSource(...a); }
   setBusSends(...a) { return this.engine.setBusSends(...a); }
   clearBusSends(...a) { return this.engine.clearBusSends(...a); }

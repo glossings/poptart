@@ -519,6 +519,12 @@ class OscEngine {
     // Where a warning goes besides the terminal: the host points it at the editor's console, as
     // the browser engine's `warn` is.
     this.warn = null;
+    // ...and where an informational line for the player goes (a MIDI input found - see
+    // /poptart/userLine). Null: the terminal only.
+    this.post = null;
+    // Which kind of midi() head source each track has, 'dev' or 'track', so a source that changes
+    // kind tears the other route down (they live in different tables - see setInputSource).
+    this._midiHeadKind = new Map();
     // Which of poptart's own devices is in which slot, as "trackId:slot" - what a `.param()`
     // argument is resolved against (see setParam). Only this half knows: the scheduler sends a
     // name and a value and does not care what is hosting them, exactly as on the web.
@@ -3000,16 +3006,18 @@ class OscEngine {
   // (the same /poptart/midiNoteIn feed MIDI record listens to) and plays nothing itself; Node maps
   // the pitch and answers with /poptart/noteOn|noteOff (see _handleMessage). That's one localhost
   // round trip per note edge - a millisecond or two on top of the MIDI driver's own latency.
-  setMidiNotes(trackId, device, channel = 0, scalePcs = null, transpose = 0, noteMap = null) {
+  // `call` is the userland call that asked, which the console names (midikeys, or midi for a
+  // midi("device") track source).
+  setMidiNotes(trackId, device, channel = 0, scalePcs = null, transpose = 0, noteMap = null, call = 'midikeys') {
     if (noteMap) {
       const prev = this._deferRoutes.get(trackId);
       // Keep the held table across re-evals, same as _addMidiRoute: sounding notes still need
       // their offs to resolve to the pitch their on actually played.
       this._deferRoutes.set(trackId, { noteMap, held: prev?.held ?? new Map() });
-      this._send('/poptart/midiRoute', [trackId, device, channel, '', 0, 1]);
+      this._send('/poptart/midiRoute', [trackId, device, channel, '', 0, 1, call]);
     } else {
       this._dropDeferRoute(trackId);
-      this._send('/poptart/midiRoute', [trackId, device, channel, (scalePcs ?? []).join(','), transpose, 0]);
+      this._send('/poptart/midiRoute', [trackId, device, channel, (scalePcs ?? []).join(','), transpose, 0, call]);
     }
   }
   /**
@@ -3114,7 +3122,16 @@ class OscEngine {
   // a device route defers its notes through Node - see setMidiNotes).
   setInputSource(trackId, io, name, channel = 0, scalePcs = null, hwChans = null, transpose = 0, noteMap = null) {
     if (io === 'midi') {
-      if (this._isDevice(name)) this.setMidiNotes(trackId, this._deviceName(name), channel, scalePcs, transpose, noteMap);
+      // A device route lives engine-side and a track route here: one replacing the other must
+      // take the other down, or a source changed from a device to a track would play both.
+      const kind = this._isDevice(name) ? 'dev' : 'track';
+      const prev = this._midiHeadKind.get(trackId);
+      if (prev && prev !== kind) {
+        if (prev === 'dev') this.clearMidiNotes(trackId);
+        else this._removeMidiRoute(trackId, 0);
+      }
+      this._midiHeadKind.set(trackId, kind);
+      if (kind === 'dev') this.setMidiNotes(trackId, this._deviceName(name), channel, scalePcs, transpose, noteMap, 'midi');
       // slot 0 = instrument, null note = pass the source's own pitch through
       else this._addMidiRoute(name, trackId, 0, null, { transpose, pcs: scalePcs, noteMap });
     } else if (io === 'audio') {
@@ -3123,6 +3140,7 @@ class OscEngine {
     }
   }
   clearInputSource(trackId) {
+    this._midiHeadKind.delete(trackId);
     this._removeMidiRoute(trackId, 0);
     this.clearMidiNotes(trackId); // no-op unless a device note-route was set for this track
     this._send('/poptart/clearAudioInput', [trackId]);
@@ -3356,6 +3374,18 @@ class OscEngine {
           ? `plugin scan started (${at.total || '?'} candidate(s))`
           : `plugin scan finished: ${at.found} plugin(s), ${at.probed} probed in ${Math.round(at.elapsedMs / 1000)}s`,
       );
+      return;
+    }
+    if (msg.address === '/poptart/userLine') {
+      // A line meant for the player's console rather than the engine log: [level, text], level
+      // 'warn' or 'info' (a MIDI name that matches no input; the input one did match).
+      const [level, text] = (msg.args ?? []).map((a) => a?.value ?? a);
+      if (String(level) === 'warn') this._warn(String(text));
+      else {
+        // eslint-disable-next-line no-console
+        console.log(String(text));
+        this.post?.(String(text));
+      }
       return;
     }
     if (msg.address === '/poptart/midiIn') {

@@ -10,7 +10,7 @@ export { struct, hold, seg, segment, chord } from './signal.mjs';
 export { channelAt, soundingEnd, timeShift, grooveAt, grooveVelScale, endEdgeStep, withSoundingSpan, MAX_FX_SLOTS, monitorSig, channelDefault } from './signal.mjs';
 export { steadyValue } from './signal.mjs';
 export { setPatternWarn, lfoShapes, lfoPoints, withNoteGate, withEventSpan, noteGateFromGrid, sampleEnvIR, NOTE_GATE_LOOKBACK_CYCLES } from './signal.mjs';
-export { feedMidiCC, midiInUse } from './midi.mjs';
+export { feedMidiCC, midiInUse, midiDeviceCalls } from './midi.mjs';
 export { takeMidiLearns, midiLearnWaiting, MIDI_LEARN_SETTLE_MS } from './midi-learn.mjs';
 export { feedOsc, oscInUse, latestOsc, normalizeOscAddress } from './osc.mjs';
 export { setAudioInputLayout, audioInputLayout, audioInputChannelCount, resolveInputChannels } from './audio-inputs.mjs';

@@ -103,6 +103,15 @@ test('MappedEngine translates track references in routing names, and only those'
   // The explicit track form is left alone: whoever writes track:kick on kick asked for the loop.
   mapped.setInputSource('#7', 'audio', 'track:kick', 0);
   assert.deepEqual(calls.pop(), ['setInputSource', '#7', 'audio', 'track:#7', 0]);
+  // A midi() source that names no track is a MIDI input: the engine takes devices as "dev:".
+  mapped.setInputSource('#1', 'midi', 'IAC', 0);
+  assert.deepEqual(calls.pop(), ['setInputSource', '#1', 'midi', 'dev:IAC', 0]);
+  mapped.setInputSource('#1', 'midi', 'kick', 0);
+  assert.deepEqual(calls.pop(), ['setInputSource', '#1', 'midi', '#7', 0]);
+  mapped.setInputSource('#1', 'midi', 'track:nope', 0);
+  assert.deepEqual(calls.pop(), ['setInputSource', '#1', 'midi', 'track:nope', 0]);
+  mapped.setInputSource('#1', 'midi', 'dev:KeyStep', 0);
+  assert.deepEqual(calls.pop(), ['setInputSource', '#1', 'midi', 'dev:KeyStep', 0]);
   // A MIDI self-reference has no bus to mean, so it resolves as any other track reference does.
   mapped.setInputSource('#7', 'midi', 'kick', 0);
   assert.deepEqual(calls.pop(), ['setInputSource', '#7', 'midi', '#7', 0]);

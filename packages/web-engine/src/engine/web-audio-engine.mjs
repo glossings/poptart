@@ -2179,8 +2179,13 @@ export class WebAudioEngine {
     if (io === 'midi') {
       // Another track's notes, or a MIDI device's, played on this one's instrument through the
       // source's pitch ops. A device is heard once the host has MIDI access (see midiIn).
-      this.midiRoutes.add(name, trackId, 0, { transpose, pcs: scalePcs, noteMap, channel });
-      if (String(name).startsWith('dev:')) this.onMidiWanted?.();
+      // Track-first, as on the desktop: a bare name no track answers to is a MIDI input -
+      // `midi("KeyStep")` with no track called KeyStep is the keyboard.
+      const text = String(name);
+      const bare = !/^(dev|track|bus):/.test(text);
+      const src = bare && (this.resolveTrack?.(text) ?? text) === text && !this.tracks.has(text) ? `dev:${text}` : text;
+      this.midiRoutes.add(src, trackId, 0, { transpose, pcs: scalePcs, noteMap, channel, call: 'midi' });
+      if (src.startsWith('dev:')) this.onMidiWanted?.();
       return;
     }
     if (String(name).startsWith('dev:')) {
@@ -2362,7 +2367,7 @@ export class WebAudioEngine {
 
   /** `midikeys("Keystep")`: a MIDI device plays this track's instrument live. */
   setMidiNotes(trackId, device, channel = 0, scalePcs = null, transpose = 0, noteMap = null) {
-    this.midiRoutes.add(`dev:${device}`, trackId, 0, { transpose, pcs: scalePcs, noteMap, channel });
+    this.midiRoutes.add(`dev:${device}`, trackId, 0, { transpose, pcs: scalePcs, noteMap, channel, call: 'midikeys' });
     this.onMidiWanted?.();
   }
 
